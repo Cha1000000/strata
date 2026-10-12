@@ -241,6 +241,12 @@ request identity prevents late focus after cancellation or navigation. There are
 creation rows; both new and existing items use the same validation and deferred rename dispatch
 outside GTK's focus walk.
 
+Every local operation that puts an item at a name goes through `placement::place` in
+`adapters/local_operations/placement.rs`, a no-clobber ladder that adapts to what the mount
+supports. Its syscalls go through the `FsOps` seam in `fs_ops.rs`, and what each mount supports is
+cached in `adapters/volume/mount_capabilities.rs`. See
+[Filesystem compatibility](filesystem-compatibility.md).
+
 Filesystem work for Trash lives in `adapters/trash.rs`. Measurement shares one entry/time budget
 across root and descendant batches; depth truncation and unreadable descendants remain branch-local.
 Deleting Trash streams its own batches, independently of any incomplete measurement. Native path
