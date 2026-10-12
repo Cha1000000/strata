@@ -23,16 +23,19 @@ use std::{
 use gtk::{gio, glib, prelude::*};
 
 use crate::test_support::ASYNC_MAIN_CONTEXT_DEFAULT;
+use fs_quirks::{FsQuirks, Quirks};
 
 mod conflicts;
 mod copy;
 mod create_entry;
 mod deletion;
+pub(super) mod fs_quirks;
 mod merge;
 mod moves;
 mod naming;
 mod paste_results;
 mod paths;
+mod placement;
 mod progress;
 mod replacement;
 mod restore_safety;
@@ -84,7 +87,7 @@ fn copy_recursively_fat_family(
 }
 
 use super::{
-    FAT32_MAX_FILE_SIZE, FailedAction, LocalDeleteRoot, LocalFileIdentity, LocalOperationProvider,
+    FAT32_MAX_FILE_SIZE, FailedAction, PinnedEntry, LocalFileIdentity, LocalOperationProvider,
     MergeHooks, MergePlan, MountTable, RestoreEntry, StageCopy, StageOverwrite,
     StagedOriginalLookup, TRANSFER_PROGRESS_INTERVAL, TransferProgressTracker, TransferStop,
     await_cancellable, copy_failure_after_cleanup, copy_failure_on_fat32, copy_new_recursively,
@@ -95,7 +98,7 @@ use super::{
     merge_local_with, move_local, move_local_with, open_local_parent_directory,
     operation_error_summary, parallel_delete_local, parse_copy_suffix, permanently_delete_local,
     permanently_delete_local_path_if_unchanged, replace_local, replace_local_with, run_merge_undo,
-    set_force_cross_volume_for_test, set_removable_roots_for_test, set_sync_observer,
+    set_removable_roots_for_test, set_sync_observer,
     stop_transfer, sync_probe_observations, target_is_fat_family, transfer_is_noop, transfer_sizes,
     trash_stage_overwrite, unique_fat_sibling_name, validated_child, was_cancelled,
 };
@@ -112,12 +115,19 @@ use crate::{
 struct RemovableFlushGuard;
 
 impl RemovableFlushGuard {
-    fn install(root: &Path, fail: Option<io::ErrorKind>, cross_volume: bool) -> Self {
+    fn install(root: &Path, fail: Option<io::ErrorKind>) -> Self {
         set_removable_roots_for_test(Some(vec![root.to_path_buf()]));
-        set_force_cross_volume_for_test(cross_volume);
         super::install_sync_probe(fail, false);
         Self
     }
+}
+
+/// Makes `source` and `destination` separate mounts, so moves between them copy.
+fn separate_volumes(source: &Path, destination: &Path) -> (FsQuirks, FsQuirks) {
+    (
+        FsQuirks::install(source, Quirks::default()),
+        FsQuirks::install(destination, Quirks::default()),
+    )
 }
 
 impl Drop for RemovableFlushGuard {
@@ -126,7 +136,6 @@ impl Drop for RemovableFlushGuard {
         super::clear_sync_probe();
         set_sync_observer(None);
         set_removable_roots_for_test(None);
-        set_force_cross_volume_for_test(false);
     }
 }
 
@@ -230,15 +239,8 @@ fn settle_cancelled_io(context: &glib::MainContext) {
     }
 }
 
-fn always_would_recurse() -> super::MoveAttempt {
-    Rc::new(|_, _, _| {
-        Box::pin(async {
-            Err(glib::Error::new(
-                gio::IOErrorEnum::WouldRecurse,
-                "injected cross-filesystem move failure",
-            ))
-        })
-    })
+fn always_copy() -> super::MoveAttempt {
+    Rc::new(|_, _, _| Box::pin(async { Ok(super::Moved::CopyFrom(None)) }))
 }
 
 fn wait_for_operation(
@@ -464,10 +466,10 @@ fn benchmark_delete_large_directory() -> Result<(), Box<dyn Error>> {
             .file_name()
             .ok_or("benchmark root has no name")?
             .to_owned();
-        let target_root = super::LocalDeleteRoot {
+        let target_root = super::PinnedEntry {
             parent: Arc::new(parent),
             name,
-            expected: None,
+            identity: None,
         };
         detected_workers = Some(super::local_delete_worker_count(std::slice::from_ref(
             &target_root,
@@ -545,10 +547,10 @@ fn benchmark_parallel_delete_scale() -> Result<(), Box<dyn Error>> {
         .file_name()
         .ok_or("benchmark root has no name")?
         .to_owned();
-    let target_root = super::LocalDeleteRoot {
+    let target_root = super::PinnedEntry {
         parent: Arc::new(parent),
         name,
-        expected: None,
+        identity: None,
     };
     let workers = super::local_delete_worker_count(std::slice::from_ref(&target_root));
     let cleanup_started = Instant::now();

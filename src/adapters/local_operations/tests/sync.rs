@@ -68,7 +68,7 @@ fn bytes_already_written_are_flushed_before_cancellation_and_cancel_is_not_paste
     fs::create_dir(&destination)?;
     let source = root.path().join("photo.bin");
     fs::write(&source, b"pixels")?;
-    let _guard = RemovableFlushGuard::install(root.path(), None, false);
+    let _guard = RemovableFlushGuard::install(root.path(), None);
     let events = Rc::new(RefCell::new(Vec::new()));
     let emitted = events.clone();
     let handle = Rc::new(RefCell::new(None));
@@ -127,7 +127,7 @@ fn a_cancel_after_the_flush_starts_does_not_report_success() -> Result<(), Box<d
     fs::create_dir(&destination)?;
     let source = root.path().join("photo.bin");
     fs::write(&source, b"pixels")?;
-    let _guard = RemovableFlushGuard::install(root.path(), None, false);
+    let _guard = RemovableFlushGuard::install(root.path(), None);
     let events = Rc::new(RefCell::new(Vec::new()));
     let emitted = events.clone();
     let handle = Rc::new(RefCell::new(None));
@@ -178,7 +178,7 @@ fn failed_final_flush_reports_that_writes_may_still_be_pending() -> Result<(), B
     fs::create_dir(&destination)?;
     let source = root.path().join("photo.bin");
     fs::write(&source, b"pixels")?;
-    let _guard = RemovableFlushGuard::install(root.path(), Some(io::ErrorKind::Other), false);
+    let _guard = RemovableFlushGuard::install(root.path(), Some(io::ErrorKind::Other));
     let events = Rc::new(RefCell::new(Vec::new()));
     let emitted = events.clone();
     let _operation = LocalOperationProvider.paste(
@@ -209,7 +209,7 @@ fn failed_flush_after_cancel_reports_that_writes_may_still_be_pending() -> Resul
     let root = tempfile::tempdir()?;
     let destination = root.path().join("usb");
     fs::create_dir(&destination)?;
-    let _guard = RemovableFlushGuard::install(root.path(), Some(io::ErrorKind::Other), false);
+    let _guard = RemovableFlushGuard::install(root.path(), Some(io::ErrorKind::Other));
     let events = Rc::new(RefCell::new(Vec::new()));
     let emitted = events.clone();
     let emit: Rc<dyn Fn(OperationEvent)> = Rc::new(move |event| emitted.borrow_mut().push(event));
@@ -243,7 +243,7 @@ fn fat32_limit_failure_does_not_start_an_uncancellable_device_flush() -> Result<
     let root = tempfile::tempdir()?;
     let destination = root.path().join("usb");
     fs::create_dir(&destination)?;
-    let _guard = RemovableFlushGuard::install(root.path(), None, false);
+    let _guard = RemovableFlushGuard::install(root.path(), None);
     let events = Rc::new(RefCell::new(Vec::new()));
     let emitted = events.clone();
     let emit: Rc<dyn Fn(OperationEvent)> = Rc::new(move |event| emitted.borrow_mut().push(event));
@@ -284,7 +284,7 @@ fn bytes_already_written_are_flushed_before_transfer_failure() -> Result<(), Box
     fs::create_dir(&destination)?;
     let source = root.path().join("photo.bin");
     fs::write(&source, b"pixels")?;
-    let _guard = RemovableFlushGuard::install(root.path(), None, false);
+    let _guard = RemovableFlushGuard::install(root.path(), None);
     let events = Rc::new(RefCell::new(Vec::new()));
     let emitted = events.clone();
     let _operation = LocalOperationProvider.paste(

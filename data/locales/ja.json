@@ -935,6 +935,8 @@
   "The maximum item count must be a number": "最大項目数は数値で指定してください",
   "The media decoder failed": "メディアデコーダーでエラーが発生しました",
   "The name is too long": "名前が長すぎます",
+  "The name isn’t valid at this location": "この場所では使用できない名前です",
+  "The result could not be confirmed. Check both locations before trying again.": "結果を確認できませんでした。再試行する前に両方の場所を確認してください。",
   "The name or filter changed. Press Open to try again.": "名前またはフィルターが変更されました。もう一度「開く」を押してください。",
   "The network file handle is no longer valid": "ネットワークファイルのハンドルが無効になりました",
   "The network is down": "ネットワークが停止しています",

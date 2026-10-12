@@ -568,3 +568,18 @@ fn unreachable_uri_resolves_to_unknown_without_hanging() {
     assert!(lookup.dest.is_none());
     assert_eq!(lookup.relation, VolumeRelation::Unknown);
 }
+
+#[test]
+fn mount_changes_forget_real_capabilities_only() {
+    let real = MountKey::Device(u64::MAX - 7);
+    let scoped = MountKey::Test(u64::MAX - 7);
+    for key in [real, scoped] {
+        learn_mount_capability(key, |capabilities| capabilities.hard_links = Some(false));
+    }
+
+    invalidate_mount_snapshot();
+
+    assert_eq!(mount_capabilities(real), MountCapabilities::default());
+    assert_eq!(mount_capabilities(scoped).hard_links, Some(false));
+    forget_test_mount_capabilities(u64::MAX - 7);
+}

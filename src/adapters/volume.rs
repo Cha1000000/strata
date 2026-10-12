@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 
+mod mount_capabilities;
 mod mount_snapshot;
 mod mounts;
 #[cfg(test)]
@@ -21,6 +22,11 @@ use crate::{
     services::{VolumeIdentity, VolumeRelation, volume_relation},
 };
 
+#[cfg(test)]
+pub(crate) use mount_capabilities::forget_test_mount_capabilities;
+pub(crate) use mount_capabilities::{
+    MountCapabilities, MountKey, learn_mount_capability, mount_capabilities,
+};
 pub(crate) use mount_snapshot::{RemovableRoot, invalidate_mount_snapshot, with_mount_snapshot};
 pub(crate) use mounts::MountTable;
 

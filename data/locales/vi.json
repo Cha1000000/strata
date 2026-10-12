@@ -935,6 +935,8 @@
   "The maximum item count must be a number": "Số mục tối đa phải là một con số",
   "The media decoder failed": "Bộ giải mã phương tiện bị lỗi",
   "The name is too long": "Tên quá dài",
+  "The name isn’t valid at this location": "Tên này không hợp lệ tại vị trí này",
+  "The result could not be confirmed. Check both locations before trying again.": "Không thể xác nhận kết quả. Hãy kiểm tra cả hai vị trí trước khi thử lại.",
   "The name or filter changed. Press Open to try again.": "Tên hoặc bộ lọc đã thay đổi. Nhấn Mở để thử lại.",
   "The network file handle is no longer valid": "Mã định danh tệp mạng không còn hợp lệ",
   "The network is down": "Mạng không hoạt động",

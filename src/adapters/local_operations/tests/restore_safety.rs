@@ -1,14 +1,23 @@
 // SPDX-License-Identifier: MIT
 
-use super::super::{
-    copy_restore_entry, discard_restore_copy, move_restore_path, move_restore_path_with,
-};
+use super::super::{copy_restore_entry, discard_restore_copy, move_restore_path};
+use super::fs_quirks::{Op, Support};
 use super::*;
-use rustix::{fs::RenameFlags, io::Errno};
-use std::os::unix::fs::symlink;
+use rustix::io::Errno;
+use std::os::unix::fs::{MetadataExt, symlink};
+
+fn restore_path(source: &Path, destination: &Path, allowed: &Path) -> Result<(), glib::Error> {
+    glib::MainContext::default().block_on(move_restore_path(
+        source.to_path_buf(),
+        destination.to_path_buf(),
+        allowed.to_path_buf(),
+        gio::Cancellable::new(),
+    ))
+}
 
 #[test]
-fn unsupported_restore_rename_never_downgrades_atomicity() -> Result<(), Box<dyn Error>> {
+fn restore_without_rename_flags_never_replaces_a_racing_destination() -> Result<(), Box<dyn Error>>
+{
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock()?;
     for error in [Errno::INVAL, Errno::NOSYS, Errno::OPNOTSUPP] {
         for directory in [false, true] {
@@ -22,46 +31,56 @@ fn unsupported_restore_rename_never_downgrades_atomicity() -> Result<(), Box<dyn
                 fs::write(&source, b"original")?;
             }
             let raced = destination.clone();
-            let result = glib::MainContext::default().block_on(move_restore_path_with(
-                source.clone(),
-                destination.clone(),
-                fixture.path().to_path_buf(),
-                gio::Cancellable::new(),
-                move |_, _, _, _, flags| {
-                    assert_eq!(flags, RenameFlags::NOREPLACE);
-                    fs::write(&raced, b"concurrent user data").expect("racing destination");
-                    Err(error)
+            let fallback = if directory { Op::Mkdir } else { Op::Link };
+            let _scope = FsQuirks::install(
+                fixture.path(),
+                Quirks {
+                    rename_flags: Support::Rejected(error),
+                    before: vec![(
+                        fallback,
+                        "destination",
+                        0,
+                        Box::new(move || {
+                            fs::write(&raced, b"concurrent user data").expect("racing destination")
+                        }),
+                    )],
+                    ..Quirks::default()
                 },
-            ));
-            let message = result
-                .expect_err("unsupported atomic operation")
+            );
+
+            let message = restore_path(&source, &destination, fixture.path())
+                .expect_err("the destination was taken")
                 .to_string();
+
             assert!(
                 message.contains("something already exists at the destination"),
                 "{message}"
             );
-            assert!(!message.contains("across volumes"));
             assert_eq!(fs::read(&destination)?, b"concurrent user data");
-            assert_eq!(
-                fs::read(if directory {
-                    source.join("contents")
-                } else {
-                    source
-                })?,
-                b"original"
-            );
+            let original = if directory {
+                source.join("contents")
+            } else {
+                source
+            };
+            assert_eq!(fs::read(original)?, b"original");
         }
     }
     Ok(())
 }
 
 #[test]
-fn unsupported_restore_rename_safely_restores_when_destination_available()
--> Result<(), Box<dyn Error>> {
+fn restoring_without_rename_flags_moves_the_item_without_copying() -> Result<(), Box<dyn Error>> {
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock()?;
     for error in [Errno::INVAL, Errno::NOSYS, Errno::OPNOTSUPP] {
         for directory in [false, true] {
             let fixture = tempfile::tempdir()?;
+            let _scope = FsQuirks::install(
+                fixture.path(),
+                Quirks {
+                    rename_flags: Support::Rejected(error),
+                    ..Quirks::default()
+                },
+            );
             let source = fixture.path().join("source");
             let destination = fixture.path().join("destination");
             if directory {
@@ -70,30 +89,25 @@ fn unsupported_restore_rename_safely_restores_when_destination_available()
             } else {
                 fs::write(&source, b"original")?;
             }
-            let result = glib::MainContext::default().block_on(move_restore_path_with(
-                source.clone(),
-                destination.clone(),
-                fixture.path().to_path_buf(),
-                gio::Cancellable::new(),
-                move |_, _, _, _, flags| {
-                    assert_eq!(flags, RenameFlags::NOREPLACE);
-                    Err(error)
-                },
-            ));
-            assert!(result.is_ok(), "restore should succeed: {result:?}");
+            let inode = fs::metadata(&source)?.ino();
+
+            restore_path(&source, &destination, fixture.path())?;
+
             assert!(!source.exists(), "source should be removed from trash");
-            if directory {
-                assert_eq!(fs::read(destination.join("contents"))?, b"original");
+            assert_eq!(fs::metadata(&destination)?.ino(), inode);
+            let restored = if directory {
+                destination.join("contents")
             } else {
-                assert_eq!(fs::read(&destination)?, b"original");
-            }
+                destination
+            };
+            assert_eq!(fs::read(restored)?, b"original");
         }
     }
     Ok(())
 }
 
 #[test]
-fn unsupported_restore_keeps_both_parents_pinned() -> Result<(), Box<dyn Error>> {
+fn restore_without_rename_flags_keeps_both_parents_pinned() -> Result<(), Box<dyn Error>> {
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock()?;
     let allowed = tempfile::tempdir()?;
     let outside = tempfile::tempdir()?;
@@ -111,19 +125,27 @@ fn unsupported_restore_keeps_both_parents_pinned() -> Result<(), Box<dyn Error>>
     let old_source = retained_source.clone();
     let old_target = retained_target.clone();
     let escaped = outside.path().to_path_buf();
-    glib::MainContext::default().block_on(move_restore_path_with(
-        source,
-        target_parent.join("report"),
-        allowed.path().to_path_buf(),
-        gio::Cancellable::new(),
-        move |_, _, _, _, _| {
-            fs::rename(&source_parent, old_source).expect("move source parent");
-            fs::rename(&target_parent, old_target).expect("move destination parent");
-            symlink(&escaped, &source_parent).expect("redirect source parent");
-            symlink(&escaped, &target_parent).expect("redirect destination parent");
-            Err(Errno::INVAL)
+    let (moved_source, moved_target) = (source_parent.clone(), target_parent.clone());
+    let _scope = FsQuirks::install(
+        allowed.path(),
+        Quirks {
+            before: vec![(
+                Op::Rename,
+                "report",
+                0,
+                Box::new(move || {
+                    fs::rename(&moved_source, &old_source).expect("move source parent");
+                    fs::rename(&moved_target, &old_target).expect("move destination parent");
+                    symlink(&escaped, &moved_source).expect("redirect source parent");
+                    symlink(&escaped, &moved_target).expect("redirect destination parent");
+                }),
+            )],
+            ..Quirks::without_rename_flags()
         },
-    ))?;
+    );
+
+    restore_path(&source, &target_parent.join("report"), allowed.path())?;
+
     assert_eq!(
         fs::read(retained_target.join("report/contents"))?,
         b"original"
@@ -137,7 +159,7 @@ fn unsupported_restore_keeps_both_parents_pinned() -> Result<(), Box<dyn Error>>
 }
 
 #[test]
-fn unsupported_restore_preserves_a_replaced_source() -> Result<(), Box<dyn Error>> {
+fn restore_without_rename_flags_preserves_a_replaced_source() -> Result<(), Box<dyn Error>> {
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock()?;
     let fixture = tempfile::tempdir()?;
     let source = fixture.path().join("source");
@@ -146,18 +168,24 @@ fn unsupported_restore_preserves_a_replaced_source() -> Result<(), Box<dyn Error
     fs::write(&source, b"original")?;
     let raced_source = source.clone();
     let retained = original.clone();
-    let result = glib::MainContext::default().block_on(move_restore_path_with(
-        source.clone(),
-        destination.clone(),
-        fixture.path().to_path_buf(),
-        gio::Cancellable::new(),
-        move |_, _, _, _, _| {
-            fs::rename(&raced_source, retained).expect("retain original source");
-            fs::write(&raced_source, b"replacement").expect("replace source");
-            Err(Errno::INVAL)
+    let _scope = FsQuirks::install(
+        fixture.path(),
+        Quirks {
+            before: vec![(
+                Op::Rename,
+                "source",
+                0,
+                Box::new(move || {
+                    fs::rename(&raced_source, &retained).expect("retain original source");
+                    fs::write(&raced_source, b"replacement").expect("replace source");
+                }),
+            )],
+            ..Quirks::without_rename_flags()
         },
-    ));
-    assert!(result.is_err());
+    );
+
+    assert!(restore_path(&source, &destination, fixture.path()).is_err());
+
     assert_eq!(fs::read(source)?, b"replacement");
     assert_eq!(fs::read(original)?, b"original");
     assert!(!destination.exists());
@@ -212,13 +240,8 @@ fn restore_exclusive_copy_handles_files_links_and_partial_failure() -> Result<()
         rustix::fs::Mode::from_raw_mode(0o600),
         0,
     )?;
-    let result = glib::MainContext::default().block_on(move_restore_path_with(
-        source.clone(),
-        fixture.path().join("incomplete"),
-        fixture.path().to_path_buf(),
-        gio::Cancellable::new(),
-        |_, _, _, _, _| Err(Errno::INVAL),
-    ));
+    let _scope = FsQuirks::install(fixture.path(), Quirks::without_placement());
+    let result = restore_path(&source, &fixture.path().join("incomplete"), fixture.path());
     let message = result.expect_err("unsupported copy source").to_string();
     assert!(
         message.contains("incomplete copy could not be removed"),
@@ -319,13 +342,8 @@ fn restore_directory_copy_preserves_permissions_times_and_xattrs() -> Result<(),
         rustix::fs::XattrFlags::empty(),
     )?;
     let destination = fixture.path().join("destination");
-    glib::MainContext::default().block_on(move_restore_path_with(
-        source.clone(),
-        destination.clone(),
-        fixture.path().to_path_buf(),
-        gio::Cancellable::new(),
-        |_, _, _, _, _| Err(Errno::INVAL),
-    ))?;
+    let _scope = FsQuirks::install(fixture.path(), Quirks::without_placement());
+    restore_path(&source, &destination, fixture.path())?;
     assert!(!source.exists());
     assert_eq!(fs::metadata(&destination)?.mode() & 0o777, 0o750);
     assert_eq!(fs::metadata(&destination)?.modified()?, modified);
@@ -345,16 +363,21 @@ fn restore_refuses_a_destination_created_immediately_before_rename() -> Result<(
     let destination = fixture.path().join("destination");
     fs::write(&source, b"original")?;
     let raced = destination.clone();
-    let result = glib::MainContext::default().block_on(move_restore_path_with(
-        source.clone(),
-        destination.clone(),
-        fixture.path().to_path_buf(),
-        gio::Cancellable::new(),
-        move |from, name, to, target, flags| {
-            fs::write(&raced, b"concurrent user data").expect("racing destination");
-            rustix::fs::renameat_with(from, name, to, target, flags)
+    let _scope = FsQuirks::install(
+        fixture.path(),
+        Quirks {
+            before: vec![(
+                Op::Rename,
+                "destination",
+                0,
+                Box::new(move || {
+                    fs::write(&raced, b"concurrent user data").expect("racing destination")
+                }),
+            )],
+            ..Quirks::default()
         },
-    ));
+    );
+    let result = restore_path(&source, &destination, fixture.path());
     assert!(
         result
             .expect_err("collision")

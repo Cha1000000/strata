@@ -935,6 +935,8 @@
   "The maximum item count must be a number": "Le nombre maximal d’éléments doit être un nombre",
   "The media decoder failed": "Le décodeur multimédia a échoué",
   "The name is too long": "Le nom est trop long",
+  "The name isn’t valid at this location": "Ce nom n’est pas valide à cet emplacement",
+  "The result could not be confirmed. Check both locations before trying again.": "Le résultat n’a pas pu être confirmé. Vérifiez les deux emplacements avant de réessayer.",
   "The name or filter changed. Press Open to try again.": "Le nom ou le filtre a changé. Cliquez sur Ouvrir pour réessayer.",
   "The network file handle is no longer valid": "Le descripteur de fichier réseau n’est plus valide",
   "The network is down": "Le réseau est hors service",

@@ -141,6 +141,8 @@ pub(crate) fn io_error_message(error: &std::io::Error) -> String {
 
 const UNEXPECTED_SYSTEM_ERROR: &str = "An unexpected system error occurred";
 
+pub(crate) const INVALID_NAME_REASON: &str = "The name isn\u{2019}t valid at this location";
+
 /// [`io_error_message`] for the `%{error}` slot after a colon; see [`error_detail`].
 pub(crate) fn io_error_detail(error: &std::io::Error) -> String {
     error_detail(io_error_message(error))
@@ -213,6 +215,7 @@ pub(crate) fn gio_error_message(error: &glib::Error) -> String {
         Some(IOErrorEnum::NotEmpty) => "The folder is not empty",
         Some(IOErrorEnum::IsDirectory) => "The item is a folder",
         Some(IOErrorEnum::FilenameTooLong) => "The name is too long",
+        Some(IOErrorEnum::InvalidFilename) => INVALID_NAME_REASON,
         Some(IOErrorEnum::Busy) => "The item is in use",
         Some(IOErrorEnum::ConnectionRefused) => "The connection was refused",
         Some(IOErrorEnum::HostUnreachable) => "The server cannot be reached",

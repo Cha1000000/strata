@@ -935,6 +935,8 @@
   "The maximum item count must be a number": "The maximum item count must be a number",
   "The media decoder failed": "The media decoder failed",
   "The name is too long": "The name is too long",
+  "The name isn’t valid at this location": "The name isn’t valid at this location",
+  "The result could not be confirmed. Check both locations before trying again.": "The result could not be confirmed. Check both locations before trying again.",
   "The name or filter changed. Press Open to try again.": "The name or filter changed. Press Open to try again.",
   "The network file handle is no longer valid": "The network file handle is no longer valid",
   "The network is down": "The network is down",

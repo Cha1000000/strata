@@ -1,5 +1,9 @@
 // SPDX-License-Identifier: MIT
 
+use rustix::io::Errno;
+
+use super::super::{StageContent, StagedSibling, publish_staged_without_replace};
+use super::fs_quirks::{Op, Racer, Support};
 use super::*;
 
 #[test]
@@ -374,7 +378,7 @@ fn cancelling_a_new_file_copy_removes_the_incomplete_stage() -> Result<(), Box<d
         cancellable,
         Some(progress),
     ));
-    assert!(result.is_err_and(|error| error.matches(gio::IOErrorEnum::Cancelled)));
+    assert!(result.as_ref().is_err_and(|error| error.matches(gio::IOErrorEnum::Cancelled)), "{result:?}");
     assert!(!target.exists());
     assert_eq!(fs::read_dir(root.path())?.count(), 2);
     assert_eq!(fs::read(root.path().join("keep.txt"))?, b"keep");
@@ -382,7 +386,7 @@ fn cancelling_a_new_file_copy_removes_the_incomplete_stage() -> Result<(), Box<d
 }
 
 #[test]
-fn copying_and_replacing_symlinks_accepts_an_aliased_destination() -> Result<(), Box<dyn Error>> {
+fn copying_symlinks_accepts_an_aliased_destination() -> Result<(), Box<dyn Error>> {
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
         .lock()
         .map_err(|error| error.to_string())?;
@@ -396,19 +400,17 @@ fn copying_and_replacing_symlinks_accepts_an_aliased_destination() -> Result<(),
     std::os::unix::fs::symlink("../sentinel.txt", &source)?;
     let context = glib::MainContext::default();
 
-    for overwrite in [false, true] {
-        context.block_on(copy_recursively(
-            gio::File::for_path(&source),
-            gio::File::for_path(alias.join("link")),
-            overwrite,
-            gio::Cancellable::new(),
-            None,
-        ))?;
-        assert_eq!(
-            fs::read_link(actual.join("link"))?,
-            Path::new("../sentinel.txt")
-        );
-    }
+    context.block_on(copy_recursively(
+        gio::File::for_path(&source),
+        gio::File::for_path(alias.join("link")),
+        false,
+        gio::Cancellable::new(),
+        None,
+    ))?;
+    assert_eq!(
+        fs::read_link(actual.join("link"))?,
+        Path::new("../sentinel.txt")
+    );
     context.block_on(copy_new_recursively(
         gio::File::for_path(root.path().join("sentinel.txt")),
         gio::File::for_path(alias.join("new.txt")),
@@ -647,20 +649,41 @@ fn non_fat_copy_leaves_invalid_characters_untouched() -> Result<(), Box<dyn Erro
     Ok(())
 }
 
+fn stage(root: &Path, directory: bool) -> Result<StagedSibling, Box<dyn Error>> {
+    let content = if directory {
+        StageContent::Directory
+    } else {
+        StageContent::File
+    };
+    Ok(StagedSibling::create(root, content)?)
+}
+
+fn publish(staged: StagedSibling, target: &Path) -> Result<(), glib::Error> {
+    glib::MainContext::default().block_on(publish_staged_without_replace(
+        staged,
+        target.to_path_buf(),
+        gio::Cancellable::new(),
+    ))
+}
+
 #[test]
-fn commit_staged_falls_back_when_noreplace_is_unsupported() -> Result<(), Box<dyn Error>> {
+fn staged_publication_without_rename_flags_places_the_stage_itself() -> Result<(), Box<dyn Error>> {
+    use std::os::unix::fs::MetadataExt;
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
         .lock()
         .map_err(|error| error.to_string())?;
-    for error in [
-        rustix::io::Errno::INVAL,
-        rustix::io::Errno::NOSYS,
-        rustix::io::Errno::OPNOTSUPP,
-    ] {
+    for error in [Errno::INVAL, Errno::NOSYS, Errno::OPNOTSUPP] {
         for directory in [false, true] {
             let root = tempfile::tempdir()?;
-            let staged = super::super::StagedSibling::create(root.path(), directory)?;
-            let staged_path = staged.path().to_owned();
+            let _scope = FsQuirks::install(
+                root.path(),
+                Quirks {
+                    rename_flags: Support::Rejected(error),
+                    ..Quirks::default()
+                },
+            );
+            let staged = stage(root.path(), directory)?;
+            let staged_path = staged.path();
             let target = root.path().join("target");
             if directory {
                 fs::create_dir_all(staged_path.join("nested"))?;
@@ -668,28 +691,16 @@ fn commit_staged_falls_back_when_noreplace_is_unsupported() -> Result<(), Box<dy
             } else {
                 fs::write(&staged_path, b"file data")?;
             }
+            let inode = fs::metadata(&staged_path)?.ino();
 
-            let result = glib::MainContext::default().block_on(
-                super::super::publish_staged_without_replace_with(
-                    staged,
-                    target.clone(),
-                    gio::Cancellable::new(),
-                    move |_, _| Err(error),
-                ),
-            );
-            assert!(result.is_ok(), "fallback commit must succeed for {error:?}");
-            assert!(
-                !staged_path.exists(),
-                "staged source should no longer exist"
-            );
-            assert!(target.exists(), "target destination must exist");
+            publish(staged, &target)?;
+
+            assert!(!staged_path.exists(), "{error:?}");
+            assert_eq!(fs::metadata(&target)?.ino(), inode, "{error:?}");
             if directory {
-                assert_eq!(
-                    fs::read_to_string(target.join("nested/file.txt"))?,
-                    "directory data"
-                );
+                assert_eq!(fs::read(target.join("nested/file.txt"))?, b"directory data");
             } else {
-                assert_eq!(fs::read_to_string(&target)?, "file data");
+                assert_eq!(fs::read(&target)?, b"file data");
             }
         }
     }
@@ -697,19 +708,16 @@ fn commit_staged_falls_back_when_noreplace_is_unsupported() -> Result<(), Box<dy
 }
 
 #[test]
-fn commit_staged_fallback_refuses_to_overwrite_existing_target() -> Result<(), Box<dyn Error>> {
+fn staged_publication_refuses_to_overwrite_an_existing_target() -> Result<(), Box<dyn Error>> {
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
         .lock()
         .map_err(|error| error.to_string())?;
-    for error in [
-        rustix::io::Errno::INVAL,
-        rustix::io::Errno::NOSYS,
-        rustix::io::Errno::OPNOTSUPP,
-    ] {
+    for quirks in [Quirks::default, Quirks::without_rename_flags, Quirks::without_placement] {
         for directory in [false, true] {
             let root = tempfile::tempdir()?;
-            let staged = super::super::StagedSibling::create(root.path(), directory)?;
-            let staged_path = staged.path().to_owned();
+            let _scope = FsQuirks::install(root.path(), quirks());
+            let staged = stage(root.path(), directory)?;
+            let staged_path = staged.path();
             let target = root.path().join("target");
             if directory {
                 fs::create_dir(&target)?;
@@ -719,31 +727,16 @@ fn commit_staged_fallback_refuses_to_overwrite_existing_target() -> Result<(), B
                 fs::write(&target, b"target data")?;
             }
 
-            let result = glib::MainContext::default().block_on(
-                super::super::publish_staged_without_replace_with(
-                    staged,
-                    target.clone(),
-                    gio::Cancellable::new(),
-                    move |_, _| Err(error),
-                ),
-            );
-            assert!(
-                result
-                    .expect_err("must refuse to overwrite existing target")
-                    .matches(gio::IOErrorEnum::Exists)
-            );
-            assert!(
-                !staged_path.exists(),
-                "failed publication must clean its stage"
-            );
-            if directory {
-                assert_eq!(
-                    fs::read_to_string(target.join("existing.txt"))?,
-                    "target data"
-                );
+            let error = publish(staged, &target).expect_err("must refuse an existing target");
+
+            assert!(error.matches(gio::IOErrorEnum::Exists), "{error}");
+            assert!(!staged_path.exists(), "failed publication must clean its stage");
+            let kept = if directory {
+                target.join("existing.txt")
             } else {
-                assert_eq!(fs::read_to_string(&target)?, "target data");
-            }
+                target.clone()
+            };
+            assert_eq!(fs::read(kept)?, b"target data");
         }
     }
     Ok(())
@@ -757,31 +750,33 @@ fn staged_publication_preserves_racing_destinations() -> Result<(), Box<dyn Erro
     for source_directory in [false, true] {
         for destination_kind in ["file", "directory", "symlink"] {
             let root = tempfile::tempdir()?;
-            let staged = super::super::StagedSibling::create(root.path(), source_directory)?;
-            let stage_path = staged.path().to_owned();
+            let target = root.path().join("target");
+            let raced = target.clone();
+            let racer: Racer = Box::new(move || match destination_kind {
+                "file" => fs::write(&raced, b"racing data").expect("create competing file"),
+                "directory" => fs::create_dir(&raced).expect("create competing directory"),
+                _ => std::os::unix::fs::symlink("protected", &raced)
+                    .expect("create competing symlink"),
+            });
+            // The race lands after the first rung, in front of the fallback rung.
+            let fallback = if source_directory { Op::Mkdir } else { Op::Link };
+            let _scope = FsQuirks::install(
+                root.path(),
+                Quirks {
+                    rename_flags: Support::Rejected(Errno::OPNOTSUPP),
+                    before: vec![(fallback, "target", 0, racer)],
+                    ..Quirks::default()
+                },
+            );
+            let staged = stage(root.path(), source_directory)?;
+            let stage_path = staged.path();
             if !source_directory {
                 fs::write(&stage_path, b"new data")?;
             }
-            let target = root.path().join("target");
-            let protected = root.path().join("protected");
-            fs::write(&protected, b"protected data")?;
-            let result = glib::MainContext::default().block_on(
-                super::super::publish_staged_without_replace_with(
-                    staged,
-                    target.clone(),
-                    gio::Cancellable::new(),
-                    move |_, to| {
-                        match destination_kind {
-                            "file" => fs::write(to, b"racing data").expect("create competing file"),
-                            "directory" => fs::create_dir(to).expect("create competing directory"),
-                            _ => std::os::unix::fs::symlink("protected", to)
-                                .expect("create competing symlink"),
-                        }
-                        Err(rustix::io::Errno::OPNOTSUPP)
-                    },
-                ),
-            );
-            assert!(result.is_err());
+            fs::write(root.path().join("protected"), b"protected data")?;
+
+            assert!(publish(staged, &target).is_err());
+
             assert!(!stage_path.exists());
             match destination_kind {
                 "file" => assert_eq!(fs::read(&target)?, b"racing data"),
@@ -795,22 +790,18 @@ fn staged_publication_preserves_racing_destinations() -> Result<(), Box<dyn Erro
 }
 
 #[test]
-fn staged_fallback_preserves_dangling_symlinks() -> Result<(), Box<dyn Error>> {
+fn staged_symlinks_are_recreated_where_links_are_missing() -> Result<(), Box<dyn Error>> {
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
         .lock()
         .map_err(|error| error.to_string())?;
     let root = tempfile::tempdir()?;
-    let staged = super::super::StagedSibling::create(root.path(), false)?;
-    let staged_path = staged.path().to_owned();
-    fs::remove_file(&staged_path)?;
-    std::os::unix::fs::symlink("missing", &staged_path)?;
+    let _scope = FsQuirks::install(root.path(), Quirks::without_placement());
+    let staged = StagedSibling::create(root.path(), StageContent::Symlink("missing".into()))?;
+    let staged_path = staged.path();
     let target = root.path().join("target");
-    glib::MainContext::default().block_on(super::super::publish_staged_without_replace_with(
-        staged,
-        target.clone(),
-        gio::Cancellable::new(),
-        |_, _| Err(rustix::io::Errno::INVAL),
-    ))?;
+
+    publish(staged, &target)?;
+
     assert_eq!(fs::read_link(target)?, Path::new("missing"));
     assert!(fs::symlink_metadata(staged_path).is_err());
     Ok(())
@@ -822,50 +813,55 @@ fn staged_fallback_removes_reserved_directory_on_copy_error() -> Result<(), Box<
         .lock()
         .map_err(|error| error.to_string())?;
     let root = tempfile::tempdir()?;
-    let staged = super::super::StagedSibling::create(root.path(), true)?;
-    let staged_path = staged.path().to_owned();
+    let _scope = FsQuirks::install(root.path(), Quirks::without_placement());
+    let staged = stage(root.path(), true)?;
+    let staged_path = staged.path();
     let _socket = std::os::unix::net::UnixListener::bind(staged_path.join("unsupported.sock"))?;
     let target = root.path().join("target");
-    let result =
-        glib::MainContext::default().block_on(super::super::publish_staged_without_replace_with(
-            staged,
-            target.clone(),
-            gio::Cancellable::new(),
-            |_, _| Err(rustix::io::Errno::NOSYS),
-        ));
-    assert!(result.is_err());
+
+    assert!(publish(staged, &target).is_err());
+
     assert!(!target.exists());
     assert!(!staged_path.exists());
     Ok(())
 }
 
 #[test]
-fn staged_fallback_reports_cleanup_failure_after_publication() -> Result<(), Box<dyn Error>> {
+fn a_stage_swapped_before_publication_is_neither_published_nor_deleted()
+-> Result<(), Box<dyn Error>> {
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
         .lock()
         .map_err(|error| error.to_string())?;
     let root = tempfile::tempdir()?;
-    let staged = super::super::StagedSibling::create(root.path(), false)?;
-    let target = root.path().join("target");
-    let result =
-        glib::MainContext::default().block_on(super::super::publish_staged_without_replace_with(
-            staged,
-            target.clone(),
-            gio::Cancellable::new(),
-            |from, _| {
-                fs::remove_file(from).expect("remove file stage");
-                fs::create_dir(from).expect("replace stage with directory");
-                fs::write(from.join("copied.txt"), b"published data").expect("populate stage");
-                Err(rustix::io::Errno::INVAL)
-            },
-        ));
-    assert!(
-        result
-            .expect_err("cleanup must fail")
-            .to_string()
-            .contains("The item was copied")
+    let staged = stage(root.path(), false)?;
+    let staged_path = staged.path();
+    let swapped = staged_path.clone();
+    let _scope = FsQuirks::install(
+        root.path(),
+        Quirks {
+            before: vec![(
+                Op::Rename,
+                ".strata-replacement-*",
+                0,
+                Box::new(move || {
+                    fs::remove_file(&swapped).expect("remove file stage");
+                    fs::create_dir(&swapped).expect("replace stage with directory");
+                    fs::write(swapped.join("copied.txt"), b"foreign data").expect("populate");
+                }),
+            )],
+            ..Quirks::without_placement()
+        },
     );
-    assert_eq!(fs::read(target.join("copied.txt"))?, b"published data");
+    let target = root.path().join("target");
+
+    let error = publish(staged, &target).expect_err("a swapped stage is refused");
+
+    assert!(
+        error.message().contains("incomplete copy could not be removed"),
+        "{error}"
+    );
+    assert!(fs::symlink_metadata(&target).is_err());
+    assert_eq!(fs::read(staged_path.join("copied.txt"))?, b"foreign data");
     Ok(())
 }
 
@@ -875,8 +871,9 @@ fn cancelling_staged_fallback_removes_its_reserved_directory() -> Result<(), Box
         .lock()
         .map_err(|error| error.to_string())?;
     let root = tempfile::tempdir()?;
-    let staged = super::super::StagedSibling::create(root.path(), true)?;
-    let staged_path = staged.path().to_owned();
+    let _scope = FsQuirks::install(root.path(), Quirks::without_placement());
+    let staged = stage(root.path(), true)?;
+    let staged_path = staged.path();
     fs::File::create(staged_path.join("large.bin"))?.set_len(64 * 1024 * 1024)?;
     let target = root.path().join("target");
     let cancellable = gio::Cancellable::new();
@@ -886,13 +883,8 @@ fn cancelling_staged_fallback_removes_its_reserved_directory() -> Result<(), Box
     let publish_cancellable = cancellable.clone();
     let context = glib::MainContext::default();
     let task = context.spawn_local(async move {
-        let result = super::super::publish_staged_without_replace_with(
-            staged,
-            publish_target,
-            publish_cancellable,
-            |_, _| Err(rustix::io::Errno::INVAL),
-        )
-        .await;
+        let result =
+            publish_staged_without_replace(staged, publish_target, publish_cancellable).await;
         completed.set(true);
         result
     });
@@ -909,5 +901,33 @@ fn cancelling_staged_fallback_removes_its_reserved_directory() -> Result<(), Box
     assert!(result.is_err_and(|error| error.matches(gio::IOErrorEnum::Cancelled)));
     assert!(!target.exists());
     assert!(!staged_path.exists());
+    Ok(())
+}
+
+#[test]
+fn a_symlink_child_never_overwrites_an_existing_entry() -> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let root = tempfile::tempdir()?;
+    let source = root.path().join("source");
+    let target = root.path().join("target");
+    fs::create_dir(&source)?;
+    fs::create_dir(&target)?;
+    std::os::unix::fs::symlink("elsewhere", source.join("Link"))?;
+    fs::write(target.join("Link"), b"existing")?;
+
+    let error = glib::MainContext::default()
+        .block_on(copy_recursively(
+            gio::File::for_path(&source),
+            gio::File::for_path(&target),
+            true,
+            gio::Cancellable::new(),
+            None,
+        ))
+        .expect_err("an existing entry blocks the link");
+
+    assert!(error.matches(gio::IOErrorEnum::Exists), "{error}");
+    assert_eq!(fs::read(target.join("Link"))?, b"existing");
     Ok(())
 }

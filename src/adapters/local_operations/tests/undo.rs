@@ -297,7 +297,8 @@ fn undoing_a_cross_volume_move_keeps_the_item_when_the_removable_flush_fails()
     fs::create_dir_all(&archive)?;
     let current = archive.join("report.txt");
     fs::write(&current, b"contents")?;
-    let _guard = RemovableFlushGuard::install(root.path(), Some(io::ErrorKind::Other), true);
+    let _guard = RemovableFlushGuard::install(root.path(), Some(io::ErrorKind::Other));
+    let _volumes = separate_volumes(&archive, &origin);
 
     let (_operation, events) = undo_one(
         97,
@@ -336,7 +337,8 @@ fn undoing_a_cross_volume_move_flushes_before_deleting_the_moved_item() -> Resul
     let current = archive.join("report.txt");
     fs::write(&current, b"contents")?;
     let during = watch_source_during_sync(&current);
-    let _guard = RemovableFlushGuard::install(root.path(), None, true);
+    let _guard = RemovableFlushGuard::install(root.path(), None);
+    let _volumes = separate_volumes(&archive, &origin);
 
     let (_operation, events) = undo_one(
         98,

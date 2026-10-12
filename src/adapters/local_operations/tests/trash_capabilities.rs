@@ -145,7 +145,8 @@ fn isolated_trash_supports_read_copy_move_restore_and_delete() {
                 child.clone(),
                 gio::File::for_path(home.join("child.txt")),
                 gio::Cancellable::new(),
-                None
+                None,
+                false,
             ))
             .is_err()
     );
@@ -156,6 +157,7 @@ fn isolated_trash_supports_read_copy_move_restore_and_delete() {
             gio::File::for_path(&moved),
             gio::Cancellable::new(),
             None,
+            false,
         ))
         .expect("move whole item out of Trash");
     assert_eq!(

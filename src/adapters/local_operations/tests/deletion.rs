@@ -1,26 +1,26 @@
 use super::*;
 use crate::adapters::local_operations::{
-    LocalDeleteJob, LocalDeleteQueue, LocalDeleteRoot, parallel_delete_local_blocking_with_workers,
+    LocalDeleteJob, LocalDeleteQueue, PinnedEntry, parallel_delete_local_blocking_with_workers,
     parallel_delete_local_with, process_local_delete_job, retry_local_open,
     run_local_delete_workers,
 };
 use std::sync::{Barrier, atomic::Ordering, mpsc};
 
-fn delete_root(path: &Path) -> Result<LocalDeleteRoot, Box<dyn Error>> {
-    Ok(LocalDeleteRoot {
+fn delete_root(path: &Path) -> Result<PinnedEntry, Box<dyn Error>> {
+    Ok(PinnedEntry {
         parent: Arc::new(super::super::open_local_parent_directory(
             path.parent().ok_or("no parent")?,
         )?),
         name: path.file_name().ok_or("no name")?.to_owned(),
-        expected: None,
+        identity: None,
     })
 }
 
-fn enqueue_root(queue: &Arc<LocalDeleteQueue>, root: LocalDeleteRoot) {
+fn enqueue_root(queue: &Arc<LocalDeleteQueue>, root: PinnedEntry) {
     queue.enqueue(LocalDeleteJob::Entry {
         parent: root.parent,
         name: root.name,
-        expected: root.expected,
+        expected: root.identity,
         guard: None,
         completion: None,
     });
@@ -838,10 +838,10 @@ fn an_already_cancelled_recursive_delete_preserves_the_root() -> Result<(), Box<
     let cancellable = gio::Cancellable::new();
     cancellable.cancel();
     let parent = super::open_local_parent_directory(root.parent().ok_or("no parent")?)?;
-    let delete_root = super::LocalDeleteRoot {
+    let delete_root = super::PinnedEntry {
         parent: Arc::new(parent),
         name: root.file_name().ok_or("no name")?.to_owned(),
-        expected: None,
+        identity: None,
     };
     let context = glib::MainContext::default();
     let error = context
