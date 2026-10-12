@@ -114,14 +114,12 @@ pub(super) fn start(
                 }
                 // Retry only a collision from atomic creation, never a preflight exists() check.
                 Err(error)
-                    if unique_name
-                        && error.matches(gio::IOErrorEnum::Exists)
-                        && suffix < u64::MAX =>
+                    if unique_name && name_taken(&error, is_directory) && suffix < u64::MAX =>
                 {
                     suffix += 1;
                     continue;
                 }
-                Err(error) if error.matches(gio::IOErrorEnum::Exists) => {
+                Err(error) if name_taken(&error, is_directory) => {
                     emit(OperationEvent::Failed {
                         request_id: id,
                         message: rust_i18n::t!("“%{name}” already exists", name = candidate)
@@ -148,6 +146,13 @@ pub(super) fn start(
         }
     });
     cancellation_handle(cancellable)
+}
+
+/// SMB with POSIX extensions fails an exclusive file create over a folder
+/// with `EISDIR`, which GIO reports as `IsDirectory`.
+pub(super) fn name_taken(error: &glib::Error, is_directory: bool) -> bool {
+    error.matches(gio::IOErrorEnum::Exists)
+        || (!is_directory && error.matches(gio::IOErrorEnum::IsDirectory))
 }
 
 fn creation_failed(name: &str, error: &glib::Error) -> String {

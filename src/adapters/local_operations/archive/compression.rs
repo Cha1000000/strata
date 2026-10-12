@@ -12,8 +12,8 @@ use super::super::{
     original_kept_aside,
     placement::{
         COMPRESSION_STAGE_PREFIX, Displacement, NUMBERED_NAME_ATTEMPTS, PlaceError,
-        REPLACED_PREFIX, creation_error, displacement_without_trash, exchange, place, put_back,
-        remove_if_unchanged, reserve_hidden_name, set_aside, set_aside_if_safe,
+        REPLACED_PREFIX, displacement_without_trash, exchange, file_creation_error, place,
+        put_back, remove_if_unchanged, reserve_hidden_name, set_aside, set_aside_if_safe,
     },
     placement_reason, remove_displaced_original,
     trash::trash_verified,
@@ -193,7 +193,7 @@ impl Publication {
                 Entry::new(&*parent, name),
                 rustix::fs::Mode::from_raw_mode(0o600),
             )
-            .map_err(creation_error)
+            .map_err(file_creation_error)
         })
         .map_err(|error| self.creation_failed(placement_reason(error)))?;
         let identity = rustix::fs::fstat(&file).map(|stat| LocalFileIdentity::from_stat(&stat));

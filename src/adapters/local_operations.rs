@@ -2905,6 +2905,9 @@ impl StagedSibling {
                 Ok(Some(stat)) => stat,
                 Ok(None) => fs().stat(entry, false).map_err(PlaceError::Io)?,
                 Err(rustix::io::Errno::EXIST) => return Err(PlaceError::Exists),
+                Err(error) if matches!(content, StageContent::File) => {
+                    return Err(placement::file_creation_error(error));
+                }
                 Err(error) => return Err(PlaceError::Io(error)),
             };
             Ok((stat.identity, stat.kind))

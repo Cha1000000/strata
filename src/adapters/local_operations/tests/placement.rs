@@ -681,7 +681,7 @@ type ProbeCase = (fn() -> Quirks, Probed, Feasibility, Feasibility);
 
 #[test]
 fn the_probe_learns_each_quirk_and_leaves_nothing_behind() -> Result<(), Box<dyn Error>> {
-    let cases: [ProbeCase; 5] = [
+    let cases: [ProbeCase; 6] = [
         (
             Quirks::default,
             Probed {
@@ -736,6 +736,24 @@ fn the_probe_learns_each_quirk_and_leaves_nothing_behind() -> Result<(), Box<dyn
                 rename_over_empty_directory: Some(true),
             },
             Feasibility::No,
+            Feasibility::Yes,
+        ),
+        (
+            // SMB with POSIX extensions: EISDIR from an exclusive file create is
+            // a taken name, but from mkdir it is not.
+            || Quirks {
+                fail: vec![
+                    (Op::Create, ".strata-probe-*", 0, Errno::ISDIR),
+                    (Op::Mkdir, ".strata-probe-*", 0, Errno::ISDIR),
+                ],
+                ..Quirks::default()
+            },
+            Probed {
+                no_replace: Some(true),
+                hard_links: Some(true),
+                rename_over_empty_directory: None,
+            },
+            Feasibility::Yes,
             Feasibility::Yes,
         ),
     ];
@@ -1083,5 +1101,25 @@ fn a_failed_rename_over_the_reserved_file_removes_only_an_untouched_placeholder(
             assert_eq!(names(root.path())?, ["source"]);
         }
     }
+    Ok(())
+}
+
+#[test]
+fn a_reserved_name_reported_as_a_folder_is_taken() -> Result<(), Box<dyn Error>> {
+    let root = tempfile::tempdir()?;
+    let _scope = FsQuirks::install(
+        root.path(),
+        Quirks {
+            fail: vec![(Op::Create, "target", 0, Errno::ISDIR)],
+            ..Quirks::without_placement()
+        },
+    );
+    fs::write(root.path().join("source"), b"data")?;
+
+    assert_eq!(
+        rename_in(root.path(), "source", "target"),
+        Err(RenameFailure::Place(PlaceError::Exists))
+    );
+    assert_eq!(names(root.path())?, ["source"]);
     Ok(())
 }

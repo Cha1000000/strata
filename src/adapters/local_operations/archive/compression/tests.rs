@@ -15,6 +15,7 @@ use crate::{
 };
 use gtk::glib;
 use policy::assert_seven_z_methods;
+use rustix::io::Errno;
 use std::{
     collections::BTreeMap,
     error::Error,
@@ -407,31 +408,43 @@ fn a_name_taken_during_replacement_keeps_the_original_aside() -> Result<(), Box<
 }
 
 #[test]
-fn keep_both_numbering_works_with_sshfs_eperm_collisions() -> Result<(), Box<dyn Error>> {
+fn keep_both_numbering_works_with_network_collision_errnos() -> Result<(), Box<dyn Error>> {
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
         .lock()
         .map_err(|error| error.to_string())?;
-    let root = tempfile::tempdir()?;
-    fs::write(root.path().join("existing.zip"), b"original")?;
-    fs::write(root.path().join("existing (1).zip"), b"numbered")?;
-    let _quirks = FsQuirks::install(
-        root.path(),
-        Quirks {
-            collisions_as_eperm: true,
-            ..Quirks::without_rename_flags()
-        },
-    );
+    for sshfs in [true, false] {
+        let root = tempfile::tempdir()?;
+        fs::write(root.path().join("existing.zip"), b"original")?;
+        fs::write(root.path().join("existing (1).zip"), b"numbered")?;
+        let quirks = if sshfs {
+            Quirks {
+                collisions_as_eperm: true,
+                ..Quirks::without_rename_flags()
+            }
+        } else {
+            // SMB with POSIX extensions: the first stage name is held by a folder.
+            Quirks {
+                fail: vec![(Op::Create, ".strata-compression-*", 0, Errno::ISDIR)],
+                ..Quirks::default()
+            }
+        };
+        let _quirks = FsQuirks::install(root.path(), quirks);
 
-    let (result, _) = publish_replacement(root.path(), TransferConflict::KeepBoth);
+        let (result, _) = publish_replacement(root.path(), TransferConflict::KeepBoth);
 
-    assert_eq!(result, Ok(("existing (2).zip".to_owned(), None)));
-    assert_eq!(
-        fs::read(root.path().join("existing (2).zip"))?,
-        b"replacement"
-    );
-    assert_eq!(fs::read(root.path().join("existing.zip"))?, b"original");
-    assert_eq!(fs::read(root.path().join("existing (1).zip"))?, b"numbered");
-    assert!(stages(root.path(), COMPRESSION_STAGE)?.is_empty());
+        assert_eq!(
+            result,
+            Ok(("existing (2).zip".to_owned(), None)),
+            "sshfs: {sshfs}"
+        );
+        assert_eq!(
+            fs::read(root.path().join("existing (2).zip"))?,
+            b"replacement"
+        );
+        assert_eq!(fs::read(root.path().join("existing.zip"))?, b"original");
+        assert_eq!(fs::read(root.path().join("existing (1).zip"))?, b"numbered");
+        assert!(stages(root.path(), COMPRESSION_STAGE)?.is_empty());
+    }
     Ok(())
 }
 

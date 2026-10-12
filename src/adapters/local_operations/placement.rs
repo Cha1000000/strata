@@ -593,6 +593,15 @@ pub(super) fn creation_error(error: Errno) -> PlaceError {
     }
 }
 
+/// For `O_CREAT | O_EXCL` files: SMB with POSIX extensions reports a folder
+/// already at the name as `EISDIR`.
+pub(super) fn file_creation_error(error: Errno) -> PlaceError {
+    match error {
+        Errno::ISDIR => PlaceError::Exists,
+        error => creation_error(error),
+    }
+}
+
 /// Tries each primitive on new names of Strata's own in `dir`, where no
 /// errno can be blamed on the user's item. Fields stay `None` when the probe
 /// cannot tell.
@@ -607,7 +616,7 @@ pub(super) fn probe(
     let created = reserve_hidden_name(PROBE_PREFIX, |name| {
         drop(
             fs.create_exclusive(at(dir, name), Mode::from_raw_mode(0o600))
-                .map_err(creation_error)?,
+                .map_err(file_creation_error)?,
         );
         fs.stat(at(dir, name), false)
             .map(|stat| stat.identity)
@@ -1003,7 +1012,7 @@ fn rename_over_reserved_file(
     let reserved = match fs.create_exclusive(to, Mode::from_raw_mode(0o600)) {
         Ok(file) => fs.stat_fd(file.as_fd()).map_err(PlaceError::Io)?.identity,
         Err(Errno::PERM) if exists(fs, to)? => return Err(PlaceError::Exists),
-        Err(error) => return Err(creation_error(error)),
+        Err(error) => return Err(file_creation_error(error)),
     };
     let still_reserved = || {
         fs.stat(to, true).is_ok_and(|current| {
