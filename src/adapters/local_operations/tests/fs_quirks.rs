@@ -74,6 +74,10 @@ pub(crate) enum Trash {
     #[default]
     Supported,
     Unsupported,
+    /// GLib #4060: FALSE without an error, and nothing moved.
+    FalseWithoutError,
+    /// TRUE, but nothing moved.
+    SucceedsWithoutMoving,
 }
 
 pub(crate) type Racer = Box<dyn FnMut() + Send>;
@@ -594,6 +598,7 @@ impl FsOps for Scoped {
                     Ok(match scope.quirk(|quirks| quirks.trash) {
                         Trash::Supported => System.can_trash(path),
                         Trash::Unsupported => false,
+                        Trash::FalseWithoutError | Trash::SucceedsWithoutMoving => true,
                     })
                 })
                 .unwrap_or(false),
@@ -601,13 +606,13 @@ impl FsOps for Scoped {
         }
     }
 
-    fn trash(&self, path: &Path, cancellable: &gio::Cancellable) -> Result<(), glib::Error> {
+    fn trash(&self, path: &Path, cancellable: &gio::Cancellable) -> Result<bool, glib::Error> {
         assert_off_main_thread();
         let Some(scope) = scope_for_path(path) else {
             return System.trash(path, cancellable);
         };
         let name = path.file_name().unwrap_or_default();
-        let mut outcome = Ok(());
+        let mut outcome = Ok(true);
         let _ = scope.run(Op::Trash, &[name], |scope| {
             outcome = match scope.quirk(|quirks| quirks.trash) {
                 Trash::Supported => System.trash(path, cancellable),
@@ -615,6 +620,8 @@ impl FsOps for Scoped {
                     gio::IOErrorEnum::NotSupported,
                     "Trash is not supported here",
                 )),
+                Trash::FalseWithoutError => Ok(false),
+                Trash::SucceedsWithoutMoving => Ok(true),
             };
             Ok(())
         });

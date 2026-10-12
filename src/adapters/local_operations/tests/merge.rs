@@ -829,9 +829,10 @@ fn merge_without_trash_sets_originals_aside_and_removes_them_after_success()
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
         .lock()
         .map_err(|error| error.to_string())?;
-    for (quirks, move_source) in [
-        (Quirks::default(), false),
-        (Quirks::without_rename_flags(), true),
+    for (trash, quirks, move_source) in [
+        (Trash::Unsupported, Quirks::default(), false),
+        (Trash::Unsupported, Quirks::without_rename_flags(), true),
+        (Trash::FalseWithoutError, Quirks::default(), false),
     ] {
         let root = tempfile::tempdir()?;
         let source = root.path().join("source");
@@ -852,11 +853,11 @@ fn merge_without_trash_sets_originals_aside_and_removes_them_after_success()
                 ("nested/stays.txt", "keep me"),
             ],
         )?;
-        let quirks = FsQuirks::install(root.path(), without_trash(quirks));
+        let quirks = FsQuirks::install(root.path(), Quirks { trash, ..quirks });
 
         let (result, plans) = merge_through_trash(&source, &target, move_source, real_copy());
 
-        assert!(result.is_ok(), "{result:?}");
+        assert!(result.is_ok(), "{trash:?}: {result:?}");
         assert!(used_aside(&quirks));
         assert_eq!(fs::read(target.join("shared.txt"))?, b"new");
         assert_eq!(fs::read(target.join("nested/deep/shared.txt"))?, b"new deep");

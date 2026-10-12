@@ -256,7 +256,11 @@ fn replacing_an_archive_without_trash_sets_the_original_aside() -> Result<(), Bo
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
         .lock()
         .map_err(|error| error.to_string())?;
-    for (fs_type, sets_aside) in [(NFS_SUPER_MAGIC, true), (TMPFS_MAGIC, false)] {
+    for (trash, fs_type, sets_aside) in [
+        (Trash::Unsupported, NFS_SUPER_MAGIC, true),
+        (Trash::Unsupported, TMPFS_MAGIC, false),
+        (Trash::SucceedsWithoutMoving, NFS_SUPER_MAGIC, true),
+    ] {
         let root = tempfile::tempdir()?;
         let archive = root.path().join("existing.zip");
         fs::write(&archive, b"original")?;
@@ -264,7 +268,7 @@ fn replacing_an_archive_without_trash_sets_the_original_aside() -> Result<(), Bo
         let quirks = FsQuirks::install(
             root.path(),
             Quirks {
-                trash: Trash::Unsupported,
+                trash,
                 fs_type: Some(fs_type),
                 ..Quirks::default()
             },
@@ -275,7 +279,7 @@ fn replacing_an_archive_without_trash_sets_the_original_aside() -> Result<(), Bo
         assert_eq!(
             result,
             Ok(("existing.zip".to_owned(), Some(ReplacedOriginal::Deleted))),
-            "{fs_type:#x}"
+            "{trash:?} {fs_type:#x}"
         );
         assert_eq!(fs::read(&archive)?, b"replacement");
         assert_eq!(fs::metadata(&archive)?.permissions().mode() & 0o777, 0o640);
@@ -285,7 +289,7 @@ fn replacing_an_archive_without_trash_sets_the_original_aside() -> Result<(), Bo
                 .iter()
                 .any(|name| name.to_string_lossy().starts_with(".strata-replaced-"))
         });
-        assert_eq!(set_aside, sets_aside, "{fs_type:#x}");
+        assert_eq!(set_aside, sets_aside, "{trash:?} {fs_type:#x}");
     }
     Ok(())
 }

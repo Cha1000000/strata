@@ -938,6 +938,7 @@
   "The name isn’t valid at this location": "O nome não é válido neste local",
   "The result could not be confirmed. Check both locations before trying again.": "Não foi possível confirmar o resultado. Verifique os dois locais antes de tentar novamente.",
   "This location can’t guarantee that another item won’t be overwritten": "Este local não pode garantir que outro item não seja sobrescrito",
+  "Trash reported success, but the item was not moved": "A Lixeira informou que a operação foi concluída, mas o item não foi movido",
   "The name or filter changed. Press Open to try again.": "O nome ou o filtro mudou. Clique em Abrir para tentar novamente.",
   "The network file handle is no longer valid": "O identificador de arquivo de rede não é mais válido",
   "The network is down": "A rede está fora do ar",

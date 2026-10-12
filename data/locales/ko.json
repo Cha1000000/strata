@@ -938,6 +938,7 @@
   "The name isn’t valid at this location": "이 위치에서 사용할 수 없는 이름입니다",
   "The result could not be confirmed. Check both locations before trying again.": "결과를 확인할 수 없습니다. 다시 시도하기 전에 두 위치를 모두 확인하세요.",
   "This location can’t guarantee that another item won’t be overwritten": "이 위치에서는 다른 항목을 덮어쓰지 않는다고 보장할 수 없습니다",
+  "Trash reported success, but the item was not moved": "휴지통에서 성공했다고 보고했지만 항목이 이동되지 않았습니다",
   "The name or filter changed. Press Open to try again.": "이름 또는 필터가 변경되었습니다. 다시 시도하려면 [열기]를 누르세요.",
   "The network file handle is no longer valid": "네트워크 파일 핸들이 더 이상 유효하지 않습니다",
   "The network is down": "네트워크가 작동하지 않습니다",

@@ -938,6 +938,7 @@
   "The name isn’t valid at this location": "Это имя недопустимо в этом расположении",
   "The result could not be confirmed. Check both locations before trying again.": "Не удалось подтвердить результат. Проверьте оба расположения, прежде чем повторить попытку.",
   "This location can’t guarantee that another item won’t be overwritten": "Это расположение не может гарантировать, что другой элемент не будет перезаписан",
+  "Trash reported success, but the item was not moved": "Корзина сообщила об успехе, но элемент не был перемещён",
   "The name or filter changed. Press Open to try again.": "Имя или фильтр изменились. Нажмите «Открыть», чтобы повторить попытку.",
   "The network file handle is no longer valid": "Дескриптор сетевого файла больше недействителен",
   "The network is down": "Сеть не работает",

@@ -71,7 +71,8 @@ pub(super) trait FsOps: Send + Sync {
     fn fs_type(&self, dir: BorrowedFd<'_>) -> Option<FsWord>;
     /// GIO's `access::can-trash` for a native item, without following it.
     fn can_trash(&self, path: &Path) -> bool;
-    fn trash(&self, path: &Path, cancellable: &gio::Cancellable) -> Result<(), glib::Error>;
+    /// GLib's own result: `Ok(false)` is a failure without an error (GLib #4060).
+    fn trash(&self, path: &Path, cancellable: &gio::Cancellable) -> Result<bool, glib::Error>;
 }
 
 pub(super) struct System;
@@ -256,8 +257,29 @@ impl FsOps for System {
             .is_ok_and(|info| info.boolean(gio::FILE_ATTRIBUTE_ACCESS_CAN_TRASH))
     }
 
-    fn trash(&self, path: &Path, cancellable: &gio::Cancellable) -> Result<(), glib::Error> {
+    #[expect(
+        unsafe_code,
+        reason = "gio-rs asserts that FALSE always carries an error, which GLib #4060 breaks"
+    )]
+    fn trash(&self, path: &Path, cancellable: &gio::Cancellable) -> Result<bool, glib::Error> {
+        use glib::translate::{ToGlibPtr, from_glib_full};
+
         assert_off_main_thread();
-        gio::File::for_path(path).trash(Some(cancellable))
+        let file = gio::File::for_path(path);
+        let mut error = std::ptr::null_mut();
+        // SAFETY: file and cancellable outlive the call, and error is a valid out-pointer.
+        let trashed = unsafe {
+            gio::ffi::g_file_trash(
+                file.to_glib_none().0,
+                cancellable.to_glib_none().0,
+                &mut error,
+            )
+        };
+        if error.is_null() {
+            Ok(trashed != glib::ffi::GFALSE)
+        } else {
+            // SAFETY: GLib set the error and transferred its ownership to us.
+            Err(unsafe { from_glib_full(error) })
+        }
     }
 }

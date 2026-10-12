@@ -596,6 +596,48 @@ fn replace_without_trash_or_exchange_sets_the_original_aside() -> Result<(), Box
 }
 
 #[test]
+fn replace_falls_back_to_aside_when_trash_lies() -> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    for (trash, move_source) in [
+        (Trash::FalseWithoutError, false),
+        (Trash::SucceedsWithoutMoving, true),
+    ] {
+        let root = tempfile::tempdir()?;
+        let source = root.path().join("source");
+        let target = root.path().join("target");
+        fs::write(&source, b"new")?;
+        fs::write(&target, b"old")?;
+        let quirks = FsQuirks::install(
+            root.path(),
+            Quirks {
+                trash,
+                fs_type: Some(NFS_SUPER_MAGIC),
+                ..Quirks::default()
+            },
+        );
+
+        let (result, replaced) = replace_reporting(&source, &target, move_source);
+
+        assert!(result.is_ok(), "{trash:?}: {result:?}");
+        assert_eq!(quirks.count(Op::Trash), 1);
+        assert_eq!(replaced, [ReplacedOriginal::Deleted]);
+        assert_eq!(fs::read(&target)?, b"new");
+        assert!(used_name(&quirks, ".strata-replaced-"));
+        assert_eq!(
+            names(root.path())?,
+            if move_source {
+                vec!["target"]
+            } else {
+                vec!["source", "target"]
+            }
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn replace_never_uses_exchange_on_fuse() -> Result<(), Box<dyn Error>> {
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
         .lock()

@@ -4,6 +4,7 @@ use crate::adapters::local_operations::{
     parallel_delete_local_with, process_local_delete_job, retry_local_open,
     run_local_delete_workers,
 };
+use super::fs_quirks::Trash;
 use std::sync::{Barrier, atomic::Ordering, mpsc};
 
 fn delete_root(path: &Path) -> Result<PinnedEntry, Box<dyn Error>> {
@@ -894,6 +895,57 @@ fn trashing_reports_each_items_identity_and_a_permanent_delete_reports_none() {
                         vec![(Location::local(&folder), identity)]
                     }
                 );
+            }
+        },
+    );
+}
+
+#[test]
+fn a_trash_that_moves_nothing_is_retryable_and_records_no_undo() {
+    crate::test_support::gtk_test(
+        "adapters::local_operations::tests::deletion::a_trash_that_moves_nothing_is_retryable_and_records_no_undo",
+        || {
+            for trash in [Trash::FalseWithoutError, Trash::SucceedsWithoutMoving] {
+                let root = tempfile::tempdir().expect("root");
+                let folder = root.path().join("folder");
+                fs::create_dir(&folder).expect("folder");
+                let _quirks = FsQuirks::install(
+                    root.path(),
+                    Quirks {
+                        trash,
+                        ..Quirks::default()
+                    },
+                );
+                let events = Rc::new(RefCell::new(Vec::new()));
+                let emitted = events.clone();
+                let _operation = LocalOperationProvider.delete(
+                    DeleteRequest {
+                        id: OperationRequestId(4060),
+                        entries: vec![directory_entry(&folder)],
+                        permanent: false,
+                    },
+                    Rc::new(move |event| emitted.borrow_mut().push(event)),
+                );
+                wait_for_operation(&events, |event| {
+                    matches!(
+                        event,
+                        OperationEvent::Deleted { .. } | OperationEvent::CompletedWithErrors { .. }
+                    )
+                });
+
+                let events = events.borrow();
+                assert!(
+                    matches!(
+                        events.last(),
+                        Some(OperationEvent::CompletedWithErrors { deleted_locations, retryable_locations, .. })
+                            if deleted_locations.is_empty()
+                                && retryable_locations == &[Location::local(&folder)]
+                    ),
+                    "{trash:?}: {:?}",
+                    events.last()
+                );
+                assert!(trashed_items(&events).is_empty());
+                assert!(folder.is_dir());
             }
         },
     );

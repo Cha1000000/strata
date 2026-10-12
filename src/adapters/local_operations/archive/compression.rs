@@ -17,6 +17,7 @@ use super::super::{
         reserve_hidden_name, set_aside,
     },
     placement_reason,
+    trash::trash_verified,
 };
 use super::{
     ArchiveError, COPY_BUF, archive_failed, check_archive_cancelled, copy_with_big_buf,
@@ -311,7 +312,12 @@ impl Publication {
         stage: &Stage,
         identity: LocalFileIdentity,
     ) -> Result<Published, ArchiveError> {
-        match fs().trash(&self.destination.join(&self.name), &gio::Cancellable::new()) {
+        match trash_verified(
+            Entry::new(&*stage.parent, OsStr::new(&self.name)),
+            &self.destination.join(&self.name),
+            identity,
+            &gio::Cancellable::new(),
+        ) {
             Ok(()) => {}
             Err(error) if error.matches(gio::IOErrorEnum::NotSupported) => {
                 let replacement = self.without_trash(&stage.parent)?;
@@ -325,13 +331,9 @@ impl Publication {
                 )));
             }
         }
-        let original = TrashedOriginal {
-            device: identity.device,
-            inode: identity.inode,
-        };
         stage
             .place(OsStr::new(&self.name))
-            .map(|()| self.published(Displaced::Trashed(original)))
+            .map(|()| self.published(Displaced::Trashed(identity.into())))
             .map_err(|error| {
                 archive_failed(rust_i18n::t!(
                     "Could not publish the archive; the original is in Trash: %{error}",

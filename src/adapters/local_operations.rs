@@ -8,6 +8,7 @@ mod create_entry;
 mod fs_ops;
 mod merge_aside;
 mod placement;
+mod trash;
 
 #[cfg(test)]
 pub(crate) use archive::ArchiveListing;
@@ -3221,10 +3222,7 @@ impl ReplacePlan {
     }
 
     fn trashed_original(&self) -> TrashedOriginal {
-        TrashedOriginal {
-            device: self.target.identity.device,
-            inode: self.target.identity.inode,
-        }
+        self.target.identity.into()
     }
 
     /// A folder may only be copied once the target is known to lie outside it.
@@ -3394,7 +3392,7 @@ fn place_source(
     let source = plan.source_entry();
     let expected = Some(plan.source.identity);
     ensure_unchanged(target, plan.target.identity)?;
-    match fs().trash(target_path, cancellable) {
+    match trash::trash_verified(target, target_path, plan.target.identity, cancellable) {
         Ok(()) => {
             return match placement::place(fs(), source, target, expected) {
                 Ok(_) => Ok(SourcePlaced::Trashed),
@@ -3508,7 +3506,12 @@ async fn replace_through_stage(
                 run_blocking(move || {
                     let target = Entry::new(&*parent, &step_plan.target_name);
                     ensure_unchanged(target, step_plan.target.identity)?;
-                    match fs().trash(&path, &cancellable) {
+                    match trash::trash_verified(
+                        target,
+                        &path,
+                        step_plan.target.identity,
+                        &cancellable,
+                    ) {
                         Ok(()) => Ok(Removal::Trashed),
                         Err(error) if is_trash_unsupported_failure(false, &error) => {
                             displacement_without_trash(
@@ -3771,16 +3774,9 @@ fn trash_stage_overwrite(
     cancellable: gio::Cancellable,
 ) -> Pin<Box<dyn Future<Output = Result<(), glib::Error>>>> {
     Box::pin(async move {
-        if let Some(path) = location.native_path().map(Path::to_path_buf) {
-            return run_blocking(move || fs().trash(&path, &cancellable)).await;
-        }
-        let file = gio_file_for_location(&location);
-        await_cancellable(&file, &cancellable, |file, cancellable, result| {
-            file.trash_async(glib::Priority::DEFAULT, Some(cancellable), move |output| {
-                result.resolve(output)
-            });
-        })
-        .await
+        trash::trash_entry(&gio_file_for_location(&location), &cancellable)
+            .await
+            .map(drop)
     })
 }
 
@@ -4120,6 +4116,15 @@ impl LocalFileIdentity {
         Self {
             device: stat.st_dev,
             inode: stat.st_ino,
+        }
+    }
+}
+
+impl From<LocalFileIdentity> for TrashedOriginal {
+    fn from(identity: LocalFileIdentity) -> Self {
+        Self {
+            device: identity.device,
+            inode: identity.inode,
         }
     }
 }
@@ -5475,32 +5480,17 @@ async fn run_merge_undo(
         let mut trashed_identity = None;
         let result = match existing_type {
             None => Ok(()),
-            Some(_) => {
-                let identity = local_trash_identity(&file);
-                let trashed =
-                    await_cancellable(&file, &cancellable, |file, cancellable, result| {
-                        file.trash_async(
-                            glib::Priority::DEFAULT,
-                            Some(cancellable),
-                            move |output| result.resolve(output),
-                        );
-                    })
-                    .await;
-                match trashed {
-                    Err(error) if error.matches(gio::IOErrorEnum::NotSupported) => {
-                        permanently_delete_maybe_local(
-                            file,
-                            existing_type == Some(gio::FileType::Directory),
-                            cancellable.clone(),
-                        )
-                        .await
-                    }
-                    result => {
-                        trashed_identity = identity;
-                        result.map(|_| ())
-                    }
+            Some(_) => match trash::trash_entry(&file, &cancellable).await {
+                Err(error) if error.matches(gio::IOErrorEnum::NotSupported) => {
+                    permanently_delete_maybe_local(
+                        file,
+                        existing_type == Some(gio::FileType::Directory),
+                        cancellable.clone(),
+                    )
+                    .await
                 }
-            }
+                result => result.map(|identity| trashed_identity = identity),
+            },
         };
         let deleted_locations = match result {
             Ok(()) => {
@@ -5649,11 +5639,6 @@ fn home_trash_entries_at(
         .collect()
 }
 
-/// Read before trashing: GIO does not say where in Trash an item went.
-fn local_trash_identity(file: &gio::File) -> Option<TrashedOriginal> {
-    file.path().as_deref().and_then(TrashedOriginal::at_path)
-}
-
 fn cancellation_handle(cancellable: gio::Cancellable) -> LoadHandle {
     LoadHandle::new(move || cancellable.cancel())
 }
@@ -5763,41 +5748,32 @@ async fn run_deletion(
                 let cancellable = cancellable.clone();
                 let task = context.spawn_local(async move {
                     let file = gio_file_for_location(&operation_target.location);
-                    let identity = (!permanent).then(|| local_trash_identity(&file)).flatten();
-                    let result = if permanent {
-                        if operation_target
-                            .location
-                            .uri_value()
-                            .is_some_and(|uri| uri.starts_with("trash:"))
-                        {
-                            await_cancellable(&file, &cancellable, |file, cancellable, result| {
-                                file.delete_async(
-                                    glib::Priority::DEFAULT,
-                                    Some(cancellable),
-                                    move |output| result.resolve(output),
-                                );
-                            })
-                            .await
-                        } else {
-                            permanently_delete_maybe_local_with_worker_count(
-                                file,
-                                operation_target.is_directory,
-                                cancellable.clone(),
-                                local_tree_worker_count,
-                            )
-                            .await
-                        }
-                    } else {
+                    if !permanent {
+                        return trash::trash_entry(&file, &cancellable).await;
+                    }
+                    if operation_target
+                        .location
+                        .uri_value()
+                        .is_some_and(|uri| uri.starts_with("trash:"))
+                    {
                         await_cancellable(&file, &cancellable, |file, cancellable, result| {
-                            file.trash_async(
+                            file.delete_async(
                                 glib::Priority::DEFAULT,
                                 Some(cancellable),
                                 move |output| result.resolve(output),
                             );
                         })
                         .await
-                    };
-                    (result, identity)
+                    } else {
+                        permanently_delete_maybe_local_with_worker_count(
+                            file,
+                            operation_target.is_directory,
+                            cancellable.clone(),
+                            local_tree_worker_count,
+                        )
+                        .await
+                    }
+                    .map(|()| None)
                 });
                 (target, task)
             })
@@ -5806,13 +5782,12 @@ async fn run_deletion(
         let mut chunk_cancelled = false;
         for (target, result) in join_local_tasks(tasks).await {
             completed_count += 1;
-            let (result, identity) =
-                result.unwrap_or_else(|_| (Err(io_error("Delete worker failed")), None));
-            if let Err(error) = result {
-                if was_cancelled(&error) {
+            match result.unwrap_or_else(|_| Err(io_error("Delete worker failed"))) {
+                Err(error) if was_cancelled(&error) => {
                     chunk_cancelled = true;
                     failed_locations.push(target.location.clone());
-                } else {
+                }
+                Err(error) => {
                     if is_trash_unsupported_failure(permanent, &error) {
                         retryable_locations.push(target.location.clone());
                     }
@@ -5823,17 +5798,18 @@ async fn run_deletion(
                     ));
                     failed_locations.push(target.location.clone());
                 }
-            } else {
-                super::bookmarks::deletion_completed(std::slice::from_ref(&target.location));
-                if let Some(identity) = identity {
-                    emit(OperationEvent::ItemTrashed {
-                        request_id,
-                        location: target.location.clone(),
-                        identity,
-                    });
+                Ok(identity) => {
+                    super::bookmarks::deletion_completed(std::slice::from_ref(&target.location));
+                    if let Some(identity) = identity {
+                        emit(OperationEvent::ItemTrashed {
+                            request_id,
+                            location: target.location.clone(),
+                            identity,
+                        });
+                    }
+                    deleted_locations.push(target.location.clone());
+                    pending_progress_locations.push(target.location.clone());
                 }
-                deleted_locations.push(target.location.clone());
-                pending_progress_locations.push(target.location.clone());
             }
             let is_last = completed_count == total;
             let now = std::time::Instant::now();
@@ -6623,39 +6599,27 @@ impl OperationProvider for LocalOperationProvider {
             }
             for location in &request.cleanup_locations {
                 let file = gio_file_for_location(location);
-                let identity = local_trash_identity(&file);
-                let result = await_cancellable(
-                    &file,
-                    &operation_cancellable,
-                    |file, cancellable, result| {
-                        file.trash_async(
-                            glib::Priority::DEFAULT,
-                            Some(cancellable),
-                            move |output| {
-                                result.resolve(output);
-                            },
-                        );
-                    },
-                )
-                .await;
-                if let Err(error) = result {
-                    if was_cancelled(&error) {
-                        emit(cancelled_event(
-                            request.id,
-                            completed,
-                            Vec::new(),
-                            vec![location.clone()],
-                            affected_locations,
-                        ));
-                    } else {
-                        emit(OperationEvent::TransferFailed {
-                            request_id: request.id,
-                            completed_locations: completed,
-                            message: crate::services::gio_error_message(&error),
-                        });
+                let identity = match trash::trash_entry(&file, &operation_cancellable).await {
+                    Ok(identity) => identity,
+                    Err(error) => {
+                        if was_cancelled(&error) {
+                            emit(cancelled_event(
+                                request.id,
+                                completed,
+                                Vec::new(),
+                                vec![location.clone()],
+                                affected_locations,
+                            ));
+                        } else {
+                            emit(OperationEvent::TransferFailed {
+                                request_id: request.id,
+                                completed_locations: completed,
+                                message: crate::services::gio_error_message(&error),
+                            });
+                        }
+                        return;
                     }
-                    return;
-                }
+                };
                 if let Some(identity) = identity {
                     emit(OperationEvent::ItemTrashed {
                         request_id: request.id,
