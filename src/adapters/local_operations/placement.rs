@@ -932,9 +932,11 @@ pub(super) fn alias_of(
     alias.then_some(source.identity)
 }
 
-/// The ladder, plus a last rung so renames still work on mounts that have
-/// neither `RENAME_NOREPLACE` nor hard links. That rung runs only once a
-/// probe on Strata's own names, or a definitive errno, shows both are missing.
+/// The ladder, plus a last rung so renames still work on mounts without
+/// `RENAME_NOREPLACE` where a hard link is impossible: missing on the mount,
+/// or refused for one file (`protected_hardlinks`). That rung runs only once a
+/// probe on Strata's own names, or a definitive errno, shows NOREPLACE is
+/// missing and settles whether links work; folders need links missing too.
 struct Renaming<'a> {
     fs: &'a dyn FsOps,
     mount: Mount<'a>,
@@ -964,7 +966,7 @@ impl<'a> Renaming<'a> {
         if expected.is_some_and(|expected| expected != source.identity) {
             return Err(PlaceError::Changed);
         }
-        if !self.lacks_placement() {
+        if !self.allows_last_rung(source.is_directory()) {
             return Err(PlaceError::Unsupported);
         }
         if source.is_directory() {
@@ -974,7 +976,7 @@ impl<'a> Renaming<'a> {
         }
     }
 
-    fn lacks_placement(&self) -> bool {
+    fn allows_last_rung(&self, directory: bool) -> bool {
         let known = |capabilities: MountCapabilities| {
             capabilities.no_replace.is_some() && capabilities.hard_links.is_some()
         };
@@ -982,7 +984,13 @@ impl<'a> Renaming<'a> {
             let _ = self.mount.probe(true, false);
         }
         let capabilities = self.mount.capabilities();
-        capabilities.no_replace == Some(false) && capabilities.hard_links == Some(false)
+        capabilities.no_replace == Some(false)
+            && match capabilities.hard_links {
+                Some(false) => true,
+                // The ladder only gives up on a file whose own link was refused.
+                Some(true) => !directory,
+                None => false,
+            }
     }
 }
 

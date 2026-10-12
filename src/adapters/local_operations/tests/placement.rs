@@ -904,11 +904,24 @@ fn a_failed_case_only_rename_moves_back_or_names_the_temporary() -> Result<(), B
     Ok(())
 }
 
+/// No `RENAME_NOREPLACE`, and a link to `target` refused for that item alone,
+/// as `protected_hardlinks` does for another user's file.
+fn links_refused_for_the_item() -> Quirks {
+    Quirks {
+        fail: vec![(Op::Link, "target", 0, Errno::PERM)],
+        ..Quirks::without_rename_flags()
+    }
+}
+
 #[test]
 fn renames_without_noreplace_or_links_reserve_the_name_first() -> Result<(), Box<dyn Error>> {
-    for folder in [false, true] {
+    for (quirks, folder, links) in [
+        (Quirks::without_placement(), false, false),
+        (Quirks::without_placement(), true, false),
+        (links_refused_for_the_item(), false, true),
+    ] {
         let root = tempfile::tempdir()?;
-        let scope = FsQuirks::install(root.path(), Quirks::without_placement());
+        let scope = FsQuirks::install(root.path(), quirks);
         let source = root.path().join("source");
         make(&source, folder)?;
         let original = identity(&source);
@@ -927,14 +940,14 @@ fn renames_without_noreplace_or_links_reserve_the_name_first() -> Result<(), Box
         assert_eq!(identity(&root.path().join("target")), original);
         let capabilities = mount_capabilities(scope.key());
         assert_eq!(capabilities.no_replace, Some(false));
-        assert_eq!(capabilities.hard_links, Some(false));
+        assert_eq!(capabilities.hard_links, Some(links), "folder: {folder}");
     }
     Ok(())
 }
 
 #[test]
 fn the_last_rename_rung_never_clobbers_a_plain_creator() -> Result<(), Box<dyn Error>> {
-    for folder in [false, true] {
+    for (folder, item_refuses_links) in [(false, false), (true, false), (false, true)] {
         for early in [true, false] {
             let root = tempfile::tempdir()?;
             let target = root.path().join("target");
@@ -961,11 +974,16 @@ fn the_last_rename_rung_never_clobbers_a_plain_creator() -> Result<(), Box<dyn E
                 (true, true) => (Op::Stat, "target", 2, racer),
                 (true, false) => (Op::Rename, "target", 2, racer),
             };
+            let quirks = if item_refuses_links {
+                links_refused_for_the_item()
+            } else {
+                Quirks::without_placement()
+            };
             let _scope = FsQuirks::install(
                 root.path(),
                 Quirks {
                     before: vec![before],
-                    ..Quirks::without_placement()
+                    ..quirks
                 },
             );
             let source = root.path().join("source");
@@ -975,7 +993,7 @@ fn the_last_rename_rung_never_clobbers_a_plain_creator() -> Result<(), Box<dyn E
             let result = rename_in(root.path(), "source", "target");
 
             let racer_blocked = blocked.lock().expect("racer outcome").expect("racer ran");
-            let case = format!("folder: {folder}, early: {early}");
+            let case = format!("folder: {folder}, item: {item_refuses_links}, early: {early}");
             if racer_blocked {
                 assert!(!folder && !early, "{case}");
                 assert!(result.is_ok(), "{case}");
@@ -1000,7 +1018,7 @@ fn the_last_rename_rung_never_clobbers_a_plain_creator() -> Result<(), Box<dyn E
 }
 
 #[test]
-fn the_last_rename_rung_needs_both_primitives_confirmed_missing() -> Result<(), Box<dyn Error>> {
+fn the_last_rename_rung_needs_the_missing_primitives_confirmed() -> Result<(), Box<dyn Error>> {
     let over_empty = |rename_over_empty_dir| Quirks {
         rename_over_empty_dir,
         ..Quirks::without_rename_flags()
