@@ -68,7 +68,7 @@ pub use operations::{
     ArchiveFormat, CancelledOperation, CompressRequest, CreateDirectoryRequest, CreateFileRequest,
     DeleteRequest, ExtractRequest, MoveRecord, OperationEvent, OperationProvider,
     OperationRequestId, PasswordFailure, PasteItem, PasteRequest, RenameRecord, RenameRequest,
-    RestoreRequest, RestoreSource, RestoreTrashItem, TransferConflict, TrashedOriginal,
+    ReplacedOriginal, RestoreRequest, RestoreSource, RestoreTrashItem, TransferConflict, TrashedOriginal,
     UndoCopyRequest, UndoMergeRequest, UndoMoveItem, UndoMoveRequest, UndoRenameRequest,
     validate_basename,
 };

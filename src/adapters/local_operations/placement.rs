@@ -347,7 +347,7 @@ fn recreate_symlink(
     }
 }
 
-fn remove_if_unchanged(
+pub(super) fn remove_if_unchanged(
     fs: &dyn FsOps,
     entry: Entry<'_>,
     identity: LocalFileIdentity,
@@ -486,7 +486,7 @@ pub(super) struct Probed {
     pub rename_over_empty_directory: Option<bool>,
 }
 
-fn creation_error(error: Errno) -> PlaceError {
+pub(super) fn creation_error(error: Errno) -> PlaceError {
     match error {
         Errno::EXIST => PlaceError::Exists,
         Errno::INVAL => PlaceError::InvalidName,
@@ -586,10 +586,6 @@ fn probe_folders(fs: &dyn FsOps, dir: BorrowedFd<'_>) -> Option<bool> {
     result
 }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "replace and merge without Trash set originals aside")
-)]
 #[derive(Debug)]
 pub(super) struct SetAside {
     pub name: OsString,
@@ -599,10 +595,6 @@ pub(super) struct SetAside {
 
 /// Moves the entry at `entry` to a hidden sibling, refusing an entry that is
 /// no longer `expected`.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "replace and merge without Trash set originals aside")
-)]
 pub(super) fn set_aside(
     fs: &dyn FsOps,
     entry: Entry<'_>,
@@ -630,10 +622,6 @@ pub(super) fn set_aside(
     Ok(aside)
 }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "replace and merge without Trash set originals aside")
-)]
 pub(super) fn put_back(
     fs: &dyn FsOps,
     dir: BorrowedFd<'_>,
@@ -643,10 +631,6 @@ pub(super) fn put_back(
     place(fs, at(dir, &aside.name), at(dir, name), Some(aside.identity)).map(drop)
 }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "replace and merge without Trash set originals aside")
-)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum Feasibility {
     Yes,
@@ -655,10 +639,6 @@ pub(super) enum Feasibility {
 
 /// Whether an existing entry in `dir` can be moved aside without risking a
 /// clobber, probing the mount when nothing is known yet.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "replace and merge without Trash set originals aside")
-)]
 pub(super) fn can_set_aside(
     fs: &dyn FsOps,
     dir: BorrowedFd<'_>,
@@ -710,10 +690,6 @@ pub(super) fn exchange(fs: &dyn FsOps, from: Entry<'_>, to: Entry<'_>) -> Result
 /// Filesystems known to implement `RENAME_EXCHANGE` faithfully. FUSE,
 /// network, overlay and the other FAT-family drivers are left out because
 /// some silently overwrite instead.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "replace decides on EXCHANGE through this")
-)]
 const EXCHANGE_FILESYSTEMS: [u32; 8] = [
     0xEF53,      // ext2/3/4
     0x5846_5342, // XFS
@@ -726,10 +702,6 @@ const EXCHANGE_FILESYSTEMS: [u32; 8] = [
 ];
 
 /// Reads the filesystem type afresh on every call; it is never cached.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "replace decides on EXCHANGE through this")
-)]
 pub(super) fn exchange_allowed(fs: &dyn FsOps, dir: BorrowedFd<'_>) -> bool {
     fs.fs_type(dir)
         .is_some_and(|fs_type| EXCHANGE_FILESYSTEMS.contains(&(fs_type as u32)))

@@ -13,7 +13,13 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use super::super::{
+    fs_ops::{Entry, fs},
+    placement::{PlaceError, creation_error, place, reserve_hidden_name},
+    placement_reason,
+};
 use super::extraction::MemberMetadata;
+use crate::services::error_detail;
 
 /// Reading procfs avoids a process-global umask(2) race in the multithreaded GUI.
 pub(super) fn process_umask() -> u32 {
@@ -254,34 +260,30 @@ impl ExtractionDestination {
     }
 
     pub(super) fn create_staging(&self) -> Result<(OsString, Self), String> {
-        for _ in 0..8 {
-            let name = format!(".strata-extraction-{}", gtk::glib::uuid_string_random());
-            match rustix::fs::mkdirat(&self.root, &name, rustix::fs::Mode::from_raw_mode(0o777)) {
-                Ok(()) => {}
-                Err(rustix::io::Errno::EXIST) => continue,
-                Err(error) => return Err(staging_creation_failed(&errno_detail(error))),
-            }
-            let root = rustix::fs::openat(
-                &self.root,
-                &name,
-                rustix::fs::OFlags::RDONLY
-                    | rustix::fs::OFlags::DIRECTORY
-                    | rustix::fs::OFlags::NOFOLLOW
-                    | rustix::fs::OFlags::CLOEXEC,
-                rustix::fs::Mode::empty(),
+        let (name, ()) = reserve_hidden_name(".strata-extraction-", |name| {
+            fs().mkdir(Entry::new(&self.root, name), rustix::fs::Mode::from_raw_mode(0o777))
+                .map_err(creation_error)
+        })
+        .map_err(|error| staging_creation_failed(&error_detail(placement_reason(error))))?;
+        let root = rustix::fs::openat(
+            &self.root,
+            &name,
+            rustix::fs::OFlags::RDONLY
+                | rustix::fs::OFlags::DIRECTORY
+                | rustix::fs::OFlags::NOFOLLOW
+                | rustix::fs::OFlags::CLOEXEC,
+            rustix::fs::Mode::empty(),
+        )
+        .map_err(|error| {
+            let _ = rustix::fs::unlinkat(&self.root, &name, rustix::fs::AtFlags::REMOVEDIR);
+            rust_i18n::t!(
+                "Could not open the extraction staging folder: %{error}",
+                error = errno_detail(error)
             )
-            .map_err(|error| {
-                let _ = rustix::fs::unlinkat(&self.root, &name, rustix::fs::AtFlags::REMOVEDIR);
-                rust_i18n::t!(
-                    "Could not open the extraction staging folder: %{error}",
-                    error = errno_detail(error)
-                )
-                .into_owned()
-            })?;
-            let calls = self.calls;
-            return Ok((OsString::from(name), Self { root, calls }));
-        }
-        Err(staging_creation_failed(&crate::i18n::tr("no unused name")))
+            .into_owned()
+        })?;
+        let calls = self.calls;
+        Ok((name, Self { root, calls }))
     }
 
     pub(super) fn remove_empty_staging(&self, staging: &OsStr) -> Result<bool, String> {
@@ -294,12 +296,12 @@ impl ExtractionDestination {
     }
 
     pub(super) fn remove_directory_only_staging(&self, staging: &OsStr) -> Result<bool, String> {
-        remove_tree(self.root.as_fd(), staging, false, false).map_err(staging_removal_failed)
+        remove_tree(self.root.as_fd(), staging, false).map_err(staging_removal_failed)
     }
 
     /// Never follows symlinks. Removal errors can leave a partially deleted tree.
     pub(super) fn remove_staging(&self, staging: &OsStr) -> Result<(), String> {
-        remove_tree(self.root.as_fd(), staging, true, false)
+        remove_tree(self.root.as_fd(), staging, true)
             .map(|_| ())
             .map_err(staging_removal_failed)
     }
@@ -308,15 +310,6 @@ impl ExtractionDestination {
         &self,
         staging: &OsStr,
         archive_name: &str,
-    ) -> Result<String, String> {
-        self.publish_staging_as_folder_with(staging, archive_name, rename_no_replace)
-    }
-
-    fn publish_staging_as_folder_with(
-        &self,
-        staging: &OsStr,
-        archive_name: &str,
-        rename: RenameNoReplace,
     ) -> Result<String, String> {
         let stem = archive_stem(archive_name);
         if stem.contains('/') {
@@ -330,25 +323,14 @@ impl ExtractionDestination {
             } else {
                 format!("{stem} ({suffix})")
             };
-            match move_without_replacing(
-                self.root.as_fd(),
-                staging,
-                self.root.as_fd(),
-                OsStr::new(&name),
-                rename,
-            ) {
+            match place_without_replacing(&self.root, staging, &self.root, OsStr::new(&name)) {
                 Ok(()) => return Ok(name),
-                Err(
-                    rustix::io::Errno::EXIST
-                    | rustix::io::Errno::NOTEMPTY
-                    | rustix::io::Errno::ISDIR
-                    | rustix::io::Errno::NOTDIR,
-                ) => {}
+                Err(PlaceError::Exists) => {}
                 Err(error) => {
                     return Err(rust_i18n::t!(
                         "Could not publish the extracted entries as “%{name}”: %{error}",
                         name = name,
-                        error = errno_detail(error)
+                        error = error_detail(placement_reason(error))
                     )
                     .into_owned());
                 }
@@ -362,15 +344,6 @@ impl ExtractionDestination {
         staging: &Self,
         root: &Path,
     ) -> Result<OsString, String> {
-        self.publish_single_root_with(staging, root, rename_no_replace)
-    }
-
-    fn publish_single_root_with(
-        &self,
-        staging: &Self,
-        root: &Path,
-        rename: RenameNoReplace,
-    ) -> Result<OsString, String> {
         let leaf = root.file_name().ok_or_else(no_file_name)?;
         for index in 1.. {
             let candidate = if index == 1 {
@@ -378,25 +351,14 @@ impl ExtractionDestination {
             } else {
                 suffixed_name(leaf, index)
             };
-            match move_without_replacing(
-                staging.root.as_fd(),
-                root.as_os_str(),
-                self.root.as_fd(),
-                &candidate,
-                rename,
-            ) {
+            match place_without_replacing(&staging.root, root.as_os_str(), &self.root, &candidate) {
                 Ok(()) => return Ok(candidate),
-                Err(
-                    rustix::io::Errno::EXIST
-                    | rustix::io::Errno::NOTEMPTY
-                    | rustix::io::Errno::ISDIR
-                    | rustix::io::Errno::NOTDIR,
-                ) => {}
+                Err(PlaceError::Exists) => {}
                 Err(error) => {
                     return Err(rust_i18n::t!(
                         "Could not publish “%{name}”: %{error}",
                         name = candidate.to_string_lossy(),
-                        error = errno_detail(error)
+                        error = error_detail(placement_reason(error))
                     )
                     .into_owned());
                 }
@@ -679,181 +641,25 @@ impl ExtractionDestination {
     }
 }
 
-type RenameNoReplace = fn(BorrowedFd<'_>, &OsStr, BorrowedFd<'_>, &OsStr) -> rustix::io::Result<()>;
-
-fn rename_no_replace(
-    from_directory: BorrowedFd<'_>,
+/// Publishes through the shared no-clobber ladder; a file on a mount with
+/// neither `RENAME_NOREPLACE` nor hard links stays in staging.
+fn place_without_replacing(
+    from_directory: &OwnedFd,
     from: &OsStr,
-    to_directory: BorrowedFd<'_>,
+    to_directory: &OwnedFd,
     to: &OsStr,
-) -> rustix::io::Result<()> {
-    rustix::fs::renameat_with(
-        from_directory,
-        from,
-        to_directory,
-        to,
-        rustix::fs::RenameFlags::NOREPLACE,
+) -> Result<(), PlaceError> {
+    place(
+        fs(),
+        Entry::new(from_directory, from),
+        Entry::new(to_directory, to),
+        None,
     )
-}
-
-fn move_without_replacing(
-    from_directory: BorrowedFd<'_>,
-    from: &OsStr,
-    to_directory: BorrowedFd<'_>,
-    to: &OsStr,
-    rename: RenameNoReplace,
-) -> rustix::io::Result<()> {
-    match rename(from_directory, from, to_directory, to) {
-        Err(rustix::io::Errno::INVAL | rustix::io::Errno::NOSYS | rustix::io::Errno::OPNOTSUPP) => {
-            move_by_link(from_directory, from, to_directory, to)
-        }
-        result => result,
-    }
-}
-
-fn move_by_link(
-    from_directory: BorrowedFd<'_>,
-    from: &OsStr,
-    to_directory: BorrowedFd<'_>,
-    to: &OsStr,
-) -> rustix::io::Result<()> {
-    let stat = rustix::fs::statat(from_directory, from, rustix::fs::AtFlags::SYMLINK_NOFOLLOW)?;
-    let file_type = rustix::fs::FileType::from_raw_mode(stat.st_mode);
-    if file_type != rustix::fs::FileType::Directory {
-        if let Err(error) = rustix::fs::linkat(
-            from_directory,
-            from,
-            to_directory,
-            to,
-            rustix::fs::AtFlags::empty(),
-        ) {
-            if file_type == rustix::fs::FileType::Symlink {
-                let target = rustix::fs::readlinkat(from_directory, from, Vec::new())?;
-                rustix::fs::symlinkat(&target, to_directory, to)?;
-            } else {
-                return Err(error);
-            }
-        }
-        // A leftover source link is reported later as unpublished staging content.
-        let _ = rustix::fs::unlinkat(from_directory, from, rustix::fs::AtFlags::empty());
-        return Ok(());
-    }
-    move_directory(from_directory, from, to_directory, to, &stat)
-}
-
-/// Linking every entry before removing the source keeps staging intact when migration fails.
-fn move_directory(
-    from_parent: BorrowedFd<'_>,
-    from_name: &OsStr,
-    to_parent: BorrowedFd<'_>,
-    to_name: &OsStr,
-    stat: &rustix::fs::Stat,
-) -> rustix::io::Result<()> {
-    let mode = rustix::fs::Mode::from_raw_mode(0o700 | permission_bits(stat.st_mode));
-    rustix::fs::mkdirat(to_parent, to_name, mode)?;
-    let result = migrate_directory(from_parent, from_name, to_parent, to_name, stat);
-    if result.is_err() {
-        let _ = remove_tree(to_parent, to_name, true, true);
-        return result;
-    }
-    remove_tree(from_parent, from_name, true, true).map(|_| ())
-}
-
-fn migrate_directory(
-    from_parent: BorrowedFd<'_>,
-    from_name: &OsStr,
-    to_parent: BorrowedFd<'_>,
-    to_name: &OsStr,
-    stat: &rustix::fs::Stat,
-) -> rustix::io::Result<()> {
-    let from_dir = rustix::fs::openat(
-        from_parent,
-        from_name,
-        rustix::fs::OFlags::RDONLY
-            | rustix::fs::OFlags::DIRECTORY
-            | rustix::fs::OFlags::NOFOLLOW
-            | rustix::fs::OFlags::CLOEXEC,
-        rustix::fs::Mode::empty(),
-    )?;
-    let to_dir = rustix::fs::openat(
-        to_parent,
-        to_name,
-        rustix::fs::OFlags::RDONLY
-            | rustix::fs::OFlags::DIRECTORY
-            | rustix::fs::OFlags::NOFOLLOW
-            | rustix::fs::OFlags::CLOEXEC,
-        rustix::fs::Mode::empty(),
-    )?;
-    let mut children = Vec::new();
-    for entry in rustix::fs::Dir::read_from(&from_dir)? {
-        let entry = entry?;
-        let child = OsStr::from_bytes(entry.file_name().to_bytes());
-        if child == "." || child == ".." {
-            continue;
-        }
-        let file_type = match entry.file_type() {
-            rustix::fs::FileType::Unknown => rustix::fs::FileType::from_raw_mode(
-                rustix::fs::statat(&from_dir, child, rustix::fs::AtFlags::SYMLINK_NOFOLLOW)?
-                    .st_mode,
-            ),
-            file_type => file_type,
-        };
-        children.push((child.to_os_string(), file_type));
-    }
-    for (child, file_type) in children {
-        if file_type == rustix::fs::FileType::Directory {
-            let child_stat =
-                rustix::fs::statat(&from_dir, &child, rustix::fs::AtFlags::SYMLINK_NOFOLLOW)?;
-            let mode = rustix::fs::Mode::from_raw_mode(0o700 | permission_bits(child_stat.st_mode));
-            rustix::fs::mkdirat(&to_dir, &child, mode)?;
-            migrate_directory(
-                from_dir.as_fd(),
-                &child,
-                to_dir.as_fd(),
-                &child,
-                &child_stat,
-            )?;
-        } else if let Err(error) = rustix::fs::linkat(
-            &from_dir,
-            &child,
-            &to_dir,
-            &child,
-            rustix::fs::AtFlags::empty(),
-        ) {
-            if file_type == rustix::fs::FileType::Symlink {
-                let target = rustix::fs::readlinkat(&from_dir, &child, Vec::new())?;
-                rustix::fs::symlinkat(&target, &to_dir, &child)?;
-            } else {
-                return Err(error);
-            }
-        }
-    }
-    let _ = best_effort(rustix::fs::fchmod(
-        &to_dir,
-        rustix::fs::Mode::from_raw_mode(permission_bits(stat.st_mode)),
-    ));
-    let times = rustix::fs::Timestamps {
-        last_access: rustix::fs::Timespec {
-            tv_sec: stat.st_atime as _,
-            tv_nsec: stat.st_atime_nsec as _,
-        },
-        last_modification: rustix::fs::Timespec {
-            tv_sec: stat.st_mtime as _,
-            tv_nsec: stat.st_mtime_nsec as _,
-        },
-    };
-    let _ = best_effort(rustix::fs::futimens(&to_dir, &times));
-    Ok(())
+    .map(drop)
 }
 
 /// Never follows symlinks. With `files` disabled, any non-directory preserves its ancestors.
-/// `unlock` restores owner access first so restored read-only modes cannot block removal.
-fn remove_tree(
-    parent: BorrowedFd<'_>,
-    name: &OsStr,
-    files: bool,
-    unlock: bool,
-) -> rustix::io::Result<bool> {
+fn remove_tree(parent: BorrowedFd<'_>, name: &OsStr, files: bool) -> rustix::io::Result<bool> {
     let directory = rustix::fs::openat(
         parent,
         name,
@@ -863,9 +669,6 @@ fn remove_tree(
             | rustix::fs::OFlags::CLOEXEC,
         rustix::fs::Mode::empty(),
     )?;
-    if unlock {
-        let _ = rustix::fs::fchmod(&directory, rustix::fs::Mode::from_raw_mode(0o700));
-    }
     let mut children = Vec::new();
     for entry in rustix::fs::Dir::read_from(&directory)? {
         let entry = entry?;
@@ -889,7 +692,7 @@ fn remove_tree(
     for (child, is_directory) in children {
         if !is_directory {
             rustix::fs::unlinkat(&directory, &child, rustix::fs::AtFlags::empty())?;
-        } else if !remove_tree(directory.as_fd(), &child, files, unlock)? {
+        } else if !remove_tree(directory.as_fd(), &child, files)? {
             return Ok(false);
         }
     }

@@ -65,6 +65,8 @@ use crate::{
 const INVALID_NAME_REASON: &str = crate::services::INVALID_NAME_REASON;
 const UNCONFIRMED_REASON: &str =
     "The result could not be confirmed. Check both locations before trying again.";
+const UNSUPPORTED_REASON: &str =
+    "This location can\u{2019}t guarantee that another item won\u{2019}t be overwritten";
 
 #[derive(Clone, Debug)]
 pub(crate) struct MountFlushHint {
@@ -2265,7 +2267,7 @@ fn placement_reason(error: PlaceError) -> String {
         }
         PlaceError::Unconfirmed => crate::i18n::tr(UNCONFIRMED_REASON),
         PlaceError::CrossDevice => os_error_text(rustix::io::Errno::XDEV),
-        PlaceError::Unsupported => os_error_text(rustix::io::Errno::OPNOTSUPP),
+        PlaceError::Unsupported => crate::i18n::tr(UNSUPPORTED_REASON),
         PlaceError::Io(error) => os_error_text(error),
     }
 }

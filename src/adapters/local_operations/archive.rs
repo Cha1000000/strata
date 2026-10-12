@@ -131,7 +131,7 @@ pub(super) fn compress(request: CompressRequest, emit: Rc<dyn Fn(OperationEvent)
             &dest_dir,
             &archive_path,
             request.conflict,
-            &task_cancelled,
+            task_cancelled.clone(),
             move |file| {
                 let sources = inspect_archive_sources(&entries, &work_cancelled)?;
                 work_total.store(sources.files, Ordering::Relaxed);

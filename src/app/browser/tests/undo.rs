@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 
 use super::*;
+use crate::services::ReplacedOriginal;
 
 #[test]
 fn a_completed_trash_operation_can_be_undone_once() {
@@ -1387,15 +1388,52 @@ fn a_put_back_can_be_retrashed_and_redone() {
 }
 
 #[test]
-fn a_replaced_archive_restores_the_original_on_undo() {
+fn a_replaced_archive_restores_the_original_on_undo_even_after_a_cancel_request() {
     let browser = Browser::new(Rc::new(FakeFileSource));
     browser.set_operation_provider(Rc::new(ImmediateOperationProvider));
-    UNDO_MERGE_REQUESTS.with(|requests| requests.borrow_mut().clear());
     let archive = Location::local("/fixture/report.zip");
     let original = TrashedOriginal {
         device: 1,
         inode: 42,
     };
+    for cancel_requested in [false, true] {
+        UNDO_MERGE_REQUESTS.with(|requests| requests.borrow_mut().clear());
+        let request_id = browser.begin_operation();
+        browser.archive_operation.set(true);
+        let emit = browser.operation_callback(request_id, false, HashSet::new());
+        if cancel_requested {
+            browser.cancel_file_operation();
+        }
+
+        emit(OperationEvent::Compressed {
+            request_id,
+            archive_name: "report.zip".to_owned(),
+            archive: archive.clone(),
+            original: Some(ReplacedOriginal::Trashed(original)),
+        });
+
+        let (generation, created, overwritten) = browser
+            .pending_undo_merge()
+            .expect("replacement undo");
+        assert!(created.is_empty());
+        assert_eq!(overwritten, vec![archive.clone()]);
+        assert!(browser.undo_merge(generation, created, overwritten));
+        assert_eq!(
+            UNDO_MERGE_REQUESTS.with(|requests| requests.borrow().clone()),
+            vec![(
+                Vec::new(),
+                vec![archive.clone()],
+                HashMap::from([(archive.clone(), original)])
+            )]
+        );
+        assert_eq!(pending_undo_entry(), None);
+    }
+}
+
+#[test]
+fn an_archive_that_replaced_its_original_without_trash_records_no_undo() {
+    let browser = Browser::new(Rc::new(FakeFileSource));
+    browser.set_operation_provider(Rc::new(ImmediateOperationProvider));
     let request_id = browser.begin_operation();
     browser.archive_operation.set(true);
     let emit = browser.operation_callback(request_id, false, HashSet::new());
@@ -1403,23 +1441,10 @@ fn a_replaced_archive_restores_the_original_on_undo() {
     emit(OperationEvent::Compressed {
         request_id,
         archive_name: "report.zip".to_owned(),
-        archive: archive.clone(),
-        original: Some(original),
+        archive: Location::local("/fixture/report.zip"),
+        original: Some(ReplacedOriginal::Deleted),
     });
 
-    let (generation, created, overwritten) =
-        browser.pending_undo_merge().expect("replacement undo");
-    assert!(created.is_empty());
-    assert_eq!(overwritten, vec![archive.clone()]);
-    assert!(browser.undo_merge(generation, created, overwritten));
-    assert_eq!(
-        UNDO_MERGE_REQUESTS.with(|requests| requests.borrow().clone()),
-        vec![(
-            Vec::new(),
-            vec![archive.clone()],
-            HashMap::from([(archive, original)])
-        )]
-    );
     assert_eq!(pending_undo_entry(), None);
 }
 

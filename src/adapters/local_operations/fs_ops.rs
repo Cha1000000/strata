@@ -9,7 +9,10 @@ use std::{
         fd::{AsFd, BorrowedFd, OwnedFd},
         unix::ffi::OsStringExt,
     },
+    path::Path,
 };
+
+use gtk::{gio, glib, prelude::*};
 
 use rustix::{
     fs::{AtFlags, FileType, FsWord, Mode, OFlags, RenameFlags, StatxFlags},
@@ -64,11 +67,10 @@ pub(super) trait FsOps: Send + Sync {
     fn create_exclusive(&self, at: Entry<'_>, mode: Mode) -> Result<OwnedFd, Errno>;
     fn names(&self, dir: Entry<'_>) -> Result<Vec<OsString>, Errno>;
     fn mount_key(&self, dir: BorrowedFd<'_>) -> MountKey;
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "replace decides on EXCHANGE through this")
-    )]
     fn fs_type(&self, dir: BorrowedFd<'_>) -> Option<FsWord>;
+    /// GIO's `access::can-trash` for a native item, without following it.
+    fn can_trash(&self, path: &Path) -> bool;
+    fn trash(&self, path: &Path, cancellable: &gio::Cancellable) -> Result<(), glib::Error>;
 }
 
 pub(super) struct System;
@@ -86,7 +88,7 @@ pub(super) fn fs() -> &'static dyn FsOps {
 
 pub(super) fn assert_off_main_thread() {
     debug_assert!(
-        !gtk::glib::MainContext::default().is_owner(),
+        !glib::MainContext::default().is_owner(),
         "filesystem placement must not run on the main thread"
     );
 }
@@ -238,5 +240,21 @@ impl FsOps for System {
     fn fs_type(&self, dir: BorrowedFd<'_>) -> Option<FsWord> {
         assert_off_main_thread();
         rustix::fs::fstatfs(dir).ok().map(|stat| stat.f_type)
+    }
+
+    fn can_trash(&self, path: &Path) -> bool {
+        assert_off_main_thread();
+        gio::File::for_path(path)
+            .query_info(
+                gio::FILE_ATTRIBUTE_ACCESS_CAN_TRASH,
+                gio::FileQueryInfoFlags::NOFOLLOW_SYMLINKS,
+                gio::Cancellable::NONE,
+            )
+            .is_ok_and(|info| info.boolean(gio::FILE_ATTRIBUTE_ACCESS_CAN_TRASH))
+    }
+
+    fn trash(&self, path: &Path, cancellable: &gio::Cancellable) -> Result<(), glib::Error> {
+        assert_off_main_thread();
+        gio::File::for_path(path).trash(Some(cancellable))
     }
 }

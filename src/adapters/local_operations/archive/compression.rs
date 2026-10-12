@@ -6,19 +6,28 @@
 mod tests;
 
 use super::super::{
+    LocalFileIdentity, PinnedEntry, flush_removable_destination,
+    fs_ops::{Entry, fs},
     local_directory_children, open_local_child_directory, open_local_parent_directory,
+    parallel_delete_local,
+    placement::{
+        Feasibility, PlaceError, can_set_aside, creation_error, exchange, exchange_allowed, place,
+        put_back, remove_if_unchanged, reserve_hidden_name, set_aside,
+    },
+    placement_reason,
 };
 use super::{
     ArchiveError, COPY_BUF, archive_failed, check_archive_cancelled, copy_with_big_buf,
     decoders::FILE_ATTRIBUTE_UNIX_EXTENSION, destination::process_umask,
 };
-use crate::services::{TransferConflict, TrashedOriginal};
-use gtk::{gio, glib, prelude::*};
+use crate::services::{ReplacedOriginal, TransferConflict, TrashedOriginal, error_detail};
+use gtk::{gio, glib};
+use rustix::fs::AtFlags;
 use std::{
     ffi::{OsStr, OsString},
     io::{self, Read, Seek, SeekFrom, Write},
     os::{
-        fd::AsFd,
+        fd::{AsFd, OwnedFd},
         unix::{ffi::OsStringExt, fs::PermissionsExt},
     },
     path::{Path, PathBuf},
@@ -29,150 +38,425 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-/// Writes an archive through a staging file, then publishes it at `archive_path`.
+const COMPRESSION_STAGE: &str = ".strata-compression-";
+const REPLACED_PREFIX: &str = ".strata-replaced-";
+
+/// Writes an archive through a private staging file, then publishes it at
+/// `archive_path` without ever replacing an entry it did not account for.
 ///
-/// Creates a `.strata-compression-` tempfile in `destination` with mode `0o600`,
-/// runs `write_archive` on a worker thread, applies the published permissions,
-/// and persists the file according to `conflict`, returning the published filename
-/// and the identity of any original preserved in Trash for undo.
-/// [`FailIfExists`] refuses to replace an existing archive; [`KeepBoth`] tries numbered names atomically
-/// without encoding again; [`ReplaceExisting`] trashes the original and copies
-/// the current destination file's mode when that path is already a regular
-/// file. Otherwise the published mode is `0o666` masked by the process umask.
-///
-/// # Arguments
-///
-/// * `destination` - Directory that holds both the staging file and the final archive
-/// * `archive_path` - Final path to publish once encoding succeeds
-/// * `conflict` - Whether an existing archive may be replaced
-/// * `cancelled` - Flag checked after encoding and before persist
-/// * `write_archive` - Encoder that writes the archive body into the staging file
+/// Staging, encoding and publication run in one blocking step. A
+/// replacement strategy is chosen before encoding, so an archive is never
+/// written that cannot be published: the original goes to Trash where
+/// possible, otherwise it is exchanged or set aside and deleted once the new
+/// archive is flushed. [`KeepBoth`] numbers the name without encoding again.
+/// The published mode is the replaced file's, or `0o666` masked by the umask.
 ///
 /// # Errors
 ///
-/// - [`Cancelled`] if `cancelled` is set after encoding finishes
-/// - [`Failed`] if staging, encoding, permission updates, or persist fail, including
-///   when the compression task panics
+/// - [`Cancelled`] if `cancelled` is set before publication starts
+/// - [`Failed`] if staging, encoding or publication fails, or no safe way to
+///   replace the existing archive exists
 ///
 /// [`Cancelled`]: ArchiveError::Cancelled
 /// [`Failed`]: ArchiveError::Failed
-/// [`FailIfExists`]: TransferConflict::FailIfExists
-/// [`ReplaceExisting`]: TransferConflict::ReplaceExisting
 /// [`KeepBoth`]: TransferConflict::KeepBoth
 pub(super) async fn write_staged_archive<F>(
     destination: &Path,
     archive_path: &Path,
     conflict: TransferConflict,
-    cancelled: &AtomicBool,
+    cancelled: Arc<AtomicBool>,
     write_archive: F,
-) -> Result<(String, Option<TrashedOriginal>), ArchiveError>
+) -> Result<(String, Option<ReplacedOriginal>), ArchiveError>
 where
     F: FnOnce(std::fs::File) -> Result<(), ArchiveError> + Send + 'static,
 {
-    let requested_name = archive_path
+    let name = archive_path
         .file_name()
         .and_then(OsStr::to_str)
-        .ok_or_else(|| crate::i18n::tr("Archive filename must be UTF-8"))?;
-    let published_permissions = if conflict == TransferConflict::ReplaceExisting {
-        match std::fs::symlink_metadata(archive_path) {
-            Ok(metadata) if metadata.file_type().is_file() => Some(metadata.permissions()),
-            Ok(_) => None,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
-            Err(error) => return Err(archive_creation_failed(destination, &error)),
-        }
-    } else {
-        None
-    }
-    .unwrap_or_else(umask_adjusted_file_permissions);
-    let mut builder = tempfile::Builder::new();
-    builder
-        .prefix(".strata-compression-")
-        .permissions(std::fs::Permissions::from_mode(0o600));
-    let mut staged = builder
-        .tempfile_in(destination)
-        .map_err(|error| archive_creation_failed(destination, &error))?;
-    let file = staged
-        .reopen()
-        .map_err(|error| archive_creation_failed(destination, &error))?;
-    gio::spawn_blocking(move || write_archive(file))
+        .ok_or_else(|| crate::i18n::tr("Archive filename must be UTF-8"))?
+        .to_owned();
+    let job = Publication {
+        destination: destination.to_path_buf(),
+        name: name.clone(),
+    };
+    let published = gio::spawn_blocking(move || job.write(conflict, &cancelled, write_archive))
         .await
         .map_err(|_| archive_failed(crate::i18n::tr("Compression stopped unexpectedly")))??;
-    // The non-Send LoadHandle cancels on this same main context. Keep the
-    // final cancellation check and publication synchronous, without yielding.
-    check_archive_cancelled(cancelled)?;
-    staged
-        .as_file()
-        .set_permissions(published_permissions)
-        .map_err(|error| archive_creation_failed(destination, &error))?;
-    if conflict != TransferConflict::KeepBoth {
-        let original = if conflict == TransferConflict::ReplaceExisting {
-            match std::fs::symlink_metadata(archive_path) {
-                Ok(metadata) if metadata.is_dir() => {
-                    return Err(archive_failed(crate::i18n::tr(
-                        "An archive cannot replace a folder",
-                    )));
-                }
-                Ok(metadata) => {
-                    gio::File::for_path(archive_path)
-                        .trash(None::<&gio::Cancellable>)
-                        .map_err(|error| {
-                            archive_failed(rust_i18n::t!(
-                                "Could not move %{name} to Trash: %{error}",
-                                name = requested_name,
-                                error = crate::services::gio_error_detail(&error)
-                            ))
-                        })?;
-                    Some(TrashedOriginal::from_metadata(&metadata))
-                }
-                Err(error) if error.kind() == io::ErrorKind::NotFound => None,
-                Err(error) => return Err(archive_creation_failed(destination, &error)),
-            }
-        } else {
-            None
-        };
-        return staged
-            .persist_noclobber(archive_path)
-            .map(|_| (requested_name.to_owned(), original))
-            .map_err(|error| {
-                if original.is_some() {
-                    archive_failed(rust_i18n::t!(
-                        "Could not publish the archive; the original is in Trash: %{error}",
-                        error = crate::services::io_error_detail(&error.error)
-                    ))
-                } else {
-                    archive_creation_failed(destination, &error.error)
-                }
-            });
-    }
-
-    let (stem, extension) = requested_name
-        .strip_suffix(".tar.gz")
-        .map(|stem| (stem, "tar.gz"))
-        .or_else(|| requested_name.rsplit_once('.'))
-        .ok_or_else(|| crate::i18n::tr("Archive filename must have a format extension"))?;
-    let mut candidate_name = requested_name.to_owned();
-    for suffix in 1_u64.. {
-        let candidate = archive_path.with_file_name(&candidate_name);
-        match staged.persist_noclobber(&candidate) {
-            Ok(_) => return Ok((candidate_name, None)),
-            Err(error) if error.error.kind() == io::ErrorKind::AlreadyExists => {
-                staged = error.file;
-                candidate_name = format!("{stem} ({suffix}).{extension}");
-            }
-            Err(error) => return Err(archive_creation_failed(destination, &error.error)),
+    let original = match published.displaced {
+        Displaced::None => None,
+        Displaced::Trashed(original) => Some(ReplacedOriginal::Trashed(original)),
+        Displaced::Aside(aside) => {
+            remove_displaced(&destination.join(&published.name), &name, aside).await?;
+            Some(ReplacedOriginal::Deleted)
         }
-    }
-    Err(archive_failed(crate::i18n::tr(
-        "No available archive filename",
-    )))
+    };
+    Ok((published.name, original))
 }
 
-fn archive_creation_failed(destination: &Path, error: &io::Error) -> ArchiveError {
-    archive_failed(rust_i18n::t!(
-        "Could not create the archive in %{folder}: %{error}",
-        folder = destination.display(),
-        error = crate::services::io_error_detail(error)
-    ))
+enum Strategy {
+    New,
+    Numbered,
+    Replace(Replacement),
+}
+
+#[derive(Clone, Copy)]
+enum Replacement {
+    Trash,
+    Exchange,
+    Aside,
+}
+
+/// An original moved to a hidden sibling by EXCHANGE or set-aside.
+struct Aside {
+    parent: Arc<OwnedFd>,
+    name: OsString,
+    identity: LocalFileIdentity,
+}
+
+enum Displaced {
+    None,
+    Trashed(TrashedOriginal),
+    Aside(Aside),
+}
+
+struct Published {
+    name: String,
+    displaced: Displaced,
+}
+
+struct Stage {
+    parent: Arc<OwnedFd>,
+    name: OsString,
+    identity: LocalFileIdentity,
+}
+
+impl Stage {
+    fn entry(&self) -> Entry<'_> {
+        Entry::new(&*self.parent, &self.name)
+    }
+
+    fn place(&self, name: &OsStr) -> Result<(), PlaceError> {
+        place(
+            fs(),
+            self.entry(),
+            Entry::new(&*self.parent, name),
+            Some(self.identity),
+        )
+        .map(drop)
+    }
+}
+
+struct Publication {
+    destination: PathBuf,
+    name: String,
+}
+
+impl Publication {
+    fn write<F>(
+        &self,
+        conflict: TransferConflict,
+        cancelled: &AtomicBool,
+        write_archive: F,
+    ) -> Result<Published, ArchiveError>
+    where
+        F: FnOnce(std::fs::File) -> Result<(), ArchiveError>,
+    {
+        let parent = Arc::new(
+            open_local_parent_directory(&self.destination)
+                .map_err(|error| self.creation_failed(error))?,
+        );
+        let (mode, strategy) = match conflict {
+            TransferConflict::FailIfExists | TransferConflict::Merge => {
+                (default_file_mode(), Strategy::New)
+            }
+            TransferConflict::KeepBoth => (default_file_mode(), Strategy::Numbered),
+            TransferConflict::ReplaceExisting => match self.existing(&parent)? {
+                None => (default_file_mode(), Strategy::New),
+                Some(stat) => {
+                    let mode = if rustix::fs::FileType::from_raw_mode(stat.st_mode)
+                        == rustix::fs::FileType::RegularFile
+                    {
+                        stat.st_mode & 0o7777
+                    } else {
+                        default_file_mode()
+                    };
+                    let replacement = if fs().can_trash(&self.destination.join(&self.name)) {
+                        Replacement::Trash
+                    } else {
+                        self.without_trash(&parent)?
+                    };
+                    (mode, Strategy::Replace(replacement))
+                }
+            },
+        };
+
+        let (name, file) = reserve_hidden_name(COMPRESSION_STAGE, |name| {
+            fs().create_exclusive(
+                Entry::new(&*parent, name),
+                rustix::fs::Mode::from_raw_mode(0o600),
+            )
+            .map_err(creation_error)
+        })
+        .map_err(|error| self.creation_failed(placement_reason(error)))?;
+        let identity = rustix::fs::fstat(&file).map(|stat| LocalFileIdentity::from_stat(&stat));
+        let stage = match identity {
+            Ok(identity) => Stage {
+                parent,
+                name,
+                identity,
+            },
+            Err(error) => return Err(self.creation_failed(errno_text(error))),
+        };
+        let result = self.encode_and_publish(&stage, file, mode, cancelled, strategy, write_archive);
+        if result.is_err() {
+            remove_if_unchanged(fs(), stage.entry(), stage.identity, AtFlags::empty());
+        }
+        result
+    }
+
+    fn encode_and_publish<F>(
+        &self,
+        stage: &Stage,
+        file: OwnedFd,
+        mode: u32,
+        cancelled: &AtomicBool,
+        strategy: Strategy,
+        write_archive: F,
+    ) -> Result<Published, ArchiveError>
+    where
+        F: FnOnce(std::fs::File) -> Result<(), ArchiveError>,
+    {
+        let handle = rustix::io::dup(&file).map_err(|error| self.creation_failed(errno_text(error)))?;
+        write_archive(std::fs::File::from(file))?;
+        check_archive_cancelled(cancelled)?;
+        rustix::fs::fchmod(&handle, rustix::fs::Mode::from_raw_mode(mode))
+            .map_err(|error| self.creation_failed(errno_text(error)))?;
+        // Closed before publication so NFS never silly-renames the stage.
+        drop(handle);
+        self.publish(stage, strategy)
+    }
+
+    fn existing(&self, parent: &OwnedFd) -> Result<Option<rustix::fs::Stat>, ArchiveError> {
+        match rustix::fs::statat(parent, self.name.as_str(), AtFlags::SYMLINK_NOFOLLOW) {
+            Ok(stat)
+                if rustix::fs::FileType::from_raw_mode(stat.st_mode)
+                    == rustix::fs::FileType::Directory =>
+            {
+                Err(archive_failed(crate::i18n::tr(
+                    "An archive cannot replace a folder",
+                )))
+            }
+            Ok(stat) => Ok(Some(stat)),
+            Err(rustix::io::Errno::NOENT) => Ok(None),
+            Err(error) => Err(self.creation_failed(errno_text(error))),
+        }
+    }
+
+    /// Chooses how to move the original out of the way when Trash is unavailable.
+    fn without_trash(&self, parent: &OwnedFd) -> Result<Replacement, ArchiveError> {
+        if exchange_allowed(fs(), parent.as_fd()) {
+            return Ok(Replacement::Exchange);
+        }
+        match can_set_aside(fs(), parent.as_fd(), false) {
+            Ok(Feasibility::Yes) => Ok(Replacement::Aside),
+            Ok(Feasibility::No) => Err(self.cannot_replace_safely()),
+            Err(error) => Err(self.creation_failed(placement_reason(error))),
+        }
+    }
+
+    fn publish(&self, stage: &Stage, strategy: Strategy) -> Result<Published, ArchiveError> {
+        let replacement = match strategy {
+            Strategy::New => {
+                return stage
+                    .place(OsStr::new(&self.name))
+                    .map(|()| self.published(Displaced::None))
+                    .map_err(|error| self.creation_failed(placement_reason(error)));
+            }
+            Strategy::Numbered => return self.publish_numbered(stage),
+            Strategy::Replace(replacement) => replacement,
+        };
+        let Some(stat) = self.existing(&stage.parent)? else {
+            return self.publish(stage, Strategy::New);
+        };
+        let identity = LocalFileIdentity::from_stat(&stat);
+        match replacement {
+            Replacement::Trash => self.publish_after_trash(stage, identity),
+            Replacement::Exchange => self.publish_by_exchange(stage, identity),
+            Replacement::Aside => self.publish_after_set_aside(stage, identity),
+        }
+    }
+
+    fn publish_by_exchange(
+        &self,
+        stage: &Stage,
+        identity: LocalFileIdentity,
+    ) -> Result<Published, ArchiveError> {
+        let target = Entry::new(&*stage.parent, OsStr::new(&self.name));
+        match exchange(fs(), stage.entry(), target) {
+            Ok(true) => Ok(self.published(Displaced::Aside(Aside {
+                parent: stage.parent.clone(),
+                name: stage.name.clone(),
+                identity,
+            }))),
+            Ok(false) => match can_set_aside(fs(), stage.parent.as_fd(), false) {
+                Ok(Feasibility::Yes) => self.publish_after_set_aside(stage, identity),
+                Ok(Feasibility::No) => Err(self.cannot_replace_safely()),
+                Err(error) => Err(self.creation_failed(placement_reason(error))),
+            },
+            Err(error) => Err(self.creation_failed(placement_reason(error))),
+        }
+    }
+
+    fn publish_after_trash(
+        &self,
+        stage: &Stage,
+        identity: LocalFileIdentity,
+    ) -> Result<Published, ArchiveError> {
+        match fs().trash(&self.destination.join(&self.name), &gio::Cancellable::new()) {
+            Ok(()) => {}
+            Err(error) if error.matches(gio::IOErrorEnum::NotSupported) => {
+                let replacement = self.without_trash(&stage.parent)?;
+                return self.publish(stage, Strategy::Replace(replacement));
+            }
+            Err(error) => {
+                return Err(archive_failed(rust_i18n::t!(
+                    "Could not move %{name} to Trash: %{error}",
+                    name = self.name,
+                    error = crate::services::gio_error_detail(&error)
+                )));
+            }
+        }
+        let original = TrashedOriginal {
+            device: identity.device,
+            inode: identity.inode,
+        };
+        stage
+            .place(OsStr::new(&self.name))
+            .map(|()| self.published(Displaced::Trashed(original)))
+            .map_err(|error| {
+                archive_failed(rust_i18n::t!(
+                    "Could not publish the archive; the original is in Trash: %{error}",
+                    error = error_detail(placement_reason(error))
+                ))
+            })
+    }
+
+    fn publish_after_set_aside(
+        &self,
+        stage: &Stage,
+        identity: LocalFileIdentity,
+    ) -> Result<Published, ArchiveError> {
+        let target = OsStr::new(&self.name);
+        let aside = match set_aside(
+            fs(),
+            Entry::new(&*stage.parent, target),
+            REPLACED_PREFIX,
+            identity,
+        ) {
+            Ok(aside) => aside,
+            Err(PlaceError::Unsupported) => return Err(self.cannot_replace_safely()),
+            Err(error) => return Err(self.creation_failed(placement_reason(error))),
+        };
+        match stage.place(target) {
+            Ok(()) => Ok(self.published(Displaced::Aside(Aside {
+                parent: stage.parent.clone(),
+                name: aside.name,
+                identity: aside.identity,
+            }))),
+            Err(error) => match put_back(fs(), stage.parent.as_fd(), &aside, target) {
+                Ok(()) => Err(self.creation_failed(placement_reason(error))),
+                Err(_) => Err(archive_failed(rust_i18n::t!(
+                    "Could not replace “%{name}”; the original was kept as “%{kept}”: %{error}",
+                    name = self.name,
+                    kept = aside.name.to_string_lossy(),
+                    error = error_detail(placement_reason(error))
+                ))),
+            },
+        }
+    }
+
+    fn publish_numbered(&self, stage: &Stage) -> Result<Published, ArchiveError> {
+        let mut candidate = self.name.clone();
+        for suffix in 1_u64.. {
+            match stage.place(OsStr::new(&candidate)) {
+                Ok(()) => {
+                    return Ok(Published {
+                        name: candidate,
+                        displaced: Displaced::None,
+                    });
+                }
+                Err(PlaceError::Exists) => {
+                    let (stem, extension) = self
+                        .name
+                        .strip_suffix(".tar.gz")
+                        .map(|stem| (stem, "tar.gz"))
+                        .or_else(|| self.name.rsplit_once('.'))
+                        .ok_or_else(|| {
+                            crate::i18n::tr("Archive filename must have a format extension")
+                        })?;
+                    candidate = format!("{stem} ({suffix}).{extension}");
+                }
+                Err(error) => return Err(self.creation_failed(placement_reason(error))),
+            }
+        }
+        Err(archive_failed(crate::i18n::tr(
+            "No available archive filename",
+        )))
+    }
+
+    fn published(&self, displaced: Displaced) -> Published {
+        Published {
+            name: self.name.clone(),
+            displaced,
+        }
+    }
+
+    fn creation_failed(&self, reason: String) -> ArchiveError {
+        archive_failed(rust_i18n::t!(
+            "Could not create the archive in %{folder}: %{error}",
+            folder = self.destination.display(),
+            error = error_detail(reason)
+        ))
+    }
+
+    fn cannot_replace_safely(&self) -> ArchiveError {
+        archive_failed(rust_i18n::t!(
+            "“%{name}” can’t be replaced safely at this location. Delete or rename it first, then try again.",
+            name = self.name
+        ))
+    }
+}
+
+/// Deletes an original that EXCHANGE or set-aside kept, once the new archive
+/// has reached a removable device.
+async fn remove_displaced(archive: &Path, name: &str, aside: Aside) -> Result<(), ArchiveError> {
+    let kept = aside.name.to_string_lossy().into_owned();
+    let removed = match flush_removable_destination(archive).await {
+        Ok(()) => {
+            parallel_delete_local(
+                vec![PinnedEntry {
+                    parent: aside.parent,
+                    name: aside.name,
+                    identity: Some(aside.identity),
+                }],
+                gio::Cancellable::new(),
+            )
+            .await
+        }
+        Err(error) => Err(error),
+    };
+    removed.map_err(|error| {
+        archive_failed(rust_i18n::t!(
+            "“%{name}” was replaced, but its original could not be removed from “%{kept}”: %{error}",
+            name = name,
+            kept = kept,
+            error = crate::services::gio_error_detail(&error)
+        ))
+    })
+}
+
+fn default_file_mode() -> u32 {
+    0o666 & !process_umask()
 }
 
 fn io_text(error: &io::Error) -> String {
@@ -203,11 +487,6 @@ fn sevenz_text(error: sevenz_rust2::Error) -> String {
 fn encoder_failure(error: &dyn std::fmt::Display) -> String {
     tracing::warn!(%error, "archive encoder failed");
     crate::i18n::tr("The archive could not be written")
-}
-
-/// Returns `0o666` masked by the process umask from [`process_umask`].
-fn umask_adjusted_file_permissions() -> std::fs::Permissions {
-    std::fs::Permissions::from_mode(0o666 & !process_umask())
 }
 
 /// An opened compression source, re-read from disk relative to its parent

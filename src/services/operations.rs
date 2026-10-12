@@ -126,6 +126,14 @@ impl TrashedOriginal {
     }
 }
 
+/// What became of the item a new archive replaced.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ReplacedOriginal {
+    Trashed(TrashedOriginal),
+    /// Removed without Trash, so undo must not offer to delete the only copy.
+    Deleted,
+}
+
 #[derive(Clone, Debug)]
 pub struct UndoMergeRequest {
     pub id: OperationRequestId,
@@ -380,8 +388,8 @@ pub enum OperationEvent {
         archive_name: String,
         /// The finished archive, recorded so undo can trash it.
         archive: Location,
-        /// The exact original to restore, when publication replaced an archive.
-        original: Option<TrashedOriginal>,
+        /// The archive this one replaced, if any.
+        original: Option<ReplacedOriginal>,
     },
     Extracted {
         request_id: OperationRequestId,

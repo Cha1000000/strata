@@ -9,7 +9,8 @@ use super::super::fixtures::{
 };
 use super::{ArchiveError, inspect_archive_sources, process_umask, write_staged_archive};
 use crate::{
-    services::{ArchiveFormat, TransferConflict, TrashedOriginal},
+    adapters::local_operations::tests::fs_quirks::{FsQuirks, Op, Quirks, Trash},
+    services::{ArchiveFormat, ReplacedOriginal, TransferConflict, TrashedOriginal},
     test_support::ASYNC_MAIN_CONTEXT_DEFAULT,
 };
 use gtk::glib;
@@ -51,7 +52,7 @@ fn compression_staging_stays_private_while_encoding() -> Result<(), Box<dyn Erro
             &worker_destination,
             &worker_archive,
             TransferConflict::ReplaceExisting,
-            &never_cancelled(),
+            never_cancelled(),
             move |mut file| {
                 file.write_all(b"replacement")
                     .map_err(|error| error.to_string())?;
@@ -74,7 +75,10 @@ fn compression_staging_stays_private_while_encoding() -> Result<(), Box<dyn Erro
     release.store(true, Ordering::Release);
     assert_eq!(
         context.block_on(task)?,
-        Ok(("existing.zip".to_owned(), Some(original)))
+        Ok((
+            "existing.zip".to_owned(),
+            Some(ReplacedOriginal::Trashed(original))
+        ))
     );
     assert_eq!(fs::read(&archive)?, b"replacement");
     assert_eq!(fs::metadata(&archive)?.permissions().mode() & 0o777, 0o640);
@@ -101,7 +105,7 @@ fn compression_new_archive_staging_stays_private_until_publish() -> Result<(), B
             &worker_destination,
             &worker_archive,
             TransferConflict::ReplaceExisting,
-            &never_cancelled(),
+            never_cancelled(),
             move |mut file| {
                 file.write_all(b"created")
                     .map_err(|error| error.to_string())?;
@@ -151,7 +155,7 @@ fn compression_replacement_preserves_directory_destinations() -> Result<(), Box<
             root.path(),
             &archive,
             TransferConflict::ReplaceExisting,
-            &never_cancelled(),
+            never_cancelled(),
             |mut file| {
                 file.write_all(b"replacement")
                     .map_err(|error| error.to_string())?;
@@ -192,7 +196,7 @@ fn keep_both_retries_publication_collisions_without_encoding_again() -> Result<(
             &destination,
             &archive,
             TransferConflict::KeepBoth,
-            &never_cancelled(),
+            never_cancelled(),
             move |mut file| {
                 worker_encoded.fetch_add(1, Ordering::Relaxed);
                 file.write_all(b"new archive")
@@ -212,6 +216,179 @@ fn keep_both_retries_publication_collisions_without_encoding_again() -> Result<(
         assert_eq!(fs::read_link(symlink)?, Path::new("missing"));
         assert!(stages(&destination, COMPRESSION_STAGE)?.is_empty());
     }
+    Ok(())
+}
+
+const NFS_SUPER_MAGIC: rustix::fs::FsWord = 0x6969;
+const TMPFS_MAGIC: rustix::fs::FsWord = 0x0102_1994;
+
+type Compressed = Result<(String, Option<ReplacedOriginal>), ArchiveError>;
+
+/// Publishes a one-line archive, reporting whether the encoder ran.
+fn publish_replacement(destination: &Path, conflict: TransferConflict) -> (Compressed, bool) {
+    let encoded = Arc::new(AtomicBool::new(false));
+    let worker_encoded = encoded.clone();
+    let result = glib::MainContext::default().block_on(write_staged_archive(
+        destination,
+        &destination.join("existing.zip"),
+        conflict,
+        never_cancelled(),
+        move |mut file| {
+            worker_encoded.store(true, Ordering::Relaxed);
+            file.write_all(b"replacement")
+                .map_err(|error| error.to_string())?;
+            Ok(())
+        },
+    ));
+    (result, encoded.load(Ordering::Relaxed))
+}
+
+fn names_in(destination: &Path) -> Result<Vec<String>, Box<dyn Error>> {
+    let mut names = fs::read_dir(destination)?
+        .map(|entry| Ok(entry?.file_name().to_string_lossy().into_owned()))
+        .collect::<Result<Vec<_>, std::io::Error>>()?;
+    names.sort();
+    Ok(names)
+}
+
+#[test]
+fn replacing_an_archive_without_trash_sets_the_original_aside() -> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    for (fs_type, sets_aside) in [(NFS_SUPER_MAGIC, true), (TMPFS_MAGIC, false)] {
+        let root = tempfile::tempdir()?;
+        let archive = root.path().join("existing.zip");
+        fs::write(&archive, b"original")?;
+        fs::set_permissions(&archive, fs::Permissions::from_mode(0o640))?;
+        let quirks = FsQuirks::install(
+            root.path(),
+            Quirks {
+                trash: Trash::Unsupported,
+                fs_type: Some(fs_type),
+                ..Quirks::default()
+            },
+        );
+
+        let (result, _) = publish_replacement(root.path(), TransferConflict::ReplaceExisting);
+
+        assert_eq!(
+            result,
+            Ok(("existing.zip".to_owned(), Some(ReplacedOriginal::Deleted))),
+            "{fs_type:#x}"
+        );
+        assert_eq!(fs::read(&archive)?, b"replacement");
+        assert_eq!(fs::metadata(&archive)?.permissions().mode() & 0o777, 0o640);
+        assert_eq!(names_in(root.path())?, ["existing.zip"]);
+        let set_aside = quirks.calls().iter().any(|call| {
+            call.names
+                .iter()
+                .any(|name| name.to_string_lossy().starts_with(".strata-replaced-"))
+        });
+        assert_eq!(set_aside, sets_aside, "{fs_type:#x}");
+    }
+    Ok(())
+}
+
+#[test]
+fn replacement_fails_before_encoding_when_no_strategy_is_safe() -> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let root = tempfile::tempdir()?;
+    let archive = root.path().join("existing.zip");
+    fs::write(&archive, b"original")?;
+    let _quirks = FsQuirks::install(
+        root.path(),
+        Quirks {
+            trash: Trash::Unsupported,
+            fs_type: Some(NFS_SUPER_MAGIC),
+            ..Quirks::without_placement()
+        },
+    );
+
+    let (result, encoded) = publish_replacement(root.path(), TransferConflict::ReplaceExisting);
+
+    let Err(ArchiveError::Failed(message)) = result else {
+        return Err(format!("expected a refusal, got {result:?}").into());
+    };
+    assert!(message.contains("replaced safely"), "{message}");
+    assert!(!encoded);
+    assert_eq!(fs::read(&archive)?, b"original");
+    assert_eq!(names_in(root.path())?, ["existing.zip"]);
+    Ok(())
+}
+
+#[test]
+fn a_name_taken_during_replacement_keeps_the_original_aside() -> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let root = tempfile::tempdir()?;
+    let archive = root.path().join("existing.zip");
+    fs::write(&archive, b"original")?;
+    let racer_archive = archive.clone();
+    let _quirks = FsQuirks::install(
+        root.path(),
+        Quirks {
+            trash: Trash::Unsupported,
+            fs_type: Some(NFS_SUPER_MAGIC),
+            // The first rename of the name sets the original aside; the second publishes.
+            before: vec![(
+                Op::Rename,
+                "existing.zip",
+                1,
+                Box::new(move || {
+                    let _ = fs::write(&racer_archive, b"racer");
+                }),
+            )],
+            ..Quirks::default()
+        },
+    );
+
+    let (result, _) = publish_replacement(root.path(), TransferConflict::ReplaceExisting);
+
+    let Err(ArchiveError::Failed(message)) = result else {
+        return Err(format!("expected the original to be kept aside, got {result:?}").into());
+    };
+    assert_eq!(fs::read(&archive)?, b"racer");
+    let names = names_in(root.path())?;
+    let [kept] = names
+        .iter()
+        .filter(|name| name.starts_with(".strata-replaced-"))
+        .collect::<Vec<_>>()[..]
+    else {
+        return Err(format!("expected one kept original, found {names:?}").into());
+    };
+    assert!(message.contains(kept.as_str()), "{message}");
+    assert_eq!(fs::read(root.path().join(kept))?, b"original");
+    assert!(stages(root.path(), COMPRESSION_STAGE)?.is_empty());
+    Ok(())
+}
+
+#[test]
+fn keep_both_numbering_works_with_sshfs_eperm_collisions() -> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let root = tempfile::tempdir()?;
+    fs::write(root.path().join("existing.zip"), b"original")?;
+    fs::write(root.path().join("existing (1).zip"), b"numbered")?;
+    let _quirks = FsQuirks::install(
+        root.path(),
+        Quirks {
+            collisions_as_eperm: true,
+            ..Quirks::without_rename_flags()
+        },
+    );
+
+    let (result, _) = publish_replacement(root.path(), TransferConflict::KeepBoth);
+
+    assert_eq!(result, Ok(("existing (2).zip".to_owned(), None)));
+    assert_eq!(fs::read(root.path().join("existing (2).zip"))?, b"replacement");
+    assert_eq!(fs::read(root.path().join("existing.zip"))?, b"original");
+    assert_eq!(fs::read(root.path().join("existing (1).zip"))?, b"numbered");
+    assert!(stages(root.path(), COMPRESSION_STAGE)?.is_empty());
     Ok(())
 }
 
@@ -465,7 +642,7 @@ fn cancelling_staged_compression_waits_for_worker_exit_before_cleanup() -> Resul
             &worker_destination,
             &worker_archive,
             TransferConflict::ReplaceExisting,
-            &task_cancelled,
+            task_cancelled,
             move |mut file| {
                 file.write_all(b"partial")
                     .map_err(|error| error.to_string())?;
@@ -518,7 +695,7 @@ fn write_staged_archive_does_not_publish_when_cancelled_after_write() -> Result<
             &worker_destination,
             &worker_archive,
             TransferConflict::ReplaceExisting,
-            &persist_cancelled,
+            persist_cancelled,
             move |mut file| {
                 file.write_all(b"replacement")
                     .map_err(|error| error.to_string())?;

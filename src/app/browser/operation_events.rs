@@ -8,7 +8,7 @@ use std::{
 
 use crate::{
     model::Location,
-    services::{OperationEvent, OperationRequestId, TrashedOriginal},
+    services::{OperationEvent, OperationRequestId, ReplacedOriginal, TrashedOriginal},
 };
 
 mod background;
@@ -553,15 +553,15 @@ impl Browser {
                 ..
             } => {
                 if !completion.undoing {
-                    push_pending_undo(if let Some(original) = original {
-                        UndoEntry::Merge {
+                    match original {
+                        Some(ReplacedOriginal::Trashed(original)) => push_pending_undo(UndoEntry::Merge {
                             created: Vec::new(),
                             overwritten: vec![archive.clone()],
                             originals: HashMap::from([(archive, original)]),
-                        }
-                    } else {
-                        UndoEntry::Copy(vec![archive])
-                    });
+                        }),
+                        Some(ReplacedOriginal::Deleted) => {}
+                        None => push_pending_undo(UndoEntry::Copy(vec![archive])),
+                    }
                 }
                 self.emit(BrowserEvent::ArchiveCompleted {
                     select_name: archive_name,

@@ -6,7 +6,7 @@ use std::{
     rc::Rc,
 };
 
-use crate::services::{LoadHandle, OperationEvent, OperationRequestId};
+use crate::services::{LoadHandle, OperationEvent, OperationRequestId, ReplacedOriginal};
 
 use super::super::push_background_undo;
 use super::{
@@ -242,15 +242,15 @@ impl Browser {
                         original,
                         ..
                     } => {
-                        push_background_undo(if let Some(original) = original {
-                            UndoEntry::Merge {
+                        match original {
+                            Some(ReplacedOriginal::Trashed(original)) => push_background_undo(UndoEntry::Merge {
                                 created: Vec::new(),
                                 overwritten: vec![archive.clone()],
                                 originals: HashMap::from([(archive, original)]),
-                            }
-                        } else {
-                            UndoEntry::Copy(vec![archive])
-                        });
+                            }),
+                            Some(ReplacedOriginal::Deleted) => {}
+                            None => push_background_undo(UndoEntry::Copy(vec![archive])),
+                        }
                         let can_reveal = self.last_started_operation() == Some(context.request_id)
                             && self.validation_generation.get() == context.navigation_generation
                             && self.active_location() == context.origin;

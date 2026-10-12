@@ -4,7 +4,7 @@ use super::{
     ExtractNameResolver, ExtractionDestination, MemberMetadata, MetadataCalls, archive_stem,
     sanitized_archive_path,
 };
-use std::os::fd::BorrowedFd;
+use crate::adapters::local_operations::tests::fs_quirks::{FsQuirks, Quirks};
 use std::{
     error::Error,
     ffi::{OsStr, OsString},
@@ -399,17 +399,8 @@ fn archive_stem_strips_known_extensions() {
     }
 }
 
-fn no_replace_unsupported(
-    _: BorrowedFd<'_>,
-    _: &OsStr,
-    _: BorrowedFd<'_>,
-    _: &OsStr,
-) -> rustix::io::Result<()> {
-    Err(rustix::io::Errno::INVAL)
-}
-
 #[test]
-fn publication_without_rename_noreplace_never_replaces_entries() -> Result<(), Box<dyn Error>> {
+fn publication_without_rename_flags_never_replaces_entries() -> Result<(), Box<dyn Error>> {
     let cases: [(&str, &str, &str, Setup, &str); 4] = [
         ("file", "readme.txt", "readme.txt", |_| Ok(()), "readme.txt"),
         (
@@ -433,18 +424,21 @@ fn publication_without_rename_noreplace_never_replaces_entries() -> Result<(), B
     ];
     for (label, member, root_name, create_existing, expected) in cases {
         let root = tempfile::tempdir()?;
+        let _quirks = FsQuirks::install(root.path(), Quirks::without_rename_flags());
         create_existing(root.path())?;
         let before = fingerprint(&root.path().join(root_name));
         let destination = ExtractionDestination::open(root.path())?;
         let (name, staging) = stage(&destination, &[member])?;
+        let staged_inode = fs::symlink_metadata(root.path().join(&name).join(root_name))?.ino();
 
-        let published = destination.publish_single_root_with(
-            &staging,
-            Path::new(root_name),
-            no_replace_unsupported,
-        )?;
+        let published = destination.publish_single_root(&staging, Path::new(root_name))?;
 
         assert_eq!(published, OsString::from(expected), "{label}");
+        assert_eq!(
+            fs::symlink_metadata(root.path().join(expected))?.ino(),
+            staged_inode,
+            "{label}"
+        );
         let inside = Path::new(member).strip_prefix(root_name)?;
         let moved = if inside.as_os_str().is_empty() {
             Path::new(expected).to_path_buf()
@@ -467,6 +461,7 @@ fn publication_without_rename_noreplace_never_replaces_entries() -> Result<(), B
 
     for taken in [false, true] {
         let root = tempfile::tempdir()?;
+        let _quirks = FsQuirks::install(root.path(), Quirks::without_rename_flags());
         if taken {
             fs::create_dir(root.path().join("bundle"))?;
             fs::write(root.path().join("bundle/keep.txt"), b"keep")?;
@@ -474,11 +469,8 @@ fn publication_without_rename_noreplace_never_replaces_entries() -> Result<(), B
         let destination = ExtractionDestination::open(root.path())?;
         let (name, _) = stage(&destination, &["docs/readme.txt"])?;
 
-        let published = destination.publish_staging_as_folder_with(
-            &name,
-            "bundle.zip",
-            no_replace_unsupported,
-        )?;
+        let published = destination.publish_staging_as_folder(&name, "bundle.zip")?;
+
         let expected = if taken { "bundle (1)" } else { "bundle" };
         assert_eq!(published, expected);
         assert_eq!(
@@ -494,60 +486,73 @@ fn publication_without_rename_noreplace_never_replaces_entries() -> Result<(), B
     Ok(())
 }
 
-/// Nested directory metadata is restored in staging before publication.
 #[test]
-fn publication_without_rename_noreplace_moves_read_only_directories() -> Result<(), Box<dyn Error>>
-{
+fn publication_without_rename_flags_moves_unreadable_subtrees_whole() -> Result<(), Box<dyn Error>> {
     let root = tempfile::tempdir()?;
+    let _quirks = FsQuirks::install(root.path(), Quirks::without_rename_flags());
     let destination = ExtractionDestination::open(root.path())?;
     let (name, staging) = stage(&destination, &["ro/sub/child.txt"])?;
+    staging.create_directories(Path::new("ro/unreadable"))?;
     let read_only = MemberMetadata {
         mode: Some(0o555),
         modified: Some(UNIX_EPOCH + Duration::from_secs(1_000_000_000)),
     };
     staging.apply_directory_metadata(Path::new("ro/sub"), read_only, 0o022)?;
+    let unreadable = root.path().join(&name).join("ro/unreadable");
+    fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o000))?;
+    let staged_inode = fs::metadata(root.path().join(&name).join("ro"))?.ino();
 
-    let published =
-        destination.publish_single_root_with(&staging, Path::new("ro"), no_replace_unsupported);
+    let published = destination.publish_single_root(&staging, Path::new("ro"));
 
-    let sub = root.path().join("ro/sub");
-    let _ = fs::set_permissions(&sub, fs::Permissions::from_mode(0o755));
-    let _ = fs::set_permissions(
-        root.path().join(&name).join("ro/sub"),
-        fs::Permissions::from_mode(0o755),
-    );
+    let published_root = root.path().join("ro");
+    for directory in [published_root.join("unreadable"), unreadable] {
+        let _ = fs::set_permissions(directory, fs::Permissions::from_mode(0o755));
+    }
     assert_eq!(published?, OsString::from("ro"));
-    assert_eq!(fs::read(sub.join("child.txt"))?, b"ro/sub/child.txt");
+    assert_eq!(fs::metadata(&published_root)?.ino(), staged_inode);
+    assert_eq!(
+        fs::read(published_root.join("sub/child.txt"))?,
+        b"ro/sub/child.txt"
+    );
+    assert_eq!(
+        fs::metadata(published_root.join("sub"))?.permissions().mode() & 0o777,
+        0o555
+    );
+    assert!(published_root.join("unreadable").is_dir());
     assert!(root.path().join(&name).read_dir()?.next().is_none());
     Ok(())
 }
 
 #[test]
-fn a_failed_fallback_publication_removes_its_partial_output() -> Result<(), Box<dyn Error>> {
+fn publication_without_links_or_noreplace_keeps_staging() -> Result<(), Box<dyn Error>> {
     let root = tempfile::tempdir()?;
+    let _quirks = FsQuirks::install(root.path(), Quirks::without_placement());
     let destination = ExtractionDestination::open(root.path())?;
-    let (name, staging) = stage(&destination, &["ro/done/file.txt"])?;
-    staging.create_directories(Path::new("ro/unreadable"))?;
-    let done = root.path().join(&name).join("ro/done");
-    let unreadable = root.path().join(&name).join("ro/unreadable");
-    fs::set_permissions(&done, fs::Permissions::from_mode(0o555))?;
-    fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o000))?;
+    let (name, staging) = stage(&destination, &["readme.txt", "docs/guide.txt"])?;
 
-    let published =
-        destination.publish_single_root_with(&staging, Path::new("ro"), no_replace_unsupported);
+    let file = destination.publish_single_root(&staging, Path::new("readme.txt"));
+    let folder = destination.publish_single_root(&staging, Path::new("docs"));
 
-    let _ = fs::set_permissions(&done, fs::Permissions::from_mode(0o755));
-    let _ = fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o755));
-    let _ = fs::set_permissions(
-        root.path().join("ro/done"),
-        fs::Permissions::from_mode(0o755),
+    for result in [file, folder] {
+        let error = result.expect_err("publication must refuse an unsafe placement");
+        assert!(error.contains("guarantee"), "{error}");
+    }
+    let staged = root.path().join(&name);
+    assert_eq!(fs::read(staged.join("readme.txt"))?, b"readme.txt");
+    assert_eq!(fs::read(staged.join("docs/guide.txt"))?, b"docs/guide.txt");
+    assert_eq!(
+        entry_names(root.path())?,
+        vec![name.to_string_lossy().into_owned()]
     );
-    assert!(published.is_err(), "{published:?}");
-    assert!(!root.path().join("ro").exists());
-    assert!(!root.path().join("ro (2)").exists());
-    assert_eq!(fs::read(done.join("file.txt"))?, b"ro/done/file.txt");
-    assert!(unreadable.is_dir());
     Ok(())
+}
+
+fn entry_names(directory: &Path) -> Result<Vec<String>, Box<dyn Error>> {
+    let mut names = fs::read_dir(directory)?
+        .map(|entry| Ok(entry?.file_name().to_string_lossy().into_owned()))
+        .collect::<Result<Vec<_>, std::io::Error>>()?;
+    names.sort();
+    Ok(names)
 }
 
 #[test]

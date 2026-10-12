@@ -15,6 +15,7 @@ use std::{
     },
 };
 
+use gtk::{gio, glib};
 use rustix::{
     fs::{AtFlags, FsWord, Mode, RenameFlags},
     io::Errno,
@@ -38,6 +39,8 @@ pub(crate) enum Op {
     Names,
     MountKey,
     FsType,
+    CanTrash,
+    Trash,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -62,6 +65,13 @@ pub(crate) enum OverEmptyDirectory {
     Eperm,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) enum Trash {
+    #[default]
+    Supported,
+    Unsupported,
+}
+
 pub(crate) type Racer = Box<dyn FnMut() + Send>;
 
 /// Patterns match a name exactly, or by prefix when they end in `*`.
@@ -77,6 +87,7 @@ pub(crate) struct Quirks {
     /// and with `EPERM` by link, as on vfat.
     pub invalid_name: Option<fn(&OsStr) -> bool>,
     pub fs_type: Option<FsWord>,
+    pub trash: Trash,
     /// Performs the call, then reports this errno once.
     pub lost_reply: Vec<(Op, &'static str, Errno)>,
     /// Fails the matching call after skipping the given number of matches, once.
@@ -402,6 +413,15 @@ fn scope_for(dir: BorrowedFd<'_>) -> Option<Arc<Scope>> {
         .cloned()
 }
 
+fn scope_for_path(path: &Path) -> Option<Arc<Scope>> {
+    let parent = path.parent()?.canonicalize().ok()?;
+    scopes()
+        .iter()
+        .filter(|scope| parent.starts_with(&scope.root))
+        .max_by_key(|scope| scope.root.as_os_str().len())
+        .cloned()
+}
+
 fn same_scope(left: &Option<Arc<Scope>>, right: &Option<Arc<Scope>>) -> bool {
     match (left, right) {
         (None, None) => true,
@@ -552,5 +572,40 @@ impl FsOps for Scoped {
                 .flatten(),
             None => System.fs_type(dir),
         }
+    }
+
+    fn can_trash(&self, path: &Path) -> bool {
+        assert_off_main_thread();
+        match scope_for_path(path) {
+            Some(scope) => scope
+                .run(Op::CanTrash, &[], |scope| {
+                    Ok(match scope.quirk(|quirks| quirks.trash) {
+                        Trash::Supported => System.can_trash(path),
+                        Trash::Unsupported => false,
+                    })
+                })
+                .unwrap_or(false),
+            None => System.can_trash(path),
+        }
+    }
+
+    fn trash(&self, path: &Path, cancellable: &gio::Cancellable) -> Result<(), glib::Error> {
+        assert_off_main_thread();
+        let Some(scope) = scope_for_path(path) else {
+            return System.trash(path, cancellable);
+        };
+        let name = path.file_name().unwrap_or_default();
+        let mut outcome = Ok(());
+        let _ = scope.run(Op::Trash, &[name], |scope| {
+            outcome = match scope.quirk(|quirks| quirks.trash) {
+                Trash::Supported => System.trash(path, cancellable),
+                Trash::Unsupported => Err(glib::Error::new(
+                    gio::IOErrorEnum::NotSupported,
+                    "Trash is not supported here",
+                )),
+            };
+            Ok(())
+        });
+        outcome
     }
 }
