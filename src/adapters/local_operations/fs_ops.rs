@@ -63,7 +63,8 @@ pub(super) trait FsOps: Send + Sync {
     fn readlink(&self, at: Entry<'_>) -> Result<OsString, Errno>;
     /// Never follows `at`; `force_sync` asks a network filesystem to revalidate.
     fn stat(&self, at: Entry<'_>, force_sync: bool) -> Result<EntryStat, Errno>;
-    fn stat_dir(&self, dir: BorrowedFd<'_>) -> Result<EntryStat, Errno>;
+    /// The open file or folder itself, from cached attributes.
+    fn stat_fd(&self, fd: BorrowedFd<'_>) -> Result<EntryStat, Errno>;
     fn open_parent(&self, dir: BorrowedFd<'_>) -> Result<OwnedFd, Errno>;
     fn create_exclusive(&self, at: Entry<'_>, mode: Mode) -> Result<OwnedFd, Errno>;
     fn names(&self, dir: Entry<'_>) -> Result<Vec<OsString>, Errno>;
@@ -170,9 +171,13 @@ impl FsOps for System {
         statx_at(at.dir, at.name, flags)
     }
 
-    fn stat_dir(&self, dir: BorrowedFd<'_>) -> Result<EntryStat, Errno> {
+    fn stat_fd(&self, fd: BorrowedFd<'_>) -> Result<EntryStat, Errno> {
         assert_off_main_thread();
-        statx_at(dir, OsStr::new(""), AtFlags::EMPTY_PATH)
+        statx_at(
+            fd,
+            OsStr::new(""),
+            AtFlags::EMPTY_PATH | AtFlags::STATX_DONT_SYNC,
+        )
     }
 
     fn open_parent(&self, dir: BorrowedFd<'_>) -> Result<OwnedFd, Errno> {

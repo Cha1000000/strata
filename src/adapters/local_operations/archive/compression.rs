@@ -6,17 +6,16 @@
 mod tests;
 
 use super::super::{
-    LocalFileIdentity, PinnedEntry, REPLACED_PREFIX, cannot_replace_safely,
-    flush_removable_destination,
+    DisplacedOriginal, LocalFileIdentity, cannot_replace_safely,
     fs_ops::{Entry, fs},
     local_directory_children, open_local_child_directory, open_local_parent_directory,
-    original_kept_aside, original_not_removed, parallel_delete_local,
+    original_kept_aside,
     placement::{
-        Displacement, Feasibility, PlaceError, can_set_aside, creation_error,
-        displacement_without_trash, exchange, place, put_back, remove_if_unchanged,
-        reserve_hidden_name, set_aside,
+        COMPRESSION_STAGE_PREFIX, Displacement, NUMBERED_NAME_ATTEMPTS, PlaceError, REPLACED_PREFIX,
+        creation_error, displacement_without_trash, exchange, place,
+        put_back, remove_if_unchanged, reserve_hidden_name, set_aside, set_aside_if_safe,
     },
-    placement_reason,
+    placement_reason, remove_displaced_original,
     trash::trash_verified,
 };
 use super::{
@@ -40,8 +39,6 @@ use std::{
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-
-const COMPRESSION_STAGE: &str = ".strata-compression-";
 
 /// Writes an archive through a private staging file, then publishes it at
 /// `archive_path` without ever replacing an entry it did not account for.
@@ -88,7 +85,9 @@ where
         Displaced::None => None,
         Displaced::Trashed(original) => Some(ReplacedOriginal::Trashed(original)),
         Displaced::Aside(aside) => {
-            remove_displaced(&destination.join(&published.name), &name, aside).await?;
+            remove_displaced_original(aside, Some(&destination.join(&published.name)), &name)
+                .await
+                .map_err(|error| archive_failed(error.message()))?;
             Some(ReplacedOriginal::Deleted)
         }
     };
@@ -98,7 +97,8 @@ where
 enum Strategy {
     New,
     Numbered,
-    Replace(Replacement),
+    /// Replaces only the item seen before encoding.
+    Replace(Replacement, LocalFileIdentity),
 }
 
 #[derive(Clone, Copy)]
@@ -108,17 +108,10 @@ enum Replacement {
     Aside,
 }
 
-/// An original moved to a hidden sibling by EXCHANGE or set-aside.
-struct Aside {
-    parent: Arc<OwnedFd>,
-    name: OsString,
-    identity: LocalFileIdentity,
-}
-
 enum Displaced {
     None,
     Trashed(TrashedOriginal),
-    Aside(Aside),
+    Aside(DisplacedOriginal),
 }
 
 struct Published {
@@ -187,12 +180,15 @@ impl Publication {
                     } else {
                         self.without_trash(&parent)?
                     };
-                    (mode, Strategy::Replace(replacement))
+                    (
+                        mode,
+                        Strategy::Replace(replacement, LocalFileIdentity::from_stat(&stat)),
+                    )
                 }
             },
         };
 
-        let (name, file) = reserve_hidden_name(COMPRESSION_STAGE, |name| {
+        let (name, file) = reserve_hidden_name(COMPRESSION_STAGE_PREFIX, |name| {
             fs().create_exclusive(
                 Entry::new(&*parent, name),
                 rustix::fs::Mode::from_raw_mode(0o600),
@@ -265,7 +261,7 @@ impl Publication {
     }
 
     fn publish(&self, stage: &Stage, strategy: Strategy) -> Result<Published, ArchiveError> {
-        let replacement = match strategy {
+        let (replacement, identity) = match strategy {
             Strategy::New => {
                 return stage
                     .place(OsStr::new(&self.name))
@@ -273,12 +269,16 @@ impl Publication {
                     .map_err(|error| self.creation_failed(placement_reason(error)));
             }
             Strategy::Numbered => return self.publish_numbered(stage),
-            Strategy::Replace(replacement) => replacement,
+            Strategy::Replace(replacement, identity) => (replacement, identity),
         };
         let Some(stat) = self.existing(&stage.parent)? else {
             return self.publish(stage, Strategy::New);
         };
-        let identity = LocalFileIdentity::from_stat(&stat);
+        if LocalFileIdentity::from_stat(&stat) != identity {
+            return Err(archive_failed(crate::i18n::tr(
+                "The target changed while the operation was in progress",
+            )));
+        }
         match replacement {
             Replacement::Trash => self.publish_after_trash(stage, identity),
             Replacement::Exchange => self.publish_by_exchange(stage, identity),
@@ -293,14 +293,14 @@ impl Publication {
     ) -> Result<Published, ArchiveError> {
         let target = Entry::new(&*stage.parent, OsStr::new(&self.name));
         match exchange(fs(), stage.entry(), target) {
-            Ok(true) => Ok(self.published(Displaced::Aside(Aside {
+            Ok(true) => Ok(self.published(Displaced::Aside(DisplacedOriginal {
                 parent: stage.parent.clone(),
                 name: stage.name.clone(),
                 identity,
             }))),
-            Ok(false) => match can_set_aside(fs(), stage.parent.as_fd(), false) {
-                Ok(Feasibility::Yes) => self.publish_after_set_aside(stage, identity),
-                Ok(Feasibility::No) => Err(self.cannot_replace_safely()),
+            Ok(false) => match set_aside_if_safe(fs(), stage.parent.as_fd(), false) {
+                Ok(Some(_)) => self.publish_after_set_aside(stage, identity),
+                Ok(None) => Err(self.cannot_replace_safely()),
                 Err(error) => Err(self.creation_failed(placement_reason(error))),
             },
             Err(error) => Err(self.creation_failed(placement_reason(error))),
@@ -321,7 +321,7 @@ impl Publication {
             Ok(()) => {}
             Err(error) if error.matches(gio::IOErrorEnum::NotSupported) => {
                 let replacement = self.without_trash(&stage.parent)?;
-                return self.publish(stage, Strategy::Replace(replacement));
+                return self.publish(stage, Strategy::Replace(replacement, identity));
             }
             Err(error) => {
                 return Err(archive_failed(rust_i18n::t!(
@@ -359,7 +359,7 @@ impl Publication {
             Err(error) => return Err(self.creation_failed(placement_reason(error))),
         };
         match stage.place(target) {
-            Ok(()) => Ok(self.published(Displaced::Aside(Aside {
+            Ok(()) => Ok(self.published(Displaced::Aside(DisplacedOriginal {
                 parent: stage.parent.clone(),
                 name: aside.name,
                 identity: aside.identity,
@@ -377,7 +377,7 @@ impl Publication {
 
     fn publish_numbered(&self, stage: &Stage) -> Result<Published, ArchiveError> {
         let mut candidate = self.name.clone();
-        for suffix in 1_u64.. {
+        for suffix in 1..NUMBERED_NAME_ATTEMPTS {
             match stage.place(OsStr::new(&candidate)) {
                 Ok(()) => {
                     return Ok(Published {
@@ -422,27 +422,6 @@ impl Publication {
     fn cannot_replace_safely(&self) -> ArchiveError {
         archive_failed(cannot_replace_safely(&self.name))
     }
-}
-
-/// Deletes an original that EXCHANGE or set-aside kept, once the new archive
-/// has reached a removable device.
-async fn remove_displaced(archive: &Path, name: &str, aside: Aside) -> Result<(), ArchiveError> {
-    let kept = aside.name.clone();
-    let removed = match flush_removable_destination(archive).await {
-        Ok(()) => {
-            parallel_delete_local(
-                vec![PinnedEntry {
-                    parent: aside.parent,
-                    name: aside.name,
-                    identity: Some(aside.identity),
-                }],
-                gio::Cancellable::new(),
-            )
-            .await
-        }
-        Err(error) => Err(error),
-    };
-    removed.map_err(|error| archive_failed(original_not_removed(name, &kept, &error)))
 }
 
 fn default_file_mode() -> u32 {

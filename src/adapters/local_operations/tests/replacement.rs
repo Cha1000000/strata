@@ -21,14 +21,6 @@ fn without_trash(fs_type: FsWord, quirks: Quirks) -> Quirks {
     }
 }
 
-fn names(dir: &Path) -> Result<Vec<String>, io::Error> {
-    let mut names = fs::read_dir(dir)?
-        .map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned()))
-        .collect::<Result<Vec<_>, _>>()?;
-    names.sort();
-    Ok(names)
-}
-
 fn inode(path: &Path) -> Result<u64, io::Error> {
     Ok(fs::symlink_metadata(path)?.ino())
 }
@@ -904,39 +896,41 @@ fn same_filesystem_replacing_move_refuses_a_substituted_source() -> Result<(), B
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
         .lock()
         .map_err(|error| error.to_string())?;
-    let root = tempfile::tempdir()?;
-    let source = root.path().join("source");
-    let preserved = root.path().join("preserved");
-    let target = root.path().join("target");
-    fs::write(&source, b"incoming")?;
-    fs::write(&target, b"old")?;
-    let original = inode(&target)?;
-    let (racer_source, racer_preserved) = (source.clone(), preserved.clone());
-    let racer: Box<dyn FnMut() + Send> = Box::new(move || {
-        let _ = fs::rename(&racer_source, &racer_preserved);
-        let _ = fs::write(&racer_source, b"new arrival");
-    });
-    let _quirks = FsQuirks::install(
-        root.path(),
-        without_trash(
-            NFS_SUPER_MAGIC,
-            Quirks {
-                before: vec![(Op::Rename, "source", 0, racer)],
-                ..Quirks::without_rename_flags()
-            },
-        ),
-    );
+    for quirks in [Quirks::default, Quirks::without_rename_flags] {
+        let root = tempfile::tempdir()?;
+        let source = root.path().join("source");
+        let preserved = root.path().join("preserved");
+        let target = root.path().join("target");
+        fs::write(&source, b"incoming")?;
+        fs::write(&target, b"old")?;
+        let original = inode(&target)?;
+        let (racer_source, racer_preserved) = (source.clone(), preserved.clone());
+        let racer: Box<dyn FnMut() + Send> = Box::new(move || {
+            let _ = fs::rename(&racer_source, &racer_preserved);
+            let _ = fs::write(&racer_source, b"new arrival");
+        });
+        let _quirks = FsQuirks::install(
+            root.path(),
+            without_trash(
+                NFS_SUPER_MAGIC,
+                Quirks {
+                    before: vec![(Op::Rename, "source", 0, racer)],
+                    ..quirks()
+                },
+            ),
+        );
 
-    let (result, replaced) = replace_reporting(&source, &target, true);
+        let (result, replaced) = replace_reporting(&source, &target, true);
 
-    let error = result.expect_err("a substituted source is refused");
-    assert!(error.message().contains("changed"), "{error}");
-    assert!(replaced.is_empty());
-    assert_eq!(inode(&target)?, original);
-    assert_eq!(fs::read(&target)?, b"old");
-    assert_eq!(fs::read(&source)?, b"new arrival");
-    assert_eq!(fs::read(&preserved)?, b"incoming");
-    assert_eq!(names(root.path())?, ["preserved", "source", "target"]);
+        let error = result.expect_err("a substituted source is refused");
+        assert!(error.message().contains("changed"), "{error}");
+        assert!(replaced.is_empty());
+        assert_eq!(inode(&target)?, original);
+        assert_eq!(fs::read(&target)?, b"old");
+        assert_eq!(fs::read(&source)?, b"new arrival");
+        assert_eq!(fs::read(&preserved)?, b"incoming");
+        assert_eq!(names(root.path())?, ["preserved", "source", "target"]);
+    }
     Ok(())
 }
 

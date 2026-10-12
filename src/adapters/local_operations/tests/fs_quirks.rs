@@ -35,7 +35,7 @@ pub(crate) enum Op {
     Symlink,
     Readlink,
     Stat,
-    StatDir,
+    StatFd,
     OpenParent,
     Create,
     Names,
@@ -531,11 +531,11 @@ impl FsOps for Scoped {
         }
     }
 
-    fn stat_dir(&self, dir: BorrowedFd<'_>) -> Result<EntryStat, Errno> {
+    fn stat_fd(&self, fd: BorrowedFd<'_>) -> Result<EntryStat, Errno> {
         assert_off_main_thread();
-        match scope_for(dir) {
-            Some(scope) => scope.run(Op::StatDir, &[], |_| System.stat_dir(dir)),
-            None => System.stat_dir(dir),
+        match scope_for(fd) {
+            Some(scope) => scope.run(Op::StatFd, &[], |_| System.stat_fd(fd)),
+            None => System.stat_fd(fd),
         }
     }
 

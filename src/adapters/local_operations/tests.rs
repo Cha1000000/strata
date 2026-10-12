@@ -90,8 +90,8 @@ use super::{
     FAT32_MAX_FILE_SIZE, FailedAction, PinnedEntry, LocalFileIdentity, LocalOperationProvider,
     MergeHooks, MergePlan, MountTable, RestoreEntry, StageCopy, StageOverwrite,
     StagedOriginalLookup, TRANSFER_PROGRESS_INTERVAL, TransferProgressTracker, TransferStop,
-    await_cancellable, copy_failure_after_cleanup, copy_failure_on_fat32, copy_new_recursively,
-    copy_new_recursively_with_progress, copy_new_remote_file_with, copy_recursively,
+    await_cancellable, copy_failure_after_cleanup, copy_failure_on_fat32,
+    copy_new_recursively_on_filesystem, copy_new_remote_file_with, copy_recursively,
     copy_recursively_with_progress, deletion_error_message, deletion_error_summary,
     duplicate_candidate_name, fat_sanitized_name, fat32_file_size_limit, home_trash_entries_at,
     io_error, is_trash_unsupported_failure, join_local_tasks, local_file_identity, merge_local,
@@ -137,6 +137,38 @@ impl Drop for RemovableFlushGuard {
         set_sync_observer(None);
         set_removable_roots_for_test(None);
     }
+}
+
+/// The sorted entry names in `dir`.
+fn names(dir: &Path) -> io::Result<Vec<String>> {
+    let mut names = fs::read_dir(dir)?
+        .map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned()))
+        .collect::<Result<Vec<_>, _>>()?;
+    names.sort();
+    Ok(names)
+}
+
+/// A name vfat rejects, for emulating its invalid-name errors.
+fn has_colon(name: &OsStr) -> bool {
+    name.as_encoded_bytes().contains(&b':')
+}
+
+/// A new copy onto a filesystem that is not FAT-like, as the test roots are.
+async fn copy_new_recursively_with_progress(
+    source: gio::File,
+    target: gio::File,
+    cancellable: gio::Cancellable,
+    progress: Option<Rc<TransferProgressTracker>>,
+) -> Result<(), glib::Error> {
+    copy_new_recursively_on_filesystem(source, target, cancellable, progress, false).await
+}
+
+async fn copy_new_recursively(
+    source: gio::File,
+    target: gio::File,
+    cancellable: gio::Cancellable,
+) -> Result<(), glib::Error> {
+    copy_new_recursively_with_progress(source, target, cancellable, None).await
 }
 
 fn terminal_transfer(events: &[OperationEvent]) -> Option<&OperationEvent> {

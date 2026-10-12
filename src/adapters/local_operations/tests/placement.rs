@@ -49,15 +49,6 @@ fn place_in(
     )
 }
 
-fn names(dir: &Path) -> Vec<String> {
-    let mut names = fs::read_dir(dir)
-        .expect("list")
-        .map(|entry| entry.expect("entry").file_name().to_string_lossy().into_owned())
-        .collect::<Vec<_>>();
-    names.sort();
-    names
-}
-
 /// What a user would see at `path`, to prove an entry was left untouched.
 fn fingerprint(path: &Path) -> String {
     let Ok(metadata) = fs::symlink_metadata(path) else {
@@ -66,7 +57,7 @@ fn fingerprint(path: &Path) -> String {
     if metadata.file_type().is_symlink() {
         format!("link {:?}", fs::read_link(path).expect("read link"))
     } else if metadata.is_dir() {
-        format!("dir {} {:?}", metadata.ino(), names(path))
+        format!("dir {} {:?}", metadata.ino(), names(path).expect("list"))
     } else {
         format!("file {} {:?}", metadata.ino(), fs::read(path).expect("read"))
     }
@@ -114,7 +105,7 @@ fn rejected_rename_flags_link_files_without_copying() -> Result<(), Box<dyn Erro
             );
 
             assert_eq!(identity(&root.path().join("target")), original);
-            assert_eq!(names(root.path()), ["target"]);
+            assert_eq!(names(root.path())?, ["target"]);
             assert_eq!(mount_capabilities(scope.key()).no_replace, Some(false));
             // Only an ambiguous EINVAL needs the probe to learn this.
             let probed = scope.count(Op::Create) > 0;
@@ -146,7 +137,7 @@ fn rejected_rename_flags_move_folders_over_a_placeholder() -> Result<(), Box<dyn
     assert_eq!(fs::metadata(&target)?.mode() & 0o777, 0o750);
     assert_eq!(fs::metadata(&target)?.modified()?, modified);
     assert_eq!(fs::read(target.join("inside.txt"))?, b"inside");
-    assert_eq!(names(root.path()), ["target"]);
+    assert_eq!(names(root.path())?, ["target"]);
     Ok(())
 }
 
@@ -215,15 +206,11 @@ fn the_ladder_never_replaces_an_existing_destination() -> Result<(), Box<dyn Err
                 if let Some(target_before) = target_before {
                     assert_eq!(fingerprint(&target), target_before);
                 }
-                assert_eq!(names(root.path()), ["other", "source", "target"], "{index} {kind}");
+                assert_eq!(names(root.path())?, ["other", "source", "target"], "{index} {kind}");
             }
         }
     }
     Ok(())
-}
-
-fn has_colon(name: &OsStr) -> bool {
-    name.as_encoded_bytes().contains(&b':')
 }
 
 #[test]
@@ -248,10 +235,12 @@ fn an_invalid_name_on_a_fat_like_mount_is_reported_and_learns_nothing() -> Resul
         mount_capabilities(scope.key()),
         MountCapabilities {
             no_replace: Some(true),
+            // Learned by the probe on Strata's own names, not from "a:b".
+            hard_links: Some(false),
             ..MountCapabilities::default()
         }
     );
-    assert_eq!(names(root.path()), ["source"]);
+    assert_eq!(names(root.path())?, ["source"]);
 
     scope.clear_calls();
     assert_eq!(place_in(root.path(), "source", "valid", None), Ok(Placed::Renamed));
@@ -278,7 +267,7 @@ fn a_folder_into_itself_is_refused_and_learns_nothing() -> Result<(), Box<dyn Er
         );
 
         assert_eq!(result, Err(PlaceError::IntoItself));
-        assert!(names(&source.join("child")).is_empty());
+        assert!(names(&source.join("child"))?.is_empty());
         let learned = mount_capabilities(scope.key());
         let expected = MountCapabilities {
             no_replace: rejected_definitively.then_some(false),
@@ -301,12 +290,14 @@ fn item_level_eperm_does_not_disable_links_for_the_mount() -> Result<(), Box<dyn
     );
     fs::write(root.path().join("source"), b"data")?;
 
+    // protected_hardlinks refuses links to another user's file that a rename
+    // could still move, so a move may fall back to copying it.
     assert_eq!(
         place_in(root.path(), "source", "target", None),
-        Err(PlaceError::Io(Errno::PERM))
+        Err(PlaceError::Unsupported)
     );
     assert_eq!(mount_capabilities(scope.key()).hard_links, Some(true));
-    assert_eq!(names(root.path()), ["source"]);
+    assert_eq!(names(root.path())?, ["source"]);
     Ok(())
 }
 
@@ -328,7 +319,7 @@ fn a_lost_link_reply_is_recognized() -> Result<(), Box<dyn Error>> {
         Ok(Placed::Linked)
     );
     assert_eq!(identity(&root.path().join("target")), original);
-    assert_eq!(names(root.path()), ["target"]);
+    assert_eq!(names(root.path())?, ["target"]);
     Ok(())
 }
 
@@ -358,14 +349,14 @@ fn a_case_alias_or_existing_hard_link_is_never_taken_for_a_lost_reply() -> Resul
             }
         };
         let _scope = FsQuirks::install(root.path(), quirks);
-        let before = names(root.path());
+        let before = names(root.path())?;
 
         let result = place_in(root.path(), "source", target, None);
 
         assert_eq!(result, Err(PlaceError::Exists), "{case}");
         assert_eq!(fs::read(&source)?, b"data", "{case}");
         if case != "alias of a new link" {
-            assert_eq!(names(root.path()), before, "{case}");
+            assert_eq!(names(root.path())?, before, "{case}");
         }
     }
     Ok(())
@@ -388,7 +379,7 @@ fn a_lost_unlink_reply_completes_the_move() -> Result<(), Box<dyn Error>> {
         Ok(Placed::Linked)
     );
     assert_eq!(fs::read(root.path().join("target"))?, b"data");
-    assert_eq!(names(root.path()), ["target"]);
+    assert_eq!(names(root.path())?, ["target"]);
     Ok(())
 }
 
@@ -408,7 +399,7 @@ fn a_failed_source_unlink_rolls_back_only_our_link() -> Result<(), Box<dyn Error
         place_in(root.path(), "source", "target", None),
         Err(PlaceError::Io(Errno::ACCESS))
     );
-    assert_eq!(names(root.path()), ["source"]);
+    assert_eq!(names(root.path())?, ["source"]);
     assert_eq!(fs::metadata(root.path().join("source"))?.nlink(), 1);
     Ok(())
 }
@@ -504,7 +495,7 @@ fn an_empty_own_placeholder_rejected_means_unsupported() -> Result<(), Box<dyn E
             place_in(root.path(), "source", "target", None),
             Err(PlaceError::Unsupported)
         );
-        assert_eq!(names(root.path()), ["source"]);
+        assert_eq!(names(root.path())?, ["source"]);
         assert_eq!(
             mount_capabilities(scope.key()).rename_over_empty_directory,
             learned
@@ -538,7 +529,67 @@ fn an_ambiguous_rename_failure_is_resolved_by_identity() -> Result<(), Box<dyn E
         );
         assert_eq!(identity(&root.path().join("target")), original);
         assert_eq!(fs::read(root.path().join("target/mine"))?, b"mine");
-        assert_eq!(names(root.path()), ["target"]);
+        assert_eq!(names(root.path())?, ["target"]);
+    }
+    Ok(())
+}
+
+#[test]
+fn a_source_substituted_before_it_moves_is_moved_back() -> Result<(), Box<dyn Error>> {
+    for (quirks, folder) in [(Quirks::default(), false), (without_flags(Errno::NOSYS), true)] {
+        let root = tempfile::tempdir()?;
+        let source = root.path().join("source");
+        make(&source, folder)?;
+        let original = identity(&source);
+        let (raced, moved) = (source.clone(), root.path().join("moved"));
+        let racer: Racer = Box::new(move || {
+            fs::rename(&raced, &moved).expect("move the original away");
+            make(&raced, folder).expect("substitute");
+        });
+        // Folders: the second rename into `target` is the one over the placeholder.
+        let skip = usize::from(folder);
+        let _scope = FsQuirks::install(
+            root.path(),
+            Quirks {
+                before: vec![(Op::Rename, "target", skip, racer)],
+                ..quirks
+            },
+        );
+
+        assert_eq!(
+            place_in(root.path(), "source", "target", Some(original)),
+            Err(PlaceError::Changed),
+            "folder: {folder}"
+        );
+        assert_eq!(names(root.path())?, ["moved", "source"], "folder: {folder}");
+        assert_eq!(identity(&root.path().join("moved")), original);
+    }
+    Ok(())
+}
+
+#[test]
+fn an_ambiguous_mkdir_failure_is_not_taken_for_a_taken_name() -> Result<(), Box<dyn Error>> {
+    for (lost, expected, left) in [
+        (false, PlaceError::Io(Errno::IO), vec!["source"]),
+        // A lost reply leaves the documented empty folder behind.
+        (true, PlaceError::Exists, vec!["source", "target"]),
+    ] {
+        let root = tempfile::tempdir()?;
+        let mut quirks = without_flags(Errno::NOSYS);
+        if lost {
+            quirks.lost_reply = vec![(Op::Mkdir, "target", Errno::IO)];
+        } else {
+            quirks.fail = vec![(Op::Mkdir, "target", 0, Errno::IO)];
+        }
+        let _scope = FsQuirks::install(root.path(), quirks);
+        fs::create_dir(root.path().join("source"))?;
+
+        assert_eq!(
+            place_in(root.path(), "source", "target", None),
+            Err(expected),
+            "lost: {lost}"
+        );
+        assert_eq!(names(root.path())?, left, "lost: {lost}");
     }
     Ok(())
 }
@@ -562,8 +613,8 @@ fn cross_device_is_reported_without_copying() -> Result<(), Box<dyn Error>> {
     );
 
     assert_eq!(result, Err(PlaceError::CrossDevice));
-    assert_eq!(names(&left), ["source"]);
-    assert!(names(&right).is_empty());
+    assert_eq!(names(&left)?, ["source"]);
+    assert!(names(&right)?.is_empty());
     Ok(())
 }
 
@@ -597,7 +648,7 @@ fn set_aside_refuses_a_substituted_target() -> Result<(), Box<dyn Error>> {
     assert_eq!(result.map(|aside| aside.name), Err(PlaceError::Changed));
     assert_eq!(fs::read(&target)?, b"stranger");
     assert_eq!(fs::read(root.path().join("moved"))?, b"original");
-    assert_eq!(names(root.path()), ["moved", "target"]);
+    assert_eq!(names(root.path())?, ["moved", "target"]);
     Ok(())
 }
 
@@ -666,12 +717,12 @@ fn the_probe_learns_each_quirk_and_leaves_nothing_behind() -> Result<(), Box<dyn
         let parent = open_local_parent_directory(root.path())?;
         {
             let _scope = FsQuirks::install(root.path(), quirks());
-            assert_eq!(probe(fs(), parent.as_fd(), true, true), Ok(expected));
+            assert_eq!(probe(fs(), parent.as_fd(), true, true, true), Ok(expected));
         }
         let _scope = FsQuirks::install(root.path(), quirks());
         assert_eq!(can_set_aside(fs(), parent.as_fd(), false), Ok(files));
         assert_eq!(can_set_aside(fs(), parent.as_fd(), true), Ok(folders));
-        assert!(names(root.path()).is_empty(), "{:?}", names(root.path()));
+        assert!(names(root.path())?.is_empty(), "{:?}", names(root.path())?);
     }
     Ok(())
 }
@@ -755,7 +806,7 @@ fn a_case_only_rename_goes_through_a_temporary_name() -> Result<(), Box<dyn Erro
             assert_eq!(rename_in(root.path(), "report", "report"), Ok(Renamed::Unchanged));
             assert_eq!(rename_in(root.path(), "report", "Report"), Ok(Renamed::CaseOnly));
 
-            assert_eq!(names(root.path()), ["Report"], "folder: {folder}");
+            assert_eq!(names(root.path())?, ["Report"], "folder: {folder}");
             assert_eq!(identity(&root.path().join("Report")), original);
         }
     }
@@ -773,7 +824,7 @@ fn a_hard_link_is_never_taken_for_a_case_alias() -> Result<(), Box<dyn Error>> {
         rename_in(root.path(), "report", "Report"),
         Err(RenameFailure::Place(PlaceError::Exists))
     );
-    assert_eq!(names(root.path()), ["Report", "report"]);
+    assert_eq!(names(root.path())?, ["Report", "report"]);
     assert_eq!(fs::metadata(root.path().join("report"))?.nlink(), 2);
     Ok(())
 }
@@ -800,7 +851,7 @@ fn a_failed_case_only_rename_moves_back_or_names_the_temporary() -> Result<(), B
 
         let result = rename_in(root.path(), "report", "Report");
 
-        let left = names(root.path());
+        let left = names(root.path())?;
         assert_eq!(left.len(), 1);
         assert_eq!(identity(&root.path().join(&left[0])), original);
         if moves_back {
@@ -839,7 +890,7 @@ fn renames_without_noreplace_or_links_reserve_the_name_first() -> Result<(), Box
             Ok(Renamed::Direct(expected))
         );
 
-        assert_eq!(names(root.path()), ["target"]);
+        assert_eq!(names(root.path())?, ["target"]);
         assert_eq!(identity(&root.path().join("target")), original);
         let capabilities = mount_capabilities(scope.key());
         assert_eq!(capabilities.no_replace, Some(false));
@@ -908,22 +959,70 @@ fn the_last_rename_rung_never_clobbers_a_plain_creator() -> Result<(), Box<dyn E
 }
 
 #[test]
-fn an_unconfirmed_mount_refuses_the_last_rename_rung() -> Result<(), Box<dyn Error>> {
-    let root = tempfile::tempdir()?;
-    let _scope = FsQuirks::install(
-        root.path(),
-        Quirks {
-            // EMLINK says nothing about the mount, so the probe cannot confirm.
-            links: Support::Rejected(Errno::MLINK),
-            ..Quirks::without_rename_flags()
-        },
-    );
-    fs::write(root.path().join("source"), b"data")?;
+fn the_last_rename_rung_needs_both_primitives_confirmed_missing() -> Result<(), Box<dyn Error>> {
+    let over_empty = |rename_over_empty_dir| Quirks {
+        rename_over_empty_dir,
+        ..Quirks::without_rename_flags()
+    };
+    for (quirks, folder) in [
+        // EMLINK says nothing about the mount, so the probe cannot confirm.
+        (
+            Quirks {
+                links: Support::Rejected(Errno::MLINK),
+                ..Quirks::without_rename_flags()
+            },
+            false,
+        ),
+        // Hard links work here, so folders do not get the unguarded rename either.
+        (over_empty(OverEmptyDirectory::NotEmpty), true),
+        (over_empty(OverEmptyDirectory::Eperm), true),
+    ] {
+        let root = tempfile::tempdir()?;
+        let _scope = FsQuirks::install(root.path(), quirks);
+        make(&root.path().join("source"), folder)?;
 
-    assert_eq!(
-        rename_in(root.path(), "source", "target"),
-        Err(RenameFailure::Place(PlaceError::Unsupported))
-    );
-    assert_eq!(names(root.path()), ["source"]);
+        assert_eq!(
+            rename_in(root.path(), "source", "target"),
+            Err(RenameFailure::Place(PlaceError::Unsupported)),
+            "folder: {folder}"
+        );
+        assert_eq!(names(root.path())?, ["source"]);
+    }
+    Ok(())
+}
+
+#[test]
+fn a_failed_rename_over_the_reserved_file_removes_only_an_untouched_placeholder()
+-> Result<(), Box<dyn Error>> {
+    for written in [false, true] {
+        let root = tempfile::tempdir()?;
+        let target = root.path().join("target");
+        let raced = target.clone();
+        let mut quirks = Quirks {
+            // The second rename into `target` is the one over the reserved file.
+            fail: vec![(Op::Rename, "target", 1, Errno::IO)],
+            ..Quirks::without_placement()
+        };
+        if written {
+            let racer: Racer = Box::new(move || {
+                fs::write(&raced, b"theirs").expect("write into the placeholder");
+            });
+            quirks.before = vec![(Op::Rename, "target", 1, racer)];
+        }
+        let _scope = FsQuirks::install(root.path(), quirks);
+        fs::write(root.path().join("source"), b"data")?;
+
+        assert_eq!(
+            rename_in(root.path(), "source", "target"),
+            Err(RenameFailure::Place(PlaceError::Io(Errno::IO))),
+            "written: {written}"
+        );
+        assert_eq!(fs::read(root.path().join("source"))?, b"data");
+        if written {
+            assert_eq!(fs::read(&target)?, b"theirs");
+        } else {
+            assert_eq!(names(root.path())?, ["source"]);
+        }
+    }
     Ok(())
 }

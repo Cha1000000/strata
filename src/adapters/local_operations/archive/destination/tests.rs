@@ -4,6 +4,7 @@ use super::{
     ExtractNameResolver, ExtractionDestination, MemberMetadata, MetadataCalls, archive_stem,
     sanitized_archive_path,
 };
+use super::super::fixtures::entry_names;
 use crate::adapters::local_operations::tests::fs_quirks::{FsQuirks, Quirks};
 use std::{
     error::Error,
@@ -545,14 +546,6 @@ fn publication_without_links_or_noreplace_keeps_staging() -> Result<(), Box<dyn 
         vec![name.to_string_lossy().into_owned()]
     );
     Ok(())
-}
-
-fn entry_names(directory: &Path) -> Result<Vec<String>, Box<dyn Error>> {
-    let mut names = fs::read_dir(directory)?
-        .map(|entry| Ok(entry?.file_name().to_string_lossy().into_owned()))
-        .collect::<Result<Vec<_>, std::io::Error>>()?;
-    names.sort();
-    Ok(names)
 }
 
 #[test]

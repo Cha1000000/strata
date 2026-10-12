@@ -775,14 +775,6 @@ fn without_trash(quirks: Quirks) -> Quirks {
     }
 }
 
-fn names(dir: &Path) -> Result<Vec<String>, io::Error> {
-    let mut names = fs::read_dir(dir)?
-        .map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned()))
-        .collect::<Result<Vec<_>, _>>()?;
-    names.sort();
-    Ok(names)
-}
-
 fn aside_folder(target: &Path) -> Result<Option<String>, io::Error> {
     Ok(names(target)?
         .into_iter()

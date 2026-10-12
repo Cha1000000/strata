@@ -52,9 +52,22 @@ pub(super) enum PlaceError {
 }
 
 const ENOTSUPP: Errno = Errno::from_raw_os_error(524);
-const PROBE_PREFIX: &str = ".strata-probe-";
+
+// Hidden sibling names. These may hold the user's only copy of an item after a
+// crash, so they must never be swept: originals set aside before a replace or
+// merge, an item mid case-only rename, and stages, which hold the swapped-out
+// original after an EXCHANGE.
+pub(super) const REPLACED_PREFIX: &str = ".strata-replaced-";
+pub(super) const MERGE_PREFIX: &str = ".strata-merge-";
 const RENAME_PREFIX: &str = ".strata-rename-";
+pub(super) const STAGE_PREFIX: &str = ".strata-replacement-";
+pub(super) const COMPRESSION_STAGE_PREFIX: &str = ".strata-compression-";
+// Only Strata's own scratch data, which may be swept.
+pub(super) const EXTRACTION_STAGE_PREFIX: &str = ".strata-extraction-";
+const PROBE_PREFIX: &str = ".strata-probe-";
 const NAME_ATTEMPTS: usize = 8;
+/// Bounds "name (n)" numbering, so a fault reported as `Exists` cannot loop forever.
+pub(super) const NUMBERED_NAME_ATTEMPTS: u64 = 10_000;
 
 fn is_unsupported(error: Errno) -> bool {
     matches!(error, Errno::NOSYS | Errno::OPNOTSUPP | ENOTSUPP)
@@ -105,8 +118,10 @@ impl<'a> Mount<'a> {
         learn_mount_capability(self.key(), learn);
     }
 
+    /// Probes what is still unknown; a known `no_replace` skips its test.
     fn probe(&self, links: bool, folders: bool) -> Result<Probed, Errno> {
-        let probed = probe(self.fs, self.dir, links, folders)?;
+        let renames = self.capabilities().no_replace.is_none();
+        let probed = probe(self.fs, self.dir, renames, links, folders)?;
         self.learn(|capabilities| {
             for (field, value) in [
                 (&mut capabilities.no_replace, probed.no_replace),
@@ -125,28 +140,93 @@ impl<'a> Mount<'a> {
     }
 }
 
+/// Places `from` at `to`. With `expected`, an entry found to be another
+/// item after it moved is moved back and reported as `Changed`.
 pub(super) fn place(
     fs: &dyn FsOps,
     from: Entry<'_>,
     to: Entry<'_>,
     expected: Option<LocalFileIdentity>,
 ) -> Result<Placed, PlaceError> {
+    verified(fs, from, to, expected, ladder(fs, from, to, expected))
+}
+
+/// [`place`] for a caller whose own `renameat2(NOREPLACE)` failed with `error`.
+pub(super) fn place_after_rename(
+    fs: &dyn FsOps,
+    from: Entry<'_>,
+    to: Entry<'_>,
+    expected: Option<LocalFileIdentity>,
+    error: Errno,
+) -> Result<Placed, PlaceError> {
+    verified(fs, from, to, expected, fallback(fs, from, to, expected, error))
+}
+
+fn verified(
+    fs: &dyn FsOps,
+    from: Entry<'_>,
+    to: Entry<'_>,
+    expected: Option<LocalFileIdentity>,
+    placed: Result<Placed, PlaceError>,
+) -> Result<Placed, PlaceError> {
+    let placed = placed?;
+    let Some(expected) = expected else {
+        return Ok(placed);
+    };
+    if placed == Placed::RecreatedSymlink {
+        return Ok(placed);
+    }
+    match fs.stat(to, false) {
+        Ok(current) if current.identity == expected => Ok(placed),
+        Ok(current) => Err(match ladder(fs, to, from, Some(current.identity)) {
+            Ok(_) => PlaceError::Changed,
+            Err(_) => PlaceError::Unconfirmed,
+        }),
+        Err(_) => Err(PlaceError::Unconfirmed),
+    }
+}
+
+fn ladder(
+    fs: &dyn FsOps,
+    from: Entry<'_>,
+    to: Entry<'_>,
+    expected: Option<LocalFileIdentity>,
+) -> Result<Placed, PlaceError> {
+    match fs.rename(from, to, RenameFlags::NOREPLACE) {
+        Ok(()) => Ok(Placed::Renamed),
+        Err(error) => fallback(fs, from, to, expected, error),
+    }
+}
+
+/// The rungs after `renameat2(NOREPLACE)` failed with `error`.
+fn fallback(
+    fs: &dyn FsOps,
+    from: Entry<'_>,
+    to: Entry<'_>,
+    expected: Option<LocalFileIdentity>,
+    error: Errno,
+) -> Result<Placed, PlaceError> {
     let mount = Mount::new(fs, to.dir);
     let mut source = None;
-    match fs.rename(from, to, RenameFlags::NOREPLACE) {
-        Ok(()) => return Ok(Placed::Renamed),
-        Err(Errno::EXIST | Errno::NOTEMPTY) => return Err(PlaceError::Exists),
-        Err(Errno::XDEV) => return Err(PlaceError::CrossDevice),
-        Err(Errno::INVAL) => {
+    match error {
+        Errno::EXIST | Errno::NOTEMPTY => return Err(PlaceError::Exists),
+        Errno::XDEV => return Err(PlaceError::CrossDevice),
+        Errno::INVAL => {
             let stat = stat_source(fs, from)?;
-            if stat.is_directory() && contains(fs, stat.identity, to.dir) != Some(false) {
+            let known = mount.capabilities().no_replace;
+            // Once NOREPLACE is known missing, the folder rung's own rename or the
+            // caller's copy guard catches a move into itself.
+            if stat.is_directory()
+                && known != Some(false)
+                && contains(fs, stat.identity, to.dir) != Some(false)
+            {
                 return Err(PlaceError::IntoItself);
             }
-            let no_replace = match mount.capabilities().no_replace {
+            let no_replace = match known {
                 None => mount
-                    .probe(false, false)
+                    .probe(!stat.is_directory(), false)
                     .ok()
-                    .and_then(|probed| probed.no_replace),
+                    .and_then(|_| mount.capabilities().no_replace),
                 known => known,
             };
             if no_replace == Some(true) {
@@ -154,13 +234,13 @@ pub(super) fn place(
             }
             source = Some(stat);
         }
-        Err(error) if is_unsupported(error) => {
+        error if is_unsupported(error) => {
             mount.learn(|capabilities| capabilities.no_replace = Some(false));
         }
-        Err(error) if may_have_lost_reply(error) => {
+        error if may_have_lost_reply(error) => {
             return resolve(fs, from, to, expected, error).map(|()| Placed::Renamed);
         }
-        Err(error) => return Err(PlaceError::Io(error)),
+        error => return Err(PlaceError::Io(error)),
     }
 
     let source = match source {
@@ -233,15 +313,10 @@ fn place_non_directory(
                 if exists(fs, to)? {
                     return Err(PlaceError::Exists);
                 }
-                let hard_links = match mount.capabilities().hard_links {
-                    None => mount
-                        .probe(true, false)
-                        .ok()
-                        .and_then(|probed| probed.hard_links),
-                    known => known,
-                };
-                if hard_links == Some(true) {
-                    return Err(PlaceError::Io(Errno::PERM));
+                // Linking can be refused for this item alone (protected_hardlinks),
+                // so only a probe teaches the mount anything.
+                if mount.capabilities().hard_links.is_none() {
+                    let _ = mount.probe(true, false);
                 }
             }
             Err(Errno::MLINK) => {}
@@ -389,15 +464,27 @@ fn place_directory(
         Err(Errno::PERM) if exists(fs, to)? => return Err(PlaceError::Exists),
         Err(Errno::INVAL) => return Err(PlaceError::InvalidName),
         // A lost reply leaves an empty folder that cannot be told apart from a racer's.
-        Err(error) if may_have_lost_reply(error) => return Err(PlaceError::Exists),
+        Err(error) if may_have_lost_reply(error) => {
+            return Err(if exists(fs, to)? {
+                PlaceError::Exists
+            } else {
+                PlaceError::Io(error)
+            });
+        }
         Err(error) => return Err(PlaceError::Io(error)),
     }
     let placeholder = fs.stat(to, false).map_err(PlaceError::Io)?.identity;
     match fs.rename(from, to, RenameFlags::empty()) {
         Ok(()) => Ok(Placed::ReservedDirectory),
         Err(error @ (Errno::NOTEMPTY | Errno::EXIST | Errno::PERM)) => {
-            if !placeholder_is_ours(fs, to, placeholder) {
-                return Err(PlaceError::Exists);
+            match fs.stat(to, true) {
+                Ok(current) if current.identity == placeholder => match fs.names(to) {
+                    Ok(names) if names.is_empty() => {}
+                    Ok(_) => return Err(PlaceError::Exists),
+                    Err(error) => return Err(PlaceError::Io(error)),
+                },
+                Ok(_) | Err(Errno::NOENT) => return Err(PlaceError::Exists),
+                Err(error) => return Err(PlaceError::Io(error)),
             }
             let _ = fs.unlink(to, AtFlags::REMOVEDIR);
             if error != Errno::PERM {
@@ -449,13 +536,13 @@ pub(super) fn contains(
     ancestor: LocalFileIdentity,
     dir: BorrowedFd<'_>,
 ) -> Option<bool> {
-    let mut current = fs.stat_dir(dir).ok()?;
+    let mut current = fs.stat_fd(dir).ok()?;
     if current.identity == ancestor {
         return Some(true);
     }
     let mut handle = fs.open_parent(dir).ok()?;
     for _ in 0..4096 {
-        let parent = fs.stat_dir(handle.as_fd()).ok()?;
+        let parent = fs.stat_fd(handle.as_fd()).ok()?;
         if parent.identity == ancestor {
             return Some(true);
         }
@@ -505,6 +592,7 @@ pub(super) fn creation_error(error: Errno) -> PlaceError {
 pub(super) fn probe(
     fs: &dyn FsOps,
     dir: BorrowedFd<'_>,
+    renames: bool,
     links: bool,
     folders: bool,
 ) -> Result<Probed, Errno> {
@@ -524,14 +612,16 @@ pub(super) fn probe(
         Err(_) => return Ok(probed),
     };
 
-    if let Ok((renamed, supported)) = reserve_hidden_name(PROBE_PREFIX, |name| {
-        match fs.rename(at(dir, &current), at(dir, name), RenameFlags::NOREPLACE) {
-            Ok(()) => Ok(Some(true)),
-            Err(Errno::EXIST) => Err(PlaceError::Exists),
-            Err(error) if error == Errno::INVAL || is_unsupported(error) => Ok(Some(false)),
-            Err(_) => Ok(None),
-        }
-    }) {
+    if renames
+        && let Ok((renamed, supported)) = reserve_hidden_name(PROBE_PREFIX, |name| {
+            match fs.rename(at(dir, &current), at(dir, name), RenameFlags::NOREPLACE) {
+                Ok(()) => Ok(Some(true)),
+                Err(Errno::EXIST) => Err(PlaceError::Exists),
+                Err(error) if error == Errno::INVAL || is_unsupported(error) => Ok(Some(false)),
+                Err(_) => Ok(None),
+            }
+        })
+    {
         probed.no_replace = supported;
         if supported == Some(true) {
             current = renamed;
@@ -606,18 +696,12 @@ pub(super) fn move_aside(
     to: Entry<'_>,
     expected: LocalFileIdentity,
 ) -> Result<LocalFileIdentity, PlaceError> {
-    let placed = place(fs, from, to, Some(expected))?;
-    let identity = fs
-        .stat(to, true)
-        .map_err(|_| PlaceError::Unconfirmed)?
-        .identity;
-    if placed != Placed::RecreatedSymlink && identity != expected {
-        return Err(match place(fs, to, from, Some(identity)) {
-            Ok(_) => PlaceError::Changed,
-            Err(_) => PlaceError::Unconfirmed,
-        });
+    if place(fs, from, to, Some(expected))? != Placed::RecreatedSymlink {
+        return Ok(expected);
     }
-    Ok(identity)
+    fs.stat(to, true)
+        .map(|stat| stat.identity)
+        .map_err(|_| PlaceError::Unconfirmed)
 }
 
 /// Moves the entry at `entry` to a hidden sibling, refusing an entry that is
@@ -741,6 +825,15 @@ pub(super) fn displacement_without_trash(
     if exchange_allowed(fs, dir) {
         return Ok(Some(Displacement::Exchange));
     }
+    set_aside_if_safe(fs, dir, directory)
+}
+
+/// `SetAside` where that cannot clobber, also after EXCHANGE was rejected.
+pub(super) fn set_aside_if_safe(
+    fs: &dyn FsOps,
+    dir: BorrowedFd<'_>,
+    directory: bool,
+) -> Result<Option<Displacement>, PlaceError> {
     Ok((can_set_aside(fs, dir, directory)? == Feasibility::Yes).then_some(Displacement::SetAside))
 }
 
@@ -802,7 +895,7 @@ pub(super) fn rename_in_place(
 }
 
 fn same_directory(fs: &dyn FsOps, left: BorrowedFd<'_>, right: BorrowedFd<'_>) -> bool {
-    match (fs.stat_dir(left), fs.stat_dir(right)) {
+    match (fs.stat_fd(left), fs.stat_fd(right)) {
         (Ok(left), Ok(right)) => left.identity == right.identity,
         _ => false,
     }
@@ -810,7 +903,7 @@ fn same_directory(fs: &dyn FsOps, left: BorrowedFd<'_>, right: BorrowedFd<'_>) -
 
 /// The item's identity when `to` names `from` itself rather than another
 /// item: a case alias, never a separate hard link.
-fn alias_of(fs: &dyn FsOps, from: Entry<'_>, to: Entry<'_>) -> Option<LocalFileIdentity> {
+pub(super) fn alias_of(fs: &dyn FsOps, from: Entry<'_>, to: Entry<'_>) -> Option<LocalFileIdentity> {
     let source = fs.stat(from, true).ok()?;
     let target = fs.stat(to, true).ok()?;
     if source.identity != target.identity {
@@ -825,12 +918,12 @@ fn alias_of(fs: &dyn FsOps, from: Entry<'_>, to: Entry<'_>) -> Option<LocalFileI
 }
 
 /// The ladder, plus a last rung so renames still work on mounts that have
-/// neither `RENAME_NOREPLACE` nor hard links. That rung runs only after a
-/// probe on Strata's own names confirms both are missing.
+/// neither `RENAME_NOREPLACE` nor hard links. That rung runs only once a
+/// probe on Strata's own names, or a definitive errno, shows both are missing.
 struct Renaming<'a> {
     fs: &'a dyn FsOps,
     mount: Mount<'a>,
-    probed: Cell<Option<Option<Probed>>>,
+    probed: Cell<bool>,
 }
 
 impl<'a> Renaming<'a> {
@@ -838,7 +931,7 @@ impl<'a> Renaming<'a> {
         Self {
             fs,
             mount: Mount::new(fs, dir),
-            probed: Cell::new(None),
+            probed: Cell::new(false),
         }
     }
 
@@ -856,7 +949,7 @@ impl<'a> Renaming<'a> {
         if expected.is_some_and(|expected| expected != source.identity) {
             return Err(PlaceError::Changed);
         }
-        if !self.lacks_placement(source.is_directory()) {
+        if !self.lacks_placement() {
             return Err(PlaceError::Unsupported);
         }
         if source.is_directory() {
@@ -866,18 +959,15 @@ impl<'a> Renaming<'a> {
         }
     }
 
-    fn lacks_placement(&self, directory: bool) -> bool {
-        let probed = match self.probed.get() {
-            Some(probed) => probed,
-            None => {
-                let probed = self.mount.probe(true, false).ok();
-                self.probed.set(Some(probed));
-                probed
-            }
+    fn lacks_placement(&self) -> bool {
+        let known = |capabilities: MountCapabilities| {
+            capabilities.no_replace.is_some() && capabilities.hard_links.is_some()
         };
-        probed.is_some_and(|probed| {
-            probed.no_replace == Some(false) && (directory || probed.hard_links == Some(false))
-        })
+        if !known(self.mount.capabilities()) && !self.probed.replace(true) {
+            let _ = self.mount.probe(true, false);
+        }
+        let capabilities = self.mount.capabilities();
+        capabilities.no_replace == Some(false) && capabilities.hard_links == Some(false)
     }
 }
 
@@ -888,9 +978,7 @@ fn rename_over_reserved_file(
     source: &EntryStat,
 ) -> Result<Placed, PlaceError> {
     let reserved = match fs.create_exclusive(to, Mode::from_raw_mode(0o600)) {
-        Ok(file) => rustix::fs::fstat(&file)
-            .map(|stat| LocalFileIdentity::from_stat(&stat))
-            .map_err(PlaceError::Io)?,
+        Ok(file) => fs.stat_fd(file.as_fd()).map_err(PlaceError::Io)?.identity,
         Err(Errno::PERM) if exists(fs, to)? => return Err(PlaceError::Exists),
         Err(error) => return Err(creation_error(error)),
     };

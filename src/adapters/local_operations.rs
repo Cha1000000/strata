@@ -46,7 +46,7 @@ use std::{
 use gtk::{gio, glib, prelude::*};
 
 use fs_ops::{Entry, EntryStat, fs};
-use placement::{Displacement, PlaceError, RenameFailure};
+use placement::{Displacement, PlaceError, REPLACED_PREFIX, RenameFailure, STAGE_PREFIX};
 
 use crate::{
     adapters::{
@@ -1425,10 +1425,7 @@ fn cancelled_local_operation() -> glib::Error {
 async fn run_local_fs_step<T: Send + 'static>(
     work: impl FnOnce() -> Result<T, String> + Send + 'static,
 ) -> Result<T, glib::Error> {
-    gio::spawn_blocking(work)
-        .await
-        .map_err(|_| io_error("Local filesystem task panicked"))?
-        .map_err(io_error)
+    run_blocking(move || work().map_err(io_error)).await
 }
 
 fn open_local_child_directory<Fd: AsFd>(parent: &Fd, name: &OsStr) -> Result<OwnedFd, String> {
@@ -1728,9 +1725,7 @@ fn copy_recursively_local(
                 let target_path = target
                     .path()
                     .ok_or_else(|| translated_io_error("Copy destination must be a local path"))?;
-                gio::spawn_blocking(move || copy_local_symlink(&link_target, &target_path))
-                    .await
-                    .map_err(|_| io_error("Local filesystem task panicked"))?
+                run_blocking(move || copy_local_symlink(&link_target, &target_path)).await
             }
             LocalCopySource::File(file) => {
                 #[cfg(test)]
@@ -2056,17 +2051,6 @@ fn copy_recursively(
     )
 }
 
-#[cfg(test)]
-async fn copy_new_recursively_with_progress(
-    source: gio::File,
-    target: gio::File,
-    cancellable: gio::Cancellable,
-    progress: Option<Rc<TransferProgressTracker>>,
-) -> Result<(), glib::Error> {
-    let fat_family = target_is_fat_family(&target, &MountTable::current());
-    copy_new_recursively_on_filesystem(source, target, cancellable, progress, fat_family).await
-}
-
 async fn copy_new_recursively_on_filesystem(
     source: gio::File,
     target: gio::File,
@@ -2196,15 +2180,6 @@ async fn copy_new_recursively_on_filesystem(
     result
 }
 
-#[cfg(test)]
-async fn copy_new_recursively(
-    source: gio::File,
-    target: gio::File,
-    cancellable: gio::Cancellable,
-) -> Result<(), glib::Error> {
-    copy_new_recursively_with_progress(source, target, cancellable, None).await
-}
-
 /// How a move attempt ended: done, or the item must be copied and the
 /// source (when its identity is known) deleted afterwards.
 enum Moved {
@@ -2284,6 +2259,7 @@ fn placement_error_kind(error: PlaceError) -> gio::IOErrorEnum {
 
 /// A placement failure as a complete message about `name`, using `template`
 /// (with `%{name}` and `%{error}`) unless the failure has its own sentence.
+/// Its kind stays generic, so callers that reword known kinds keep the name.
 fn placement_failure(
     error: PlaceError,
     name: &str,
@@ -2298,7 +2274,7 @@ fn placement_failure(
         .into_owned(),
         error => template(name, &crate::services::error_detail(placement_reason(error))),
     };
-    glib::Error::new(placement_error_kind(error), &message)
+    io_error(message)
 }
 
 fn could_not_move(name: &str, error: &str) -> String {
@@ -2858,8 +2834,6 @@ async fn move_local(
     .await
 }
 
-const STAGE_PREFIX: &str = ".strata-replacement-";
-
 enum StageContent {
     File,
     Directory,
@@ -2984,9 +2958,7 @@ async fn discard_incomplete_staged(staged: StagedSibling) -> Result<(), glib::Er
         // GIO unlinks and recreates a file it copies over, so the regular
         // file now at the hidden stage name is the one to remove.
         let (parent, name) = (staged.parent.clone(), staged.name.clone());
-        let current = gio::spawn_blocking(move || fs().stat(Entry::new(&*parent, &name), false))
-            .await
-            .map_err(|_| io_error("Local filesystem task panicked"))?;
+        let current = run_blocking(move || Ok(fs().stat(Entry::new(&*parent, &name), false))).await?;
         if let Ok(current) = current
             && current.kind == rustix::fs::FileType::RegularFile
         {
@@ -3026,8 +2998,20 @@ async fn publish_staged_without_replace(
     let (recorded, kind) = (staged.identity, staged.kind);
     let step = gio::spawn_blocking(move || {
         let stage = Entry::new(&*parent, &stage_name);
+        let target = Entry::new(&*parent, &target_name);
+        // The stage is our own hidden name, so the first rung needs no check.
+        let error = match fs().rename(stage, target, rustix::fs::RenameFlags::NOREPLACE) {
+            Ok(()) => return (recorded, Ok(placement::Placed::Renamed)),
+            Err(rustix::io::Errno::EXIST | rustix::io::Errno::NOTEMPTY) => {
+                return (recorded, Err(PlaceError::Exists));
+            }
+            Err(rustix::io::Errno::XDEV) => return (recorded, Err(PlaceError::CrossDevice)),
+            Err(error) => error,
+        };
         let current = match fs().stat(stage, false) {
             Ok(current) => current,
+            // A lost reply may have published it; nothing tells where the copy is.
+            Err(rustix::io::Errno::NOENT) => return (recorded, Err(PlaceError::Unconfirmed)),
             Err(error) => return (recorded, Err(PlaceError::Io(error))),
         };
         // GIO recreates a file stage while copying into it, so only its kind is kept.
@@ -3036,10 +3020,9 @@ async fn publish_staged_without_replace(
         if !ours {
             return (recorded, Err(PlaceError::Changed));
         }
-        let target = Entry::new(&*parent, &target_name);
         (
             current.identity,
-            placement::place(fs(), stage, target, Some(current.identity)),
+            placement::place_after_rename(fs(), stage, target, Some(current.identity), error),
         )
     })
     .await;
@@ -3128,8 +3111,6 @@ type StageCopy = Rc<
         gio::Cancellable,
     ) -> Pin<Box<dyn Future<Output = Result<(), glib::Error>>>>,
 >;
-
-const REPLACED_PREFIX: &str = ".strata-replaced-";
 
 fn cannot_replace_safely(name: &str) -> String {
     rust_i18n::t!(
@@ -3268,18 +3249,20 @@ fn plan_replace(
             &crate::i18n::tr("A file and a folder cannot safely replace one another"),
         ));
     }
-    let target_directory = fs().stat_dir(target_parent.as_fd()).ok();
+    let target_directory = fs().stat_fd(target_parent.as_fd()).ok();
     let shared_parent = target_directory.is_some()
-        && fs().stat_dir(source_parent.as_fd()).ok().map(|dir| dir.identity)
+        && fs().stat_fd(source_parent.as_fd()).ok().map(|dir| dir.identity)
             == target_directory.map(|dir| dir.identity);
     // A hard link elsewhere in the folder is a separate name and is replaced.
     if shared_parent
         && source.identity == target.identity
         && (source_name == target_name
-            || (!source.is_directory() && source.nlink == 1)
-            || fs()
-                .names(Entry::new(&target_parent, OsStr::new(".")))
-                .is_ok_and(|names| !names.contains(&target_name)))
+            || placement::alias_of(
+                fs(),
+                Entry::new(&source_parent, &source_name),
+                Entry::new(&target_parent, &target_name),
+            )
+            .is_some())
     {
         return Ok(None);
     }
@@ -3313,7 +3296,17 @@ fn displacement_without_trash(
     directory: bool,
     name: &str,
 ) -> Result<Displacement, glib::Error> {
-    match placement::displacement_without_trash(fs(), parent.as_fd(), directory) {
+    displacement_or_refusal(
+        placement::displacement_without_trash(fs(), parent.as_fd(), directory),
+        name,
+    )
+}
+
+fn displacement_or_refusal(
+    displacement: Result<Option<Displacement>, PlaceError>,
+    name: &str,
+) -> Result<Displacement, glib::Error> {
+    match displacement {
         Ok(Some(displacement)) => Ok(displacement),
         Ok(None) => Err(io_error(cannot_replace_safely(name))),
         Err(error) => Err(placement_failure(error, name, could_not_replace)),
@@ -3531,15 +3524,24 @@ async fn replace_through_stage(
                 let exchanged = run_blocking(move || {
                     let target = Entry::new(&*parent, &step_plan.target_name);
                     ensure_unchanged(target, step_plan.target.identity)?;
-                    placement::exchange(fs(), Entry::new(&*parent, &stage_name), target).map_err(
-                        |error| {
-                            placement_failure(error, &step_plan.target_display(), could_not_replace)
-                        },
-                    )
+                    let name = step_plan.target_display();
+                    match placement::exchange(fs(), Entry::new(&*parent, &stage_name), target) {
+                        Ok(true) => Ok(None),
+                        Ok(false) => displacement_or_refusal(
+                            placement::set_aside_if_safe(
+                                fs(),
+                                parent.as_fd(),
+                                step_plan.directory(),
+                            ),
+                            &name,
+                        )
+                        .map(|displacement| Some(Removal::Without(displacement))),
+                        Err(error) => Err(placement_failure(error, &name, could_not_replace)),
+                    }
                 })
                 .await;
                 match exchanged {
-                    Ok(true) => {
+                    Ok(None) => {
                         return Ok(StagedReplacement {
                             original: ReplacedOriginal::Deleted,
                             displaced: Some(DisplacedOriginal {
@@ -3549,7 +3551,7 @@ async fn replace_through_stage(
                             }),
                         });
                     }
-                    Ok(false) => Ok(Removal::Without(Displacement::SetAside)),
+                    Ok(Some(next)) => Ok(next),
                     Err(error) => Err(error),
                 }
             }

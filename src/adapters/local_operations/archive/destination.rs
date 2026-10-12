@@ -15,7 +15,10 @@ use std::{
 
 use super::super::{
     fs_ops::{Entry, fs},
-    placement::{PlaceError, creation_error, place, reserve_hidden_name},
+    placement::{
+        EXTRACTION_STAGE_PREFIX, NUMBERED_NAME_ATTEMPTS, PlaceError, creation_error, place,
+        reserve_hidden_name,
+    },
     placement_reason,
 };
 use super::extraction::MemberMetadata;
@@ -260,7 +263,7 @@ impl ExtractionDestination {
     }
 
     pub(super) fn create_staging(&self) -> Result<(OsString, Self), String> {
-        let (name, ()) = reserve_hidden_name(".strata-extraction-", |name| {
+        let (name, ()) = reserve_hidden_name(EXTRACTION_STAGE_PREFIX, |name| {
             fs().mkdir(Entry::new(&self.root, name), rustix::fs::Mode::from_raw_mode(0o777))
                 .map_err(creation_error)
         })
@@ -317,7 +320,7 @@ impl ExtractionDestination {
                 rust_i18n::t!("Invalid extraction folder name “%{name}”", name = stem).into_owned(),
             );
         }
-        for suffix in 0_u64.. {
+        for suffix in 0..NUMBERED_NAME_ATTEMPTS {
             let name = if suffix == 0 {
                 stem.to_owned()
             } else {
@@ -345,7 +348,7 @@ impl ExtractionDestination {
         root: &Path,
     ) -> Result<OsString, String> {
         let leaf = root.file_name().ok_or_else(no_file_name)?;
-        for index in 1.. {
+        for index in 1..=NUMBERED_NAME_ATTEMPTS {
             let candidate = if index == 1 {
                 leaf.to_owned()
             } else {
@@ -392,7 +395,7 @@ impl ExtractionDestination {
     }
 
     fn available_name<Fd: AsFd>(&self, directory: &Fd, name: &OsStr) -> Result<OsString, String> {
-        for index in 1.. {
+        for index in 1..=NUMBERED_NAME_ATTEMPTS {
             let candidate = if index == 1 {
                 name.to_owned()
             } else {

@@ -20,12 +20,11 @@ use rustix::{
 use super::{
     LocalFileIdentity, PinnedEntry, flush_removable_destination,
     fs_ops::{Entry, fs},
-    io_error, open_local_parent_directory, parallel_delete_local,
-    placement::{self, Feasibility, PlaceError},
+    io_error, open_local_parent_directory, parallel_delete_local, run_blocking,
+    placement::{self, Feasibility, MERGE_PREFIX, PlaceError},
     placement_reason, retry_local_open, was_cancelled,
 };
 
-const MERGE_PREFIX: &str = ".strata-merge-";
 
 struct Folder {
     name: OsString,
@@ -103,7 +102,7 @@ fn create_folder(target: &OwnedFd) -> Result<Folder, PlaceError> {
         error => error,
     })?;
     let opened = open_beneath(target, Path::new(&name)).and_then(|handle| {
-        match fs().stat_dir(handle.as_fd()) {
+        match fs().stat_fd(handle.as_fd()) {
             Ok(stat) if stat.identity == identity => Ok(handle),
             Ok(_) => Err(PlaceError::Changed),
             Err(error) => Err(PlaceError::Io(error)),
@@ -315,12 +314,11 @@ pub(super) async fn set_aside(
         .take()
         .unwrap_or_else(|| MergeAside::new(root.to_path_buf()));
     let path = path.to_path_buf();
-    let (step, result) = gio::spawn_blocking(move || {
+    let (step, result) = run_blocking(move || {
         let result = step.set_aside(&path, &name);
-        (step, result)
+        Ok((step, result))
     })
-    .await
-    .map_err(|_| io_error("Local filesystem task panicked"))?;
+    .await?;
     *aside = Some(step);
     result
 }

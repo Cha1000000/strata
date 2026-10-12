@@ -232,14 +232,35 @@ fn same_volume_move_on_a_flag_rejecting_filesystem_never_copies() -> Result<(), 
 }
 
 #[test]
+fn a_file_that_cannot_be_linked_is_moved_by_copying() -> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let root = tempfile::tempdir()?;
+    // As protected_hardlinks refuses another user's file that a rename could move.
+    let _scope = FsQuirks::install(
+        root.path(),
+        Quirks {
+            fail: vec![(Op::Link, "moved.txt", 0, Errno::PERM)],
+            ..Quirks::without_rename_flags()
+        },
+    );
+    let source = root.path().join("notes.txt");
+    fs::write(&source, b"notes")?;
+
+    move_native(&source, &root.path().join("moved.txt"))?;
+
+    assert_eq!(fs::read(root.path().join("moved.txt"))?, b"notes");
+    assert!(!source.exists());
+    Ok(())
+}
+
+#[test]
 fn einval_from_every_rung_reports_an_invalid_name_and_keeps_the_source()
 -> Result<(), Box<dyn Error>> {
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
         .lock()
         .map_err(|error| error.to_string())?;
-    fn has_colon(name: &OsStr) -> bool {
-        name.as_encoded_bytes().contains(&b':')
-    }
     let flags_supported = || Quirks {
         invalid_name: Some(has_colon),
         ..Quirks::default()
@@ -268,7 +289,17 @@ fn einval_from_every_rung_reports_an_invalid_name_and_keeps_the_source()
 
         let error = move_native(&source, &target).expect_err("invalid name");
 
-        assert!(error.matches(gio::IOErrorEnum::InvalidFilename), "{kind}: {error}");
+        assert_eq!(
+            error.message(),
+            rust_i18n::t!(
+                "Could not move %{name}: %{error}",
+                name = "source",
+                error = crate::services::error_detail(crate::i18n::tr(
+                    crate::services::INVALID_NAME_REASON
+                ))
+            ),
+            "{kind}"
+        );
         assert!(fs::symlink_metadata(&source).is_ok(), "{kind}");
         assert!(fs::symlink_metadata(&target).is_err(), "{kind}");
         assert_eq!(fs::read_dir(root.path())?.count(), 1, "{kind}");
