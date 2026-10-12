@@ -1138,7 +1138,7 @@ fn open_local_regular_copy(
         .ok_or_else(|| translated_io_error("Invalid copy source"))?;
     let source_parent = open_local_parent_directory(source_parent_path).map_err(io_error)?;
     let source_file = match open_local_copy_source(&source_parent, source_name).map_err(io_error)? {
-        LocalCopySource::File(file) => file,
+        LocalCopySource::File { file, .. } => file,
         _ => {
             return Err(translated_io_error(
                 "Copy source is no longer a regular file",
@@ -1372,9 +1372,62 @@ fn fat_family_child_name(name: &OsStr, fat_family: bool, used: &mut HashSet<OsSt
     }
 }
 
+/// What a recursive copy meets at its target.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CopyInto {
+    /// Nothing: every entry is created, and a taken name fails.
+    New,
+    /// A fresh folder made beforehand, which is filled as `New`.
+    MadeFolder,
+    /// Entries that may exist, which a merge copies over and into.
+    Existing,
+}
+
+impl CopyInto {
+    fn children(self) -> Self {
+        match self {
+            Self::New | Self::MadeFolder => Self::New,
+            Self::Existing => Self::Existing,
+        }
+    }
+
+    fn file_flags(self) -> gio::FileCopyFlags {
+        let overwrite = if self == Self::Existing {
+            gio::FileCopyFlags::OVERWRITE
+        } else {
+            gio::FileCopyFlags::NONE
+        };
+        gio::FileCopyFlags::ALL_METADATA | overwrite
+    }
+
+    /// Whether the copy makes the target folder, probing only for a merge.
+    async fn makes_folder(self, target: &gio::File, cancellable: &gio::Cancellable) -> bool {
+        match self {
+            Self::New => true,
+            Self::MadeFolder => false,
+            Self::Existing => !query_exists(target, cancellable).await,
+        }
+    }
+}
+
+/// `g_file_query_exists` off the calling thread.
+async fn query_exists(file: &gio::File, cancellable: &gio::Cancellable) -> bool {
+    await_cancellable(file, cancellable, |file, cancellable, result| {
+        file.query_info_async(
+            gio::FILE_ATTRIBUTE_STANDARD_TYPE,
+            gio::FileQueryInfoFlags::NONE,
+            glib::Priority::DEFAULT,
+            Some(cancellable),
+            move |output| result.resolve(output),
+        );
+    })
+    .await
+    .is_ok()
+}
+
 #[derive(Clone, Copy)]
 struct CopyOptions {
-    overwrite_existing: bool,
+    into: CopyInto,
     fat_family: bool,
     workers: usize,
 }
@@ -1487,11 +1540,14 @@ fn local_directory_children<Fd: AsFd>(handle: &Fd) -> Result<Vec<OsString>, Stri
 /// directory is copied as the symlink it now is instead of being opened as
 /// a directory.
 enum LocalCopySource {
-    /// An open file description for a regular file. Kept alive until the
-    /// GIO copy that reads through it has finished, so `/proc/self/fd/<n>`
-    /// always resolves to this exact file no matter what happens to its
-    /// name afterward.
-    File(std::fs::File),
+    /// An open file description for a regular file, and its size. Kept
+    /// alive until the GIO copy that reads through it has finished, so
+    /// `/proc/self/fd/<n>` always resolves to this exact file no matter what
+    /// happens to its name afterward.
+    File {
+        file: std::fs::File,
+        size: Option<u64>,
+    },
     /// A symlink and the path it points to, copied as a new symlink rather
     /// than by following it.
     Symlink(OsString),
@@ -1572,7 +1628,10 @@ fn open_local_copy_source<Fd: AsFd>(parent: &Fd, name: &OsStr) -> Result<LocalCo
                 )
                 .into_owned());
             }
-            Ok(LocalCopySource::File(std::fs::File::from(file)))
+            Ok(LocalCopySource::File {
+                file: std::fs::File::from(file),
+                size: u64::try_from(opened.st_size).ok(),
+            })
         }
         _ => Err(rust_i18n::t!(
             "Cannot copy %{name}: it is not a regular file, directory, or symbolic link",
@@ -1739,7 +1798,10 @@ fn copy_recursively_local(
                     .ok_or_else(|| translated_io_error("Copy destination must be a local path"))?;
                 run_blocking(move || copy_local_symlink(&link_target, &target_path)).await
             }
-            LocalCopySource::File(file) => {
+            LocalCopySource::File {
+                file,
+                size: source_size,
+            } => {
                 #[cfg(test)]
                 let _activity = tests::CopyActivity::start();
                 // Deliberately no NOFOLLOW_SYMLINKS here: `/proc/self/fd/<n>`
@@ -1747,14 +1809,8 @@ fn copy_recursively_local(
                 // fd it names was already verified to be a plain file. GIO
                 // must follow it to reach that file's actual content rather
                 // than copying the magic-link's target text as a new symlink.
-                let source_size = file.metadata().ok().map(|metadata| metadata.len());
                 let source_ref = gio::File::for_path(format!("/proc/self/fd/{}", file.as_raw_fd()));
-                let flags = gio::FileCopyFlags::ALL_METADATA
-                    | if options.overwrite_existing {
-                        gio::FileCopyFlags::OVERWRITE
-                    } else {
-                        gio::FileCopyFlags::NONE
-                    };
+                let flags = options.into.file_flags();
                 let track_bytes =
                     source_size.is_none_or(|size| size >= BYTE_PROGRESS_MIN_FILE_SIZE);
                 let file_progress = progress.as_ref().map(|progress| {
@@ -1788,7 +1844,7 @@ fn copy_recursively_local(
                 if options.fat_family {
                     children.sort();
                 }
-                if !options.overwrite_existing || !target.query_exists(Some(&cancellable)) {
+                if options.into.makes_folder(&target, &cancellable).await {
                     await_cancellable(&target, &cancellable, |target, cancellable, result| {
                         target.make_directory_async(
                             glib::Priority::DEFAULT,
@@ -1803,6 +1859,7 @@ fn copy_recursively_local(
                 let mut used_names = HashSet::with_capacity(children.len());
                 let batch_size = children.len().min(options.workers).max(1);
                 let child_options = CopyOptions {
+                    into: options.into.children(),
                     workers: options.workers / batch_size,
                     ..options
                 };
@@ -1882,7 +1939,7 @@ fn copy_recursively_local(
 fn copy_recursively_local_path(
     source_path: PathBuf,
     target: gio::File,
-    overwrite_existing: bool,
+    into: CopyInto,
     cancellable: gio::Cancellable,
     created_root: Option<Rc<CreatedCopyRoot>>,
     progress: Option<Rc<TransferProgressTracker>>,
@@ -1910,7 +1967,7 @@ fn copy_recursively_local_path(
             name,
             target,
             CopyOptions {
-                overwrite_existing,
+                into,
                 fat_family,
                 workers,
             },
@@ -1925,7 +1982,7 @@ fn copy_recursively_local_path(
 fn copy_recursively_with_progress(
     source: gio::File,
     target: gio::File,
-    overwrite_existing: bool,
+    into: CopyInto,
     cancellable: gio::Cancellable,
     created_root: Option<Rc<CreatedCopyRoot>>,
     progress: Option<Rc<TransferProgressTracker>>,
@@ -1941,7 +1998,7 @@ fn copy_recursively_with_progress(
         return copy_recursively_local_path(
             source_path,
             target,
-            overwrite_existing,
+            into,
             cancellable,
             created_root,
             progress,
@@ -1960,7 +2017,7 @@ fn copy_recursively_with_progress(
         })
         .await?;
         if info.file_type() == gio::FileType::Directory {
-            if !overwrite_existing || !target.query_exists(Some(&cancellable)) {
+            if into.makes_folder(&target, &cancellable).await {
                 await_cancellable(&target, &cancellable, |target, cancellable, result| {
                     target.make_directory_async(
                         glib::Priority::DEFAULT,
@@ -1995,7 +2052,7 @@ fn copy_recursively_with_progress(
                     copy_recursively_with_progress(
                         source.child(&child_name),
                         target.child(&target_name),
-                        overwrite_existing,
+                        into.children(),
                         cancellable.clone(),
                         None,
                         progress.clone(),
@@ -2012,13 +2069,7 @@ fn copy_recursively_with_progress(
             let source_size = info
                 .has_attribute(gio::FILE_ATTRIBUTE_STANDARD_SIZE)
                 .then(|| info.size().max(0) as u64);
-            let flags = gio::FileCopyFlags::ALL_METADATA
-                | gio::FileCopyFlags::NOFOLLOW_SYMLINKS
-                | if overwrite_existing {
-                    gio::FileCopyFlags::OVERWRITE
-                } else {
-                    gio::FileCopyFlags::NONE
-                };
+            let flags = into.file_flags() | gio::FileCopyFlags::NOFOLLOW_SYMLINKS;
             let track_bytes = source_size.is_none_or(|size| size >= BYTE_PROGRESS_MIN_FILE_SIZE);
             let file_progress = progress.as_ref().map(|progress| {
                 progress.begin_file(
@@ -2055,7 +2106,11 @@ fn copy_recursively(
     copy_recursively_with_progress(
         source,
         target,
-        overwrite_existing,
+        if overwrite_existing {
+            CopyInto::Existing
+        } else {
+            CopyInto::New
+        },
         cancellable,
         created_root,
         None,
@@ -2095,7 +2150,7 @@ async fn copy_new_recursively_on_filesystem(
                         copy_recursively_with_progress(
                             source,
                             stage,
-                            true,
+                            CopyInto::Existing,
                             cancellable,
                             None,
                             progress,
@@ -2168,7 +2223,7 @@ async fn copy_new_recursively_on_filesystem(
     let result = copy_recursively_with_progress(
         source,
         target.clone(),
-        false,
+        CopyInto::New,
         cancellable.clone(),
         Some(created_root.clone()),
         progress,
@@ -2540,7 +2595,7 @@ fn copy_restore_entry(
             )?;
             let source = open_local_copy_source(&parent, &name)?;
             let opened = match &source {
-                LocalCopySource::File(file) => fs().stat_fd(file.as_fd()),
+                LocalCopySource::File { file, .. } => fs().stat_fd(file.as_fd()),
                 LocalCopySource::Directory { handle, .. } => fs().stat_fd(handle.as_fd()),
                 LocalCopySource::Symlink(_) => fs().stat(entry, false),
             }
@@ -2600,7 +2655,7 @@ fn copy_restore_entry(
                 });
                 Ok(())
             }
-            LocalCopySource::File(file) => {
+            LocalCopySource::File { file, .. } => {
                 let parent = target_parent.clone();
                 let name = target_name.clone();
                 let (target, identity) = create_restore_entry(move || {
@@ -2935,14 +2990,14 @@ fn copy_into_stage(
     progress: Option<Rc<TransferProgressTracker>>,
     fat_family: bool,
 ) -> StageCopyFuture {
-    let (overwrite_existing, created_root) = match root {
-        StageRoot::Made => (true, None),
-        StageRoot::Fresh(created_root) => (false, Some(created_root)),
+    let (into, created_root) = match root {
+        StageRoot::Made => (CopyInto::MadeFolder, None),
+        StageRoot::Fresh(created_root) => (CopyInto::New, Some(created_root)),
     };
     copy_recursively_with_progress(
         source,
         stage,
-        overwrite_existing,
+        into,
         cancellable,
         created_root,
         progress,
@@ -3231,7 +3286,7 @@ async fn publish_staged_without_replace(
             let copied = copy_recursively_with_progress(
                 gio::File::for_path(staged.path()),
                 target.clone(),
-                false,
+                CopyInto::New,
                 cancellable,
                 Some(created_root.clone()),
                 None,
@@ -4170,7 +4225,7 @@ fn progress_merge_hooks(
             copy_recursively_with_progress(
                 source,
                 target,
-                true,
+                CopyInto::Existing,
                 cancellable,
                 None,
                 progress.clone(),

@@ -30,7 +30,7 @@ fn nested_copy_shares_one_worker_budget_across_subdirectories() -> Result<(), Bo
         OsString::from("source"),
         gio::File::for_path(&target),
         super::super::CopyOptions {
-            overwrite_existing: false,
+            into: super::super::CopyInto::New,
             fat_family: false,
             workers: 2,
         },

@@ -78,7 +78,11 @@ fn copy_recursively_fat_family(
     copy_recursively_with_progress(
         source,
         target,
-        overwrite_existing,
+        if overwrite_existing {
+            super::CopyInto::Existing
+        } else {
+            super::CopyInto::New
+        },
         cancellable,
         created_root,
         None,
