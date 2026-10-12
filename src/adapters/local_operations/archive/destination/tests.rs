@@ -507,7 +507,14 @@ fn publication_without_rename_flags_moves_unreadable_subtrees_whole() -> Result<
     let published = destination.publish_single_root(&staging, Path::new("ro"));
 
     let published_root = root.path().join("ro");
-    for directory in [published_root.join("unreadable"), unreadable] {
+    let sub_mode = fs::metadata(published_root.join("sub"));
+    let staged_sub = root.path().join(&name).join("ro/sub");
+    for directory in [
+        published_root.join("unreadable"),
+        unreadable,
+        published_root.join("sub"),
+        staged_sub,
+    ] {
         let _ = fs::set_permissions(directory, fs::Permissions::from_mode(0o755));
     }
     assert_eq!(published?, OsString::from("ro"));
@@ -516,13 +523,7 @@ fn publication_without_rename_flags_moves_unreadable_subtrees_whole() -> Result<
         fs::read(published_root.join("sub/child.txt"))?,
         b"ro/sub/child.txt"
     );
-    assert_eq!(
-        fs::metadata(published_root.join("sub"))?
-            .permissions()
-            .mode()
-            & 0o777,
-        0o555
-    );
+    assert_eq!(sub_mode?.permissions().mode() & 0o777, 0o555);
     assert!(published_root.join("unreadable").is_dir());
     assert!(root.path().join(&name).read_dir()?.next().is_none());
     Ok(())
