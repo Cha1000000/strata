@@ -6,6 +6,7 @@
 //! separate mounts.
 
 use std::{
+    collections::HashMap,
     ffi::{OsStr, OsString},
     os::fd::{AsRawFd, BorrowedFd, OwnedFd},
     path::{Path, PathBuf},
@@ -96,6 +97,11 @@ pub(crate) struct Quirks {
     pub invalid_name: Option<fn(&OsStr) -> bool>,
     pub fs_type: Option<FsWord>,
     pub trash: Trash,
+    /// Reports the first inode number seen at each matching name for whatever
+    /// is there later, as ext4, NFS and CIFS hand a freed number straight out.
+    pub reused_inodes: Option<&'static str>,
+    /// As on NFSv3, ntfs-3g and exfat-fuse.
+    pub no_birth_time: bool,
     /// Performs the call, then reports this errno once.
     pub lost_reply: Vec<(Op, &'static str, Errno)>,
     /// Fails the matching call after skipping the given number of matches, once.
@@ -138,6 +144,7 @@ struct Scope {
 struct State {
     quirks: Quirks,
     calls: Vec<Call>,
+    inodes: HashMap<PathBuf, u64>,
 }
 
 static SCOPES: Mutex<Vec<Arc<Scope>>> = Mutex::new(Vec::new());
@@ -160,6 +167,7 @@ impl FsQuirks {
             state: Mutex::new(State {
                 quirks,
                 calls: Vec::new(),
+                inodes: HashMap::new(),
             }),
         });
         scopes().push(scope.clone());
@@ -273,6 +281,21 @@ impl Scope {
             }
         }
         result
+    }
+
+    fn reported(&self, path: Option<PathBuf>, mut stat: EntryStat) -> EntryStat {
+        let mut state = self.state();
+        if let (Some(pattern), Some(path)) = (state.quirks.reused_inodes, path)
+            && path
+                .file_name()
+                .is_some_and(|name| matches(pattern, &[name]))
+        {
+            stat.identity.inode = *state.inodes.entry(path).or_insert(stat.identity.inode);
+        }
+        if state.quirks.no_birth_time {
+            stat.identity.birth = None;
+        }
+        stat
     }
 
     fn quirk<T>(&self, read: impl FnOnce(&Quirks) -> T) -> T {
@@ -531,9 +554,11 @@ impl FsOps for Scoped {
     fn stat(&self, at: Entry<'_>, force_sync: bool) -> Result<EntryStat, Errno> {
         assert_off_main_thread();
         match scope_for(at.dir) {
-            Some(scope) => scope.run(Op::Stat, &[at.name], |scope| {
-                scope.resolved(at, |at| System.stat(at, force_sync))
-            }),
+            Some(scope) => scope
+                .run(Op::Stat, &[at.name], |scope| {
+                    scope.resolved(at, |at| System.stat(at, force_sync))
+                })
+                .map(|stat| scope.reported(path_of(at.dir).map(|dir| dir.join(at.name)), stat)),
             None => System.stat(at, force_sync),
         }
     }
@@ -541,7 +566,9 @@ impl FsOps for Scoped {
     fn stat_fd(&self, fd: BorrowedFd<'_>) -> Result<EntryStat, Errno> {
         assert_off_main_thread();
         match scope_for(fd) {
-            Some(scope) => scope.run(Op::StatFd, &[], |_| System.stat_fd(fd)),
+            Some(scope) => scope
+                .run(Op::StatFd, &[], |_| System.stat_fd(fd))
+                .map(|stat| scope.reported(path_of(fd), stat)),
             None => System.stat_fd(fd),
         }
     }

@@ -44,6 +44,8 @@ impl<'a> Entry<'a> {
 pub(super) struct EntryStat {
     pub identity: LocalFileIdentity,
     pub kind: FileType,
+    /// Permission bits only.
+    pub mode: u32,
     pub nlink: u64,
     pub size: u64,
 }
@@ -97,12 +99,19 @@ pub(super) fn assert_off_main_thread() {
 }
 
 fn entry_stat(stat: &rustix::fs::Statx) -> EntryStat {
+    let kind = FileType::from_raw_mode(u32::from(stat.stx_mode));
+    let birth = StatxFlags::from_bits_retain(stat.stx_mask)
+        .contains(StatxFlags::BTIME)
+        .then_some((stat.stx_btime.tv_sec, stat.stx_btime.tv_nsec));
     EntryStat {
         identity: LocalFileIdentity {
             device: rustix::fs::makedev(stat.stx_dev_major, stat.stx_dev_minor),
             inode: stat.stx_ino,
+            kind,
+            birth,
         },
-        kind: FileType::from_raw_mode(u32::from(stat.stx_mode)),
+        kind,
+        mode: u32::from(stat.stx_mode) & 0o7777,
         nlink: u64::from(stat.stx_nlink),
         size: stat.stx_size,
     }
@@ -112,13 +121,19 @@ fn legacy_stat(stat: &rustix::fs::Stat) -> EntryStat {
     EntryStat {
         identity: LocalFileIdentity::from_stat(stat),
         kind: FileType::from_raw_mode(stat.st_mode),
+        mode: stat.st_mode & 0o7777,
         nlink: stat.st_nlink,
         size: u64::try_from(stat.st_size).unwrap_or(u64::MAX),
     }
 }
 
 fn statx_at(dir: BorrowedFd<'_>, name: &OsStr, flags: AtFlags) -> Result<EntryStat, Errno> {
-    let mask = StatxFlags::TYPE | StatxFlags::INO | StatxFlags::NLINK | StatxFlags::SIZE;
+    let mask = StatxFlags::TYPE
+        | StatxFlags::MODE
+        | StatxFlags::INO
+        | StatxFlags::NLINK
+        | StatxFlags::SIZE
+        | StatxFlags::BTIME;
     match rustix::fs::statx(dir, name, flags | AtFlags::SYMLINK_NOFOLLOW, mask) {
         Ok(stat) => Ok(entry_stat(&stat)),
         Err(Errno::NOSYS) => {

@@ -7,7 +7,7 @@ mod tests;
 
 use super::super::{
     DisplacedOriginal, LocalFileIdentity, cannot_replace_safely,
-    fs_ops::{Entry, fs},
+    fs_ops::{Entry, EntryStat, fs},
     local_directory_children, open_local_child_directory, open_local_parent_directory,
     original_kept_aside,
     placement::{
@@ -168,10 +168,8 @@ impl Publication {
             TransferConflict::ReplaceExisting => match self.existing(&parent)? {
                 None => (default_file_mode(), Strategy::New),
                 Some(stat) => {
-                    let mode = if rustix::fs::FileType::from_raw_mode(stat.st_mode)
-                        == rustix::fs::FileType::RegularFile
-                    {
-                        stat.st_mode & 0o7777
+                    let mode = if stat.kind == rustix::fs::FileType::RegularFile {
+                        stat.mode
                     } else {
                         default_file_mode()
                     };
@@ -180,10 +178,7 @@ impl Publication {
                     } else {
                         self.without_trash(&parent)?
                     };
-                    (
-                        mode,
-                        Strategy::Replace(replacement, LocalFileIdentity::from_stat(&stat)),
-                    )
+                    (mode, Strategy::Replace(replacement, stat.identity))
                 }
             },
         };
@@ -196,8 +191,7 @@ impl Publication {
             .map_err(file_creation_error)
         })
         .map_err(|error| self.creation_failed(placement_reason(error)))?;
-        let identity = rustix::fs::fstat(&file).map(|stat| LocalFileIdentity::from_stat(&stat));
-        let stage = match identity {
+        let stage = match fs().stat_fd(file.as_fd()).map(|stat| stat.identity) {
             Ok(identity) => Stage {
                 parent,
                 name,
@@ -236,16 +230,11 @@ impl Publication {
         self.publish(stage, strategy)
     }
 
-    fn existing(&self, parent: &OwnedFd) -> Result<Option<rustix::fs::Stat>, ArchiveError> {
-        match rustix::fs::statat(parent, self.name.as_str(), AtFlags::SYMLINK_NOFOLLOW) {
-            Ok(stat)
-                if rustix::fs::FileType::from_raw_mode(stat.st_mode)
-                    == rustix::fs::FileType::Directory =>
-            {
-                Err(archive_failed(crate::i18n::tr(
-                    "An archive cannot replace a folder",
-                )))
-            }
+    fn existing(&self, parent: &OwnedFd) -> Result<Option<EntryStat>, ArchiveError> {
+        match fs().stat(Entry::new(parent, OsStr::new(&self.name)), false) {
+            Ok(stat) if stat.is_directory() => Err(archive_failed(crate::i18n::tr(
+                "An archive cannot replace a folder",
+            ))),
             Ok(stat) => Ok(Some(stat)),
             Err(rustix::io::Errno::NOENT) => Ok(None),
             Err(error) => Err(self.creation_failed(errno_text(error))),
@@ -276,7 +265,7 @@ impl Publication {
         let Some(stat) = self.existing(&stage.parent)? else {
             return self.publish(stage, Strategy::New);
         };
-        if LocalFileIdentity::from_stat(&stat) != identity {
+        if stat.identity != identity {
             return Err(archive_failed(crate::i18n::tr(
                 "The target changed while the operation was in progress",
             )));

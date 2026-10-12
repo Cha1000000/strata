@@ -13,7 +13,7 @@ the GVfs backend, and Strata uses GIO for them.
 
 - **Never replace a concurrent arrival.** An item that appears at a destination while Strata is
   working is never overwritten, on any mount. Replace only ever removes the item the user
-  confirmed, identified by device and inode.
+  confirmed, identified by device, inode, type and, where the filesystem reports it, birth time.
 - **Never remove a name on a guess.** A name is unlinked only after Strata has proven which inode
   it holds. When the outcome of a step cannot be proven, both names are kept and the operation
   reports that the result could not be confirmed.
@@ -46,6 +46,15 @@ possible meanings, and Strata never treats it as "copy instead":
 
 Residual limits:
 
+- ext4, ntfs3, NFS and SMB give a freed inode number straight to the next item created. Where no
+  birth time is reported (NFSv3, ntfs-3g, exfat-fuse), an item deleted and recreated at the same
+  name with the same type passes for the original.
+- Undo and restore find an item Strata moved to Trash (by Delete, Replace or Merge) by original
+  path, device and inode number, without birth time. If another item trashed from the same path got
+  that inode number, they can bring back that item instead; they never overwrite anything.
+- A file stage's identity is read by name once GIO's copy into it finishes, so a process that
+  replaced that randomly named stage at any point during the copy would have its file treated as
+  the copy.
 - On SMB2/3, gvfsd-fuse and FUSE daemons that ignore rename flags, the no-replace check is made
   by the client kernel, so it protects against local processes but not against another client
   creating the same name at the same moment.
@@ -88,6 +97,10 @@ Before copying anything, Replace chooses how to remove the original, in this ord
    identity. If placing fails, the original is put back; if its name was taken meanwhile, it is
    kept and the error names it. The original's name is briefly absent, as it is with Trash.
 4. Otherwise Replace fails before any data is copied.
+
+Copies are written into a hidden `.strata-replacement-<id>` stage before they are placed. A file
+stage is created by the copy itself, exclusively, at a fresh name, so nothing is ever copied over
+a stage.
 
 When Replace is part of a move within one filesystem, the source itself is placed after the
 original is out of the way, so nothing is copied. Without Trash, a replaced original is gone for
@@ -183,7 +196,8 @@ let _quirks = FsQuirks::install(root.path(), Quirks::without_rename_flags());
 
 Quirks emulate rejected rename flags (NFS, ntfs-3g), missing hard links (vfat, vboxsf), sshfs
 collisions reported as `EPERM`, gvfsd-fuse refusing to rename over an empty folder, case-insensitive
-lookups, invalid names, unsupported or lying Trash, lost replies and racing processes. The seam
+lookups, invalid names, unsupported or lying Trash, reused inode numbers, missing birth times, lost
+replies and racing processes. The seam
 also asserts that no call runs on the main context's thread. Run them with:
 
 ```bash

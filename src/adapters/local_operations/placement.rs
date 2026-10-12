@@ -562,14 +562,18 @@ pub(super) fn contains(
     None
 }
 
-/// Tries fixed-length `<prefix><uuid>` names until `attempt` stops reporting
-/// that the name is taken.
+/// A bounded run of fresh fixed-length `<prefix><uuid>` names.
+pub(super) fn hidden_names(prefix: &str) -> impl Iterator<Item = OsString> + '_ {
+    (0..NAME_ATTEMPTS)
+        .map(move |_| OsString::from(format!("{prefix}{}", glib::uuid_string_random())))
+}
+
+/// Tries [`hidden_names`] until `attempt` stops reporting that the name is taken.
 pub(super) fn reserve_hidden_name<T>(
     prefix: &str,
     mut attempt: impl FnMut(&OsStr) -> Result<T, PlaceError>,
 ) -> Result<(OsString, T), PlaceError> {
-    for _ in 0..NAME_ATTEMPTS {
-        let name = OsString::from(format!("{prefix}{}", glib::uuid_string_random()));
+    for name in hidden_names(prefix) {
         match attempt(&name) {
             Err(PlaceError::Exists) => continue,
             result => return result.map(|value| (name, value)),

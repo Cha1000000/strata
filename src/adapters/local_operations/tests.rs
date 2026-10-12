@@ -86,6 +86,22 @@ fn copy_recursively_fat_family(
     )
 }
 
+fn gio_error(error: io::Error) -> glib::Error {
+    glib::Error::new(
+        gio::io_error_from_errno(error.raw_os_error().unwrap_or_default()),
+        &error.to_string(),
+    )
+}
+
+/// A file stage as a completed copy into `root` leaves it.
+fn file_stage(root: &Path) -> Result<super::StagedSibling, glib::Error> {
+    super::copy_to_file_stage_blocking(&root.join("target"), |stage| {
+        let path = stage.path().ok_or_else(|| io_error("missing stage path"))?;
+        fs::File::create_new(path).map(drop).map_err(gio_error)
+    })
+    .map_err(|(error, _)| error)
+}
+
 use super::{
     FAT32_MAX_FILE_SIZE, FailedAction, LocalFileIdentity, LocalOperationProvider, MergeHooks,
     MergePlan, MountTable, PinnedEntry, RestoreEntry, StageCopy, StageOverwrite,

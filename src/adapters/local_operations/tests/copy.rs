@@ -3,7 +3,8 @@
 use rustix::io::Errno;
 
 use super::super::{
-    StageContent, StagedSibling, copy_new_local_regular_file, publish_staged_without_replace,
+    StageContent, StagedSibling, copy_to_file_stage_blocking, copy_to_new_stage,
+    discard_failed_file_stage, publish_staged_without_replace, stage_copier,
 };
 use super::fs_quirks::{Op, Racer, Support};
 use super::*;
@@ -393,33 +394,104 @@ fn cancelling_a_new_file_copy_removes_the_incomplete_stage() -> Result<(), Box<d
 }
 
 #[test]
-fn a_cancelled_parallel_file_copy_removes_its_stage() -> Result<(), Box<dyn Error>> {
+fn a_file_stage_is_created_by_the_copy_at_a_free_name() -> Result<(), Box<dyn Error>> {
+    let root = tempfile::tempdir()?;
+    let attempts = RefCell::new(Vec::new());
+
+    let staged = copy_to_file_stage_blocking(&root.path().join("target"), |stage| {
+        let path = stage.path().ok_or_else(|| io_error("missing stage path"))?;
+        attempts.borrow_mut().push(path.clone());
+        if attempts.borrow().len() == 1 {
+            fs::write(&path, b"theirs").map_err(gio_error)?;
+            return Err(glib::Error::new(gio::IOErrorEnum::Exists, "taken"));
+        }
+        fs::File::create_new(&path)
+            .and_then(|mut file| io::Write::write_all(&mut file, b"copied"))
+            .map_err(gio_error)
+    })
+    .map_err(|(error, _)| error)?;
+
+    let attempts = attempts.into_inner();
+    assert_eq!(attempts.len(), 2);
+    assert_eq!(fs::read(&attempts[0])?, b"theirs");
+    assert_eq!(staged.path(), attempts[1]);
+    assert_eq!(fs::read(staged.path())?, b"copied");
+    Ok(())
+}
+
+#[test]
+fn a_failed_file_stage_copy_removes_only_its_own_partial_file() -> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    for (partial, kept) in [("file", 0), ("hard-linked file", 2), ("folder", 1)] {
+        let root = tempfile::tempdir()?;
+
+        let failure = copy_to_file_stage_blocking(&root.path().join("target"), |stage| {
+            let path = stage.path().ok_or_else(|| io_error("missing stage path"))?;
+            if partial == "folder" {
+                fs::create_dir(&path).map_err(gio_error)?;
+            } else {
+                fs::write(&path, b"partial").map_err(gio_error)?;
+            }
+            if partial == "hard-linked file" {
+                fs::hard_link(&path, root.path().join("other")).map_err(gio_error)?;
+            }
+            Err(glib::Error::new(gio::IOErrorEnum::Cancelled, "cancelled"))
+        })
+        .err()
+        .ok_or("the copy failed")?;
+        let error = glib::MainContext::default().block_on(discard_failed_file_stage(failure));
+
+        assert_eq!(fs::read_dir(root.path())?.count(), kept, "{partial}");
+        if partial == "file" {
+            assert!(error.matches(gio::IOErrorEnum::Cancelled), "{error}");
+        } else {
+            assert!(error.message().contains("was retained"), "{error}");
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn a_file_stage_turned_folder_is_kept_when_a_name_inside_it_is_taken() -> Result<(), Box<dyn Error>>
+{
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
         .lock()
         .map_err(|error| error.to_string())?;
     let root = tempfile::tempdir()?;
-    let source = root.path().join("source.bin");
-    fs::write(&source, b"data")?;
-    let cancellable = gio::Cancellable::new();
-    let cancel = cancellable.clone();
-    let racer: Racer = Box::new(move || cancel.cancel());
+    let source = root.path().join("source");
+    fs::create_dir(&source)?;
+    std::os::unix::fs::symlink("elsewhere", source.join("link"))?;
+    let stage_root = root.path().to_path_buf();
+    let racer: Racer = Box::new(move || {
+        fs::write(only_stage(&stage_root).join("link"), b"theirs").expect("take the name")
+    });
     let _scope = FsQuirks::install(
         root.path(),
         Quirks {
-            // Cancels once the stage exists, before anything is copied into it.
-            before: vec![(Op::Create, ".strata-replacement-*", 0, racer)],
+            before: vec![(Op::Symlink, "link", 0, racer)],
             ..Quirks::default()
         },
     );
+    let (copy, cancellable) = (stage_copier(None, false), gio::Cancellable::new());
+    let source_file = gio::File::for_path(&source);
 
-    let result = glib::MainContext::default().block_on(copy_new_local_regular_file(
-        gio::File::for_path(&source),
-        gio::File::for_path(root.path().join("target.bin")),
-        cancellable,
-    ));
+    // As if the source was still a file when its type was read.
+    let error = glib::MainContext::default()
+        .block_on(copy_to_new_stage(
+            &source_file,
+            gio::FileType::Regular,
+            &root.path().join("target"),
+            &cancellable,
+            &|stage, kind| copy(source_file.clone(), stage, kind, cancellable.clone()),
+        ))
+        .err()
+        .ok_or("the copy failed")?;
 
-    assert!(result.is_err_and(|error| error.matches(gio::IOErrorEnum::Cancelled)));
-    assert_eq!(fs::read_dir(root.path())?.count(), 1);
+    assert!(error.message().contains("was retained"), "{error}");
+    assert_eq!(names(root.path())?.len(), 2);
+    assert_eq!(fs::read(only_stage(root.path()).join("link"))?, b"theirs");
     Ok(())
 }
 
@@ -688,12 +760,11 @@ fn non_fat_copy_leaves_invalid_characters_untouched() -> Result<(), Box<dyn Erro
 }
 
 fn stage(root: &Path, directory: bool) -> Result<StagedSibling, Box<dyn Error>> {
-    let content = if directory {
-        StageContent::Directory
+    Ok(if directory {
+        StagedSibling::create(root, StageContent::Directory)?
     } else {
-        StageContent::File
-    };
-    Ok(StagedSibling::create(root, content)?)
+        file_stage(root)?
+    })
 }
 
 fn publish(staged: StagedSibling, target: &Path) -> Result<(), glib::Error> {
@@ -875,28 +946,48 @@ fn staged_fallback_removes_reserved_directory_on_copy_error() -> Result<(), Box<
     Ok(())
 }
 
+fn only_stage(root: &Path) -> PathBuf {
+    fs::read_dir(root)
+        .expect("list the stage's folder")
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| {
+            path.file_name()
+                .is_some_and(|name| name.to_string_lossy().starts_with(".strata-replacement-"))
+        })
+        .expect("a stage")
+}
+
+/// A folder put at a file stage's name gets the stage's inode number back.
+fn reusing_stage_inodes(before: (Op, &'static str, usize, Racer)) -> Quirks {
+    Quirks {
+        reused_inodes: Some(".strata-replacement-*"),
+        no_birth_time: true,
+        before: vec![before],
+        ..Quirks::without_placement()
+    }
+}
+
 #[test]
 fn a_stage_left_after_the_exclusive_copy_is_reported() -> Result<(), Box<dyn Error>> {
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
         .lock()
         .map_err(|error| error.to_string())?;
     let root = tempfile::tempdir()?;
+    let stage_root = root.path().to_path_buf();
+    let racer: Racer = Box::new(move || {
+        let stage = only_stage(&stage_root);
+        fs::remove_file(&stage).expect("remove file stage");
+        fs::create_dir(&stage).expect("replace stage with directory");
+    });
+    // One stat records the stage and two decide publication; the fourth is the discard.
+    let _scope = FsQuirks::install(
+        root.path(),
+        reusing_stage_inodes((Op::Stat, ".strata-replacement-*", 3, racer)),
+    );
     let staged = stage(root.path(), false)?;
     let staged_path = staged.path();
     fs::write(&staged_path, b"copied")?;
-    let swapped = staged_path.clone();
-    let racer: Racer = Box::new(move || {
-        fs::remove_file(&swapped).expect("remove file stage");
-        fs::create_dir(&swapped).expect("replace stage with directory");
-    });
-    let _scope = FsQuirks::install(
-        root.path(),
-        Quirks {
-            // Two stats decide publication; the third is the discard after copying.
-            before: vec![(Op::Stat, ".strata-replacement-*", 2, racer)],
-            ..Quirks::without_placement()
-        },
-    );
     let target = root.path().join("target");
 
     let error = publish(staged, &target).expect_err("the stage cannot be removed");
@@ -919,25 +1010,19 @@ fn a_stage_swapped_before_publication_is_neither_published_nor_deleted()
         .lock()
         .map_err(|error| error.to_string())?;
     let root = tempfile::tempdir()?;
-    let staged = stage(root.path(), false)?;
-    let staged_path = staged.path();
-    let swapped = staged_path.clone();
+    let stage_root = root.path().to_path_buf();
+    let racer: Racer = Box::new(move || {
+        let stage = only_stage(&stage_root);
+        fs::remove_file(&stage).expect("remove file stage");
+        fs::create_dir(&stage).expect("replace stage with directory");
+        fs::write(stage.join("copied.txt"), b"foreign data").expect("populate");
+    });
     let _scope = FsQuirks::install(
         root.path(),
-        Quirks {
-            before: vec![(
-                Op::Rename,
-                ".strata-replacement-*",
-                0,
-                Box::new(move || {
-                    fs::remove_file(&swapped).expect("remove file stage");
-                    fs::create_dir(&swapped).expect("replace stage with directory");
-                    fs::write(swapped.join("copied.txt"), b"foreign data").expect("populate");
-                }),
-            )],
-            ..Quirks::without_placement()
-        },
+        reusing_stage_inodes((Op::Rename, ".strata-replacement-*", 0, racer)),
     );
+    let staged = stage(root.path(), false)?;
+    let staged_path = staged.path();
     let target = root.path().join("target");
 
     let error = publish(staged, &target).expect_err("a swapped stage is refused");

@@ -1122,11 +1122,11 @@ struct ParallelCopyOutcome {
     written_paths: Vec<PathBuf>,
 }
 
-/// Opens the source and creates its stage, so a failure here leaves nothing to discard.
+/// Opens the source, so a failure here leaves nothing to discard.
 fn open_local_regular_copy(
     source: &gio::File,
     target: &gio::File,
-) -> Result<(std::fs::File, PathBuf, StagedSibling), glib::Error> {
+) -> Result<(std::fs::File, PathBuf), glib::Error> {
     let source_path = source
         .path()
         .ok_or_else(|| translated_io_error("Copy source must be a local path"))?;
@@ -1148,12 +1148,7 @@ fn open_local_regular_copy(
     let target_path = target
         .path()
         .ok_or_else(|| translated_io_error("Copy destination must be a local path"))?;
-    let target_parent = target_path
-        .parent()
-        .ok_or_else(|| translated_io_error("The destination has no parent directory"))?;
-    let staged = StagedSibling::create(target_parent, StageContent::File)
-        .map_err(|error| staging_failed(&target_path, error))?;
-    Ok((source_file, target_path, staged))
+    Ok((source_file, target_path))
 }
 
 async fn copy_new_local_regular_file(
@@ -1167,20 +1162,19 @@ async fn copy_new_local_regular_file(
         let opened = cancellable
             .set_error_if_cancelled()
             .and_then(|()| open_local_regular_copy(&source, &target));
-        let (source_file, target_path, staged) = opened.map_err(|error| (error, None))?;
+        let (source_file, target_path) = opened.map_err(|error| (error, None))?;
         let source_ref = gio::File::for_path(format!("/proc/self/fd/{}", source_file.as_raw_fd()));
-        let copied = source_ref
-            .copy(
-                &gio::File::for_path(staged.path()),
-                gio::FileCopyFlags::ALL_METADATA | gio::FileCopyFlags::OVERWRITE,
-                Some(&cancellable),
-                None,
-            )
-            .and_then(|()| cancellable.set_error_if_cancelled());
-        match copied {
-            Ok(()) => Ok((staged, target_path)),
-            Err(error) => Err((error, Some(staged))),
-        }
+        copy_to_file_stage_blocking(&target_path, |stage| {
+            source_ref
+                .copy(
+                    stage,
+                    gio::FileCopyFlags::ALL_METADATA,
+                    Some(&cancellable),
+                    None,
+                )
+                .and_then(|()| cancellable.set_error_if_cancelled())
+        })
+        .map(|staged| (staged, target_path))
     })
     .await
     .map_err(|_| io_error("Copy worker stopped unexpectedly"))?;
@@ -1188,11 +1182,7 @@ async fn copy_new_local_regular_file(
         Ok((staged, target_path)) => {
             publish_staged_without_replace(staged, target_path, cancellable).await
         }
-        Err((error, None)) => Err(error),
-        Err((error, Some(staged))) => {
-            let cleanup = discard_incomplete_staged(staged).await;
-            Err(copy_failure_after_cleanup(error, cleanup))
-        }
+        Err(failure) => Err(discard_failed_file_stage(failure).await),
     }
 }
 
@@ -2154,27 +2144,23 @@ async fn copy_new_recursively_on_filesystem(
             })
             .await?
             .file_type();
-        let staged = stage_for(&source, source_type, &target_path).await?;
-        if staged.kind != rustix::fs::FileType::Symlink
-            && let Err(error) = copy_recursively_with_progress(
-                source,
-                gio::File::for_path(staged.path()),
-                true,
-                cancellable.clone(),
-                None,
-                progress.clone(),
-                fat_family,
-            )
-            .await
-        {
-            let cleanup = discard_incomplete_staged(staged).await;
-            return Err(copy_failure_after_cleanup(error, cleanup));
-        }
-        if let Err(error) = cancellable.set_error_if_cancelled() {
-            let cleanup = discard_incomplete_staged(staged).await;
-            return Err(copy_failure_after_cleanup(error, cleanup));
-        }
-
+        let staged = copy_to_new_stage(
+            &source,
+            source_type,
+            &target_path,
+            &cancellable,
+            &|stage, root| {
+                copy_into_stage(
+                    source.clone(),
+                    stage,
+                    root,
+                    cancellable.clone(),
+                    progress.clone(),
+                    fat_family,
+                )
+            },
+        )
+        .await?;
         return publish_staged_without_replace(staged, target_path, cancellable).await;
     }
 
@@ -2425,13 +2411,10 @@ async fn discard_restore_copy(journal: RestoreCopyJournal) -> Result<(), glib::E
                     )
                     .into_owned()
                 })?;
-                let stat = rustix::fs::statat(
-                    &entry.parent,
-                    &entry.name,
-                    rustix::fs::AtFlags::SYMLINK_NOFOLLOW,
-                )
-                .map_err(os_error_text)?;
-                ensure_expected_local_identity(&entry.name, &stat, Some(identity))?;
+                let stat = fs()
+                    .stat(Entry::new(&*entry.parent, &entry.name), false)
+                    .map_err(os_error_text)?;
+                ensure_expected_local_identity(&entry.name, stat.identity, Some(identity))?;
                 rustix::fs::unlinkat(
                     &entry.parent,
                     &entry.name,
@@ -2544,25 +2527,27 @@ fn copy_restore_entry(
         let parent = source_parent.clone();
         let name = source_name.clone();
         let (source, source_stat) = run_local_fs_step(move || {
-            let snapshot =
-                rustix::fs::statat(&parent, &name, rustix::fs::AtFlags::SYMLINK_NOFOLLOW)
+            let metadata =
+                rustix::fs::statat(&*parent, &name, rustix::fs::AtFlags::SYMLINK_NOFOLLOW)
                     .map_err(os_error_text)?;
-            ensure_expected_local_identity(&name, &snapshot, expected)?;
-            let source = open_local_copy_source(&parent, &name)?;
-            let stat = match &source {
-                LocalCopySource::File(file) => rustix::fs::fstat(file),
-                LocalCopySource::Directory { handle, .. } => rustix::fs::fstat(handle),
-                LocalCopySource::Symlink(_) => {
-                    rustix::fs::statat(&parent, &name, rustix::fs::AtFlags::SYMLINK_NOFOLLOW)
-                }
-            }
-            .map_err(os_error_text)?;
+            let entry = Entry::new(&*parent, &name);
+            let snapshot = fs().stat(entry, false).map_err(os_error_text)?.identity;
+            ensure_expected_local_identity(&name, snapshot, expected)?;
             ensure_expected_local_identity(
                 &name,
-                &stat,
-                Some(LocalFileIdentity::from_stat(&snapshot)),
+                LocalFileIdentity::from_stat(&metadata),
+                Some(snapshot),
             )?;
-            Ok((source, snapshot))
+            let source = open_local_copy_source(&parent, &name)?;
+            let opened = match &source {
+                LocalCopySource::File(file) => fs().stat_fd(file.as_fd()),
+                LocalCopySource::Directory { handle, .. } => fs().stat_fd(handle.as_fd()),
+                LocalCopySource::Symlink(_) => fs().stat(entry, false),
+            }
+            .map_err(os_error_text)?
+            .identity;
+            ensure_expected_local_identity(&name, opened, Some(snapshot))?;
+            Ok((source, metadata))
         })
         .await?;
         match source {
@@ -2628,7 +2613,7 @@ fn copy_restore_entry(
                             | rustix::fs::OFlags::CLOEXEC,
                         rustix::fs::Mode::from_raw_mode(0o600),
                     )?;
-                    let identity = LocalFileIdentity::from_stat(&rustix::fs::fstat(&target)?);
+                    let identity = fs().stat_fd(target.as_fd())?.identity;
                     Ok((target, identity))
                 })
                 .await?;
@@ -2870,7 +2855,6 @@ async fn move_local(
 }
 
 enum StageContent {
-    File,
     Directory,
     Symlink(OsString),
 }
@@ -2883,50 +2867,216 @@ struct StagedSibling {
     parent_path: PathBuf,
     name: OsString,
     identity: LocalFileIdentity,
-    kind: rustix::fs::FileType,
 }
 
 impl StagedSibling {
     fn create(parent_path: &Path, content: StageContent) -> io::Result<Self> {
         let parent = open_local_parent_directory(parent_path).map_err(io::Error::other)?;
-        let (name, (identity, kind)) = placement::reserve_hidden_name(STAGE_PREFIX, |name| {
+        let (name, identity) = placement::reserve_hidden_name(STAGE_PREFIX, |name| {
             let entry = Entry::new(&parent, name);
-            let created = match &content {
-                StageContent::File => fs()
-                    .create_exclusive(entry, rustix::fs::Mode::from_raw_mode(0o600))
-                    .and_then(|file| fs().stat_fd(file.as_fd()))
-                    .map(Some),
-                StageContent::Directory => fs()
-                    .mkdir(entry, rustix::fs::Mode::from_raw_mode(0o700))
-                    .map(|()| None),
-                StageContent::Symlink(link) => fs().symlink(link, entry).map(|()| None),
-            };
-            let stat = match created {
-                Ok(Some(stat)) => stat,
-                Ok(None) => fs().stat(entry, false).map_err(PlaceError::Io)?,
-                Err(rustix::io::Errno::EXIST) => return Err(PlaceError::Exists),
-                Err(error) if matches!(content, StageContent::File) => {
-                    return Err(placement::file_creation_error(error));
+            match &content {
+                StageContent::Directory => {
+                    fs().mkdir(entry, rustix::fs::Mode::from_raw_mode(0o700))
                 }
-                Err(error) => return Err(PlaceError::Io(error)),
-            };
-            Ok((stat.identity, stat.kind))
+                StageContent::Symlink(link) => fs().symlink(link, entry),
+            }
+            .map_err(|error| match error {
+                rustix::io::Errno::EXIST => PlaceError::Exists,
+                error => PlaceError::Io(error),
+            })?;
+            fs().stat(entry, false)
+                .map(|stat| stat.identity)
+                .map_err(PlaceError::Io)
         })
-        .map_err(|error| match error {
-            PlaceError::Io(error) => io::Error::from(error),
-            error => io::Error::other(placement_reason(error)),
-        })?;
+        .map_err(stage_name_error)?;
         Ok(Self {
             parent: Arc::new(parent),
             parent_path: parent_path.to_path_buf(),
             name,
             identity,
-            kind,
         })
+    }
+
+    fn kind(&self) -> rustix::fs::FileType {
+        self.identity.kind
     }
 
     fn path(&self) -> PathBuf {
         self.parent_path.join(&self.name)
+    }
+}
+
+fn stage_name_error(error: PlaceError) -> io::Error {
+    match error {
+        PlaceError::Io(error) => io::Error::from(error),
+        error => io::Error::other(placement_reason(error)),
+    }
+}
+
+/// A failed file stage copy, with the partial stage left to discard.
+type FileStageFailure = (glib::Error, Option<StagedSibling>);
+
+type StageCopyFuture = Pin<Box<dyn Future<Output = Result<(), glib::Error>>>>;
+
+/// How a stage copy meets its stage.
+#[derive(Clone)]
+enum StageRoot {
+    /// A folder stage made beforehand.
+    Made,
+    /// A fresh name the copy creates, recording whether it made a folder there.
+    Fresh(Rc<CreatedCopyRoot>),
+}
+
+fn copy_into_stage(
+    source: gio::File,
+    stage: gio::File,
+    root: StageRoot,
+    cancellable: gio::Cancellable,
+    progress: Option<Rc<TransferProgressTracker>>,
+    fat_family: bool,
+) -> StageCopyFuture {
+    let (overwrite_existing, created_root) = match root {
+        StageRoot::Made => (true, None),
+        StageRoot::Fresh(created_root) => (false, Some(created_root)),
+    };
+    copy_recursively_with_progress(
+        source,
+        stage,
+        overwrite_existing,
+        cancellable,
+        created_root,
+        progress,
+        fat_family,
+    )
+}
+
+/// What a copy left at the fresh stage name `name`. A completed copy's entry
+/// is the stage; a failed copy's is only taken as a regular file with no
+/// other name, and anything else there is kept.
+fn file_stage_after_copy(
+    parent: &Arc<OwnedFd>,
+    parent_path: &Path,
+    target_path: &Path,
+    name: OsString,
+    copied: Result<(), glib::Error>,
+) -> Result<StagedSibling, FileStageFailure> {
+    let stat = fs().stat(Entry::new(&**parent, &name), false);
+    let staged = |stat: EntryStat| StagedSibling {
+        parent: parent.clone(),
+        parent_path: parent_path.to_path_buf(),
+        name: name.clone(),
+        identity: stat.identity,
+    };
+    match (copied, stat) {
+        (Ok(()), Ok(stat)) => Ok(staged(stat)),
+        (Ok(()), Err(error)) => Err((staging_failed(target_path, error.into()), None)),
+        (Err(error), Err(rustix::io::Errno::NOENT)) => Err((error, None)),
+        (Err(error), Ok(stat))
+            if stat.kind == rustix::fs::FileType::RegularFile && stat.nlink == 1 =>
+        {
+            Err((error, Some(staged(stat))))
+        }
+        (Err(error), Ok(_)) => {
+            let kept = io_error(rust_i18n::t!(
+                "Partial entry %{name} was retained because its creation could not be verified atomically",
+                name = name.to_string_lossy()
+            ));
+            Err((copy_failure_after_cleanup(error, Err(kept)), None))
+        }
+        (Err(error), Err(stat_error)) => Err((
+            copy_failure_after_cleanup(error, Err(os_io_error(stat_error))),
+            None,
+        )),
+    }
+}
+
+/// What one copy to the fresh stage name `name` left, or `None` when the name
+/// was already taken. An `Exists` from inside a folder the copy made there is
+/// the copy's own failure.
+fn file_stage_attempt(
+    parent: &Arc<OwnedFd>,
+    parent_path: &Path,
+    target_path: &Path,
+    name: OsString,
+    copied: Result<(), glib::Error>,
+    made_root: bool,
+) -> Option<Result<StagedSibling, FileStageFailure>> {
+    let taken = !made_root
+        && copied
+            .as_ref()
+            .is_err_and(|error| error.matches(gio::IOErrorEnum::Exists));
+    (!taken).then(|| file_stage_after_copy(parent, parent_path, target_path, name, copied))
+}
+
+fn stage_parent_path(target_path: &Path) -> Result<PathBuf, glib::Error> {
+    target_path
+        .parent()
+        .map(Path::to_path_buf)
+        .ok_or_else(|| translated_io_error("The destination has no parent directory"))
+}
+
+fn stage_names_exhausted(target_path: &Path) -> glib::Error {
+    staging_failed(target_path, stage_name_error(PlaceError::Exists))
+}
+
+/// Copies a file into a fresh hidden sibling of `target_path` that the copy
+/// itself creates, so a stage is never copied over.
+async fn copy_to_file_stage(
+    target_path: &Path,
+    copy: &dyn Fn(gio::File, Rc<CreatedCopyRoot>) -> StageCopyFuture,
+) -> Result<StagedSibling, glib::Error> {
+    let parent_path = stage_parent_path(target_path)?;
+    let opened = parent_path.clone();
+    let parent = Arc::new(run_local_fs_step(move || open_local_parent_directory(&opened)).await?);
+    for name in placement::hidden_names(STAGE_PREFIX) {
+        let created_root = Rc::new(CreatedCopyRoot::new());
+        let copied = copy(
+            gio::File::for_path(parent_path.join(&name)),
+            created_root.clone(),
+        )
+        .await;
+        let made_root = created_root.was_created.get();
+        let (parent, parent_path) = (parent.clone(), parent_path.clone());
+        let target_path = target_path.to_path_buf();
+        let attempt = gio::spawn_blocking(move || {
+            file_stage_attempt(&parent, &parent_path, &target_path, name, copied, made_root)
+        })
+        .await
+        .map_err(|_| io_error("Local filesystem task panicked"))?;
+        match attempt {
+            None => {}
+            Some(Ok(staged)) => return Ok(staged),
+            Some(Err(failure)) => return Err(discard_failed_file_stage(failure).await),
+        }
+    }
+    Err(stage_names_exhausted(target_path))
+}
+
+/// [`copy_to_file_stage`] for a synchronous copy on a worker thread.
+fn copy_to_file_stage_blocking(
+    target_path: &Path,
+    copy: impl Fn(&gio::File) -> Result<(), glib::Error>,
+) -> Result<StagedSibling, FileStageFailure> {
+    let parent_path = stage_parent_path(target_path).map_err(|error| (error, None))?;
+    let parent = open_local_parent_directory(&parent_path)
+        .map(Arc::new)
+        .map_err(|error| (staging_failed(target_path, io::Error::other(error)), None))?;
+    for name in placement::hidden_names(STAGE_PREFIX) {
+        let copied = copy(&gio::File::for_path(parent_path.join(&name)));
+        // A synchronous copy of a regular file never makes a folder there.
+        if let Some(outcome) =
+            file_stage_attempt(&parent, &parent_path, target_path, name, copied, false)
+        {
+            return outcome;
+        }
+    }
+    Err((stage_names_exhausted(target_path), None))
+}
+
+async fn discard_failed_file_stage((error, partial): FileStageFailure) -> glib::Error {
+    match partial {
+        Some(staged) => copy_failure_after_cleanup(error, discard_incomplete_staged(staged).await),
+        None => error,
     }
 }
 
@@ -2945,31 +3095,49 @@ fn read_local_symlink(path: &Path) -> Result<OsString, String> {
     })
 }
 
-/// Creates the stage for copying `source` next to `target_path`. A symlink
-/// source is staged as the finished link, so it never needs copying.
-async fn stage_for(
+/// Copies `source` into a new hidden sibling of `target_path` with `copy`: a
+/// folder is copied into a stage made first, a file into one the copy
+/// creates, and a symlink is staged as the finished link.
+async fn copy_to_new_stage(
     source: &gio::File,
     source_type: gio::FileType,
     target_path: &Path,
+    cancellable: &gio::Cancellable,
+    copy: &dyn Fn(gio::File, StageRoot) -> StageCopyFuture,
 ) -> Result<StagedSibling, glib::Error> {
-    let parent = target_path
-        .parent()
-        .ok_or_else(|| translated_io_error("The destination has no parent directory"))?
-        .to_path_buf();
     let link_source = (source_type == gio::FileType::SymbolicLink)
         .then(|| source.path())
         .flatten();
-    let target_path = target_path.to_path_buf();
-    run_local_fs_step(move || {
-        let content = match link_source {
-            Some(path) => StageContent::Symlink(read_local_symlink(&path)?),
-            None if source_type == gio::FileType::Directory => StageContent::Directory,
-            None => StageContent::File,
-        };
-        StagedSibling::create(&parent, content)
-            .map_err(|error| staging_failed_message(&target_path, error))
-    })
-    .await
+    let staged = if link_source.is_some() || source_type == gio::FileType::Directory {
+        let parent = stage_parent_path(target_path)?;
+        let stage_target = target_path.to_path_buf();
+        let staged = run_local_fs_step(move || {
+            let content = match link_source {
+                Some(path) => StageContent::Symlink(read_local_symlink(&path)?),
+                None => StageContent::Directory,
+            };
+            StagedSibling::create(&parent, content)
+                .map_err(|error| staging_failed_message(&stage_target, error))
+        })
+        .await?;
+        if staged.kind() == rustix::fs::FileType::Directory
+            && let Err(error) = copy(gio::File::for_path(staged.path()), StageRoot::Made).await
+        {
+            let cleanup = discard_incomplete_staged(staged).await;
+            return Err(copy_failure_after_cleanup(error, cleanup));
+        }
+        staged
+    } else {
+        copy_to_file_stage(target_path, &|stage, created_root| {
+            copy(stage, StageRoot::Fresh(created_root))
+        })
+        .await?
+    };
+    if let Err(error) = cancellable.set_error_if_cancelled() {
+        let cleanup = discard_incomplete_staged(staged).await;
+        return Err(copy_failure_after_cleanup(error, cleanup));
+    }
+    Ok(staged)
 }
 
 /// The staging name is internal, so the error names the item being written instead.
@@ -2990,24 +3158,11 @@ fn staging_failed(target_path: &Path, error: io::Error) -> glib::Error {
 }
 
 async fn discard_incomplete_staged(staged: StagedSibling) -> Result<(), glib::Error> {
-    let mut identity = staged.identity;
-    if staged.kind == rustix::fs::FileType::RegularFile {
-        // GIO unlinks and recreates a file it copies over, so the regular
-        // file now at the hidden stage name is the one to remove.
-        let (parent, name) = (staged.parent.clone(), staged.name.clone());
-        let current =
-            run_blocking(move || Ok(fs().stat(Entry::new(&*parent, &name), false))).await?;
-        if let Ok(current) = current
-            && current.kind == rustix::fs::FileType::RegularFile
-        {
-            identity = current.identity;
-        }
-    }
     parallel_delete_local(
         vec![PinnedEntry {
             parent: staged.parent,
             name: staged.name,
-            identity: Some(identity),
+            identity: Some(staged.identity),
         }],
         gio::Cancellable::new(),
     )
@@ -3020,7 +3175,7 @@ fn placement_error(error: PlaceError) -> glib::Error {
 
 /// Places a finished stage at `target_path` without replacing anything there.
 async fn publish_staged_without_replace(
-    mut staged: StagedSibling,
+    staged: StagedSibling,
     target_path: PathBuf,
     cancellable: gio::Cancellable,
 ) -> Result<(), glib::Error> {
@@ -3033,38 +3188,30 @@ async fn publish_staged_without_replace(
     };
     let parent = staged.parent.clone();
     let stage_name = staged.name.clone();
-    let (recorded, kind) = (staged.identity, staged.kind);
+    let recorded = staged.identity;
     let step = gio::spawn_blocking(move || {
         let stage = Entry::new(&*parent, &stage_name);
         let target = Entry::new(&*parent, &target_name);
         // The stage is our own hidden name, so the first rung needs no check.
         let error = match fs().rename(stage, target, rustix::fs::RenameFlags::NOREPLACE) {
-            Ok(()) => return (recorded, Ok(placement::Placed::Renamed)),
+            Ok(()) => return Ok(placement::Placed::Renamed),
             Err(rustix::io::Errno::EXIST | rustix::io::Errno::NOTEMPTY) => {
-                return (recorded, Err(PlaceError::Exists));
+                return Err(PlaceError::Exists);
             }
-            Err(rustix::io::Errno::XDEV) => return (recorded, Err(PlaceError::CrossDevice)),
+            Err(rustix::io::Errno::XDEV) => return Err(PlaceError::CrossDevice),
             Err(error) => error,
         };
-        let current = match fs().stat(stage, false) {
-            Ok(current) => current,
+        match fs().stat(stage, false) {
+            Ok(current) if current.identity == recorded => {}
+            Ok(_) => return Err(PlaceError::Changed),
             // A lost reply may have published it; nothing tells where the copy is.
-            Err(rustix::io::Errno::NOENT) => return (recorded, Err(PlaceError::Unconfirmed)),
-            Err(error) => return (recorded, Err(PlaceError::Io(error))),
-        };
-        // GIO recreates a file stage while copying into it, so only its kind is kept.
-        let ours = current.identity == recorded
-            || (kind == rustix::fs::FileType::RegularFile && current.kind == kind);
-        if !ours {
-            return (recorded, Err(PlaceError::Changed));
+            Err(rustix::io::Errno::NOENT) => return Err(PlaceError::Unconfirmed),
+            Err(error) => return Err(PlaceError::Io(error)),
         }
-        (
-            current.identity,
-            placement::place_after_rename(fs(), stage, target, Some(current.identity), error),
-        )
+        placement::place_after_rename(fs(), stage, target, Some(recorded), error)
     })
     .await;
-    let (identity, placed) = match step {
+    let placed = match step {
         Ok(step) => step,
         Err(error) => {
             let cleanup = discard_incomplete_staged(staged).await;
@@ -3074,7 +3221,6 @@ async fn publish_staged_without_replace(
             ));
         }
     };
-    staged.identity = identity;
     let result = match placed {
         Ok(_) => return Ok(()),
         // Without NOREPLACE, links or a rename over an empty folder, publication
@@ -3145,7 +3291,7 @@ type StageCopy = Rc<
     dyn Fn(
         gio::File,
         gio::File,
-        bool,
+        StageRoot,
         gio::Cancellable,
     ) -> Pin<Box<dyn Future<Output = Result<(), glib::Error>>>>,
 >;
@@ -3501,29 +3647,15 @@ async fn replace_through_stage(
         Removal::Trashed => original_in_trash(&crate::services::gio_error_detail(&error)),
         _ => error,
     };
-    let staged = stage_for(source, gio_file_type(plan.source.kind), target_path)
-        .await
-        .map_err(|error| in_trash(error, removal))?;
-    let ready = async {
-        if staged.kind != rustix::fs::FileType::Symlink {
-            copy_to_stage(
-                source.clone(),
-                gio::File::for_path(staged.path()),
-                plan.directory(),
-                cancellable.clone(),
-            )
-            .await?;
-        }
-        cancellable.set_error_if_cancelled()
-    }
-    .await;
-    if let Err(error) = ready {
-        let cleanup = discard_incomplete_staged(staged).await;
-        return Err(in_trash(
-            copy_failure_after_cleanup(error, cleanup),
-            removal,
-        ));
-    }
+    let staged = copy_to_new_stage(
+        source,
+        gio_file_type(plan.source.kind),
+        target_path,
+        cancellable,
+        &|stage, root| copy_to_stage(source.clone(), stage, root, cancellable.clone()),
+    )
+    .await
+    .map_err(|error| in_trash(error, removal))?;
     loop {
         let parent = staged.parent.clone();
         let step_plan = plan.clone();
@@ -3764,13 +3896,12 @@ async fn publish_staged_replacement(
 }
 
 fn stage_copier(progress: Option<Rc<TransferProgressTracker>>, fat_family: bool) -> StageCopy {
-    Rc::new(move |source, staged, _directory, cancellable| {
-        copy_recursively_with_progress(
+    Rc::new(move |source, staged, root, cancellable| {
+        copy_into_stage(
             source,
             staged,
-            true,
+            root,
             cancellable,
-            None,
             progress.clone(),
             fat_family,
         )
@@ -4010,7 +4141,8 @@ async fn merge_local_with(
         overwritten: trashed,
     });
     if let Err(error) =
-        (hooks.copy_into_target)(source.clone(), target, true, cancellable.clone()).await
+        (hooks.copy_into_target)(source.clone(), target, StageRoot::Made, cancellable.clone())
+            .await
     {
         return Err(merge_aside::abandon(aside, error).await);
     }
@@ -4034,7 +4166,7 @@ fn progress_merge_hooks(
 ) -> MergeHooks<'_> {
     MergeHooks {
         fat_family,
-        copy_into_target: Rc::new(move |source, target, _directory, cancellable| {
+        copy_into_target: Rc::new(move |source, target, _, cancellable| {
             copy_recursively_with_progress(
                 source,
                 target,
@@ -4136,10 +4268,27 @@ enum LocalDeleteStep {
     },
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// Many filesystems hand a freed inode number to the next item created, so
+/// the type and, where reported, the birth time tell the two apart.
+#[derive(Clone, Copy, Debug)]
 struct LocalFileIdentity {
     device: u64,
     inode: u64,
+    kind: rustix::fs::FileType,
+    birth: Option<(i64, u32)>,
+}
+
+impl PartialEq for LocalFileIdentity {
+    /// A birth time counts only when both sides have one.
+    fn eq(&self, other: &Self) -> bool {
+        self.device == other.device
+            && self.inode == other.inode
+            && self.kind == other.kind
+            && match (self.birth, other.birth) {
+                (Some(left), Some(right)) => left == right,
+                _ => true,
+            }
+    }
 }
 
 impl LocalFileIdentity {
@@ -4147,6 +4296,8 @@ impl LocalFileIdentity {
         Self {
             device: stat.st_dev,
             inode: stat.st_ino,
+            kind: rustix::fs::FileType::from_raw_mode(stat.st_mode),
+            birth: None,
         }
     }
 }
@@ -4162,10 +4313,10 @@ impl From<LocalFileIdentity> for TrashedOriginal {
 
 fn ensure_expected_local_identity(
     name: &OsStr,
-    stat: &rustix::fs::Stat,
+    current: LocalFileIdentity,
     expected: Option<LocalFileIdentity>,
 ) -> Result<(), String> {
-    if expected.is_some_and(|expected| expected != LocalFileIdentity::from_stat(stat)) {
+    if expected.is_some_and(|expected| expected != current) {
         return Err(rust_i18n::t!(
             "%{name} changed while the operation was in progress",
             name = name.to_string_lossy()
@@ -4181,17 +4332,17 @@ fn ensure_local_delete_target_unchanged<ParentFd: AsFd, TargetFd: AsFd>(
     name: &OsStr,
     target: &TargetFd,
 ) -> Result<(), String> {
-    let named = rustix::fs::statat(parent, name, rustix::fs::AtFlags::SYMLINK_NOFOLLOW).map_err(
-        |error| {
+    let named = fs()
+        .stat(Entry::new(parent, name), false)
+        .map_err(|error| {
             rust_i18n::t!(
                 "%{name} changed while it was being deleted: %{error}",
                 name = name.to_string_lossy(),
                 error = os_error_detail(error)
             )
             .into_owned()
-        },
-    )?;
-    let opened = rustix::fs::fstat(target).map_err(|error| {
+        })?;
+    let opened = fs().stat_fd(target.as_fd()).map_err(|error| {
         rust_i18n::t!(
             "Could not recheck %{name}: %{error}",
             name = name.to_string_lossy(),
@@ -4199,7 +4350,7 @@ fn ensure_local_delete_target_unchanged<ParentFd: AsFd, TargetFd: AsFd>(
         )
         .into_owned()
     })?;
-    if named.st_dev != opened.st_dev || named.st_ino != opened.st_ino {
+    if named.identity != opened.identity {
         return Err(rust_i18n::t!(
             "%{name} changed while it was being deleted",
             name = name.to_string_lossy()
@@ -4217,21 +4368,18 @@ fn open_local_delete_target<Fd: AsFd>(
     name: &OsStr,
     expected: Option<LocalFileIdentity>,
 ) -> Result<LocalDeleteStep, String> {
-    let stat = rustix::fs::statat(parent, name, rustix::fs::AtFlags::SYMLINK_NOFOLLOW).map_err(
-        |error| {
+    let stat = fs()
+        .stat(Entry::new(parent, name), false)
+        .map_err(|error| {
             rust_i18n::t!(
                 "Could not inspect %{name}: %{error}",
                 name = name.to_string_lossy(),
                 error = os_error_detail(error)
             )
             .into_owned()
-        },
-    )?;
-    ensure_expected_local_identity(name, &stat, expected)?;
-    if !matches!(
-        rustix::fs::FileType::from_raw_mode(stat.st_mode),
-        rustix::fs::FileType::Directory
-    ) {
+        })?;
+    ensure_expected_local_identity(name, stat.identity, expected)?;
+    if !stat.is_directory() {
         rustix::fs::unlinkat(parent, name, rustix::fs::AtFlags::empty()).map_err(|error| {
             rust_i18n::t!(
                 "Could not delete %{name}: %{error}",
@@ -4267,7 +4415,7 @@ fn open_local_delete_target<Fd: AsFd>(
         )
         .into_owned()
     })?;
-    let opened = rustix::fs::fstat(&handle).map_err(|error| {
+    let opened = fs().stat_fd(handle.as_fd()).map_err(|error| {
         rust_i18n::t!(
             "Could not recheck %{name}: %{error}",
             name = name.to_string_lossy(),
@@ -4275,7 +4423,7 @@ fn open_local_delete_target<Fd: AsFd>(
         )
         .into_owned()
     })?;
-    ensure_expected_local_identity(name, &opened, expected)?;
+    ensure_expected_local_identity(name, opened.identity, expected)?;
     let mut children = Vec::new();
     for entry in rustix::fs::Dir::read_from(&handle).map_err(os_error_text)? {
         let entry = entry.map_err(os_error_text)?;
@@ -4958,7 +5106,8 @@ async fn local_file_identity(file: &gio::File) -> Result<Option<LocalFileIdentit
             .file_name()
             .ok_or_else(|| crate::i18n::tr("Invalid local filesystem target"))?;
         let parent = open_local_parent_directory(parent_path)?;
-        let stat = rustix::fs::statat(&parent, name, rustix::fs::AtFlags::SYMLINK_NOFOLLOW)
+        let stat = fs()
+            .stat(Entry::new(&parent, name), false)
             .map_err(|error| {
                 rust_i18n::t!(
                     "Could not inspect %{path}: %{error}",
@@ -4967,7 +5116,7 @@ async fn local_file_identity(file: &gio::File) -> Result<Option<LocalFileIdentit
                 )
                 .into_owned()
             })?;
-        Ok(LocalFileIdentity::from_stat(&stat))
+        Ok(stat.identity)
     })
     .await
     .map(Some)

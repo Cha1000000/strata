@@ -27,11 +27,7 @@ fn without_flags(error: Errno) -> Quirks {
 }
 
 fn identity(path: &Path) -> LocalFileIdentity {
-    let metadata = fs::symlink_metadata(path).expect("entry exists");
-    LocalFileIdentity {
-        device: metadata.dev(),
-        inode: metadata.ino(),
-    }
+    LocalFileIdentity::from_stat(&rustix::fs::lstat(path).expect("entry exists"))
 }
 
 fn place_in(

@@ -331,6 +331,7 @@ fn an_archive_swapped_while_encoding_is_never_replaced() -> Result<(), Box<dyn E
             Quirks {
                 trash: Trash::Unsupported,
                 fs_type: Some(fs_type),
+                reused_inodes: Some("existing.zip"),
                 ..Quirks::default()
             },
         );
@@ -342,6 +343,8 @@ fn an_archive_swapped_while_encoding_is_never_replaced() -> Result<(), Box<dyn E
             TransferConflict::ReplaceExisting,
             never_cancelled(),
             move |mut file| {
+                // Birth times can be as coarse as a scheduler tick.
+                std::thread::sleep(std::time::Duration::from_millis(20));
                 fs::remove_file(&swapped).map_err(|error| error.to_string())?;
                 fs::write(&swapped, b"theirs").map_err(|error| error.to_string())?;
                 file.write_all(b"replacement")

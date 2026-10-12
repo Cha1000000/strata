@@ -77,14 +77,11 @@ fn replacement_publication_preserves_concurrent_arrivals() -> Result<(), Box<dyn
     for directory in [false, true] {
         let root = tempfile::tempdir()?;
         let target = root.path().join("target");
-        let staged = StagedSibling::create(
-            root.path(),
-            if directory {
-                StageContent::Directory
-            } else {
-                StageContent::File
-            },
-        )?;
+        let staged = if directory {
+            StagedSibling::create(root.path(), StageContent::Directory)?
+        } else {
+            file_stage(root.path())?
+        };
         let staged_path = staged.path().to_owned();
         if directory {
             fs::write(staged_path.join("incoming"), b"replacement")?;
@@ -119,7 +116,15 @@ fn replacement_publication_reports_a_stage_it_cannot_remove() -> Result<(), Box<
     let root = tempfile::tempdir()?;
     let target = root.path().join("target");
     fs::write(&target, b"existing")?;
-    let staged = StagedSibling::create(root.path(), StageContent::File)?;
+    let _quirks = FsQuirks::install(
+        root.path(),
+        Quirks {
+            reused_inodes: Some(".strata-replacement-*"),
+            no_birth_time: true,
+            ..Quirks::default()
+        },
+    );
+    let staged = file_stage(root.path())?;
     let staged_path = staged.path().to_owned();
     fs::remove_file(&staged_path)?;
     fs::create_dir(&staged_path)?;
