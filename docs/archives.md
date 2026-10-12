@@ -50,10 +50,12 @@ Strata publishes the folder:
   other, with the reason and the folder that keeps the output, and no password
   prompt opens.
 
-Publication never replaces an existing entry. If the filesystem lacks atomic
-no-replace directory renames, folder publication fails and the error names the
-hidden staging folder holding the output. Single files can use a no-clobber
-hard-link/unlink fallback when supported.
+Publication never replaces an existing entry. Where the filesystem lacks
+atomic no-replace renames, a file is published through a hard link and a
+folder is moved whole over an empty placeholder Strata has just created. Only
+a file on a filesystem with neither no-replace renames nor hard links cannot
+be published safely; the error says so and names the hidden staging folder
+holding the output.
 
 Partial output from any other failed attempt stays in its own folder, so a
 retry never merges into it. An archive with several top-level entries is
@@ -180,8 +182,16 @@ Keep Both, and Replace. Keep Both publishes the next available numbered name,
 such as `archive (1).zip` or `archive (1).tar.gz`, and selects that new archive.
 It skips existing files, directories, and symlinks, including names that appear
 while encoding is running. The completed staging file is retried atomically at
-publication; the sources are not compressed again for each collision. Replace
-retains its existing overwrite behavior.
+publication; the sources are not compressed again for each collision.
+
+Replace moves the existing archive to Trash where the location supports it,
+and Undo restores it. Elsewhere, the original is swapped out atomically on
+filesystems known to support that, or moved to a hidden sibling, and it is
+deleted only after the new archive is in place and flushed to removable
+drives. Such a replacement has no Undo, because the original no longer exists.
+If none of these is safe at the location, or the existing archive is replaced
+by another item while the new one is encoded, nothing is replaced; the refusal
+comes before encoding when possible.
 
 ## Feedback and cancellation
 

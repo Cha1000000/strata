@@ -49,6 +49,22 @@ The operations are individually scoped and document:
 
 If a maintained safe API gains this capability, this exception should be removed.
 
+### Verified Trash result
+
+Location: `src/adapters/local_operations/fs_ops.rs::System::trash`
+
+Reason: GLib can return FALSE from `g_file_trash` without setting an error
+(GLib #4060). gio-rs asserts in debug builds that FALSE always carries an
+error, so its safe `trash()` would panic there, and in release builds it
+cannot tell that failure apart. Strata calls `g_file_trash` directly and treats
+FALSE without an error as "not moved".
+
+The file and cancellable outlive the call, and the error out-pointer starts
+null. When GLib sets it, ownership transfers to Strata, which takes it with
+`from_glib_full`; otherwise nothing is freed. The call runs only off the main
+thread. Callers re-check the item's identity afterwards, so a TRUE that moved
+nothing is caught too.
+
 ### Browser sandbox fork boundary
 
 Location: `src/sandbox/browser/process.rs::{fork,namespaces}`
