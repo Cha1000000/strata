@@ -593,6 +593,28 @@ pub(super) struct SetAside {
     pub identity: LocalFileIdentity,
 }
 
+/// Moves `from` to the free name `to`, refusing an entry that is no longer
+/// `expected`, and returns the identity now at `to`.
+pub(super) fn move_aside(
+    fs: &dyn FsOps,
+    from: Entry<'_>,
+    to: Entry<'_>,
+    expected: LocalFileIdentity,
+) -> Result<LocalFileIdentity, PlaceError> {
+    let placed = place(fs, from, to, Some(expected))?;
+    let identity = fs
+        .stat(to, true)
+        .map_err(|_| PlaceError::Unconfirmed)?
+        .identity;
+    if placed != Placed::RecreatedSymlink && identity != expected {
+        return Err(match place(fs, to, from, Some(identity)) {
+            Ok(_) => PlaceError::Changed,
+            Err(_) => PlaceError::Unconfirmed,
+        });
+    }
+    Ok(identity)
+}
+
 /// Moves the entry at `entry` to a hidden sibling, refusing an entry that is
 /// no longer `expected`.
 pub(super) fn set_aside(
@@ -601,25 +623,14 @@ pub(super) fn set_aside(
     prefix: &str,
     expected: LocalFileIdentity,
 ) -> Result<SetAside, PlaceError> {
-    let (name, placed) = reserve_hidden_name(prefix, |name| {
-        place(fs, entry, at(entry.dir, name), Some(expected))
+    reserve_hidden_name(prefix, |name| {
+        move_aside(fs, entry, at(entry.dir, name), expected)
     })
+    .map(|(name, identity)| SetAside { name, identity })
     .map_err(|error| match error {
         PlaceError::InvalidName => PlaceError::Unsupported,
         error => error,
-    })?;
-    let identity = fs
-        .stat(at(entry.dir, &name), true)
-        .map_err(|_| PlaceError::Unconfirmed)?
-        .identity;
-    let aside = SetAside { name, identity };
-    if placed != Placed::RecreatedSymlink && identity != expected {
-        return Err(match put_back(fs, entry.dir, &aside, entry.name) {
-            Ok(()) => PlaceError::Changed,
-            Err(_) => PlaceError::Unconfirmed,
-        });
-    }
-    Ok(aside)
+    })
 }
 
 pub(super) fn put_back(

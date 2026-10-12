@@ -6,6 +6,7 @@ mod tests;
 mod archive;
 mod create_entry;
 mod fs_ops;
+mod merge_aside;
 mod placement;
 
 #[cfg(test)]
@@ -3708,7 +3709,7 @@ async fn replace_local(
 
 /// What a merge will write: `created` are the topmost destination paths with
 /// no existing counterpart, `overwritten` are leaf collisions whose originals
-/// get staged in Trash so undo can restore them.
+/// were staged in Trash so undo can restore them.
 #[derive(Default)]
 struct MergePlan {
     created: Vec<Location>,
@@ -3717,7 +3718,8 @@ struct MergePlan {
 
 /// Backs up an overwritten original before the incoming copy lands. Production
 /// stages through Trash; tests substitute a rename so fixtures on filesystems
-/// without Trash support still exercise the flow.
+/// without Trash support still exercise the flow. `NotSupported` sets a local
+/// original aside instead.
 type StageOverwrite = Rc<
     dyn Fn(Location, gio::Cancellable) -> Pin<Box<dyn Future<Output = Result<(), glib::Error>>>>,
 >;
@@ -3727,6 +3729,9 @@ fn trash_stage_overwrite(
     cancellable: gio::Cancellable,
 ) -> Pin<Box<dyn Future<Output = Result<(), glib::Error>>>> {
     Box::pin(async move {
+        if let Some(path) = location.native_path().map(Path::to_path_buf) {
+            return run_blocking(move || fs().trash(&path, &cancellable)).await;
+        }
         let file = gio_file_for_location(&location);
         await_cancellable(&file, &cancellable, |file, cancellable, result| {
             file.trash_async(glib::Priority::DEFAULT, Some(cancellable), move |output| {
@@ -3875,33 +3880,61 @@ async fn merge_local_with(
     }
     let mut plan = MergePlan::default();
     classify_merge(&source, &target, &mut plan, &cancellable, hooks.fat_family).await?;
-    // Stage every overwritten original in Trash before the copy so undo can
-    // restore it; on failure, report what was staged so it stays recoverable.
-    let mut staged = Vec::new();
-    for location in &plan.overwritten {
-        let result = (hooks.stage_overwrite)(location.clone(), cancellable.clone()).await;
-        if let Err(error) = result {
-            (hooks.on_merged)(MergePlan {
-                created: Vec::new(),
-                overwritten: staged,
-            });
-            return Err(glib::Error::new(
-                gio::IOErrorEnum::Failed,
-                &rust_i18n::t!(
-                    "Could not move %{name} to Trash before merging: %{error}",
-                    name = location.display_name(),
-                    error = crate::services::gio_error_detail(&error)
-                ),
-            ));
-        }
-        staged.push(location.clone());
-    }
-    (hooks.on_merged)(plan);
     let source_identity = local_file_identity(&source).await?;
     let target_path = target.path();
-    (hooks.copy_into_target)(source.clone(), target, true, cancellable.clone()).await?;
+    // Stage every overwritten original in Trash before the copy so undo can
+    // restore it; on failure, report what was staged so it stays recoverable.
+    // Without Trash, originals go aside and are deleted after the merge, so
+    // undo keeps their incoming copies.
+    let mut trashed = Vec::new();
+    let mut aside = None;
+    for location in &plan.overwritten {
+        let staged = if cancellable.is_cancelled() {
+            Err(cancelled_local_operation())
+        } else {
+            match (hooks.stage_overwrite)(location.clone(), cancellable.clone()).await {
+                Ok(()) => {
+                    trashed.push(location.clone());
+                    Ok(())
+                }
+                Err(error) => match (target_path.as_deref(), location.native_path()) {
+                    (Some(root), Some(path)) if is_trash_unsupported_failure(false, &error) => {
+                        merge_aside::set_aside(&mut aside, root, path, location.display_name())
+                            .await
+                    }
+                    _ if was_cancelled(&error) => Err(error),
+                    _ => Err(glib::Error::new(
+                        gio::IOErrorEnum::Failed,
+                        &rust_i18n::t!(
+                            "Could not move %{name} to Trash before merging: %{error}",
+                            name = location.display_name(),
+                            error = crate::services::gio_error_detail(&error)
+                        ),
+                    )),
+                },
+            }
+        };
+        if let Err(error) = staged {
+            (hooks.on_merged)(MergePlan {
+                created: Vec::new(),
+                overwritten: trashed,
+            });
+            return Err(merge_aside::abandon(aside, error).await);
+        }
+    }
+    (hooks.on_merged)(MergePlan {
+        created: plan.created,
+        overwritten: trashed,
+    });
+    if let Err(error) = (hooks.copy_into_target)(source.clone(), target, true, cancellable.clone()).await
+    {
+        return Err(merge_aside::abandon(aside, error).await);
+    }
+    let flushed = merge_aside::finish(aside).await?;
     if move_source {
-        if let Some(path) = target_path.as_deref() {
+        if let Some(path) = target_path.as_deref()
+            && !flushed
+        {
             flush_removable_destination(path).await?;
         }
         permanently_delete_maybe_local_if_unchanged(source, true, source_identity, cancellable)
@@ -3917,9 +3950,9 @@ async fn merge_local_with_progress(
     cancellable: gio::Cancellable,
     affected_locations: Option<&mut HashSet<Location>>,
     progress: Option<Rc<TransferProgressTracker>>,
+    fat_family: bool,
     on_merged: &dyn Fn(MergePlan),
 ) -> Result<(), glib::Error> {
-    let fat_family = target_is_fat_family(&target, &MountTable::current());
     merge_local_with(
         source,
         target,
@@ -3961,6 +3994,7 @@ async fn merge_local(
         cancellable,
         None,
         None,
+        false,
         on_merged,
     )
     .await
@@ -6221,6 +6255,7 @@ impl OperationProvider for LocalOperationProvider {
                         operation_cancellable.clone(),
                         Some(&mut affected_locations),
                         Some(progress.clone()),
+                        fat_family,
                         &|plan| {
                             emit(OperationEvent::Merged {
                                 request_id: request.id,
