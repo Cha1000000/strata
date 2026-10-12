@@ -905,6 +905,9 @@ fn append_tar_entries(
     cancelled: &AtomicBool,
 ) -> Result<(), ArchiveError> {
     let mut builder = tar::Builder::new(CompressionIo::new(writer, cancelled));
+    // The crate takes a file that reports no blocks as all holes, as small
+    // files on ntfs3 or with ext4 inline data do, and would store zeros.
+    builder.sparse(false);
     visit_archive_entries(entries, cancelled, &mut |path, source| {
         let mut header = tar::Header::new_gnu();
         match source {

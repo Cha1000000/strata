@@ -147,7 +147,9 @@ bytes, including any already-compressed members. The all-compressed fast path
 still emits a valid gzip header, DEFLATE stream, checksum and trailer, not raw
 TAR or concatenated per-file gzip streams. It trades a little size overhead,
 including uncompressed TAR metadata/padding, for avoiding recompression. TAR
-retains its existing sparse-file and symlink handling. Choose ZIP or 7Z when
+retains its existing symlink handling but stores sparse files in full, because
+the tar crate's sparse detection takes a file that reports no allocated blocks,
+such as a small file on ntfs3, for one made only of holes. Choose ZIP or 7Z when
 per-member compression selection matters for mixed inputs.
 
 ## Classification and limits
