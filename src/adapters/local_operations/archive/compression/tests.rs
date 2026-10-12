@@ -9,7 +9,7 @@ use super::super::fixtures::{
 };
 use super::{ArchiveError, inspect_archive_sources, process_umask, write_staged_archive};
 use crate::{
-    adapters::local_operations::tests::fs_quirks::{FsQuirks, Op, Quirks, Trash},
+    adapters::local_operations::tests::fs_quirks::{FsQuirks, Op, Quirks, Trash, recreated},
     services::{ArchiveFormat, ReplacedOriginal, TransferConflict, TrashedOriginal},
     test_support::ASYNC_MAIN_CONTEXT_DEFAULT,
 };
@@ -343,10 +343,9 @@ fn an_archive_swapped_while_encoding_is_never_replaced() -> Result<(), Box<dyn E
             TransferConflict::ReplaceExisting,
             never_cancelled(),
             move |mut file| {
-                // Birth times can be as coarse as a scheduler tick.
-                std::thread::sleep(std::time::Duration::from_millis(20));
                 fs::remove_file(&swapped).map_err(|error| error.to_string())?;
                 fs::write(&swapped, b"theirs").map_err(|error| error.to_string())?;
+                recreated(&swapped);
                 file.write_all(b"replacement")
                     .map_err(|error| error.to_string())?;
                 Ok(())

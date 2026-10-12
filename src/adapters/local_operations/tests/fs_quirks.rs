@@ -103,7 +103,8 @@ pub(crate) struct Quirks {
     pub fs_type: Option<FsWord>,
     pub trash: Trash,
     /// Reports the first inode number seen at each matching name for whatever
-    /// is there later, as ext4, NFS and CIFS hand a freed number straight out.
+    /// is there later, as ext4, NFS and CIFS hand a freed number straight out,
+    /// with a birth time that changes only when [`recreated`] marks a new item.
     pub reused_inodes: Option<&'static str>,
     /// As on NFSv3, ntfs-3g and exfat-fuse.
     pub no_birth_time: bool,
@@ -150,6 +151,7 @@ struct State {
     quirks: Quirks,
     calls: Vec<Call>,
     inodes: HashMap<PathBuf, u64>,
+    births: HashMap<PathBuf, i64>,
     stale: HashMap<PathBuf, EntryStat>,
 }
 
@@ -174,6 +176,7 @@ impl FsQuirks {
                 quirks,
                 calls: Vec::new(),
                 inodes: HashMap::new(),
+                births: HashMap::new(),
                 stale: HashMap::new(),
             }),
         });
@@ -297,7 +300,8 @@ impl Scope {
                 .file_name()
                 .is_some_and(|name| matches(pattern, &[name]))
         {
-            stat.identity.inode = *state.inodes.entry(path).or_insert(stat.identity.inode);
+            stat.identity.inode = *state.inodes.entry(path.clone()).or_insert(stat.identity.inode);
+            stat.identity.birth = Some((*state.births.entry(path).or_default(), 0));
         }
         if state.quirks.no_birth_time {
             stat.identity.birth = None;
@@ -509,6 +513,16 @@ fn scope_for_path(path: &Path) -> Option<Arc<Scope>> {
         .filter(|scope| parent.starts_with(&scope.root))
         .max_by_key(|scope| scope.root.as_os_str().len())
         .cloned()
+}
+
+/// Gives whatever is now at `path` a new birth time under `reused_inodes`.
+pub(crate) fn recreated(path: &Path) {
+    let (Some(scope), Some(name)) = (scope_for_path(path), path.file_name()) else {
+        return;
+    };
+    if let Some(parent) = path.parent().and_then(|parent| parent.canonicalize().ok()) {
+        *scope.state().births.entry(parent.join(name)).or_default() += 1;
+    }
 }
 
 fn same_scope(left: &Option<Arc<Scope>>, right: &Option<Arc<Scope>>) -> bool {
