@@ -4024,40 +4024,27 @@ async fn merge_local_with(
     Ok(())
 }
 
-async fn merge_local_with_progress(
-    source: gio::File,
-    target: gio::File,
-    move_source: bool,
-    cancellable: gio::Cancellable,
-    affected_locations: Option<&mut HashSet<Location>>,
+fn progress_merge_hooks(
     progress: Option<Rc<TransferProgressTracker>>,
     fat_family: bool,
     on_merged: &dyn Fn(MergePlan),
-) -> Result<(), glib::Error> {
-    merge_local_with(
-        source,
-        target,
-        move_source,
-        cancellable,
-        affected_locations,
-        MergeHooks {
-            fat_family,
-            copy_into_target: Rc::new(move |source, target, _directory, cancellable| {
-                copy_recursively_with_progress(
-                    source,
-                    target,
-                    true,
-                    cancellable,
-                    None,
-                    progress.clone(),
-                    fat_family,
-                )
-            }),
-            stage_overwrite: Rc::new(trash_stage_overwrite),
-            on_merged,
-        },
-    )
-    .await
+) -> MergeHooks<'_> {
+    MergeHooks {
+        fat_family,
+        copy_into_target: Rc::new(move |source, target, _directory, cancellable| {
+            copy_recursively_with_progress(
+                source,
+                target,
+                true,
+                cancellable,
+                None,
+                progress.clone(),
+                fat_family,
+            )
+        }),
+        stage_overwrite: Rc::new(trash_stage_overwrite),
+        on_merged,
+    }
 }
 
 #[cfg(test)]
@@ -4068,15 +4055,13 @@ async fn merge_local(
     cancellable: gio::Cancellable,
     on_merged: &dyn Fn(MergePlan),
 ) -> Result<(), glib::Error> {
-    merge_local_with_progress(
+    merge_local_with(
         source,
         target,
         move_source,
         cancellable,
         None,
-        None,
-        false,
-        on_merged,
+        progress_merge_hooks(None, false, on_merged),
     )
     .await
 }
@@ -6321,22 +6306,20 @@ impl OperationProvider for LocalOperationProvider {
                     )
                     .await
                 } else if item.conflict == TransferConflict::Merge {
-                    merge_local_with_progress(
+                    merge_local_with(
                         source,
                         target,
                         request.move_sources,
                         operation_cancellable.clone(),
                         Some(&mut affected_locations),
-                        Some(progress.clone()),
-                        fat_family,
-                        &|plan| {
+                        progress_merge_hooks(Some(progress.clone()), fat_family, &|plan| {
                             emit(OperationEvent::Merged {
                                 request_id: request.id,
                                 source: item.source.clone(),
                                 created: plan.created,
                                 overwritten: plan.overwritten,
                             });
-                        },
+                        }),
                     )
                     .await
                 } else if item.conflict == TransferConflict::ReplaceExisting {

@@ -677,9 +677,11 @@ fn set_aside_refuses_a_substituted_target() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+type ProbeCase = (fn() -> Quirks, Probed, Feasibility, Feasibility);
+
 #[test]
 fn the_probe_learns_each_quirk_and_leaves_nothing_behind() -> Result<(), Box<dyn Error>> {
-    let cases: [(fn() -> Quirks, Probed, Feasibility, Feasibility); 5] = [
+    let cases: [ProbeCase; 5] = [
         (
             Quirks::default,
             Probed {
