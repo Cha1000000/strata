@@ -1122,56 +1122,79 @@ struct ParallelCopyOutcome {
     written_paths: Vec<PathBuf>,
 }
 
+/// Opens the source and creates its stage, so a failure here leaves nothing to discard.
+fn open_local_regular_copy(
+    source: &gio::File,
+    target: &gio::File,
+) -> Result<(std::fs::File, PathBuf, StagedSibling), glib::Error> {
+    let source_path = source
+        .path()
+        .ok_or_else(|| translated_io_error("Copy source must be a local path"))?;
+    let source_parent_path = source_path
+        .parent()
+        .ok_or_else(|| translated_io_error("Cannot copy the filesystem root"))?;
+    let source_name = source_path
+        .file_name()
+        .ok_or_else(|| translated_io_error("Invalid copy source"))?;
+    let source_parent = open_local_parent_directory(source_parent_path).map_err(io_error)?;
+    let source_file =
+        match open_local_copy_source(&source_parent, source_name).map_err(io_error)? {
+            LocalCopySource::File(file) => file,
+            _ => {
+                return Err(translated_io_error(
+                    "Copy source is no longer a regular file",
+                ));
+            }
+        };
+    let target_path = target
+        .path()
+        .ok_or_else(|| translated_io_error("Copy destination must be a local path"))?;
+    let target_parent = target_path
+        .parent()
+        .ok_or_else(|| translated_io_error("The destination has no parent directory"))?;
+    let staged = StagedSibling::create(target_parent, StageContent::File)
+        .map_err(|error| staging_failed(&target_path, error))?;
+    Ok((source_file, target_path, staged))
+}
+
 async fn copy_new_local_regular_file(
     source: gio::File,
     target: gio::File,
     cancellable: gio::Cancellable,
 ) -> Result<(), glib::Error> {
     let copy_cancellable = cancellable.clone();
-    let (staged, target_path) = gio::spawn_blocking(move || {
+    let copied = gio::spawn_blocking(move || {
         let cancellable = copy_cancellable;
-        cancellable.set_error_if_cancelled()?;
-        let source_path = source
-            .path()
-            .ok_or_else(|| translated_io_error("Copy source must be a local path"))?;
-        let source_parent_path = source_path
-            .parent()
-            .ok_or_else(|| translated_io_error("Cannot copy the filesystem root"))?;
-        let source_name = source_path
-            .file_name()
-            .ok_or_else(|| translated_io_error("Invalid copy source"))?;
-        let source_parent = open_local_parent_directory(source_parent_path).map_err(io_error)?;
-        let source_file =
-            match open_local_copy_source(&source_parent, source_name).map_err(io_error)? {
-                LocalCopySource::File(file) => file,
-                _ => {
-                    return Err(translated_io_error(
-                        "Copy source is no longer a regular file",
-                    ));
-                }
-            };
-        let target_path = target
-            .path()
-            .ok_or_else(|| translated_io_error("Copy destination must be a local path"))?;
-        let target_parent = target_path
-            .parent()
-            .ok_or_else(|| translated_io_error("The destination has no parent directory"))?;
-        let staged = StagedSibling::create(target_parent, StageContent::File)
-            .map_err(|error| staging_failed(&target_path, error))?;
+        let opened = cancellable
+            .set_error_if_cancelled()
+            .and_then(|()| open_local_regular_copy(&source, &target));
+        let (source_file, target_path, staged) = opened.map_err(|error| (error, None))?;
         let source_ref = gio::File::for_path(format!("/proc/self/fd/{}", source_file.as_raw_fd()));
-        let staged_file = gio::File::for_path(staged.path());
-        source_ref.copy(
-            &staged_file,
-            gio::FileCopyFlags::ALL_METADATA | gio::FileCopyFlags::OVERWRITE,
-            Some(&cancellable),
-            None,
-        )?;
-        cancellable.set_error_if_cancelled()?;
-        Ok::<_, glib::Error>((staged, target_path))
+        let copied = source_ref
+            .copy(
+                &gio::File::for_path(staged.path()),
+                gio::FileCopyFlags::ALL_METADATA | gio::FileCopyFlags::OVERWRITE,
+                Some(&cancellable),
+                None,
+            )
+            .and_then(|()| cancellable.set_error_if_cancelled());
+        match copied {
+            Ok(()) => Ok((staged, target_path)),
+            Err(error) => Err((error, Some(staged))),
+        }
     })
     .await
-    .map_err(|_| io_error("Copy worker stopped unexpectedly"))??;
-    publish_staged_without_replace(staged, target_path, cancellable).await
+    .map_err(|_| io_error("Copy worker stopped unexpectedly"))?;
+    match copied {
+        Ok((staged, target_path)) => {
+            publish_staged_without_replace(staged, target_path, cancellable).await
+        }
+        Err((error, None)) => Err(error),
+        Err((error, Some(staged))) => {
+            let cleanup = discard_incomplete_staged(staged).await;
+            Err(copy_failure_after_cleanup(error, cleanup))
+        }
+    }
 }
 
 async fn execute_parallel_copy_plans(
@@ -2860,20 +2883,20 @@ impl StagedSibling {
                 let created = match &content {
                     StageContent::File => fs()
                         .create_exclusive(entry, rustix::fs::Mode::from_raw_mode(0o600))
-                        .map(drop),
-                    StageContent::Directory => {
-                        fs().mkdir(entry, rustix::fs::Mode::from_raw_mode(0o700))
-                    }
-                    StageContent::Symlink(link) => fs().symlink(link, entry),
+                        .and_then(|file| fs().stat_fd(file.as_fd()))
+                        .map(Some),
+                    StageContent::Directory => fs()
+                        .mkdir(entry, rustix::fs::Mode::from_raw_mode(0o700))
+                        .map(|()| None),
+                    StageContent::Symlink(link) => fs().symlink(link, entry).map(|()| None),
                 };
-                match created {
-                    Ok(()) => {}
+                let stat = match created {
+                    Ok(Some(stat)) => stat,
+                    Ok(None) => fs().stat(entry, false).map_err(PlaceError::Io)?,
                     Err(rustix::io::Errno::EXIST) => return Err(PlaceError::Exists),
                     Err(error) => return Err(PlaceError::Io(error)),
-                }
-                fs().stat(entry, false)
-                    .map(|stat| (stat.identity, stat.kind))
-                    .map_err(PlaceError::Io)
+                };
+                Ok((stat.identity, stat.kind))
             })
             .map_err(|error| match error {
                 PlaceError::Io(error) => io::Error::from(error),

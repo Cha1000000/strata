@@ -2,7 +2,9 @@
 
 use rustix::io::Errno;
 
-use super::super::{StageContent, StagedSibling, publish_staged_without_replace};
+use super::super::{
+    StageContent, StagedSibling, copy_new_local_regular_file, publish_staged_without_replace,
+};
 use super::fs_quirks::{Op, Racer, Support};
 use super::*;
 
@@ -382,6 +384,37 @@ fn cancelling_a_new_file_copy_removes_the_incomplete_stage() -> Result<(), Box<d
     assert!(!target.exists());
     assert_eq!(fs::read_dir(root.path())?.count(), 2);
     assert_eq!(fs::read(root.path().join("keep.txt"))?, b"keep");
+    Ok(())
+}
+
+#[test]
+fn a_cancelled_parallel_file_copy_removes_its_stage() -> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let root = tempfile::tempdir()?;
+    let source = root.path().join("source.bin");
+    fs::write(&source, b"data")?;
+    let cancellable = gio::Cancellable::new();
+    let cancel = cancellable.clone();
+    let racer: Racer = Box::new(move || cancel.cancel());
+    let _scope = FsQuirks::install(
+        root.path(),
+        Quirks {
+            // Cancels once the stage exists, before anything is copied into it.
+            before: vec![(Op::Create, ".strata-replacement-*", 0, racer)],
+            ..Quirks::default()
+        },
+    );
+
+    let result = glib::MainContext::default().block_on(copy_new_local_regular_file(
+        gio::File::for_path(&source),
+        gio::File::for_path(root.path().join("target.bin")),
+        cancellable,
+    ));
+
+    assert!(result.is_err_and(|error| error.matches(gio::IOErrorEnum::Cancelled)));
+    assert_eq!(fs::read_dir(root.path())?.count(), 1);
     Ok(())
 }
 
@@ -823,6 +856,43 @@ fn staged_fallback_removes_reserved_directory_on_copy_error() -> Result<(), Box<
 
     assert!(!target.exists());
     assert!(!staged_path.exists());
+    Ok(())
+}
+
+#[test]
+fn a_stage_left_after_the_exclusive_copy_is_reported() -> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let root = tempfile::tempdir()?;
+    let staged = stage(root.path(), false)?;
+    let staged_path = staged.path();
+    fs::write(&staged_path, b"copied")?;
+    let swapped = staged_path.clone();
+    let racer: Racer = Box::new(move || {
+        fs::remove_file(&swapped).expect("remove file stage");
+        fs::create_dir(&swapped).expect("replace stage with directory");
+    });
+    let _scope = FsQuirks::install(
+        root.path(),
+        Quirks {
+            // Two stats decide publication; the third is the discard after copying.
+            before: vec![(Op::Stat, ".strata-replacement-*", 2, racer)],
+            ..Quirks::without_placement()
+        },
+    );
+    let target = root.path().join("target");
+
+    let error = publish(staged, &target).expect_err("the stage cannot be removed");
+
+    assert!(
+        error
+            .message()
+            .contains("staging copy could not be removed"),
+        "{error}"
+    );
+    assert_eq!(fs::read(&target)?, b"copied");
+    assert!(staged_path.is_dir());
     Ok(())
 }
 
