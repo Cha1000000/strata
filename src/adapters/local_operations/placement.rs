@@ -909,6 +909,9 @@ pub(super) fn rename_in_place(
         })
     })?;
     let parked = at(from.dir, &temporary);
+    // The SMB client keeps answering for the lookup of `to` for about a
+    // second; revalidating drops it.
+    let _ = fs.stat(to, true);
     match rename.place(parked, to, Some(identity)) {
         Ok(_) => Ok(Renamed::CaseOnly),
         Err(error) => match rename.place(parked, from, Some(identity)) {
@@ -934,15 +937,30 @@ pub(super) fn alias_of(
 ) -> Option<LocalFileIdentity> {
     let source = fs.stat(from, true).ok()?;
     let target = fs.stat(to, true).ok()?;
+    let names = || fs.names(at(to.dir, OsStr::new(".")));
     if source.identity != target.identity {
-        return None;
+        // libfuse without `use_ino` numbers each spelling as its own node.
+        let same_item = (source.kind, source.size, source.mtime)
+            == (target.kind, target.size, target.mtime)
+            && same_directory(fs, from.dir, to.dir)
+            && names().is_ok_and(|names| {
+                let mut spellings = names
+                    .iter()
+                    .filter(|name| same_ignoring_case(name, to.name));
+                spellings.next().is_some_and(|name| name == from.name) && spellings.next().is_none()
+            });
+        return same_item.then_some(source.identity);
     }
     let single_name = !source.is_directory() && source.nlink == 1;
-    let alias = single_name
-        || fs
-            .names(at(to.dir, OsStr::new(".")))
-            .is_ok_and(|names| !names.iter().any(|name| name == to.name));
+    let alias = single_name || names().is_ok_and(|names| !names.iter().any(|name| name == to.name));
     alias.then_some(source.identity)
+}
+
+fn same_ignoring_case(left: &OsStr, right: &OsStr) -> bool {
+    match (left.to_str(), right.to_str()) {
+        (Some(left), Some(right)) => left.to_lowercase() == right.to_lowercase(),
+        _ => left.eq_ignore_ascii_case(right),
+    }
 }
 
 /// The ladder, plus a last rung so renames still work on mounts without

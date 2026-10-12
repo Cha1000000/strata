@@ -58,6 +58,11 @@ Residual limits:
 - On SMB2/3, gvfsd-fuse and FUSE daemons that ignore rename flags, the no-replace check is made
   by the client kernel, so it protects against local processes but not against another client
   creating the same name at the same moment.
+- On a case-insensitive SMB share without POSIX extensions, the Linux cifs client turns server
+  inode numbers off for the whole mount once a folder is looked up under a second spelling, as the
+  check before a case-only folder rename does ("Autodisabling the use of server inode numbers" in
+  the kernel log). Hard links then report different inode numbers, so steps that prove a link fail
+  closed; `RENAME_NOREPLACE` still places items there.
 - If the reply to the placeholder `mkdir` is lost on NFS, an empty folder can remain at the
   destination name.
 
@@ -118,7 +123,11 @@ Local renames go through the same routine instead of GIO's check-then-rename.
 - **Case-only renames** (`notes.txt` to `Notes.txt`) on case-insensitive folders — vfat, exFAT,
   SMB shares, casefolded ext4, f2fs and tmpfs folders, ntfs3 with `nocase` — are done in two steps
   through a hidden `.strata-rename-<id>` name, with rollback. A plain rename is a silent no-op
-  there, and a no-replace rename reports the name as taken.
+  there, and a no-replace rename reports the name as taken. The SMB client caches the lookup of
+  the new spelling for about a second, so it is revalidated before the second step. exfat-fuse
+  gives each spelling its own inode number, so there the new spelling counts as the item itself
+  only when the folder lists no such name, the item's own name is the only one that matches it
+  ignoring case, and type, size and modification time agree.
 - **Mounts with neither `RENAME_NOREPLACE` nor hard links** (vboxsf, rclone, s3fs, sshfs without
   the hardlink extension), confirmed by a probe, and files that refuse a hard link on a mount
   without `RENAME_NOREPLACE` (for example under `fs.protected_hardlinks`): a file rename first

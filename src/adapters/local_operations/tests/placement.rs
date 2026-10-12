@@ -836,7 +836,16 @@ fn make(path: &Path, folder: bool) -> io::Result<()> {
 
 #[test]
 fn a_case_only_rename_goes_through_a_temporary_name() -> Result<(), Box<dyn Error>> {
-    for quirks in [Quirks::default, Quirks::without_placement] {
+    let smb = || Quirks {
+        stale_aliases: true,
+        ..Quirks::default()
+    };
+    let exfat_fuse = || Quirks {
+        alias_inodes: true,
+        ..Quirks::default()
+    };
+    let shapes: [fn() -> Quirks; 4] = [Quirks::default, Quirks::without_placement, smb, exfat_fuse];
+    for quirks in shapes {
         for folder in [false, true] {
             let root = tempfile::tempdir()?;
             let _scope = FsQuirks::install(root.path(), case_insensitive(quirks()));
@@ -873,6 +882,33 @@ fn a_hard_link_is_never_taken_for_a_case_alias() -> Result<(), Box<dyn Error>> {
     );
     assert_eq!(names(root.path())?, ["Report", "report"]);
     assert_eq!(fs::metadata(root.path().join("report"))?.nlink(), 2);
+    Ok(())
+}
+
+#[test]
+fn a_twin_spelling_is_never_taken_for_a_case_alias() -> Result<(), Box<dyn Error>> {
+    let root = tempfile::tempdir()?;
+    let modified = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+    for name in ["report", "Report"] {
+        fs::write(root.path().join(name), b"data")?;
+        fs::File::options()
+            .write(true)
+            .open(root.path().join(name))?
+            .set_modified(modified)?;
+    }
+    // Separate nodes alike in type, size and time, as libfuse without `use_ino`
+    // numbers each spelling; the first listed would pass for the item itself.
+    let listed = fs::read_dir(root.path())?
+        .map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned()))
+        .collect::<Result<Vec<_>, _>>()?;
+    let scope = FsQuirks::install(root.path(), Quirks::default());
+
+    assert_eq!(
+        rename_in(root.path(), &listed[0], &listed[1]),
+        Err(RenameFailure::Place(PlaceError::Exists))
+    );
+    assert_eq!(scope.count(Op::Rename), 1);
+    assert_eq!(names(root.path())?, ["Report", "report"]);
     Ok(())
 }
 

@@ -92,6 +92,11 @@ pub(crate) struct Quirks {
     pub collisions_as_eperm: bool,
     pub rename_over_empty_dir: OverEmptyDirectory,
     pub case_insensitive: bool,
+    /// Keeps answering for a name found through a case alias until a forced
+    /// revalidation, as the SMB client's lookup cache does for about a second.
+    pub stale_aliases: bool,
+    /// A case alias reports its own inode number, as libfuse without `use_ino` does.
+    pub alias_inodes: bool,
     /// Names rejected with `EINVAL` by rename, mkdir, symlink and create,
     /// and with `EPERM` by link, as on vfat.
     pub invalid_name: Option<fn(&OsStr) -> bool>,
@@ -145,6 +150,7 @@ struct State {
     quirks: Quirks,
     calls: Vec<Call>,
     inodes: HashMap<PathBuf, u64>,
+    stale: HashMap<PathBuf, EntryStat>,
 }
 
 static SCOPES: Mutex<Vec<Arc<Scope>>> = Mutex::new(Vec::new());
@@ -168,6 +174,7 @@ impl FsQuirks {
                 quirks,
                 calls: Vec::new(),
                 inodes: HashMap::new(),
+                stale: HashMap::new(),
             }),
         });
         scopes().push(scope.clone());
@@ -308,9 +315,10 @@ impl Scope {
     }
 
     /// The differently-cased existing name a case-insensitive lookup of
-    /// `entry` would find.
+    /// `entry` would find. Lookups revalidate, so an already case-insensitive
+    /// FUSE mount cannot answer from its cache for a name that has moved.
     fn alias(&self, entry: Entry<'_>) -> Option<OsString> {
-        if !self.quirk(|quirks| quirks.case_insensitive) || System.stat(entry, false).is_ok() {
+        if !self.quirk(|quirks| quirks.case_insensitive) || System.stat(entry, true).is_ok() {
             return None;
         }
         System
@@ -323,8 +331,48 @@ impl Scope {
             .find(|name| name != entry.name && name.eq_ignore_ascii_case(entry.name))
     }
 
+    fn stat(
+        &self,
+        at: Entry<'_>,
+        path: Option<&Path>,
+        force_sync: bool,
+    ) -> Result<EntryStat, Errno> {
+        let (stale_aliases, alias_inodes) =
+            self.quirk(|quirks| (quirks.stale_aliases, quirks.alias_inodes));
+        let path = path.filter(|_| stale_aliases);
+        if let Some(path) = path {
+            let mut state = self.state();
+            if force_sync {
+                state.stale.remove(path);
+            } else if let Some(stat) = state.stale.get(path) {
+                return Ok(*stat);
+            }
+        }
+        let Some(alias) = self.alias(at) else {
+            return System.stat(at, force_sync);
+        };
+        let mut stat = System.stat(
+            Entry {
+                dir: at.dir,
+                name: &alias,
+            },
+            force_sync,
+        )?;
+        if alias_inodes {
+            stat.identity.inode = !stat.identity.inode;
+        }
+        if let Some(path) = path {
+            self.state().stale.insert(path.to_path_buf(), stat);
+        }
+        Ok(stat)
+    }
+
+    fn stale(&self, entry: Entry<'_>) -> bool {
+        path_of(entry.dir).is_some_and(|dir| self.state().stale.contains_key(&dir.join(entry.name)))
+    }
+
     fn occupied(&self, entry: Entry<'_>) -> bool {
-        System.stat(entry, false).is_ok() || self.alias(entry).is_some()
+        System.stat(entry, true).is_ok() || self.alias(entry).is_some()
     }
 
     fn collision(&self) -> Errno {
@@ -364,7 +412,7 @@ impl Scope {
             )
         });
         if flags.contains(RenameFlags::NOREPLACE) {
-            if self.occupied(to) {
+            if self.occupied(to) || self.stale(to) {
                 return Err(Errno::EXIST);
             }
             if let Support::Rejected(error) = rename_flags {
@@ -554,11 +602,14 @@ impl FsOps for Scoped {
     fn stat(&self, at: Entry<'_>, force_sync: bool) -> Result<EntryStat, Errno> {
         assert_off_main_thread();
         match scope_for(at.dir) {
-            Some(scope) => scope
-                .run(Op::Stat, &[at.name], |scope| {
-                    scope.resolved(at, |at| System.stat(at, force_sync))
-                })
-                .map(|stat| scope.reported(path_of(at.dir).map(|dir| dir.join(at.name)), stat)),
+            Some(scope) => {
+                let path = path_of(at.dir).map(|dir| dir.join(at.name));
+                scope
+                    .run(Op::Stat, &[at.name], |scope| {
+                        scope.stat(at, path.as_deref(), force_sync)
+                    })
+                    .map(|stat| scope.reported(path, stat))
+            }
             None => System.stat(at, force_sync),
         }
     }

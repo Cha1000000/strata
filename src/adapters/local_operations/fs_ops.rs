@@ -48,6 +48,7 @@ pub(super) struct EntryStat {
     pub mode: u32,
     pub nlink: u64,
     pub size: u64,
+    pub mtime: (i64, u32),
 }
 
 impl EntryStat {
@@ -114,6 +115,7 @@ fn entry_stat(stat: &rustix::fs::Statx) -> EntryStat {
         mode: u32::from(stat.stx_mode) & 0o7777,
         nlink: u64::from(stat.stx_nlink),
         size: stat.stx_size,
+        mtime: (stat.stx_mtime.tv_sec, stat.stx_mtime.tv_nsec),
     }
 }
 
@@ -124,6 +126,10 @@ fn legacy_stat(stat: &rustix::fs::Stat) -> EntryStat {
         mode: stat.st_mode & 0o7777,
         nlink: stat.st_nlink,
         size: u64::try_from(stat.st_size).unwrap_or(u64::MAX),
+        mtime: (
+            stat.st_mtime,
+            u32::try_from(stat.st_mtime_nsec).unwrap_or_default(),
+        ),
     }
 }
 
@@ -133,6 +139,7 @@ fn statx_at(dir: BorrowedFd<'_>, name: &OsStr, flags: AtFlags) -> Result<EntrySt
         | StatxFlags::INO
         | StatxFlags::NLINK
         | StatxFlags::SIZE
+        | StatxFlags::MTIME
         | StatxFlags::BTIME;
     match rustix::fs::statx(dir, name, flags | AtFlags::SYMLINK_NOFOLLOW, mask) {
         Ok(stat) => Ok(entry_stat(&stat)),
