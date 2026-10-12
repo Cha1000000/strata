@@ -298,6 +298,7 @@
   "Could not remove incomplete extraction %{path}: %{error}": "无法删除未完成的解压内容 %{path}：%{error}",
   "Could not remove portal preference: %{error}": "无法移除门户偏好设置：%{error}",
   "Could not remove the extraction staging folder: %{error}": "无法删除解压临时文件夹：%{error}",
+  "Could not rename “%{name}”; it was left as “%{temporary}”: %{error}": "无法重命名“%{name}”，它现在的名称为“%{temporary}”：%{error}",
   "Could not replace the installed binary: %{error}": "无法替换已安装的二进制文件：%{error}",
   "Could not replace “%{name}”; the original was kept as “%{kept}”: %{error}": "无法替换“%{name}”，原项目已保留为“%{kept}”：%{error}",
   "Could not resolve the Strata executable %{path}: %{error}": "无法解析 Strata 可执行文件 %{path}：%{error}",

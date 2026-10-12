@@ -298,6 +298,7 @@
   "Could not remove incomplete extraction %{path}: %{error}": "Impossibile rimuovere l’estrazione incompleta %{path}: %{error}",
   "Could not remove portal preference: %{error}": "Impossibile rimuovere la preferenza del portale: %{error}",
   "Could not remove the extraction staging folder: %{error}": "Impossibile rimuovere la cartella temporanea di estrazione: %{error}",
+  "Could not rename “%{name}”; it was left as “%{temporary}”: %{error}": "Impossibile rinominare “%{name}”; l’elemento è rimasto come “%{temporary}”: %{error}",
   "Could not replace the installed binary: %{error}": "Impossibile sostituire il binario installato: %{error}",
   "Could not replace “%{name}”; the original was kept as “%{kept}”: %{error}": "Impossibile sostituire “%{name}”; l’originale è stato conservato come “%{kept}”: %{error}",
   "Could not resolve the Strata executable %{path}: %{error}": "Impossibile risolvere l’eseguibile di Strata %{path}: %{error}",

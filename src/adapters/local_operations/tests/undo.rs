@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: MIT
 
+use rustix::io::Errno;
+
+use super::fs_quirks::Op;
 use super::*;
+use crate::services::RenameRequest;
 
 fn drive_until_rename_settles(events: &Rc<RefCell<Vec<OperationEvent>>>) {
     wait_for_operation(events, |event| {
@@ -256,6 +260,182 @@ fn rename_undo_refuses_an_occupied_destination_and_can_retry() -> Result<(), Box
     ));
     assert!(!current.exists());
     assert_eq!(fs::read(&original)?, b"renamed");
+    Ok(())
+}
+
+fn inode(path: &Path) -> u64 {
+    std::os::unix::fs::MetadataExt::ino(&fs::symlink_metadata(path).expect("entry exists"))
+}
+
+fn settle(start: impl FnOnce(Rc<dyn Fn(OperationEvent)>) -> LoadHandle) -> Vec<OperationEvent> {
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let emitted = events.clone();
+    let _operation = start(Rc::new(move |event| emitted.borrow_mut().push(event)));
+    drive_until_rename_settles(&events);
+    events.take()
+}
+
+fn rename(path: &Path, new_name: &str) -> Vec<OperationEvent> {
+    let entry = file_entry(path);
+    settle(|emit| {
+        LocalOperationProvider.rename(
+            RenameRequest {
+                id: OperationRequestId(46),
+                entry,
+                new_name: new_name.to_owned(),
+            },
+            emit,
+        )
+    })
+}
+
+fn undo_rename(current: &Path, original: &Path) -> Vec<OperationEvent> {
+    let request = UndoRenameRequest {
+        id: OperationRequestId(47),
+        current: Location::local(current),
+        original: Location::local(original),
+    };
+    settle(|emit| LocalOperationProvider.undo_rename(request, emit))
+}
+
+fn failure(events: &[OperationEvent]) -> String {
+    match events {
+        [OperationEvent::Failed { message, .. }] => message.clone(),
+        other => panic!("expected one failure, got {other:?}"),
+    }
+}
+
+#[test]
+fn renames_and_their_undo_keep_the_item_where_rename_flags_or_links_are_missing()
+-> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    for quirks in [Quirks::without_rename_flags, Quirks::without_placement] {
+        for folder in [false, true] {
+            let root = tempfile::tempdir()?;
+            let _scope = FsQuirks::install(root.path(), quirks());
+            let source = root.path().join("item");
+            let renamed = root.path().join("renamed");
+            if folder {
+                fs::create_dir(&source)?;
+            } else {
+                fs::write(&source, b"data")?;
+            }
+            let original = inode(&source);
+
+            let events = rename(&source, "renamed");
+            assert!(
+                matches!(events.as_slice(), [OperationEvent::Renamed { .. }]),
+                "{events:?}"
+            );
+            assert_eq!(inode(&renamed), original);
+
+            let events = undo_rename(&renamed, &source);
+            assert!(
+                matches!(events.as_slice(), [OperationEvent::Renamed { .. }]),
+                "{events:?}"
+            );
+            assert_eq!(inode(&source), original);
+            assert!(!renamed.exists());
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn a_rename_never_replaces_an_item_created_meanwhile() -> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    for quirks in [Quirks::default, Quirks::without_placement] {
+        let root = tempfile::tempdir()?;
+        let source = root.path().join("item.txt");
+        let taken = root.path().join("new.txt");
+        fs::write(&source, b"mine")?;
+        let raced = taken.clone();
+        let _scope = FsQuirks::install(
+            root.path(),
+            Quirks {
+                before: vec![(
+                    Op::Rename,
+                    "new.txt",
+                    0,
+                    Box::new(move || fs::write(&raced, b"theirs").expect("racer")),
+                )],
+                ..quirks()
+            },
+        );
+
+        assert_eq!(
+            failure(&rename(&source, "new.txt")),
+            "\u{201c}new.txt\u{201d} already exists"
+        );
+        assert_eq!(fs::read(&source)?, b"mine");
+        assert_eq!(fs::read(&taken)?, b"theirs");
+    }
+    Ok(())
+}
+
+#[test]
+fn a_case_only_rename_and_its_undo_keep_the_item_or_say_where_it_was_left()
+-> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let root = tempfile::tempdir()?;
+    let source = root.path().join("report.txt");
+    let renamed = root.path().join("Report.txt");
+    fs::write(&source, b"data")?;
+    let original = inode(&source);
+    {
+        let _scope = FsQuirks::install(
+            root.path(),
+            Quirks {
+                case_insensitive: true,
+                ..Quirks::default()
+            },
+        );
+        assert!(matches!(
+            rename(&source, "Report.txt").as_slice(),
+            [OperationEvent::Renamed { .. }]
+        ));
+        assert_eq!(inode(&renamed), original);
+        assert!(matches!(
+            undo_rename(&renamed, &source).as_slice(),
+            [OperationEvent::Renamed { .. }]
+        ));
+        assert_eq!(inode(&source), original);
+    }
+
+    let _scope = FsQuirks::install(
+        root.path(),
+        Quirks {
+            case_insensitive: true,
+            // Skips the direct attempts, then fails the second step and the way back.
+            fail: vec![
+                (Op::Rename, "Report.txt", 1, Errno::IO),
+                (Op::Rename, "report.txt", 1, Errno::IO),
+            ],
+            ..Quirks::default()
+        },
+    );
+    let message = failure(&rename(&source, "Report.txt"));
+
+    let left = fs::read_dir(root.path())?
+        .map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned()))
+        .collect::<Result<Vec<_>, _>>()?;
+    let [temporary] = left.as_slice() else {
+        panic!("expected one entry, got {left:?}");
+    };
+    assert!(temporary.starts_with(".strata-rename-"), "{temporary}");
+    assert_eq!(inode(&root.path().join(temporary)), original);
+    assert_eq!(
+        message,
+        format!(
+            "Could not rename \u{201c}report.txt\u{201d}; it was left as \u{201c}{temporary}\u{201d}: A device input/output error occurred"
+        )
+    );
     Ok(())
 }
 

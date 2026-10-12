@@ -32,6 +32,10 @@ pub(super) enum Placed {
     Linked,
     ReservedDirectory,
     RecreatedSymlink,
+    /// Only from a rename: a plain rename over an empty file reserved first.
+    OverReservedFile,
+    /// Only from a rename: a plain rename of a folder to a name found free.
+    AfterCheck,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -49,6 +53,7 @@ pub(super) enum PlaceError {
 
 const ENOTSUPP: Errno = Errno::from_raw_os_error(524);
 const PROBE_PREFIX: &str = ".strata-probe-";
+const RENAME_PREFIX: &str = ".strata-rename-";
 const NAME_ATTEMPTS: usize = 8;
 
 fn is_unsupported(error: Errno) -> bool {
@@ -737,4 +742,214 @@ pub(super) fn displacement_without_trash(
         return Ok(Some(Displacement::Exchange));
     }
     Ok((can_set_aside(fs, dir, directory)? == Feasibility::Yes).then_some(Displacement::SetAside))
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum Renamed {
+    Direct(Placed),
+    /// Only the case changed, through a hidden temporary name.
+    CaseOnly,
+    Unchanged,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) enum RenameFailure {
+    Place(PlaceError),
+    /// A case-only rename failed and the item could not be moved back from
+    /// its temporary name.
+    Stranded {
+        temporary: OsString,
+        error: PlaceError,
+    },
+}
+
+/// Renames `from` to `to` without replacing another item. A name that only
+/// differs in case on a case-insensitive mount resolves to the item itself,
+/// so it is renamed in two steps through a hidden temporary name.
+pub(super) fn rename_in_place(
+    fs: &dyn FsOps,
+    from: Entry<'_>,
+    to: Entry<'_>,
+) -> Result<Renamed, RenameFailure> {
+    if from.name == to.name && same_directory(fs, from.dir, to.dir) {
+        return Ok(Renamed::Unchanged);
+    }
+    let rename = Renaming::new(fs, to.dir);
+    match rename.place(from, to, None) {
+        Err(PlaceError::Exists) => {}
+        result => return result.map(Renamed::Direct).map_err(RenameFailure::Place),
+    }
+    let Some(identity) = alias_of(fs, from, to) else {
+        return Err(RenameFailure::Place(PlaceError::Exists));
+    };
+    let (temporary, _) = reserve_hidden_name(RENAME_PREFIX, |name| {
+        rename.place(from, at(from.dir, name), Some(identity))
+    })
+    .map_err(|error| {
+        RenameFailure::Place(match error {
+            PlaceError::InvalidName => PlaceError::Unsupported,
+            error => error,
+        })
+    })?;
+    let parked = at(from.dir, &temporary);
+    match rename.place(parked, to, Some(identity)) {
+        Ok(_) => Ok(Renamed::CaseOnly),
+        Err(error) => match rename.place(parked, from, Some(identity)) {
+            Ok(_) => Err(RenameFailure::Place(error)),
+            Err(_) => Err(RenameFailure::Stranded { temporary, error }),
+        },
+    }
+}
+
+fn same_directory(fs: &dyn FsOps, left: BorrowedFd<'_>, right: BorrowedFd<'_>) -> bool {
+    match (fs.stat_dir(left), fs.stat_dir(right)) {
+        (Ok(left), Ok(right)) => left.identity == right.identity,
+        _ => false,
+    }
+}
+
+/// The item's identity when `to` names `from` itself rather than another
+/// item: a case alias, never a separate hard link.
+fn alias_of(fs: &dyn FsOps, from: Entry<'_>, to: Entry<'_>) -> Option<LocalFileIdentity> {
+    let source = fs.stat(from, true).ok()?;
+    let target = fs.stat(to, true).ok()?;
+    if source.identity != target.identity {
+        return None;
+    }
+    let single_name = !source.is_directory() && source.nlink == 1;
+    let alias = single_name
+        || fs
+            .names(at(to.dir, OsStr::new(".")))
+            .is_ok_and(|names| !names.iter().any(|name| name == to.name));
+    alias.then_some(source.identity)
+}
+
+/// The ladder, plus a last rung so renames still work on mounts that have
+/// neither `RENAME_NOREPLACE` nor hard links. That rung runs only after a
+/// probe on Strata's own names confirms both are missing.
+struct Renaming<'a> {
+    fs: &'a dyn FsOps,
+    mount: Mount<'a>,
+    probed: Cell<Option<Option<Probed>>>,
+}
+
+impl<'a> Renaming<'a> {
+    fn new(fs: &'a dyn FsOps, dir: BorrowedFd<'a>) -> Self {
+        Self {
+            fs,
+            mount: Mount::new(fs, dir),
+            probed: Cell::new(None),
+        }
+    }
+
+    fn place(
+        &self,
+        from: Entry<'_>,
+        to: Entry<'_>,
+        expected: Option<LocalFileIdentity>,
+    ) -> Result<Placed, PlaceError> {
+        match place(self.fs, from, to, expected) {
+            Err(PlaceError::Unsupported) => {}
+            result => return result,
+        }
+        let source = stat_source(self.fs, from)?;
+        if expected.is_some_and(|expected| expected != source.identity) {
+            return Err(PlaceError::Changed);
+        }
+        if !self.lacks_placement(source.is_directory()) {
+            return Err(PlaceError::Unsupported);
+        }
+        if source.is_directory() {
+            rename_folder_after_check(self.fs, from, to, &source)
+        } else {
+            rename_over_reserved_file(self.fs, from, to, &source)
+        }
+    }
+
+    fn lacks_placement(&self, directory: bool) -> bool {
+        let probed = match self.probed.get() {
+            Some(probed) => probed,
+            None => {
+                let probed = self.mount.probe(true, false).ok();
+                self.probed.set(Some(probed));
+                probed
+            }
+        };
+        probed.is_some_and(|probed| {
+            probed.no_replace == Some(false) && (directory || probed.hard_links == Some(false))
+        })
+    }
+}
+
+fn rename_over_reserved_file(
+    fs: &dyn FsOps,
+    from: Entry<'_>,
+    to: Entry<'_>,
+    source: &EntryStat,
+) -> Result<Placed, PlaceError> {
+    let reserved = match fs.create_exclusive(to, Mode::from_raw_mode(0o600)) {
+        Ok(file) => rustix::fs::fstat(&file)
+            .map(|stat| LocalFileIdentity::from_stat(&stat))
+            .map_err(PlaceError::Io)?,
+        Err(Errno::PERM) if exists(fs, to)? => return Err(PlaceError::Exists),
+        Err(error) => return Err(creation_error(error)),
+    };
+    let still_reserved = || {
+        fs.stat(to, true).is_ok_and(|current| {
+            current.identity == reserved
+                && current.kind == FileType::RegularFile
+                && current.size == 0
+        })
+    };
+    if !still_reserved() {
+        return Err(PlaceError::Exists);
+    }
+    let error = match fs.rename(from, to, RenameFlags::empty()) {
+        Ok(()) => return Ok(Placed::OverReservedFile),
+        Err(error) => error,
+    };
+    if may_have_lost_reply(error)
+        && matches!(fs.stat(from, true), Err(Errno::NOENT))
+        && fs
+            .stat(to, true)
+            .is_ok_and(|target| target.identity == source.identity)
+    {
+        return Ok(Placed::OverReservedFile);
+    }
+    if still_reserved() {
+        let _ = fs.unlink(to, AtFlags::empty());
+    }
+    Err(match error {
+        Errno::INVAL => PlaceError::InvalidName,
+        Errno::XDEV => PlaceError::CrossDevice,
+        error => PlaceError::Io(error),
+    })
+}
+
+fn rename_folder_after_check(
+    fs: &dyn FsOps,
+    from: Entry<'_>,
+    to: Entry<'_>,
+    source: &EntryStat,
+) -> Result<Placed, PlaceError> {
+    if exists(fs, to)? {
+        return Err(PlaceError::Exists);
+    }
+    match fs.rename(from, to, RenameFlags::empty()) {
+        Ok(()) => Ok(Placed::AfterCheck),
+        Err(Errno::EXIST | Errno::NOTEMPTY | Errno::NOTDIR | Errno::ISDIR) => {
+            Err(PlaceError::Exists)
+        }
+        Err(Errno::PERM) if exists(fs, to)? => Err(PlaceError::Exists),
+        Err(Errno::INVAL) => Err(if contains(fs, source.identity, to.dir) == Some(false) {
+            PlaceError::InvalidName
+        } else {
+            PlaceError::IntoItself
+        }),
+        Err(Errno::XDEV) => Err(PlaceError::CrossDevice),
+        Err(error) if may_have_lost_reply(error) => {
+            resolve(fs, from, to, Some(source.identity), error).map(|()| Placed::AfterCheck)
+        }
+        Err(error) => Err(PlaceError::Io(error)),
+    }
 }

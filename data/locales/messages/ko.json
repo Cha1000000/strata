@@ -298,6 +298,7 @@
   "Could not remove incomplete extraction %{path}: %{error}": "불완전하게 압축을 푼 %{path}을(를) 제거할 수 없습니다: %{error}",
   "Could not remove portal preference: %{error}": "포털 기본 설정을 제거할 수 없습니다: %{error}",
   "Could not remove the extraction staging folder: %{error}": "압축 풀기용 임시 폴더를 제거할 수 없습니다: %{error}",
+  "Could not rename “%{name}”; it was left as “%{temporary}”: %{error}": "“%{name}”의 이름을 바꿀 수 없습니다. 항목은 “%{temporary}”(이)라는 이름으로 남아 있습니다: %{error}",
   "Could not replace the installed binary: %{error}": "설치된 바이너리를 교체할 수 없습니다: %{error}",
   "Could not replace “%{name}”; the original was kept as “%{kept}”: %{error}": "“%{name}”을(를) 바꿀 수 없습니다. 원본은 “%{kept}”(으)로 보관되었습니다: %{error}",
   "Could not resolve the Strata executable %{path}: %{error}": "Strata 실행 파일 %{path}을(를) 확인할 수 없습니다: %{error}",

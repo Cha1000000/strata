@@ -137,7 +137,7 @@ fn tenxer_footer_rename_changes_only_the_focused_item_on_enter() {
             submit_rename(&fixture, "a.txt");
             assert_eq!(fixture.shortcuts.open_prompt_kind(), None);
             submit_rename(&fixture, "renamed.txt");
-            assert_eq!(fixture.shortcuts.open_prompt_kind(), None);
+            wait_until(|| fixture.shortcuts.open_prompt_kind().is_none());
             wait_until(|| directory.join("renamed.txt").is_file());
             assert!(!directory.join("a.txt").exists());
             assert_eq!(contents(&directory.join("renamed.txt")), "preview");
@@ -152,8 +152,8 @@ fn tenxer_footer_rename_changes_only_the_focused_item_on_enter() {
                 ("b.txt", "\u{201c}b.txt\u{201d} already exists"),
             ] {
                 submit_rename(&fixture, text);
+                wait_until(|| fixture.shortcuts.prompt_hint().as_deref() == Some(hint));
                 assert_eq!(fixture.shortcuts.open_prompt_kind(), Some(Prompt::Rename));
-                assert_eq!(fixture.shortcuts.prompt_hint().as_deref(), Some(hint));
                 assert_eq!(
                     fixture.shortcuts.prompt_text(),
                     text,
@@ -207,6 +207,38 @@ fn tenxer_footer_rename_changes_only_the_focused_item_on_enter() {
                 assert!(!directory.join("denied.txt").exists());
             }
             std::fs::set_permissions(&directory, writable).expect("restore fixture");
+        },
+    );
+}
+
+#[test]
+fn typed_rename_passes_a_same_item_name_to_the_operation() {
+    crate::test_support::gtk_test(
+        "ui::window::tests::keyboard_dispatch::file_verbs::typed_rename_passes_a_same_item_name_to_the_operation",
+        || {
+            let fixture = KeyboardFixture::new();
+            enable_tenxer(&fixture);
+            let directory = fixture._directory.path().to_path_buf();
+            let browser = fixture.view.browser();
+            std::fs::hard_link(directory.join("a.txt"), directory.join("link.txt"))
+                .expect("hard link");
+            refresh(&fixture, "link.txt");
+            move_to_named(&fixture, &browser, "a.txt");
+
+            submit_rename(&fixture, "later.txt");
+            plain(&fixture, Key::Escape);
+            pump(200);
+            assert!(!directory.join("later.txt").exists(), "a dismissed prompt renames nothing");
+
+            // The same item under another name is not refused by the prompt;
+            // the operation itself refuses a separate hard link.
+            submit_rename(&fixture, "link.txt");
+            wait_until(|| modal_visible(&fixture.overlay));
+            assert_eq!(fixture.shortcuts.open_prompt_kind(), None);
+            assert!(click_class(&fixture.overlay, "action-dialog-close"));
+            wait_until(|| !modal_visible(&fixture.overlay));
+            assert_eq!(contents(&directory.join("a.txt")), "preview");
+            assert_eq!(contents(&directory.join("link.txt")), "preview");
         },
     );
 }

@@ -298,6 +298,7 @@
   "Could not remove incomplete extraction %{path}: %{error}": "Không thể xóa bản giải nén chưa hoàn tất %{path}: %{error}",
   "Could not remove portal preference: %{error}": "Không thể xóa tùy chọn cổng: %{error}",
   "Could not remove the extraction staging folder: %{error}": "Không thể xóa thư mục tạm để giải nén: %{error}",
+  "Could not rename “%{name}”; it was left as “%{temporary}”: %{error}": "Không thể đổi tên “%{name}”; mục này hiện có tên “%{temporary}”: %{error}",
   "Could not replace the installed binary: %{error}": "Không thể thay thế tệp nhị phân đã cài đặt: %{error}",
   "Could not replace “%{name}”; the original was kept as “%{kept}”: %{error}": "Không thể thay thế “%{name}”; bản gốc được giữ lại với tên “%{kept}”: %{error}",
   "Could not resolve the Strata executable %{path}: %{error}": "Không thể phân giải tệp thực thi Strata %{path}: %{error}",

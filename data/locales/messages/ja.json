@@ -298,6 +298,7 @@
   "Could not remove incomplete extraction %{path}: %{error}": "不完全な展開結果 %{path} を削除できませんでした: %{error}",
   "Could not remove portal preference: %{error}": "ポータルの優先設定を削除できませんでした: %{error}",
   "Could not remove the extraction staging folder: %{error}": "展開用の一時フォルダーを削除できませんでした: %{error}",
+  "Could not rename “%{name}”; it was left as “%{temporary}”: %{error}": "「%{name}」の名前を変更できませんでした。項目は「%{temporary}」という名前で残っています: %{error}",
   "Could not replace the installed binary: %{error}": "インストール済みのバイナリを置き換えられませんでした: %{error}",
   "Could not replace “%{name}”; the original was kept as “%{kept}”: %{error}": "「%{name}」を置き換えられませんでした。元の項目は「%{kept}」として残っています: %{error}",
   "Could not resolve the Strata executable %{path}: %{error}": "Strata の実行ファイル %{path} を解決できませんでした: %{error}",

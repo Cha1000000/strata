@@ -298,6 +298,7 @@
   "Could not remove incomplete extraction %{path}: %{error}": "Не удалось удалить незавершённое извлечение %{path}: %{error}",
   "Could not remove portal preference: %{error}": "Не удалось удалить настройку портала: %{error}",
   "Could not remove the extraction staging folder: %{error}": "Не удалось удалить временную папку для извлечения: %{error}",
+  "Could not rename “%{name}”; it was left as “%{temporary}”: %{error}": "Не удалось переименовать «%{name}»; объект остался под именем «%{temporary}»: %{error}",
   "Could not replace the installed binary: %{error}": "Не удалось заменить установленный исполняемый файл: %{error}",
   "Could not replace “%{name}”; the original was kept as “%{kept}”: %{error}": "Не удалось заменить «%{name}»; оригинал сохранён как «%{kept}»: %{error}",
   "Could not resolve the Strata executable %{path}: %{error}": "Не удалось определить путь к исполняемому файлу Strata %{path}: %{error}",

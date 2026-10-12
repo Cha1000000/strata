@@ -45,6 +45,7 @@ pub(super) struct EntryStat {
     pub identity: LocalFileIdentity,
     pub kind: FileType,
     pub nlink: u64,
+    pub size: u64,
 }
 
 impl EntryStat {
@@ -101,6 +102,7 @@ fn entry_stat(stat: &rustix::fs::Statx) -> EntryStat {
         },
         kind: FileType::from_raw_mode(u32::from(stat.stx_mode)),
         nlink: u64::from(stat.stx_nlink),
+        size: stat.stx_size,
     }
 }
 
@@ -109,11 +111,12 @@ fn legacy_stat(stat: &rustix::fs::Stat) -> EntryStat {
         identity: LocalFileIdentity::from_stat(stat),
         kind: FileType::from_raw_mode(stat.st_mode),
         nlink: stat.st_nlink,
+        size: u64::try_from(stat.st_size).unwrap_or(u64::MAX),
     }
 }
 
 fn statx_at(dir: BorrowedFd<'_>, name: &OsStr, flags: AtFlags) -> Result<EntryStat, Errno> {
-    let mask = StatxFlags::TYPE | StatxFlags::INO | StatxFlags::NLINK;
+    let mask = StatxFlags::TYPE | StatxFlags::INO | StatxFlags::NLINK | StatxFlags::SIZE;
     match rustix::fs::statx(dir, name, flags | AtFlags::SYMLINK_NOFOLLOW, mask) {
         Ok(stat) => Ok(entry_stat(&stat)),
         Err(Errno::NOSYS) => {

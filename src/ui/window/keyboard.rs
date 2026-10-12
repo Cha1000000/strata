@@ -543,6 +543,8 @@ struct Dispatcher {
     shortcuts: ShortcutFooter,
     history: Rc<NavigationHistory>,
     rename_target: Rc<RefCell<Option<crate::model::FileEntry>>>,
+    /// Only the latest submitted rename may act after its name check.
+    rename_revision: Rc<Cell<u64>>,
     /// Cursor and fill changes must not retarget an open prompt.
     destination_targets: Rc<RefCell<Vec<crate::model::FileEntry>>>,
     destination_revision: Rc<Cell<u64>>,
@@ -600,6 +602,7 @@ impl Dispatcher {
             shortcuts: parts.shortcuts,
             history: parts.history,
             rename_target: Rc::default(),
+            rename_revision: Rc::default(),
             destination_targets: Rc::default(),
             destination_revision: Rc::default(),
             destinations: crate::ui::folder_picker::FolderPicker::default(),

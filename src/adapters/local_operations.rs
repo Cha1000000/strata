@@ -45,7 +45,7 @@ use std::{
 use gtk::{gio, glib, prelude::*};
 
 use fs_ops::{Entry, EntryStat, fs};
-use placement::{Displacement, PlaceError};
+use placement::{Displacement, PlaceError, RenameFailure};
 
 use crate::{
     adapters::{
@@ -2302,6 +2302,48 @@ fn placement_failure(
 
 fn could_not_move(name: &str, error: &str) -> String {
     rust_i18n::t!("Could not move %{name}: %{error}", name = name, error = error).into_owned()
+}
+
+/// Renames a native item without replacing another, in one blocking step.
+async fn rename_native(source: PathBuf, target: PathBuf) -> Result<(), glib::Error> {
+    let (Some(source_parent), Some(source_name), Some(target_parent), Some(target_name)) = (
+        source.parent().map(Path::to_path_buf),
+        source.file_name().map(OsStr::to_os_string),
+        target.parent().map(Path::to_path_buf),
+        target.file_name().map(OsStr::to_os_string),
+    ) else {
+        return Err(translated_io_error("Invalid move destination"));
+    };
+    let name = source_name.to_string_lossy().into_owned();
+    let new_name = target_name.to_string_lossy().into_owned();
+    let outcome = run_local_fs_step(move || {
+        let source_dir = open_local_parent_directory(&source_parent)?;
+        let target_dir = if target_parent == source_parent {
+            None
+        } else {
+            Some(open_local_parent_directory(&target_parent)?)
+        };
+        Ok(placement::rename_in_place(
+            fs(),
+            Entry::new(&source_dir, &source_name),
+            Entry::new(target_dir.as_ref().unwrap_or(&source_dir), &target_name),
+        ))
+    })
+    .await?;
+    match outcome {
+        Ok(_) => Ok(()),
+        Err(RenameFailure::Place(PlaceError::Exists)) => Err(glib::Error::new(
+            gio::IOErrorEnum::Exists,
+            &rust_i18n::t!("“%{name}” already exists", name = new_name),
+        )),
+        Err(RenameFailure::Place(error)) => Err(placement_error(error)),
+        Err(RenameFailure::Stranded { temporary, error }) => Err(io_error(rust_i18n::t!(
+            "Could not rename “%{name}”; it was left as “%{temporary}”: %{error}",
+            name = name,
+            temporary = temporary.to_string_lossy(),
+            error = crate::services::error_detail(placement_reason(error))
+        ))),
+    }
 }
 
 /// Pins both resolved parents and places the entry through the no-clobber
@@ -5894,21 +5936,33 @@ impl OperationProvider for LocalOperationProvider {
                 ));
                 return;
             }
-            match await_cancellable(
-                &file,
-                &operation_cancellable,
-                move |file, cancellable, result| {
-                    file.set_display_name_async(
-                        &request.new_name,
-                        glib::Priority::DEFAULT,
-                        Some(cancellable),
-                        move |output| result.resolve(output),
-                    );
+            let result = match request.entry.location.native_path() {
+                Some(path) => match glib::filename_from_utf8(&request.new_name) {
+                    Ok((name, _)) => {
+                        rename_native(path.to_path_buf(), path.with_file_name(name)).await
+                    }
+                    Err(error) => Err(glib::Error::new(
+                        gio::IOErrorEnum::InvalidFilename,
+                        &error.to_string(),
+                    )),
                 },
-            )
-            .await
-            {
-                Ok(_) => emit(OperationEvent::Renamed {
+                None => await_cancellable(
+                    &file,
+                    &operation_cancellable,
+                    move |file, cancellable, result| {
+                        file.set_display_name_async(
+                            &request.new_name,
+                            glib::Priority::DEFAULT,
+                            Some(cancellable),
+                            move |output| result.resolve(output),
+                        );
+                    },
+                )
+                .await
+                .map(drop),
+            };
+            match result {
+                Ok(()) => emit(OperationEvent::Renamed {
                     request_id: request.id,
                 }),
                 Err(error) if was_cancelled(&error) => {
@@ -6635,16 +6689,24 @@ impl OperationProvider for LocalOperationProvider {
                     affected_locations.insert(parent);
                 }
             }
-            let target = gio_file_for_location(&original);
-            let fat_family = target_is_fat_family(&target, &current_mount_table().await);
-            let result = move_local(
-                gio_file_for_location(&current),
-                target,
-                operation_cancellable,
-                None,
-                fat_family,
-            )
-            .await;
+            let result = if operation_cancellable.is_cancelled() {
+                Err(cancelled_local_operation())
+            } else if let (Some(source), Some(target)) =
+                (current.native_path(), original.native_path())
+            {
+                rename_native(source.to_path_buf(), target.to_path_buf()).await
+            } else {
+                move_file_with_progress(
+                    gio_file_for_location(&current),
+                    gio_file_for_location(&original),
+                    gio::FileCopyFlags::NOFOLLOW_SYMLINKS
+                        | gio::FileCopyFlags::ALL_METADATA
+                        | gio::FileCopyFlags::NO_FALLBACK_FOR_MOVE,
+                    operation_cancellable,
+                    None,
+                )
+                .await
+            };
             match result {
                 Ok(()) => emit(OperationEvent::Renamed {
                     request_id: request.id,
