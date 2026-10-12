@@ -436,7 +436,7 @@ fn cross_volume_move_flushes_the_removable_destination_before_deleting_the_sourc
 }
 
 #[test]
-fn replacing_move_onto_removable_media_keeps_the_source_when_the_flush_fails()
+fn cross_volume_replacing_move_keeps_the_source_when_the_removable_flush_fails()
 -> Result<(), Box<dyn Error>> {
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
         .lock()
@@ -450,6 +450,8 @@ fn replacing_move_onto_removable_media_keeps_the_source_when_the_flush_fails()
     fs::write(&source, b"incoming")?;
     fs::write(destination.join("notes.txt"), b"old")?;
     let _guard = RemovableFlushGuard::install(root.path(), Some(io::ErrorKind::Other));
+
+    let _volumes = separate_volumes(&source_dir, &destination);
 
     let (_operation, events) =
         paste_move(92, &destination, &source, TransferConflict::ReplaceExisting);
@@ -471,7 +473,7 @@ fn replacing_move_onto_removable_media_keeps_the_source_when_the_flush_fails()
 }
 
 #[test]
-fn replacing_move_flushes_the_removable_destination_before_deleting_the_source()
+fn cross_volume_replacing_move_flushes_the_removable_destination_before_deleting_the_source()
 -> Result<(), Box<dyn Error>> {
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
         .lock()
@@ -486,6 +488,8 @@ fn replacing_move_flushes_the_removable_destination_before_deleting_the_source()
     fs::write(destination.join("notes.txt"), b"old")?;
     let during = watch_source_during_sync(&source);
     let _guard = RemovableFlushGuard::install(root.path(), None);
+
+    let _volumes = separate_volumes(&source_dir, &destination);
 
     let (_operation, events) =
         paste_move(93, &destination, &source, TransferConflict::ReplaceExisting);
@@ -625,5 +629,44 @@ fn same_filesystem_rename_is_not_held_for_the_removable_flush() -> Result<(), Bo
             .any(|event| matches!(event, OperationEvent::Pasted { .. }))
     );
     assert!(!source.exists());
+    Ok(())
+}
+
+#[test]
+fn same_filesystem_replacing_move_renames_without_waiting_for_the_flush()
+-> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let root = tempfile::tempdir()?;
+    let source_dir = root.path().join("source");
+    let destination = root.path().join("usb");
+    fs::create_dir_all(&source_dir)?;
+    fs::create_dir_all(&destination)?;
+    let source = source_dir.join("notes.txt");
+    fs::write(&source, b"incoming")?;
+    fs::write(destination.join("notes.txt"), b"old")?;
+    let during = watch_source_during_sync(&source);
+    let _guard = RemovableFlushGuard::install(root.path(), Some(io::ErrorKind::Other));
+    let _quirks = FsQuirks::install(
+        root.path(),
+        Quirks {
+            trash: super::fs_quirks::Trash::Unsupported,
+            ..Quirks::default()
+        },
+    );
+
+    let (_operation, events) =
+        paste_move(97, &destination, &source, TransferConflict::ReplaceExisting);
+    pump_until_transfer(&events);
+    let seen = during.lock().unwrap_or_else(|error| error.into_inner());
+    assert!(
+        !seen.is_empty() && seen.iter().all(|exists| !exists),
+        "the source was renamed before the removable flush started: {seen:?}"
+    );
+
+    assert!(!source.exists());
+    assert_eq!(fs::read(destination.join("notes.txt"))?, b"incoming");
+    assert_eq!(fs::read_dir(&destination)?.count(), 1);
     Ok(())
 }

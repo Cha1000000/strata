@@ -707,3 +707,23 @@ pub(super) fn exchange_allowed(fs: &dyn FsOps, dir: BorrowedFd<'_>) -> bool {
         .is_some_and(|fs_type| EXCHANGE_FILESYSTEMS.contains(&(fs_type as u32)))
         && Mount::new(fs, dir).capabilities().exchange != Some(false)
 }
+
+/// How an existing entry is moved out of the way where Trash is unavailable.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum Displacement {
+    Exchange,
+    SetAside,
+}
+
+/// The safe way to displace an entry in `dir` without Trash, or `None`
+/// when the mount offers none.
+pub(super) fn displacement_without_trash(
+    fs: &dyn FsOps,
+    dir: BorrowedFd<'_>,
+    directory: bool,
+) -> Result<Option<Displacement>, PlaceError> {
+    if exchange_allowed(fs, dir) {
+        return Ok(Some(Displacement::Exchange));
+    }
+    Ok((can_set_aside(fs, dir, directory)? == Feasibility::Yes).then_some(Displacement::SetAside))
+}

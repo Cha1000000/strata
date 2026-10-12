@@ -27,6 +27,8 @@ use crate::adapters::volume::{MountKey, forget_test_mount_capabilities};
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Op {
     Rename,
+    /// A rename with `RENAME_EXCHANGE`.
+    Exchange,
     Link,
     Unlink,
     Mkdir,
@@ -55,6 +57,8 @@ pub(crate) enum Exchange {
     #[default]
     Supported,
     Rejected,
+    /// Overwrites the target instead of swapping, as some FUSE daemons do.
+    IgnoredOverwrites,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -343,6 +347,9 @@ impl Scope {
             match exchange {
                 Exchange::Supported => {}
                 Exchange::Rejected => return Err(Errno::INVAL),
+                Exchange::IgnoredOverwrites => {
+                    return System.rename(from, to, RenameFlags::empty());
+                }
             }
         }
         if flags.is_empty() {
@@ -442,8 +449,13 @@ impl FsOps for Scoped {
         if !same_scope(&source, &target) {
             return Err(Errno::XDEV);
         }
+        let op = if flags.contains(RenameFlags::EXCHANGE) {
+            Op::Exchange
+        } else {
+            Op::Rename
+        };
         match target {
-            Some(scope) => scope.run(Op::Rename, &[from.name, to.name], |scope| {
+            Some(scope) => scope.run(op, &[from.name, to.name], |scope| {
                 scope.rename(from, to, flags)
             }),
             None => System.rename(from, to, flags),

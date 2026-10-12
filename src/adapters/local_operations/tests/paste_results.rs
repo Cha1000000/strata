@@ -150,3 +150,79 @@ fn a_move_reports_where_each_item_landed_instead_of_a_created_destination()
     );
     Ok(())
 }
+
+#[test]
+fn an_item_replaced_without_trash_is_left_out_of_the_paste_undo() -> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    for move_sources in [false, true] {
+        let root = tempfile::tempdir()?;
+        let sources = root.path().join("sources");
+        let destination = root.path().join("destination");
+        fs::create_dir(&sources)?;
+        fs::create_dir(&destination)?;
+        fs::write(sources.join("replace.txt"), b"incoming")?;
+        fs::write(sources.join("new.txt"), b"new")?;
+        fs::write(destination.join("replace.txt"), b"only copy")?;
+        let _quirks = FsQuirks::install(
+            root.path(),
+            Quirks {
+                trash: super::fs_quirks::Trash::Unsupported,
+                fs_type: Some(0x6969),
+                ..Quirks::default()
+            },
+        );
+
+        let events = run_paste(PasteRequest {
+            id: OperationRequestId(74),
+            destination: Location::local(&destination),
+            items: vec![
+                PasteItem {
+                    source: Location::local(sources.join("replace.txt")),
+                    conflict: TransferConflict::ReplaceExisting,
+                },
+                PasteItem {
+                    source: Location::local(sources.join("new.txt")),
+                    conflict: TransferConflict::FailIfExists,
+                },
+            ],
+            move_sources,
+        });
+
+        let created = events
+            .iter()
+            .filter_map(|event| match event {
+                OperationEvent::TransferProgress {
+                    created_location, ..
+                } => created_location.clone(),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let expected_created = if move_sources {
+            Vec::new()
+        } else {
+            vec![Location::local(destination.join("new.txt"))]
+        };
+        assert_eq!(created, expected_created);
+        assert!(!events.iter().any(|event| matches!(
+            event,
+            OperationEvent::Merged { .. } | OperationEvent::ItemTrashed { .. }
+        )));
+        let expected_moves = if move_sources {
+            ["replace.txt", "new.txt"]
+                .map(|name| {
+                    (
+                        Location::local(sources.join(name)),
+                        Location::local(destination.join(name)),
+                    )
+                })
+                .to_vec()
+        } else {
+            Vec::new()
+        };
+        assert_eq!(item_moves(&events), expected_moves);
+        assert_eq!(fs::read(destination.join("replace.txt"))?, b"incoming");
+    }
+    Ok(())
+}

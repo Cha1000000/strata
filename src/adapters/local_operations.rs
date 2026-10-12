@@ -43,8 +43,8 @@ use std::{
 
 use gtk::{gio, glib, prelude::*};
 
-use fs_ops::{Entry, fs};
-use placement::PlaceError;
+use fs_ops::{Entry, EntryStat, fs};
+use placement::{Displacement, PlaceError};
 
 use crate::{
     adapters::{
@@ -56,8 +56,8 @@ use crate::{
     services::{
         CancelledOperation, CompressRequest, CreateDirectoryRequest, CreateFileRequest,
         DeleteRequest, ExtractRequest, LoadHandle, OperationEvent, OperationProvider,
-        OperationRequestId, PasteRequest, RenameRequest, RestoreRequest, RestoreSource,
-        TransferConflict, TrashedOriginal, UndoCopyRequest, UndoMergeRequest, UndoMoveRequest,
+        OperationRequestId, PasteRequest, RenameRequest, ReplacedOriginal, RestoreRequest,
+        RestoreSource, TransferConflict, TrashedOriginal, UndoCopyRequest, UndoMergeRequest, UndoMoveRequest,
         UndoRenameRequest, validate_basename,
     },
 };
@@ -3085,6 +3085,497 @@ type StageCopy = Rc<
     ) -> Pin<Box<dyn Future<Output = Result<(), glib::Error>>>>,
 >;
 
+const REPLACED_PREFIX: &str = ".strata-replaced-";
+
+fn cannot_replace_safely(name: &str) -> String {
+    rust_i18n::t!(
+        "“%{name}” can’t be replaced safely at this location. Delete or rename it first, then try again.",
+        name = name
+    )
+    .into_owned()
+}
+
+fn original_kept_aside(name: &str, kept: &OsStr, error: &str) -> String {
+    rust_i18n::t!(
+        "Could not replace “%{name}”; the original was kept as “%{kept}”: %{error}",
+        name = name,
+        kept = kept.to_string_lossy(),
+        error = error
+    )
+    .into_owned()
+}
+
+fn original_not_removed(name: &str, kept: &OsStr, error: &glib::Error) -> String {
+    rust_i18n::t!(
+        "“%{name}” was replaced, but its original could not be removed from “%{kept}”: %{error}",
+        name = name,
+        kept = kept.to_string_lossy(),
+        error = crate::services::gio_error_detail(error)
+    )
+    .into_owned()
+}
+
+fn could_not_replace(_name: &str, error: &str) -> String {
+    rust_i18n::t!("Could not safely replace the item: %{error}", error = error).into_owned()
+}
+
+fn original_in_trash(error: &str) -> glib::Error {
+    io_error(rust_i18n::t!(
+        "Could not finish placing the replacement item; the original is in Trash: %{error}",
+        error = error
+    ))
+}
+
+async fn run_blocking<T: Send + 'static>(
+    work: impl FnOnce() -> Result<T, glib::Error> + Send + 'static,
+) -> Result<T, glib::Error> {
+    gio::spawn_blocking(work)
+        .await
+        .map_err(|_| io_error("Local filesystem task panicked"))?
+}
+
+/// How the original leaves the target name.
+#[derive(Clone, Copy)]
+enum Removal {
+    Trash,
+    /// Already in Trash; only the replacement is left to place.
+    Trashed,
+    Without(Displacement),
+}
+
+#[derive(Clone, Copy)]
+enum ReplaceStrategy {
+    /// A move within one filesystem renames the source itself onto the target.
+    PlaceSource,
+    Staged(Removal),
+}
+
+struct ReplacePlan {
+    source_parent: Arc<OwnedFd>,
+    source_name: OsString,
+    source: EntryStat,
+    target_parent: Arc<OwnedFd>,
+    target_name: OsString,
+    target: EntryStat,
+    strategy: ReplaceStrategy,
+}
+
+impl ReplacePlan {
+    fn source_entry(&self) -> Entry<'_> {
+        Entry::new(&*self.source_parent, &self.source_name)
+    }
+
+    fn target_entry(&self) -> Entry<'_> {
+        Entry::new(&*self.target_parent, &self.target_name)
+    }
+
+    fn target_display(&self) -> String {
+        self.target_name.to_string_lossy().into_owned()
+    }
+
+    fn directory(&self) -> bool {
+        self.source.is_directory()
+    }
+
+    fn trashed_original(&self) -> TrashedOriginal {
+        TrashedOriginal {
+            device: self.target.identity.device,
+            inode: self.target.identity.inode,
+        }
+    }
+
+    /// A folder may only be copied once the target is known to lie outside it.
+    fn copy_stays_outside_source(&self) -> bool {
+        !self.directory()
+            || placement::contains(fs(), self.source.identity, self.target_parent.as_fd())
+                == Some(false)
+    }
+}
+
+fn split_local_path(path: &Path) -> Result<(PathBuf, OsString), glib::Error> {
+    path.parent()
+        .zip(path.file_name())
+        .map(|(parent, name)| (parent.to_path_buf(), name.to_os_string()))
+        .ok_or_else(|| translated_io_error("Invalid local filesystem target"))
+}
+
+/// Pins both parents, compares the two items and chooses how the original
+/// leaves before anything is copied. `None` means both names are one item.
+fn plan_replace(
+    source_path: &Path,
+    target_path: &Path,
+    move_source: bool,
+) -> Result<Option<ReplacePlan>, glib::Error> {
+    let (source_parent_path, source_name) = split_local_path(source_path)?;
+    let (target_parent_path, target_name) = split_local_path(target_path)?;
+    let source_parent = open_local_parent_directory(&source_parent_path).map_err(io_error)?;
+    let target_parent = open_local_parent_directory(&target_parent_path).map_err(io_error)?;
+    let inspect = |parent: &OwnedFd, name: &OsStr, path: &Path| {
+        fs().stat(Entry::new(parent, name), false).map_err(|error| {
+            io_error(rust_i18n::t!(
+                "Could not inspect %{path}: %{error}",
+                path = path.display(),
+                error = os_error_detail(error)
+            ))
+        })
+    };
+    let source = inspect(&source_parent, &source_name, source_path)?;
+    let target = inspect(&target_parent, &target_name, target_path)?;
+    if source.is_directory() != target.is_directory() {
+        return Err(glib::Error::new(
+            gio::IOErrorEnum::NotSupported,
+            &crate::i18n::tr("A file and a folder cannot safely replace one another"),
+        ));
+    }
+    let target_directory = fs().stat_dir(target_parent.as_fd()).ok();
+    let shared_parent = target_directory.is_some()
+        && fs().stat_dir(source_parent.as_fd()).ok().map(|dir| dir.identity)
+            == target_directory.map(|dir| dir.identity);
+    // A hard link elsewhere in the folder is a separate name and is replaced.
+    if shared_parent
+        && source.identity == target.identity
+        && (source_name == target_name
+            || (!source.is_directory() && source.nlink == 1)
+            || fs()
+                .names(Entry::new(&target_parent, OsStr::new(".")))
+                .is_ok_and(|names| !names.contains(&target_name)))
+    {
+        return Ok(None);
+    }
+    let strategy = if move_source
+        && fs().mount_key(source_parent.as_fd()) == fs().mount_key(target_parent.as_fd())
+        && target_directory.is_some_and(|dir| dir.identity.device == source.identity.device)
+    {
+        ReplaceStrategy::PlaceSource
+    } else if fs().can_trash(target_path) {
+        ReplaceStrategy::Staged(Removal::Trash)
+    } else {
+        ReplaceStrategy::Staged(Removal::Without(displacement_without_trash(
+            &target_parent,
+            source.is_directory(),
+            &target_name.to_string_lossy(),
+        )?))
+    };
+    Ok(Some(ReplacePlan {
+        source_parent: Arc::new(source_parent),
+        source_name,
+        source,
+        target_parent: Arc::new(target_parent),
+        target_name,
+        target,
+        strategy,
+    }))
+}
+
+fn displacement_without_trash(
+    parent: &OwnedFd,
+    directory: bool,
+    name: &str,
+) -> Result<Displacement, glib::Error> {
+    match placement::displacement_without_trash(fs(), parent.as_fd(), directory) {
+        Ok(Some(displacement)) => Ok(displacement),
+        Ok(None) => Err(io_error(cannot_replace_safely(name))),
+        Err(error) => Err(placement_failure(error, name, could_not_replace)),
+    }
+}
+
+fn ensure_unchanged(entry: Entry<'_>, expected: LocalFileIdentity) -> Result<(), glib::Error> {
+    match fs().stat(entry, false) {
+        Ok(stat) if stat.identity == expected => Ok(()),
+        Ok(_) | Err(rustix::io::Errno::NOENT) => Err(translated_io_error(
+            "The target changed while the operation was in progress",
+        )),
+        Err(error) => Err(os_io_error(error)),
+    }
+}
+
+fn set_aside_failure(error: PlaceError, name: &str) -> glib::Error {
+    match error {
+        PlaceError::Unsupported => io_error(cannot_replace_safely(name)),
+        PlaceError::Changed => {
+            translated_io_error("The target changed while the operation was in progress")
+        }
+        error => placement_failure(error, name, could_not_replace),
+    }
+}
+
+/// An original kept under a hidden name until its replacement is safe on disk.
+struct DisplacedOriginal {
+    parent: Arc<OwnedFd>,
+    name: OsString,
+    identity: LocalFileIdentity,
+}
+
+/// Deletes a displaced original, after flushing `flush` when the
+/// replacement was newly written there.
+async fn remove_displaced_original(
+    original: DisplacedOriginal,
+    flush: Option<&Path>,
+    name: &str,
+) -> Result<(), glib::Error> {
+    let kept = original.name.clone();
+    let removed = async {
+        if let Some(path) = flush {
+            flush_removable_destination(path).await?;
+        }
+        parallel_delete_local(
+            vec![PinnedEntry {
+                parent: original.parent,
+                name: original.name,
+                identity: Some(original.identity),
+            }],
+            gio::Cancellable::new(),
+        )
+        .await
+    }
+    .await;
+    removed.map_err(|error| io_error(original_not_removed(name, &kept, &error)))
+}
+
+enum SourcePlaced {
+    Trashed,
+    SetAside(placement::SetAside),
+    /// The original is in Trash, but the source must be copied into place.
+    CopyAfterTrash,
+    /// The original is back at its name, and the source must be copied.
+    PutBack,
+}
+
+/// Moves the original out of the way and renames the source onto its name.
+fn place_source(
+    plan: &ReplacePlan,
+    target_path: &Path,
+    cancellable: &gio::Cancellable,
+) -> Result<SourcePlaced, glib::Error> {
+    let target = plan.target_entry();
+    let source = plan.source_entry();
+    let expected = Some(plan.source.identity);
+    ensure_unchanged(target, plan.target.identity)?;
+    match fs().trash(target_path, cancellable) {
+        Ok(()) => {
+            return match placement::place(fs(), source, target, expected) {
+                Ok(_) => Ok(SourcePlaced::Trashed),
+                Err(
+                    error @ (PlaceError::Exists
+                    | PlaceError::Changed
+                    | PlaceError::Unconfirmed
+                    | PlaceError::IntoItself),
+                ) => Err(original_in_trash(&crate::services::error_detail(
+                    placement_reason(error),
+                ))),
+                Err(_) if !plan.copy_stays_outside_source() => Err(original_in_trash(
+                    &crate::services::error_detail(placement_reason(PlaceError::IntoItself)),
+                )),
+                Err(_) => Ok(SourcePlaced::CopyAfterTrash),
+            };
+        }
+        Err(error) if is_trash_unsupported_failure(false, &error) => {}
+        Err(error) => return Err(error),
+    }
+    let name = plan.target_display();
+    let aside = placement::set_aside(fs(), target, REPLACED_PREFIX, plan.target.identity)
+        .map_err(|error| set_aside_failure(error, &name))?;
+    let error = match placement::place(fs(), source, target, expected) {
+        Ok(_) => return Ok(SourcePlaced::SetAside(aside)),
+        Err(error) => error,
+    };
+    if placement::put_back(fs(), plan.target_parent.as_fd(), &aside, &plan.target_name).is_err() {
+        return Err(io_error(original_kept_aside(
+            &name,
+            &aside.name,
+            &crate::services::error_detail(placement_reason(error)),
+        )));
+    }
+    match error {
+        PlaceError::CrossDevice | PlaceError::Unsupported if plan.copy_stays_outside_source() => {
+            Ok(SourcePlaced::PutBack)
+        }
+        error => Err(placement_failure(
+            error,
+            &plan.source_name.to_string_lossy(),
+            could_not_replace,
+        )),
+    }
+}
+
+struct StagedReplacement {
+    original: ReplacedOriginal,
+    displaced: Option<DisplacedOriginal>,
+}
+
+fn gio_file_type(kind: rustix::fs::FileType) -> gio::FileType {
+    match kind {
+        rustix::fs::FileType::Directory => gio::FileType::Directory,
+        rustix::fs::FileType::Symlink => gio::FileType::SymbolicLink,
+        rustix::fs::FileType::RegularFile => gio::FileType::Regular,
+        _ => gio::FileType::Special,
+    }
+}
+
+/// Copies the source next to the target, then moves the original out of the
+/// way and publishes the copy. Every failure discards the stage.
+async fn replace_through_stage(
+    plan: &Arc<ReplacePlan>,
+    mut removal: Removal,
+    source: &gio::File,
+    target_path: &Path,
+    cancellable: &gio::Cancellable,
+    copy_to_stage: StageCopy,
+) -> Result<StagedReplacement, glib::Error> {
+    let in_trash = |error: glib::Error, removal: Removal| match removal {
+        Removal::Trashed => original_in_trash(&crate::services::gio_error_detail(&error)),
+        _ => error,
+    };
+    let staged = stage_for(source, gio_file_type(plan.source.kind), target_path)
+        .await
+        .map_err(|error| in_trash(error, removal))?;
+    let ready = async {
+        if staged.kind != rustix::fs::FileType::Symlink {
+            copy_to_stage(
+                source.clone(),
+                gio::File::for_path(staged.path()),
+                plan.directory(),
+                cancellable.clone(),
+            )
+            .await?;
+        }
+        cancellable.set_error_if_cancelled()
+    }
+    .await;
+    if let Err(error) = ready {
+        let cleanup = discard_incomplete_staged(staged).await;
+        return Err(in_trash(copy_failure_after_cleanup(error, cleanup), removal));
+    }
+    loop {
+        let parent = staged.parent.clone();
+        let step_plan = plan.clone();
+        let step = match removal {
+            Removal::Trashed => {
+                publish_staged_replacement(staged, target_path.to_path_buf()).await?;
+                return Ok(StagedReplacement {
+                    original: ReplacedOriginal::Trashed(plan.trashed_original()),
+                    displaced: None,
+                });
+            }
+            Removal::Without(Displacement::SetAside) => {
+                return set_aside_and_publish(plan, staged, target_path).await;
+            }
+            Removal::Trash => {
+                let (path, cancellable) = (target_path.to_path_buf(), cancellable.clone());
+                run_blocking(move || {
+                    let target = Entry::new(&*parent, &step_plan.target_name);
+                    ensure_unchanged(target, step_plan.target.identity)?;
+                    match fs().trash(&path, &cancellable) {
+                        Ok(()) => Ok(Removal::Trashed),
+                        Err(error) if is_trash_unsupported_failure(false, &error) => {
+                            displacement_without_trash(
+                                &parent,
+                                step_plan.directory(),
+                                &step_plan.target_display(),
+                            )
+                            .map(Removal::Without)
+                        }
+                        Err(error) => Err(error),
+                    }
+                })
+                .await
+            }
+            Removal::Without(Displacement::Exchange) => {
+                let stage_name = staged.name.clone();
+                let exchanged = run_blocking(move || {
+                    let target = Entry::new(&*parent, &step_plan.target_name);
+                    ensure_unchanged(target, step_plan.target.identity)?;
+                    placement::exchange(fs(), Entry::new(&*parent, &stage_name), target).map_err(
+                        |error| {
+                            placement_failure(error, &step_plan.target_display(), could_not_replace)
+                        },
+                    )
+                })
+                .await;
+                match exchanged {
+                    Ok(true) => {
+                        return Ok(StagedReplacement {
+                            original: ReplacedOriginal::Deleted,
+                            displaced: Some(DisplacedOriginal {
+                                parent: staged.parent,
+                                name: staged.name,
+                                identity: plan.target.identity,
+                            }),
+                        });
+                    }
+                    Ok(false) => Ok(Removal::Without(Displacement::SetAside)),
+                    Err(error) => Err(error),
+                }
+            }
+        };
+        match step {
+            Ok(next) => removal = next,
+            Err(error) => {
+                let cleanup = discard_incomplete_staged(staged).await;
+                return Err(copy_failure_after_cleanup(error, cleanup));
+            }
+        }
+    }
+}
+
+async fn set_aside_and_publish(
+    plan: &Arc<ReplacePlan>,
+    staged: StagedSibling,
+    target_path: &Path,
+) -> Result<StagedReplacement, glib::Error> {
+    let name = plan.target_display();
+    let parent = staged.parent.clone();
+    let step_plan = plan.clone();
+    let step_name = name.clone();
+    let aside = run_blocking(move || {
+        placement::set_aside(
+            fs(),
+            Entry::new(&*parent, &step_plan.target_name),
+            REPLACED_PREFIX,
+            step_plan.target.identity,
+        )
+        .map_err(|error| set_aside_failure(error, &step_name))
+    })
+    .await;
+    let aside = match aside {
+        Ok(aside) => aside,
+        Err(error) => {
+            let cleanup = discard_incomplete_staged(staged).await;
+            return Err(copy_failure_after_cleanup(error, cleanup));
+        }
+    };
+    let parent = staged.parent.clone();
+    // Publication finishes regardless of cancellation once the original is aside.
+    if let Err(error) =
+        publish_staged_without_replace(staged, target_path.to_path_buf(), gio::Cancellable::new())
+            .await
+    {
+        let detail = crate::services::gio_error_detail(&error);
+        let kept = aside.name.clone();
+        let step_plan = plan.clone();
+        let restored = run_blocking(move || {
+            placement::put_back(fs(), parent.as_fd(), &aside, &step_plan.target_name)
+                .map_err(placement_error)
+        })
+        .await;
+        return Err(io_error(match restored {
+            Ok(()) => could_not_replace(&name, &detail),
+            Err(_) => original_kept_aside(&name, &kept, &detail),
+        }));
+    }
+    Ok(StagedReplacement {
+        original: ReplacedOriginal::Deleted,
+        displaced: Some(DisplacedOriginal {
+            parent,
+            name: aside.name,
+            identity: aside.identity,
+        }),
+    })
+}
+
+/// Replaces `target` with `source` without a window in which neither
+/// exists. The original goes to Trash where possible, otherwise it is
+/// exchanged or set aside and deleted once the replacement is on disk.
 async fn replace_local_with(
     source: gio::File,
     target: gio::File,
@@ -3092,156 +3583,79 @@ async fn replace_local_with(
     cancellable: gio::Cancellable,
     affected_locations: Option<&mut HashSet<Location>>,
     copy_to_stage: StageCopy,
-    on_replaced: &dyn Fn(Option<TrashedOriginal>),
+    on_replaced: &dyn Fn(ReplacedOriginal),
 ) -> Result<(), glib::Error> {
     if let Some(locations) = affected_locations {
         locations.extend([&source, &target].into_iter().filter_map(location_for_file));
     }
-    if source.path().is_none() {
-        return Err(glib::Error::new(
+    let source_path = source.path().ok_or_else(|| {
+        glib::Error::new(
             gio::IOErrorEnum::NotSupported,
             &crate::i18n::tr("Safe replacement is unavailable for this source"),
-        ));
-    }
+        )
+    })?;
     let target_path = target.path().ok_or_else(|| {
         glib::Error::new(
             gio::IOErrorEnum::NotSupported,
             &crate::i18n::tr("Safe replacement is unavailable at this destination"),
         )
     })?;
-    let source_type = await_cancellable(&source, &cancellable, |source, cancellable, result| {
-        source.query_info_async(
-            "standard::type",
-            gio::FileQueryInfoFlags::NOFOLLOW_SYMLINKS,
-            glib::Priority::DEFAULT,
-            Some(cancellable),
-            move |output| result.resolve(output),
-        );
-    })
-    .await?
-    .file_type();
-    let target_type = await_cancellable(&target, &cancellable, |target, cancellable, result| {
-        target.query_info_async(
-            "standard::type",
-            gio::FileQueryInfoFlags::NOFOLLOW_SYMLINKS,
-            glib::Priority::DEFAULT,
-            Some(cancellable),
-            move |output| result.resolve(output),
-        );
-    })
-    .await?
-    .file_type();
-    let source_is_directory = source_type == gio::FileType::Directory;
-    let target_is_directory = target_type == gio::FileType::Directory;
-    if source_is_directory != target_is_directory {
-        return Err(glib::Error::new(
-            gio::IOErrorEnum::NotSupported,
-            &crate::i18n::tr("A file and a folder cannot safely replace one another"),
-        ));
-    }
-
-    let source_identity = local_file_identity(&source).await?;
-    let target_identity = local_file_identity(&target).await?;
-    let staged = stage_for(&source, source_type, &target_path).await?;
-    if staged.kind != rustix::fs::FileType::Symlink
-        && let Err(error) = copy_to_stage(
-            source.clone(),
-            gio::File::for_path(staged.path()),
-            source_is_directory,
-            cancellable.clone(),
-        )
-        .await
-    {
-        let cleanup = discard_incomplete_staged(staged).await;
-        return Err(copy_failure_after_cleanup(error, cleanup));
-    }
-    if let Err(error) = cancellable.set_error_if_cancelled() {
-        let cleanup = discard_incomplete_staged(staged).await;
-        return Err(copy_failure_after_cleanup(error, cleanup));
-    }
-    if let Err(error) = ensure_local_file_identity(&target, target_identity).await {
-        let cleanup = discard_incomplete_staged(staged).await;
-        return Err(copy_failure_after_cleanup(error, cleanup));
-    }
-
-    // Trash the original first so undo can restore it; keep the atomic
-    // exchange with permanent delete where Trash is unsupported.
-    let trashed = match await_cancellable(&target, &cancellable, |target, cancellable, result| {
-        target.trash_async(glib::Priority::DEFAULT, Some(cancellable), move |output| {
-            result.resolve(output)
-        });
-    })
-    .await
-    {
-        Ok(()) => true,
-        Err(error) if is_trash_unsupported_failure(false, &error) => false,
-        Err(error) => {
-            let cleanup = discard_incomplete_staged(staged).await;
-            return Err(copy_failure_after_cleanup(error, cleanup));
+    cancellable.set_error_if_cancelled()?;
+    let (planned_source, planned_target) = (source_path, target_path.clone());
+    let Some(plan) =
+        run_blocking(move || plan_replace(&planned_source, &planned_target, move_source)).await?
+    else {
+        return Ok(());
+    };
+    let plan = Arc::new(plan);
+    let removal = match plan.strategy {
+        ReplaceStrategy::Staged(removal) => removal,
+        ReplaceStrategy::PlaceSource => {
+            cancellable.set_error_if_cancelled()?;
+            let (step_plan, path, step_cancellable) =
+                (plan.clone(), target_path.clone(), cancellable.clone());
+            match run_blocking(move || place_source(&step_plan, &path, &step_cancellable)).await? {
+                SourcePlaced::Trashed => {
+                    on_replaced(ReplacedOriginal::Trashed(plan.trashed_original()));
+                    return Ok(());
+                }
+                SourcePlaced::SetAside(aside) => {
+                    on_replaced(ReplacedOriginal::Deleted);
+                    let original = DisplacedOriginal {
+                        parent: plan.target_parent.clone(),
+                        name: aside.name,
+                        identity: aside.identity,
+                    };
+                    return remove_displaced_original(original, None, &plan.target_display())
+                        .await;
+                }
+                SourcePlaced::CopyAfterTrash => Removal::Trashed,
+                SourcePlaced::PutBack => Removal::Without(Displacement::SetAside),
+            }
         }
     };
-    if trashed {
-        publish_staged_replacement(staged, target_path.clone()).await?;
-        // A failed publication must not register an undo that would delete
-        // a concurrent arrival. The original remains recoverable in Trash.
-        on_replaced(target_identity.map(|identity| TrashedOriginal {
-            device: identity.device,
-            inode: identity.inode,
-        }));
-    } else {
-        let parent = staged.parent.clone();
-        let stage_name = staged.name.clone();
-        let Some(target_name) = target_path.file_name().map(OsStr::to_os_string) else {
-            let cleanup = discard_incomplete_staged(staged).await;
-            return Err(copy_failure_after_cleanup(
-                translated_io_error("Invalid local filesystem target"),
-                cleanup,
-            ));
-        };
-        let exchanged = gio::spawn_blocking(move || {
-            placement::exchange(
-                fs(),
-                Entry::new(&*parent, &stage_name),
-                Entry::new(&*parent, &target_name),
-            )
-        })
-        .await
-        .map_err(|_| io_error("The replacement worker stopped unexpectedly"));
-        let exchanged = match exchanged {
-            Ok(Ok(true)) => Ok(()),
-            Ok(Ok(false)) => Err(PlaceError::Unsupported),
-            Ok(Err(error)) => Err(error),
-            Err(error) => {
-                let cleanup = discard_incomplete_staged(staged).await;
-                return Err(copy_failure_after_cleanup(error, cleanup));
-            }
-        };
-        if let Err(error) = exchanged {
-            let cleanup = discard_incomplete_staged(staged).await;
-            return Err(copy_failure_after_cleanup(
-                io_error(rust_i18n::t!(
-                    "Could not safely replace the item: %{error}",
-                    error = crate::services::error_detail(placement_reason(error))
-                )),
-                cleanup,
-            ));
-        }
-        parallel_delete_local(
-            vec![PinnedEntry {
-                parent: staged.parent,
-                name: staged.name,
-                identity: target_identity,
-            }],
-            gio::Cancellable::new(),
-        )
-        .await?;
+    let replaced = replace_through_stage(
+        &plan,
+        removal,
+        &source,
+        &target_path,
+        &cancellable,
+        copy_to_stage,
+    )
+    .await?;
+    on_replaced(replaced.original);
+    let flushed = replaced.displaced.is_some();
+    if let Some(original) = replaced.displaced {
+        remove_displaced_original(original, Some(&target_path), &plan.target_display()).await?;
     }
     if move_source {
-        flush_removable_destination(&target_path).await?;
+        if !flushed {
+            flush_removable_destination(&target_path).await?;
+        }
         permanently_delete_maybe_local_if_unchanged(
             source,
-            source_is_directory,
-            source_identity,
+            plan.directory(),
+            Some(plan.source.identity),
             cancellable,
         )
         .await?;
@@ -3255,44 +3669,21 @@ async fn publish_staged_replacement(
 ) -> Result<(), glib::Error> {
     publish_staged_without_replace(staged, target_path, gio::Cancellable::new())
         .await
-        .map_err(|error| {
-            io_error(rust_i18n::t!(
-                "Could not finish placing the replacement item; the original is in Trash: %{error}",
-                error = crate::services::gio_error_detail(&error)
-            ))
-        })
+        .map_err(|error| original_in_trash(&crate::services::gio_error_detail(&error)))
 }
 
-async fn replace_local_with_progress(
-    source: gio::File,
-    target: gio::File,
-    move_source: bool,
-    cancellable: gio::Cancellable,
-    affected_locations: Option<&mut HashSet<Location>>,
-    progress: Option<Rc<TransferProgressTracker>>,
-    on_replaced: &dyn Fn(Option<TrashedOriginal>),
-) -> Result<(), glib::Error> {
-    let fat_family = target_is_fat_family(&target, &MountTable::current());
-    replace_local_with(
-        source,
-        target,
-        move_source,
-        cancellable,
-        affected_locations,
-        Rc::new(move |source, staged, _directory, cancellable| {
-            copy_recursively_with_progress(
-                source,
-                staged,
-                true,
-                cancellable,
-                None,
-                progress.clone(),
-                fat_family,
-            )
-        }),
-        on_replaced,
-    )
-    .await
+fn stage_copier(progress: Option<Rc<TransferProgressTracker>>, fat_family: bool) -> StageCopy {
+    Rc::new(move |source, staged, _directory, cancellable| {
+        copy_recursively_with_progress(
+            source,
+            staged,
+            true,
+            cancellable,
+            None,
+            progress.clone(),
+            fat_family,
+        )
+    })
 }
 
 #[cfg(test)]
@@ -3303,13 +3694,13 @@ async fn replace_local(
     cancellable: gio::Cancellable,
     affected_locations: Option<&mut HashSet<Location>>,
 ) -> Result<(), glib::Error> {
-    replace_local_with_progress(
+    replace_local_with(
         source,
         target,
         move_source,
         cancellable,
         affected_locations,
-        None,
+        stage_copier(None, false),
         &|_| {},
     )
     .await
@@ -4468,19 +4859,6 @@ async fn local_file_identity(file: &gio::File) -> Result<Option<LocalFileIdentit
     })
     .await
     .map(Some)
-}
-
-async fn ensure_local_file_identity(
-    file: &gio::File,
-    expected: Option<LocalFileIdentity>,
-) -> Result<(), glib::Error> {
-    let current = local_file_identity(file).await?;
-    if current != expected {
-        return Err(translated_io_error(
-            "The target changed while the operation was in progress",
-        ));
-    }
-    Ok(())
 }
 
 /// Deletes `file` through the descriptor-relative local walk when it names a
@@ -5825,6 +6203,7 @@ impl OperationProvider for LocalOperationProvider {
                 if let Some(path) = target.path() {
                     written_paths.push(path);
                 }
+                let replaced_permanently = Rc::new(Cell::new(false));
                 let result = if is_duplicate {
                     copy_new_recursively_on_filesystem(
                         source,
@@ -5855,15 +6234,23 @@ impl OperationProvider for LocalOperationProvider {
                 } else if item.conflict == TransferConflict::ReplaceExisting {
                     let replaced_target = target_location.clone();
                     let emit = emit.clone();
-                    replace_local_with_progress(
+                    let replaced_permanently = replaced_permanently.clone();
+                    replace_local_with(
                         source,
                         target,
                         request.move_sources,
                         operation_cancellable.clone(),
                         Some(&mut affected_locations),
-                        Some(progress.clone()),
-                        &move |identity| {
-                            if let (Some(target), Some(identity)) = (&replaced_target, identity) {
+                        stage_copier(Some(progress.clone()), fat_family),
+                        &move |original| {
+                            let identity = match original {
+                                ReplacedOriginal::Trashed(identity) => identity,
+                                ReplacedOriginal::Deleted => {
+                                    replaced_permanently.set(true);
+                                    return;
+                                }
+                            };
+                            if let Some(target) = &replaced_target {
                                 emit(OperationEvent::ItemTrashed {
                                     request_id: request.id,
                                     location: target.clone(),
@@ -5943,8 +6330,13 @@ impl OperationProvider for LocalOperationProvider {
                 // A merge reports its written paths through Merged instead:
                 // copy undo trashes recorded locations, and the merged folder
                 // held pre-existing contents that must not be trashed.
-                let created_location = target_location
-                    .filter(|_| !request.move_sources && item.conflict != TransferConflict::Merge);
+                // Undoing a copy deletes it, which must never remove the only
+                // copy left after an original was replaced without Trash.
+                let created_location = target_location.filter(|_| {
+                    !request.move_sources
+                        && item.conflict != TransferConflict::Merge
+                        && !replaced_permanently.get()
+                });
                 progress.finish_item(
                     item_started_at,
                     item_sizes[index],
@@ -6062,15 +6454,16 @@ impl OperationProvider for LocalOperationProvider {
                 }
                 let target = gio_file_for_location(&item.record.original);
                 let result = if item.conflict == TransferConflict::ReplaceExisting {
-                    replace_local_with_progress(
+                    let fat_family = target_is_fat_family(&target, &mounts);
+                    replace_local_with(
                         source,
                         target,
                         true,
                         operation_cancellable.clone(),
                         Some(&mut affected_locations),
-                        Some(progress.clone()),
-                        &|identity| {
-                            if let Some(identity) = identity {
+                        stage_copier(Some(progress.clone()), fat_family),
+                        &|original| {
+                            if let ReplacedOriginal::Trashed(identity) = original {
                                 emit(OperationEvent::ItemTrashed {
                                     request_id: request.id,
                                     location: item.record.original.clone(),

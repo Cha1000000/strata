@@ -126,7 +126,7 @@ impl TrashedOriginal {
     }
 }
 
-/// What became of the item a new archive replaced.
+/// What became of the item a pasted item or new archive replaced.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ReplacedOriginal {
     Trashed(TrashedOriginal),

@@ -6,13 +6,15 @@
 mod tests;
 
 use super::super::{
-    LocalFileIdentity, PinnedEntry, flush_removable_destination,
+    LocalFileIdentity, PinnedEntry, REPLACED_PREFIX, cannot_replace_safely,
+    flush_removable_destination,
     fs_ops::{Entry, fs},
     local_directory_children, open_local_child_directory, open_local_parent_directory,
-    parallel_delete_local,
+    original_kept_aside, original_not_removed, parallel_delete_local,
     placement::{
-        Feasibility, PlaceError, can_set_aside, creation_error, exchange, exchange_allowed, place,
-        put_back, remove_if_unchanged, reserve_hidden_name, set_aside,
+        Displacement, Feasibility, PlaceError, can_set_aside, creation_error,
+        displacement_without_trash, exchange, place, put_back, remove_if_unchanged,
+        reserve_hidden_name, set_aside,
     },
     placement_reason,
 };
@@ -39,7 +41,6 @@ use std::{
 };
 
 const COMPRESSION_STAGE: &str = ".strata-compression-";
-const REPLACED_PREFIX: &str = ".strata-replaced-";
 
 /// Writes an archive through a private staging file, then publishes it at
 /// `archive_path` without ever replacing an entry it did not account for.
@@ -254,12 +255,10 @@ impl Publication {
 
     /// Chooses how to move the original out of the way when Trash is unavailable.
     fn without_trash(&self, parent: &OwnedFd) -> Result<Replacement, ArchiveError> {
-        if exchange_allowed(fs(), parent.as_fd()) {
-            return Ok(Replacement::Exchange);
-        }
-        match can_set_aside(fs(), parent.as_fd(), false) {
-            Ok(Feasibility::Yes) => Ok(Replacement::Aside),
-            Ok(Feasibility::No) => Err(self.cannot_replace_safely()),
+        match displacement_without_trash(fs(), parent.as_fd(), false) {
+            Ok(Some(Displacement::Exchange)) => Ok(Replacement::Exchange),
+            Ok(Some(Displacement::SetAside)) => Ok(Replacement::Aside),
+            Ok(None) => Err(self.cannot_replace_safely()),
             Err(error) => Err(self.creation_failed(placement_reason(error))),
         }
     }
@@ -365,11 +364,10 @@ impl Publication {
             }))),
             Err(error) => match put_back(fs(), stage.parent.as_fd(), &aside, target) {
                 Ok(()) => Err(self.creation_failed(placement_reason(error))),
-                Err(_) => Err(archive_failed(rust_i18n::t!(
-                    "Could not replace “%{name}”; the original was kept as “%{kept}”: %{error}",
-                    name = self.name,
-                    kept = aside.name.to_string_lossy(),
-                    error = error_detail(placement_reason(error))
+                Err(_) => Err(archive_failed(original_kept_aside(
+                    &self.name,
+                    &aside.name,
+                    &error_detail(placement_reason(error)),
                 ))),
             },
         }
@@ -420,17 +418,14 @@ impl Publication {
     }
 
     fn cannot_replace_safely(&self) -> ArchiveError {
-        archive_failed(rust_i18n::t!(
-            "“%{name}” can’t be replaced safely at this location. Delete or rename it first, then try again.",
-            name = self.name
-        ))
+        archive_failed(cannot_replace_safely(&self.name))
     }
 }
 
 /// Deletes an original that EXCHANGE or set-aside kept, once the new archive
 /// has reached a removable device.
 async fn remove_displaced(archive: &Path, name: &str, aside: Aside) -> Result<(), ArchiveError> {
-    let kept = aside.name.to_string_lossy().into_owned();
+    let kept = aside.name.clone();
     let removed = match flush_removable_destination(archive).await {
         Ok(()) => {
             parallel_delete_local(
@@ -445,14 +440,7 @@ async fn remove_displaced(archive: &Path, name: &str, aside: Aside) -> Result<()
         }
         Err(error) => Err(error),
     };
-    removed.map_err(|error| {
-        archive_failed(rust_i18n::t!(
-            "“%{name}” was replaced, but its original could not be removed from “%{kept}”: %{error}",
-            name = name,
-            kept = kept,
-            error = crate::services::gio_error_detail(&error)
-        ))
-    })
+    removed.map_err(|error| archive_failed(original_not_removed(name, &kept, &error)))
 }
 
 fn default_file_mode() -> u32 {
