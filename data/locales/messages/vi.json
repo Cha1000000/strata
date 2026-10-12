@@ -320,7 +320,6 @@
   "Could not serialize udiskie installation state: %{error}": "Không thể lưu trạng thái cài đặt udiskie: %{error}",
   "Could not set permissions on %{path}: %{error}": "Không thể đặt quyền cho %{path}: %{error}",
   "Could not set the default file manager: %{error}": "Không thể đặt trình quản lý tệp mặc định: %{error}",
-  "Could not stage %{path}: %{error}": "Không thể chuẩn bị %{path}: %{error}",
   "Could not stage the new binary: %{error}": "Không thể chuẩn bị tệp nhị phân mới: %{error}",
   "Could not stage the update: %{error}": "Không thể chuẩn bị bản cập nhật: %{error}",
   "Could not synchronize the install directory: %{error}": "Không thể đồng bộ thư mục cài đặt: %{error}",

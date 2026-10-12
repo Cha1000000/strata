@@ -320,7 +320,6 @@
   "Could not serialize udiskie installation state: %{error}": "Der Installationsstatus von udiskie konnte nicht gespeichert werden: %{error}",
   "Could not set permissions on %{path}: %{error}": "Die Berechtigungen für %{path} konnten nicht festgelegt werden: %{error}",
   "Could not set the default file manager: %{error}": "Der Standard-Dateimanager konnte nicht festgelegt werden: %{error}",
-  "Could not stage %{path}: %{error}": "%{path} konnte nicht vorbereitet werden: %{error}",
   "Could not stage the new binary: %{error}": "Neue Programmdatei konnte nicht vorbereitet werden: %{error}",
   "Could not stage the update: %{error}": "Update konnte nicht vorbereitet werden: %{error}",
   "Could not synchronize the install directory: %{error}": "Installationsordner konnte nicht synchronisiert werden: %{error}",

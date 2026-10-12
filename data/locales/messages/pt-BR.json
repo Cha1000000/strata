@@ -320,7 +320,6 @@
   "Could not serialize udiskie installation state: %{error}": "Não foi possível salvar o estado de instalação do udiskie: %{error}",
   "Could not set permissions on %{path}: %{error}": "Não foi possível definir as permissões de %{path}: %{error}",
   "Could not set the default file manager: %{error}": "Não foi possível definir o gerenciador de arquivos padrão: %{error}",
-  "Could not stage %{path}: %{error}": "Não foi possível preparar %{path}: %{error}",
   "Could not stage the new binary: %{error}": "Não foi possível preparar o novo binário: %{error}",
   "Could not stage the update: %{error}": "Não foi possível preparar a atualização: %{error}",
   "Could not synchronize the install directory: %{error}": "Não foi possível sincronizar a pasta de instalação: %{error}",

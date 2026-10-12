@@ -320,7 +320,6 @@
   "Could not serialize udiskie installation state: %{error}": "udiskie のインストール状態を保存できませんでした: %{error}",
   "Could not set permissions on %{path}: %{error}": "%{path} のアクセス権を設定できませんでした: %{error}",
   "Could not set the default file manager: %{error}": "デフォルトのファイルマネージャーを設定できませんでした: %{error}",
-  "Could not stage %{path}: %{error}": "%{path} を準備できませんでした: %{error}",
   "Could not stage the new binary: %{error}": "新しいバイナリを準備できませんでした: %{error}",
   "Could not stage the update: %{error}": "更新を準備できませんでした: %{error}",
   "Could not synchronize the install directory: %{error}": "インストール先フォルダーを同期できませんでした: %{error}",

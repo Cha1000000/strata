@@ -320,7 +320,6 @@
   "Could not serialize udiskie installation state: %{error}": "Не удалось сохранить состояние установки udiskie: %{error}",
   "Could not set permissions on %{path}: %{error}": "Не удалось задать права доступа для %{path}: %{error}",
   "Could not set the default file manager: %{error}": "Не удалось назначить файловый менеджер по умолчанию: %{error}",
-  "Could not stage %{path}: %{error}": "Не удалось подготовить %{path}: %{error}",
   "Could not stage the new binary: %{error}": "Не удалось подготовить новый исполняемый файл: %{error}",
   "Could not stage the update: %{error}": "Не удалось подготовить обновление: %{error}",
   "Could not synchronize the install directory: %{error}": "Не удалось синхронизировать папку установки: %{error}",

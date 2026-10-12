@@ -320,7 +320,6 @@
   "Could not serialize udiskie installation state: %{error}": "Could not serialize udiskie installation state: %{error}",
   "Could not set permissions on %{path}: %{error}": "Could not set permissions on %{path}: %{error}",
   "Could not set the default file manager: %{error}": "Could not set the default file manager: %{error}",
-  "Could not stage %{path}: %{error}": "Could not stage %{path}: %{error}",
   "Could not stage the new binary: %{error}": "Could not stage the new binary: %{error}",
   "Could not stage the update: %{error}": "Could not stage the update: %{error}",
   "Could not synchronize the install directory: %{error}": "Could not synchronize the install directory: %{error}",

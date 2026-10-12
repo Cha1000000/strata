@@ -320,7 +320,6 @@
   "Could not serialize udiskie installation state: %{error}": "无法序列化 udiskie 安装状态：%{error}",
   "Could not set permissions on %{path}: %{error}": "无法设置 %{path} 的权限：%{error}",
   "Could not set the default file manager: %{error}": "无法设置默认文件管理器：%{error}",
-  "Could not stage %{path}: %{error}": "无法暂存 %{path}：%{error}",
   "Could not stage the new binary: %{error}": "无法暂存新的二进制文件：%{error}",
   "Could not stage the update: %{error}": "无法暂存更新：%{error}",
   "Could not synchronize the install directory: %{error}": "无法同步安装目录：%{error}",
