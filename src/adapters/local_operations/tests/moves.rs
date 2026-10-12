@@ -222,11 +222,20 @@ fn same_volume_move_on_a_flag_rejecting_filesystem_never_copies() -> Result<(), 
         move_native(&file, &destination.join("notes.txt"))?;
         move_native(&folder, &destination.join("folder"))?;
 
-        assert_eq!(fs::metadata(destination.join("notes.txt"))?.ino(), file_inode);
-        assert_eq!(fs::metadata(destination.join("folder"))?.ino(), folder_inode);
+        assert_eq!(
+            fs::metadata(destination.join("notes.txt"))?.ino(),
+            file_inode
+        );
+        assert_eq!(
+            fs::metadata(destination.join("folder"))?.ino(),
+            folder_inode
+        );
         assert_eq!(fs::read(destination.join("folder/inside.txt"))?, b"inside");
         assert!(!file.exists() && !folder.exists());
-        assert_eq!(scope.count(Op::Create), usize::from(rejection == Errno::INVAL));
+        assert_eq!(
+            scope.count(Op::Create),
+            usize::from(rejection == Errno::INVAL)
+        );
     }
     Ok(())
 }

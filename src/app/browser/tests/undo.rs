@@ -1412,9 +1412,8 @@ fn a_replaced_archive_restores_the_original_on_undo_even_after_a_cancel_request(
             original: Some(ReplacedOriginal::Trashed(original)),
         });
 
-        let (generation, created, overwritten) = browser
-            .pending_undo_merge()
-            .expect("replacement undo");
+        let (generation, created, overwritten) =
+            browser.pending_undo_merge().expect("replacement undo");
         assert!(created.is_empty());
         assert_eq!(overwritten, vec![archive.clone()]);
         assert!(browser.undo_merge(generation, created, overwritten));

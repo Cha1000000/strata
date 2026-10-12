@@ -1,10 +1,10 @@
+use super::fs_quirks::Trash;
 use super::*;
 use crate::adapters::local_operations::{
     LocalDeleteJob, LocalDeleteQueue, PinnedEntry, parallel_delete_local_blocking_with_workers,
     parallel_delete_local_with, process_local_delete_job, retry_local_open,
     run_local_delete_workers,
 };
-use super::fs_quirks::Trash;
 use std::sync::{Barrier, atomic::Ordering, mpsc};
 
 fn delete_root(path: &Path) -> Result<PinnedEntry, Box<dyn Error>> {

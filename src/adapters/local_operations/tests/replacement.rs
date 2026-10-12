@@ -858,7 +858,8 @@ fn the_original_is_deleted_only_after_the_removable_flush() -> Result<(), Box<dy
 }
 
 #[test]
-fn same_filesystem_replacing_move_places_the_source_without_a_stage() -> Result<(), Box<dyn Error>> {
+fn same_filesystem_replacing_move_places_the_source_without_a_stage() -> Result<(), Box<dyn Error>>
+{
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
         .lock()
         .map_err(|error| error.to_string())?;

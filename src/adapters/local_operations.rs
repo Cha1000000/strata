@@ -59,8 +59,8 @@ use crate::{
         CancelledOperation, CompressRequest, CreateDirectoryRequest, CreateFileRequest,
         DeleteRequest, ExtractRequest, LoadHandle, OperationEvent, OperationProvider,
         OperationRequestId, PasteRequest, RenameRequest, ReplacedOriginal, RestoreRequest,
-        RestoreSource, TransferConflict, TrashedOriginal, UndoCopyRequest, UndoMergeRequest, UndoMoveRequest,
-        UndoRenameRequest, validate_basename,
+        RestoreSource, TransferConflict, TrashedOriginal, UndoCopyRequest, UndoMergeRequest,
+        UndoMoveRequest, UndoRenameRequest, validate_basename,
     },
 };
 
@@ -1137,15 +1137,14 @@ fn open_local_regular_copy(
         .file_name()
         .ok_or_else(|| translated_io_error("Invalid copy source"))?;
     let source_parent = open_local_parent_directory(source_parent_path).map_err(io_error)?;
-    let source_file =
-        match open_local_copy_source(&source_parent, source_name).map_err(io_error)? {
-            LocalCopySource::File(file) => file,
-            _ => {
-                return Err(translated_io_error(
-                    "Copy source is no longer a regular file",
-                ));
-            }
-        };
+    let source_file = match open_local_copy_source(&source_parent, source_name).map_err(io_error)? {
+        LocalCopySource::File(file) => file,
+        _ => {
+            return Err(translated_io_error(
+                "Copy source is no longer a regular file",
+            ));
+        }
+    };
     let target_path = target
         .path()
         .ok_or_else(|| translated_io_error("Copy destination must be a local path"))?;
@@ -2295,13 +2294,21 @@ fn placement_failure(
             name = name
         )
         .into_owned(),
-        error => template(name, &crate::services::error_detail(placement_reason(error))),
+        error => template(
+            name,
+            &crate::services::error_detail(placement_reason(error)),
+        ),
     };
     io_error(message)
 }
 
 fn could_not_move(name: &str, error: &str) -> String {
-    rust_i18n::t!("Could not move %{name}: %{error}", name = name, error = error).into_owned()
+    rust_i18n::t!(
+        "Could not move %{name}: %{error}",
+        name = name,
+        error = error
+    )
+    .into_owned()
 }
 
 /// Renames a native item without replacing another, in one blocking step.
@@ -2652,7 +2659,12 @@ fn copy_restore_entry(
 }
 
 fn could_not_restore(name: &str, error: &str) -> String {
-    rust_i18n::t!("Could not restore %{name}: %{error}", name = name, error = error).into_owned()
+    rust_i18n::t!(
+        "Could not restore %{name}: %{error}",
+        name = name,
+        error = error
+    )
+    .into_owned()
 }
 
 async fn move_restore_path(
@@ -2877,31 +2889,30 @@ struct StagedSibling {
 impl StagedSibling {
     fn create(parent_path: &Path, content: StageContent) -> io::Result<Self> {
         let parent = open_local_parent_directory(parent_path).map_err(io::Error::other)?;
-        let (name, (identity, kind)) =
-            placement::reserve_hidden_name(STAGE_PREFIX, |name| {
-                let entry = Entry::new(&parent, name);
-                let created = match &content {
-                    StageContent::File => fs()
-                        .create_exclusive(entry, rustix::fs::Mode::from_raw_mode(0o600))
-                        .and_then(|file| fs().stat_fd(file.as_fd()))
-                        .map(Some),
-                    StageContent::Directory => fs()
-                        .mkdir(entry, rustix::fs::Mode::from_raw_mode(0o700))
-                        .map(|()| None),
-                    StageContent::Symlink(link) => fs().symlink(link, entry).map(|()| None),
-                };
-                let stat = match created {
-                    Ok(Some(stat)) => stat,
-                    Ok(None) => fs().stat(entry, false).map_err(PlaceError::Io)?,
-                    Err(rustix::io::Errno::EXIST) => return Err(PlaceError::Exists),
-                    Err(error) => return Err(PlaceError::Io(error)),
-                };
-                Ok((stat.identity, stat.kind))
-            })
-            .map_err(|error| match error {
-                PlaceError::Io(error) => io::Error::from(error),
-                error => io::Error::other(placement_reason(error)),
-            })?;
+        let (name, (identity, kind)) = placement::reserve_hidden_name(STAGE_PREFIX, |name| {
+            let entry = Entry::new(&parent, name);
+            let created = match &content {
+                StageContent::File => fs()
+                    .create_exclusive(entry, rustix::fs::Mode::from_raw_mode(0o600))
+                    .and_then(|file| fs().stat_fd(file.as_fd()))
+                    .map(Some),
+                StageContent::Directory => fs()
+                    .mkdir(entry, rustix::fs::Mode::from_raw_mode(0o700))
+                    .map(|()| None),
+                StageContent::Symlink(link) => fs().symlink(link, entry).map(|()| None),
+            };
+            let stat = match created {
+                Ok(Some(stat)) => stat,
+                Ok(None) => fs().stat(entry, false).map_err(PlaceError::Io)?,
+                Err(rustix::io::Errno::EXIST) => return Err(PlaceError::Exists),
+                Err(error) => return Err(PlaceError::Io(error)),
+            };
+            Ok((stat.identity, stat.kind))
+        })
+        .map_err(|error| match error {
+            PlaceError::Io(error) => io::Error::from(error),
+            error => io::Error::other(placement_reason(error)),
+        })?;
         Ok(Self {
             parent: Arc::new(parent),
             parent_path: parent_path.to_path_buf(),
@@ -2981,7 +2992,8 @@ async fn discard_incomplete_staged(staged: StagedSibling) -> Result<(), glib::Er
         // GIO unlinks and recreates a file it copies over, so the regular
         // file now at the hidden stage name is the one to remove.
         let (parent, name) = (staged.parent.clone(), staged.name.clone());
-        let current = run_blocking(move || Ok(fs().stat(Entry::new(&*parent, &name), false))).await?;
+        let current =
+            run_blocking(move || Ok(fs().stat(Entry::new(&*parent, &name), false))).await?;
         if let Ok(current) = current
             && current.kind == rustix::fs::FileType::RegularFile
         {
@@ -3274,7 +3286,10 @@ fn plan_replace(
     }
     let target_directory = fs().stat_fd(target_parent.as_fd()).ok();
     let shared_parent = target_directory.is_some()
-        && fs().stat_fd(source_parent.as_fd()).ok().map(|dir| dir.identity)
+        && fs()
+            .stat_fd(source_parent.as_fd())
+            .ok()
+            .map(|dir| dir.identity)
             == target_directory.map(|dir| dir.identity);
     // A hard link elsewhere in the folder is a separate name and is replaced.
     if shared_parent
@@ -3501,7 +3516,10 @@ async fn replace_through_stage(
     .await;
     if let Err(error) = ready {
         let cleanup = discard_incomplete_staged(staged).await;
-        return Err(in_trash(copy_failure_after_cleanup(error, cleanup), removal));
+        return Err(in_trash(
+            copy_failure_after_cleanup(error, cleanup),
+            removal,
+        ));
     }
     loop {
         let parent = staged.parent.clone();
@@ -3697,8 +3715,7 @@ async fn replace_local_with(
                         name: aside.name,
                         identity: aside.identity,
                     };
-                    return remove_displaced_original(original, None, &plan.target_display())
-                        .await;
+                    return remove_displaced_original(original, None, &plan.target_display()).await;
                 }
                 SourcePlaced::CopyAfterTrash => Removal::Trashed,
                 SourcePlaced::PutBack => Removal::Without(Displacement::SetAside),
@@ -3989,7 +4006,8 @@ async fn merge_local_with(
         created: plan.created,
         overwritten: trashed,
     });
-    if let Err(error) = (hooks.copy_into_target)(source.clone(), target, true, cancellable.clone()).await
+    if let Err(error) =
+        (hooks.copy_into_target)(source.clone(), target, true, cancellable.clone()).await
     {
         return Err(merge_aside::abandon(aside, error).await);
     }

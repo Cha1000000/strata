@@ -9,7 +9,10 @@ use std::{collections::BTreeMap, sync::Mutex};
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub(crate) enum MountKey {
     Unique(u64),
-    Mount { id: u64, device: u64 },
+    Mount {
+        id: u64,
+        device: u64,
+    },
     Device(u64),
     #[cfg(test)]
     Test(u64),

@@ -241,8 +241,9 @@ impl FsOps for System {
                     MountKey::Device(device)
                 }
             }
-            Err(_) => rustix::fs::fstat(dir)
-                .map_or(MountKey::Device(u64::MAX), |stat| MountKey::Device(stat.st_dev)),
+            Err(_) => rustix::fs::fstat(dir).map_or(MountKey::Device(u64::MAX), |stat| {
+                MountKey::Device(stat.st_dev)
+            }),
         }
     }
 

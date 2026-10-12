@@ -87,8 +87,8 @@ fn copy_recursively_fat_family(
 }
 
 use super::{
-    FAT32_MAX_FILE_SIZE, FailedAction, PinnedEntry, LocalFileIdentity, LocalOperationProvider,
-    MergeHooks, MergePlan, MountTable, RestoreEntry, StageCopy, StageOverwrite,
+    FAT32_MAX_FILE_SIZE, FailedAction, LocalFileIdentity, LocalOperationProvider, MergeHooks,
+    MergePlan, MountTable, PinnedEntry, RestoreEntry, StageCopy, StageOverwrite,
     StagedOriginalLookup, TRANSFER_PROGRESS_INTERVAL, TransferProgressTracker, TransferStop,
     await_cancellable, copy_failure_after_cleanup, copy_failure_on_fat32,
     copy_new_recursively_on_filesystem, copy_new_remote_file_with, copy_recursively,
@@ -98,9 +98,9 @@ use super::{
     merge_local_with, move_local, move_local_with, open_local_parent_directory,
     operation_error_summary, parallel_delete_local, parse_copy_suffix, permanently_delete_local,
     permanently_delete_local_path_if_unchanged, replace_local, replace_local_with, run_merge_undo,
-    set_removable_roots_for_test, set_sync_observer,
-    stop_transfer, sync_probe_observations, target_is_fat_family, transfer_is_noop, transfer_sizes,
-    trash_stage_overwrite, unique_fat_sibling_name, validated_child, was_cancelled,
+    set_removable_roots_for_test, set_sync_observer, stop_transfer, sync_probe_observations,
+    target_is_fat_family, transfer_is_noop, transfer_sizes, trash_stage_overwrite,
+    unique_fat_sibling_name, validated_child, was_cancelled,
 };
 use crate::{
     model::{EntryKind, FileEntry, Location, MetadataValue},

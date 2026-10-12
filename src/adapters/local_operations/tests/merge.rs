@@ -852,7 +852,10 @@ fn merge_without_trash_sets_originals_aside_and_removes_them_after_success()
         assert!(result.is_ok(), "{trash:?}: {result:?}");
         assert!(used_aside(&quirks));
         assert_eq!(fs::read(target.join("shared.txt"))?, b"new");
-        assert_eq!(fs::read(target.join("nested/deep/shared.txt"))?, b"new deep");
+        assert_eq!(
+            fs::read(target.join("nested/deep/shared.txt"))?,
+            b"new deep"
+        );
         assert_eq!(fs::read(target.join("nested/stays.txt"))?, b"keep me");
         assert_eq!(names(&target)?, ["incoming.txt", "nested", "shared.txt"]);
         assert_eq!(source.exists(), !move_source);
@@ -893,12 +896,18 @@ fn a_failed_merge_without_trash_puts_back_what_it_can_and_names_the_rest()
         write_files(&source, &[("a.txt", "new a"), ("b.txt", "new b")])?;
         write_files(
             &target,
-            &[("a.txt", "old a"), ("b.txt", "old b"), ("stays.txt", "keep me")],
+            &[
+                ("a.txt", "old a"),
+                ("b.txt", "old b"),
+                ("stays.txt", "keep me"),
+            ],
         )?;
         let _quirks = FsQuirks::install(root.path(), without_trash(Quirks::default()));
         let partial: StageCopy = Rc::new(move |_, target, _, _| {
             Box::pin(async move {
-                let path = target.path().ok_or_else(|| io_error("missing target path"))?;
+                let path = target
+                    .path()
+                    .ok_or_else(|| io_error("missing target path"))?;
                 fs::write(path.join("a.txt"), b"partial").map_err(io_error)?;
                 Err(glib::Error::new(failure, "injected copy failure"))
             })
@@ -934,7 +943,14 @@ fn a_failed_aside_puts_every_original_back_before_merging() -> Result<(), Box<dy
         let root = tempfile::tempdir()?;
         let source = root.path().join("source");
         let target = root.path().join("target");
-        write_files(&source, &[("a.txt", "new a"), ("b.txt", "new b"), ("mount/c.txt", "new c")])?;
+        write_files(
+            &source,
+            &[
+                ("a.txt", "new a"),
+                ("b.txt", "new b"),
+                ("mount/c.txt", "new c"),
+            ],
+        )?;
         write_files(&target, &target_files)?;
         let quirks = match case {
             "no safe placement" => Quirks::without_placement(),
@@ -950,9 +966,8 @@ fn a_failed_aside_puts_every_original_back_before_merging() -> Result<(), Box<dy
                 capabilities.no_replace = Some(true);
             });
         }
-        let _nested = (case == "nested mount").then(|| {
-            FsQuirks::install(&target.join("mount"), without_trash(Quirks::default()))
-        });
+        let _nested = (case == "nested mount")
+            .then(|| FsQuirks::install(&target.join("mount"), without_trash(Quirks::default())));
         let copied = Rc::new(Cell::new(false));
         let copy_observed = copied.clone();
 
@@ -967,7 +982,10 @@ fn a_failed_aside_puts_every_original_back_before_merging() -> Result<(), Box<dy
         );
 
         let error = result.expect_err(case);
-        assert!(error.message().contains("out of the way"), "{case}: {error}");
+        assert!(
+            error.message().contains("out of the way"),
+            "{case}: {error}"
+        );
         assert!(!copied.get(), "{case}");
         assert_eq!(used_aside(&quirks), case != "no safe placement", "{case}");
         for (path, contents) in target_files {

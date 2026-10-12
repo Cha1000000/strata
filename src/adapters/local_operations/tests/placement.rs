@@ -59,7 +59,11 @@ fn fingerprint(path: &Path) -> String {
     } else if metadata.is_dir() {
         format!("dir {} {:?}", metadata.ino(), names(path).expect("list"))
     } else {
-        format!("file {} {:?}", metadata.ino(), fs::read(path).expect("read"))
+        format!(
+            "file {} {:?}",
+            metadata.ino(),
+            fs::read(path).expect("read")
+        )
     }
 }
 
@@ -69,7 +73,10 @@ fn noreplace_success_needs_no_fallback_stat_or_mount_key() -> Result<(), Box<dyn
     let scope = FsQuirks::install(root.path(), Quirks::default());
     fs::write(root.path().join("source"), b"data")?;
 
-    assert_eq!(place_in(root.path(), "source", "target", None), Ok(Placed::Renamed));
+    assert_eq!(
+        place_in(root.path(), "source", "target", None),
+        Ok(Placed::Renamed)
+    );
 
     let calls = scope.calls();
     assert_eq!(calls.len(), 1, "{calls:?}");
@@ -191,7 +198,11 @@ fn the_ladder_never_replaces_an_existing_destination() -> Result<(), Box<dyn Err
                 } else {
                     // Rung 1 sees no destination; it appears in front of the fallback rung.
                     let raced = target.clone();
-                    let fallback = if source_is_folder { Op::Mkdir } else { Op::Link };
+                    let fallback = if source_is_folder {
+                        Op::Mkdir
+                    } else {
+                        Op::Link
+                    };
                     let racer: Racer = Box::new(move || create_destination(&raced, kind));
                     quirks.before.push((fallback, "target", 0, racer));
                 }
@@ -206,7 +217,11 @@ fn the_ladder_never_replaces_an_existing_destination() -> Result<(), Box<dyn Err
                 if let Some(target_before) = target_before {
                     assert_eq!(fingerprint(&target), target_before);
                 }
-                assert_eq!(names(root.path())?, ["other", "source", "target"], "{index} {kind}");
+                assert_eq!(
+                    names(root.path())?,
+                    ["other", "source", "target"],
+                    "{index} {kind}"
+                );
             }
         }
     }
@@ -243,14 +258,21 @@ fn an_invalid_name_on_a_fat_like_mount_is_reported_and_learns_nothing() -> Resul
     assert_eq!(names(root.path())?, ["source"]);
 
     scope.clear_calls();
-    assert_eq!(place_in(root.path(), "source", "valid", None), Ok(Placed::Renamed));
+    assert_eq!(
+        place_in(root.path(), "source", "valid", None),
+        Ok(Placed::Renamed)
+    );
     assert_eq!(scope.calls().len(), 1);
     Ok(())
 }
 
 #[test]
 fn a_folder_into_itself_is_refused_and_learns_nothing() -> Result<(), Box<dyn Error>> {
-    for quirks in [Quirks::default(), without_flags(Errno::INVAL), without_flags(Errno::NOSYS)] {
+    for quirks in [
+        Quirks::default(),
+        without_flags(Errno::INVAL),
+        without_flags(Errno::NOSYS),
+    ] {
         let root = tempfile::tempdir()?;
         let source = root.path().join("source");
         fs::create_dir_all(source.join("child"))?;
@@ -536,7 +558,10 @@ fn an_ambiguous_rename_failure_is_resolved_by_identity() -> Result<(), Box<dyn E
 
 #[test]
 fn a_source_substituted_before_it_moves_is_moved_back() -> Result<(), Box<dyn Error>> {
-    for (quirks, folder) in [(Quirks::default(), false), (without_flags(Errno::NOSYS), true)] {
+    for (quirks, folder) in [
+        (Quirks::default(), false),
+        (without_flags(Errno::NOSYS), true),
+    ] {
         let root = tempfile::tempdir()?;
         let source = root.path().join("source");
         make(&source, folder)?;
@@ -803,8 +828,14 @@ fn a_case_only_rename_goes_through_a_temporary_name() -> Result<(), Box<dyn Erro
             make(&source, folder)?;
             let original = identity(&source);
 
-            assert_eq!(rename_in(root.path(), "report", "report"), Ok(Renamed::Unchanged));
-            assert_eq!(rename_in(root.path(), "report", "Report"), Ok(Renamed::CaseOnly));
+            assert_eq!(
+                rename_in(root.path(), "report", "report"),
+                Ok(Renamed::Unchanged)
+            );
+            assert_eq!(
+                rename_in(root.path(), "report", "Report"),
+                Ok(Renamed::CaseOnly)
+            );
 
             assert_eq!(names(root.path())?, ["Report"], "folder: {folder}");
             assert_eq!(identity(&root.path().join("Report")), original);
@@ -948,9 +979,17 @@ fn the_last_rename_rung_never_clobbers_a_plain_creator() -> Result<(), Box<dyn E
                 assert!(result.is_ok(), "{case}");
                 assert_eq!(identity(&target), original, "{case}");
             } else {
-                assert_eq!(result, Err(RenameFailure::Place(PlaceError::Exists)), "{case}");
+                assert_eq!(
+                    result,
+                    Err(RenameFailure::Place(PlaceError::Exists)),
+                    "{case}"
+                );
                 assert_eq!(identity(&source), original, "{case}");
-                let theirs = if folder { target.join("theirs") } else { target.clone() };
+                let theirs = if folder {
+                    target.join("theirs")
+                } else {
+                    target.clone()
+                };
                 assert_eq!(fs::read(theirs)?, b"theirs", "{case}");
             }
         }

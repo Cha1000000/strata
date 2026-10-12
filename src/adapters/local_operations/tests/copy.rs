@@ -380,7 +380,12 @@ fn cancelling_a_new_file_copy_removes_the_incomplete_stage() -> Result<(), Box<d
         cancellable,
         Some(progress),
     ));
-    assert!(result.as_ref().is_err_and(|error| error.matches(gio::IOErrorEnum::Cancelled)), "{result:?}");
+    assert!(
+        result
+            .as_ref()
+            .is_err_and(|error| error.matches(gio::IOErrorEnum::Cancelled)),
+        "{result:?}"
+    );
     assert!(!target.exists());
     assert_eq!(fs::read_dir(root.path())?.count(), 2);
     assert_eq!(fs::read(root.path().join("keep.txt"))?, b"keep");
@@ -745,7 +750,11 @@ fn staged_publication_refuses_to_overwrite_an_existing_target() -> Result<(), Bo
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
         .lock()
         .map_err(|error| error.to_string())?;
-    for quirks in [Quirks::default, Quirks::without_rename_flags, Quirks::without_placement] {
+    for quirks in [
+        Quirks::default,
+        Quirks::without_rename_flags,
+        Quirks::without_placement,
+    ] {
         for directory in [false, true] {
             let root = tempfile::tempdir()?;
             let _scope = FsQuirks::install(root.path(), quirks());
@@ -763,7 +772,10 @@ fn staged_publication_refuses_to_overwrite_an_existing_target() -> Result<(), Bo
             let error = publish(staged, &target).expect_err("must refuse an existing target");
 
             assert!(error.matches(gio::IOErrorEnum::Exists), "{error}");
-            assert!(!staged_path.exists(), "failed publication must clean its stage");
+            assert!(
+                !staged_path.exists(),
+                "failed publication must clean its stage"
+            );
             let kept = if directory {
                 target.join("existing.txt")
             } else {
@@ -792,7 +804,11 @@ fn staged_publication_preserves_racing_destinations() -> Result<(), Box<dyn Erro
                     .expect("create competing symlink"),
             });
             // The race lands after the first rung, in front of the fallback rung.
-            let fallback = if source_directory { Op::Mkdir } else { Op::Link };
+            let fallback = if source_directory {
+                Op::Mkdir
+            } else {
+                Op::Link
+            };
             let _scope = FsQuirks::install(
                 root.path(),
                 Quirks {
@@ -927,7 +943,9 @@ fn a_stage_swapped_before_publication_is_neither_published_nor_deleted()
     let error = publish(staged, &target).expect_err("a swapped stage is refused");
 
     assert!(
-        error.message().contains("incomplete copy could not be removed"),
+        error
+            .message()
+            .contains("incomplete copy could not be removed"),
         "{error}"
     );
     assert!(fs::symlink_metadata(&target).is_err());

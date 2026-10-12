@@ -264,8 +264,11 @@ impl ExtractionDestination {
 
     pub(super) fn create_staging(&self) -> Result<(OsString, Self), String> {
         let (name, ()) = reserve_hidden_name(EXTRACTION_STAGE_PREFIX, |name| {
-            fs().mkdir(Entry::new(&self.root, name), rustix::fs::Mode::from_raw_mode(0o777))
-                .map_err(creation_error)
+            fs().mkdir(
+                Entry::new(&self.root, name),
+                rustix::fs::Mode::from_raw_mode(0o777),
+            )
+            .map_err(creation_error)
         })
         .map_err(|error| staging_creation_failed(&error_detail(placement_reason(error))))?;
         let root = rustix::fs::openat(

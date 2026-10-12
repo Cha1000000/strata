@@ -11,9 +11,9 @@ use super::super::{
     local_directory_children, open_local_child_directory, open_local_parent_directory,
     original_kept_aside,
     placement::{
-        COMPRESSION_STAGE_PREFIX, Displacement, NUMBERED_NAME_ATTEMPTS, PlaceError, REPLACED_PREFIX,
-        creation_error, displacement_without_trash, exchange, place,
-        put_back, remove_if_unchanged, reserve_hidden_name, set_aside, set_aside_if_safe,
+        COMPRESSION_STAGE_PREFIX, Displacement, NUMBERED_NAME_ATTEMPTS, PlaceError,
+        REPLACED_PREFIX, creation_error, displacement_without_trash, exchange, place, put_back,
+        remove_if_unchanged, reserve_hidden_name, set_aside, set_aside_if_safe,
     },
     placement_reason, remove_displaced_original,
     trash::trash_verified,
@@ -205,7 +205,8 @@ impl Publication {
             },
             Err(error) => return Err(self.creation_failed(errno_text(error))),
         };
-        let result = self.encode_and_publish(&stage, file, mode, cancelled, strategy, write_archive);
+        let result =
+            self.encode_and_publish(&stage, file, mode, cancelled, strategy, write_archive);
         if result.is_err() {
             remove_if_unchanged(fs(), stage.entry(), stage.identity, AtFlags::empty());
         }
@@ -224,7 +225,8 @@ impl Publication {
     where
         F: FnOnce(std::fs::File) -> Result<(), ArchiveError>,
     {
-        let handle = rustix::io::dup(&file).map_err(|error| self.creation_failed(errno_text(error)))?;
+        let handle =
+            rustix::io::dup(&file).map_err(|error| self.creation_failed(errno_text(error)))?;
         write_archive(std::fs::File::from(file))?;
         check_archive_cancelled(cancelled)?;
         rustix::fs::fchmod(&handle, rustix::fs::Mode::from_raw_mode(mode))

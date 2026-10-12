@@ -20,11 +20,10 @@ use rustix::{
 use super::{
     LocalFileIdentity, PinnedEntry, flush_removable_destination,
     fs_ops::{Entry, fs},
-    io_error, open_local_parent_directory, parallel_delete_local, run_blocking,
+    io_error, open_local_parent_directory, parallel_delete_local,
     placement::{self, Feasibility, MERGE_PREFIX, PlaceError},
-    placement_reason, retry_local_open, was_cancelled,
+    placement_reason, retry_local_open, run_blocking, was_cancelled,
 };
-
 
 struct Folder {
     name: OsString,
@@ -255,7 +254,10 @@ impl MergeAside {
             }
         }
         for mirror in self.mirrors.drain(..).rev() {
-            let _ = fs().unlink(Entry::new(&*mirror.parent, &mirror.name), AtFlags::REMOVEDIR);
+            let _ = fs().unlink(
+                Entry::new(&*mirror.parent, &mirror.name),
+                AtFlags::REMOVEDIR,
+            );
         }
         let (Some(target), Some(folder)) = (&self.target, &self.folder) else {
             return Ok(());

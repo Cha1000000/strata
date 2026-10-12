@@ -312,7 +312,11 @@ impl Scope {
         }
     }
 
-    fn creating<T>(&self, at: Entry<'_>, create: impl FnOnce() -> Result<T, Errno>) -> Result<T, Errno> {
+    fn creating<T>(
+        &self,
+        at: Entry<'_>,
+        create: impl FnOnce() -> Result<T, Errno>,
+    ) -> Result<T, Errno> {
         if self.invalid(at.name) {
             return Err(Errno::INVAL);
         }
@@ -357,9 +361,12 @@ impl Scope {
             }
         }
         if flags.is_empty() {
-            let source_is_directory = System.stat(from, false).is_ok_and(|stat| stat.is_directory());
-            let target_is_empty_directory = System.stat(to, false).is_ok_and(|stat| stat.is_directory())
-                && System.names(to).is_ok_and(|names| names.is_empty());
+            let source_is_directory = System
+                .stat(from, false)
+                .is_ok_and(|stat| stat.is_directory());
+            let target_is_empty_directory =
+                System.stat(to, false).is_ok_and(|stat| stat.is_directory())
+                    && System.names(to).is_ok_and(|names| names.is_empty());
             if source_is_directory && target_is_empty_directory {
                 match over_empty {
                     OverEmptyDirectory::Supported => {}

@@ -243,11 +243,13 @@ impl Browser {
                         ..
                     } => {
                         match original {
-                            Some(ReplacedOriginal::Trashed(original)) => push_background_undo(UndoEntry::Merge {
-                                created: Vec::new(),
-                                overwritten: vec![archive.clone()],
-                                originals: HashMap::from([(archive, original)]),
-                            }),
+                            Some(ReplacedOriginal::Trashed(original)) => {
+                                push_background_undo(UndoEntry::Merge {
+                                    created: Vec::new(),
+                                    overwritten: vec![archive.clone()],
+                                    originals: HashMap::from([(archive, original)]),
+                                })
+                            }
                             Some(ReplacedOriginal::Deleted) => {}
                             None => push_background_undo(UndoEntry::Copy(vec![archive])),
                         }

@@ -228,7 +228,10 @@ fn typed_rename_passes_a_same_item_name_to_the_operation() {
             submit_rename(&fixture, "later.txt");
             plain(&fixture, Key::Escape);
             pump(200);
-            assert!(!directory.join("later.txt").exists(), "a dismissed prompt renames nothing");
+            assert!(
+                !directory.join("later.txt").exists(),
+                "a dismissed prompt renames nothing"
+            );
 
             // The same item under another name is not refused by the prompt;
             // the operation itself refuses a separate hard link.

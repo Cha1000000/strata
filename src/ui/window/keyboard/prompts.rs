@@ -318,7 +318,9 @@ fn refuse_rename(
             return;
         }
     };
-    shortcuts.prompt_sink(Prompt::Rename).show(None, Some(&hint));
+    shortcuts
+        .prompt_sink(Prompt::Rename)
+        .show(None, Some(&hint));
 }
 
 pub(super) fn return_to_listing(shortcuts: &ShortcutFooter, view: &BrowserView, browser: &Browser) {

@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: MIT
 
+use super::super::fixtures::entry_names;
 use super::{
     ExtractNameResolver, ExtractionDestination, MemberMetadata, MetadataCalls, archive_stem,
     sanitized_archive_path,
 };
-use super::super::fixtures::entry_names;
 use crate::adapters::local_operations::tests::fs_quirks::{FsQuirks, Quirks};
 use std::{
     error::Error,
@@ -488,7 +488,8 @@ fn publication_without_rename_flags_never_replaces_entries() -> Result<(), Box<d
 }
 
 #[test]
-fn publication_without_rename_flags_moves_unreadable_subtrees_whole() -> Result<(), Box<dyn Error>> {
+fn publication_without_rename_flags_moves_unreadable_subtrees_whole() -> Result<(), Box<dyn Error>>
+{
     let root = tempfile::tempdir()?;
     let _quirks = FsQuirks::install(root.path(), Quirks::without_rename_flags());
     let destination = ExtractionDestination::open(root.path())?;
@@ -516,7 +517,10 @@ fn publication_without_rename_flags_moves_unreadable_subtrees_whole() -> Result<
         b"ro/sub/child.txt"
     );
     assert_eq!(
-        fs::metadata(published_root.join("sub"))?.permissions().mode() & 0o777,
+        fs::metadata(published_root.join("sub"))?
+            .permissions()
+            .mode()
+            & 0o777,
         0o555
     );
     assert!(published_root.join("unreadable").is_dir());

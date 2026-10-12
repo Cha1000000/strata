@@ -159,7 +159,13 @@ pub(super) fn place_after_rename(
     expected: Option<LocalFileIdentity>,
     error: Errno,
 ) -> Result<Placed, PlaceError> {
-    verified(fs, from, to, expected, fallback(fs, from, to, expected, error))
+    verified(
+        fs,
+        from,
+        to,
+        expected,
+        fallback(fs, from, to, expected, error),
+    )
 }
 
 fn verified(
@@ -343,11 +349,11 @@ fn place_non_directory(
 /// An `EEXIST` can be the lost reply of a link that did happen; a case alias
 /// or an older hard link fails the link-count or exact-name test.
 fn link_reply_was_lost(fs: &dyn FsOps, to: Entry<'_>, source: &EntryStat) -> bool {
-    fs.stat(to, true).is_ok_and(|target| {
-        target.identity == source.identity && target.nlink == source.nlink + 1
-    }) && fs
-        .names(at(to.dir, OsStr::new(".")))
-        .is_ok_and(|names| names.iter().any(|name| name == to.name))
+    fs.stat(to, true)
+        .is_ok_and(|target| target.identity == source.identity && target.nlink == source.nlink + 1)
+        && fs
+            .names(at(to.dir, OsStr::new(".")))
+            .is_ok_and(|names| names.iter().any(|name| name == to.name))
 }
 
 fn finish_link(
@@ -377,9 +383,10 @@ fn finish_link(
             resolve(fs, from, to, Some(source.identity), Errno::NOENT).map(|()| Placed::Linked)
         }
         Err(error) => {
-            if fs.stat(to, true).is_ok_and(|target| {
-                target.identity == source.identity && target.nlink >= 2
-            }) {
+            if fs
+                .stat(to, true)
+                .is_ok_and(|target| target.identity == source.identity && target.nlink >= 2)
+            {
                 let _ = fs.unlink(to, AtFlags::empty());
             }
             Err(PlaceError::Io(error))
@@ -728,7 +735,13 @@ pub(super) fn put_back(
     aside: &SetAside,
     name: &OsStr,
 ) -> Result<(), PlaceError> {
-    place(fs, at(dir, &aside.name), at(dir, name), Some(aside.identity)).map(drop)
+    place(
+        fs,
+        at(dir, &aside.name),
+        at(dir, name),
+        Some(aside.identity),
+    )
+    .map(drop)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -760,9 +773,7 @@ pub(super) fn can_set_aside(
     let known = match feasible(mount.capabilities()) {
         Some(known) => known,
         None => {
-            mount
-                .probe(!directory, directory)
-                .map_err(PlaceError::Io)?;
+            mount.probe(!directory, directory).map_err(PlaceError::Io)?;
             feasible(mount.capabilities()) == Some(true)
         }
     };
@@ -903,7 +914,11 @@ fn same_directory(fs: &dyn FsOps, left: BorrowedFd<'_>, right: BorrowedFd<'_>) -
 
 /// The item's identity when `to` names `from` itself rather than another
 /// item: a case alias, never a separate hard link.
-pub(super) fn alias_of(fs: &dyn FsOps, from: Entry<'_>, to: Entry<'_>) -> Option<LocalFileIdentity> {
+pub(super) fn alias_of(
+    fs: &dyn FsOps,
+    from: Entry<'_>,
+    to: Entry<'_>,
+) -> Option<LocalFileIdentity> {
     let source = fs.stat(from, true).ok()?;
     let target = fs.stat(to, true).ok()?;
     if source.identity != target.identity {

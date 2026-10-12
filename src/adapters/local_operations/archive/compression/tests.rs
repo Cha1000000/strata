@@ -425,7 +425,10 @@ fn keep_both_numbering_works_with_sshfs_eperm_collisions() -> Result<(), Box<dyn
     let (result, _) = publish_replacement(root.path(), TransferConflict::KeepBoth);
 
     assert_eq!(result, Ok(("existing (2).zip".to_owned(), None)));
-    assert_eq!(fs::read(root.path().join("existing (2).zip"))?, b"replacement");
+    assert_eq!(
+        fs::read(root.path().join("existing (2).zip"))?,
+        b"replacement"
+    );
     assert_eq!(fs::read(root.path().join("existing.zip"))?, b"original");
     assert_eq!(fs::read(root.path().join("existing (1).zip"))?, b"numbered");
     assert!(stages(root.path(), COMPRESSION_STAGE)?.is_empty());

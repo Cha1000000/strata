@@ -59,7 +59,11 @@ pub(super) fn trash_verified(
     cancellable: &gio::Cancellable,
 ) -> Result<(), glib::Error> {
     let trashed = fs().trash(path, cancellable)?;
-    if trashed && !fs().stat(at, false).is_ok_and(|stat| stat.identity == identity) {
+    if trashed
+        && !fs()
+            .stat(at, false)
+            .is_ok_and(|stat| stat.identity == identity)
+    {
         return Ok(());
     }
     Err(glib::Error::new(
