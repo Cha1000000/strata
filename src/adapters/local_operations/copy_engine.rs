@@ -538,8 +538,8 @@ pub(super) fn unlock_stage(staged: &StagedSibling) {
         .stat_fd(root.as_fd())
         .is_ok_and(|stat| stat.identity == staged.identity)
     {
-        let stable = stable_inodes(Mount::new(fs, root.as_fd()).family);
-        restrictive::loosen(fs, root.as_fd(), &staged.restrictive, stable);
+        let family = Mount::new(fs, root.as_fd()).family;
+        restrictive::loosen(fs, root.as_fd(), &staged.restrictive, family);
     }
 }
 
@@ -873,7 +873,7 @@ fn fill(
     )?;
     let stable = stable_inodes(mount.family);
     if let Err(error) = restrictive::tighten(fs, opened.as_fd(), &mut restrictive, stable) {
-        restrictive::loosen(fs, opened.as_fd(), &restrictive, stable);
+        restrictive::loosen(fs, opened.as_fd(), &restrictive, mount.family);
         return Err(error.into());
     }
     Ok(restrictive)

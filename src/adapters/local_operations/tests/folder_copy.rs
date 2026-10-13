@@ -691,35 +691,46 @@ fn an_item_put_at_a_linked_name_right_after_the_link_is_kept() -> Result<(), Box
 fn a_stage_with_read_only_folders_is_removed_when_it_cannot_be_published()
 -> Result<(), Box<dyn Error>> {
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock()?;
-    let root = tempfile::tempdir()?;
-    let source = root.path().join("source");
-    fs::create_dir_all(source.join("sub"))?;
-    fs::write(source.join("sub/file.txt"), b"contents")?;
-    set_mode(&source.join("sub"), 0o555)?;
-    set_mode(&source, 0o555)?;
-    let destination = root.path().join("destination");
-    fs::create_dir(&destination)?;
-    let taken = destination.join("target");
-    let racer: Racer = Box::new(move || fs::create_dir(&taken).expect("take the name"));
-    let _scope = FsQuirks::install(
-        &destination,
-        Quirks {
-            before: vec![(Op::Rename, ".strata-copy-*", 0, racer)],
-            ..Quirks::default()
-        },
-    );
+    let smb: Preset = || Quirks {
+        mount_type: Some(("cifs", "rw")),
+        stale_read_only: true,
+        ..Quirks::default()
+    };
+    for (row, preset) in [("default", Quirks::default as Preset), ("SMB", smb)] {
+        let root = tempfile::tempdir()?;
+        let source = root.path().join("source");
+        fs::create_dir_all(source.join("sub"))?;
+        fs::write(source.join("sub/file.txt"), b"contents")?;
+        set_mode(&source.join("sub"), 0o555)?;
+        set_mode(&source, 0o555)?;
+        let destination = root.path().join("destination");
+        fs::create_dir(&destination)?;
+        let taken = destination.join("target");
+        let racer: Racer = Box::new(move || fs::create_dir(&taken).expect("take the name"));
+        let _scope = FsQuirks::install(
+            &destination,
+            Quirks {
+                before: vec![(Op::Rename, ".strata-copy-*", 0, racer)],
+                ..preset()
+            },
+        );
 
-    let result = copy(&source, &destination.join("target"));
+        let result = copy(&source, &destination.join("target"));
 
-    unlock(&source)?;
-    assert!(
-        result
-            .as_ref()
-            .is_err_and(|error| error.matches(gio::IOErrorEnum::Exists)),
-        "{result:?}"
-    );
-    assert_eq!(names(&destination)?, ["target"]);
-    assert_eq!(names(&destination.join("target"))?, Vec::<String>::new());
+        unlock(&source)?;
+        assert!(
+            result
+                .as_ref()
+                .is_err_and(|error| error.matches(gio::IOErrorEnum::Exists)),
+            "{row}: {result:?}"
+        );
+        assert_eq!(names(&destination)?, ["target"], "{row}");
+        assert_eq!(
+            names(&destination.join("target"))?,
+            Vec::<String>::new(),
+            "{row}"
+        );
+    }
     Ok(())
 }
 

@@ -209,6 +209,10 @@ pub(crate) struct Quirks {
     /// with `EINVAL`, as the SMB client's one lease per file makes a second
     /// open while the first is held.
     pub one_open_per_file: bool,
+    /// Giving a folder write access back right after taking it does
+    /// nothing until a stat that revalidates comes between, as the SMB
+    /// client without POSIX extensions decides from attributes it cached.
+    pub stale_read_only: bool,
 }
 
 impl Quirks {
@@ -337,6 +341,8 @@ struct State {
     reported_losses: HashMap<RawFd, u64>,
     /// The name each file was first opened by, by device and inode.
     opened_names: HashMap<(u64, u64), PathBuf>,
+    /// Folders made read-only that no revalidating stat has seen since.
+    read_only_unseen: HashSet<PathBuf>,
 }
 
 static SCOPES: Mutex<Vec<Arc<Scope>>> = Mutex::new(Vec::new());
@@ -369,6 +375,7 @@ impl FsQuirks {
                 writebacks_lost: 0,
                 reported_losses: HashMap::new(),
                 opened_names: HashMap::new(),
+                read_only_unseen: HashSet::new(),
             }),
         });
         scopes().push(scope.clone());
@@ -1071,6 +1078,12 @@ impl FsOps for Scoped {
         match scope_for(at.dir) {
             Some(scope) => {
                 let path = path_of(at.dir).map(|dir| dir.join(at.name));
+                if force_sync
+                    && scope.quirk(|quirks| quirks.stale_read_only)
+                    && let Some(path) = path.as_deref().and_then(|path| path.canonicalize().ok())
+                {
+                    scope.state().read_only_unseen.remove(&path);
+                }
                 scope
                     .run(Op::Stat, &[at.name], |scope| {
                         scope.stat(at, path.as_deref(), force_sync)
@@ -1390,7 +1403,20 @@ impl FsOps for Scoped {
 
     fn chmod_fd(&self, fd: BorrowedFd<'_>, mode: u32) -> Result<(), Errno> {
         assert_off_main_thread();
-        on_fd(fd, Op::ChmodFd, None, |_| System.chmod_fd(fd, mode))
+        on_fd(fd, Op::ChmodFd, None, |scope| {
+            if let (Some(scope), Some(path)) = (scope, path_of(fd))
+                && scope.quirk(|quirks| quirks.stale_read_only)
+                && path.is_dir()
+            {
+                let mut state = scope.state();
+                if mode & 0o200 == 0 {
+                    state.read_only_unseen.insert(path);
+                } else if state.read_only_unseen.contains(&path) {
+                    return Ok(());
+                }
+            }
+            System.chmod_fd(fd, mode)
+        })
     }
 
     fn set_times_fd(

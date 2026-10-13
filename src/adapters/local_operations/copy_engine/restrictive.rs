@@ -13,10 +13,13 @@ use std::{
 
 use rustix::io::Errno;
 
-use super::{best_effort, is_fatal};
-use crate::adapters::local_operations::{
-    LocalFileIdentity,
-    fs_ops::{Entry, FsOps},
+use super::{best_effort, is_fatal, stable_inodes};
+use crate::adapters::{
+    local_operations::{
+        LocalFileIdentity,
+        fs_ops::{Entry, FsOps},
+    },
+    volume::Family,
 };
 
 #[derive(Clone, Debug)]
@@ -93,12 +96,22 @@ pub(super) fn loosen(
     fs: &dyn FsOps,
     root: BorrowedFd<'_>,
     folders: &[Restrictive],
-    stable_inodes: bool,
+    family: Family,
 ) {
     let mut folders = folders.iter().collect::<Vec<_>>();
     folders.sort_by_key(|folder| folder.depth());
     for folder in folders {
-        if let Ok(Some(fd)) = reopen(fs, root, &folder.path, folder.identity, stable_inodes) {
+        let at = Entry {
+            dir: root,
+            name: beneath(&folder.path),
+        };
+        // Without POSIX extensions, the SMB client clears the read-only
+        // attribute it set only once it has seen it set.
+        if family == Family::Smb {
+            let _ = fs.stat(at, true);
+        }
+        let stable = stable_inodes(family);
+        if let Ok(Some(fd)) = reopen(fs, root, &folder.path, folder.identity, stable) {
             let _ = fs.chmod_fd(fd.as_fd(), folder.mode | 0o700);
         }
     }
