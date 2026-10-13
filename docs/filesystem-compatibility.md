@@ -62,7 +62,8 @@ Residual limits:
   inode numbers off for the whole mount once a folder is looked up under a second spelling, as the
   check before a case-only folder rename does ("Autodisabling the use of server inode numbers" in
   the kernel log). Hard links then report different inode numbers, so steps that prove a link fail
-  closed; `RENAME_NOREPLACE` still places items there.
+  closed, and the capability probe proves its own files by birth time instead; `RENAME_NOREPLACE`
+  still places items there.
 - If the reply to the placeholder `mkdir` is lost on NFS, an empty folder can remain at the
   destination name.
 

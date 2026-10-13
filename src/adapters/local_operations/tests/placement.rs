@@ -677,7 +677,7 @@ type ProbeCase = (fn() -> Quirks, Probed, Feasibility, Feasibility);
 
 #[test]
 fn the_probe_learns_each_quirk_and_leaves_nothing_behind() -> Result<(), Box<dyn Error>> {
-    let cases: [ProbeCase; 6] = [
+    let cases: [ProbeCase; 7] = [
         (
             Quirks::default,
             Probed {
@@ -752,6 +752,20 @@ fn the_probe_learns_each_quirk_and_leaves_nothing_behind() -> Result<(), Box<dyn
             Feasibility::Yes,
             Feasibility::Yes,
         ),
+        (
+            // cifs with server inode numbers turned off.
+            || Quirks {
+                link_inodes: true,
+                ..Quirks::default()
+            },
+            Probed {
+                no_replace: Some(true),
+                hard_links: Some(true),
+                rename_over_empty_directory: Some(true),
+            },
+            Feasibility::Yes,
+            Feasibility::Yes,
+        ),
     ];
     for (quirks, expected, files, folders) in cases {
         let root = tempfile::tempdir()?;
@@ -765,6 +779,26 @@ fn the_probe_learns_each_quirk_and_leaves_nothing_behind() -> Result<(), Box<dyn
         assert_eq!(can_set_aside(fs(), parent.as_fd(), true), Ok(folders));
         assert!(names(root.path())?.is_empty(), "{:?}", names(root.path())?);
     }
+    Ok(())
+}
+
+#[test]
+fn the_probe_keeps_files_it_cannot_prove_are_its_own() -> Result<(), Box<dyn Error>> {
+    let root = tempfile::tempdir()?;
+    let parent = open_local_parent_directory(root.path())?;
+    let _scope = FsQuirks::install(
+        root.path(),
+        Quirks {
+            link_inodes: true,
+            no_birth_time: true,
+            ..Quirks::default()
+        },
+    );
+
+    probe(fs(), parent.as_fd(), true, true, false)?;
+
+    let left = names(root.path())?;
+    assert_eq!(left.len(), 2, "{left:?}");
     Ok(())
 }
 

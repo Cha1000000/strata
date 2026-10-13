@@ -660,10 +660,10 @@ pub(super) fn probe(
     {
         probed.hard_links = supported;
         if supported == Some(true) {
-            remove_if_unchanged(fs, at(dir, &linked), identity, AtFlags::empty());
+            remove_probe_file(fs, at(dir, &linked), identity);
         }
     }
-    remove_if_unchanged(fs, at(dir, &current), identity, AtFlags::empty());
+    remove_probe_file(fs, at(dir, &current), identity);
 
     if folders {
         probed.rename_over_empty_directory = probe_folders(fs, dir);
@@ -699,6 +699,21 @@ fn probe_folders(fs: &dyn FsOps, dir: BorrowedFd<'_>) -> Option<bool> {
     remove_placeholder(fs, at(dir, &moved), moved_identity);
     remove_placeholder(fs, at(dir, &target), target_identity);
     result
+}
+
+/// Removes a probe file while it is still the empty file the probe made. Once
+/// cifs turns server inode numbers off, each name of a file gets its own
+/// inode number, so there a matching birth time proves it instead.
+fn remove_probe_file(fs: &dyn FsOps, entry: Entry<'_>, made: LocalFileIdentity) {
+    let Ok(current) = fs.stat(entry, true) else {
+        return;
+    };
+    let born_with_it = current.identity.birth.is_some()
+        && (current.identity.device, current.identity.kind, current.identity.birth)
+            == (made.device, made.kind, made.birth);
+    if (current.identity == made || born_with_it) && current.size == 0 {
+        let _ = fs.unlink(entry, AtFlags::empty());
+    }
 }
 
 #[derive(Debug)]

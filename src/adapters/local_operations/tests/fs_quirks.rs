@@ -18,7 +18,7 @@ use std::{
 
 use gtk::{gio, glib};
 use rustix::{
-    fs::{AtFlags, FsWord, Mode, RenameFlags},
+    fs::{AtFlags, FileType, FsWord, Mode, RenameFlags},
     io::Errno,
 };
 
@@ -97,6 +97,9 @@ pub(crate) struct Quirks {
     pub stale_aliases: bool,
     /// A case alias reports its own inode number, as libfuse without `use_ino` does.
     pub alias_inodes: bool,
+    /// Each further name of a hard-linked file reports its own inode number,
+    /// as cifs does once it turns server inode numbers off.
+    pub link_inodes: bool,
     /// Names rejected with `EINVAL` by rename, mkdir, symlink and create,
     /// and with `EPERM` by link, as on vfat.
     pub invalid_name: Option<fn(&OsStr) -> bool>,
@@ -152,6 +155,7 @@ struct State {
     calls: Vec<Call>,
     inodes: HashMap<PathBuf, u64>,
     births: HashMap<PathBuf, i64>,
+    first_names: HashMap<u64, PathBuf>,
     stale: HashMap<PathBuf, EntryStat>,
 }
 
@@ -177,6 +181,7 @@ impl FsQuirks {
                 calls: Vec::new(),
                 inodes: HashMap::new(),
                 births: HashMap::new(),
+                first_names: HashMap::new(),
                 stale: HashMap::new(),
             }),
         });
@@ -295,6 +300,17 @@ impl Scope {
 
     fn reported(&self, path: Option<PathBuf>, mut stat: EntryStat) -> EntryStat {
         let mut state = self.state();
+        if state.quirks.link_inodes
+            && stat.kind == FileType::RegularFile
+            && let Some(path) = &path
+        {
+            // cifs reports the server's creation time, which every name of a file shares.
+            let inode = stat.identity.inode;
+            stat.identity.birth = stat.identity.birth.or(Some((inode as i64, 0)));
+            if *state.first_names.entry(inode).or_insert_with(|| path.clone()) != *path {
+                stat.identity.inode = !inode;
+            }
+        }
         if let (Some(pattern), Some(path)) = (state.quirks.reused_inodes, path)
             && path
                 .file_name()
