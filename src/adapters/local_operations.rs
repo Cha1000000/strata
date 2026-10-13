@@ -1655,10 +1655,17 @@ impl CreatedCopyRoot {
     }
 }
 
-async fn record_created_copy_root(
-    created_root: &Option<Rc<CreatedCopyRoot>>,
+/// Makes a copy's target folder, recording it when it is the copy's root.
+/// The synchronous call reports a folder it made even if the copy is
+/// cancelled meanwhile, where `make_directory_async` reports only the cancel
+/// and the folder would be left behind.
+async fn make_copy_folder(
     target: &gio::File,
+    cancellable: &gio::Cancellable,
+    created_root: &Option<Rc<CreatedCopyRoot>>,
 ) -> Result<(), glib::Error> {
+    let (folder, cancellable) = (target.clone(), cancellable.clone());
+    run_blocking(move || folder.make_directory(Some(&cancellable))).await?;
     if let Some(created_root) = created_root {
         created_root.was_created.set(true);
         created_root
@@ -1845,15 +1852,7 @@ fn copy_recursively_local(
                     children.sort();
                 }
                 if options.into.makes_folder(&target, &cancellable).await {
-                    await_cancellable(&target, &cancellable, |target, cancellable, result| {
-                        target.make_directory_async(
-                            glib::Priority::DEFAULT,
-                            Some(cancellable),
-                            move |output| result.resolve(output),
-                        );
-                    })
-                    .await?;
-                    record_created_copy_root(&created_root, &target).await?;
+                    make_copy_folder(&target, &cancellable, &created_root).await?;
                 }
                 let handle = Arc::new(handle);
                 let mut used_names = HashSet::with_capacity(children.len());
@@ -2018,15 +2017,7 @@ fn copy_recursively_with_progress(
         .await?;
         if info.file_type() == gio::FileType::Directory {
             if into.makes_folder(&target, &cancellable).await {
-                await_cancellable(&target, &cancellable, |target, cancellable, result| {
-                    target.make_directory_async(
-                        glib::Priority::DEFAULT,
-                        Some(cancellable),
-                        move |output| result.resolve(output),
-                    );
-                })
-                .await?;
-                record_created_copy_root(&created_root, &target).await?;
+                make_copy_folder(&target, &cancellable, &created_root).await?;
             }
             let enumerator =
                 await_cancellable(&source, &cancellable, |source, cancellable, result| {

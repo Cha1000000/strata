@@ -8,6 +8,7 @@ use super::super::{
 };
 use super::fs_quirks::{Op, Racer, Support};
 use super::*;
+use crate::adapters::volume::learn_mount_capability;
 
 #[test]
 fn nested_copy_shares_one_worker_budget_across_subdirectories() -> Result<(), Box<dyn Error>> {
@@ -1044,7 +1045,11 @@ fn cancelling_staged_fallback_removes_its_reserved_directory() -> Result<(), Box
         .lock()
         .map_err(|error| error.to_string())?;
     let root = tempfile::tempdir()?;
-    let _scope = FsQuirks::install(root.path(), Quirks::without_placement());
+    let scope = FsQuirks::install(root.path(), Quirks::without_placement());
+    // No placeholder, so the target appears only when the copy makes it.
+    learn_mount_capability(scope.key(), |capabilities| {
+        capabilities.rename_over_empty_directory = Some(false);
+    });
     let staged = stage(root.path(), true)?;
     let staged_path = staged.path();
     fs::File::create(staged_path.join("large.bin"))?.set_len(64 * 1024 * 1024)?;
@@ -1061,8 +1066,11 @@ fn cancelling_staged_fallback_removes_its_reserved_directory() -> Result<(), Box
         completed.set(true);
         result
     });
+    // The pause lets a worker make the folder before its result is
+    // dispatched, so the cancel lands in between.
     while !target.exists() && !finished.get() {
-        context.iteration(true);
+        context.iteration(false);
+        thread::sleep(Duration::from_millis(1));
     }
     assert!(
         target.exists(),
