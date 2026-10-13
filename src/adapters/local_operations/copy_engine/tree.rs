@@ -10,7 +10,7 @@ use std::{
     ffi::{OsStr, OsString},
     io,
     os::fd::{AsFd, BorrowedFd, OwnedFd},
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
@@ -25,7 +25,7 @@ use rustix::{
 };
 
 use super::{
-    Copy, Failure, Mount, best_effort, changed,
+    Copy, Created, Failure, Mount, best_effort, changed,
     data::Data,
     is_unsupported,
     links::{self, Links, Role},
@@ -59,6 +59,15 @@ pub(super) struct Tree {
     links: Links,
     /// The next link scope a merged folder takes.
     link_scopes: AtomicUsize,
+    created: Option<Arc<Created>>,
+}
+
+impl Tree {
+    fn made(&self, path: &Path, identity: LocalFileIdentity) {
+        if let Some(created) = &self.created {
+            created.add(path.to_path_buf(), identity);
+        }
+    }
 }
 
 pub(super) enum TreeJob {
@@ -103,10 +112,12 @@ pub(super) struct Walked {
     pub(super) links: Links,
 }
 
-/// Runs the walk that `root` starts on `workers` threads.
+/// Runs the walk that `root` starts on `workers` threads, recording what it
+/// makes in `created`.
 pub(super) fn walk(
     copy: &Arc<Copy>,
     workers: usize,
+    created: Option<Arc<Created>>,
     root: impl FnOnce(Arc<Tree>) -> TreeJob,
 ) -> Result<Walked, glib::Error> {
     let tree = Arc::new(Tree {
@@ -114,6 +125,7 @@ pub(super) fn walk(
         restrictive: Mutex::default(),
         links: Links::default(),
         link_scopes: AtomicUsize::new(0),
+        created,
     });
     let queue = Arc::new(Queue::new(copy.cancelled.clone()));
     queue.enqueue(root(tree.clone()));
@@ -262,16 +274,18 @@ impl Made {
     ) -> Result<(), Failure> {
         let copy = &tree.copy;
         let target = Entry::new(&*self.dir, target_name);
+        let path = self.path.join(target_name);
         match kind {
             FileType::Directory => {
                 let created = claim_folder(copy.fs, target, Some(claimed))?;
+                tree.made(&path, created);
                 queue.enqueue(TreeJob::Folder(
                     tree.clone(),
                     Folder {
                         source: (source.clone(), name.to_os_string(), None),
                         target: (self.dir.clone(), target_name.to_os_string(), created),
                         parent: self.stat,
-                        path: self.path.join(target_name),
+                        path,
                         claims: Some(self.claims),
                         mount: self.mount,
                         link_scope: self.link_scope,
@@ -281,7 +295,9 @@ impl Made {
             }
             FileType::RegularFile => {
                 let claimed = if self.claims {
-                    Some(claim_file(copy, target, claimed)?)
+                    let identity = claim_file(copy, target, claimed)?;
+                    tree.made(&path, identity);
+                    Some(identity)
                 } else {
                     None
                 };
@@ -295,7 +311,7 @@ impl Made {
                         parent: self.stat,
                         claimed,
                         mount: self.mount,
-                        path: self.path.join(target_name),
+                        path,
                         link_scope: self.link_scope,
                         completion: Some(group.clone()),
                     },
@@ -309,6 +325,9 @@ impl Made {
                     &self.mount,
                     Some(claimed),
                 )?;
+                if tree.created.is_some() {
+                    tree.made(&path, copy.fs.stat(target, false)?.identity);
+                }
                 copy.progress.add_file();
                 queue.complete(Some(group.clone()));
             }
@@ -544,15 +563,18 @@ impl File {
                 })?,
         };
         let created = fs.stat_fd(fd.as_fd())?;
-        if let Some(claimed) = self.claimed {
-            let ours = if stable_inodes(self.mount.family) {
-                created.identity == claimed
-            } else {
-                created.kind == FileType::RegularFile && created.size == 0
-            };
-            if !ours {
-                return Err(Failure::Place(PlaceError::Changed));
+        match self.claimed {
+            Some(claimed) => {
+                let ours = if stable_inodes(self.mount.family) {
+                    created.identity == claimed
+                } else {
+                    created.kind == FileType::RegularFile && created.size == 0
+                };
+                if !ours {
+                    return Err(Failure::Place(PlaceError::Changed));
+                }
             }
+            None => tree.made(&self.path, created.identity),
         }
         // Takes `fd`, so a failed file is closed before it is removed: NFS
         // renames an open file aside instead.
@@ -695,7 +717,7 @@ impl Live {
         name: &OsStr,
         kind: FileType,
         target_name: &OsStr,
-        path: &std::path::Path,
+        path: &Path,
     ) -> Result<(), Failure> {
         let copy = &tree.copy;
         let fs = copy.fs;

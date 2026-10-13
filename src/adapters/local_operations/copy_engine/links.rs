@@ -15,8 +15,8 @@ use std::{
 use rustix::{fs::AtFlags, io::Errno};
 
 use super::{
-    Copy, Failure, FileCopy, Mount, is_fatal, lock, metadata::Snapshot, restrictive, stable_inodes,
-    tree,
+    Copy, Created, Failure, FileCopy, Mount, is_fatal, lock, metadata::Snapshot, restrictive,
+    stable_inodes, tree,
 };
 use crate::adapters::{
     local_operations::{
@@ -153,6 +153,7 @@ impl Links {
         copy: &Copy,
         root: BorrowedFd<'_>,
         family: Family,
+        created: Option<&Created>,
     ) -> Result<(), Failure> {
         let State {
             firsts,
@@ -171,7 +172,10 @@ impl Links {
                 Some(first) => make(copy, root, first, name, &mut linking),
                 None => Err(Failure::Changed),
             };
-            made.map_err(|failure| failure.named(&name.source))?;
+            let made = made.map_err(|failure| failure.named(&name.source))?;
+            if let Some(created) = created {
+                created.add(name.path.clone(), made);
+            }
             if copy.counted {
                 copy.progress.add_bytes(name.size);
                 copy.progress.add_file();
@@ -191,13 +195,14 @@ impl Links {
 
 /// Links `name` to the copy at `first`, or copies that copy on the same
 /// device where the destination refuses; one refusal ends `linking`.
+/// Returns what `name` holds.
 fn make(
     copy: &Copy,
     root: BorrowedFd<'_>,
     (first, identity): (&Path, LocalFileIdentity),
     name: &Name,
     linking: &mut bool,
-) -> Result<(), Failure> {
+) -> Result<LocalFileIdentity, Failure> {
     let fs = copy.fs;
     let (Some(first_name), Some(file_name)) = (first.file_name(), name.path.file_name()) else {
         return Err(Failure::Changed);
@@ -213,14 +218,13 @@ fn make(
     }
     if *linking {
         match fs.link(from, to) {
-            Ok(()) => return linked(fs, from, to, identity),
+            Ok(()) => return linked(fs, from, to, identity).map(|()| identity),
             // Only this copy's own link, from a lost NFS reply, reports the
             // copy's identity.
             Err(error) if tree::taken(fs, to, error) => {
                 return tree::adopt(fs, to, Some(&HashSet::new()), |stat| {
                     stat.identity == identity
-                })
-                .map(drop);
+                });
             }
             Err(error) if is_fatal(error) || matches!(error, Errno::NOSPC | Errno::DQUOT) => {
                 return Err(error.into());
@@ -229,9 +233,7 @@ fn make(
         }
     }
     let parent = fs.stat_fd(dir.as_fd())?;
-    FileCopy::new(copy, dir.as_fd())
-        .create_from(from, identity, None, file_name, &parent)
-        .map(drop)
+    FileCopy::new(copy, dir.as_fd()).create_from(from, identity, None, file_name, &parent)
 }
 
 /// The folder holding `path` beneath `root`.

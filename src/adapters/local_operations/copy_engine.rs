@@ -347,7 +347,7 @@ fn stage_folder(
         name: staged.name.clone(),
         identity: staged.identity,
     };
-    match fill(copy, source, expected, &root, workers) {
+    match fill(copy, source, expected, &root, workers, None) {
         Ok(restrictive) => {
             staged.restrictive = restrictive;
             Ok(staged)
@@ -415,13 +415,14 @@ struct Root {
 
 /// Copies the folder `source` into the empty folder `root`, links the later
 /// names of linked files, then gives the folders that would lock their owner
-/// out their exact modes.
+/// out their exact modes. `created` records each entry made beneath `root`.
 fn fill(
     copy: &Arc<Copy>,
     source: &Source,
     expected: LocalFileIdentity,
     root: &Root,
     workers: usize,
+    created: Option<&Arc<Created>>,
 ) -> Result<Vec<Restrictive>, Failure> {
     let fs = copy.fs;
     let parent = fs.stat_fd(root.parent.as_fd())?;
@@ -439,8 +440,10 @@ fn fill(
     let tree::Walked {
         mut restrictive,
         links,
-    } = tree::walk(copy, workers, |tree| tree::TreeJob::Folder(tree, folder))
-        .map_err(Failure::Error)?;
+    } = tree::walk(copy, workers, created.cloned(), |tree| {
+        tree::TreeJob::Folder(tree, folder)
+    })
+    .map_err(Failure::Error)?;
     if restrictive.is_empty() && links.is_empty() {
         return Ok(restrictive);
     }
@@ -448,13 +451,76 @@ fn fill(
     if !same_entry(&fs.stat_fd(opened.as_fd())?, root.identity, mount.family) {
         return Err(Failure::Place(PlaceError::Changed));
     }
-    links.make(copy, opened.as_fd(), mount.family)?;
+    links.make(copy, opened.as_fd(), mount.family, created.map(|created| &**created))?;
     let stable = stable_inodes(mount.family);
     if let Err(error) = restrictive::tighten(fs, opened.as_fd(), &mut restrictive, stable) {
         restrictive::loosen(fs, opened.as_fd(), &restrictive, stable);
         return Err(error.into());
     }
     Ok(restrictive)
+}
+
+/// Entries a copy made beneath a root at its final name, by path beneath
+/// it, so a failed copy removes only what it made.
+#[derive(Default)]
+struct Created(Mutex<Vec<(PathBuf, LocalFileIdentity)>>);
+
+impl Created {
+    fn add(&self, path: PathBuf, identity: LocalFileIdentity) {
+        lock(&self.0).push((path, identity));
+    }
+
+    /// Removes each entry still as it was made, deepest first, then `root`
+    /// unless something else is left in it.
+    fn remove(&self, fs: &dyn FsOps, root: &Root, family: Family) -> Result<(), glib::Error> {
+        let root_entry = Entry::new(&*root.parent, &root.name);
+        let Ok(dir) = fs.open_dir(root_entry) else {
+            return Ok(());
+        };
+        if !fs
+            .stat_fd(dir.as_fd())
+            .is_ok_and(|stat| same_entry(&stat, root.identity, family))
+        {
+            return Ok(());
+        }
+        let mut made = std::mem::take(&mut *lock(&self.0));
+        made.sort_by(|(left, _), (right, _)| {
+            let depth = |path: &Path| path.components().count();
+            depth(right)
+                .cmp(&depth(left))
+                .then_with(|| left.parent().cmp(&right.parent()))
+        });
+        let mut folder: Option<(&Path, OwnedFd)> = None;
+        for (path, identity) in &made {
+            let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
+                continue;
+            };
+            if folder.as_ref().is_none_or(|(opened, _)| *opened != parent) {
+                folder = fs
+                    .open_dir(Entry {
+                        dir: dir.as_fd(),
+                        name: restrictive::beneath(parent),
+                    })
+                    .ok()
+                    .map(|fd| (parent, fd));
+            }
+            if let Some((_, fd)) = &folder {
+                let flags = if identity.kind == FileType::Directory {
+                    AtFlags::REMOVEDIR
+                } else {
+                    AtFlags::empty()
+                };
+                placement::remove_if_unchanged(fs, Entry::new(fd, name), *identity, flags);
+            }
+        }
+        drop((folder, dir));
+        match fs.stat(root_entry, true) {
+            Ok(current) if current.identity == root.identity => fs
+                .unlink(root_entry, AtFlags::REMOVEDIR)
+                .map_err(|error| io_error(os_error_detail(error))),
+            _ => Ok(()),
+        }
+    }
 }
 
 /// Copies the folder `source` to `name`, making each entry at its final
@@ -486,19 +552,12 @@ fn direct_folder(
         name: name.to_os_string(),
         identity,
     };
-    fill(copy, source, expected, &root, workers)
+    let created = Arc::new(Created::default());
+    fill(copy, source, expected, &root, workers, Some(&created))
         .map(drop)
         .map_err(|failure| {
-            let removed = parallel_delete_local_blocking_with_workers(
-                vec![PinnedEntry {
-                    parent: root.parent,
-                    name: root.name,
-                    identity: Some(root.identity),
-                }],
-                Arc::new(AtomicBool::new(false)),
-                workers,
-            )
-            .map_err(io_error);
+            let family = Mount::new(fs, parent.as_fd()).family;
+            let removed = created.remove(fs, &root, family);
             copy.after_cleanup(failure, removed)
         })
 }
@@ -543,14 +602,14 @@ fn merge(
     let tree::Walked {
         mut restrictive,
         links,
-    } = tree::walk(copy, workers, |tree| tree::TreeJob::Merge(tree, merged))
+    } = tree::walk(copy, workers, None, |tree| tree::TreeJob::Merge(tree, merged))
         .map_err(Failure::Error)?;
     if restrictive.is_empty() && links.is_empty() {
         return Ok(());
     }
     let root = copy.fs.open_dir(Entry::new(&*parent, &name))?;
     let family = Mount::new(copy.fs, root.as_fd()).family;
-    links.make(copy, root.as_fd(), family)?;
+    links.make(copy, root.as_fd(), family, None)?;
     restrictive::tighten(
         copy.fs,
         root.as_fd(),

@@ -496,6 +496,42 @@ fn a_folder_is_copied_in_place_where_nothing_can_place_it() -> Result<(), Box<dy
 }
 
 #[test]
+fn a_failed_copy_in_place_removes_only_what_it_made() -> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock()?;
+    let root = tempfile::tempdir()?;
+    let source = root.path().join("source");
+    fs::create_dir_all(source.join("nested"))?;
+    fs::write(source.join("a.txt"), b"a")?;
+    fs::write(source.join("nested/b.txt"), b"b")?;
+    std::os::unix::fs::symlink("a.txt", source.join("link"))?;
+    let destination = root.path().join("destination");
+    fs::create_dir(&destination)?;
+    let target = destination.join("target");
+    let user = target.join("user.txt");
+    let racer: Racer = Box::new(move || fs::write(&user, b"user data").expect("write"));
+    let scope = FsQuirks::install(
+        &destination,
+        Quirks {
+            before: vec![(Op::Close, "*", 0, racer)],
+            fail: vec![(Op::Close, "*", 0, Errno::IO)],
+            ..Quirks::without_folder_placement()
+        },
+    );
+    learn_mount_capability(scope.key(), |capabilities| {
+        capabilities.no_replace = Some(false);
+        capabilities.hard_links = Some(true);
+        capabilities.rename_over_empty_directory = Some(false);
+    });
+
+    let result = copy(&source, &target);
+
+    assert!(result.is_err(), "{result:?}");
+    assert_eq!(names(&target)?, ["user.txt"]);
+    assert_eq!(fs::read(target.join("user.txt"))?, b"user data");
+    Ok(())
+}
+
+#[test]
 fn a_stage_with_read_only_folders_is_removed_when_it_cannot_be_published()
 -> Result<(), Box<dyn Error>> {
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock()?;
