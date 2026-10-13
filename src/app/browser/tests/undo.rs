@@ -1107,6 +1107,45 @@ fn a_move_undo_record_keeps_the_names_the_move_changed_inside_its_item() {
 }
 
 #[test]
+fn an_item_whose_move_left_entries_behind_is_excluded_from_the_move_undo() {
+    let browser = Browser::new(Rc::new(FakeFileSource));
+    browser.set_operation_provider(Rc::new(ImmediateOperationProvider));
+    let project = Location::local("/fixture/project");
+    let moved = Location::local("/fixture/report.txt");
+    let request_id = browser.begin_operation();
+    browser.transfer_operation.set(Some(true));
+    browser
+        .transfer_destination
+        .replace(Some(Location::local("/fixture/archive")));
+    let emit = browser.operation_callback(request_id, false, HashSet::new());
+
+    emit(OperationEvent::ItemsReported {
+        request_id,
+        report: crate::services::TransferReport {
+            kept: vec![crate::services::KeptItem {
+                location: Location::local("/fixture/project/notes.txt"),
+                cause: crate::services::KeptCause::Changed,
+            }],
+            ..Default::default()
+        },
+    });
+    emit(OperationEvent::Pasted {
+        request_id,
+        locations: vec![project, moved.clone()],
+    });
+
+    assert_eq!(
+        pending_undo_entry(),
+        Some(UndoEntry::Move(vec![MoveRecord {
+            original: moved,
+            current: Location::local("/fixture/archive/report.txt"),
+            renamed: Vec::new(),
+        }])),
+        "moving the project back would replace the newer notes left in its folder"
+    );
+}
+
+#[test]
 fn a_merged_move_source_is_excluded_from_the_move_undo() {
     let browser = Browser::new(Rc::new(FakeFileSource));
     browser.set_operation_provider(Rc::new(ImmediateOperationProvider));

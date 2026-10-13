@@ -9,7 +9,7 @@ use std::{
 use crate::{
     model::Location,
     services::{
-        OperationEvent, OperationRequestId, RenamedItem, ReplacedOriginal, TrashedOriginal,
+        OperationEvent, OperationRequestId, ReplacedOriginal, TransferReport, TrashedOriginal,
     },
 };
 
@@ -86,7 +86,7 @@ impl OperationCompletion {
 
     fn record_transfer_undo(
         &self,
-        (moved, moved_to, renamed): (&[Location], &HashMap<Location, Location>, &[RenamedItem]),
+        (moved, moved_to, report): (&[Location], &HashMap<Location, Location>, &TransferReport),
         created: Vec<Location>,
         merged: MergeUndoState,
         publish: fn(UndoEntry),
@@ -98,17 +98,24 @@ impl OperationCompletion {
             Some(true) => {
                 if let Some(destination) = &self.destination {
                     // A merged move deletes its source, so it cannot be moved
-                    // back: exclude merged sources from the move records.
+                    // back, and moving an item back over what its move left
+                    // behind would replace newer entries: exclude both.
                     let movable: Vec<_> = moved
                         .iter()
                         .filter(|source| !merged.sources.contains(*source))
+                        .filter(|source| {
+                            !report
+                                .kept
+                                .iter()
+                                .any(|kept| kept.location.is_within(source))
+                        })
                         .cloned()
                         .collect();
                     publish(UndoEntry::Move(move_records(
                         &movable,
                         destination,
                         moved_to,
-                        renamed,
+                        &report.renamed,
                     )));
                 }
             }
@@ -478,7 +485,7 @@ impl Browser {
             .borrow_mut()
             .retain_selectionless_removals(moved.iter().cloned());
         completion.record_transfer_undo(
-            (&moved, &moved_to, &self.transfer_report.borrow().renamed),
+            (&moved, &moved_to, &self.transfer_report.borrow()),
             created,
             self.merged_undo.take(),
             push_pending_undo,

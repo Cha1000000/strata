@@ -203,7 +203,7 @@ impl Browser {
                 completion.record_trash_undo(&event, push_background_undo);
                 if job.copying {
                     completion.record_transfer_undo(
-                        (&[], &HashMap::new(), &[]),
+                        (&[], &HashMap::new(), &TransferReport::default()),
                         job.created.take(),
                         job.merged.take(),
                         push_background_undo,
