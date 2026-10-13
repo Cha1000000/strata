@@ -232,6 +232,9 @@ impl Data {
             }
             offset += copied as u64;
             progress(copied as u64);
+            if offset >= size {
+                return Ok(Ranged::Done);
+            }
             if elapsed > Duration::from_secs(1) && chunk <= 2 * MIB {
                 self.copy_range_slow = true;
                 return Ok(Ranged::From(offset));

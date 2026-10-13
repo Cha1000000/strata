@@ -1087,14 +1087,18 @@ impl FsOps for Scoped {
         outcome
     }
 
-    fn open_source(&self, at: Entry<'_>) -> Result<Option<(OwnedFd, EntryStat)>, Errno> {
+    fn open_source(
+        &self,
+        at: Entry<'_>,
+        listed: bool,
+    ) -> Result<Option<(OwnedFd, EntryStat)>, Errno> {
         assert_off_main_thread();
         let Some(scope) = scope_for(at.dir) else {
-            return System.open_source(at);
+            return System.open_source(at, listed);
         };
         let path = path_of(at.dir).map(|dir| dir.join(at.name));
         let opened = scope.run(Op::OpenSource, &[at.name], |scope| {
-            scope.resolved(at, |at| System.open_source(at))
+            scope.resolved(at, |at| System.open_source(at, listed))
         })?;
         Ok(opened.map(|(fd, stat)| (fd, scope.reported(path, stat))))
     }

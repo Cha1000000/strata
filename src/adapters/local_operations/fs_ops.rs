@@ -81,8 +81,13 @@ pub(super) trait FsOps: Send + Sync {
     /// GLib's own result: `Ok(false)` is a failure without an error (GLib #4060).
     fn trash(&self, path: &Path, cancellable: &gio::Cancellable) -> Result<bool, glib::Error>;
     /// The regular file at `at`, opened for reading without following it,
-    /// or `None` when something else is there.
-    fn open_source(&self, at: Entry<'_>) -> Result<Option<(OwnedFd, EntryStat)>, Errno>;
+    /// or `None` when something else is there. `listed` skips looking at it
+    /// by name first, where the caller just saw a regular file there.
+    fn open_source(
+        &self,
+        at: Entry<'_>,
+        listed: bool,
+    ) -> Result<Option<(OwnedFd, EntryStat)>, Errno>;
     /// An unnamed file in `dir`, readable so a failed link can copy it out.
     fn open_tmpfile(&self, dir: BorrowedFd<'_>, mode: Mode) -> Result<OwnedFd, Errno>;
     /// Gives an unnamed file a name, never replacing one; `through_proc`
@@ -234,6 +239,9 @@ fn read_sized(mut read: impl FnMut(&mut [u8]) -> Result<usize, Errno>) -> Result
     let mut attempts = 0;
     loop {
         let size = read(&mut [])?;
+        if size == 0 {
+            return Ok(Vec::new());
+        }
         let mut buffer = vec![0; size];
         match read(&mut buffer) {
             Ok(length) => {
@@ -406,9 +414,13 @@ impl FsOps for System {
         }
     }
 
-    fn open_source(&self, at: Entry<'_>) -> Result<Option<(OwnedFd, EntryStat)>, Errno> {
+    fn open_source(
+        &self,
+        at: Entry<'_>,
+        listed: bool,
+    ) -> Result<Option<(OwnedFd, EntryStat)>, Errno> {
         assert_off_main_thread();
-        if statx_at(at.dir, at.name, AtFlags::empty())?.kind != FileType::RegularFile {
+        if !listed && statx_at(at.dir, at.name, AtFlags::empty())?.kind != FileType::RegularFile {
             return Ok(None);
         }
         // NONBLOCK, so an entry swapped for a FIFO meanwhile cannot block the open.
@@ -426,7 +438,7 @@ impl FsOps for System {
             return Ok(None);
         }
         // Some FUSE daemons pass the flag on to their reads.
-        rustix::fs::fcntl_setfl(&fd, rustix::fs::fcntl_getfl(&fd)? - OFlags::NONBLOCK)?;
+        rustix::fs::fcntl_setfl(&fd, OFlags::empty())?;
         Ok(Some((fd, stat)))
     }
 

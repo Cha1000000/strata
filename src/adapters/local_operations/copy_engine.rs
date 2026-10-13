@@ -936,7 +936,7 @@ impl Copy {
             return Ok(());
         }
         let fs = self.fs;
-        let reopened = match fs.open_source(entry) {
+        let reopened = match fs.open_source(entry, false) {
             // A mode that gives the owner no read, as a copy of another
             // user's file readable through its group or others may have.
             Err(Errno::ACCESS) => fs.open_write(entry).and_then(|fd| {
@@ -1016,9 +1016,9 @@ fn changed(name: &OsStr, error: Errno) -> Failure {
     )))
 }
 
-/// The regular file at `at`, opened without following it.
+/// The regular file just listed at `at`, opened without following it.
 fn open_file(fs: &dyn FsOps, at: Entry<'_>) -> Result<Opened, Failure> {
-    match fs.open_source(at) {
+    match fs.open_source(at, true) {
         Ok(Some((fd, stat))) => Ok(Opened { fd, stat }),
         Ok(None) => Err(Failure::Changed),
         Err(error) => Err(changed(at.name, error)),
@@ -1326,7 +1326,7 @@ impl<'a> FileCopy<'a> {
         parent: &EntryStat,
     ) -> Result<LocalFileIdentity, Failure> {
         let fs = self.copy.fs;
-        let source = match fs.open_source(from)? {
+        let source = match fs.open_source(from, false)? {
             Some((fd, stat)) if stat.identity == expected => Opened { fd, stat },
             _ => return Err(Failure::Changed),
         };
