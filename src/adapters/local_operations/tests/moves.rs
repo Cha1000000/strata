@@ -1608,3 +1608,65 @@ fn moving_to_a_remote_target_keeps_a_source_entry_changed_during_the_copy()
     );
     Ok(())
 }
+
+#[test]
+fn a_moved_source_stays_when_its_copy_is_gone_before_the_deletion() -> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    // The copy is removed or replaced once the move has published it, as
+    // the deletion it owes waits for its batch.
+    for conflict in [
+        TransferConflict::FailIfExists,
+        TransferConflict::ReplaceExisting,
+    ] {
+        for replaced in [false, true] {
+            let row = format!("{conflict:?}, replaced: {replaced}");
+            let root = tempfile::tempdir()?;
+            let sources = root.path().join("sources");
+            let destination = root.path().join("destination");
+            fs::create_dir(&sources)?;
+            fs::create_dir(&destination)?;
+            let source = sources.join("notes.txt");
+            fs::write(&source, b"notes")?;
+            if conflict == TransferConflict::ReplaceExisting {
+                fs::write(destination.join("notes.txt"), b"old")?;
+            }
+            let copy = destination.join("notes.txt");
+            let racer: super::fs_quirks::Racer = Box::new(move || {
+                fs::remove_file(&copy).expect("remove the copy");
+                if replaced {
+                    fs::write(&copy, b"other").expect("put another file there");
+                }
+            });
+            let _sources = FsQuirks::install(&sources, Quirks::default());
+            let _destination = FsQuirks::install(
+                &destination,
+                Quirks {
+                    trash: super::fs_quirks::Trash::Unsupported,
+                    before: vec![(Op::SyncFs, "*", 0, racer)],
+                    ..Quirks::ext4()
+                },
+            );
+
+            let (_operation, events) = paste_move(98, &destination, &source, conflict);
+            pump_until_transfer(&events);
+
+            assert!(
+                matches!(
+                    terminal_transfer(&events.borrow()),
+                    Some(OperationEvent::Pasted { .. })
+                ),
+                "{row}: {:?}",
+                events.borrow()
+            );
+            assert_eq!(fs::read(&source)?, b"notes", "{row}");
+            assert_eq!(
+                reported(&events).kept,
+                [kept(source.clone(), KeptCause::CopyGone)],
+                "{row}"
+            );
+        }
+    }
+    Ok(())
+}

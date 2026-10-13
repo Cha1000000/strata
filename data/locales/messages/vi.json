@@ -935,6 +935,7 @@
   "“%{name}” isn’t pinned": "“%{name}” chưa được ghim",
   "“%{name}” must be a plain file name beside action.toml without a path or leading dash": "“%{name}” phải là tên tệp đơn giản cạnh action.toml, không có đường dẫn hay dấu gạch ngang ở đầu",
   "“%{name}” must be a regular file, not a link or directory": "“%{name}” phải là tệp thông thường, không phải liên kết hay thư mục",
+  "“%{name}” was left in “%{folder}”, as its copy was no longer where the move put it": "“%{name}” được giữ lại trong “%{folder}” vì bản sao của nó không còn ở nơi thao tác di chuyển đã đặt",
   "“%{name}” was replaced, but its original could not be removed from “%{kept}”: %{error}": "Đã thay thế “%{name}”, nhưng không thể xóa bản gốc khỏi “%{kept}”: %{error}",
   "“%{name}” was saved as “%{new_name}”": "“%{name}” đã được lưu thành “%{new_name}”",
   "“%{path}” does not contain an action.toml file": "“%{path}” không chứa tệp action.toml",

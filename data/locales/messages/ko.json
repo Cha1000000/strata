@@ -935,6 +935,7 @@
   "“%{name}” isn’t pinned": "“%{name}”은(는) 고정되어 있지 않습니다",
   "“%{name}” must be a plain file name beside action.toml without a path or leading dash": "“%{name}”은(는) 경로나 앞쪽 대시 없이 action.toml 옆에 있는 단순 파일 이름이어야 합니다",
   "“%{name}” must be a regular file, not a link or directory": "“%{name}”은(는) 링크나 디렉터리가 아닌 일반 파일이어야 합니다",
+  "“%{name}” was left in “%{folder}”, as its copy was no longer where the move put it": "이동으로 만든 사본이 원래 둔 위치에 더 이상 없어 “%{name}” 항목이 “%{folder}”에 남겨졌습니다",
   "“%{name}” was replaced, but its original could not be removed from “%{kept}”: %{error}": "“%{name}”을(를) 바꿨지만 “%{kept}”에서 원본을 제거할 수 없습니다: %{error}",
   "“%{name}” was saved as “%{new_name}”": "“%{name}” 항목은 “%{new_name}”(으)로 저장되었습니다",
   "“%{path}” does not contain an action.toml file": "“%{path}”에 action.toml 파일이 없습니다",

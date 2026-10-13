@@ -935,6 +935,7 @@
   "“%{name}” isn’t pinned": "“%{name}” non è tra i fissati",
   "“%{name}” must be a plain file name beside action.toml without a path or leading dash": "“%{name}” deve essere un semplice nome di file accanto ad action.toml, senza percorso né trattino iniziale",
   "“%{name}” must be a regular file, not a link or directory": "“%{name}” deve essere un file normale, non un collegamento o una cartella",
+  "“%{name}” was left in “%{folder}”, as its copy was no longer where the move put it": "“%{name}” è rimasto in “%{folder}”, perché la sua copia non era più dove lo spostamento l’aveva messa",
   "“%{name}” was replaced, but its original could not be removed from “%{kept}”: %{error}": "“%{name}” è stato sostituito, ma non è stato possibile rimuovere l’originale da “%{kept}”: %{error}",
   "“%{name}” was saved as “%{new_name}”": "“%{name}” è stato salvato come “%{new_name}”",
   "“%{path}” does not contain an action.toml file": "“%{path}” non contiene un file action.toml",

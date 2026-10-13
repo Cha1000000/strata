@@ -309,6 +309,8 @@ pub enum KeptCause {
     Undeletable(i32),
     /// The destination cannot store it.
     Skipped(SpecialKind),
+    /// Its copy was no longer where the move put it.
+    CopyGone,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

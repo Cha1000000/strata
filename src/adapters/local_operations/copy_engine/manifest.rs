@@ -165,6 +165,43 @@ impl Pending {
 pub(in crate::adapters::local_operations) struct Manifest {
     pub(super) parent: OffMain<Arc<OwnedFd>>,
     pub(super) root: Arc<Folder>,
+    /// Where the copy went, where the move can see it.
+    copy: Option<Published>,
+}
+
+impl Manifest {
+    pub(in crate::adapters::local_operations) fn copied_to(&mut self, copy: Published) {
+        self.copy = Some(copy);
+    }
+}
+
+/// A move's copy, by name in its pinned parent, as published.
+pub(in crate::adapters::local_operations) struct Published {
+    parent: OffMain<Arc<OwnedFd>>,
+    name: OsString,
+    identity: LocalFileIdentity,
+}
+
+impl Published {
+    /// The item `name` in `parent` as it is now.
+    pub(super) fn at(fs: &dyn FsOps, parent: Arc<OwnedFd>, name: OsString) -> Result<Self, Errno> {
+        let identity = fs.stat(Entry::new(&*parent, &name), false)?.identity;
+        Ok(Self {
+            parent: OffMain::new(parent),
+            name,
+            identity,
+        })
+    }
+
+    /// Whether the copy is still where it was published.
+    fn stays(&self, fs: &dyn FsOps) -> bool {
+        let parent = &**self.parent;
+        let stable = Mount::keeps_inode_numbers(fs, parent.as_fd());
+        fs.stat(Entry::new(parent, &self.name), false)
+            .is_ok_and(|current| {
+                current.kind == self.identity.kind && (!stable || current.identity == self.identity)
+            })
+    }
 }
 
 /// Records the item `name` in `parent` as it is now, for a copy that this
@@ -180,7 +217,17 @@ pub(super) fn snapshot(
     Ok(Manifest {
         parent: OffMain::new(parent),
         root,
+        copy: None,
     })
+}
+
+/// A manifest of what a copy that records took of the item in `parent`.
+pub(super) fn of(parent: Arc<OwnedFd>, root: Arc<Folder>) -> Manifest {
+    Manifest {
+        parent: OffMain::new(parent),
+        root,
+        copy: None,
+    }
 }
 
 fn record(
@@ -222,7 +269,16 @@ pub(super) fn delete(
     unlinks: Arc<Unlinks>,
     cancelled: Arc<AtomicBool>,
 ) -> (Vec<(PathBuf, KeptCause)>, Result<(), glib::Error>) {
-    let Manifest { parent, root } = manifest;
+    let Manifest { parent, root, copy } = manifest;
+    // Deleting what only a copy that is gone held would lose it.
+    if copy.is_some_and(|copy| !copy.stays(fs)) {
+        let kept = root
+            .take()
+            .into_iter()
+            .map(|(name, _)| (PathBuf::from(name), KeptCause::CopyGone))
+            .collect();
+        return (kept, Ok(()));
+    }
     let parent = parent.into_inner();
     let deletion = Arc::new(Deletion {
         fs,

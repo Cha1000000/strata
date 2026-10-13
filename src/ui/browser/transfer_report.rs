@@ -81,6 +81,12 @@ fn skipped_line(item: &SkippedItem) -> String {
 /// source.
 fn kept_line(item: &KeptItem, in_trash: bool) -> String {
     let name = display_name(&item.location);
+    let folder = || {
+        item.location
+            .parent()
+            .map(|folder| display_name(&folder))
+            .unwrap_or_default()
+    };
     match &item.cause {
         KeptCause::Changed if in_trash => rust_i18n::t!(
             "“%{name}” changed during the restore and was left in the Trash",
@@ -90,11 +96,13 @@ fn kept_line(item: &KeptItem, in_trash: bool) -> String {
         KeptCause::Changed => rust_i18n::t!(
             "“%{name}” changed during the move and was left in “%{folder}”",
             name = name,
-            folder = item
-                .location
-                .parent()
-                .map(|folder| display_name(&folder))
-                .unwrap_or_default()
+            folder = folder()
+        )
+        .into_owned(),
+        KeptCause::CopyGone => rust_i18n::t!(
+            "“%{name}” was left in “%{folder}”, as its copy was no longer where the move put it",
+            name = name,
+            folder = folder()
         )
         .into_owned(),
         KeptCause::Undeletable(error) => rust_i18n::t!(

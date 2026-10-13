@@ -3514,7 +3514,9 @@ async fn replace_owing(
     if let Some(original) = replaced.displaced {
         owed.owe(Deletion::Displaced(original, plan.target_display()));
     }
-    if let Some(sources) = sources {
+    if let Some(mut sources) = sources {
+        let (parent, name) = (plan.target_parent.clone(), plan.target_name.clone());
+        sources.copied_to(copy_engine::published(parent, name).await?);
         owed.owe(Deletion::Sources(source, sources));
     }
     Ok(owed)

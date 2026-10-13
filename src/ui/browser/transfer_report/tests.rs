@@ -138,6 +138,7 @@ fn items_left_out_or_left_behind_make_the_report_a_warning() {
         kept(KeptCause::Changed),
         kept(KeptCause::Undeletable(denied)),
         kept(KeptCause::Skipped(SpecialKind::Socket)),
+        kept(KeptCause::CopyGone),
     ];
     let left_in_trash = vec![
         in_trash(KeptCause::Changed),
@@ -149,9 +150,9 @@ fn items_left_out_or_left_behind_make_the_report_a_warning() {
         (0, 2, 0, 0, false),
         (1, 2, 0, 0, false),
         (3, 2, 0, 0, false),
-        (0, 0, 3, 0, false),
-        (1, 2, 3, 0, false),
-        (1, 2, 3, 0, true),
+        (0, 0, 4, 0, false),
+        (1, 2, 4, 0, false),
+        (1, 2, 4, 0, true),
         (0, 0, 0, 2, false),
     ] {
         let row =
@@ -185,6 +186,12 @@ fn items_left_out_or_left_behind_make_the_report_a_warning() {
             folder = "run"
         );
         assert_eq!(detail.contains(&*changed), kept_count > 0, "{row}");
+        let gone = rust_i18n::t!(
+            "“%{name}” was left in “%{folder}”, as its copy was no longer where the move put it",
+            name = "data",
+            folder = "run"
+        );
+        assert_eq!(detail.contains(&*gone), kept_count > 0, "{row}");
         let heading = crate::i18n::count("items_kept_in_trash", in_trash_count);
         assert_eq!(detail.contains(&heading), in_trash_count > 0, "{row}");
         let changed = rust_i18n::t!(

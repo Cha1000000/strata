@@ -935,6 +935,7 @@
   "“%{name}” isn’t pinned": "«%{name}» не закреплено",
   "“%{name}” must be a plain file name beside action.toml without a path or leading dash": "«%{name}» должно быть простым именем файла рядом с action.toml, без пути и начального дефиса",
   "“%{name}” must be a regular file, not a link or directory": "«%{name}» должен быть обычным файлом, а не ссылкой или папкой",
+  "“%{name}” was left in “%{folder}”, as its copy was no longer where the move put it": "Элемент «%{name}» остался в «%{folder}», так как его копии больше нет там, куда её поместило перемещение",
   "“%{name}” was replaced, but its original could not be removed from “%{kept}”: %{error}": "«%{name}» заменён, но не удалось удалить оригинал из «%{kept}»: %{error}",
   "“%{name}” was saved as “%{new_name}”": "Элемент «%{name}» сохранён как «%{new_name}»",
   "“%{path}” does not contain an action.toml file": "«%{path}» не содержит файла action.toml",

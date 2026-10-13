@@ -37,7 +37,7 @@ use super::{
     LocalFileIdentity, PinnedEntry, Reported, StageContent, StagedSibling, Taken,
     TransferProgressTracker, blocking_join_message, bounded_local_worker_count,
     cancelled_local_operation, copy_failure_after_cleanup,
-    fs_ops::{Entry, EntryStat, FsOps, OffMain, fs},
+    fs_ops::{Entry, EntryStat, FsOps, fs},
     io_error, local_delete_worker_count, local_device_is_rotational, open_local_parent_directory,
     os_error_detail, os_error_text, parallel_delete_local_blocking_with_workers, placement,
     placement::{COPY_PREFIX, ENOTSUPP, PlaceError, STAGE_PREFIX},
@@ -52,7 +52,7 @@ use crate::{
 };
 pub(super) use barrier::Barrier;
 use data::Data;
-pub(super) use manifest::{Manifest, Unlinks};
+pub(super) use manifest::{Manifest, Published, Unlinks};
 use metadata::Snapshot;
 pub(super) use restrictive::Restrictive;
 
@@ -148,27 +148,35 @@ pub(super) async fn copy_local(
             Destination::New(target, taken) => {
                 let (parent, name) = split(&target).map_err(Failure::Error)?;
                 let new = NewItem::Published(taken);
-                copy_new(copy, source, (&parent, &name), new, options.workers)
-                    .map(|name| (name, Vec::new()))
+                let name = copy_new(copy, source, (&parent, &name), new, options.workers)?;
+                let published = match source.recorded_in {
+                    Some(_) => Some(Published::at(copy.fs, parent, name.clone())?),
+                    None => None,
+                };
+                Ok((name, Vec::new(), published))
             }
             Destination::Merge(folder) => {
                 let name = folder.file_name().unwrap_or_default().to_os_string();
-                merge(copy, source, &folder, options.workers).map(|nested| (name, nested))
+                merge(copy, source, &folder, options.workers).map(|nested| (name, nested, None))
             }
         },
     )
     .await?;
     match followed.value {
-        Ok((name, nested)) => {
+        Ok((name, nested, published)) => {
             report(
                 progress.as_deref(),
                 &target.with_file_name(&name),
                 followed.left,
             );
+            let mut manifest = followed.manifest;
+            if let (Some(manifest), Some(published)) = (&mut manifest, published) {
+                manifest.copied_to(published);
+            }
             Ok(Copied {
                 name,
                 reported: followed.reported,
-                manifest: followed.manifest,
+                manifest,
                 nested,
             })
         }
@@ -280,6 +288,18 @@ pub(super) async fn delete_unchanged_sources(
             Err(io_error("Delete worker stopped unexpectedly")),
         )
     })
+}
+
+/// Where a move published its copy, as `name` in `parent` is now.
+pub(super) async fn published(
+    parent: Arc<OwnedFd>,
+    name: OsString,
+) -> Result<Published, glib::Error> {
+    run_blocking(move || {
+        let shown = name.clone();
+        Published::at(fs(), parent, name).map_err(|error| Failure::Os(error).into_error(&shown))
+    })
+    .await
 }
 
 /// A barrier at the folder `path`, which must be opened before a copy
@@ -409,10 +429,9 @@ async fn following<T: Send + 'static>(
             options,
         );
         let value = work(&copy, &source).map_err(|failure| failure.into_error(&source.name));
-        let manifest = source.recorded_in.map(|root| Manifest {
-            parent: OffMain::new(source.parent),
-            root,
-        });
+        let manifest = source
+            .recorded_in
+            .map(|root| manifest::of(source.parent, root));
         (value, std::mem::take(&mut *lock(&copy.left)), manifest)
     })
     .await;
