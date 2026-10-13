@@ -31,6 +31,13 @@ use crate::{
     services::KeptCause,
 };
 
+/// The link count each name deletions removed of a file with several names
+/// had just before, by device and inode. A transfer's deletions share one,
+/// as its items may hold names of one file. Those counts tell which
+/// removals followed a snapshot: the ones at or below its count.
+#[derive(Default)]
+pub(in crate::adapters::local_operations) struct Unlinks(Mutex<HashMap<(u64, u64), Vec<u64>>>);
+
 /// A source entry as the copy read it.
 #[derive(Clone, Copy)]
 struct SourceSnapshot {
@@ -52,9 +59,9 @@ impl SourceSnapshot {
         }
     }
 
-    /// Whether `current` is still this entry, where this deletion has
-    /// already removed `unlinked` of its other names. Removing a name changes
-    /// the ctime and link count of the others.
+    /// Whether `current` is still this entry, where deletions have removed
+    /// `unlinked` of its other names since it was taken. Removing a name
+    /// changes the ctime and link count of the others.
     fn holds(&self, current: &EntryStat, stable_inodes: bool, unlinked: u64) -> bool {
         let same = current.kind == self.identity.kind
             && current.size == self.size
@@ -209,13 +216,14 @@ fn record(
 pub(super) fn delete(
     fs: &'static dyn FsOps,
     manifest: Manifest,
+    unlinks: Arc<Unlinks>,
     cancelled: Arc<AtomicBool>,
 ) -> (Vec<(PathBuf, KeptCause)>, Result<(), glib::Error>) {
     let Manifest { parent, root } = manifest;
     let deletion = Arc::new(Deletion {
         fs,
         stable_inodes: Mount::keeps_inode_numbers(fs, parent.as_fd()),
-        unlinked: Mutex::default(),
+        unlinks,
         kept: Mutex::default(),
     });
     let queue = Arc::new(WorkQueue::new(cancelled));
@@ -250,9 +258,7 @@ struct Deletion {
     /// FUSE daemons without `use_ino` and cifs without server inode
     /// numbers number an entry afresh once the kernel evicts it.
     stable_inodes: bool,
-    /// The names this deletion removed of each file with several, by device
-    /// and inode.
-    unlinked: Mutex<HashMap<(u64, u64), u64>>,
+    unlinks: Arc<Unlinks>,
     kept: Mutex<Vec<(PathBuf, KeptCause)>>,
 }
 
@@ -424,17 +430,22 @@ impl At {
         let key = (snapshot.identity.device, snapshot.identity.inode);
         // Checking, removing and counting a name of a file with several
         // names must not interleave with another name's check.
-        let mut unlinked = (snapshot.nlink > 1).then(|| lock(&deletion.unlinked));
-        let ours = unlinked
+        let mut unlinks = (snapshot.nlink > 1).then(|| lock(&deletion.unlinks.0));
+        let since = unlinks
             .as_ref()
-            .and_then(|unlinked| unlinked.get(&key).copied())
-            .unwrap_or(0);
+            .and_then(|unlinks| unlinks.get(&key))
+            .map_or(0, |counts| {
+                counts
+                    .iter()
+                    .filter(|&&count| count <= snapshot.nlink)
+                    .count() as u64
+            });
         match fs.stat(self.entry_at(), true) {
-            Ok(current) if snapshot.holds(&current, deletion.stable_inodes, ours) => {
+            Ok(current) if snapshot.holds(&current, deletion.stable_inodes, since) => {
                 match fs.unlink(self.entry_at(), AtFlags::empty()) {
                     Ok(()) => {
-                        if let Some(unlinked) = &mut unlinked {
-                            *unlinked.entry(key).or_default() += 1;
+                        if let Some(unlinks) = &mut unlinks {
+                            unlinks.entry(key).or_default().push(current.nlink);
                         }
                     }
                     Err(error) => deletion.failed(self.path.clone(), error),

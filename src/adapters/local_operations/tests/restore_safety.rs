@@ -16,6 +16,7 @@ fn restore_path(
         source.to_path_buf(),
         destination.to_path_buf(),
         allowed.to_path_buf(),
+        Arc::default(),
         gio::Cancellable::new(),
     ))
 }
@@ -679,6 +680,7 @@ fn restore_execution_refuses_a_parent_symlink_escape() -> Result<(), Box<dyn Err
         source.clone(),
         allowed.path().join("parent/report"),
         allowed.path().to_path_buf(),
+        Arc::default(),
         gio::Cancellable::new(),
     ));
     assert!(result.is_err());
@@ -1003,5 +1005,97 @@ fn restore_uses_the_trash_entry_target_path_as_the_physical_source() -> Result<(
     );
     assert_eq!(fs::read(&destination)?, b"notes");
     assert!(!source.exists());
+    Ok(())
+}
+
+#[test]
+fn trash_items_whose_files_share_names_are_restored_whole() -> Result<(), Box<dyn Error>> {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock()?;
+    let uid = rustix::process::getuid().as_raw();
+    let fixture = tempfile::tempdir()?;
+    let trash = fixture.path().join(format!(".Trash-{uid}"));
+    let names = ["daily.0", "daily.1"];
+    fs::create_dir_all(trash.join("info"))?;
+    fs::create_dir(fixture.path().join("Backups"))?;
+    for name in names {
+        fs::create_dir_all(trash.join("files").join(name))?;
+        fs::write(
+            trash.join("info").join(format!("{name}.trashinfo")),
+            format!("[Trash Info]\nPath=Backups/{name}\nDeletionDate=2026-01-01T00:00:00\n"),
+        )?;
+    }
+    let shared = trash.join("files/daily.0/notes.txt");
+    fs::write(&shared, b"notes")?;
+    fs::hard_link(&shared, trash.join("files/daily.1/notes.txt"))?;
+    // Neither Trash copy is deleted before both items are copied.
+    let copied = Arc::new(AtomicUsize::new(0));
+    let after = (0..names.len())
+        .map(|_| {
+            let copied = copied.clone();
+            let racer: Racer = Box::new(move || {
+                copied.fetch_add(1, Ordering::SeqCst);
+            });
+            (Op::Close, "notes.txt", 0, racer)
+        })
+        .collect();
+    let both = copied.clone();
+    let wait: Racer = Box::new(move || {
+        let start = Instant::now();
+        while both.load(Ordering::SeqCst) < 2 && start.elapsed() < Duration::from_secs(5) {
+            thread::sleep(Duration::from_millis(5));
+        }
+    });
+    let _scope = FsQuirks::install(
+        fixture.path(),
+        Quirks {
+            mount_type: Some(("ext4", "rw")),
+            before: vec![(Op::SyncFs, "*", 0, wait)],
+            after,
+            ..Quirks::without_placement()
+        },
+    );
+    let destination = fixture.path().canonicalize()?.join("Backups");
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let emitted = events.clone();
+    let _operation = LocalOperationProvider.restore(
+        RestoreRequest {
+            id: OperationRequestId(507),
+            source: RestoreSource::TrashEntries(
+                names
+                    .iter()
+                    .map(|name| RestoreTrashItem {
+                        entry: directory_entry(&trash.join("files").join(name)),
+                        destination: destination.join(name),
+                    })
+                    .collect(),
+            ),
+        },
+        Rc::new(move |event| emitted.borrow_mut().push(event)),
+    );
+    wait_for_restore(&events);
+
+    let events = events.borrow();
+    assert!(
+        matches!(events.last(), Some(OperationEvent::Restored { .. })),
+        "{events:?}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, OperationEvent::ItemsReported { .. })),
+        "{events:?}"
+    );
+    assert_eq!(fs::read_dir(trash.join("files"))?.count(), 0);
+    assert_eq!(fs::read_dir(trash.join("info"))?.count(), 0);
+    for name in names {
+        assert_eq!(
+            fs::read(destination.join(name).join("notes.txt"))?,
+            b"notes"
+        );
+    }
     Ok(())
 }

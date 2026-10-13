@@ -975,3 +975,82 @@ fn many_moved_files_are_copied_in_parallel_and_share_a_barrier() -> Result<(), B
     assert_eq!(last, Some((12, Some(12), bytes, Some(bytes))));
     Ok(())
 }
+
+#[test]
+fn names_of_one_file_moved_as_separate_items_are_all_deleted() -> Result<(), Box<dyn Error>> {
+    use super::super::owed::Limits;
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    // Selected names of one file, or folders whose files share names (as
+    // backup snapshots do), deleted in one batch or each item in its own,
+    // after the next item's copy recorded fewer names.
+    let items: [(&str, &[&str]); 2] = [
+        ("selected names", &["a", "b", "c"]),
+        ("folders", &["daily.0", "daily.1", "daily.2"]),
+    ];
+    let batches = [
+        NO_LIMITS,
+        Limits {
+            items: 1,
+            ..NO_LIMITS
+        },
+    ];
+    for (id, (&(row, names), limits)) in (350..).zip(
+        items
+            .iter()
+            .flat_map(|item| batches.iter().map(move |limits| (item, limits))),
+    ) {
+        let row = format!("{row}, a batch of {}", limits.items);
+        let _limits = LimitsGuard::set(*limits);
+        let root = tempfile::tempdir()?;
+        let sources = root.path().join("sources");
+        let destination = root.path().join("destination");
+        fs::create_dir(&sources)?;
+        fs::create_dir(&destination)?;
+        if row.starts_with("selected") {
+            fs::write(sources.join("a"), b"shared")?;
+            for name in &names[1..] {
+                fs::hard_link(sources.join("a"), sources.join(name))?;
+            }
+        } else {
+            for name in names {
+                fs::create_dir(sources.join(name))?;
+            }
+            for file in ["f1", "f2", "f3"] {
+                let first = sources.join(names[0]).join(file);
+                fs::write(&first, file)?;
+                for name in &names[1..] {
+                    fs::hard_link(&first, sources.join(name).join(file))?;
+                }
+            }
+        }
+        let paths: Vec<PathBuf> = names.iter().map(|name| sources.join(name)).collect();
+        let _volumes = separate_volumes(&sources, &destination);
+
+        let (_operation, events, _) = paste_moves(id, &destination, &paths, &Barriers::new(), None);
+        pump_until_transfer(&events);
+
+        assert!(
+            matches!(
+                terminal_transfer(&events.borrow()),
+                Some(OperationEvent::Pasted { .. })
+            ),
+            "{row}: {:?}",
+            events.borrow()
+        );
+        let kept: Vec<_> = events
+            .borrow()
+            .iter()
+            .filter_map(|event| match event {
+                OperationEvent::ItemsReported { report, .. } => Some(report.kept.clone()),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        assert_eq!(kept, [], "{row}");
+        assert_eq!(fs::read_dir(&sources)?.count(), 0, "{row}");
+        assert_eq!(moved_count(&events.borrow()), names.len(), "{row}");
+    }
+    Ok(())
+}

@@ -2196,10 +2196,12 @@ async fn move_local_with_progress(
 async fn delete_moved_sources(
     source: &gio::File,
     sources: copy_engine::Manifest,
+    unlinks: Arc<copy_engine::Unlinks>,
     progress: Option<&TransferProgressTracker>,
     cancellable: &gio::Cancellable,
 ) -> Result<(), glib::Error> {
-    let (kept, deleted) = copy_engine::delete_unchanged_sources(sources, cancellable).await;
+    let (kept, deleted) =
+        copy_engine::delete_unchanged_sources(sources, unlinks, cancellable).await;
     if let (Some(progress), Some(parent)) =
         (progress, source.path().as_deref().and_then(Path::parent))
     {
@@ -2472,6 +2474,7 @@ async fn move_restore_path(
     source_path: PathBuf,
     target_path: PathBuf,
     allowed_root: PathBuf,
+    unlinks: Arc<copy_engine::Unlinks>,
     cancellable: gio::Cancellable,
 ) -> Result<TransferReport, glib::Error> {
     if cancellable.is_cancelled() {
@@ -2559,7 +2562,7 @@ async fn move_restore_path(
     owed::flush(barrier).await.map_err(io_error)?;
     // The copy is complete, so a cancel no longer stops this restore.
     let (kept, deleted) =
-        copy_engine::delete_unchanged_sources(sources, &gio::Cancellable::new()).await;
+        copy_engine::delete_unchanged_sources(sources, unlinks, &gio::Cancellable::new()).await;
     deleted.map_err(|error| {
         io_error(rust_i18n::t!(
             "The item was restored, but its trash copy could not be removed: %{error}",
@@ -2581,6 +2584,7 @@ async fn move_restore(
     source: gio::File,
     target: gio::File,
     allowed_root: PathBuf,
+    unlinks: Arc<copy_engine::Unlinks>,
     cancellable: gio::Cancellable,
 ) -> Result<TransferReport, glib::Error> {
     if cancellable.is_cancelled() {
@@ -2590,7 +2594,8 @@ async fn move_restore(
         && target.is_native()
         && let (Some(source_path), Some(target_path)) = (source.path(), target.path())
     {
-        return move_restore_path(source_path, target_path, allowed_root, cancellable).await;
+        return move_restore_path(source_path, target_path, allowed_root, unlinks, cancellable)
+            .await;
     }
     Err(io_error(crate::i18n::tr(
         "Trash restore requires a local source and destination",
@@ -4994,6 +4999,7 @@ async fn restore_trash_entry(
     entry: &RestoreEntry,
     context: &RestoreContext,
     affected_locations: &mut HashSet<Location>,
+    unlinks: &Arc<copy_engine::Unlinks>,
     cancellable: &gio::Cancellable,
 ) -> Result<TransferReport, glib::Error> {
     let plan = match plan_restore_for_location(
@@ -5031,7 +5037,14 @@ async fn restore_trash_entry(
     }
     let source = gio::File::for_path(&plan.source_path);
     let target = gio::File::for_path(&plan.destination);
-    let report = move_restore(source, target, plan.allowed_root, cancellable.clone()).await?;
+    let report = move_restore(
+        source,
+        target,
+        plan.allowed_root,
+        unlinks.clone(),
+        cancellable.clone(),
+    )
+    .await?;
     if report.kept_in_trash.is_empty()
         && let Some(info_path) = plan.trash_info.or_else(|| entry.trash_info.clone())
         && let Ok(Err(error)) = gio::spawn_blocking(move || std::fs::remove_file(info_path)).await
@@ -5071,6 +5084,7 @@ async fn undo_merged_overwrite(
     staged: &RestoreEntry,
     context: &RestoreContext,
     affected_locations: &mut HashSet<Location>,
+    unlinks: &Arc<copy_engine::Unlinks>,
     cancellable: &gio::Cancellable,
 ) -> Result<TransferReport, glib::Error> {
     let file = gio_file_for_location(location);
@@ -5094,7 +5108,7 @@ async fn undo_merged_overwrite(
         )
         .await?;
     }
-    restore_trash_entry(staged, context, affected_locations, cancellable).await
+    restore_trash_entry(staged, context, affected_locations, unlinks, cancellable).await
 }
 
 /// Resolves where an overwritten original was staged. Production reads Trash;
@@ -5123,6 +5137,7 @@ async fn run_merge_undo(
         }
     }
     let context = RestoreContext::current().await;
+    let unlinks = Arc::default();
     let mut completed_locations = Vec::new();
     let mut restored = Vec::new();
     let mut failed_locations = Vec::new();
@@ -5150,6 +5165,7 @@ async fn run_merge_undo(
                     &staged,
                     &context,
                     &mut affected_locations,
+                    &unlinks,
                     &cancellable,
                 )
                 .await
@@ -6517,6 +6533,7 @@ impl OperationProvider for LocalOperationProvider {
             let mut failed_locations = Vec::new();
             let mut affected_locations = HashSet::from([Location::uri("trash:///")]);
             let context = RestoreContext::current().await;
+            let unlinks = Arc::new(copy_engine::Unlinks::default());
             let worker_count = restore_worker_count(&entries).await;
             let mut completed = 0;
             let mut cancelled = false;
@@ -6539,13 +6556,18 @@ impl OperationProvider for LocalOperationProvider {
                     .iter()
                     .cloned()
                     .map(|entry| {
-                        let context = context.clone();
+                        let (context, unlinks) = (context.clone(), unlinks.clone());
                         let cancellable = operation_cancellable.clone();
                         main_context.spawn_local(async move {
                             let mut affected = HashSet::new();
-                            let result =
-                                restore_trash_entry(&entry, &context, &mut affected, &cancellable)
-                                    .await;
+                            let result = restore_trash_entry(
+                                &entry,
+                                &context,
+                                &mut affected,
+                                &unlinks,
+                                &cancellable,
+                            )
+                            .await;
                             (entry, result, affected)
                         })
                     })

@@ -9,6 +9,7 @@
 use std::cell::Cell;
 use std::{
     rc::Rc,
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -16,7 +17,7 @@ use gtk::{gio, glib};
 
 use super::{
     DisplacedOriginal, TransferProgressTracker,
-    copy_engine::{self, Barrier, Manifest},
+    copy_engine::{self, Barrier, Manifest, Unlinks},
     delete_moved_sources, device_flush_failure, io_error,
     merge_aside::MergeAside,
     original_not_removed, permanently_delete_maybe_local, removable_roots_for_paths,
@@ -42,11 +43,13 @@ impl Deletion {
     async fn run(
         self,
         progress: Option<&TransferProgressTracker>,
+        unlinks: &Arc<Unlinks>,
         cancellable: &gio::Cancellable,
     ) -> Result<(), glib::Error> {
         match self {
             Self::Sources(source, manifest) => {
-                delete_moved_sources(&source, manifest, progress, cancellable).await
+                delete_moved_sources(&source, manifest, unlinks.clone(), progress, cancellable)
+                    .await
             }
             Self::Source(source) => {
                 permanently_delete_maybe_local(source, true, cancellable.clone()).await
@@ -94,7 +97,7 @@ impl Owed {
         let mut batch = Batch::new(None);
         batch.add((), self, 0);
         batch
-            .close(progress, cancellable)
+            .close(progress, &Arc::default(), cancellable)
             .await
             .pop()
             .map_or(Ok(()), |((), settled)| settled)
@@ -193,6 +196,7 @@ impl<T> Batch<T> {
     async fn close(
         self,
         progress: Option<&TransferProgressTracker>,
+        unlinks: &Arc<Unlinks>,
         cancellable: &gio::Cancellable,
     ) -> Vec<(T, Result<(), glib::Error>)> {
         let flushed = match self.barrier {
@@ -216,7 +220,7 @@ impl<T> Batch<T> {
                 Ok(()) => {
                     let mut result = Ok(());
                     for deletion in deletions {
-                        result = deletion.run(progress, cancellable).await;
+                        result = deletion.run(progress, unlinks, cancellable).await;
                         if result.is_err() {
                             break;
                         }
@@ -276,6 +280,7 @@ pub(super) struct Settling<'a> {
     emit: Rc<dyn Fn(OperationEvent)>,
     progress: Rc<TransferProgressTracker>,
     batches: Batches<Done>,
+    unlinks: Arc<Unlinks>,
     completed: Vec<usize>,
     failed: Vec<usize>,
     failures: Vec<String>,
@@ -292,6 +297,7 @@ impl<'a> Settling<'a> {
             emit,
             progress,
             batches: Batches { open: Vec::new() },
+            unlinks: Arc::default(),
             completed: Vec::new(),
             failed: Vec::new(),
             failures: Vec::new(),
@@ -330,7 +336,10 @@ impl<'a> Settling<'a> {
         // What complete copies owe is finished whatever stops the paste.
         let cancellable = gio::Cancellable::new();
         for batch in batches {
-            for (done, result) in batch.close(Some(&self.progress), &cancellable).await {
+            let closed = batch
+                .close(Some(&self.progress), &self.unlinks, &cancellable)
+                .await;
+            for (done, result) in closed {
                 match result {
                     Ok(()) => self.done(done),
                     Err(error) => {

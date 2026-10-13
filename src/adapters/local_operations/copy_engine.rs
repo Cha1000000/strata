@@ -52,7 +52,7 @@ use crate::{
 };
 pub(super) use barrier::Barrier;
 use data::Data;
-pub(super) use manifest::Manifest;
+pub(super) use manifest::{Manifest, Unlinks};
 use metadata::Snapshot;
 pub(super) use restrictive::Restrictive;
 
@@ -262,10 +262,11 @@ pub(super) async fn snapshot(
 /// beneath the item's parent, with why, even when it stopped.
 pub(super) async fn delete_unchanged_sources(
     manifest: Manifest,
+    unlinks: Arc<Unlinks>,
     cancellable: &gio::Cancellable,
 ) -> (Vec<(PathBuf, KeptCause)>, Result<(), glib::Error>) {
     let deleted = run_cancellable(cancellable, move |cancelled| {
-        manifest::delete(fs(), manifest, cancelled)
+        manifest::delete(fs(), manifest, unlinks, cancelled)
     })
     .await;
     deleted.unwrap_or_else(|_| {
