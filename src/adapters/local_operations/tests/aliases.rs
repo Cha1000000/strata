@@ -2,39 +2,16 @@
 
 use std::os::unix::fs::MetadataExt;
 
-use super::super::copy_engine::{Destination, Options, copy_local};
 use super::*;
 use crate::services::{RenameCause, RenamedItem};
 
 /// Copies `source` to `target` with `workers`, and returns the names it
-/// reported saved under others.
-fn copy_reporting(
+/// reported saved under others, beneath `target`.
+fn copy_renaming(
     source: &Path,
     target: &Path,
     workers: Option<usize>,
 ) -> Result<Vec<(String, String)>, Box<dyn Error>> {
-    let reported = Rc::new(RefCell::new(Vec::new()));
-    let events = reported.clone();
-    let progress = TransferProgressTracker::new(
-        OperationRequestId(1),
-        None,
-        None,
-        Rc::new(move |event| {
-            if let OperationEvent::ItemsReported { report, .. } = event {
-                events.borrow_mut().extend(report.renamed);
-            }
-        }),
-    );
-    glib::MainContext::default().block_on(copy_local(
-        source.to_path_buf(),
-        Destination::New(target.to_path_buf(), Taken::Fail),
-        Options {
-            fat_family: false,
-            workers,
-        },
-        Some(progress),
-        &gio::Cancellable::new(),
-    ))?;
     let relative = |location: &Location| {
         location
             .native_path()
@@ -42,8 +19,8 @@ fn copy_reporting(
             .map(|path| path.to_string_lossy().into_owned())
             .unwrap_or_default()
     };
-    Ok(reported
-        .take()
+    Ok(copy_reporting(source, target, workers)?
+        .renamed
         .into_iter()
         .map(
             |RenamedItem {
@@ -89,7 +66,7 @@ fn case_aliases_inside_a_copied_folder_are_numbered_and_reported() -> Result<(),
         let _destination = FsQuirks::install(&destination, preset());
         let target = destination.join("copy");
 
-        let renamed = copy_reporting(&source, &target, Some(1))?;
+        let renamed = copy_renaming(&source, &target, Some(1))?;
 
         let mut expected = vec![
             ("docs".to_owned(), "docs (1)".to_owned()),
@@ -151,7 +128,7 @@ fn a_linked_name_that_aliases_another_is_numbered_and_reported() -> Result<(), B
 
     // One worker takes the folder's files last first, so `B` is linked
     // after `b` is made.
-    let renamed = copy_reporting(&source, &target, Some(1))?;
+    let renamed = copy_renaming(&source, &target, Some(1))?;
 
     assert_eq!(renamed, [("B".to_owned(), "B (1)".to_owned())]);
     assert_eq!(names(&target)?, ["B (1)", "a", "b"]);

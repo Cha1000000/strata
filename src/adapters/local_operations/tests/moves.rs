@@ -855,3 +855,39 @@ fn keep_both_move_renumbers_when_its_name_is_taken_meanwhile() -> Result<(), Box
     }
     Ok(())
 }
+
+#[test]
+fn a_move_keeps_a_folder_whose_special_files_cannot_be_copied() -> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    for conflict in [TransferConflict::FailIfExists, TransferConflict::Merge] {
+        let root = tempfile::tempdir()?;
+        let source_dir = root.path().join("source");
+        let destination = root.path().join("destination");
+        let folder = source_dir.join("folder");
+        fs::create_dir_all(&folder)?;
+        fs::create_dir_all(&destination)?;
+        fs::write(folder.join("notes.txt"), b"keep-me")?;
+        let _socket = std::os::unix::net::UnixListener::bind(folder.join("socket"))?;
+        if conflict == TransferConflict::Merge {
+            fs::create_dir(destination.join("folder"))?;
+        }
+        let _volumes = separate_volumes(&source_dir, &destination);
+
+        let (_operation, events) = paste_move(91, &destination, &folder, conflict);
+        pump_until_transfer(&events);
+
+        assert!(
+            matches!(
+                terminal_transfer(&events.borrow()),
+                Some(OperationEvent::TransferFailed { .. })
+            ),
+            "{conflict:?}: {:?}",
+            events.borrow()
+        );
+        assert_eq!(fs::read(folder.join("notes.txt"))?, b"keep-me");
+        assert!(fs::symlink_metadata(folder.join("socket")).is_ok());
+    }
+    Ok(())
+}

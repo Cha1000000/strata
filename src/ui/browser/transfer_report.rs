@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: MIT
 
 //! Tells the user, once a transfer ends, about items inside the ones it was
-//! given that it saved under other names.
+//! given that it saved under other names or left out.
 
 use std::time::Duration;
 
 use crate::model::Location;
-use crate::services::{RenameCause, RenamedItem, TransferReport};
+use crate::services::{RenameCause, RenamedItem, SkippedItem, SpecialKind, TransferReport};
 use crate::ui::browser::ViewState;
 
 #[cfg(test)]
@@ -27,6 +27,10 @@ enum Presentation {
     Information {
         message: String,
         summary: String,
+        detail: String,
+    },
+    /// Items were left out, so the transfer completed with errors.
+    Warning {
         detail: String,
     },
 }
@@ -54,33 +58,62 @@ fn renamed_line(item: &RenamedItem) -> String {
     .into_owned()
 }
 
-fn presentation(report: &TransferReport) -> Option<Presentation> {
-    let renamed = &report.renamed;
-    let heading = heading(renamed.first()?.cause);
-    if renamed.len() <= NOTICE_ITEMS {
-        let lines = renamed.iter().map(renamed_line).collect::<Vec<_>>();
-        return Some(Presentation::Notice {
-            heading,
-            text: lines.join("\n"),
-        });
+fn skipped_line(item: &SkippedItem) -> String {
+    let name = display_name(&item.location);
+    match item.kind {
+        SpecialKind::Pipe => rust_i18n::t!("“%{name}” (named pipe)", name = name),
+        SpecialKind::Socket => rust_i18n::t!("“%{name}” (socket)", name = name),
+        SpecialKind::Device => rust_i18n::t!("“%{name}” (device file)", name = name),
     }
-    let mut detail = renamed
+    .into_owned()
+}
+
+/// The first [`LISTED_ITEMS`] lines as bullets, then how many more there are.
+fn bullets(lines: &[String]) -> String {
+    let mut text = lines
         .iter()
         .take(LISTED_ITEMS)
-        .map(|item| format!("• {}", renamed_line(item)))
+        .map(|line| format!("• {line}"))
         .collect::<Vec<_>>()
         .join("\n\n");
-    if renamed.len() > LISTED_ITEMS {
-        detail.push_str("\n\n");
-        detail.push_str(&crate::i18n::count(
+    if lines.len() > LISTED_ITEMS {
+        text.push_str("\n\n");
+        text.push_str(&crate::i18n::count(
             "more_items",
-            renamed.len() - LISTED_ITEMS,
+            lines.len() - LISTED_ITEMS,
         ));
+    }
+    text
+}
+
+fn presentation(report: &TransferReport) -> Option<Presentation> {
+    let renamed = report.renamed.iter().map(renamed_line).collect::<Vec<_>>();
+    let renamed_heading = report.renamed.first().map(|item| heading(item.cause));
+    if !report.skipped.is_empty() {
+        let skipped = report.skipped.iter().map(skipped_line).collect::<Vec<_>>();
+        let skipped_heading =
+            crate::i18n::tr("These special files can\u{2019}t be copied and were left out");
+        let sections = renamed_heading
+            .map(|heading| (heading, renamed))
+            .into_iter()
+            .chain([(skipped_heading, skipped)])
+            .map(|(heading, lines)| format!("{heading}\n\n{}", bullets(&lines)))
+            .collect::<Vec<_>>();
+        return Some(Presentation::Warning {
+            detail: sections.join("\n\n"),
+        });
+    }
+    let heading = renamed_heading?;
+    if renamed.len() <= NOTICE_ITEMS {
+        return Some(Presentation::Notice {
+            heading,
+            text: renamed.join("\n"),
+        });
     }
     Some(Presentation::Information {
         message: crate::i18n::count("items_renamed", renamed.len()),
         summary: heading,
-        detail,
+        detail: bullets(&renamed),
     })
 }
 
@@ -103,6 +136,9 @@ impl ViewState {
                 &summary,
                 &detail,
             ),
+            Some(Presentation::Warning { detail }) => {
+                crate::ui::modal::show_partial_failure_dialog(&self.overlay, &detail);
+            }
             None => {}
         }
     }

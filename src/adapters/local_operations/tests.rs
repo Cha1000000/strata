@@ -80,12 +80,20 @@ fn copy_recursively_fat_family(
     cancellable: gio::Cancellable,
 ) -> Pin<Box<dyn Future<Output = Result<(), glib::Error>>>> {
     if merge {
-        return super::merge_copy(None, true)(source, target, cancellable);
+        return super::merge_copy(None, true, false)(source, target, cancellable);
     }
     Box::pin(async move {
-        copy_new_recursively_on_filesystem(source, target, Taken::Fail, cancellable, None, true)
-            .await
-            .map(drop)
+        copy_new_recursively_on_filesystem(
+            source,
+            target,
+            Taken::Fail,
+            false,
+            cancellable,
+            None,
+            true,
+        )
+        .await
+        .map(drop)
     })
 }
 
@@ -192,9 +200,17 @@ async fn copy_new_recursively_with_progress(
     cancellable: gio::Cancellable,
     progress: Option<Rc<TransferProgressTracker>>,
 ) -> Result<(), glib::Error> {
-    copy_new_recursively_on_filesystem(source, target, Taken::Fail, cancellable, progress, false)
-        .await
-        .map(drop)
+    copy_new_recursively_on_filesystem(
+        source,
+        target,
+        Taken::Fail,
+        false,
+        cancellable,
+        progress,
+        false,
+    )
+    .await
+    .map(drop)
 }
 
 async fn copy_new_recursively(
@@ -203,6 +219,38 @@ async fn copy_new_recursively(
     cancellable: gio::Cancellable,
 ) -> Result<(), glib::Error> {
     copy_new_recursively_with_progress(source, target, cancellable, None).await
+}
+
+/// Copies `source` to `target` with `workers`, and returns what the copy
+/// reported.
+fn copy_reporting(
+    source: &Path,
+    target: &Path,
+    workers: Option<usize>,
+) -> Result<crate::services::TransferReport, Box<dyn Error>> {
+    let reported = Rc::new(RefCell::new(crate::services::TransferReport::default()));
+    let events = reported.clone();
+    let progress = TransferProgressTracker::new(
+        OperationRequestId(1),
+        None,
+        None,
+        Rc::new(move |event| {
+            if let OperationEvent::ItemsReported { report, .. } = event {
+                events.borrow_mut().extend(report);
+            }
+        }),
+    );
+    glib::MainContext::default().block_on(super::copy_engine::copy_local(
+        source.to_path_buf(),
+        super::copy_engine::Destination::New(target.to_path_buf(), Taken::Fail),
+        super::copy_engine::Options {
+            workers,
+            ..super::copy_engine::Options::default()
+        },
+        Some(progress),
+        &gio::Cancellable::new(),
+    ))?;
+    Ok(reported.take())
 }
 
 fn terminal_transfer(events: &[OperationEvent]) -> Option<&OperationEvent> {

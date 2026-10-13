@@ -938,6 +938,7 @@
   "The name is too long": "名称过长",
   "The name isn’t valid at this location": "此位置不允许使用该名称",
   "The result could not be confirmed. Check both locations before trying again.": "无法确认结果。重试前请检查两个位置。",
+  "These special files can’t be copied and were left out": "无法复制这些特殊文件，已跳过",
   "This location can’t guarantee that another item won’t be overwritten": "此位置无法确保不会覆盖其他项目",
   "Trash reported success, but the item was not moved": "回收站报告已完成，但项目并未移走",
   "The name or filter changed. Press Open to try again.": "名称或文件类型已更改。请点击“打开”重试。",

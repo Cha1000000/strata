@@ -126,8 +126,11 @@ pub(super) trait FsOps: Send + Sync {
     /// The folder's entries with their types; `Unknown` where the
     /// filesystem does not say.
     fn list(&self, dir: BorrowedFd<'_>) -> Result<Vec<(OsString, FileType)>, Errno>;
-    /// Claims a regular file without opening it.
-    fn create_node(&self, at: Entry<'_>, mode: Mode) -> Result<(), Errno>;
+    /// Makes a regular file without opening it, or a named pipe.
+    fn create_node(&self, at: Entry<'_>, kind: FileType, mode: Mode) -> Result<(), Errno>;
+    /// Opens the named pipe at `at` for its metadata, which never waits for
+    /// a writer.
+    fn open_fifo(&self, at: Entry<'_>) -> Result<OwnedFd, Errno>;
     /// Creates a file exclusively without opening it for writing, so its
     /// close flushes nothing (vfat mounted with `flush` waits there).
     fn create_readonly(&self, at: Entry<'_>, mode: Mode) -> Result<OwnedFd, Errno>;
@@ -628,9 +631,19 @@ impl FsOps for System {
         Ok(entries)
     }
 
-    fn create_node(&self, at: Entry<'_>, mode: Mode) -> Result<(), Errno> {
+    fn create_node(&self, at: Entry<'_>, kind: FileType, mode: Mode) -> Result<(), Errno> {
         assert_off_main_thread();
-        rustix::fs::mknodat(at.dir, at.name, FileType::RegularFile, mode, 0)
+        rustix::fs::mknodat(at.dir, at.name, kind, mode, 0)
+    }
+
+    fn open_fifo(&self, at: Entry<'_>) -> Result<OwnedFd, Errno> {
+        assert_off_main_thread();
+        rustix::fs::openat(
+            at.dir,
+            at.name,
+            OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
     }
 
     fn create_readonly(&self, at: Entry<'_>, mode: Mode) -> Result<OwnedFd, Errno> {

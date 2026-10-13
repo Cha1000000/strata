@@ -938,6 +938,7 @@
   "The name is too long": "Tên quá dài",
   "The name isn’t valid at this location": "Tên này không hợp lệ tại vị trí này",
   "The result could not be confirmed. Check both locations before trying again.": "Không thể xác nhận kết quả. Hãy kiểm tra cả hai vị trí trước khi thử lại.",
+  "These special files can’t be copied and were left out": "Không thể sao chép các tệp đặc biệt này nên chúng đã bị bỏ qua",
   "This location can’t guarantee that another item won’t be overwritten": "Vị trí này không thể đảm bảo rằng mục khác sẽ không bị ghi đè",
   "Trash reported success, but the item was not moved": "Thùng rác báo đã hoàn tất, nhưng mục chưa được di chuyển",
   "The name or filter changed. Press Open to try again.": "Tên hoặc bộ lọc đã thay đổi. Nhấn Mở để thử lại.",

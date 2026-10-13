@@ -63,6 +63,7 @@ pub(crate) enum Op {
     OpenDir,
     List,
     CreateNode,
+    OpenFifo,
     CreateReadonly,
     OpenWrite,
     FileFlags,
@@ -175,6 +176,8 @@ pub(crate) struct Quirks {
     pub extra_xattrs: Vec<(&'static str, &'static [u8])>,
     /// `mknodat` of a regular file, which FUSE daemons without `mknod` refuse.
     pub node_create: Support,
+    /// `mknodat` of a named pipe, which FAT, exFAT and SMB refuse.
+    pub fifos: Support,
     /// Unlinking a file this process holds open renames it to `.nfs*`
     /// instead, as the NFS client does until the last close.
     pub silly_rename: bool,
@@ -258,12 +261,13 @@ impl Quirks {
         }
     }
 
-    /// No hard links or xattrs, and names compared without case.
+    /// No hard links, named pipes or xattrs, and names compared without case.
     pub(crate) fn vfat() -> Self {
         Self {
             mount_type: Some("vfat"),
             fs_type: Some(0x4d44),
             links: Support::Rejected(Errno::PERM),
+            fifos: Support::Rejected(Errno::PERM),
             case_insensitive: true,
             xattrs_refused: vec![("", Errno::OPNOTSUPP)],
             ..Self::default()
@@ -1337,16 +1341,30 @@ impl FsOps for Scoped {
         on_fd(dir, Op::List, None, |_| System.list(dir))
     }
 
-    fn create_node(&self, at: Entry<'_>, mode: Mode) -> Result<(), Errno> {
+    fn create_node(&self, at: Entry<'_>, kind: FileType, mode: Mode) -> Result<(), Errno> {
         assert_off_main_thread();
         match scope_for(at.dir) {
             Some(scope) => scope.run(Op::CreateNode, &[at.name], |scope| {
-                scope.creating(at, || match scope.quirk(|quirks| quirks.node_create) {
+                let support = scope.quirk(|quirks| match kind {
+                    FileType::Fifo => quirks.fifos,
+                    _ => quirks.node_create,
+                });
+                scope.creating(at, || match support {
                     Support::Rejected(error) => Err(error),
-                    Support::Supported => System.create_node(at, mode),
+                    Support::Supported => System.create_node(at, kind, mode),
                 })
             }),
-            None => System.create_node(at, mode),
+            None => System.create_node(at, kind, mode),
+        }
+    }
+
+    fn open_fifo(&self, at: Entry<'_>) -> Result<OwnedFd, Errno> {
+        assert_off_main_thread();
+        match scope_for(at.dir) {
+            Some(scope) => scope.run(Op::OpenFifo, &[at.name], |scope| {
+                scope.resolved(at, |at| System.open_fifo(at))
+            }),
+            None => System.open_fifo(at),
         }
     }
 

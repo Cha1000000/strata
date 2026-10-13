@@ -279,20 +279,38 @@ pub struct RenamedItem {
     pub cause: RenameCause,
 }
 
+/// A special file a transfer cannot recreate at its destination.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SpecialKind {
+    /// A named pipe the destination refuses.
+    Pipe,
+    Socket,
+    Device,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SkippedItem {
+    pub location: Location,
+    pub kind: SpecialKind,
+}
+
 /// What a transfer did to items inside the ones it was given, told once it
 /// ends. Keep Both numbering, which the user chose, is not reported.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct TransferReport {
     pub renamed: Vec<RenamedItem>,
+    /// Left out of the copy.
+    pub skipped: Vec<SkippedItem>,
 }
 
 impl TransferReport {
     pub fn is_empty(&self) -> bool {
-        self.renamed.is_empty()
+        self.renamed.is_empty() && self.skipped.is_empty()
     }
 
     pub fn extend(&mut self, other: Self) {
         self.renamed.extend(other.renamed);
+        self.skipped.extend(other.skipped);
     }
 }
 

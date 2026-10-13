@@ -948,6 +948,7 @@ fn a_merge_undo_removes_merged_items_under_the_names_they_were_saved_as() {
                 saved_as: saved_as.clone(),
                 cause: crate::services::RenameCause::Alias,
             }],
+            ..Default::default()
         },
     });
     emit(OperationEvent::Pasted {

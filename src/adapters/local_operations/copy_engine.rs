@@ -45,7 +45,7 @@ use crate::{
         Family, MountCapabilities, MountKey, family, learn_mount_capability, mount_capabilities,
     },
     model::Location,
-    services::{RenameCause, RenamedItem, TransferReport},
+    services::{RenameCause, RenamedItem, SkippedItem, SpecialKind, TransferReport},
 };
 use data::Data;
 use metadata::Snapshot;
@@ -109,6 +109,9 @@ pub(super) struct Options {
     pub fat_family: bool,
     /// Worked out from the source and destination devices when `None`.
     pub workers: Option<usize>,
+    /// The source is removed after the copy, so a special file that cannot
+    /// be recreated fails the copy instead of being left out.
+    pub moving: bool,
 }
 
 /// Copies the native item at `source`.
@@ -137,10 +140,10 @@ pub(super) async fn copy_local(
         },
     )
     .await?;
-    report_renamed(
+    report(
         progress.as_deref(),
         &target.with_file_name(&followed.value),
-        followed.renamed,
+        followed.left,
     );
     Ok(Copied {
         name: followed.value,
@@ -172,35 +175,48 @@ pub(super) async fn copy_to_stage(
         },
     )
     .await?;
-    report_renamed(progress.as_deref(), &root, followed.renamed);
+    report(progress.as_deref(), &root, followed.left);
     Ok(followed.value)
 }
 
-/// What a copy run by [`following`] made, added to progress, and saved
-/// under other names, by path beneath the item.
+/// What a copy run by [`following`] made and added to progress, and what
+/// it left as the user would not expect.
 struct Followed<T> {
     value: T,
     reported: Reported,
-    renamed: Vec<(PathBuf, PathBuf)>,
+    left: Left,
 }
 
-/// Tells `progress` which entries inside the item at `root` were saved under
-/// other names.
-fn report_renamed(
-    progress: Option<&TransferProgressTracker>,
-    root: &Path,
+/// Entries a copy saved under other names than they asked for, and special
+/// files it left out, by path beneath the item.
+#[derive(Default)]
+struct Left {
     renamed: Vec<(PathBuf, PathBuf)>,
-) {
+    skipped: Vec<(PathBuf, SpecialKind)>,
+}
+
+/// Tells `progress` what the copy left inside the item at `root`.
+fn report(progress: Option<&TransferProgressTracker>, root: &Path, left: Left) {
     let Some(progress) = progress else {
         return;
     };
+    let location = |path: PathBuf| Location::local(root.join(path));
     progress.report(TransferReport {
-        renamed: renamed
+        renamed: left
+            .renamed
             .into_iter()
             .map(|(requested, saved_as)| RenamedItem {
-                requested: Location::local(root.join(requested)),
-                saved_as: Location::local(root.join(saved_as)),
+                requested: location(requested),
+                saved_as: location(saved_as),
                 cause: RenameCause::Alias,
+            })
+            .collect(),
+        skipped: left
+            .skipped
+            .into_iter()
+            .map(|(path, kind)| SkippedItem {
+                location: location(path),
+                kind,
             })
             .collect(),
     });
@@ -231,18 +247,18 @@ async fn following<T: Send + 'static>(
             cancelled,
             counters,
             true,
-            options.fat_family,
+            options,
         );
         let value = work(&copy, &source).map_err(|failure| failure.into_error(&source.name))?;
-        Ok::<_, glib::Error>((value, std::mem::take(&mut *lock(&copy.renamed))))
+        Ok::<_, glib::Error>((value, std::mem::take(&mut *lock(&copy.left))))
     })
     .await;
     let reported = follower.map_or_else(|| shared.reported(), |follower| follower.stop());
-    let (value, renamed) = copied.map_err(|_| io_error("Copy worker stopped unexpectedly"))??;
+    let (value, left) = copied.map_err(|_| io_error("Copy worker stopped unexpectedly"))??;
     Ok(Followed {
         value,
         reported,
-        renamed,
+        left,
     })
 }
 
@@ -258,7 +274,18 @@ pub(super) async fn copy_from_stage(
     };
     let identity = staged.identity;
     let copied = run_cancellable(cancellable, move |cancelled| {
-        let copy = Copy::new(fs(), name.clone(), cancelled, Arc::default(), false, false);
+        let options = Options {
+            moving: true,
+            ..Options::default()
+        };
+        let copy = Copy::new(
+            fs(),
+            name.clone(),
+            cancelled,
+            Arc::default(),
+            false,
+            options,
+        );
         let parent = source.parent.clone();
         from_stage(&copy, &source, identity, &parent, &name)
             .map_err(|failure| failure.into_error(&name))
@@ -360,6 +387,17 @@ fn copy_new(
             }
             let staged = stage_folder(copy, source, stat.identity, &parent, COPY_PREFIX, workers)?;
             publish_folder(copy, staged, &name, taken, workers)
+        }
+        FileType::Fifo => {
+            copy.check_cancelled()?;
+            let mount = Mount::new(copy.fs, parent.as_fd());
+            let parent_stat = copy.fs.stat_fd(parent.as_fd())?;
+            first_free(taken.names(&name, false), taken, |name| {
+                let target = Entry::new(&*parent, name);
+                tree::copy_fifo(copy, source.entry(), target, &parent_stat, &mount, false)?
+                    .ok_or(Failure::NotCopyable)
+            })
+            .map(|(name, _)| name)
         }
         _ => Err(Failure::NotCopyable),
     }
@@ -917,9 +955,8 @@ struct Copy {
     refused_xattrs: Mutex<HashSet<OsString>>,
     /// The target refused `mknodat`, so claims create and close instead.
     nodes_refused: AtomicBool,
-    /// Entries saved under another name than they asked for, by path
-    /// beneath the item.
-    renamed: Mutex<Vec<(PathBuf, PathBuf)>>,
+    moving: bool,
+    left: Mutex<Left>,
 }
 
 impl Copy {
@@ -929,7 +966,7 @@ impl Copy {
         cancelled: Arc<AtomicBool>,
         progress: Arc<SharedProgress>,
         counted: bool,
-        fat_family: bool,
+        options: Options,
     ) -> Arc<Self> {
         Arc::new(Self {
             fs,
@@ -937,28 +974,43 @@ impl Copy {
             cancelled,
             progress,
             counted,
-            fat_family,
+            fat_family: options.fat_family,
             data: Mutex::default(),
             refused_xattrs: Mutex::default(),
             nodes_refused: AtomicBool::new(false),
-            renamed: Mutex::default(),
+            moving: options.moving,
+            left: Mutex::default(),
         })
     }
 
-    /// The same copy repeating bytes it already counted, as from a stage.
+    /// The same copy repeating bytes it already counted, from a stage that
+    /// is removed afterwards.
     fn uncounted(&self) -> Arc<Self> {
+        let options = Options {
+            moving: true,
+            ..Options::default()
+        };
         Self::new(
             self.fs,
             self.item.clone(),
             self.cancelled.clone(),
             self.progress.clone(),
             false,
-            false,
+            options,
         )
     }
 
     fn renamed(&self, requested: PathBuf, saved_as: PathBuf) {
-        lock(&self.renamed).push((requested, saved_as));
+        lock(&self.left).renamed.push((requested, saved_as));
+    }
+
+    /// Leaves out the special file at `path`, unless the copy is a move.
+    fn skip(&self, path: PathBuf, kind: SpecialKind) -> Result<(), Failure> {
+        if self.moving {
+            return Err(Failure::NotCopyable);
+        }
+        lock(&self.left).skipped.push((path, kind));
+        Ok(())
     }
 
     /// Counts a completed file, with the `bytes` it made without copying

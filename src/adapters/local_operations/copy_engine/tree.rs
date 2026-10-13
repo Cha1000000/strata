@@ -27,7 +27,7 @@ use rustix::{
 use super::{
     Copy, Created, Failure, Mount, best_effort, changed,
     data::Data,
-    is_unsupported,
+    is_fatal, is_unsupported,
     links::{self, Links, Role},
     lock,
     metadata::Snapshot,
@@ -35,15 +35,18 @@ use super::{
     restrictive::Restrictive,
     same_entry, stable_inodes, stage,
 };
-use crate::adapters::{
-    local_operations::{
-        LocalFileIdentity, cancelled_local_operation, fat_family_child_name,
-        fs_ops::{Entry, EntryStat, FsOps},
-        io_error, numbered_names, placement,
-        placement::PlaceError,
-        work_queue::{self, Group, Job, WorkQueue},
+use crate::{
+    adapters::{
+        local_operations::{
+            LocalFileIdentity, cancelled_local_operation, fat_family_child_name,
+            fs_ops::{Entry, EntryStat, FsOps},
+            io_error, numbered_names, placement,
+            placement::PlaceError,
+            work_queue::{self, Group, Job, WorkQueue},
+        },
+        volume::Family,
     },
-    volume::Family,
+    services::SpecialKind,
 };
 
 /// `FS_CASEFOLD_FL`, which folders made inside a casefolded one inherit.
@@ -438,7 +441,7 @@ impl Made {
                     },
                 ));
             }
-            _ => {
+            FileType::Symlink => {
                 let source = Entry::new(&**source, name);
                 let (path, ()) = make_numbered(copy, names, &path, false, |name| {
                     copy_link(copy, source, Entry::new(dir, name), &self.mount, true)
@@ -449,8 +452,39 @@ impl Made {
                 }
                 queue.complete(Some(group.clone()));
             }
+            FileType::Fifo => {
+                let source = Entry::new(&**source, name);
+                let (path, made) = make_numbered(copy, names, &path, false, |name| {
+                    copy_fifo(
+                        copy,
+                        source,
+                        Entry::new(dir, name),
+                        &self.stat,
+                        &self.mount,
+                        true,
+                    )
+                })?;
+                match made {
+                    Some(identity) => tree.made(&path, identity),
+                    None => copy.skip(path, SpecialKind::Pipe)?,
+                }
+                queue.complete(Some(group.clone()));
+            }
+            kind => {
+                copy.skip(path, special_kind(kind))?;
+                queue.complete(Some(group.clone()));
+            }
         }
         Ok(())
+    }
+}
+
+/// How a special file other than a named pipe is reported.
+fn special_kind(kind: FileType) -> SpecialKind {
+    if kind == FileType::Socket {
+        SpecialKind::Socket
+    } else {
+        SpecialKind::Device
     }
 }
 
@@ -459,8 +493,7 @@ fn file_name(path: &Path) -> OsString {
     path.file_name().unwrap_or_default().to_os_string()
 }
 
-/// The folder's entries in byte order with their types. Special files are
-/// refused before any of the folder's data is copied.
+/// The folder's entries in byte order with their types.
 fn children(fs: &dyn FsOps, folder: BorrowedFd<'_>) -> Result<Vec<(OsString, FileType)>, Failure> {
     let mut children = fs.list(folder)?;
     children.sort_by(|(left, _), (right, _)| left.cmp(right));
@@ -471,15 +504,6 @@ fn children(fs: &dyn FsOps, folder: BorrowedFd<'_>) -> Result<Vec<(OsString, Fil
                 .map_err(|error| Failure::Os(error).named(name))?
                 .kind;
         }
-    }
-    let special = children.iter().find(|(_, kind)| {
-        !matches!(
-            kind,
-            FileType::RegularFile | FileType::Directory | FileType::Symlink
-        )
-    });
-    if let Some((name, _)) = special {
-        return Err(Failure::NotCopyable.named(name));
     }
     Ok(children)
 }
@@ -541,7 +565,7 @@ fn claim_folder(
 fn claim_file(copy: &Copy, entry: Entry<'_>) -> Result<LocalFileIdentity, Failure> {
     let fs = copy.fs;
     if !copy.nodes_refused.load(Ordering::Relaxed) {
-        match fs.create_node(entry, Mode::from_raw_mode(0o600)) {
+        match fs.create_node(entry, FileType::RegularFile, Mode::from_raw_mode(0o600)) {
             Ok(()) => return Ok(fs.stat(entry, false)?.identity),
             Err(error) if taken(fs, entry, error) => {
                 return adopt(fs, entry, true, fresh_file);
@@ -614,6 +638,61 @@ pub(super) fn copy_link(
     }
     copy.add_file(stat.size);
     Ok(())
+}
+
+/// Recreates the named pipe at `source` as `target`, in a folder this copy
+/// `made` or not, with its owner, mode and times, and counts it as a file;
+/// `None` where the destination refuses named pipes. Reading the source's
+/// xattrs would open it, which lets a writer waiting on it go on.
+pub(super) fn copy_fifo(
+    copy: &Copy,
+    source: Entry<'_>,
+    target: Entry<'_>,
+    parent: &EntryStat,
+    mount: &Mount,
+    made: bool,
+) -> Result<Option<LocalFileIdentity>, Failure> {
+    let fs = copy.fs;
+    let stat = fs.stat(source, false)?;
+    if stat.kind != FileType::Fifo {
+        return Err(Failure::Changed);
+    }
+    match fs.create_node(target, FileType::Fifo, Mode::from_raw_mode(0o600)) {
+        Ok(()) => {}
+        Err(error) if taken(fs, target, error) => {
+            adopt(fs, target, made, |stat| stat.kind == FileType::Fifo)?;
+        }
+        Err(error) if refuses_pipes(error) => return Ok(None),
+        Err(error) => return Err(error.into()),
+    }
+    let created = match fs.open_fifo(target) {
+        Ok(fd) => {
+            let created = fs.stat_fd(fd.as_fd())?;
+            if created.kind != FileType::Fifo {
+                return Err(Failure::Place(PlaceError::Changed));
+            }
+            Snapshot::of(&stat).apply_to_pipe(
+                fs,
+                fd.as_fd(),
+                &created,
+                parent,
+                mount,
+                &copy.refused_xattrs,
+            )?;
+            best_effort(fs.close(fd))?;
+            created
+        }
+        Err(error) if is_fatal(error) => return Err(error.into()),
+        Err(_) => fs.stat(target, false)?,
+    };
+    copy.add_file(0);
+    Ok(Some(created.identity))
+}
+
+/// How filesystems without named pipes refuse one: vfat with `EPERM`,
+/// exfat-fuse with `EIO` and SMB with `EOPNOTSUPP`.
+fn refuses_pipes(error: Errno) -> bool {
+    matches!(error, Errno::PERM | Errno::IO | Errno::NOSYS | Errno::INVAL) || is_unsupported(error)
 }
 
 /// A regular file copied into a folder through its own descriptor.
@@ -926,7 +1005,7 @@ impl Live {
                     completion: None,
                 },
             )),
-            (None, _) => {
+            (None, FileType::Symlink) => {
                 copy_link(
                     copy,
                     Entry::new(&*self.source, name),
@@ -935,6 +1014,13 @@ impl Live {
                     false,
                 )?;
             }
+            (None, FileType::Fifo) => {
+                let source = Entry::new(&*self.source, name);
+                if copy_fifo(copy, source, target, &self.stat, &self.mount, false)?.is_none() {
+                    copy.skip(path, SpecialKind::Pipe)?;
+                }
+            }
+            (None, kind) => copy.skip(path, special_kind(kind))?,
         }
         Ok(())
     }

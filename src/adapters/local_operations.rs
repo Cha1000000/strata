@@ -1992,21 +1992,31 @@ fn copy_recursively(
     cancellable: gio::Cancellable,
 ) -> Pin<Box<dyn Future<Output = Result<(), glib::Error>>>> {
     if merge {
-        return merge_copy(None, false)(source, target, cancellable);
+        return merge_copy(None, false, false)(source, target, cancellable);
     }
     Box::pin(async move {
-        copy_new_recursively_on_filesystem(source, target, Taken::Fail, cancellable, None, false)
-            .await
-            .map(drop)
+        copy_new_recursively_on_filesystem(
+            source,
+            target,
+            Taken::Fail,
+            false,
+            cancellable,
+            None,
+            false,
+        )
+        .await
+        .map(drop)
     })
 }
 
 /// Copies `source` to the free name `target`, or under [`Taken::Number`] to
 /// the first free numbered name beside it, and returns where it went.
+/// `moving` fails the copy where it would leave a special file out.
 async fn copy_new_recursively_on_filesystem(
     source: gio::File,
     target: gio::File,
     taken: Taken,
+    moving: bool,
     cancellable: gio::Cancellable,
     progress: Option<Rc<TransferProgressTracker>>,
     fat_family: bool,
@@ -2018,6 +2028,7 @@ async fn copy_new_recursively_on_filesystem(
         let options = copy_engine::Options {
             fat_family,
             workers: None,
+            moving,
         };
         let copied = copy_engine::copy_local(
             source_path,
@@ -2165,6 +2176,7 @@ async fn move_local_with_progress(
         source.clone(),
         target,
         taken,
+        true,
         cancellable.clone(),
         progress,
         fat_family,
@@ -3347,7 +3359,7 @@ struct StagedReplacement {
 async fn replace_through_stage(
     plan: &Arc<ReplacePlan>,
     mut removal: Removal,
-    source_path: &Path,
+    (source_path, moving): (&Path, bool),
     target_path: &Path,
     cancellable: &gio::Cancellable,
     copying: Copying,
@@ -3359,6 +3371,7 @@ async fn replace_through_stage(
     let options = copy_engine::Options {
         fat_family: copying.fat_family,
         workers: None,
+        moving,
     };
     let staged = copy_engine::copy_to_stage(
         source_path.to_path_buf(),
@@ -3573,7 +3586,7 @@ async fn replace_local_with(
     let replaced = replace_through_stage(
         &plan,
         removal,
-        &source_path,
+        (&source_path, move_source),
         &target_path,
         &cancellable,
         copying,
@@ -3867,11 +3880,12 @@ async fn merge_local_with(
 fn progress_merge_hooks(
     progress: Option<Rc<TransferProgressTracker>>,
     fat_family: bool,
+    moving: bool,
     on_merged: &dyn Fn(MergePlan),
 ) -> MergeHooks<'_> {
     MergeHooks {
         fat_family,
-        copy_into_target: merge_copy(progress, fat_family),
+        copy_into_target: merge_copy(progress, fat_family, moving),
         stage_overwrite: Rc::new(trash_stage_overwrite),
         on_merged,
     }
@@ -3879,7 +3893,11 @@ fn progress_merge_hooks(
 
 /// Copies a folder's contents into the folder of the same name, never
 /// replacing an entry there.
-fn merge_copy(progress: Option<Rc<TransferProgressTracker>>, fat_family: bool) -> CopyStep {
+fn merge_copy(
+    progress: Option<Rc<TransferProgressTracker>>,
+    fat_family: bool,
+    moving: bool,
+) -> CopyStep {
     Rc::new(move |source, target, cancellable| {
         let progress = progress.clone();
         if source.is_native()
@@ -3890,6 +3908,7 @@ fn merge_copy(progress: Option<Rc<TransferProgressTracker>>, fat_family: bool) -
                 let options = copy_engine::Options {
                     fat_family,
                     workers: None,
+                    moving,
                 };
                 copy_engine::copy_local(
                     source_path,
@@ -3928,7 +3947,7 @@ async fn merge_local(
         move_source,
         cancellable,
         None,
-        progress_merge_hooks(None, false, on_merged),
+        progress_merge_hooks(None, false, move_source, on_merged),
     )
     .await
 }
@@ -5947,6 +5966,7 @@ impl OperationProvider for LocalOperationProvider {
                         source,
                         target,
                         taken,
+                        false,
                         operation_cancellable.clone(),
                         Some(progress.clone()),
                         fat_family,
@@ -5959,14 +5979,19 @@ impl OperationProvider for LocalOperationProvider {
                         request.move_sources,
                         operation_cancellable.clone(),
                         Some(&mut affected_locations),
-                        progress_merge_hooks(Some(progress.clone()), fat_family, &|plan| {
-                            emit(OperationEvent::Merged {
-                                request_id: request.id,
-                                source: item.source.clone(),
-                                created: plan.created,
-                                overwritten: plan.overwritten,
-                            });
-                        }),
+                        progress_merge_hooks(
+                            Some(progress.clone()),
+                            fat_family,
+                            request.move_sources,
+                            &|plan| {
+                                emit(OperationEvent::Merged {
+                                    request_id: request.id,
+                                    source: item.source.clone(),
+                                    created: plan.created,
+                                    overwritten: plan.overwritten,
+                                });
+                            },
+                        ),
                     )
                     .await
                     .map(|()| target)
@@ -6032,6 +6057,7 @@ impl OperationProvider for LocalOperationProvider {
                         source,
                         target,
                         taken,
+                        false,
                         operation_cancellable.clone(),
                         Some(progress.clone()),
                         fat_family,

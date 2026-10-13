@@ -31,8 +31,8 @@ fn nested_copy_shares_one_worker_budget_across_subdirectories() -> Result<(), Bo
         source,
         Destination::New(target.clone(), Taken::Fail),
         Options {
-            fat_family: false,
             workers: Some(2),
+            ..Options::default()
         },
         None,
         &gio::Cancellable::new(),
@@ -673,44 +673,141 @@ fn copying_symlinks_accepts_an_aliased_destination() -> Result<(), Box<dyn Error
     Ok(())
 }
 
+fn make_fifo(path: &Path, mode: u32) -> io::Result<()> {
+    rustix::fs::mknodat(
+        rustix::fs::CWD,
+        path,
+        rustix::fs::FileType::Fifo,
+        rustix::fs::Mode::from_raw_mode(mode),
+        0,
+    )?;
+    Ok(())
+}
+
 #[test]
-fn copying_a_tree_with_a_named_pipe_fails_instead_of_blocking() -> Result<(), Box<dyn Error>> {
+fn special_files_inside_a_copied_folder_are_recreated_or_left_out_and_reported()
+-> Result<(), Box<dyn Error>> {
+    use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
         .lock()
         .map_err(|error| error.to_string())?;
-    let root = tempfile::tempdir()?;
-    let source = root.path().join("source");
-    let target = root.path().join("target");
-    fs::create_dir_all(&source)?;
-    rustix::fs::mkfifoat(
-        rustix::fs::CWD,
-        source.join("00-pipe"),
-        rustix::fs::Mode::from_bits_truncate(0o600),
-    )?;
-    for index in 1..16 {
-        fs::write(
-            source.join(format!("{index:02}-file.txt")),
-            index.to_string(),
+    for (row, preset, pipes) in [
+        ("tmpfs", Quirks::default as Preset, true),
+        ("ext4", Quirks::ext4, true),
+        ("vfat", Quirks::vfat, false),
+    ] {
+        let root = tempfile::tempdir()?;
+        let source = root.path().join("source");
+        let destination = root.path().join("destination");
+        fs::create_dir_all(&source)?;
+        fs::create_dir(&destination)?;
+        make_fifo(&source.join("00-pipe"), 0o600)?;
+        fs::set_permissions(source.join("00-pipe"), fs::Permissions::from_mode(0o640))?;
+        let _socket = std::os::unix::net::UnixListener::bind(source.join("socket"))?;
+        for index in 1..4 {
+            fs::write(
+                source.join(format!("{index:02}-file.txt")),
+                index.to_string(),
+            )?;
+        }
+        let modified = rustix::fs::Timespec {
+            tv_sec: 1_000_000_000,
+            tv_nsec: 0,
+        };
+        rustix::fs::utimensat(
+            rustix::fs::CWD,
+            source.join("00-pipe"),
+            &rustix::fs::Timestamps {
+                last_access: modified,
+                last_modification: modified,
+            },
+            rustix::fs::AtFlags::empty(),
         )?;
-    }
+        let _sources = FsQuirks::install(&source, Quirks::default());
+        let _destination = FsQuirks::install(&destination, preset());
+        let target = destination.join("copy");
 
-    let error = glib::MainContext::default()
-        .block_on(copy_new_recursively(
+        let report = copy_reporting(&source, &target, None)?;
+
+        let mut expected = vec![(
+            Location::local(target.join("socket")),
+            crate::services::SpecialKind::Socket,
+        )];
+        if pipes {
+            let pipe = fs::symlink_metadata(target.join("00-pipe"))?;
+            assert!(pipe.file_type().is_fifo(), "{row}");
+            assert_eq!(pipe.mode() & 0o7777, 0o640, "{row}");
+            assert_eq!(pipe.mtime(), 1_000_000_000, "{row}");
+        } else {
+            assert!(!target.join("00-pipe").exists(), "{row}");
+            expected.insert(
+                0,
+                (
+                    Location::local(target.join("00-pipe")),
+                    crate::services::SpecialKind::Pipe,
+                ),
+            );
+        }
+        assert_eq!(
+            report
+                .skipped
+                .into_iter()
+                .map(|item| (item.location, item.kind))
+                .collect::<Vec<_>>(),
+            expected,
+            "{row}"
+        );
+        assert!(!target.join("socket").exists(), "{row}");
+        for index in 1..4 {
+            assert_eq!(
+                fs::read_to_string(target.join(format!("{index:02}-file.txt")))?,
+                index.to_string(),
+                "{row}"
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn a_selected_named_pipe_is_recreated_where_the_destination_can() -> Result<(), Box<dyn Error>> {
+    use std::os::unix::fs::FileTypeExt;
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    for (row, preset, pipes) in [
+        ("tmpfs", Quirks::default as Preset, true),
+        ("vfat", Quirks::vfat, false),
+    ] {
+        let root = tempfile::tempdir()?;
+        let destination = root.path().join("destination");
+        fs::create_dir(&destination)?;
+        let source = root.path().join("pipe");
+        make_fifo(&source, 0o600)?;
+        let _destination = FsQuirks::install(&destination, preset());
+        let target = destination.join("pipe");
+
+        let copied = glib::MainContext::default().block_on(copy_new_recursively(
             gio::File::for_path(&source),
             gio::File::for_path(&target),
             gio::Cancellable::new(),
-        ))
-        .expect_err("a named pipe cannot be copied as a regular file");
+        ));
 
-    assert!(
-        error.to_string().contains("pipe"),
-        "the error should name the entry: {error}"
-    );
-    assert_eq!(
-        names(root.path())?,
-        ["source"],
-        "failed new copies leave no partial tree"
-    );
+        if pipes {
+            copied?;
+            assert!(
+                fs::symlink_metadata(&target)?.file_type().is_fifo(),
+                "{row}"
+            );
+        } else {
+            let error = copied.expect_err("vfat has no named pipes");
+            assert!(
+                error.message().contains("not a regular file"),
+                "{row}: {error}"
+            );
+            assert_eq!(names(&destination)?, Vec::<String>::new(), "{row}");
+        }
+    }
     Ok(())
 }
 

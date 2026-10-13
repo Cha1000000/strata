@@ -366,6 +366,7 @@ fn renamed(name: &str) -> crate::services::TransferReport {
             saved_as: Location::local(format!("/fixture/destination/folder/{name} (1)")),
             cause: crate::services::RenameCause::Alias,
         }],
+        ..Default::default()
     }
 }
 

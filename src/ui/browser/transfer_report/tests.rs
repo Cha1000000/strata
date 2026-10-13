@@ -18,6 +18,7 @@ fn renamed(count: usize) -> TransferReport {
                 cause: RenameCause::Alias,
             })
             .collect(),
+        ..TransferReport::default()
     }
 }
 
@@ -42,8 +43,30 @@ fn a_few_renamed_items_get_a_notice_and_more_get_a_dialog() {
                     "{count}"
                 );
             }
-            None => panic!("{count} renamed items are reported"),
+            other => panic!("{count} renamed items are reported: {other:?}"),
         }
+    }
+}
+
+#[test]
+fn items_left_out_make_the_report_a_warning() {
+    let skipped = |kind| SkippedItem {
+        location: Location::local("/copy/run/socket"),
+        kind,
+    };
+    for renamed_count in [0, 1, 3] {
+        let report = TransferReport {
+            skipped: vec![skipped(SpecialKind::Socket), skipped(SpecialKind::Pipe)],
+            ..renamed(renamed_count)
+        };
+        let Some(Presentation::Warning { detail }) = presentation(&report) else {
+            panic!("{renamed_count} renamed items");
+        };
+        assert_eq!(
+            detail.matches('•').count(),
+            renamed_count + 2,
+            "{renamed_count}"
+        );
     }
 }
 
@@ -67,12 +90,21 @@ fn a_report_after_a_transfer_shows_its_notice_or_dialog() {
     crate::test_support::gtk_test(
         "ui::browser::transfer_report::tests::a_report_after_a_transfer_shows_its_notice_or_dialog",
         || {
-            for (count, background, dialog) in [
-                (1, false, false),
-                (3, false, true),
-                (2, true, false),
-                (3, true, true),
+            let left_out = TransferReport {
+                skipped: vec![SkippedItem {
+                    location: Location::local("/copy/run/socket"),
+                    kind: SpecialKind::Socket,
+                }],
+                ..TransferReport::default()
+            };
+            for (report, background, dialog) in [
+                (renamed(1), false, false),
+                (renamed(3), false, true),
+                (renamed(2), true, false),
+                (renamed(3), true, true),
+                (left_out, false, true),
             ] {
+                let row = format!("{report:?}, background: {background}");
                 let view = BrowserView::new(
                     Rc::new(crate::adapters::LocalFileSource),
                     PeekBehavior::default(),
@@ -80,9 +112,7 @@ fn a_report_after_a_transfer_shows_its_notice_or_dialog() {
                 let overlay = view.overlay();
                 let window = gtk::Window::builder().child(&overlay).build();
                 window.present();
-                let event = BrowserEvent::ItemsReported {
-                    report: renamed(count),
-                };
+                let event = BrowserEvent::ItemsReported { report };
                 let event = if background {
                     BrowserEvent::BackgroundOperation {
                         request_id: OperationRequestId(1),
@@ -98,7 +128,6 @@ fn a_report_after_a_transfer_shows_its_notice_or_dialog() {
                 while context.pending() {
                     context.iteration(false);
                 }
-                let row = format!("{count} items, background: {background}");
                 assert_eq!(shows(&overlay, "overlay-notice"), !dialog, "{row}");
                 assert_eq!(shows(&overlay, "app-modal-layer"), dialog, "{row}");
                 window.destroy();

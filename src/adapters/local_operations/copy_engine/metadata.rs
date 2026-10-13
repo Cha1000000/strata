@@ -61,6 +61,18 @@ pub(super) struct Snapshot {
 }
 
 impl Snapshot {
+    /// What `stat` says, without xattrs.
+    pub(super) fn of(stat: &EntryStat) -> Self {
+        Self {
+            mode: stat.mode,
+            uid: stat.uid,
+            gid: stat.gid,
+            atime: stat.atime,
+            mtime: stat.mtime,
+            xattrs: Vec::new(),
+        }
+    }
+
     pub(super) fn read(
         fs: &dyn FsOps,
         fd: BorrowedFd<'_>,
@@ -80,12 +92,8 @@ impl Snapshot {
             }
         }
         Ok(Self {
-            mode: stat.mode,
-            uid: stat.uid,
-            gid: stat.gid,
-            atime: stat.atime,
-            mtime: stat.mtime,
             xattrs,
+            ..Self::of(stat)
         })
     }
 
@@ -107,6 +115,22 @@ impl Snapshot {
         if mount.family == Family::Nfs4 {
             return Ok(());
         }
+        self.apply_times(fs, fd)
+    }
+
+    /// As [`Self::apply`] for a named pipe, whose times nothing written
+    /// resets.
+    pub(super) fn apply_to_pipe(
+        &self,
+        fs: &dyn FsOps,
+        fd: BorrowedFd<'_>,
+        created: &EntryStat,
+        parent: &EntryStat,
+        mount: &Mount,
+        refused_names: &Mutex<HashSet<OsString>>,
+    ) -> Result<(), Errno> {
+        let mode = self.owner_and_xattrs(fs, fd, created, parent, mount, refused_names)?;
+        best_effort(fs.chmod_fd(fd, mode))?;
         self.apply_times(fs, fd)
     }
 

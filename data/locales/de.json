@@ -938,6 +938,7 @@
   "The name is too long": "Der Name ist zu lang",
   "The name isn’t valid at this location": "Der Name ist an diesem Ort nicht zulässig",
   "The result could not be confirmed. Check both locations before trying again.": "Das Ergebnis konnte nicht bestätigt werden. Prüfen Sie beide Orte, bevor Sie es erneut versuchen.",
+  "These special files can’t be copied and were left out": "Diese Spezialdateien können nicht kopiert werden und wurden ausgelassen",
   "This location can’t guarantee that another item won’t be overwritten": "An diesem Ort kann nicht garantiert werden, dass kein anderes Element überschrieben wird",
   "Trash reported success, but the item was not moved": "Der Papierkorb hat Erfolg gemeldet, aber das Element wurde nicht verschoben",
   "The name or filter changed. Press Open to try again.": "Name oder Filter wurden geändert. Klicken Sie auf „Öffnen“, um es erneut zu versuchen.",
