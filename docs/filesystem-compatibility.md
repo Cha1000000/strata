@@ -84,8 +84,9 @@ the device number. Entries are dropped whenever Strata's mount monitor reports a
   exchange), from Strata's own placeholder, or from a probe on Strata's own temporary names
   (`.strata-probe-*`) in the destination. An `EINVAL` or `EPERM` from placing a user's item never
   marks a mount as unsupported, because it can also mean an invalid name or a protected file.
-- The cache only orders the steps above. Every step is safe on its own, so a stale entry can make
-  an operation slower, never unsafe.
+- The cache orders the steps above, each safe on its own, so a stale entry can make an operation
+  slower or refuse it. The exception is the last rename step under [Rename](#rename), which the
+  cache alone enables: a stale entry can let a rename take it, with that step's small window.
 - The common case costs nothing extra: step 1 always runs first, and the cache is read only after
   it fails.
 
