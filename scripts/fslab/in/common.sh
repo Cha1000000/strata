@@ -12,6 +12,8 @@ HOST_UDEV=/host-udev
 OUT=/out
 TEST_UID=$(id -u strata)
 TEST_GID=$(id -g strata)
+# The UNC server of the lab's SMB mounts, which tells their kernel messages from the host's.
+SMB_SERVER=127.0.0.1
 
 # Probe/test order. Each name has a mount point and a tmp dir writable by TEST_UID.
 ALL_MOUNTS=(tmpfs ext4 ext4-casefold vfat exfat exfat-fuse ntfs3 ntfs-3g nfs42 nfs3 cifs cifs-nocase cifs-posix sshfs)

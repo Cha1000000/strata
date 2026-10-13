@@ -213,11 +213,11 @@ EOF
   local login="vers=3.1.1,username=strata,password=$password"
   local owner="uid=$TEST_UID,gid=$TEST_GID"
   mkdir -p "$MNT/cifs" "$MNT/cifs-nocase" "$MNT/cifs-posix"
-  timeout 60 mount -t cifs //127.0.0.1/cifs "$MNT/cifs" -o "$login,$owner"
-  timeout 60 mount -t cifs //127.0.0.1/nocase "$MNT/cifs-nocase" -o "$login,$owner,nocase"
+  timeout 60 mount -t cifs "//$SMB_SERVER/cifs" "$MNT/cifs" -o "$login,$owner"
+  timeout 60 mount -t cifs "//$SMB_SERVER/nocase" "$MNT/cifs-nocase" -o "$login,$owner,nocase"
   # POSIX extensions carry real modes, but owners arrive as SIDs that need the
   # cifs.idmap upcall; forcing the owner keeps client-side permission checks sane.
-  timeout 60 mount -t cifs //127.0.0.1/posix "$MNT/cifs-posix" -o "$login,$owner,posix" \
+  timeout 60 mount -t cifs "//$SMB_SERVER/posix" "$MNT/cifs-posix" -o "$login,$owner,posix" \
     || log "cifs-posix: SMB3 POSIX extensions mount failed"
 }
 

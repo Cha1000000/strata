@@ -63,7 +63,7 @@ for name in "${mounts[@]}"; do
   echo "$status $((SECONDS - start))" > "$out/$name.status"
   # Kernel messages logged during this mount's run, such as cifs turning server inode numbers off.
   if [[ -n $kernel ]]; then
-    python3 -I "$LAB/in/kmsg.py" since "$kernel" > "$out/$name.kmsg" 2>/dev/null || rm -f "$out/$name.kmsg"
+    python3 -I "$LAB/in/kmsg.py" since "$kernel" "$SMB_SERVER" > "$out/$name.kmsg" 2>/dev/null || rm -f "$out/$name.kmsg"
   fi
   find "$tmp" -mindepth 1 -maxdepth 3 -printf '%P\n' 2>/dev/null | head -50 > "$out/$name.leftovers" || true
   find "$tmp" -mindepth 1 -delete 2>/dev/null || rm -rf "${tmp:?}"/* "${tmp:?}"/.[!.]* 2>/dev/null || true
