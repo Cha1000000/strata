@@ -1050,9 +1050,10 @@ fn rename_over_reserved_file(
         Err(error) => return Err(file_creation_error(error)),
     };
     let still_reserved = || match fs.stat(to, true) {
-        Ok(current) => Ok(current.identity == reserved
-            && current.kind == FileType::RegularFile
-            && current.size == 0),
+        Ok(current) => {
+            let empty_file = current.kind == FileType::RegularFile && current.size == 0;
+            Ok(current.identity == reserved && empty_file)
+        }
         Err(Errno::NOENT) => Ok(false),
         Err(error) => Err(PlaceError::Io(error)),
     };

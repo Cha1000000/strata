@@ -556,37 +556,39 @@ fn an_ambiguous_rename_failure_is_resolved_by_identity() -> Result<(), Box<dyn E
 
 #[test]
 fn a_lost_reply_over_a_placeholder_removes_nothing() -> Result<(), Box<dyn Error>> {
-    for (folder, performed) in [(false, true), (false, false), (true, true), (true, false)] {
-        let root = tempfile::tempdir()?;
-        let source = root.path().join("source");
-        if folder {
-            fs::create_dir(&source)?;
-        } else {
-            // Empty, so the moved file passes for the placeholder at `target`.
-            fs::write(&source, b"")?;
-        }
-        let original = identity(&source);
-        let mut quirks = Quirks::sshfs();
-        if performed {
-            quirks.lost_reply = vec![(Op::Rename, "target", Errno::IO)];
-        } else {
-            // The second rename into `target` is the one over the placeholder.
-            quirks.fail = vec![(Op::Rename, "target", 1, Errno::IO)];
-        }
-        let _scope = FsQuirks::install(root.path(), quirks);
+    for folder in [false, true] {
+        for performed in [true, false] {
+            let root = tempfile::tempdir()?;
+            let source = root.path().join("source");
+            if folder {
+                fs::create_dir(&source)?;
+            } else {
+                // Empty, so the moved file passes for the placeholder at `target`.
+                fs::write(&source, b"")?;
+            }
+            let original = identity(&source);
+            let mut quirks = Quirks::sshfs();
+            if performed {
+                quirks.lost_reply = vec![(Op::Rename, "target", Errno::IO)];
+            } else {
+                // The second rename into `target` is the one over the placeholder.
+                quirks.fail = vec![(Op::Rename, "target", 1, Errno::IO)];
+            }
+            let _scope = FsQuirks::install(root.path(), quirks);
 
-        let case = format!("folder: {folder}, performed: {performed}");
-        assert_eq!(
-            place_in(root.path(), "source", "target", Some(original)),
-            Err(PlaceError::Unconfirmed),
-            "{case}"
-        );
-        if performed {
-            assert_eq!(names(root.path())?, ["target"], "{case}");
-            assert_eq!(identity(&root.path().join("target")), original, "{case}");
-        } else {
-            assert_eq!(names(root.path())?, ["source", "target"], "{case}");
-            assert_eq!(identity(&source), original, "{case}");
+            let case = format!("folder: {folder}, performed: {performed}");
+            assert_eq!(
+                place_in(root.path(), "source", "target", Some(original)),
+                Err(PlaceError::Unconfirmed),
+                "{case}"
+            );
+            if performed {
+                assert_eq!(names(root.path())?, ["target"], "{case}");
+                assert_eq!(identity(&root.path().join("target")), original, "{case}");
+            } else {
+                assert_eq!(names(root.path())?, ["source", "target"], "{case}");
+                assert_eq!(identity(&source), original, "{case}");
+            }
         }
     }
     Ok(())

@@ -192,7 +192,8 @@ struct State {
     calls: Vec<Call>,
     inodes: HashMap<PathBuf, u64>,
     births: HashMap<PathBuf, i64>,
-    /// Real and reported inode number per name a hard link added.
+    /// Real and reported inode number per name a hard link added, or a lost
+    /// rename reply left reporting its old number.
     link_names: HashMap<PathBuf, (u64, u64)>,
     links_made: u64,
     stale: HashMap<PathBuf, EntryStat>,
@@ -576,10 +577,10 @@ impl Scope {
     }
 
     fn inode_kept_on_lost_reply(&self, to: Entry<'_>) -> Option<u64> {
-        self.quirk(|quirks| quirks.lost_renames_keep_inodes)
-            .then(|| System.stat(to, false).ok())
-            .flatten()
-            .map(|stat| stat.identity.inode)
+        if !self.quirk(|quirks| quirks.lost_renames_keep_inodes) {
+            return None;
+        }
+        System.stat(to, false).ok().map(|stat| stat.identity.inode)
     }
 
     fn keep_inode(&self, to: Entry<'_>, kept: u64) {

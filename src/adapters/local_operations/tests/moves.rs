@@ -325,7 +325,8 @@ fn items_no_step_can_place_are_moved_by_copying() -> Result<(), Box<dyn Error>> 
         }
         let inode = fs::metadata(&source)?.ino();
 
-        move_native(&source, &moved).map_err(|error| format!("{case}: {error}"))?;
+        move_native(&source, &moved)
+            .map_err(|error| format!("{case}: {error}"))?;
 
         assert_ne!(fs::metadata(&moved)?.ino(), inode, "{case}");
         let contents = if folder {
