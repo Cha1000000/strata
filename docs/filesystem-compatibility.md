@@ -229,6 +229,7 @@ container that mounts real kernel filesystems over loopback, then runs syscall p
 | `exfat-fuse`, `ntfs-3g` | FUSE drivers |
 | `nfs42`, `nfs3` | kernel NFS server and client over loopback |
 | `cifs`, `cifs-nocase`, `cifs-posix` | Samba with the kernel SMB 3.1.1 client |
+| `sshfs` | sshfs speaking SFTP to a loopback `sftp-server` that runs as the test user |
 
 ```sh
 scripts/fslab/fslab.sh up                              # build if needed, start, mount everything
@@ -255,16 +256,16 @@ Requirements and safety:
   `exfat`, `ntfs3`, `nfsd`, `nfs`, `cifs` and `fuse`. The image builds on the verified E2E base
   from `scripts/e2e_base.py`.
 - The container is privileged: it loads host modules and attaches loop devices in the host
-  kernel. It has no network; its NFS and SMB servers listen only on its own loopback. Crates are
-  fetched first by a separate unprivileged container, and the build runs offline.
+  kernel. It has no network; its NFS, SMB and SFTP servers listen only on its own loopback.
+  Crates are fetched first by a separate unprivileged container, and the build runs offline.
 - Images live on a container-private tmpfs and are attached blank, so the host's udev never sees a
   filesystem. `up`, `probe` and `test` check this. Only udiskie ignores the images' directory, so
   stop other automounters (GNOME Disks, KDE) while the lab is up.
-- The NFS exports are container-private tmpfs mounts, not loop devices. After full runs,
-  Linux 7.2 kept a reference to the NFSv4.2 export after nfsd had stopped, with no client,
-  thread or process left, which pinned the export's loop device and its memory on the host until
-  reboot. A leaked tmpfs export pins only its few remaining files. tmpfs has no UUID, so each
-  export sets `fsid=`; it reports birth times, which NFSv4.2 passes on.
+- The NFS exports and the sshfs server's folder are container-private tmpfs mounts, not loop
+  devices. After full runs, Linux 7.2 kept a reference to the NFSv4.2 export after nfsd had
+  stopped, with no client, thread or process left, which pinned the export's loop device and its
+  memory on the host until reboot. A leaked tmpfs export pins only its few remaining files. tmpfs
+  has no UUID, so each export sets `fsid=`; it reports birth times, which NFSv4.2 passes on.
 - `down` releases everything that is free and detaches only loop devices still backed by the
   lab's own images, deleting each image once its device is gone. If a mount or loop device stays
   busy, `down` lists what holds it and keeps the container running with that mount, its server and
@@ -272,8 +273,8 @@ Requirements and safety:
   instead, which can pin loop devices on the host until reboot.
 - The container runs its own copy of `scripts/fslab`, refreshed by every `fslab.sh` command, so
   switching branches or rebasing while the lab is up cannot break `down`.
-- The NFS and SMB servers share the kernel with their clients, so there is no latency, reconnect
-  or multi-client race. ZFS, 9p, virtiofs, eCryptfs and userspace FUSE network filesystems are not
-  covered.
+- The NFS, SMB and SFTP servers share the kernel with their clients, so there is no latency,
+  reconnect or multi-client race. ZFS, 9p, virtiofs, eCryptfs and FUSE network filesystems other
+  than sshfs are not covered.
 
 Never point tests at real user shares or removable drives.

@@ -8,7 +8,7 @@ FROM ${BASE}
 RUN sh /opt/e2e-install-packages.sh indexes \
  && sh /opt/e2e-install-packages.sh install \
       nfs-utils rpcbind samba cifs-utils dosfstools exfatprogs ntfs-3g ntfsprogs \
-      e2fsprogs python kmod fuse3 procps-ng strace \
+      e2fsprogs python kmod fuse3 procps-ng strace sshfs openssh socat \
  && pacman -Sw --noconfirm exfat-utils \
  && bsdtar -xf /var/cache/pacman/pkg/exfat-utils-*.pkg.tar.zst -C / usr/bin/mount.exfat-fuse \
  && /usr/bin/mount.exfat-fuse -V \

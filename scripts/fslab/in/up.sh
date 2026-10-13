@@ -221,12 +221,31 @@ EOF
     || log "cifs-posix: SMB3 POSIX extensions mount failed"
 }
 
+start_sshfs() {
+  local port=2022 deadline
+  mkdir -p /srv/sshfs "$MNT/sshfs"
+  mount -t tmpfs -o "size=1g,mode=0755,uid=$TEST_UID,gid=$TEST_GID" fslab-sshfs /srv/sshfs
+  as_test_user mkdir /srv/sshfs/tmp
+  # sshfs speaks SFTP straight to a loopback sftp-server instead of through ssh.
+  # The server runs as the test user, like the remote end of a user's mount, and
+  # socat serves that single connection.
+  setsid -f socat "TCP-LISTEN:$port,bind=127.0.0.1,reuseaddr" \
+    EXEC:"setpriv --reuid=$TEST_UID --regid=$TEST_GID --init-groups /usr/lib/ssh/sftp-server" \
+    > "$STATE/sshfs-server.log" 2>&1
+  deadline=$((SECONDS + 20))
+  until sshfs -o "directport=$port,allow_other" "127.0.0.1:/srv/sshfs" "$MNT/sshfs" 2>> "$STATE/sshfs-server.log"; do
+    ((SECONDS < deadline)) || die "sshfs did not mount: $(tail -3 "$STATE/sshfs-server.log")"
+    sleep 0.2
+  done
+}
+
 # Each step runs in its own bash process so `set -e` applies inside it.
 if [[ ${1:-} == step ]]; then
   case $2 in
     tmpfs) mount_tmpfs ;;
     nfs) start_nfs ;;
     smb) start_smb ;;
+    sshfs) start_sshfs ;;
     *) mount_block "$2" ;;
   esac
   exit 0
@@ -242,7 +261,7 @@ mkdir -p /var/lib/extensions
 is_mounted /var/lib/extensions || mount -t tmpfs -o size=12g,mode=0700 fslab-images /var/lib/extensions
 mkdir -p "$IMAGES"
 
-for step in tmpfs ext4 ext4-casefold vfat exfat ntfs3 ntfs-3g nfs smb; do
+for step in tmpfs ext4 ext4-casefold vfat exfat ntfs3 ntfs-3g nfs smb sshfs; do
   bash "$0" step "$step"
 done
 bash "$0" step exfat-fuse || log "exfat-fuse: optional mount failed"

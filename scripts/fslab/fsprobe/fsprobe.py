@@ -4,7 +4,7 @@
 
 Usage: fsprobe.py LABEL DIR [--other OTHER_DIR] [--backing SERVER_DIR] [--json OUT.jsonl]
 
---backing names the server-side directory that DIR is exported from (NFS/SMB);
+--backing names the server-side directory that DIR is exported from (NFS/SMB/sshfs);
 it enables the REMOTE probes, which create targets behind the client's back.
 
 Creates a fresh subdirectory in DIR (and OTHER_DIR), runs each probe in its

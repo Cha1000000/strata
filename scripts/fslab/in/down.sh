@@ -90,6 +90,10 @@ stop_daemon() {
   wait_until 10 bash -c "! pgrep -x '$1' >/dev/null" || pkill -9 -x "$1"
 }
 
+# The sftp-server also runs as the test user; it stops after its sshfs client.
+test_processes() { pgrep -u "$TEST_UID" | grep -vxF -e "$(pgrep -x sftp-server)"; }
+no_test_processes() { [[ -z $(test_processes) ]]; }
+
 nfsd_clients() { ls /proc/fs/nfsd/clients 2>/dev/null; }
 nfsd_threads() { cat /proc/fs/nfsd/threads 2>/dev/null || echo 0; }
 nfsd_idle() { [[ -z $(nfsd_clients) && $(nfsd_threads) == 0 ]]; }
@@ -201,8 +205,8 @@ report_busy() {
 [[ -d $STATE ]] && touch "$STATE/tearing-down"
 rm -f "$STATE/up"
 
-pkill -u "$TEST_UID" 2>/dev/null
-wait_until 5 bash -c "! pgrep -u $TEST_UID >/dev/null" || pkill -9 -u "$TEST_UID"
+kill $(test_processes) 2>/dev/null
+wait_until 5 no_test_processes || kill -9 $(test_processes) 2>/dev/null
 release /work/strata
 
 # Clients go first, while their servers can still answer the unmount; a server
@@ -211,6 +215,11 @@ smb_clients_released=1
 nfs_clients_released=1
 for name in cifs-posix cifs-nocase cifs; do release "$MNT/$name" || smb_clients_released=0; done
 for name in nfs3 nfs42; do release "$MNT/$name" || nfs_clients_released=0; done
+if release "$MNT/sshfs"; then
+  stop_daemon socat
+  stop_daemon sftp-server
+  release /srv/sshfs
+fi
 if ((smb_clients_released)); then
   stop_daemon smbd
   release /srv/smb

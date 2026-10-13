@@ -19,6 +19,7 @@ backing_of() {
     cifs) echo /srv/smb/cifs/tmp ;;
     cifs-nocase) echo /srv/smb/nocase/tmp ;;
     cifs-posix) echo /srv/smb/posix/tmp ;;
+    sshfs) echo /srv/sshfs/tmp ;;
   esac
 }
 
