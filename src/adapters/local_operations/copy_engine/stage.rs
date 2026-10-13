@@ -8,7 +8,7 @@ use std::{
 };
 
 use rustix::{
-    fs::{Mode, RenameFlags},
+    fs::{FileType, Mode, RenameFlags},
     io::Errno,
 };
 
@@ -53,12 +53,25 @@ pub(in crate::adapters::local_operations) fn create_file(
     prefix: &str,
 ) -> Result<(OsString, (OwnedFd, EntryStat)), PlaceError> {
     placement::reserve_hidden_name(prefix, |name| {
-        let fd = fs
-            .create_exclusive(Entry { dir, name }, Mode::from_raw_mode(0o600))
-            .map_err(placement::file_creation_error)?;
+        let entry = Entry { dir, name };
+        let fd = match fs.create_exclusive(entry, Mode::from_raw_mode(0o600)) {
+            Ok(fd) => fd,
+            Err(Errno::EXIST) => lost_file(fs, entry).ok_or(PlaceError::Exists)?,
+            Err(error) => return Err(placement::file_creation_error(error)),
+        };
         let stat = fs.stat_fd(fd.as_fd()).map_err(PlaceError::Io)?;
         Ok((fd, stat))
     })
+}
+
+/// The empty file a create whose reply was lost left at `entry`, opened.
+fn lost_file(fs: &dyn FsOps, entry: Entry<'_>) -> Option<OwnedFd> {
+    let fresh = |stat: &EntryStat| stat.kind == FileType::RegularFile && stat.size == 0;
+    let identity = placement::left_by_lost_reply(fs, entry, |stat| fresh(stat) && stat.nlink == 1)?;
+    let fd = fs.open_write(entry).ok()?;
+    fs.stat_fd(fd.as_fd())
+        .is_ok_and(|opened| opened.identity == identity && fresh(&opened))
+        .then_some(fd)
 }
 
 /// Puts the stage `stage`, recorded as `recorded`, at `name` in the same

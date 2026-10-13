@@ -2761,19 +2761,31 @@ impl StagedSibling {
     ) -> Result<Self, PlaceError> {
         let (name, identity) = placement::reserve_hidden_name(prefix, |name| {
             let entry = Entry::new(&*parent, name);
-            match &content {
+            let made = match &content {
                 StageContent::Directory => {
                     fs().mkdir(entry, rustix::fs::Mode::from_raw_mode(0o700))
                 }
                 StageContent::Symlink(link) => fs().symlink(link, entry),
+            };
+            match made {
+                Ok(()) => fs()
+                    .stat(entry, false)
+                    .map(|stat| stat.identity)
+                    .map_err(PlaceError::Io),
+                Err(rustix::io::Errno::EXIST) => {
+                    placement::left_by_lost_reply(fs(), entry, |stat| match &content {
+                        StageContent::Directory => {
+                            stat.is_directory() && fs().names(entry).is_ok_and(|names| names.is_empty())
+                        }
+                        StageContent::Symlink(link) => {
+                            stat.kind == rustix::fs::FileType::Symlink
+                                && fs().readlink(entry).is_ok_and(|current| current == *link)
+                        }
+                    })
+                    .ok_or(PlaceError::Exists)
+                }
+                Err(error) => Err(PlaceError::Io(error)),
             }
-            .map_err(|error| match error {
-                rustix::io::Errno::EXIST => PlaceError::Exists,
-                error => PlaceError::Io(error),
-            })?;
-            fs().stat(entry, false)
-                .map(|stat| stat.identity)
-                .map_err(PlaceError::Io)
         })?;
         Ok(Self {
             parent,

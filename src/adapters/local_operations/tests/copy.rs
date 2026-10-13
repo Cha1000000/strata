@@ -396,38 +396,82 @@ fn cancelling_a_new_file_copy_removes_the_incomplete_stage() -> Result<(), Box<d
 }
 
 #[test]
-fn a_taken_stage_name_moves_on_to_a_fresh_one() -> Result<(), Box<dyn Error>> {
+fn a_stage_name_left_by_a_lost_reply_is_adopted_and_a_taken_one_is_not()
+-> Result<(), Box<dyn Error>> {
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
         .lock()
         .map_err(|error| error.to_string())?;
-    let root = tempfile::tempdir()?;
-    let source = root.path().join("source.txt");
-    let target = root.path().join("target.txt");
-    fs::write(&source, b"copied")?;
-    let scope = FsQuirks::install(
-        root.path(),
-        Quirks {
-            tmpfile: Support::Rejected(Errno::OPNOTSUPP),
-            fail: vec![(Op::Create, ".strata-copy-*", 0, Errno::EXIST)],
-            ..Quirks::ext4()
-        },
-    );
+    let is_stage = |name: &str| name.starts_with(".strata-copy-");
+    for (op, folder) in [(Op::Create, false), (Op::Mkdir, true)] {
+        for taken in [false, true] {
+            let row = format!("{op:?}, taken: {taken}");
+            let root = tempfile::tempdir()?;
+            let (source, target) = (root.path().join("source"), root.path().join("target"));
+            let copied = if folder {
+                fs::create_dir(&source)?;
+                source.join("inner.txt")
+            } else {
+                source.clone()
+            };
+            fs::write(&copied, b"copied")?;
+            let parent = root.path().to_path_buf();
+            // Another program fills the name the lost reply left.
+            let racer: Racer = Box::new(move || {
+                let stage = names(&parent)
+                    .expect("list")
+                    .into_iter()
+                    .find(|name| is_stage(name))
+                    .map(|name| parent.join(name))
+                    .expect("the stage");
+                let theirs = if folder { stage.join("theirs") } else { stage };
+                fs::write(theirs, b"theirs").expect("fill the stage");
+            });
+            let scope = FsQuirks::install(
+                root.path(),
+                Quirks {
+                    tmpfile: Support::Rejected(Errno::OPNOTSUPP),
+                    lost_reply: vec![(op, ".strata-copy-*", Errno::EXIST)],
+                    before: if taken {
+                        vec![(Op::Stat, ".strata-copy-*", 0, racer)]
+                    } else {
+                        Vec::new()
+                    },
+                    ..Quirks::ext4()
+                },
+            );
 
-    glib::MainContext::default().block_on(copy_new_recursively(
-        gio::File::for_path(&source),
-        gio::File::for_path(&target),
-        gio::Cancellable::new(),
-    ))?;
+            glib::MainContext::default().block_on(copy_new_recursively(
+                gio::File::for_path(&source),
+                gio::File::for_path(&target),
+                gio::Cancellable::new(),
+            ))?;
 
-    let stages = scope
-        .calls()
-        .into_iter()
-        .filter(|call| call.op == Op::Create)
-        .flat_map(|call| call.names)
-        .collect::<HashSet<_>>();
-    assert_eq!(stages.len(), 2, "{stages:?}");
-    assert_eq!(fs::read(&target)?, b"copied");
-    assert_eq!(names(root.path())?, ["source.txt", "target.txt"]);
+            let stages = scope
+                .calls()
+                .into_iter()
+                .filter(|call| call.op == op)
+                .flat_map(|call| call.names)
+                .filter(|name| is_stage(&name.to_string_lossy()))
+                .collect::<HashSet<_>>();
+            assert_eq!(stages.len(), if taken { 2 } else { 1 }, "{row}");
+            let copy = if folder { target.join("inner.txt") } else { target };
+            assert_eq!(fs::read(copy)?, b"copied", "{row}");
+            let left = names(root.path())?
+                .into_iter()
+                .filter(|name| is_stage(name))
+                .map(|name| root.path().join(name))
+                .collect::<Vec<_>>();
+            match left.as_slice() {
+                [] => assert!(!taken, "{row}"),
+                [theirs] => {
+                    let theirs = if folder { theirs.join("theirs") } else { theirs.clone() };
+                    assert!(taken, "{row}");
+                    assert_eq!(fs::read(theirs)?, b"theirs", "{row}");
+                }
+                _ => panic!("{row}: {left:?}"),
+            }
+        }
+    }
     Ok(())
 }
 

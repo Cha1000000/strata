@@ -627,6 +627,20 @@ pub(super) fn hidden_names(prefix: &str) -> impl Iterator<Item = OsString> + '_ 
         .map(move |_| OsString::from(format!("{prefix}{}", glib::uuid_string_random())))
 }
 
+/// The entry at a fresh hidden name that this process's own create, whose
+/// reply was lost, left there: nobody else knows the name yet, so an entry
+/// as fresh as a create leaves it is that create's.
+pub(super) fn left_by_lost_reply(
+    fs: &dyn FsOps,
+    entry: Entry<'_>,
+    fresh: impl FnOnce(&EntryStat) -> bool,
+) -> Option<LocalFileIdentity> {
+    fs.stat(entry, true)
+        .ok()
+        .filter(fresh)
+        .map(|stat| stat.identity)
+}
+
 /// Tries [`hidden_names`] until `attempt` stops reporting that the name is taken.
 pub(super) fn reserve_hidden_name<T>(
     prefix: &str,
