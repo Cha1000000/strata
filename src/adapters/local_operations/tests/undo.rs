@@ -457,10 +457,10 @@ fn a_case_only_rename_and_its_undo_keep_the_item_or_say_where_it_was_left()
     Ok(())
 }
 
-fn undo_one(
+/// Undoes the moves of each (original, current) pair.
+fn undo_items(
     id: u64,
-    original: &Path,
-    current: &Path,
+    moved: &[(&Path, &Path)],
     conflict: TransferConflict,
 ) -> (LoadHandle, Rc<RefCell<Vec<OperationEvent>>>) {
     let events = Rc::new(RefCell::new(Vec::new()));
@@ -469,14 +469,17 @@ fn undo_one(
         UndoMoveRequest {
             cleanup_locations: Vec::new(),
             id: OperationRequestId(id),
-            items: vec![UndoMoveItem {
-                record: MoveRecord {
-                    original: Location::local(original),
-                    current: Location::local(current),
-                    renamed: Vec::new(),
-                },
-                conflict,
-            }],
+            items: moved
+                .iter()
+                .map(|(original, current)| UndoMoveItem {
+                    record: MoveRecord {
+                        original: Location::local(original),
+                        current: Location::local(current),
+                        renamed: Vec::new(),
+                    },
+                    conflict,
+                })
+                .collect(),
         },
         Rc::new(move |event| emitted.borrow_mut().push(event)),
     );
@@ -484,26 +487,33 @@ fn undo_one(
 }
 
 #[test]
-fn undoing_a_cross_volume_move_deletes_the_moved_item_only_once_it_is_flushed()
+fn undoing_a_cross_volume_move_deletes_the_moved_items_once_they_are_flushed()
 -> Result<(), Box<dyn Error>> {
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
         .lock()
         .map_err(|error| error.to_string())?;
+    let names = ["notes.txt", "photo.jpg", "report.txt"];
     for (id, flushed) in [(97, true), (98, false)] {
         let root = tempfile::tempdir()?;
         let origin = root.path().join("usb");
         let archive = root.path().join("archive");
         fs::create_dir_all(&origin)?;
         fs::create_dir_all(&archive)?;
-        let current = archive.join("report.txt");
-        fs::write(&current, b"contents")?;
+        let (originals, currents): (Vec<PathBuf>, Vec<PathBuf>) = names
+            .iter()
+            .map(|name| (origin.join(name), archive.join(name)))
+            .unzip();
+        for current in &currents {
+            fs::write(current, b"contents")?;
+        }
+        // The items share one barrier, before which every moved item stays.
         let during = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let (record, watched) = (during.clone(), current.clone());
+        let (record, watched) = (during.clone(), currents.clone());
         let racer: super::fs_quirks::Racer = Box::new(move || {
             record
                 .lock()
                 .unwrap_or_else(|error| error.into_inner())
-                .push(watched.exists());
+                .push(watched.iter().all(|current| current.exists()));
         });
         let _archive = FsQuirks::install(&archive, Quirks::default());
         let _origin = FsQuirks::install(
@@ -519,12 +529,12 @@ fn undoing_a_cross_volume_move_deletes_the_moved_item_only_once_it_is_flushed()
             },
         );
 
-        let (_operation, events) = undo_one(
-            id,
-            &origin.join("report.txt"),
-            &current,
-            TransferConflict::FailIfExists,
-        );
+        let moved: Vec<(&Path, &Path)> = originals
+            .iter()
+            .zip(&currents)
+            .map(|(original, current)| (original.as_path(), current.as_path()))
+            .collect();
+        let (_operation, events) = undo_items(id, &moved, TransferConflict::FailIfExists);
         pump_until_transfer(&events);
 
         assert_eq!(
@@ -532,19 +542,23 @@ fn undoing_a_cross_volume_move_deletes_the_moved_item_only_once_it_is_flushed()
             [true],
             "flushed: {flushed}"
         );
-        assert_eq!(fs::read(origin.join("report.txt"))?, b"contents");
+        for original in &originals {
+            assert_eq!(fs::read(original)?, b"contents");
+        }
         if flushed {
             assert!(matches!(
                 terminal_transfer(&events.borrow()),
                 Some(OperationEvent::Pasted { .. })
             ));
-            assert!(!current.exists());
+            assert!(currents.iter().all(|current| !current.exists()));
             continue;
         }
         assert!(matches!(terminal_transfer(&events.borrow()),
             Some(OperationEvent::TransferFailed { message, .. })
             if message.contains("writes may still be pending")));
-        assert_eq!(fs::read(&current)?, b"contents");
+        for current in &currents {
+            assert_eq!(fs::read(current)?, b"contents");
+        }
     }
     Ok(())
 }

@@ -26,7 +26,7 @@ use super::{
 use crate::{
     adapters::volume::MountKey,
     model::Location,
-    services::{OperationEvent, PasteRequest, TransferConflict},
+    services::{OperationEvent, OperationRequestId, PasteRequest, TransferConflict},
 };
 
 pub(super) enum Deletion {
@@ -286,17 +286,26 @@ impl<T> Batches<T> {
     }
 }
 
-/// A paste item that is done once what it owes is deleted, with where a
+/// A transfer item that is done once what it owes is deleted, with where a
 /// move put it.
 pub(super) struct Done {
     pub index: usize,
     pub moved_to: Option<Location>,
 }
 
-/// A paste's items as they are done: an item that owes deletions is done,
-/// and reported moved, only once its batch closes.
-pub(super) struct Settling<'a> {
-    request: &'a PasteRequest,
+/// What a transfer item came from.
+pub(super) struct Source {
+    pub location: Location,
+    /// A move merges it into the folder of its name.
+    pub merged: bool,
+}
+
+/// A transfer's items as they are done: an item that owes deletions is
+/// done, and reported moved, only once its batch closes.
+pub(super) struct Settling {
+    request_id: OperationRequestId,
+    sources: Vec<Source>,
+    moving: bool,
     emit: Rc<dyn Fn(OperationEvent)>,
     progress: Rc<TransferProgressTracker>,
     batches: Batches<Done>,
@@ -306,14 +315,18 @@ pub(super) struct Settling<'a> {
     failures: Vec<String>,
 }
 
-impl<'a> Settling<'a> {
+impl Settling {
+    /// Settles the items from `sources`, which are moved when `moving`.
     pub(super) fn new(
-        request: &'a PasteRequest,
+        request_id: OperationRequestId,
+        (sources, moving): (Vec<Source>, bool),
         emit: Rc<dyn Fn(OperationEvent)>,
         progress: Rc<TransferProgressTracker>,
     ) -> Self {
         Self {
-            request,
+            request_id,
+            sources,
+            moving,
             emit,
             progress,
             batches: Batches { open: Vec::new() },
@@ -324,17 +337,34 @@ impl<'a> Settling<'a> {
         }
     }
 
+    /// Settles a paste's items.
+    pub(super) fn paste(
+        request: &PasteRequest,
+        emit: Rc<dyn Fn(OperationEvent)>,
+        progress: Rc<TransferProgressTracker>,
+    ) -> Self {
+        let sources = request
+            .items
+            .iter()
+            .map(|item| Source {
+                location: item.source.clone(),
+                merged: item.conflict == TransferConflict::Merge,
+            })
+            .collect();
+        Self::new(request.id, (sources, request.move_sources), emit, progress)
+    }
+
     fn done(&mut self, done: Done) {
-        let item = &self.request.items[done.index];
-        if self.request.move_sources
+        let source = &self.sources[done.index];
+        if self.moving
             && let Some(to) = done.moved_to
-            && to != item.source
+            && to != source.location
         {
             (self.emit)(OperationEvent::ItemMoved {
-                request_id: self.request.id,
-                from: item.source.clone(),
+                request_id: self.request_id,
+                from: source.location.clone(),
                 to,
-                merged: item.conflict == TransferConflict::Merge,
+                merged: source.merged,
             });
         }
         self.completed.push(done.index);
@@ -382,7 +412,7 @@ impl<'a> Settling<'a> {
         let batches = self.batches.take(|_| true);
         if batches.iter().any(|batch| batch.barrier.is_some()) {
             (self.emit)(OperationEvent::FlushingToDevice {
-                request_id: self.request.id,
+                request_id: self.request_id,
             });
         }
         self.close(batches).await;
@@ -400,11 +430,11 @@ impl<'a> Settling<'a> {
         indices.sort_unstable();
         indices
             .into_iter()
-            .map(|index| self.request.items[index].source.clone())
+            .map(|index| self.sources[index].location.clone())
             .collect()
     }
 
-    /// The items done so far, in the paste's order.
+    /// The items done so far, in the transfer's order.
     pub(super) fn completed(&self) -> Vec<Location> {
         self.locations(&self.completed)
     }

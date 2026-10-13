@@ -1291,7 +1291,7 @@ async fn execute_parallel_copy_plans(
     (worker_count, moving): (usize, bool),
     cancellable: &gio::Cancellable,
     copying: &Copying,
-    settling: &mut Settling<'_>,
+    settling: &mut Settling,
 ) -> ParallelCopyOutcome {
     let mut outcome = ParallelCopyOutcome {
         failed: Vec::new(),
@@ -5854,7 +5854,7 @@ impl OperationProvider for LocalOperationProvider {
             let progress =
                 TransferProgressTracker::new(request.id, total_bytes, total_files, emit.clone());
             progress.emit();
-            let mut settling = Settling::new(&request, emit.clone(), progress.clone());
+            let mut settling = Settling::paste(&request, emit.clone(), progress.clone());
             let copying = Copying {
                 progress: Some(progress.clone()),
                 fat_family,
@@ -6264,7 +6264,16 @@ impl OperationProvider for LocalOperationProvider {
             let progress =
                 TransferProgressTracker::new(request.id, total_bytes, total_files, emit.clone());
             progress.emit();
-            let mut completed = Vec::new();
+            let undone = request
+                .items
+                .iter()
+                .map(|item| owed::Source {
+                    location: item.record.current.clone(),
+                    merged: false,
+                })
+                .collect();
+            let mut settling =
+                Settling::new(request.id, (undone, true), emit.clone(), progress.clone());
             let mut restored_paths = Vec::new();
             for (index, item) in request.items.iter().enumerate() {
                 let remaining = || {
@@ -6273,17 +6282,18 @@ impl OperationProvider for LocalOperationProvider {
                         .map(|item| item.record.current.clone())
                         .collect::<Vec<_>>()
                 };
-                if operation_cancellable.is_cancelled() {
+                if operation_cancellable.is_cancelled() || settling.failure().is_some() {
+                    settling.finish().await;
                     stop_transfer(
                         &restored_paths,
                         &emit,
                         request.id,
                         TransferStop {
-                            completed,
-                            failed: Vec::new(),
+                            completed: settling.completed(),
+                            failed: settling.failed(),
                             not_attempted: remaining(),
                             affected_locations,
-                            failure: None,
+                            failure: settling.failure(),
                             skip_flush: false,
                         },
                     )
@@ -6297,18 +6307,18 @@ impl OperationProvider for LocalOperationProvider {
                     restored_paths.push(path);
                 }
                 let target = gio_file_for_location(&item.record.original);
+                let copying = Copying {
+                    progress: Some(progress.clone()),
+                    fat_family: target_is_fat_family(&target, &mounts),
+                };
                 let result = if item.conflict == TransferConflict::ReplaceExisting {
-                    let fat_family = target_is_fat_family(&target, &mounts);
-                    replace_local_with(
+                    replace_owing(
                         source,
                         target,
                         true,
-                        operation_cancellable.clone(),
+                        &operation_cancellable,
                         Some(&mut affected_locations),
-                        Copying {
-                            progress: Some(progress.clone()),
-                            fat_family,
-                        },
+                        copying,
                         &|original| {
                             if let ReplacedOriginal::Trashed(identity) = original {
                                 emit(OperationEvent::ItemTrashed {
@@ -6321,54 +6331,73 @@ impl OperationProvider for LocalOperationProvider {
                     )
                     .await
                 } else {
-                    move_local(
+                    move_owing(
                         source,
-                        target.clone(),
+                        target,
                         Taken::Fail,
                         operation_cancellable.clone(),
-                        Some(progress.clone()),
-                        target_is_fat_family(&target, &mounts),
+                        copying,
                     )
                     .await
-                    .map(drop)
+                    .map(|moved| moved.owed)
                 };
-                if let Err(error) = result {
-                    let failure = (!was_cancelled(&error))
-                        .then(|| crate::services::gio_error_message(&error));
-                    stop_transfer(
-                        &restored_paths,
-                        &emit,
-                        request.id,
-                        TransferStop {
-                            completed,
-                            failed: vec![item.record.current.clone()],
-                            not_attempted: request.items[index + 1..]
-                                .iter()
-                                .map(|item| item.record.current.clone())
-                                .collect(),
-                            affected_locations,
-                            failure,
-                            skip_flush: false,
-                        },
-                    )
-                    .await;
-                    return;
-                }
+                let owed = match result {
+                    Ok(owed) => owed,
+                    Err(error) => {
+                        settling.finish().await;
+                        let failure = (!was_cancelled(&error))
+                            .then(|| crate::services::gio_error_message(&error));
+                        let mut failed = settling.failed();
+                        failed.push(item.record.current.clone());
+                        stop_transfer(
+                            &restored_paths,
+                            &emit,
+                            request.id,
+                            TransferStop {
+                                completed: settling.completed(),
+                                failed,
+                                not_attempted: request.items[index + 1..]
+                                    .iter()
+                                    .map(|item| item.record.current.clone())
+                                    .collect(),
+                                affected_locations,
+                                failure: joined_failures(failure, settling.failure()),
+                                skip_flush: false,
+                            },
+                        )
+                        .await;
+                        return;
+                    }
+                };
                 restore_renamed(&item.record, &progress).await;
-                emit(OperationEvent::ItemMoved {
-                    request_id: request.id,
-                    from: item.record.current.clone(),
-                    to: item.record.original.clone(),
-                    merged: false,
-                });
-                completed.push(item.record.current.clone());
-                progress.finish_item(
-                    progress.reported().since(started),
-                    item_sizes[index],
-                    item_files[index],
-                    None,
-                );
+                let reported = progress.reported().since(started);
+                progress.finish_item(reported, item_sizes[index], item_files[index], None);
+                let done = Done {
+                    index,
+                    moved_to: Some(item.record.original.clone()),
+                };
+                let last = index + 1 == request.items.len();
+                settling.owe(done, owed, reported.bytes, last).await;
             }
+            settling.finish().await;
+            if let Some(failure) = settling.failure() {
+                stop_transfer(
+                    &restored_paths,
+                    &emit,
+                    request.id,
+                    TransferStop {
+                        completed: settling.completed(),
+                        failed: settling.failed(),
+                        not_attempted: Vec::new(),
+                        affected_locations,
+                        failure: Some(failure),
+                        skip_flush: false,
+                    },
+                )
+                .await;
+                return;
+            }
+            let completed = settling.completed();
             if !flush_removable_writes(
                 restored_paths,
                 &operation_cancellable,
