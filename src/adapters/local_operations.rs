@@ -3268,9 +3268,6 @@ struct StagedReplacement {
     displaced: Option<DisplacedOriginal>,
 }
 
-/// Copies the source next to the target, then moves the original out of the
-/// way and publishes the copy. Every failure discards the stage. A move also
-/// returns what the copy took from the source.
 /// How a Replace copy reaches the disk before something only it holds is
 /// deleted.
 #[derive(Clone, Copy)]
@@ -3281,6 +3278,9 @@ struct Durability {
     each_file: bool,
 }
 
+/// Copies the source next to the target, then moves the original out of the
+/// way and publishes the copy. Every failure discards the stage. A move also
+/// returns what the copy took from the source.
 async fn replace_through_stage(
     plan: &Arc<ReplacePlan>,
     mut removal: Removal,
