@@ -213,7 +213,7 @@ fn make(
     }
     if *linking {
         match fs.link(from, to) {
-            Ok(()) => return linked(fs, to, identity),
+            Ok(()) => return linked(fs, from, to, identity),
             // Only this copy's own link, from a lost NFS reply, reports the
             // copy's identity.
             Err(error) if tree::taken(fs, to, error) => {
@@ -243,13 +243,24 @@ fn parent(fs: &dyn FsOps, root: BorrowedFd<'_>, path: &Path) -> Result<OwnedFd, 
     })
 }
 
-/// A new link that reports another item linked whatever replaced the copy,
-/// so it is removed again.
-fn linked(fs: &dyn FsOps, to: Entry<'_>, identity: LocalFileIdentity) -> Result<(), Failure> {
+/// A new link that reports another item linked whatever replaced the copy
+/// at `from`, so that second name of it is removed again. Anything else at
+/// `to` was put there after the link, and is left alone.
+fn linked(
+    fs: &dyn FsOps,
+    from: Entry<'_>,
+    to: Entry<'_>,
+    identity: LocalFileIdentity,
+) -> Result<(), Failure> {
     let made = fs.stat(to, false)?;
     if made.identity == identity {
         return Ok(());
     }
-    placement::remove_if_unchanged(fs, to, made.identity, AtFlags::empty());
+    if fs
+        .stat(from, true)
+        .is_ok_and(|current| current.identity == made.identity)
+    {
+        placement::remove_if_unchanged(fs, to, made.identity, AtFlags::empty());
+    }
     Err(Failure::Changed)
 }

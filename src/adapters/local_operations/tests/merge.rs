@@ -433,6 +433,64 @@ fn a_merged_copy_replaced_before_linking_is_not_linked() -> Result<(), Box<dyn E
 }
 
 #[test]
+fn an_item_put_at_a_linked_name_right_after_the_link_is_kept() -> Result<(), Box<dyn Error>> {
+    use super::fs_quirks::Racer;
+    use std::os::unix::fs::MetadataExt;
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let root = tempfile::tempdir()?;
+    let source = root.path().join("source");
+    let target = root.path().join("target");
+    fs::create_dir(&source)?;
+    fs::create_dir(&target)?;
+    fs::write(source.join("a"), b"linked")?;
+    fs::hard_link(source.join("a"), source.join("a2"))?;
+    // Either name may be the one linked; its check is its second stat.
+    let racer = |name: &'static str, other: &'static str| -> Racer {
+        let live = target.clone();
+        Box::new(move || {
+            let inode = |name| fs::metadata(live.join(name)).map(|metadata| metadata.ino());
+            let inode = |name| inode(name).ok();
+            if inode(name).is_some() && inode(name) == inode(other) {
+                fs::write(live.join("user"), b"user data").expect("write the user's item");
+                fs::rename(live.join("user"), live.join(name)).expect("replace the link");
+            }
+        })
+    };
+    let scope = FsQuirks::install(
+        &target,
+        Quirks {
+            before: vec![
+                (Op::Stat, "a", 1, racer("a", "a2")),
+                (Op::Stat, "a2", 1, racer("a2", "a")),
+            ],
+            ..Quirks::default()
+        },
+    );
+    learn_mount_capability(scope.key(), |capabilities| {
+        capabilities.hard_links = Some(true);
+    });
+
+    let result = glib::MainContext::default().block_on(merge_local(
+        gio::File::for_path(&source),
+        gio::File::for_path(&target),
+        false,
+        gio::Cancellable::new(),
+        &no_plan,
+    ));
+
+    assert!(result.is_err(), "{result:?}");
+    let mut contents = ["a", "a2"]
+        .map(|name| fs::read(target.join(name)))
+        .into_iter()
+        .collect::<io::Result<Vec<_>>>()?;
+    contents.sort();
+    assert_eq!(contents, [b"linked".to_vec(), b"user data".to_vec()]);
+    Ok(())
+}
+
+#[test]
 fn a_merge_move_removes_the_emptied_source() -> Result<(), Box<dyn Error>> {
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
         .lock()
