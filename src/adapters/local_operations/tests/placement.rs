@@ -1030,7 +1030,10 @@ fn a_racer_replacing_a_new_link_keeps_its_item_and_links_stay_in_use() -> Result
         assert_eq!(fs::read(root.path().join("target"))?, b"theirs");
         assert_eq!(identity(&root.path().join("source")), original);
         assert_eq!(mount_capabilities(scope.key()).hard_links, Some(true));
-        assert_eq!(place_in(root.path(), "source", "moved", None), Ok(Placed::Linked));
+        assert_eq!(
+            place_in(root.path(), "source", "moved", None),
+            Ok(Placed::Linked)
+        );
         assert_eq!(names(root.path())?, ["moved", "target"]);
     }
     Ok(())
