@@ -70,6 +70,9 @@ pub struct PasteItem {
 pub struct MoveRecord {
     pub original: Location,
     pub current: Location,
+    /// Entries inside it the move saved under other names, beneath
+    /// `current`, which undoing the move gives back their names.
+    pub renamed: Vec<RenamedItem>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -270,6 +273,8 @@ pub enum RenameCause {
     /// The destination takes the name for another item's, as a
     /// case-insensitive filesystem takes `makefile` for `Makefile`.
     Alias,
+    /// Another item has the name.
+    Taken,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

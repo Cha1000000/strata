@@ -43,6 +43,7 @@ fn undoing_a_move_returns_each_item_to_its_original_directory() -> Result<(), Bo
                     record: MoveRecord {
                         original: Location::local(origin.join("report.txt")),
                         current: Location::local(&moved),
+                        renamed: Vec::new(),
                     },
                     conflict: TransferConflict::FailIfExists,
                 }],
@@ -92,6 +93,7 @@ fn undoing_a_move_stops_at_an_unconfirmed_conflict() -> Result<(), Box<dyn Error
                     record: MoveRecord {
                         original: Location::local(origin.join("notes.txt")),
                         current: Location::local(&first),
+                        renamed: Vec::new(),
                     },
                     conflict: TransferConflict::FailIfExists,
                 },
@@ -99,6 +101,7 @@ fn undoing_a_move_stops_at_an_unconfirmed_conflict() -> Result<(), Box<dyn Error
                     record: MoveRecord {
                         original: Location::local(&blocked),
                         current: Location::local(&second),
+                        renamed: Vec::new(),
                     },
                     conflict: TransferConflict::FailIfExists,
                 },
@@ -155,6 +158,7 @@ fn a_confirmed_undo_conflict_replaces_the_newer_item() -> Result<(), Box<dyn Err
                 record: MoveRecord {
                     original: Location::local(&original),
                     current: Location::local(&moved),
+                    renamed: Vec::new(),
                 },
                 conflict: TransferConflict::ReplaceExisting,
             }],
@@ -469,6 +473,7 @@ fn undo_one(
                 record: MoveRecord {
                     original: Location::local(original),
                     current: Location::local(current),
+                    renamed: Vec::new(),
                 },
                 conflict,
             }],
@@ -615,6 +620,7 @@ fn undoing_a_grouping_reports_the_trashed_group_folder() {
                         record: MoveRecord {
                             original: Location::local(root.path().join("report.txt")),
                             current: Location::local(group.join("report.txt")),
+                            renamed: Vec::new(),
                         },
                         conflict: TransferConflict::FailIfExists,
                     }],
@@ -633,4 +639,117 @@ fn undoing_a_grouping_reports_the_trashed_group_folder() {
             );
         },
     );
+}
+
+#[test]
+fn undoing_a_move_gives_back_names_numbered_as_aliases() -> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    for taken in [false, true] {
+        let root = tempfile::tempdir()?;
+        let origin = root.path().join("origin");
+        let usb = root.path().join("usb");
+        let project = origin.join("project");
+        fs::create_dir_all(&project)?;
+        fs::create_dir(&usb)?;
+        fs::write(project.join("Makefile"), b"upper")?;
+        fs::write(project.join("makefile"), b"lower")?;
+        fs::create_dir(project.join("Docs"))?;
+        fs::create_dir(project.join("docs"))?;
+        fs::write(project.join("docs/Makefile"), b"inner upper")?;
+        fs::write(project.join("docs/makefile"), b"inner lower")?;
+        let restored = project.join("makefile");
+        let racer: super::fs_quirks::Racer = {
+            let restored = restored.clone();
+            Box::new(move || fs::write(&restored, b"taken").expect("take the name"))
+        };
+        let _origin = FsQuirks::install(
+            &origin,
+            Quirks {
+                before: taken
+                    .then(|| (Op::Rename, "makefile (1)", 0, racer))
+                    .into_iter()
+                    .collect(),
+                ..Quirks::default()
+            },
+        );
+        let _usb = FsQuirks::install(&usb, Quirks::vfat());
+        let moved = run_paste(PasteRequest {
+            id: OperationRequestId(44),
+            destination: Location::local(&usb),
+            items: vec![PasteItem {
+                source: Location::local(&project),
+                conflict: TransferConflict::FailIfExists,
+            }],
+            move_sources: true,
+        });
+        let renamed = moved
+            .iter()
+            .flat_map(|event| match event {
+                OperationEvent::ItemsReported { report, .. } => report.renamed.clone(),
+                _ => Vec::new(),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names(&usb.join("project"))?,
+            ["Docs", "Makefile", "docs (1)", "makefile (1)"]
+        );
+
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let emitted = events.clone();
+        let _operation = LocalOperationProvider.undo_move(
+            UndoMoveRequest {
+                cleanup_locations: Vec::new(),
+                id: OperationRequestId(45),
+                items: vec![UndoMoveItem {
+                    record: MoveRecord {
+                        original: Location::local(&project),
+                        current: Location::local(usb.join("project")),
+                        renamed,
+                    },
+                    conflict: TransferConflict::FailIfExists,
+                }],
+            },
+            Rc::new(move |event| emitted.borrow_mut().push(event)),
+        );
+        drive_until_transfer_settles(&events);
+
+        assert!(matches!(
+            events.borrow().last(),
+            Some(OperationEvent::Pasted { .. })
+        ));
+        assert_eq!(fs::read(project.join("Makefile"))?, b"upper");
+        assert_eq!(fs::read(project.join("docs/makefile"))?, b"inner lower");
+        assert_eq!(fs::read(project.join("docs/Makefile"))?, b"inner upper");
+        let reported = events
+            .borrow()
+            .iter()
+            .flat_map(|event| match event {
+                OperationEvent::ItemsReported { report, .. } => report.renamed.clone(),
+                _ => Vec::new(),
+            })
+            .collect::<Vec<_>>();
+        if taken {
+            assert_eq!(
+                names(&project)?,
+                ["Docs", "Makefile", "docs", "makefile", "makefile (1)"]
+            );
+            assert_eq!(fs::read(&restored)?, b"taken");
+            assert_eq!(fs::read(project.join("makefile (1)"))?, b"lower");
+            assert_eq!(
+                reported,
+                [crate::services::RenamedItem {
+                    requested: Location::local(&restored),
+                    saved_as: Location::local(project.join("makefile (1)")),
+                    cause: crate::services::RenameCause::Taken,
+                }]
+            );
+        } else {
+            assert_eq!(names(&project)?, ["Docs", "Makefile", "docs", "makefile"]);
+            assert_eq!(fs::read(&restored)?, b"lower");
+            assert!(reported.is_empty());
+        }
+    }
+    Ok(())
 }

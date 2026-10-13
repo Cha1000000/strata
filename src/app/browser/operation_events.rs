@@ -8,7 +8,9 @@ use std::{
 
 use crate::{
     model::Location,
-    services::{OperationEvent, OperationRequestId, ReplacedOriginal, TrashedOriginal},
+    services::{
+        OperationEvent, OperationRequestId, RenamedItem, ReplacedOriginal, TrashedOriginal,
+    },
 };
 
 mod background;
@@ -84,7 +86,7 @@ impl OperationCompletion {
 
     fn record_transfer_undo(
         &self,
-        (moved, moved_to): (&[Location], &HashMap<Location, Location>),
+        (moved, moved_to, renamed): (&[Location], &HashMap<Location, Location>, &[RenamedItem]),
         created: Vec<Location>,
         merged: MergeUndoState,
         publish: fn(UndoEntry),
@@ -106,6 +108,7 @@ impl OperationCompletion {
                         &movable,
                         destination,
                         moved_to,
+                        renamed,
                     )));
                 }
             }
@@ -475,7 +478,7 @@ impl Browser {
             .borrow_mut()
             .retain_selectionless_removals(moved.iter().cloned());
         completion.record_transfer_undo(
-            (&moved, &moved_to),
+            (&moved, &moved_to, &self.transfer_report.borrow().renamed),
             created,
             self.merged_undo.take(),
             push_pending_undo,

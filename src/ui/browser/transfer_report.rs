@@ -46,6 +46,7 @@ fn display_name(location: &Location) -> String {
 fn heading(cause: RenameCause) -> String {
     crate::i18n::tr(match cause {
         RenameCause::Alias => "The destination can\u{2019}t tell these names apart",
+        RenameCause::Taken => "These names were already taken",
     })
 }
 
@@ -86,34 +87,60 @@ fn bullets(lines: &[String]) -> String {
     text
 }
 
+/// The renamed items' lines under the heading of their cause, in the
+/// order the causes first appear.
+fn renamed_sections(renamed: &[RenamedItem]) -> Vec<(String, Vec<String>)> {
+    let mut sections = Vec::<(RenameCause, Vec<String>)>::new();
+    for item in renamed {
+        match sections.iter_mut().find(|(cause, _)| *cause == item.cause) {
+            Some((_, lines)) => lines.push(renamed_line(item)),
+            None => sections.push((item.cause, vec![renamed_line(item)])),
+        }
+    }
+    sections
+        .into_iter()
+        .map(|(cause, lines)| (heading(cause), lines))
+        .collect()
+}
+
+fn sections(sections: Vec<(String, Vec<String>)>) -> String {
+    sections
+        .into_iter()
+        .map(|(heading, lines)| format!("{heading}\n\n{}", bullets(&lines)))
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
 fn presentation(report: &TransferReport) -> Option<Presentation> {
-    let renamed = report.renamed.iter().map(renamed_line).collect::<Vec<_>>();
-    let renamed_heading = report.renamed.first().map(|item| heading(item.cause));
+    let mut renamed = renamed_sections(&report.renamed);
     if !report.skipped.is_empty() {
         let skipped = report.skipped.iter().map(skipped_line).collect::<Vec<_>>();
-        let skipped_heading =
+        let heading =
             crate::i18n::tr("These special files can\u{2019}t be copied and were left out");
-        let sections = renamed_heading
-            .map(|heading| (heading, renamed))
-            .into_iter()
-            .chain([(skipped_heading, skipped)])
-            .map(|(heading, lines)| format!("{heading}\n\n{}", bullets(&lines)))
-            .collect::<Vec<_>>();
+        renamed.push((heading, skipped));
         return Some(Presentation::Warning {
-            detail: sections.join("\n\n"),
+            detail: sections(renamed),
         });
     }
-    let heading = renamed_heading?;
-    if renamed.len() <= NOTICE_ITEMS {
+    let message = crate::i18n::count("items_renamed", report.renamed.len());
+    if renamed.len() > 1 {
+        return Some(Presentation::Information {
+            message,
+            summary: crate::i18n::tr("Some names changed during the transfer"),
+            detail: sections(renamed),
+        });
+    }
+    let (heading, lines) = renamed.pop()?;
+    if lines.len() <= NOTICE_ITEMS {
         return Some(Presentation::Notice {
             heading,
-            text: renamed.join("\n"),
+            text: lines.join("\n"),
         });
     }
     Some(Presentation::Information {
-        message: crate::i18n::count("items_renamed", renamed.len()),
+        message,
         summary: heading,
-        detail: bullets(&renamed),
+        detail: bullets(&lines),
     })
 }
 

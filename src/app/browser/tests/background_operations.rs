@@ -133,10 +133,12 @@ fn background_copy_preserves_partial_redo_undo_and_remaining_items() {
         MoveRecord {
             original: Location::local("/fixture/first.txt"),
             current: Location::local("/fixture/moved/first.txt"),
+            renamed: Vec::new(),
         },
         MoveRecord {
             original: Location::local("/fixture/second.txt"),
             current: Location::local("/fixture/moved/second.txt"),
+            renamed: Vec::new(),
         },
     ];
     push_pending_redo(UndoEntry::Move(records.clone()));
@@ -228,6 +230,7 @@ fn background_completion_preserves_grouped_undo_across_both_creation_windows() {
         let records = vec![MoveRecord {
             original: Location::local("/fixture/input.txt"),
             current: Location::local("/fixture/group/input.txt"),
+            renamed: Vec::new(),
         }];
         push_pending_undo(UndoEntry::Move(records.clone()));
         assert_eq!(

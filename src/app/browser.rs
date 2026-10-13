@@ -613,6 +613,7 @@ impl UndoState {
                                     .file_name()
                                     .and_then(|name| folder.child(&name))
                                     .unwrap_or_else(|| moved.current.clone()),
+                                renamed: Vec::new(),
                             })
                             .collect(),
                         folder,
@@ -842,12 +843,14 @@ fn moved_target(
         .or_else(|| source.transfer_target(destination))
 }
 
-/// Pairs each moved source with where the transfer left it. Items that never
-/// left their own directory carry no undo.
+/// Pairs each moved source with where the transfer left it and the entries
+/// it renamed inside. Items that never left their own directory carry no
+/// undo.
 fn move_records(
     sources: &[Location],
     destination: &Location,
     moved_to: &HashMap<Location, Location>,
+    renamed: &[RenamedItem],
 ) -> Vec<MoveRecord> {
     sources
         .iter()
@@ -855,6 +858,11 @@ fn move_records(
             let current = moved_target(source, destination, moved_to)?;
             (&current != source).then(|| MoveRecord {
                 original: source.clone(),
+                renamed: renamed
+                    .iter()
+                    .filter(|item| item.saved_as.is_within(&current))
+                    .cloned()
+                    .collect(),
                 current,
             })
         })
@@ -2990,6 +2998,7 @@ impl Browser {
                                 record: MoveRecord {
                                     original: item.record.current,
                                     current: item.record.original,
+                                    renamed: Vec::new(),
                                 },
                                 conflict: item.conflict,
                             }

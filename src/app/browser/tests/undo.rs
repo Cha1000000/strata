@@ -114,6 +114,7 @@ fn a_completed_move_records_where_each_item_landed() {
         Some(UndoEntry::Move(vec![MoveRecord {
             original: Location::local("/fixture/report.txt"),
             current: Location::local("/fixture/archive/report.txt"),
+            renamed: Vec::new(),
         }]))
     );
 }
@@ -430,6 +431,7 @@ fn an_undo_claim_from_an_earlier_operation_is_rejected() {
     let record = MoveRecord {
         original: Location::local("/fixture/report.txt"),
         current: Location::local("/fixture/archive/report.txt"),
+        renamed: Vec::new(),
     };
     push_pending_undo(UndoEntry::Move(vec![record.clone()]));
     let (stale_generation, _) = peek_replay(false).expect("pending undo");
@@ -451,10 +453,12 @@ fn a_partial_move_undo_keeps_the_items_still_to_move_back() {
     let first = MoveRecord {
         original: Location::local("/fixture/first.txt"),
         current: Location::local("/fixture/archive/first.txt"),
+        renamed: Vec::new(),
     };
     let second = MoveRecord {
         original: Location::local("/fixture/second.txt"),
         current: Location::local("/fixture/archive/second.txt"),
+        renamed: Vec::new(),
     };
     push_pending_undo(UndoEntry::Move(vec![first.clone(), second.clone()]));
     let (generation, entry) = claim_pending_undo(None).expect("undo claim");
@@ -477,14 +481,17 @@ fn a_partial_move_undo_does_not_retry_items_excluded_before_transfer() {
     let skipped = MoveRecord {
         original: Location::local("/fixture/skipped.txt"),
         current: Location::local("/fixture/archive/skipped.txt"),
+        renamed: Vec::new(),
     };
     let completed = MoveRecord {
         original: Location::local("/fixture/completed.txt"),
         current: Location::local("/fixture/archive/completed.txt"),
+        renamed: Vec::new(),
     };
     let retryable = MoveRecord {
         original: Location::local("/fixture/retryable.txt"),
         current: Location::local("/fixture/archive/retryable.txt"),
+        renamed: Vec::new(),
     };
     push_pending_undo(UndoEntry::Move(vec![
         skipped,
@@ -513,6 +520,7 @@ fn undoing_a_move_leaves_a_pending_cut_untouched() {
     let record = MoveRecord {
         original: Location::local("/fixture/report.txt"),
         current: Location::local("/fixture/archive/report.txt"),
+        renamed: Vec::new(),
     };
     push_pending_undo(UndoEntry::Move(vec![record.clone()]));
     let (generation, entry) = claim_pending_undo(None).expect("undo claim");
@@ -1043,6 +1051,46 @@ fn a_move_is_undone_from_where_the_item_went() {
         Some(UndoEntry::Move(vec![MoveRecord {
             original: source,
             current: kept_both,
+            renamed: Vec::new(),
+        }]))
+    );
+}
+
+#[test]
+fn a_move_undo_record_keeps_the_names_the_move_changed_inside_its_item() {
+    let browser = Browser::new(Rc::new(FakeFileSource));
+    browser.set_operation_provider(Rc::new(ImmediateOperationProvider));
+    let source = Location::local("/fixture/project");
+    let alias = |folder: &str| crate::services::RenamedItem {
+        requested: Location::local(format!("/fixture/archive/{folder}/makefile")),
+        saved_as: Location::local(format!("/fixture/archive/{folder}/makefile (1)")),
+        cause: crate::services::RenameCause::Alias,
+    };
+    let request_id = browser.begin_operation();
+    browser.transfer_operation.set(Some(true));
+    browser
+        .transfer_destination
+        .replace(Some(Location::local("/fixture/archive")));
+    let emit = browser.operation_callback(request_id, false, HashSet::new());
+
+    emit(OperationEvent::ItemsReported {
+        request_id,
+        report: crate::services::TransferReport {
+            renamed: vec![alias("project"), alias("elsewhere")],
+            ..Default::default()
+        },
+    });
+    emit(OperationEvent::Pasted {
+        request_id,
+        locations: vec![source.clone()],
+    });
+
+    assert_eq!(
+        pending_undo_entry(),
+        Some(UndoEntry::Move(vec![MoveRecord {
+            original: source,
+            current: Location::local("/fixture/archive/project"),
+            renamed: vec![alias("project")],
         }]))
     );
 }
@@ -1077,6 +1125,7 @@ fn a_merged_move_source_is_excluded_from_the_move_undo() {
         Some(UndoEntry::Move(vec![MoveRecord {
             original: moved,
             current: Location::local("/fixture/archive/report.txt"),
+            renamed: Vec::new(),
         }])),
         "a merged move deletes its source, so only the plain move can be undone"
     );
@@ -1345,6 +1394,7 @@ fn an_undone_move_can_be_redone() {
     let record = MoveRecord {
         original: Location::local("/fixture/report.txt"),
         current: Location::local("/fixture/archive/report.txt"),
+        renamed: Vec::new(),
     };
 
     let (generation, records) = browser.pending_undo_move().expect("pending undo move");
@@ -1400,6 +1450,7 @@ fn an_undone_move_can_be_redone() {
             &vec![vec![MoveRecord {
                 original: record.current,
                 current: record.original,
+                renamed: Vec::new(),
             }]]
         );
     });
@@ -1741,6 +1792,7 @@ fn a_replaced_move_keeps_the_move_undo_record() {
         Some(UndoEntry::Move(vec![MoveRecord {
             original: source,
             current: Location::local("/fixture/archive/report.txt"),
+            renamed: Vec::new(),
         }])),
         "a move-replace restores the moved item to its source; the original stays in Trash"
     );
@@ -1843,10 +1895,12 @@ fn a_completed_grouping_gesture_collapses_into_one_undo() {
         MoveRecord {
             original: Location::local("/fixture/report.txt"),
             current: Location::local("/fixture/new folder/report.txt"),
+            renamed: Vec::new(),
         },
         MoveRecord {
             original: Location::local("/fixture/notes.txt"),
             current: Location::local("/fixture/new folder/notes.txt"),
+            renamed: Vec::new(),
         },
     ]));
 
@@ -1858,10 +1912,12 @@ fn a_completed_grouping_gesture_collapses_into_one_undo() {
                 MoveRecord {
                     original: Location::local("/fixture/report.txt"),
                     current: Location::local("/fixture/new folder/report.txt"),
+                    renamed: Vec::new(),
                 },
                 MoveRecord {
                     original: Location::local("/fixture/notes.txt"),
                     current: Location::local("/fixture/new folder/notes.txt"),
+                    renamed: Vec::new(),
                 },
             ],
         })
@@ -1883,10 +1939,12 @@ fn a_completed_grouping_gesture_collapses_into_one_undo() {
                 MoveRecord {
                     original: Location::local("/fixture/report.txt"),
                     current: Location::local("/fixture/grouped/report.txt"),
+                    renamed: Vec::new(),
                 },
                 MoveRecord {
                     original: Location::local("/fixture/notes.txt"),
                     current: Location::local("/fixture/grouped/notes.txt"),
+                    renamed: Vec::new(),
                 },
             ],
         })
@@ -1902,6 +1960,7 @@ fn dismissing_the_gesture_rename_leaves_a_later_folder_rename_separate() {
     push_pending_undo(UndoEntry::Move(vec![MoveRecord {
         original: Location::local("/fixture/report.txt"),
         current: Location::local("/fixture/new folder/report.txt"),
+        renamed: Vec::new(),
     }]));
     assert!(matches!(
         pending_undo_entry(),
@@ -1930,6 +1989,7 @@ fn group_folding_leaves_an_interleaved_entry_untouched() {
     push_pending_undo(UndoEntry::Move(vec![MoveRecord {
         original: Location::local("/fixture/report.txt"),
         current: Location::local("/fixture/new folder/report.txt"),
+        renamed: Vec::new(),
     }]));
     let interleaved = UndoEntry::Trash(vec![Location::local("/fixture/elsewhere.txt")]);
     push_pending_undo(interleaved.clone());
@@ -1950,6 +2010,7 @@ fn group_folding_ignores_moves_into_another_folder() {
     let unrelated = UndoEntry::Move(vec![MoveRecord {
         original: Location::local("/fixture/report.txt"),
         current: Location::local("/fixture/archive/report.txt"),
+        renamed: Vec::new(),
     }]);
     push_pending_undo(UndoEntry::Copy(vec![created.clone()]));
     browser.expect_group_folder(created.clone());
@@ -1976,6 +2037,7 @@ fn undoing_a_group_moves_back_and_trashes_the_folder_in_one_operation() {
     push_pending_undo(UndoEntry::Move(vec![MoveRecord {
         original: Location::local("/fixture/report.txt"),
         current: Location::local("/fixture/new folder/report.txt"),
+        renamed: Vec::new(),
     }]));
     let (generation, records) = browser.pending_undo_group().expect("pending group undo");
 
@@ -2014,6 +2076,7 @@ fn failed_or_cancelled_group_cleanup_remains_undoable() {
         let record = MoveRecord {
             original: Location::local("/fixture/report.txt"),
             current: Location::local("/fixture/grouped/report.txt"),
+            renamed: Vec::new(),
         };
         push_pending_undo(UndoEntry::Group {
             folder: folder.clone(),
@@ -2062,6 +2125,7 @@ fn skipping_a_grouped_item_does_not_trash_its_folder() {
     let moved = MoveRecord {
         original: Location::local("/fixture/report.txt"),
         current: Location::local("/fixture/grouped/report.txt"),
+        renamed: Vec::new(),
     };
     push_pending_undo(UndoEntry::Group {
         folder: Location::local("/fixture/grouped"),
@@ -2070,6 +2134,7 @@ fn skipping_a_grouped_item_does_not_trash_its_folder() {
             MoveRecord {
                 original: Location::local("/fixture/skipped.txt"),
                 current: Location::local("/fixture/grouped/skipped.txt"),
+                renamed: Vec::new(),
             },
         ],
     });
@@ -2097,6 +2162,7 @@ fn a_missing_grouped_item_keeps_the_folder_cleanup() {
     let moved = MoveRecord {
         original: Location::local("/fixture/report.txt"),
         current: Location::local("/fixture/grouped/report.txt"),
+        renamed: Vec::new(),
     };
     push_pending_undo(UndoEntry::Group {
         folder: folder.clone(),
@@ -2105,6 +2171,7 @@ fn a_missing_grouped_item_keeps_the_folder_cleanup() {
             MoveRecord {
                 original: Location::local("/fixture/gone.txt"),
                 current: Location::local("/fixture/grouped/gone.txt"),
+                renamed: Vec::new(),
             },
         ],
     });
@@ -2131,6 +2198,7 @@ fn an_all_missing_group_leaves_its_folder_undoable() {
         records: vec![MoveRecord {
             original: Location::local("/fixture/gone.txt"),
             current: Location::local("/fixture/grouped/gone.txt"),
+            renamed: Vec::new(),
         }],
     });
     let (generation, _) = browser.pending_undo_group().expect("group undo");

@@ -49,6 +49,27 @@ fn a_few_renamed_items_get_a_notice_and_more_get_a_dialog() {
 }
 
 #[test]
+fn renamed_items_are_grouped_by_why_they_were_renamed() {
+    let mut report = renamed(2);
+    report.renamed[1].cause = RenameCause::Taken;
+
+    let Some(Presentation::Information { detail, .. }) = presentation(&report) else {
+        panic!("two causes need a dialog");
+    };
+
+    for cause in [RenameCause::Alias, RenameCause::Taken] {
+        assert_eq!(detail.matches(&heading(cause)).count(), 1, "{cause:?}");
+    }
+    let Some(Presentation::Notice { heading: shown, .. }) = presentation(&TransferReport {
+        renamed: report.renamed[1..].to_vec(),
+        ..TransferReport::default()
+    }) else {
+        panic!("one renamed item gets a notice");
+    };
+    assert_eq!(shown, heading(RenameCause::Taken));
+}
+
+#[test]
 fn items_left_out_make_the_report_a_warning() {
     let skipped = |kind| SkippedItem {
         location: Location::local("/copy/run/socket"),

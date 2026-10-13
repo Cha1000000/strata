@@ -61,10 +61,11 @@ use crate::{
     model::{FileEntry, Location},
     services::{
         CancelledOperation, CompressRequest, CreateDirectoryRequest, CreateFileRequest,
-        DeleteRequest, ExtractRequest, LoadHandle, OperationEvent, OperationProvider,
-        OperationRequestId, PasteRequest, RenameRequest, ReplacedOriginal, RestoreRequest,
-        RestoreSource, TransferConflict, TransferReport, TrashedOriginal, UndoCopyRequest,
-        UndoMergeRequest, UndoMoveRequest, UndoRenameRequest, validate_basename,
+        DeleteRequest, ExtractRequest, LoadHandle, MoveRecord, OperationEvent, OperationProvider,
+        OperationRequestId, PasteRequest, RenameCause, RenameRequest, RenamedItem,
+        ReplacedOriginal, RestoreRequest, RestoreSource, TransferConflict, TransferReport,
+        TrashedOriginal, UndoCopyRequest, UndoMergeRequest, UndoMoveRequest, UndoRenameRequest,
+        validate_basename,
     },
 };
 
@@ -2262,6 +2263,50 @@ fn could_not_move(name: &str, error: &str) -> String {
         error = error
     )
     .into_owned()
+}
+
+/// Gives the entries a move saved under other names their names back, now
+/// that `record` is undone, where nothing else has taken them, and reports
+/// those that keep theirs.
+async fn restore_renamed(record: &MoveRecord, progress: &TransferProgressTracker) {
+    let mut renamed = record
+        .renamed
+        .iter()
+        .filter_map(|item| {
+            let saved_as = item.saved_as.rebase(&record.current, &record.original)?;
+            let requested = item.requested.rebase(&record.current, &record.original)?;
+            Some((saved_as, requested))
+        })
+        .collect::<Vec<_>>();
+    // Entries before the folders holding them, whose paths they still use.
+    renamed.sort_by_key(|(saved_as, _)| {
+        std::cmp::Reverse(saved_as.native_path().map(|path| path.components().count()))
+    });
+    let mut taken = Vec::new();
+    for (saved_as, requested) in renamed {
+        let (Some(from), Some(to)) = (saved_as.native_path(), requested.native_path()) else {
+            continue;
+        };
+        match rename_native(from.to_path_buf(), to.to_path_buf()).await {
+            Ok(()) => {}
+            Err(error) if error.matches(gio::IOErrorEnum::Exists) => taken.push(RenamedItem {
+                requested,
+                saved_as,
+                cause: RenameCause::Taken,
+            }),
+            Err(error) => {
+                tracing::warn!(
+                    ?from,
+                    ?to,
+                    "could not give back a renamed entry its name: {error}"
+                );
+            }
+        }
+    }
+    progress.report(TransferReport {
+        renamed: taken,
+        ..TransferReport::default()
+    });
 }
 
 /// Renames a native item without replacing another, in one blocking step.
@@ -6286,6 +6331,7 @@ impl OperationProvider for LocalOperationProvider {
                     .await;
                     return;
                 }
+                restore_renamed(&item.record, &progress).await;
                 emit(OperationEvent::ItemMoved {
                     request_id: request.id,
                     from: item.record.current.clone(),
