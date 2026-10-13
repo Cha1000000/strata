@@ -1670,3 +1670,32 @@ fn a_moved_source_stays_when_its_copy_is_gone_before_the_deletion() -> Result<()
     }
     Ok(())
 }
+
+#[test]
+fn linked_names_on_an_smb_source_are_never_open_at_once() -> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let root = tempfile::tempdir()?;
+    let folder = root.path().join("source/folder");
+    fs::create_dir_all(folder.join("sub"))?;
+    fs::write(folder.join("a"), b"linked")?;
+    fs::hard_link(folder.join("a"), folder.join("sub/b"))?;
+    fs::hard_link(folder.join("a"), folder.join("sub/c"))?;
+    let smb = Quirks {
+        mount_type: Some(("cifs", "rw")),
+        one_open_per_file: true,
+        ..Quirks::default()
+    };
+
+    let (moved, report, _) = move_across_volumes(&folder, smb)?;
+
+    assert!(fs::symlink_metadata(&folder).is_err());
+    assert_eq!(report, TransferReport::default());
+    let [a, b, c] = ["a", "sub/b", "sub/c"].map(|name| fs::metadata(moved.join(name)));
+    let (a, b, c) = (a?, b?, c?);
+    assert_eq!((a.ino(), a.nlink()), (b.ino(), 3));
+    assert_eq!(c.ino(), a.ino());
+    assert_eq!(fs::read(moved.join("sub/c"))?, b"linked");
+    Ok(())
+}

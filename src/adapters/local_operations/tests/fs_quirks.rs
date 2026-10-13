@@ -202,6 +202,10 @@ pub(crate) struct Quirks {
     /// Entries matching the name report this mode, as another user's file
     /// readable through its group or others does to the user copying it.
     pub reported_mode: Option<(&'static str, u32)>,
+    /// Opening a name of a file another name of which was opened fails
+    /// with `EINVAL`, as the SMB client's one lease per file makes a second
+    /// open while the first is held.
+    pub one_open_per_file: bool,
 }
 
 impl Quirks {
@@ -328,6 +332,8 @@ struct State {
     /// Writebacks lost so far, and how many each open folder has reported.
     writebacks_lost: u64,
     reported_losses: HashMap<RawFd, u64>,
+    /// The name each file was first opened by, by device and inode.
+    opened_names: HashMap<(u64, u64), PathBuf>,
 }
 
 static SCOPES: Mutex<Vec<Arc<Scope>>> = Mutex::new(Vec::new());
@@ -359,6 +365,7 @@ impl FsQuirks {
                 renumbered: HashSet::new(),
                 writebacks_lost: 0,
                 reported_losses: HashMap::new(),
+                opened_names: HashMap::new(),
             }),
         });
         scopes().push(scope.clone());
@@ -1180,7 +1187,21 @@ impl FsOps for Scoped {
         };
         let path = path_of(at.dir).map(|dir| dir.join(at.name));
         let opened = scope.run(Op::OpenSource, &[at.name], |scope| {
-            scope.resolved(at, |at| System.open_source(at, listed))
+            let opened = scope.resolved(at, |at| System.open_source(at, listed))?;
+            if let (Some((_, stat)), Some(path)) = (&opened, &path)
+                && scope.quirk(|quirks| quirks.one_open_per_file)
+            {
+                let key = (stat.identity.device, stat.identity.inode);
+                let mut state = scope.state();
+                let first = state
+                    .opened_names
+                    .entry(key)
+                    .or_insert_with(|| path.clone());
+                if first != path {
+                    return Err(Errno::INVAL);
+                }
+            }
+            Ok(opened)
         })?;
         Ok(opened.map(|(fd, stat)| (fd, scope.reported(path, stat))))
     }

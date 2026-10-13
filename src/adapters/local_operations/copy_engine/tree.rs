@@ -74,6 +74,8 @@ pub(super) struct Tree {
     /// Where the children a merge placed went, beneath the walk's root.
     placed: Mutex<Vec<PathBuf>>,
     nested: Mutex<Nested>,
+    /// The family of the walk's source.
+    source_family: OnceLock<Family>,
 }
 
 /// The filesystems a durable merge reaches beneath its root's.
@@ -128,6 +130,18 @@ impl Tree {
                 .push(Barrier::at(fs, dir, path.to_path_buf())?);
         }
         Ok(())
+    }
+
+    /// Learns the source's family from the walk's first source folder.
+    fn source_in(&self, fs: &dyn FsOps, folder: BorrowedFd<'_>) {
+        self.source_family
+            .get_or_init(|| Mount::new(fs, folder).family);
+    }
+
+    /// Whether a file's names must not be open at once, as the SMB client
+    /// takes one lease per file and refuses or stalls a second open.
+    fn opens_one_name_per_file(&self) -> bool {
+        self.source_family.get() == Some(&Family::Smb)
     }
 
     /// The stage with `identity` is placed and removed, or must be kept.
@@ -206,6 +220,7 @@ pub(super) fn walk(
         stages: Mutex::default(),
         placed: Mutex::default(),
         nested: Mutex::default(),
+        source_family: OnceLock::new(),
     });
     let queue = Arc::new(Queue::new(copy.cancelled.clone()));
     queue.enqueue(root(tree.clone()));
@@ -404,6 +419,7 @@ impl Folder {
         if expected.is_some_and(|expected| expected != source_stat.identity) {
             return Err(Failure::Changed);
         }
+        tree.source_in(fs, source.as_fd());
         let (target_parent, target_name, created) = &self.target;
         let target = fs.open_dir(Entry::new(&**target_parent, target_name))?;
         let target_stat = fs.stat_fd(target.as_fd())?;
@@ -938,24 +954,32 @@ impl File {
         if copy.counted {
             copy.progress.start_file(&self.name);
         }
-        let source = open_file(fs, Entry::new(&*self.source, &self.name))?;
-        let key = (
-            self.scope,
-            source.stat.identity.device,
-            source.stat.identity.inode,
-        );
-        let role = if source.stat.nlink > 1 {
+        let at = Entry::new(&*self.source, &self.name);
+        // An SMB client opens one name of a file at a time, so a later name
+        // of a linked file is never opened there.
+        let (opened, stat) = if tree.opens_one_name_per_file() {
+            let stat = fs
+                .stat(at, false)
+                .map_err(|error| changed(&self.name, error))?;
+            (None, stat)
+        } else {
+            let opened = open_file(fs, at)?;
+            let stat = opened.stat;
+            (Some(opened), stat)
+        };
+        let key = (self.scope, stat.identity.device, stat.identity.inode);
+        let role = if stat.nlink > 1 {
             let name = links::Name {
                 key,
                 path: self.path.clone(),
                 source: self.name.clone(),
                 claimed: self.claimed,
                 names: self.names.clone(),
-                size: source.stat.size,
+                size: stat.size,
                 recorded: self
                     .recorded_in
                     .clone()
-                    .map(|folder| Pending::new(folder, &self.name, &source.stat)),
+                    .map(|folder| Pending::new(folder, &self.name, &stat)),
             };
             tree.links.role(fs, &self.mount, name)
         } else {
@@ -964,6 +988,16 @@ impl File {
         if role == Role::Later {
             return Ok(role);
         }
+        let source = match opened {
+            Some(opened) => opened,
+            None => {
+                let opened = open_file(fs, at)?;
+                if opened.stat.identity != stat.identity {
+                    return Err(Failure::Changed);
+                }
+                opened
+            }
+        };
         let dir = &*self.target;
         let (path, (fd, expected)) = match self.claimed {
             Some(claimed) => {
@@ -1131,6 +1165,7 @@ impl Merged {
         let source = fs
             .open_dir(Entry::new(&**source_parent, source_name))
             .map_err(|error| changed(source_name, error))?;
+        tree.source_in(fs, source.as_fd());
         let (target_parent, target_name, expected) = &self.target;
         let target = fs
             .open_dir(Entry::new(&**target_parent, target_name))
