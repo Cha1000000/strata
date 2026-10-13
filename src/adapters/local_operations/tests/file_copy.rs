@@ -643,3 +643,52 @@ fn xattr_namespaces_are_learned_separately() -> Result<(), Box<dyn Error>> {
     assert_eq!(xattrs_set(&scope.calls()), [OsString::from("user.tag")]);
     Ok(())
 }
+
+#[test]
+fn xattrs_are_kept_when_an_acl_takes_the_owners_write_access() -> Result<(), Box<dyn Error>> {
+    use rustix::fs::{XattrFlags, getxattr, setxattr};
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock()?;
+    let root = tempfile::tempdir()?;
+    let source = root.path().join("source.txt");
+    fs::write(&source, b"contents")?;
+    setxattr(
+        &source,
+        "user.strata-test",
+        b"metadata",
+        XattrFlags::empty(),
+    )?;
+    // Read-only for everyone; the named user makes it an ACL rather than a mode.
+    let entry = |tag: u16, id: u32| {
+        [
+            &tag.to_le_bytes()[..],
+            &4u16.to_le_bytes(),
+            &id.to_le_bytes(),
+        ]
+        .concat()
+    };
+    let acl = [
+        2u32.to_le_bytes().to_vec(),
+        entry(0x01, u32::MAX),
+        entry(0x02, 4321),
+        entry(0x04, u32::MAX),
+        entry(0x10, u32::MAX),
+        entry(0x20, u32::MAX),
+    ]
+    .concat();
+    setxattr(
+        &source,
+        "system.posix_acl_access",
+        &acl,
+        XattrFlags::empty(),
+    )?;
+    let target = root.path().join("copy.txt");
+
+    copy(&source, &target)?;
+
+    let mut value = [0u8; 64];
+    let length = getxattr(&target, "user.strata-test", &mut value[..])?;
+    assert_eq!(&value[..length], b"metadata");
+    let length = getxattr(&target, "system.posix_acl_access", &mut value[..])?;
+    assert_eq!(&value[..length], acl);
+    Ok(())
+}

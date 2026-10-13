@@ -33,6 +33,15 @@ const SKIPPED_XATTRS: [&str; 9] = [
     "$LXDEV",
 ];
 
+/// ACLs, the permissions entries of `xattr.conf`. They can take away the
+/// owner's write access, which setting the other xattrs needs.
+const ACL_XATTRS: [&str; 4] = [
+    "system.nfs4_acl",
+    "system.nfs4acl",
+    "system.posix_acl_access",
+    "system.posix_acl_default",
+];
+
 fn skipped(name: &OsStr) -> bool {
     let name = name.as_encoded_bytes();
     SKIPPED_XATTRS
@@ -91,6 +100,7 @@ impl Snapshot {
                 Err(_) => {}
             }
         }
+        xattrs.sort_by_key(|(name, _)| ACL_XATTRS.iter().any(|acl| name == *acl));
         Ok(Self {
             xattrs,
             ..Self::of(stat)
