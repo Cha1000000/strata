@@ -5,7 +5,7 @@ use std::os::unix::fs::MetadataExt;
 use rustix::{fs::FsWord, io::Errno};
 
 use super::super::{Copying, StageContent, publish_staged_replacement};
-use super::fs_quirks::{Exchange, Op, Racer, Trash};
+use super::fs_quirks::{Exchange, Op, Racer, Support, Trash};
 use super::*;
 use crate::{adapters::volume::mount_capabilities, services::ReplacedOriginal};
 
@@ -151,6 +151,7 @@ fn staged_file_replacement_preserves_the_destination_on_disk_full() -> Result<()
                 (Op::CopyRange, "*", 0, Errno::NOSPC),
                 (Op::Write, "*", 0, Errno::NOSPC),
             ],
+            reflink: Support::Rejected(Errno::OPNOTSUPP),
             ..Quirks::default()
         },
     );
@@ -196,6 +197,7 @@ fn cancelling_staging_preserves_the_destination_and_cleans_the_partial_copy()
                     (Op::CopyRange, "*", 0, cancel(cancellable.clone())),
                     (Op::Write, "*", 0, cancel(cancellable.clone())),
                 ],
+                reflink: Support::Rejected(Errno::OPNOTSUPP),
                 ..Quirks::default()
             },
         );

@@ -214,7 +214,9 @@ fn copying_into_a_setgid_folder_keeps_it_shared() -> Result<(), Box<dyn Error>> 
     let (sources, shared) = (root.path().join("sources"), root.path().join("shared"));
     fs::create_dir_all(sources.join("project/sub"))?;
     fs::write(sources.join("project/file.txt"), b"contents")?;
+    set_mode(&sources.join("project/file.txt"), 0o644)?;
     set_mode(&sources.join("project/sub"), 0o750)?;
+    set_mode(&sources.join("project"), 0o755)?;
     fs::create_dir(&shared)?;
     set_mode(&shared, 0o2775)?;
     // The source reports a group of its own, which the shared folder's replaces.

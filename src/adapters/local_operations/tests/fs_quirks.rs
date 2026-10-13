@@ -181,6 +181,8 @@ pub(crate) struct Quirks {
     /// Files report a size of 0 whatever they hold, so `copy_file_range`
     /// copies nothing from them, as virtual files on FUSE (lxcfs) do.
     pub virtual_sizes: bool,
+    /// `FICLONE`, which btrfs and XFS hosts would otherwise perform.
+    pub reflink: Support,
 }
 
 impl Quirks {
@@ -1127,8 +1129,13 @@ impl FsOps for Scoped {
 
     fn reflink(&self, target: BorrowedFd<'_>, source: BorrowedFd<'_>) -> Result<(), Errno> {
         assert_off_main_thread();
-        between(Op::Clone, source, target, || {
-            System.reflink(target, source).map(|()| 0)
+        let refused = scope_for(target).and_then(|scope| match scope.quirk(|quirks| quirks.reflink) {
+            Support::Rejected(error) => Some(error),
+            Support::Supported => None,
+        });
+        between(Op::Clone, source, target, || match refused {
+            Some(error) => Err(error),
+            None => System.reflink(target, source).map(|()| 0),
         })
         .map(drop)
     }

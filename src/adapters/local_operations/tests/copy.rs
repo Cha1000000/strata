@@ -374,6 +374,7 @@ fn cancelling_a_new_file_copy_removes_the_incomplete_stage() -> Result<(), Box<d
                     (Op::CopyRange, "*", 0, cancel(cancellable.clone())),
                     (Op::Write, "*", 0, cancel(cancellable.clone())),
                 ],
+                reflink: Support::Rejected(Errno::OPNOTSUPP),
                 ..preset()
             },
         );
