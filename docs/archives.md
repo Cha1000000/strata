@@ -99,7 +99,8 @@ still extract as regular files.
 On filesystems that cannot store Unix permissions or times, such as FAT and
 exFAT, those are skipped without an error, as `tar` and `unzip` do. Links
 cannot be skipped: an archive with links fails there, naming the member, and
-keeps the output written so far.
+keeps the output written so far. A symbolic link's own time is best effort, and
+is never set on FUSE mounts, where daemons such as sshfs apply it to the target.
 
 ## Extraction targets
 

@@ -200,6 +200,8 @@ links on that mount: moves copy, renames use the reserved-name step above, and a
 cannot be published there. Without that confirmation, a new name reporting another identity may
 be a racer's item, so both names are kept and the result is reported as unconfirmed.
 
+Archive extraction never sets a symbolic link's time on FUSE, where sshfs applies it to the target.
+
 ## Testing
 
 ### Unit tests

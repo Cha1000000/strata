@@ -2,8 +2,8 @@
 
 use super::super::fixtures::names;
 use super::{
-    ExtractNameResolver, ExtractionDestination, MemberMetadata, MetadataCalls, archive_stem,
-    sanitized_archive_path,
+    ExtractNameResolver, ExtractionDestination, FUSE_SUPER_MAGIC, MemberMetadata, MetadataCalls,
+    archive_stem, sanitized_archive_path,
 };
 use crate::adapters::local_operations::tests::fs_quirks::{FsQuirks, Quirks};
 use std::{
@@ -634,17 +634,32 @@ fn metadata_the_filesystem_cannot_store_is_skipped() -> Result<(), Box<dyn Error
                 .apply_directory_metadata(Path::new("folder"), metadata, 0o022)
                 .is_ok(),
             destination.set_file_times(&file, modified).is_ok(),
-            destination
-                .create_symlink(Path::new("lnk"), OsStr::new("file.txt"), Some(modified))
-                .is_ok(),
         ];
+        let link =
+            destination.create_symlink(Path::new("lnk"), OsStr::new("file.txt"), Some(modified));
 
-        assert_eq!(applied, [skipped; 3], "{errno:?}");
-        assert_eq!(
-            fs::symlink_metadata(root.path().join("lnk")).is_ok(),
-            skipped,
-            "{errno:?}"
-        );
+        assert_eq!(applied, [skipped; 2], "{errno:?}");
+        assert_eq!(link?, Path::new("lnk"), "{errno:?}");
+        assert_eq!(fs::read_link(root.path().join("lnk"))?, Path::new("file.txt"));
     }
+    Ok(())
+}
+
+#[test]
+fn a_link_time_is_never_set_on_fuse() -> Result<(), Box<dyn Error>> {
+    let root = tempfile::tempdir()?;
+    let _quirks = FsQuirks::install(
+        root.path(),
+        Quirks {
+            fs_type: Some(FUSE_SUPER_MAGIC),
+            ..Quirks::default()
+        },
+    );
+    let destination = ExtractionDestination::open(root.path())?;
+    let modified = UNIX_EPOCH + Duration::from_secs(1_000_000_000);
+
+    destination.create_symlink(Path::new("lnk"), OsStr::new("target"), Some(modified))?;
+
+    assert_ne!(fs::symlink_metadata(root.path().join("lnk"))?.mtime(), 1_000_000_000);
     Ok(())
 }

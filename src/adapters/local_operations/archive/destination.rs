@@ -55,6 +55,8 @@ fn timestamps(modified: SystemTime) -> Option<rustix::fs::Timestamps> {
     })
 }
 
+const FUSE_SUPER_MAGIC: rustix::fs::FsWord = 0x6573_5546;
+
 /// FAT and some network/FUSE mounts cannot store Unix permissions or timestamps.
 fn best_effort(result: rustix::io::Result<()>) -> rustix::io::Result<()> {
     match result {
@@ -526,12 +528,11 @@ impl ExtractionDestination {
             )
             .into_owned()
         })?;
+        // A link's time is cosmetic, and FUSE daemons such as sshfs apply it to the target.
         if let Some(times) = modified.and_then(timestamps)
-            && let Err(error) =
-                best_effort((self.calls.set_link_times)(parent.as_fd(), &name, &times))
+            && fs().fs_type(parent.as_fd()) != Some(FUSE_SUPER_MAGIC)
         {
-            let _ = rustix::fs::unlinkat(&parent, &name, rustix::fs::AtFlags::empty());
-            return Err(modification_time_failed(&created, error));
+            let _ = (self.calls.set_link_times)(parent.as_fd(), &name, &times);
         }
         Ok(created)
     }
