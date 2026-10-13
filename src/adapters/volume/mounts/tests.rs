@@ -36,13 +36,17 @@ fn parses_mount_points_and_filesystem_types() {
 }
 
 #[test]
-fn inode_numbers_are_unstable_on_fuse_and_on_cifs_without_server_inodes() {
+fn inode_numbers_are_unstable_on_fat_fuse_and_cifs_without_server_inodes() {
     let table = MountTable::parse(
         "\
 70 22 0:60 / /mnt/a rw - cifs //server/a rw,vers=3.1.1,serverino,cache=strict
 71 22 0:61 / /mnt/b rw - cifs //server/b rw,vers=3.1.1,noserverino,cache=strict
 72 22 0:62 / /mnt/c rw - fuse.sshfs host:/ rw,user_id=1000
 73 22 0:63 / /mnt/d rw - ext4 /dev/sdc1 rw,relatime
+74 22 0:64 / /mnt/e rw - smb3 //server/e rw,vers=3.1.1,noserverino
+75 22 8:33 / /mnt/f rw - vfat /dev/sdc2 rw,flush
+76 22 8:34 / /mnt/g rw - exfat /dev/sdc3 rw
+77 22 8:35 / /mnt/h rw - msdos /dev/sdc4 rw
 ",
     );
     let stable = |id| table.mount_type_of(id).map(super::MountType::stable_inodes);
@@ -50,6 +54,9 @@ fn inode_numbers_are_unstable_on_fuse_and_on_cifs_without_server_inodes() {
     assert_eq!(stable(71), Some(false));
     assert_eq!(stable(72), Some(false));
     assert_eq!(stable(73), Some(true));
+    for id in 74..=77 {
+        assert_eq!(stable(id), Some(false), "mount {id}");
+    }
 }
 
 #[test]

@@ -1149,16 +1149,21 @@ fn moves_compare_inode_numbers_only_where_the_source_keeps_them() -> Result<(), 
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
         .lock()
         .map_err(|error| error.to_string())?;
-    let cifs = |options| {
+    let mounted = |fs_type, options| {
         move || Quirks {
-            mount_type: Some(("cifs", options)),
+            mount_type: Some((fs_type, options)),
             ..Quirks::default()
         }
     };
-    let cases: [(&str, Box<dyn Fn() -> Quirks>, bool); 3] = [
+    let cases: [(&str, Box<dyn Fn() -> Quirks>, bool); 4] = [
         ("sshfs", Box::new(Quirks::sshfs), false),
-        ("cifs noserverino", Box::new(cifs("rw,noserverino")), false),
-        ("cifs", Box::new(cifs("rw,serverino")), true),
+        (
+            "cifs noserverino",
+            Box::new(mounted("cifs", "rw,noserverino")),
+            false,
+        ),
+        ("cifs", Box::new(mounted("cifs", "rw,serverino")), true),
+        ("vfat", Box::new(mounted("vfat", "rw,flush")), false),
     ];
     for (case, quirks, kept_at_source) in cases {
         let root = tempfile::tempdir()?;

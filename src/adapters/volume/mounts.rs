@@ -32,10 +32,13 @@ pub(crate) struct MountType {
 }
 
 impl MountType {
-    /// Whether an entry keeps its inode number: libfuse without `use_ino`
-    /// and cifs without server inode numbers number an entry afresh once the
-    /// kernel has evicted it.
+    /// Whether an entry keeps its inode number: FAT and exFAT, libfuse
+    /// without `use_ino` and cifs without server inode numbers number an
+    /// entry afresh once the kernel has evicted it.
     pub(crate) fn stable_inodes(&self) -> bool {
+        if matches!(self.fs_type.as_str(), "vfat" | "msdos" | "exfat") {
+            return false;
+        }
         match family(&self.fs_type) {
             Family::Fuse => false,
             Family::Smb => !self
