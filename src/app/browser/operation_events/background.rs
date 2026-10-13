@@ -201,6 +201,7 @@ impl Browser {
                     reveal_locations: job.created.borrow().clone(),
                 };
                 completion.record_trash_undo(&event, push_background_undo);
+                let stopped = super::stopped(&event);
                 if job.copying {
                     completion.record_transfer_undo(
                         (&[], &HashMap::new(), &TransferReport::default()),
@@ -311,7 +312,7 @@ impl Browser {
                 }
                 let report = job.report.take();
                 if !report.is_empty() {
-                    emit(BrowserEvent::ItemsReported { report });
+                    emit(BrowserEvent::ItemsReported { report, stopped });
                 }
                 let load = job.load.take();
                 drop(load);

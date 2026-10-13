@@ -652,9 +652,14 @@ pub(super) fn show_error_dialog(parent: &impl IsA<gtk::Widget>, message: &str, d
 
 /// Reports an operation that finished while some items failed.
 pub(super) fn show_partial_failure_dialog(parent: &impl IsA<gtk::Widget>, detail: &str) {
+    show_warning_dialog(parent, &crate::i18n::tr("Completed with errors"), detail);
+}
+
+/// [`show_partial_failure_dialog`] under another title.
+pub(super) fn show_warning_dialog(parent: &impl IsA<gtk::Widget>, message: &str, detail: &str) {
     show_message_dialog(
         parent,
-        &crate::i18n::tr("Completed with errors"),
+        message,
         None,
         detail,
         MessageKind::PartialFailure,

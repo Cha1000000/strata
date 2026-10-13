@@ -228,8 +228,8 @@ impl ViewState {
         event: &BrowserEvent,
     ) {
         // It follows the event that finished the operation.
-        if let BrowserEvent::ItemsReported { report } = event {
-            self.show_transfer_report(report);
+        if let BrowserEvent::ItemsReported { report, stopped } = event {
+            self.show_transfer_report(report, *stopped);
             return;
         }
         let background = self

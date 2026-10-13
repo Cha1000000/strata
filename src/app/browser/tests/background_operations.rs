@@ -373,12 +373,14 @@ fn renamed(name: &str) -> crate::services::TransferReport {
     }
 }
 
-fn reported(events: &[BrowserEvent]) -> Vec<(usize, crate::services::TransferReport)> {
+fn reported(events: &[BrowserEvent]) -> Vec<(usize, crate::services::TransferReport, bool)> {
     events
         .iter()
         .enumerate()
         .filter_map(|(index, event)| match operation_event(event) {
-            BrowserEvent::ItemsReported { report } => Some((index, report.clone())),
+            BrowserEvent::ItemsReported { report, stopped } => {
+                Some((index, report.clone(), *stopped))
+            }
             _ => None,
         })
         .collect()
@@ -386,23 +388,32 @@ fn reported(events: &[BrowserEvent]) -> Vec<(usize, crate::services::TransferRep
 
 #[test]
 fn a_transfer_reports_its_items_once_after_it_ends() {
-    let terminals: [fn(OperationRequestId) -> OperationEvent; 3] = [
-        |request_id| OperationEvent::Pasted {
-            request_id,
-            locations: Vec::new(),
-        },
-        |request_id| OperationEvent::TransferFailed {
-            request_id,
-            completed_locations: Vec::new(),
-            message: "Failed".into(),
-        },
-        |request_id| OperationEvent::Cancelled {
-            request_id,
-            result: crate::services::CancelledOperation::default(),
-        },
+    let terminals: [(fn(OperationRequestId) -> OperationEvent, bool); 3] = [
+        (
+            |request_id| OperationEvent::Pasted {
+                request_id,
+                locations: Vec::new(),
+            },
+            false,
+        ),
+        (
+            |request_id| OperationEvent::TransferFailed {
+                request_id,
+                completed_locations: Vec::new(),
+                message: "Failed".into(),
+            },
+            true,
+        ),
+        (
+            |request_id| OperationEvent::Cancelled {
+                request_id,
+                result: crate::services::CancelledOperation::default(),
+            },
+            true,
+        ),
     ];
     for background in [false, true] {
-        for terminal in terminals {
+        for (terminal, stopped) in terminals {
             let browser = Browser::new(Rc::new(FakeFileSource));
             let operations = Rc::new(HeldOperations::default());
             browser.set_operation_provider(operations.clone());
@@ -428,8 +439,11 @@ fn a_transfer_reports_its_items_once_after_it_ends() {
             expected.extend(renamed("README"));
             let reports = reported(&events);
             assert_eq!(
-                reports.iter().map(|(_, report)| report).collect::<Vec<_>>(),
-                [&expected],
+                reports
+                    .iter()
+                    .map(|(_, report, stopped)| (report, *stopped))
+                    .collect::<Vec<_>>(),
+                [(&expected, stopped)],
                 "background: {background}"
             );
             let ended = events.iter().position(|event| {

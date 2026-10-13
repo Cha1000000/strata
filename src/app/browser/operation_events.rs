@@ -16,6 +16,16 @@ use crate::{
 mod background;
 pub(super) use background::BackgroundOperation;
 
+/// Whether `event` ends an operation that failed or was cancelled.
+fn stopped(event: &OperationEvent) -> bool {
+    matches!(
+        event,
+        OperationEvent::TransferFailed { .. }
+            | OperationEvent::Failed { .. }
+            | OperationEvent::Cancelled { .. }
+    )
+}
+
 use super::{
     Browser, BrowserEvent, MergeUndoState, UndoEntry, completed_replay_items, finish_replay,
     mark_replay_item_completed, move_records, moved_target, push_pending_redo, push_pending_undo,
@@ -434,10 +444,11 @@ impl Browser {
         }
         let load = self.operation_load.take();
         drop(load);
+        let stopped = stopped(&event);
         self.publish_operation_outcome(context, completion, event);
         let report = self.transfer_report.take();
         if !report.is_empty() {
-            self.emit(BrowserEvent::ItemsReported { report });
+            self.emit(BrowserEvent::ItemsReported { report, stopped });
         }
         if !refresh_depths.is_empty() {
             self.emit(BrowserEvent::OperationRefreshRequired {

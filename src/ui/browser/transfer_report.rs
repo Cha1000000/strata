@@ -32,9 +32,9 @@ enum Presentation {
         summary: String,
         detail: String,
     },
-    /// Items were left out or left behind, so the transfer completed with
-    /// errors.
+    /// Items were left out or left behind.
     Warning {
+        title: String,
         detail: String,
     },
 }
@@ -141,7 +141,8 @@ fn sections(sections: Vec<(String, Vec<String>)>) -> String {
         .join("\n\n")
 }
 
-fn presentation(report: &TransferReport) -> Option<Presentation> {
+/// How `report` is shown, once its transfer completed or `stopped`.
+fn presentation(report: &TransferReport, stopped: bool) -> Option<Presentation> {
     let mut renamed = renamed_sections(&report.renamed);
     if !report.skipped.is_empty() || !report.kept.is_empty() {
         if !report.skipped.is_empty() {
@@ -154,7 +155,14 @@ fn presentation(report: &TransferReport) -> Option<Presentation> {
             let kept = report.kept.iter().map(kept_line).collect::<Vec<_>>();
             renamed.push((crate::i18n::count("items_kept", kept.len()), kept));
         }
+        // A transfer that failed or was cancelled did not complete.
+        let title = if stopped {
+            crate::i18n::tr("Some items were left out or left behind")
+        } else {
+            crate::i18n::tr("Completed with errors")
+        };
         return Some(Presentation::Warning {
+            title,
             detail: sections(renamed),
         });
     }
@@ -181,8 +189,8 @@ fn presentation(report: &TransferReport) -> Option<Presentation> {
 }
 
 impl ViewState {
-    pub(super) fn show_transfer_report(&self, report: &TransferReport) {
-        match presentation(report) {
+    pub(super) fn show_transfer_report(&self, report: &TransferReport, stopped: bool) {
+        match presentation(report, stopped) {
             Some(Presentation::Notice { heading, text }) => crate::ui::notice::show_notice(
                 &self.overlay,
                 Some(&heading),
@@ -199,8 +207,8 @@ impl ViewState {
                 &summary,
                 &detail,
             ),
-            Some(Presentation::Warning { detail }) => {
-                crate::ui::modal::show_partial_failure_dialog(&self.overlay, &detail);
+            Some(Presentation::Warning { title, detail }) => {
+                crate::ui::modal::show_warning_dialog(&self.overlay, &title, &detail);
             }
             None => {}
         }

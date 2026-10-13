@@ -254,9 +254,11 @@ pub enum BrowserEvent {
     TransferFinished {
         moved_locations: Vec<Location>,
     },
-    /// What the finished transfer did to items inside the ones it was given.
+    /// What the finished transfer did to items inside the ones it was given,
+    /// and whether it failed or was cancelled after that.
     ItemsReported {
         report: TransferReport,
+        stopped: bool,
     },
     /// Only for remembered folders; the default sort is left unchanged.
     FolderSortChosen {

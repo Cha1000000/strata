@@ -24,9 +24,9 @@ fn renamed(count: usize) -> TransferReport {
 
 #[test]
 fn a_few_renamed_items_get_a_notice_and_more_get_a_dialog() {
-    assert_eq!(presentation(&TransferReport::default()), None);
+    assert_eq!(presentation(&TransferReport::default(), false), None);
     for (count, listed) in [(1, 1), (2, 2), (3, 3), (9, LISTED_ITEMS)] {
-        match presentation(&renamed(count)) {
+        match presentation(&renamed(count), false) {
             Some(Presentation::Notice { text, .. }) => {
                 assert!(count <= NOTICE_ITEMS, "{count}");
                 assert_eq!(text.lines().count(), listed);
@@ -53,17 +53,18 @@ fn renamed_items_are_grouped_by_why_they_were_renamed() {
     let mut report = renamed(2);
     report.renamed[1].cause = RenameCause::Taken;
 
-    let Some(Presentation::Information { detail, .. }) = presentation(&report) else {
+    let Some(Presentation::Information { detail, .. }) = presentation(&report, false) else {
         panic!("two causes need a dialog");
     };
 
     for cause in [RenameCause::Alias, RenameCause::Taken] {
         assert_eq!(detail.matches(&heading(cause)).count(), 1, "{cause:?}");
     }
-    let Some(Presentation::Notice { heading: shown, .. }) = presentation(&TransferReport {
+    let only_taken = TransferReport {
         renamed: report.renamed[1..].to_vec(),
         ..TransferReport::default()
-    }) else {
+    };
+    let Some(Presentation::Notice { heading: shown, .. }) = presentation(&only_taken, false) else {
         panic!("one renamed item gets a notice");
     };
     assert_eq!(shown, heading(RenameCause::Taken));
@@ -85,19 +86,32 @@ fn items_left_out_or_left_behind_make_the_report_a_warning() {
         kept(KeptCause::Undeletable(reason.to_owned())),
         kept(KeptCause::Skipped(SpecialKind::Socket)),
     ];
-    for (renamed_count, skipped_count, kept_count) in
-        [(0, 2, 0), (1, 2, 0), (3, 2, 0), (0, 0, 3), (1, 2, 3)]
-    {
-        let row = format!("{renamed_count}, {skipped_count}, {kept_count}");
+    // A transfer that failed or was cancelled afterwards is not called
+    // complete.
+    for (renamed_count, skipped_count, kept_count, stopped) in [
+        (0, 2, 0, false),
+        (1, 2, 0, false),
+        (3, 2, 0, false),
+        (0, 0, 3, false),
+        (1, 2, 3, false),
+        (1, 2, 3, true),
+    ] {
+        let row = format!("{renamed_count}, {skipped_count}, {kept_count}, {stopped}");
         let report = TransferReport {
             skipped: [skipped(SpecialKind::Socket), skipped(SpecialKind::Pipe)][..skipped_count]
                 .to_vec(),
             kept: left_behind[..kept_count].to_vec(),
             ..renamed(renamed_count)
         };
-        let Some(Presentation::Warning { detail }) = presentation(&report) else {
+        let Some(Presentation::Warning { title, detail }) = presentation(&report, stopped) else {
             panic!("{row}");
         };
+        let expected = if stopped {
+            crate::i18n::tr("Some items were left out or left behind")
+        } else {
+            crate::i18n::tr("Completed with errors")
+        };
+        assert_eq!(title, expected, "{row}");
         assert_eq!(
             detail.matches('•').count(),
             renamed_count + skipped_count + kept_count,
@@ -151,7 +165,10 @@ fn a_report_after_a_transfer_shows_its_notice_or_dialog() {
                 let overlay = view.overlay();
                 let window = gtk::Window::builder().child(&overlay).build();
                 window.present();
-                let event = BrowserEvent::ItemsReported { report };
+                let event = BrowserEvent::ItemsReported {
+                    report,
+                    stopped: false,
+                };
                 let event = if background {
                     BrowserEvent::BackgroundOperation {
                         request_id: OperationRequestId(1),
