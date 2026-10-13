@@ -535,6 +535,22 @@ fn sparse_files_keep_their_holes_where_both_ends_can() -> Result<(), Box<dyn Err
         fail: vec![(Op::SeekData, "*", 0, Errno::OPNOTSUPP)],
         ..Quirks::ext4()
     };
+    let holes_lost: Preset = || Quirks {
+        fail: vec![(Op::SeekHole, "*", 1, Errno::OPNOTSUPP)],
+        ..Quirks::ext4()
+    };
+    let invalid: Preset = || Quirks {
+        fail: vec![(Op::SeekData, "*", 0, Errno::INVAL)],
+        ..Quirks::ext4()
+    };
+    let not_supported: Preset = || Quirks {
+        fail: vec![(Op::SeekData, "*", 0, Errno::from_raw_os_error(524))],
+        ..Quirks::ext4()
+    };
+    let ntfs3: Preset = || Quirks {
+        mount_type: Some(("ntfs3", "rw")),
+        ..Quirks::default()
+    };
     // The source, the destination (`None` on the same mount), what happens
     // to the source as the copy runs, and whether holes are kept.
     let rows: [(
@@ -543,7 +559,7 @@ fn sparse_files_keep_their_holes_where_both_ends_can() -> Result<(), Box<dyn Err
         Option<Preset>,
         Option<(Op, &str, fn(&Path) -> Racer)>,
         bool,
-    ); 8] = [
+    ); 12] = [
         ("one mount", ext4, None, None, true),
         ("two mounts", ext4, Some(ext4), None, true),
         (
@@ -561,8 +577,12 @@ fn sparse_files_keep_their_holes_where_both_ends_can() -> Result<(), Box<dyn Err
             true,
         ),
         ("FAT target", ext4, Some(vfat), None, false),
+        ("ntfs3 target", ext4, Some(ntfs3), None, false),
         ("ZFS source", zfs, Some(ext4), None, false),
         ("holes unknown", holes_unknown, Some(ext4), None, false),
+        ("holes lost midway", holes_lost, Some(ext4), None, false),
+        ("EINVAL", invalid, Some(ext4), None, false),
+        ("ENOTSUPP", not_supported, Some(ext4), None, false),
         (
             "holes unknown, grown meanwhile",
             holes_unknown,
@@ -622,19 +642,85 @@ fn sparse_files_keep_their_holes_where_both_ends_can() -> Result<(), Box<dyn Err
                 "{case}: {allocated} of {size} bytes allocated"
             );
         }
+        // Every byte, of the source at its largest, counted once.
+        let largest = size.max(fs::metadata(&source)?.len());
+        assert_eq!(counted_bytes(&events), Some(largest), "{case}");
+    }
+    Ok(())
+}
+
+/// The bytes counted before the item completed.
+fn counted_bytes(events: &[OperationEvent]) -> Option<u64> {
+    events.iter().rev().find_map(|event| match event {
+        OperationEvent::TransferProgress {
+            completed_items: 0,
+            transferred_bytes,
+            ..
+        } => Some(*transferred_bytes),
+        _ => None,
+    })
+}
+
+#[test]
+fn a_sparse_source_that_grows_is_counted_once() -> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock()?;
+    // Data written past a gap beyond the size seen at open, or a last run of
+    // data extended past it.
+    for (case, at_end) in [("past a gap", false), ("extending the last run", true)] {
+        let root = tempfile::tempdir()?;
+        let sources = root.path().join("sources");
+        let destination = root.path().join("destination");
+        fs::create_dir(&sources)?;
+        fs::create_dir(&destination)?;
+        let source = sources.join("source.img");
+        let run = patterned(64 * 1024);
+        let second = run.len() as u64 + 16 * 1024 * 1024;
+        let file = fs::File::create(&source)?;
+        file.write_all_at(&run, 0)?;
+        file.write_all_at(&run, second)?;
+        if !at_end {
+            file.set_len(second + run.len() as u64 + 1024 * 1024)?;
+        }
+        drop(file);
+        let size = fs::metadata(&source)?.len();
+        let grown = source.clone();
+        let racer: Racer = Box::new(move || {
+            let offset = if at_end { size } else { size + 1024 * 1024 };
+            fs::OpenOptions::new()
+                .write(true)
+                .open(&grown)
+                .and_then(|file| file.write_all_at(&[7; 64 * 1024], offset))
+                .expect("grow the source");
+        });
+        let _scopes = [
+            FsQuirks::install(
+                &sources,
+                Quirks {
+                    reflink: Support::Rejected(Errno::OPNOTSUPP),
+                    before: vec![(Op::SeekHole, "source.img", usize::from(at_end), racer)],
+                    ..Quirks::ext4()
+                },
+            ),
+            FsQuirks::install(&destination, Quirks::ext4()),
+        ];
+
+        let events = run_paste(PasteRequest {
+            id: OperationRequestId(1),
+            destination: Location::local(&destination),
+            items: vec![PasteItem {
+                source: Location::local(&source),
+                conflict: TransferConflict::FailIfExists,
+            }],
+            move_sources: false,
+        });
+
         assert!(
-            events.iter().any(|event| matches!(
-                event,
-                OperationEvent::TransferProgress {
-                    completed_items: 0,
-                    completed_files: 1,
-                    transferred_bytes,
-                    total_bytes: Some(total),
-                    ..
-                } if transferred_bytes == total
-            )),
-            "{case}: the file was not counted whole: {events:?}"
+            fs::read(destination.join("source.img"))? == fs::read(&source)?,
+            "{case}: the copy differs"
         );
+        let grown = fs::metadata(&source)?.len();
+        assert!(grown > size, "{case}");
+        assert_eq!(counted_bytes(&events), Some(grown), "{case}");
     }
     Ok(())
 }
