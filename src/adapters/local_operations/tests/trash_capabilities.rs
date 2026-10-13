@@ -143,6 +143,7 @@ fn isolated_trash_supports_read_copy_move_restore_and_delete() {
             .block_on(move_local(
                 child.clone(),
                 gio::File::for_path(home.join("child.txt")),
+                Taken::Fail,
                 gio::Cancellable::new(),
                 None,
                 false,
@@ -154,6 +155,7 @@ fn isolated_trash_supports_read_copy_move_restore_and_delete() {
         .block_on(move_local(
             trash.clone(),
             gio::File::for_path(&moved),
+            Taken::Fail,
             gio::Cancellable::new(),
             None,
             false,

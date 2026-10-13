@@ -29,7 +29,7 @@ fn nested_copy_shares_one_worker_budget_across_subdirectories() -> Result<(), Bo
     *copy_activity() = (0, 0);
     glib::MainContext::default().block_on(copy_local(
         source,
-        Destination::New(target.clone()),
+        Destination::New(target.clone(), Taken::Fail),
         Options {
             fat_family: false,
             workers: Some(2),
@@ -221,6 +221,7 @@ fn cancelling_staged_remote_file_copy_removes_only_the_incomplete_stage()
     let result = glib::MainContext::default().block_on(copy_new_remote_file_with(
         gio::File::for_path(&source),
         gio::File::for_path(&target),
+        Taken::Fail,
         gio::Cancellable::new(),
         Rc::new(|_, stage, _| {
             Box::pin(async move {
@@ -255,6 +256,7 @@ fn staged_remote_file_copy_preserves_a_racing_destination() -> Result<(), Box<dy
     let result = glib::MainContext::default().block_on(copy_new_remote_file_with(
         gio::File::for_path(&source),
         gio::File::for_path(&target),
+        Taken::Fail,
         gio::Cancellable::new(),
         Rc::new(|source, stage, _| {
             Box::pin(async move {
@@ -282,6 +284,70 @@ fn staged_remote_file_copy_preserves_a_racing_destination() -> Result<(), Box<dy
     assert_eq!(fs::read(&target)?, b"racing contents");
     assert_eq!(fs::read(&source)?, b"source contents");
     assert_eq!(fs::read_dir(root.path())?.count(), 2);
+    Ok(())
+}
+
+#[test]
+fn a_remote_keep_both_copy_takes_the_next_name_when_one_is_taken_meanwhile()
+-> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let root = tempfile::tempdir()?;
+    let source = root.path().join("source.bin");
+    let target = root.path().join("target.bin");
+    fs::write(&source, b"source contents")?;
+    fs::write(&target, b"existing")?;
+
+    let copied = glib::MainContext::default().block_on(copy_new_remote_file_with(
+        gio::File::for_path(&source),
+        gio::File::for_path(&target),
+        Taken::Number,
+        gio::Cancellable::new(),
+        Rc::new(|source, stage, _| {
+            Box::pin(async move {
+                fs::copy(
+                    source.path().expect("native source"),
+                    stage.path().expect("native stage"),
+                )
+                .map(drop)
+                .map_err(super::io_error)
+            })
+        }),
+        Rc::new(|stage, target, _| {
+            Box::pin(async move {
+                let target = target.path().expect("native target");
+                if target.ends_with("target (1).bin") {
+                    fs::write(&target, b"racing contents").map_err(super::io_error)?;
+                    return Err(glib::Error::new(
+                        gio::IOErrorEnum::Exists,
+                        "injected destination race",
+                    ));
+                }
+                fs::rename(stage.path().expect("native stage"), target).map_err(super::io_error)
+            })
+        }),
+    ))?;
+
+    assert_eq!(copied.path(), Some(root.path().join("target (2).bin")));
+    assert_eq!(
+        fs::read(root.path().join("target (2).bin"))?,
+        b"source contents"
+    );
+    assert_eq!(
+        fs::read(root.path().join("target (1).bin"))?,
+        b"racing contents"
+    );
+    assert_eq!(fs::read(&target)?, b"existing");
+    assert_eq!(
+        names(root.path())?,
+        [
+            "source.bin",
+            "target (1).bin",
+            "target (2).bin",
+            "target.bin"
+        ]
+    );
     Ok(())
 }
 

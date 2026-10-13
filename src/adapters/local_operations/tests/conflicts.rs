@@ -431,3 +431,82 @@ fn pasting_onto_itself_with_keep_both_creates_numbered_copy() -> Result<(), Box<
     assert_eq!(fs::read(destination.join("todo (1).txt"))?, b"existing\n");
     Ok(())
 }
+
+/// Puts a file at `path` when the racer runs, unless something is there.
+fn taking(path: &Path) -> fs_quirks::Racer {
+    let path = path.to_path_buf();
+    Box::new(move || {
+        if fs::symlink_metadata(&path).is_err() {
+            fs::write(&path, b"taken meanwhile").expect("take the name");
+        }
+    })
+}
+
+#[test]
+fn keep_both_copy_renumbers_when_its_name_is_taken_meanwhile() -> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let unnamed_files_refused: Preset = || Quirks {
+        tmpfile: fs_quirks::Support::Rejected(rustix::io::Errno::OPNOTSUPP),
+        ..Quirks::ext4()
+    };
+    let rows: [(&str, &str, Preset); 3] = [
+        ("report.txt", "report (1).txt", Quirks::default),
+        ("report.txt", "report (1).txt", unnamed_files_refused),
+        ("docs", "docs (1)", Quirks::default),
+    ];
+    for (name, first, quirks) in rows {
+        let root = tempfile::tempdir()?;
+        let sources = root.path().join("sources");
+        let destination = root.path().join("destination");
+        fs::create_dir_all(&sources)?;
+        fs::create_dir_all(&destination)?;
+        let source = sources.join(name);
+        if name == "docs" {
+            fs::create_dir(&source)?;
+            fs::write(source.join("inside.txt"), b"incoming")?;
+            fs::create_dir(destination.join(name))?;
+        } else {
+            fs::write(&source, b"incoming")?;
+            fs::write(destination.join(name), b"existing")?;
+        }
+        let taken = destination.join(first);
+        let _scope = FsQuirks::install(
+            root.path(),
+            Quirks {
+                before: vec![
+                    (fs_quirks::Op::LinkFd, first, 0, taking(&taken)),
+                    (fs_quirks::Op::Rename, first, 0, taking(&taken)),
+                ],
+                ..quirks()
+            },
+        );
+
+        let created = run_paste_collecting_created(PasteRequest {
+            id: OperationRequestId(77),
+            destination: Location::local(&destination),
+            items: vec![PasteItem {
+                source: Location::local(&source),
+                conflict: TransferConflict::KeepBoth,
+            }],
+            move_sources: false,
+        })?;
+
+        let second = first.replace("(1)", "(2)");
+        assert_eq!(
+            created.into_iter().flatten().collect::<Vec<_>>(),
+            [Location::local(destination.join(&second))],
+            "{name}"
+        );
+        assert_eq!(fs::read(&taken)?, b"taken meanwhile", "{name}");
+        let copied = destination.join(&second);
+        let copied = if name == "docs" {
+            copied.join("inside.txt")
+        } else {
+            copied
+        };
+        assert_eq!(fs::read(copied)?, b"incoming", "{name}");
+    }
+    Ok(())
+}

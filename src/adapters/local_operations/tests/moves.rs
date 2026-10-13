@@ -56,7 +56,7 @@ fn a_failed_move_attempt_is_returned_without_falling_back() -> Result<(), Box<dy
         gio::File::for_path(&source),
         gio::File::for_path(&target),
         gio::Cancellable::new(),
-        Rc::new(|_, _, _| {
+        Rc::new(|_, _, _, _| {
             Box::pin(async {
                 Err(glib::Error::new(
                     gio::IOErrorEnum::PermissionDenied,
@@ -91,13 +91,13 @@ fn a_successful_move_attempt_is_used_without_falling_back_to_copy() -> Result<()
         gio::File::for_path(&source),
         gio::File::for_path(&target),
         gio::Cancellable::new(),
-        Rc::new(|source, target, _| {
+        Rc::new(|source, target, _, _| {
             Box::pin(async move {
                 fs::rename(
                     source.path().expect("native source"),
                     target.path().expect("native target"),
                 )
-                .map(|()| super::super::Moved::Done)
+                .map(|()| super::super::Moved::Done(target))
                 .map_err(super::io_error)
             })
         }),
@@ -123,6 +123,7 @@ fn a_plain_move_relocates_the_entry_via_the_hardened_rename_path() -> Result<(),
     let result = glib::MainContext::default().block_on(move_local(
         gio::File::for_path(&source),
         gio::File::for_path(&target),
+        Taken::Fail,
         gio::Cancellable::new(),
         None,
         false,
@@ -135,13 +136,16 @@ fn a_plain_move_relocates_the_entry_via_the_hardened_rename_path() -> Result<(),
 }
 
 fn move_native(source: &Path, target: &Path) -> Result<(), glib::Error> {
-    glib::MainContext::default().block_on(move_local(
-        gio::File::for_path(source),
-        gio::File::for_path(target),
-        gio::Cancellable::new(),
-        None,
-        false,
-    ))
+    glib::MainContext::default()
+        .block_on(move_local(
+            gio::File::for_path(source),
+            gio::File::for_path(target),
+            Taken::Fail,
+            gio::Cancellable::new(),
+            None,
+            false,
+        ))
+        .map(drop)
 }
 
 fn assert_refused_into_itself(result: Result<(), glib::Error>) {
@@ -282,6 +286,7 @@ fn items_without_noreplace_or_a_usable_link_are_renamed_without_copying()
             .block_on(move_local(
                 gio::File::for_path(&source),
                 gio::File::for_path(&moved),
+                Taken::Fail,
                 gio::Cancellable::new(),
                 Some(progress.clone()),
                 false,
@@ -411,6 +416,7 @@ fn move_accepts_a_symlink_in_the_sources_parent_path() -> Result<(), Box<dyn Err
     let result = glib::MainContext::default().block_on(move_local(
         gio::File::for_path(linked_parent.join("source.txt")),
         gio::File::for_path(&target),
+        Taken::Fail,
         gio::Cancellable::new(),
         None,
         false,
@@ -438,6 +444,7 @@ fn move_accepts_a_symlink_in_the_destinations_parent_path() -> Result<(), Box<dy
     let result = glib::MainContext::default().block_on(move_local(
         gio::File::for_path(&source),
         gio::File::for_path(linked_destination.join("target.txt")),
+        Taken::Fail,
         gio::Cancellable::new(),
         None,
         false,
@@ -785,5 +792,66 @@ fn same_filesystem_replacing_move_renames_without_waiting_for_the_flush()
     assert!(!source.exists());
     assert_eq!(fs::read(destination.join("notes.txt"))?, b"incoming");
     assert_eq!(fs::read_dir(&destination)?.count(), 1);
+    Ok(())
+}
+
+#[test]
+fn keep_both_move_renumbers_when_its_name_is_taken_meanwhile() -> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    for across_volumes in [false, true] {
+        let root = tempfile::tempdir()?;
+        let sources = root.path().join("sources");
+        let destination = root.path().join("destination");
+        fs::create_dir_all(&sources)?;
+        fs::create_dir_all(&destination)?;
+        let source = sources.join("report.txt");
+        fs::write(&source, b"incoming")?;
+        fs::write(destination.join("report.txt"), b"existing")?;
+        let taken = destination.join("report (1).txt");
+        let racer = |taken: PathBuf| -> super::fs_quirks::Racer {
+            Box::new(move || {
+                if fs::symlink_metadata(&taken).is_err() {
+                    fs::write(&taken, b"taken meanwhile").expect("take the name");
+                }
+            })
+        };
+        let racing = || Quirks {
+            before: vec![
+                (Op::Rename, "report (1).txt", 0, racer(taken.clone())),
+                (Op::LinkFd, "report (1).txt", 0, racer(taken.clone())),
+            ],
+            ..Quirks::default()
+        };
+        let _scopes = if across_volumes {
+            vec![
+                FsQuirks::install(&sources, Quirks::default()),
+                FsQuirks::install(&destination, racing()),
+            ]
+        } else {
+            vec![FsQuirks::install(root.path(), racing())]
+        };
+
+        let events = run_paste(PasteRequest {
+            id: OperationRequestId(78),
+            destination: Location::local(&destination),
+            items: vec![PasteItem {
+                source: Location::local(&source),
+                conflict: TransferConflict::KeepBoth,
+            }],
+            move_sources: true,
+        });
+
+        let moved = destination.join("report (2).txt");
+        assert_eq!(
+            item_moves(&events),
+            [(Location::local(&source), Location::local(&moved))],
+            "across volumes: {across_volumes}"
+        );
+        assert_eq!(fs::read(&taken)?, b"taken meanwhile");
+        assert_eq!(fs::read(&moved)?, b"incoming");
+        assert!(!source.exists());
+    }
     Ok(())
 }

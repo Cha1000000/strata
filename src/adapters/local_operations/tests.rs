@@ -81,13 +81,11 @@ fn copy_recursively_fat_family(
     if merge {
         return super::merge_copy(None, true)(source, target, cancellable);
     }
-    Box::pin(copy_new_recursively_on_filesystem(
-        source,
-        target,
-        cancellable,
-        None,
-        true,
-    ))
+    Box::pin(async move {
+        copy_new_recursively_on_filesystem(source, target, Taken::Fail, cancellable, None, true)
+            .await
+            .map(drop)
+    })
 }
 
 /// An empty file stage in `root`, as a staged copy of a file makes it.
@@ -122,7 +120,7 @@ fn staged(
 use super::{
     CopyStep, FAT32_MAX_FILE_SIZE, FailedAction, LocalFileIdentity, LocalOperationProvider,
     MergeHooks, MergePlan, MountTable, PinnedEntry, RestoreEntry, StageOverwrite,
-    StagedOriginalLookup, TRANSFER_PROGRESS_INTERVAL, TransferProgressTracker, TransferStop,
+    StagedOriginalLookup, TRANSFER_PROGRESS_INTERVAL, Taken, TransferProgressTracker, TransferStop,
     await_cancellable, copy_failure_after_cleanup, copy_failure_on_fat32,
     copy_new_recursively_on_filesystem, copy_new_remote_file_with, copy_recursively,
     deletion_error_message, deletion_error_summary, duplicate_candidate_name, fat_sanitized_name,
@@ -193,7 +191,9 @@ async fn copy_new_recursively_with_progress(
     cancellable: gio::Cancellable,
     progress: Option<Rc<TransferProgressTracker>>,
 ) -> Result<(), glib::Error> {
-    copy_new_recursively_on_filesystem(source, target, cancellable, progress, false).await
+    copy_new_recursively_on_filesystem(source, target, Taken::Fail, cancellable, progress, false)
+        .await
+        .map(drop)
 }
 
 async fn copy_new_recursively(
@@ -305,7 +305,7 @@ fn settle_cancelled_io(context: &glib::MainContext) {
 }
 
 fn always_copy() -> super::MoveAttempt {
-    Rc::new(|_, _, _| Box::pin(async { Ok(super::Moved::CopyFrom(None)) }))
+    Rc::new(|_, _, _, _| Box::pin(async { Ok(super::Moved::CopyFrom(None)) }))
 }
 
 fn wait_for_operation(

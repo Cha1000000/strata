@@ -322,7 +322,7 @@ fn duplicating_multi_extension_file_uses_last_extension_for_candidate_name()
 fn transfer_targets_resolve_trash_leaf_names() {
     let destination = gio::File::for_path("/home/user/Documents");
     let target_name = |source: &gio::File| {
-        let (_, target) = super::super::default_transfer_target(
+        let target = super::super::default_transfer_target(
             source,
             &destination,
             false,

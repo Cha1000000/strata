@@ -31,8 +31,9 @@ use rustix::{
 };
 
 use super::{
-    LocalFileIdentity, PinnedEntry, Reported, StageContent, StagedSibling, TransferProgressTracker,
-    bounded_local_worker_count, cancelled_local_operation, copy_failure_after_cleanup,
+    LocalFileIdentity, PinnedEntry, Reported, StageContent, StagedSibling, Taken,
+    TransferProgressTracker, bounded_local_worker_count, cancelled_local_operation,
+    copy_failure_after_cleanup,
     fs_ops::{Entry, EntryStat, FsOps, fs},
     io_error, local_delete_worker_count, local_device_is_rotational, open_local_parent_directory,
     os_error_detail, parallel_delete_local_blocking_with_workers, placement,
@@ -85,10 +86,18 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 pub(super) enum Destination {
-    /// A new item at this path, which must be free.
-    New(PathBuf),
+    /// A new item at this path, or under [`Taken::Number`] at the first free
+    /// numbered name beside it.
+    New(PathBuf, Taken),
     /// Into the existing folder at this path, without replacing its entries.
     Merge(PathBuf),
+}
+
+pub(super) struct Copied {
+    /// The name the new item took, or the merged folder's.
+    pub name: OsString,
+    /// What the copy added to the progress it was given.
+    pub reported: Reported,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -98,26 +107,31 @@ pub(super) struct Options {
     pub workers: Option<usize>,
 }
 
-/// Copies the native item at `source`, and returns what it added to `progress`.
+/// Copies the native item at `source`.
 pub(super) async fn copy_local(
     source: PathBuf,
     destination: Destination,
     options: Options,
     progress: Option<Rc<TransferProgressTracker>>,
     cancellable: &gio::Cancellable,
-) -> Result<Reported, glib::Error> {
-    let copied = following(
+) -> Result<Copied, glib::Error> {
+    let (name, reported) = following(
         source,
         options,
         progress,
         cancellable,
         move |copy, source| match destination {
-            Destination::New(target) => copy_new(copy, source, &target, options.workers),
-            Destination::Merge(folder) => merge(copy, source, &folder, options.workers),
+            Destination::New(target, taken) => {
+                copy_new(copy, source, &target, taken, options.workers)
+            }
+            Destination::Merge(folder) => {
+                let name = folder.file_name().unwrap_or_default().to_os_string();
+                merge(copy, source, &folder, options.workers).map(|()| name)
+            }
         },
     )
     .await?;
-    Ok(copied.1)
+    Ok(Copied { name, reported })
 }
 
 /// Copies the native item at `source` into a hidden sibling of `target`,
@@ -241,36 +255,60 @@ fn split(path: &Path) -> Result<(Arc<OwnedFd>, OsString), glib::Error> {
     Ok((Arc::new(parent), name.to_os_string()))
 }
 
+/// Runs `attempt` with each of `names` until one is not taken, trying the
+/// next only under [`Taken::Number`], and returns the name that took.
+fn first_free<T>(
+    names: impl IntoIterator<Item = OsString>,
+    taken: Taken,
+    mut attempt: impl FnMut(&OsStr) -> Result<T, Failure>,
+) -> Result<(OsString, T), Failure> {
+    for name in names {
+        match attempt(&name) {
+            Err(Failure::Place(PlaceError::Exists)) if taken == Taken::Number => {}
+            result => return result.map(|value| (name, value)),
+        }
+    }
+    Err(Failure::Place(PlaceError::Exists))
+}
+
+/// Copies `source` to `target`, and returns the name it took.
 fn copy_new(
     copy: &Arc<Copy>,
     source: &Source,
     target: &Path,
+    taken: Taken,
     workers: Option<usize>,
-) -> Result<(), Failure> {
+) -> Result<OsString, Failure> {
     let (parent, name) = split(target).map_err(Failure::Error)?;
     let stat = copy.fs.stat(source.entry(), false)?;
     match stat.kind {
         FileType::RegularFile => FileCopy::new(copy, parent.as_fd())
-            .copy_from(source.entry(), FileTarget::Final(&name))
-            .map(drop),
+            .copy_from(source.entry(), FileTarget::Final(&name, taken))
+            .map(|(name, _)| name),
         FileType::Symlink => {
             copy.check_cancelled()?;
             let mount = Mount::new(copy.fs, parent.as_fd());
-            tree::copy_link(
-                copy,
-                source.entry(),
-                Entry::new(&*parent, &name),
-                &mount,
-                None,
-            )
+            first_free(taken.names(&name, false), taken, |name| {
+                tree::copy_link(
+                    copy,
+                    source.entry(),
+                    Entry::new(&*parent, name),
+                    &mount,
+                    None,
+                )
+            })
+            .map(|(name, ())| name)
         }
         FileType::Directory => {
             let workers = workers.unwrap_or_else(|| worker_count(source, &parent));
             if placement::can_place(copy.fs, parent.as_fd(), true) == Some(false) {
-                return direct_folder(copy, source, stat.identity, &parent, &name, workers);
+                return first_free(taken.names(&name, true), taken, |name| {
+                    direct_folder(copy, source, stat.identity, &parent, name, workers)
+                })
+                .map(|(name, ())| name);
             }
             let staged = stage_folder(copy, source, stat.identity, &parent, COPY_PREFIX, workers)?;
-            publish_folder(copy, staged, &name, workers)
+            publish_folder(copy, staged, &name, taken, workers)
         }
         _ => Err(Failure::NotCopyable),
     }
@@ -355,53 +393,61 @@ fn stage_folder(
 }
 
 /// Puts a folder stage at `name`, or copies it there where the mount cannot
-/// place it.
+/// place it, and returns the name it took.
 fn publish_folder(
     copy: &Arc<Copy>,
     staged: StagedSibling,
     name: &OsStr,
+    taken: Taken,
     workers: usize,
-) -> Result<(), Failure> {
+) -> Result<OsString, Failure> {
     if let Err(failure) = copy.check_cancelled() {
         return Err(copy.discarding(staged, failure));
     }
-    let placed = stage::publish(
-        copy.fs,
-        staged.parent.as_fd(),
-        &staged.name,
-        staged.identity,
-        name,
-    );
-    match placed {
-        Ok(_) => Ok(()),
-        // Either name may hold the copy, so neither is removed.
-        Err(PlaceError::Unconfirmed) => Err(Failure::Place(PlaceError::Unconfirmed)),
-        Err(PlaceError::Unsupported) => {
-            let from = copy.uncounted();
-            let source = Source {
-                parent: staged.parent.clone(),
-                name: staged.name.clone(),
-            };
-            let copied = direct_folder(
-                &from,
-                &source,
-                staged.identity,
-                &staged.parent,
-                name,
-                workers,
-            );
-            let discarded = copy.discard(staged);
-            match (copied, discarded) {
-                (Ok(()), Ok(())) => Ok(()),
-                (Ok(()), Err(error)) => Err(Failure::Error(io_error(rust_i18n::t!(
-                    "The item was copied, but its staging copy could not be removed: %{error}",
-                    error = crate::services::gio_error_detail(&error)
-                )))),
-                (Err(failure), discarded) => Err(copy.after_cleanup(failure, discarded)),
+    let mut names = taken.names(name, true);
+    while let Some(name) = names.next() {
+        let placed = stage::publish(
+            copy.fs,
+            staged.parent.as_fd(),
+            &staged.name,
+            staged.identity,
+            &name,
+        );
+        match placed {
+            Ok(_) => return Ok(name),
+            Err(PlaceError::Exists) if taken == Taken::Number => {}
+            // Either name may hold the copy, so neither is removed.
+            Err(PlaceError::Unconfirmed) => return Err(Failure::Place(PlaceError::Unconfirmed)),
+            Err(PlaceError::Unsupported) => {
+                let from = copy.uncounted();
+                let source = Source {
+                    parent: staged.parent.clone(),
+                    name: staged.name.clone(),
+                };
+                let copied = first_free(std::iter::once(name).chain(names), taken, |name| {
+                    direct_folder(
+                        &from,
+                        &source,
+                        staged.identity,
+                        &staged.parent,
+                        name,
+                        workers,
+                    )
+                });
+                let discarded = copy.discard(staged);
+                return match (copied, discarded) {
+                    (Ok((name, ())), Ok(())) => Ok(name),
+                    (Ok(_), Err(error)) => Err(Failure::Error(io_error(rust_i18n::t!(
+                        "The item was copied, but its staging copy could not be removed: %{error}",
+                        error = crate::services::gio_error_detail(&error)
+                    )))),
+                    (Err(failure), discarded) => Err(copy.after_cleanup(failure, discarded)),
+                };
             }
+            Err(error) => return Err(copy.discarding(staged, Failure::Place(error))),
         }
-        Err(error) => Err(copy.discarding(staged, Failure::Place(error))),
     }
+    Err(copy.discarding(staged, Failure::Place(PlaceError::Exists)))
 }
 
 /// A folder this copy made, which only it writes into.
@@ -1035,7 +1081,7 @@ fn open_file(fs: &dyn FsOps, at: Entry<'_>) -> Result<Opened, Failure> {
 /// Where a top-level file ends up.
 #[derive(Clone, Copy)]
 enum FileTarget<'a> {
-    Final(&'a OsStr),
+    Final(&'a OsStr, Taken),
     /// Under a hidden `.strata-replacement-*` name, left unpublished.
     Hidden,
 }
@@ -1043,7 +1089,7 @@ enum FileTarget<'a> {
 impl FileTarget<'_> {
     fn stage_prefix(self) -> &'static str {
         match self {
-            Self::Final(_) => COPY_PREFIX,
+            Self::Final(..) => COPY_PREFIX,
             Self::Hidden => STAGE_PREFIX,
         }
     }
@@ -1117,8 +1163,16 @@ impl<'a> FileCopy<'a> {
     fn link(&self, tmpfile: BorrowedFd<'_>, target: FileTarget<'_>) -> Result<OsString, Errno> {
         let fs = self.copy.fs;
         match target {
-            FileTarget::Final(name) => {
-                link_tmpfile(fs, tmpfile, self.at(name)).map(|()| name.to_os_string())
+            FileTarget::Final(name, taken) => {
+                for name in taken.names(name, false) {
+                    match link_tmpfile(fs, tmpfile, self.at(&name)) {
+                        Err(error)
+                            if taken == Taken::Number
+                                && placement::file_creation_error(error) == PlaceError::Exists => {}
+                        linked => return linked.map(|()| name),
+                    }
+                }
+                Err(Errno::EXIST)
             }
             FileTarget::Hidden => placement::reserve_hidden_name(STAGE_PREFIX, |name| {
                 link_tmpfile(fs, tmpfile, self.at(name)).map_err(|error| {
@@ -1283,43 +1337,54 @@ impl<'a> FileCopy<'a> {
         if let Err(failure) = settled {
             return Err(self.discard(&stage, failure));
         }
-        let FileTarget::Final(name) = target else {
+        let FileTarget::Final(name, taken) = target else {
             self.copy.add_file(0);
             return Ok((stage.name, stage.created.identity));
         };
-        let placed = stage::publish(fs, self.dir, &stage.name, stage.created.identity, name);
-        let identity = match placed {
-            Ok(_) => stage.created.identity,
-            // Either name may hold the copy, so neither is removed.
-            Err(PlaceError::Unconfirmed) => return Err(Failure::Place(PlaceError::Unconfirmed)),
-            Err(PlaceError::Unsupported) => {
-                let dir = self.dir;
-                let staged = Entry {
-                    dir,
-                    name: &stage.name,
-                };
-                let identity = match self.create_from(
-                    staged,
-                    stage.created.identity,
-                    Some(snapshot),
-                    name,
-                    parent,
-                ) {
-                    Ok(identity) => identity,
-                    Err(failure) => return Err(self.discard(&stage, failure)),
-                };
-                if let Err(error) = self.remove_stage(&stage) {
-                    return Err(Failure::Error(io_error(rust_i18n::t!(
-                        "The item was copied, but its staging copy could not be removed: %{error}",
-                        error = crate::services::gio_error_detail(&error)
-                    ))));
+        let mut names = taken.names(name, false);
+        let published = loop {
+            let Some(name) = names.next() else {
+                return Err(self.discard(&stage, Failure::Place(PlaceError::Exists)));
+            };
+            match stage::publish(fs, self.dir, &stage.name, stage.created.identity, &name) {
+                Ok(_) => break (name, stage.created.identity),
+                Err(PlaceError::Exists) if taken == Taken::Number => {}
+                // Either name may hold the copy, so neither is removed.
+                Err(PlaceError::Unconfirmed) => {
+                    return Err(Failure::Place(PlaceError::Unconfirmed));
                 }
-                identity
+                Err(PlaceError::Unsupported) => {
+                    let dir = self.dir;
+                    let staged = Entry {
+                        dir,
+                        name: &stage.name,
+                    };
+                    let created = first_free(std::iter::once(name).chain(names), taken, |name| {
+                        self.create_from(
+                            staged,
+                            stage.created.identity,
+                            Some(snapshot),
+                            name,
+                            parent,
+                        )
+                    });
+                    let created = match created {
+                        Ok(created) => created,
+                        Err(failure) => return Err(self.discard(&stage, failure)),
+                    };
+                    if let Err(error) = self.remove_stage(&stage) {
+                        return Err(Failure::Error(io_error(rust_i18n::t!(
+                            "The item was copied, but its staging copy could not be removed: %{error}",
+                            error = crate::services::gio_error_detail(&error)
+                        ))));
+                    }
+                    break created;
+                }
+                Err(error) => return Err(self.discard(&stage, Failure::Place(error))),
             }
-            Err(error) => return Err(self.discard(&stage, Failure::Place(error))),
         };
         self.copy.add_file(0);
-        Ok((name.to_os_string(), identity))
+        Ok(published)
     }
 
     /// Creates `name` exclusively and fills it from the file at `from`, which
