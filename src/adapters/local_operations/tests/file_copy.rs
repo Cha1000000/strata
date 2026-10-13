@@ -511,6 +511,18 @@ fn append_to(path: &Path) -> Racer {
     })
 }
 
+/// Cuts the source back to its first run of data.
+fn truncate(path: &Path) -> Racer {
+    let path = path.to_path_buf();
+    Box::new(move || {
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .and_then(|file| file.set_len(64 * 1024))
+            .expect("shrink the source");
+    })
+}
+
 #[test]
 fn sparse_files_keep_their_holes_where_both_ends_can() -> Result<(), Box<dyn Error>> {
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock()?;
@@ -523,14 +535,43 @@ fn sparse_files_keep_their_holes_where_both_ends_can() -> Result<(), Box<dyn Err
         fail: vec![(Op::SeekData, "*", 0, Errno::OPNOTSUPP)],
         ..Quirks::ext4()
     };
-    for (case, source_preset, destination_preset, grows, kept) in [
-        ("one mount", ext4, None, false, true),
-        ("two mounts", ext4, Some(ext4), false, true),
-        ("grown meanwhile", ext4, Some(ext4), true, true),
-        ("FAT target", ext4, Some(vfat), false, false),
-        ("ZFS source", zfs, Some(ext4), false, false),
-        ("holes unknown", holes_unknown, Some(ext4), false, false),
-    ] {
+    // The source, the destination (`None` on the same mount), what happens
+    // to the source as the copy runs, and whether holes are kept.
+    let rows: [(
+        &str,
+        Preset,
+        Option<Preset>,
+        Option<(Op, &str, fn(&Path) -> Racer)>,
+        bool,
+    ); 8] = [
+        ("one mount", ext4, None, None, true),
+        ("two mounts", ext4, Some(ext4), None, true),
+        (
+            "grown meanwhile",
+            ext4,
+            Some(ext4),
+            Some((Op::SeekHole, "source.img", append_to)),
+            true,
+        ),
+        (
+            "shrunk meanwhile",
+            ext4,
+            Some(ext4),
+            Some((Op::SeekHole, "source.img", truncate)),
+            true,
+        ),
+        ("FAT target", ext4, Some(vfat), None, false),
+        ("ZFS source", zfs, Some(ext4), None, false),
+        ("holes unknown", holes_unknown, Some(ext4), None, false),
+        (
+            "holes unknown, grown meanwhile",
+            holes_unknown,
+            None,
+            Some((Op::CopyRange, "*", append_to)),
+            false,
+        ),
+    ];
+    for (case, source_preset, destination_preset, change, kept) in rows {
         let root = tempfile::tempdir()?;
         let sources = root.path().join("sources");
         let destination = root.path().join("destination");
@@ -542,10 +583,8 @@ fn sparse_files_keep_their_holes_where_both_ends_can() -> Result<(), Box<dyn Err
             reflink: Support::Rejected(Errno::OPNOTSUPP),
             ..source_preset()
         };
-        if grows {
-            quirks
-                .before
-                .push((Op::SeekHole, "source.img", 0, append_to(&source)));
+        if let Some((op, pattern, change)) = change {
+            quirks.before.push((op, pattern, 0, change(&source)));
         }
         let _scopes = match destination_preset {
             None => vec![FsQuirks::install(root.path(), quirks)],

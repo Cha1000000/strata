@@ -196,7 +196,8 @@ enum Ranged {
 
 /// How far leaving out holes took the copy.
 enum Walked {
-    /// Up to the size seen at open, with the copy given that size.
+    /// Up to the size seen at open, with the copy given that size, or the
+    /// smaller one the source has now.
     Done,
     /// The source cannot tell its holes from here on.
     Dense(u64),
@@ -296,7 +297,9 @@ impl Data {
             }
             offset = hole;
         }
-        ends.fs.set_len(ends.target, size)?;
+        // A source that shrank meanwhile ends where it ends now.
+        let now = ends.fs.stat_fd(ends.source)?.size;
+        ends.fs.set_len(ends.target, size.min(now))?;
         Ok(Walked::Done)
     }
 
@@ -311,9 +314,14 @@ impl Data {
         progress: &mut impl FnMut(u64),
     ) -> Result<(), Failure> {
         if let Some(largest) = route.copy_range.filter(|_| !self.copy_range_slow) {
-            match self.copy_ranges(ends, (offset, until.expected()), largest, progress)? {
-                Ranged::Done => return Ok(()),
-                Ranged::From(copied) => offset = copied,
+            match (
+                self.copy_ranges(ends, (offset, until.expected()), largest, progress)?,
+                until,
+            ) {
+                (Ranged::Done, Until::At(_)) => return Ok(()),
+                // On past the size, which the source may have outgrown.
+                (Ranged::Done, Until::End(size)) => offset = size,
+                (Ranged::From(copied), _) => offset = copied,
             }
         }
         self.read_write(ends, offset, until, progress)
