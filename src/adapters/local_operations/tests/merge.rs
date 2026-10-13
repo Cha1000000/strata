@@ -945,7 +945,7 @@ fn a_failed_aside_puts_every_original_back_before_merging() -> Result<(), Box<dy
         )?;
         write_files(&target, &target_files)?;
         let quirks = match case {
-            "no safe placement" => Quirks::without_placement(),
+            "no safe placement" => Quirks::vboxsf(),
             "second aside fails" => Quirks {
                 fail: vec![(Op::Rename, "*", 1, Errno::IO)],
                 ..Quirks::default()

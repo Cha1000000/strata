@@ -299,7 +299,7 @@ fn replacement_fails_before_encoding_when_no_strategy_is_safe() -> Result<(), Bo
         Quirks {
             trash: Trash::Unsupported,
             fs_type: Some(NFS_SUPER_MAGIC),
-            ..Quirks::without_placement()
+            ..Quirks::vboxsf()
         },
     );
 

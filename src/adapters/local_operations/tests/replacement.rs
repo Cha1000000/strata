@@ -783,7 +783,7 @@ fn replace_fails_before_staging_when_no_strategy_is_safe() -> Result<(), Box<dyn
     fs::write(&target, b"old")?;
     let _quirks = FsQuirks::install(
         root.path(),
-        without_trash(FUSE_SUPER_MAGIC, Quirks::without_placement()),
+        without_trash(FUSE_SUPER_MAGIC, Quirks::vboxsf()),
     );
     let copied = Rc::new(Cell::new(false));
     let copy_observed = copied.clone();

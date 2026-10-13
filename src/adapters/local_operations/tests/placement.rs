@@ -698,7 +698,7 @@ fn the_probe_learns_each_quirk_and_leaves_nothing_behind() -> Result<(), Box<dyn
             Feasibility::Yes,
         ),
         (
-            Quirks::without_placement,
+            Quirks::vboxsf,
             Probed {
                 no_replace: Some(false),
                 hard_links: Some(false),
@@ -710,7 +710,7 @@ fn the_probe_learns_each_quirk_and_leaves_nothing_behind() -> Result<(), Box<dyn
         (
             || Quirks {
                 rename_over_empty_dir: OverEmptyDirectory::Eperm,
-                ..Quirks::without_placement()
+                ..Quirks::vboxsf()
             },
             Probed {
                 no_replace: Some(false),
@@ -857,7 +857,7 @@ fn a_case_only_rename_goes_through_a_temporary_name() -> Result<(), Box<dyn Erro
         alias_inodes: true,
         ..Quirks::default()
     };
-    let shapes: [fn() -> Quirks; 4] = [Quirks::default, Quirks::without_placement, smb, exfat_fuse];
+    let shapes: [fn() -> Quirks; 4] = [Quirks::default, Quirks::vboxsf, smb, exfat_fuse];
     for quirks in shapes {
         for folder in [false, true] {
             let root = tempfile::tempdir()?;
@@ -1067,8 +1067,8 @@ fn links_refused_for_the_item() -> Quirks {
 #[test]
 fn renames_complete_without_noreplace_or_a_usable_hard_link() -> Result<(), Box<dyn Error>> {
     for (quirks, folder, links) in [
-        (Quirks::without_placement(), false, false),
-        (Quirks::without_placement(), true, false),
+        (Quirks::vboxsf(), false, false),
+        (Quirks::vboxsf(), true, false),
         (links_refused_for_the_item(), false, true),
     ] {
         let root = tempfile::tempdir()?;
@@ -1128,7 +1128,7 @@ fn the_last_rename_rung_never_clobbers_a_plain_creator() -> Result<(), Box<dyn E
             let quirks = if item_refuses_links {
                 links_refused_for_the_item()
             } else {
-                Quirks::without_placement()
+                Quirks::vboxsf()
             };
             let _scope = FsQuirks::install(
                 root.path(),
@@ -1211,7 +1211,7 @@ fn a_failed_rename_over_the_reserved_file_removes_only_an_untouched_placeholder(
         let mut quirks = Quirks {
             // The second rename into `target` is the one over the reserved file.
             fail: vec![(Op::Rename, "target", 1, Errno::IO)],
-            ..Quirks::without_placement()
+            ..Quirks::vboxsf()
         };
         if written {
             let racer: Racer = Box::new(move || {
@@ -1244,7 +1244,7 @@ fn a_reserved_name_reported_as_a_folder_is_taken() -> Result<(), Box<dyn Error>>
         root.path(),
         Quirks {
             fail: vec![(Op::Create, "target", 0, Errno::ISDIR)],
-            ..Quirks::without_placement()
+            ..Quirks::vboxsf()
         },
     );
     fs::write(root.path().join("source"), b"data")?;

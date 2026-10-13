@@ -240,7 +240,7 @@ fn restore_exclusive_copy_handles_files_links_and_partial_failure() -> Result<()
         rustix::fs::Mode::from_raw_mode(0o600),
         0,
     )?;
-    let _scope = FsQuirks::install(fixture.path(), Quirks::without_placement());
+    let _scope = FsQuirks::install(fixture.path(), Quirks::vboxsf());
     let result = restore_path(&source, &fixture.path().join("incomplete"), fixture.path());
     let message = result.expect_err("unsupported copy source").to_string();
     assert!(
@@ -342,7 +342,7 @@ fn restore_directory_copy_preserves_permissions_times_and_xattrs() -> Result<(),
         rustix::fs::XattrFlags::empty(),
     )?;
     let destination = fixture.path().join("destination");
-    let _scope = FsQuirks::install(fixture.path(), Quirks::without_placement());
+    let _scope = FsQuirks::install(fixture.path(), Quirks::vboxsf());
     restore_path(&source, &destination, fixture.path())?;
     assert!(!source.exists());
     assert_eq!(fs::metadata(&destination)?.mode() & 0o777, 0o750);

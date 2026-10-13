@@ -532,7 +532,7 @@ fn publication_without_rename_flags_moves_unreadable_subtrees_whole() -> Result<
 #[test]
 fn publication_without_links_or_noreplace_keeps_staging() -> Result<(), Box<dyn Error>> {
     let root = tempfile::tempdir()?;
-    let _quirks = FsQuirks::install(root.path(), Quirks::without_placement());
+    let _quirks = FsQuirks::install(root.path(), Quirks::vboxsf());
     let destination = ExtractionDestination::open(root.path())?;
     let (name, staging) = stage(&destination, &["readme.txt", "docs/guide.txt"])?;
 

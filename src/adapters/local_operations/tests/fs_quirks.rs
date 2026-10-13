@@ -131,7 +131,7 @@ impl Quirks {
     }
 
     /// No `RENAME_NOREPLACE`, no hard links, and no rename over an empty folder.
-    pub(crate) fn without_placement() -> Self {
+    pub(crate) fn vboxsf() -> Self {
         Self {
             rename_flags: Support::Rejected(Errno::INVAL),
             links: Support::Rejected(Errno::PERM),

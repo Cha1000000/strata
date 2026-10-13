@@ -317,7 +317,7 @@ fn renames_and_their_undo_keep_the_item_where_rename_flags_or_links_are_missing(
     };
     let cases: [fn() -> Quirks; 4] = [
         Quirks::without_rename_flags,
-        Quirks::without_placement,
+        Quirks::vboxsf,
         Quirks::sshfs,
         linked_before_a_probe,
     ];
@@ -358,7 +358,7 @@ fn a_rename_never_replaces_an_item_created_meanwhile() -> Result<(), Box<dyn Err
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
         .lock()
         .map_err(|error| error.to_string())?;
-    for quirks in [Quirks::default, Quirks::without_placement] {
+    for quirks in [Quirks::default, Quirks::vboxsf] {
         let root = tempfile::tempdir()?;
         let source = root.path().join("item.txt");
         let taken = root.path().join("new.txt");

@@ -157,7 +157,7 @@ fn moving_a_directory_into_its_own_child_fails_instead_of_deleting_it() -> Resul
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
         .lock()
         .map_err(|error| error.to_string())?;
-    for quirks in [Quirks::default(), Quirks::without_placement()] {
+    for quirks in [Quirks::default(), Quirks::vboxsf()] {
         let root = tempfile::tempdir()?;
         let _scope = FsQuirks::install(root.path(), quirks);
         let source = root.path().join("source");

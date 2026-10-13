@@ -825,7 +825,7 @@ fn staged_publication_refuses_to_overwrite_an_existing_target() -> Result<(), Bo
     for quirks in [
         Quirks::default,
         Quirks::without_rename_flags,
-        Quirks::without_placement,
+        Quirks::vboxsf,
     ] {
         for directory in [false, true] {
             let root = tempfile::tempdir()?;
@@ -916,7 +916,7 @@ fn staged_symlinks_are_recreated_where_links_are_missing() -> Result<(), Box<dyn
         .lock()
         .map_err(|error| error.to_string())?;
     let root = tempfile::tempdir()?;
-    let _scope = FsQuirks::install(root.path(), Quirks::without_placement());
+    let _scope = FsQuirks::install(root.path(), Quirks::vboxsf());
     let staged = StagedSibling::create(root.path(), StageContent::Symlink("missing".into()))?;
     let staged_path = staged.path();
     let target = root.path().join("target");
@@ -934,7 +934,7 @@ fn staged_fallback_removes_reserved_directory_on_copy_error() -> Result<(), Box<
         .lock()
         .map_err(|error| error.to_string())?;
     let root = tempfile::tempdir()?;
-    let _scope = FsQuirks::install(root.path(), Quirks::without_placement());
+    let _scope = FsQuirks::install(root.path(), Quirks::vboxsf());
     let staged = stage(root.path(), true)?;
     let staged_path = staged.path();
     let _socket = std::os::unix::net::UnixListener::bind(staged_path.join("unsupported.sock"))?;
@@ -965,7 +965,7 @@ fn reusing_stage_inodes(before: (Op, &'static str, usize, Racer)) -> Quirks {
         reused_inodes: Some(".strata-replacement-*"),
         no_birth_time: true,
         before: vec![before],
-        ..Quirks::without_placement()
+        ..Quirks::vboxsf()
     }
 }
 
@@ -1045,7 +1045,7 @@ fn cancelling_staged_fallback_removes_its_reserved_directory() -> Result<(), Box
         .lock()
         .map_err(|error| error.to_string())?;
     let root = tempfile::tempdir()?;
-    let scope = FsQuirks::install(root.path(), Quirks::without_placement());
+    let scope = FsQuirks::install(root.path(), Quirks::vboxsf());
     // No placeholder, so the target appears only when the copy makes it.
     learn_mount_capability(scope.key(), |capabilities| {
         capabilities.rename_over_empty_directory = Some(false);
