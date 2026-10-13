@@ -1099,3 +1099,85 @@ fn trash_items_whose_files_share_names_are_restored_whole() -> Result<(), Box<dy
     }
     Ok(())
 }
+
+#[test]
+fn a_trash_entry_stays_restorable_while_its_item_is_in_the_trash() -> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock()?;
+    let uid = rustix::process::getuid().as_raw();
+    // An entry added to the Trash item once the copy listed it, or an item
+    // put at its name in the Trash once the restore removed it.
+    for added in [true, false] {
+        let fixture = tempfile::tempdir()?;
+        let trash = fixture.path().join(format!(".Trash-{uid}"));
+        let item = trash.join("files/report");
+        fs::create_dir_all(&item)?;
+        fs::create_dir_all(trash.join("info"))?;
+        fs::create_dir(fixture.path().join("Documents"))?;
+        fs::write(item.join("notes.txt"), b"notes")?;
+        let info = trash.join("info/report.trashinfo");
+        fs::write(
+            &info,
+            "[Trash Info]\nPath=Documents/report\nDeletionDate=2026-01-01T00:00:00\n",
+        )?;
+        let (before, after) = if added {
+            let added = item.join("added.txt");
+            let racer: Racer = Box::new(move || fs::write(&added, b"added").expect("add"));
+            (vec![(Op::SyncFs, "*", 0, racer)], Vec::new())
+        } else {
+            let put = item.clone();
+            let racer: Racer = Box::new(move || fs::write(&put, b"another").expect("put"));
+            // The first removes the placeholder the placement ladder tried.
+            (Vec::new(), vec![(Op::Unlink, "report", 1, racer)])
+        };
+        let _scope = FsQuirks::install(
+            fixture.path(),
+            Quirks {
+                mount_type: Some(("ext4", "rw")),
+                before,
+                after,
+                ..Quirks::without_placement()
+            },
+        );
+        let destination = fixture.path().canonicalize()?.join("Documents/report");
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let emitted = events.clone();
+        let _operation = LocalOperationProvider.restore(
+            RestoreRequest {
+                id: OperationRequestId(508),
+                source: RestoreSource::TrashEntries(vec![RestoreTrashItem {
+                    entry: directory_entry(&item),
+                    destination: destination.clone(),
+                }]),
+            },
+            Rc::new(move |event| emitted.borrow_mut().push(event)),
+        );
+        wait_for_restore(&events);
+
+        let events = events.borrow();
+        assert!(
+            matches!(events.last(), Some(OperationEvent::Restored { .. })),
+            "{added}: {events:?}"
+        );
+        let kept = events
+            .iter()
+            .filter_map(|event| match event {
+                OperationEvent::ItemsReported { report, .. } => Some(report.kept_in_trash.clone()),
+                _ => None,
+            })
+            .flatten()
+            .collect::<Vec<_>>();
+        let expected = if added {
+            vec![KeptItem {
+                location: Location::local(&item),
+                cause: KeptCause::Changed,
+            }]
+        } else {
+            Vec::new()
+        };
+        assert_eq!(kept, expected, "{added}");
+        assert!(fs::symlink_metadata(&item).is_ok(), "{added}");
+        assert!(info.exists(), "{added}: the Trash entry stays restorable");
+        assert_eq!(fs::read(destination.join("notes.txt"))?, b"notes");
+    }
+    Ok(())
+}

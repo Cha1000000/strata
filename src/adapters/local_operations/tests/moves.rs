@@ -860,7 +860,10 @@ fn a_move_keeps_source_entries_changed_or_added_after_their_copy() -> Result<(),
         assert_eq!(fs::read(&added)?, b"added", "{conflict:?}");
         assert_eq!(
             reported(&events).kept,
-            [kept(changed, KeptCause::Changed)],
+            [
+                kept(changed, KeptCause::Changed),
+                kept(folder.clone(), KeptCause::Changed)
+            ],
             "{conflict:?}"
         );
     }
@@ -1322,7 +1325,7 @@ fn entries_swapped_or_removed_after_their_copy_are_never_deleted() -> Result<(),
             }
             _ => {
                 assert_eq!(names(&folder)?, Vec::<String>::new(), "{row}");
-                assert_eq!(report, TransferReport::default(), "{row}");
+                assert_eq!(report.kept, [kept(folder.clone(), KeptCause::Changed)]);
             }
         }
     }

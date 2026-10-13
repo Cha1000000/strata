@@ -5,7 +5,7 @@
 //! are deleted. It keeps names, never descriptors.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     ffi::{OsStr, OsString},
     io,
     os::fd::{AsFd, BorrowedFd, OwnedFd},
@@ -267,6 +267,22 @@ impl Deletion {
         lock(&self.kept).push((path, cause));
     }
 
+    /// Whether the folder at `at`, at `path`, which could not be removed,
+    /// holds an entry that is not, nor holds, one already kept.
+    fn holds_others(&self, at: Entry<'_>, path: &Path) -> bool {
+        let kept: HashSet<OsString> = lock(&self.kept)
+            .iter()
+            .filter_map(|(kept, _)| kept.strip_prefix(path).ok()?.iter().next())
+            .map(OsStr::to_os_string)
+            .collect();
+        self.fs
+            .open_dir(at)
+            .and_then(|opened| self.fs.list(opened.as_fd()))
+            .map_or(true, |entries| {
+                entries.iter().any(|(name, _)| !kept.contains(name))
+            })
+    }
+
     /// Making `path` go failed with `error`.
     fn failed(&self, path: PathBuf, error: Errno) {
         match error {
@@ -461,17 +477,23 @@ impl At {
         let fs = deletion.fs;
         // An open folder keeps its inode number even where numbers change
         // between the copy and the deletion, so the name must report it.
-        let still = fs
+        let named = fs
             .stat(self.entry_at(), false)
-            .and_then(|named| Ok((named, fs.stat_fd(opened.as_fd())?)))
-            .is_ok_and(|(named, opened)| named.identity == opened.identity);
+            .and_then(|named| Ok((named, fs.stat_fd(opened.as_fd())?)));
         drop(opened);
-        if !still {
-            return;
+        match named {
+            Ok((named, opened)) if named.identity == opened.identity => {}
+            Ok(_) => return deletion.keep(self.path.clone(), KeptCause::Changed),
+            Err(error) => return deletion.failed(self.path.clone(), error),
         }
         match fs.unlink(self.entry_at(), AtFlags::REMOVEDIR) {
-            // A folder that holds entries kept or added meanwhile stays.
-            Ok(()) | Err(Errno::NOENT | Errno::NOTEMPTY | Errno::EXIST) => {}
+            Ok(()) | Err(Errno::NOENT) => {}
+            // Entries added meanwhile stay, and so does their folder.
+            Err(Errno::NOTEMPTY | Errno::EXIST) => {
+                if deletion.holds_others(self.entry_at(), &self.path) {
+                    deletion.keep(self.path.clone(), KeptCause::Changed);
+                }
+            }
             Err(error) => deletion.failed(self.path.clone(), error),
         }
     }

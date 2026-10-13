@@ -5047,9 +5047,20 @@ async fn restore_trash_entry(
     .await?;
     if report.kept_in_trash.is_empty()
         && let Some(info_path) = plan.trash_info.or_else(|| entry.trash_info.clone())
-        && let Ok(Err(error)) = gio::spawn_blocking(move || std::fs::remove_file(info_path)).await
     {
-        tracing::warn!(%error, "unable to remove restored trash metadata");
+        let item = plan.source_path;
+        let removed = gio::spawn_blocking(move || match std::fs::symlink_metadata(&item) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                std::fs::remove_file(info_path)
+            }
+            // The Trash still holds something under the item's name.
+            Ok(_) => Ok(()),
+            Err(error) => Err(error),
+        })
+        .await;
+        if let Ok(Err(error)) = removed {
+            tracing::warn!(%error, "unable to remove restored trash metadata");
+        }
     }
     Ok(report)
 }
