@@ -76,7 +76,8 @@ Residual limits:
   check before a case-only folder rename does ("Autodisabling the use of server inode numbers" in
   the kernel log). Hard links then report different inode numbers, so Strata stops using them
   there, as on sshfs; `RENAME_NOREPLACE` still places items there.
-- If the reply to the placeholder `mkdir` is lost on NFS, an empty folder can remain at the
+- After a lost reply while placing over a placeholder (to the placeholder's `mkdir` or exclusive
+  create, or to the rename over it), an empty folder or file Strata created can remain at the
   destination name.
 
 Renaming a folder in the lower layer of an overlayfs mount without `redirect_dir`, or moving
@@ -107,14 +108,20 @@ own link is refused. Where a probe cannot settle what a mount supports, the step
 For a file, Strata creates an empty placeholder at the destination with `O_CREAT | O_EXCL`, checks
 that the name still holds that placeholder (same inode, a regular file, still empty), then renames
 the item over it. For a folder, it checks that the name is free, then renames. If the rename
-fails, the placeholder is removed only while the name still holds it unchanged, and a lost reply
-is decided from where the item is found. If Strata stops between creating the placeholder and the
-rename, the empty file stays at the destination name.
+fails with an errno that shows it did not happen, the placeholder is removed only while the name
+still holds it unchanged. After one that may hide a lost reply (`EIO`, `ETIMEDOUT`, `ENOENT` and
+the like), nothing is removed: the item counts as placed only if its old name is gone and the new
+one reports its identity, and otherwise the result is reported as unconfirmed. sshfs keeps a
+name's inode number when a rename's reply is lost, so the placeholder's number there proves
+nothing. The empty placeholder therefore stays at the destination name after an unconfirmed
+rename, a check that cannot read the name, a lost reply to its creation, or if Strata stops before
+the rename.
 
 What it risks, and why that is low:
 
 - **The item being placed is never at risk.** It moves in a single rename, so it is always at its
-  old name or its new one, and a failed step leaves it where it was.
+  old name or its new one. A failed step leaves it where it was; one whose reply was lost is
+  reported as unconfirmed, with both names kept.
 - **An item already at the destination is never touched.** The exclusive create fails, and the
   name counts as taken. A program that creates the name exclusively during the step gets "already
   exists" and loses nothing.
@@ -286,7 +293,8 @@ let _quirks = FsQuirks::install(root.path(), Quirks::without_rename_flags());
 Quirks emulate rejected rename flags (NFS, ntfs-3g), missing hard links (vfat, vboxsf), sshfs
 collisions reported as `EPERM`, gvfsd-fuse refusing to rename over an empty folder, case-insensitive
 lookups, invalid names, unsupported or lying Trash, reused inode numbers, hard links with their own
-inode numbers, missing birth times, lost replies and racing processes. The seam also asserts that
+inode numbers, missing birth times, lost replies (on sshfs, a lost rename reply leaves the target
+name reporting its old inode number) and racing processes. The seam also asserts that
 no call runs on the main context's thread. Run them with:
 
 ```bash

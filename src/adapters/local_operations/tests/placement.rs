@@ -555,6 +555,44 @@ fn an_ambiguous_rename_failure_is_resolved_by_identity() -> Result<(), Box<dyn E
 }
 
 #[test]
+fn a_lost_reply_over_a_placeholder_removes_nothing() -> Result<(), Box<dyn Error>> {
+    for (folder, performed) in [(false, true), (false, false), (true, true), (true, false)] {
+        let root = tempfile::tempdir()?;
+        let source = root.path().join("source");
+        if folder {
+            fs::create_dir(&source)?;
+        } else {
+            // Empty, so the moved file passes for the placeholder at `target`.
+            fs::write(&source, b"")?;
+        }
+        let original = identity(&source);
+        let mut quirks = Quirks::sshfs();
+        if performed {
+            quirks.lost_reply = vec![(Op::Rename, "target", Errno::IO)];
+        } else {
+            // The second rename into `target` is the one over the placeholder.
+            quirks.fail = vec![(Op::Rename, "target", 1, Errno::IO)];
+        }
+        let _scope = FsQuirks::install(root.path(), quirks);
+
+        let case = format!("folder: {folder}, performed: {performed}");
+        assert_eq!(
+            place_in(root.path(), "source", "target", Some(original)),
+            Err(PlaceError::Unconfirmed),
+            "{case}"
+        );
+        if performed {
+            assert_eq!(names(root.path())?, ["target"], "{case}");
+            assert_eq!(identity(&root.path().join("target")), original, "{case}");
+        } else {
+            assert_eq!(names(root.path())?, ["source", "target"], "{case}");
+            assert_eq!(identity(&source), original, "{case}");
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn a_source_substituted_before_it_moves_is_moved_back() -> Result<(), Box<dyn Error>> {
     // `skip` passes the renames into `target` that precede the one that moves it.
     for (quirks, folder, skip) in [
@@ -1247,36 +1285,38 @@ fn the_reserved_name_rung_needs_the_missing_primitives_confirmed() -> Result<(),
 #[test]
 fn a_failed_rename_over_the_reserved_file_removes_only_an_untouched_placeholder()
 -> Result<(), Box<dyn Error>> {
-    for quirks in [Quirks::vboxsf, Quirks::sshfs] {
-        for written in [false, true] {
-            let root = tempfile::tempdir()?;
-            let target = root.path().join("target");
-            let raced = target.clone();
-            let mut quirks = Quirks {
-                // The second rename into `target` is the one over the reserved file.
-                fail: vec![(Op::Rename, "target", 1, Errno::IO)],
-                ..quirks()
-            };
-            if written {
-                let racer: Racer = Box::new(move || {
-                    fs::write(&raced, b"theirs").expect("write into the placeholder");
-                });
-                quirks.before = vec![(Op::Rename, "target", 1, racer)];
-            }
-            let _scope = FsQuirks::install(root.path(), quirks);
-            fs::write(root.path().join("source"), b"data")?;
+    for (error, written, expected) in [
+        (Errno::ACCESS, false, PlaceError::Io(Errno::ACCESS)),
+        (Errno::ACCESS, true, PlaceError::Io(Errno::ACCESS)),
+    ] {
+        let root = tempfile::tempdir()?;
+        let target = root.path().join("target");
+        let raced = target.clone();
+        let mut quirks = Quirks {
+            // The second rename into `target` is the one over the reserved file.
+            fail: vec![(Op::Rename, "target", 1, error)],
+            ..Quirks::vboxsf()
+        };
+        if written {
+            let racer: Racer = Box::new(move || {
+                fs::write(&raced, b"theirs").expect("write into the placeholder");
+            });
+            quirks.before = vec![(Op::Rename, "target", 1, racer)];
+        }
+        let _scope = FsQuirks::install(root.path(), quirks);
+        fs::write(root.path().join("source"), b"data")?;
 
-            assert_eq!(
-                place_in(root.path(), "source", "target", None),
-                Err(PlaceError::Io(Errno::IO)),
-                "written: {written}"
-            );
-            assert_eq!(fs::read(root.path().join("source"))?, b"data");
-            if written {
-                assert_eq!(fs::read(&target)?, b"theirs");
-            } else {
-                assert_eq!(names(root.path())?, ["source"]);
-            }
+        let case = format!("{error:?}, written: {written}");
+        assert_eq!(
+            place_in(root.path(), "source", "target", None),
+            Err(expected),
+            "{case}"
+        );
+        assert_eq!(fs::read(root.path().join("source"))?, b"data", "{case}");
+        if written {
+            assert_eq!(fs::read(&target)?, b"theirs", "{case}");
+        } else {
+            assert_eq!(names(root.path())?, ["source"], "{case}");
         }
     }
     Ok(())

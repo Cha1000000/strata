@@ -583,21 +583,7 @@ fn place_directory(
             Err(PlaceError::CrossDevice)
         }
         Err(error) if may_have_lost_reply(error) => {
-            match (fs.stat(from, true), fs.stat(to, true)) {
-                (Err(Errno::NOENT), Ok(target)) if target.identity == source.identity => {
-                    Ok(Placed::ReservedDirectory)
-                }
-                (Ok(current), Ok(target))
-                    if current.identity == source.identity && target.identity == placeholder =>
-                {
-                    remove_placeholder(fs, to, placeholder);
-                    Err(PlaceError::Io(error))
-                }
-                (Ok(current), _) if current.identity == source.identity => {
-                    Err(PlaceError::Io(error))
-                }
-                _ => Err(PlaceError::Unconfirmed),
-            }
+            moved_despite_lost_reply(fs, from, to, source, Placed::ReservedDirectory)
         }
         Err(error) => {
             remove_placeholder(fs, to, placeholder);
@@ -1063,29 +1049,24 @@ fn rename_over_reserved_file(
         Err(Errno::PERM) if exists(fs, to)? => return Err(PlaceError::Exists),
         Err(error) => return Err(file_creation_error(error)),
     };
-    let still_reserved = || {
-        fs.stat(to, true).is_ok_and(|current| {
-            current.identity == reserved
-                && current.kind == FileType::RegularFile
-                && current.size == 0
-        })
+    let still_reserved = || match fs.stat(to, true) {
+        Ok(current) => Ok(current.identity == reserved
+            && current.kind == FileType::RegularFile
+            && current.size == 0),
+        Err(Errno::NOENT) => Ok(false),
+        Err(error) => Err(PlaceError::Io(error)),
     };
-    if !still_reserved() {
+    if !still_reserved()? {
         return Err(PlaceError::Exists);
     }
     let error = match fs.rename(from, to, RenameFlags::empty()) {
         Ok(()) => return Ok(Placed::OverReservedFile),
         Err(error) => error,
     };
-    if may_have_lost_reply(error)
-        && matches!(fs.stat(from, true), Err(Errno::NOENT))
-        && fs
-            .stat(to, true)
-            .is_ok_and(|target| target.identity == source.identity)
-    {
-        return Ok(Placed::OverReservedFile);
+    if may_have_lost_reply(error) {
+        return moved_despite_lost_reply(fs, from, to, source, Placed::OverReservedFile);
     }
-    if still_reserved() {
+    if still_reserved() == Ok(true) {
         let _ = fs.unlink(to, AtFlags::empty());
     }
     Err(match error {
@@ -1093,6 +1074,27 @@ fn rename_over_reserved_file(
         Errno::XDEV => PlaceError::CrossDevice,
         error => PlaceError::Io(error),
     })
+}
+
+/// Decides a rename whose reply may have been lost without removing anything:
+/// libfuse without `use_ino` keeps a name's inode number then, so a
+/// placeholder's number at `to` can belong to the moved item.
+fn moved_despite_lost_reply(
+    fs: &dyn FsOps,
+    from: Entry<'_>,
+    to: Entry<'_>,
+    source: &EntryStat,
+    placed: Placed,
+) -> Result<Placed, PlaceError> {
+    if matches!(fs.stat(from, true), Err(Errno::NOENT))
+        && fs
+            .stat(to, true)
+            .is_ok_and(|target| target.identity == source.identity)
+    {
+        Ok(placed)
+    } else {
+        Err(PlaceError::Unconfirmed)
+    }
 }
 
 fn rename_folder_after_check(
@@ -1117,7 +1119,7 @@ fn rename_folder_after_check(
         }),
         Err(Errno::XDEV) => Err(PlaceError::CrossDevice),
         Err(error) if may_have_lost_reply(error) => {
-            resolve(fs, from, to, Some(source.identity), error).map(|()| Placed::AfterCheck)
+            moved_despite_lost_reply(fs, from, to, source, Placed::AfterCheck)
         }
         Err(error) => Err(PlaceError::Io(error)),
     }

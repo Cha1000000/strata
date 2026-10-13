@@ -103,6 +103,9 @@ pub(crate) struct Quirks {
     pub link_inodes: bool,
     /// Every entry reports one link, as sshfs does, whose SFTP attributes have none.
     pub single_link_count: bool,
+    /// A rename whose reply is lost leaves its target name reporting the inode
+    /// number it had, as libfuse without `use_ino` moves a node only on success.
+    pub lost_renames_keep_inodes: bool,
     /// Names rejected with `EINVAL` by rename, mkdir, symlink and create,
     /// and with `EPERM` by link, as on vfat.
     pub invalid_name: Option<fn(&OsStr) -> bool>,
@@ -165,6 +168,7 @@ impl Quirks {
             collisions_as_eperm: true,
             link_inodes: true,
             single_link_count: true,
+            lost_renames_keep_inodes: true,
             no_birth_time: true,
             ..Self::default()
         }
@@ -571,6 +575,23 @@ impl Scope {
         }
     }
 
+    fn inode_kept_on_lost_reply(&self, to: Entry<'_>) -> Option<u64> {
+        self.quirk(|quirks| quirks.lost_renames_keep_inodes)
+            .then(|| System.stat(to, false).ok())
+            .flatten()
+            .map(|stat| stat.identity.inode)
+    }
+
+    fn keep_inode(&self, to: Entry<'_>, kept: u64) {
+        if let (Some(dir), Ok(stat)) = (path_of(to.dir), System.stat(to, false))
+            && stat.identity.inode != kept
+        {
+            self.state()
+                .link_names
+                .insert(dir.join(to.name), (stat.identity.inode, kept));
+        }
+    }
+
     fn unlinked(&self, at: Entry<'_>) {
         if let Some(path) = path_of(at.dir) {
             self.state().link_names.remove(&path.join(at.name));
@@ -646,11 +667,18 @@ impl FsOps for Scoped {
             Op::Rename
         };
         match target {
-            Some(scope) => scope.run(op, &[from.name, to.name], |scope| {
-                scope.rename(from, to, flags)?;
-                scope.renamed(from, to, flags);
-                Ok(())
-            }),
+            Some(scope) => {
+                let kept = scope.inode_kept_on_lost_reply(to);
+                let renamed = scope.run(op, &[from.name, to.name], |scope| {
+                    scope.rename(from, to, flags)?;
+                    scope.renamed(from, to, flags);
+                    Ok(())
+                });
+                if let (Err(_), Some(kept)) = (renamed, kept) {
+                    scope.keep_inode(to, kept);
+                }
+                renamed
+            }
             None => System.rename(from, to, flags),
         }
     }
