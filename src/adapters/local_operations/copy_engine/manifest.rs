@@ -286,8 +286,20 @@ pub(super) fn delete(
         unlinks,
         kept: Mutex::default(),
     });
+    let steps = deletion.steps(&root, Path::new(""));
+    let workers = match steps.as_slice() {
+        // A moved file has no folder to share out.
+        [(_, _, Step::Entry(_))] => 1,
+        _ => {
+            let available = thread::available_parallelism()
+                .map(usize::from)
+                .unwrap_or(1);
+            let rotational = local_device_is_rotational(parent.as_fd()) == Some(true);
+            bounded_local_worker_count(available, rotational)
+        }
+    };
     let queue = Arc::new(WorkQueue::new(cancelled));
-    for (name, path, step) in deletion.steps(&root, Path::new("")) {
+    for (name, path, step) in steps {
         let at = At {
             deletion: deletion.clone(),
             parent: parent.clone(),
@@ -300,11 +312,6 @@ pub(super) fn delete(
             completion: None,
         });
     }
-    let available = thread::available_parallelism()
-        .map(usize::from)
-        .unwrap_or(1);
-    let rotational = local_device_is_rotational(parent.as_fd()) == Some(true);
-    let workers = bounded_local_worker_count(available, rotational);
     work_queue::run_workers(&queue, workers, Some(10), |work| {
         thread::Builder::new().spawn(work)
     });
