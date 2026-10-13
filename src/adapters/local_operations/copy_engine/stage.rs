@@ -3,6 +3,7 @@
 //! Hidden stages for copies, and publishing one without replacing anything.
 
 use std::{
+    collections::HashMap,
     ffi::{OsStr, OsString},
     os::fd::{AsFd, BorrowedFd, OwnedFd},
 };
@@ -11,6 +12,7 @@ use rustix::{
     fs::{FileType, Mode, RenameFlags},
     io::Errno,
 };
+use unicode_normalization::UnicodeNormalization;
 
 use crate::adapters::{
     local_operations::{
@@ -43,6 +45,43 @@ pub(super) fn names_never_collide(family: Family) -> bool {
     matches!(
         family,
         Family::Ext | Family::Xfs | Family::Btrfs | Family::F2fs | Family::Tmpfs
+    )
+}
+
+/// Which of a folder's names a filesystem that compares names loosely may
+/// take for another of them. Every name is, where one cannot be folded or
+/// looks like a FAT short name (`PROGRA~1`), which may alias any long name.
+pub(super) fn colliding(names: &[&OsStr]) -> Vec<bool> {
+    let short_name = |name: &&OsStr| {
+        name.as_encoded_bytes()
+            .windows(2)
+            .any(|pair| pair[0] == b'~' && pair[1].is_ascii_digit())
+    };
+    let keys = names.iter().map(|name| fold(name)).collect::<Option<Vec<_>>>();
+    let Some(keys) = keys.filter(|_| !names.iter().any(short_name)) else {
+        return vec![true; names.len()];
+    };
+    let mut counts = HashMap::<&str, usize>::new();
+    for key in &keys {
+        *counts.entry(key).or_default() += 1;
+    }
+    keys.iter().map(|key| counts[key.as_str()] > 1).collect()
+}
+
+/// The same for any two names a filesystem may take for one: compatibility
+/// forms decomposed, case folded, and without the trailing dots and spaces
+/// Windows drops. It may join names that differ, never split ones that alias.
+fn fold(name: &OsStr) -> Option<String> {
+    let name = name.to_str()?.trim_end_matches(['.', ' ']);
+    if name.is_ascii() {
+        return Some(name.to_ascii_lowercase());
+    }
+    Some(
+        name.nfkd()
+            .flat_map(char::to_uppercase)
+            .flat_map(char::to_lowercase)
+            .nfkd()
+            .collect(),
     )
 }
 

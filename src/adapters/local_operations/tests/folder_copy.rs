@@ -248,9 +248,11 @@ fn copying_into_a_setgid_folder_keeps_it_shared() -> Result<(), Box<dyn Error>> 
 #[test]
 fn a_lost_create_reply_inside_a_stage_is_adopted() -> Result<(), Box<dyn Error>> {
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock()?;
+    // `File.txt` and `file.txt` may be one name, so they are claimed first.
     for (op, name) in [
         (Op::Mkdir, "dir"),
         (Op::CreateNode, "file.txt"),
+        (Op::Create, "other.txt"),
         (Op::Symlink, "link"),
     ] {
         let mounts = mounts(Quirks {
@@ -260,21 +262,67 @@ fn a_lost_create_reply_inside_a_stage_is_adopted() -> Result<(), Box<dyn Error>>
         let source = mounts.sources.join("source");
         fs::create_dir_all(source.join("dir"))?;
         fs::write(source.join("dir/inner.txt"), b"inner")?;
-        fs::write(source.join("file.txt"), b"contents")?;
+        for file in ["File.txt", "file.txt", "other.txt"] {
+            fs::write(source.join(file), file)?;
+        }
         std::os::unix::fs::symlink("file.txt", source.join("link"))?;
         let target = mounts.destination.join("target");
 
         copy(&source, &target)?;
 
-        assert_eq!(names(&target)?, ["dir", "file.txt", "link"], "{op:?}");
+        assert_eq!(
+            names(&target)?,
+            ["File.txt", "dir", "file.txt", "link", "other.txt"],
+            "{op:?}"
+        );
         assert_eq!(fs::read(target.join("dir/inner.txt"))?, b"inner", "{op:?}");
-        assert_eq!(fs::read(target.join("file.txt"))?, b"contents", "{op:?}");
+        for file in ["File.txt", "file.txt", "other.txt"] {
+            assert_eq!(fs::read_to_string(target.join(file))?, file, "{op:?}");
+        }
         assert_eq!(fs::read_link(target.join("link"))?, Path::new("file.txt"));
         assert_eq!(
             calls_naming(&mounts.destination_scope, op, name),
             1,
             "{op:?}"
         );
+    }
+    Ok(())
+}
+
+#[test]
+fn only_names_that_may_collide_are_claimed() -> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock()?;
+    for (files, claimed) in [
+        (
+            &["Makefile", "makefile", "notes.txt", "readme."][..],
+            &["Makefile", "makefile"][..],
+        ),
+        (&["caf\u{e9}", "cafe\u{301}", "data.bin"], &["cafe\u{301}", "caf\u{e9}"]),
+        // A FAT short name may stand for any long name.
+        (&["PROGRA~1", "Program Files"], &["PROGRA~1", "Program Files"]),
+    ] {
+        let mounts = mounts(Quirks::nfs3())?;
+        let source = mounts.sources.join("source");
+        fs::create_dir(&source)?;
+        for file in files {
+            fs::write(source.join(file), file)?;
+        }
+        let target = mounts.destination.join("target");
+
+        copy(&source, &target)?;
+
+        for file in files {
+            assert_eq!(fs::read_to_string(target.join(file))?, *file);
+        }
+        let mut made = mounts
+            .destination_scope
+            .calls()
+            .into_iter()
+            .filter(|call| call.op == Op::CreateNode)
+            .flat_map(|call| call.names)
+            .collect::<Vec<_>>();
+        made.sort();
+        assert_eq!(made, claimed, "{files:?}");
     }
     Ok(())
 }
@@ -289,18 +337,16 @@ fn files_are_claimed_where_nodes_are_refused() -> Result<(), Box<dyn Error>> {
     })?;
     let source = mounts.sources.join("source");
     fs::create_dir(&source)?;
-    for index in 0..3 {
-        fs::write(source.join(format!("{index}.txt")), index.to_string())?;
+    let files = ["a.txt", "A.txt", "a.TXT"];
+    for file in files {
+        fs::write(source.join(file), file)?;
     }
     let target = mounts.destination.join("target");
 
     copy(&source, &target)?;
 
-    for index in 0..3 {
-        assert_eq!(
-            fs::read_to_string(target.join(format!("{index}.txt")))?,
-            index.to_string()
-        );
+    for file in files {
+        assert_eq!(fs::read_to_string(target.join(file))?, file);
     }
     let scope = &mounts.destination_scope;
     assert_eq!(scope.count(Op::CreateNode), 1, "learned once per copy");
@@ -315,7 +361,10 @@ fn a_claimed_name_swapped_for_a_pipe_fails_without_waiting() -> Result<(), Box<d
     let (sources, destination) = (root.path().join("sources"), root.path().join("destination"));
     fs::create_dir_all(sources.join("source"))?;
     fs::create_dir(&destination)?;
-    fs::write(sources.join("source/file.bin"), b"contents")?;
+    // Names that may be one are claimed before their files are opened.
+    for file in ["File.bin", "file.bin"] {
+        fs::write(sources.join("source").join(file), b"contents")?;
+    }
     let pipe = Arc::new(std::sync::Mutex::new(None));
     let racer: Racer = {
         let (destination, pipe) = (destination.clone(), pipe.clone());
@@ -579,7 +628,7 @@ fn a_copied_folder_keeps_its_hard_links_where_the_destination_can() -> Result<()
     };
     let rows: [(&str, Preset, Option<fn(&mut MountCapabilities)>, bool); 5] = [
         ("ext4", Quirks::ext4, None, true),
-        ("claimed names", Quirks::nfs3, None, true),
+        ("nfs3", Quirks::nfs3, None, true),
         (
             "in place",
             Quirks::without_folder_placement,

@@ -144,13 +144,38 @@ pub(super) fn walk(
     })
 }
 
-/// Whether names in a made folder are claimed one by one, in byte order,
-/// because the filesystem may take two names for one.
-fn claims_needed(fs: &dyn FsOps, family: Family, folder: BorrowedFd<'_>) -> bool {
-    !(stage::names_never_collide(family)
-        && fs
-            .file_flags(folder)
-            .is_ok_and(|flags| flags & CASEFOLD == 0))
+/// How the files of a made folder get their names.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(super) enum Naming {
+    /// Decided from the made folder itself.
+    Decide,
+    /// Each file job creates its file.
+    Create,
+    /// The filesystem may take two names for one, so names that may collide
+    /// are claimed in byte order before their files are written. A file job
+    /// adopts a file its own lost reply left, as NFS creates are not
+    /// idempotent.
+    Claim,
+    /// A folder a merge made in the live tree, where a claim that a stopped
+    /// merge left would be an empty file at a real name.
+    Live,
+}
+
+impl Naming {
+    fn decide(self, fs: &dyn FsOps, family: Family, folder: BorrowedFd<'_>) -> Self {
+        if self != Self::Decide {
+            return self;
+        }
+        let never_collide = stage::names_never_collide(family)
+            && fs
+                .file_flags(folder)
+                .is_ok_and(|flags| flags & CASEFOLD == 0);
+        if never_collide {
+            Self::Create
+        } else {
+            Self::Claim
+        }
+    }
 }
 
 /// A source folder and the folder this copy made for it, both opened when
@@ -164,8 +189,7 @@ pub(super) struct Folder {
     pub(super) parent: EntryStat,
     /// Beneath the walk's root.
     pub(super) path: PathBuf,
-    /// Decided from the made folder itself when `None`.
-    pub(super) claims: Option<bool>,
+    pub(super) naming: Naming,
     pub(super) mount: Mount,
     /// Names are linked only to names of the same scope: the whole made
     /// tree, or one merged folder.
@@ -199,15 +223,31 @@ impl Folder {
             return Err(Failure::Place(PlaceError::Changed));
         }
         let snapshot = Snapshot::read(fs, source.as_fd(), &source_stat)?;
-        let claims = self
-            .claims
-            .unwrap_or_else(|| claims_needed(fs, self.mount.family, target.as_fd()));
-        let children = children(fs, source.as_fd())?;
+        let naming = self
+            .naming
+            .decide(fs, self.mount.family, target.as_fd());
+        let mut used = HashSet::new();
+        let children = children(fs, source.as_fd())?
+            .into_iter()
+            .map(|(name, kind)| {
+                let target_name = fat_family_child_name(&name, copy.fat_family, &mut used);
+                (name, kind, target_name)
+            })
+            .collect::<Vec<_>>();
+        let colliding = if naming == Naming::Claim {
+            let names = children
+                .iter()
+                .map(|(_, _, name)| name.as_os_str())
+                .collect::<Vec<_>>();
+            stage::colliding(&names)
+        } else {
+            vec![false; children.len()]
+        };
         let made = Made {
             dir: Arc::new(target),
             stat: target_stat,
             path: self.path,
-            claims,
+            naming,
             mount: self.mount,
             link_scope: self.link_scope,
         };
@@ -227,22 +267,17 @@ impl Folder {
         }
         let group = Group::new(children.len(), TreeJob::Finish(tree.clone(), finish));
         let source = Arc::new(source);
-        let mut used = HashSet::new();
         let mut claimed = HashSet::new();
-        for (name, kind) in children {
+        for ((name, kind, target_name), colliding) in children.into_iter().zip(colliding) {
             copy.check_cancelled()?;
-            let target_name = fat_family_child_name(&name, copy.fat_family, &mut used);
-            made.make(
-                tree,
-                queue,
-                &source,
-                &name,
+            let child = Child {
+                name: &name,
                 kind,
-                &target_name,
-                &claimed,
-                &group,
-            )
-            .map_err(|failure| failure.named(&name))?;
+                target_name: &target_name,
+                claim: colliding,
+            };
+            made.make(tree, queue, &source, &child, &claimed, &group)
+                .map_err(|failure| failure.named(&name))?;
             claimed.insert(target_name);
         }
         Ok(())
@@ -254,33 +289,37 @@ struct Made {
     dir: Arc<OwnedFd>,
     stat: EntryStat,
     path: PathBuf,
-    claims: bool,
+    naming: Naming,
     mount: Mount,
     link_scope: usize,
 }
 
+/// A source folder's child and the name it gets in the made folder.
+struct Child<'a> {
+    name: &'a OsStr,
+    kind: FileType,
+    target_name: &'a OsStr,
+    /// The name may collide with a sibling's, so a file's name is claimed.
+    claim: bool,
+}
+
 impl Made {
-    /// Makes the child `target_name` for the source child `name`: a folder,
-    /// a link, or a file's claimed name, and queues what fills it.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "the walk's state and one child, borrowed from the folder job"
-    )]
+    /// Makes the target of `child`: a folder, a link, or a file's claimed
+    /// name, and queues what fills it.
     fn make(
         &self,
         tree: &Arc<Tree>,
         queue: &Queue,
         source: &Arc<OwnedFd>,
-        name: &OsStr,
-        kind: FileType,
-        target_name: &OsStr,
+        child: &Child<'_>,
         claimed: &HashSet<OsString>,
         group: &Arc<Group<TreeJob>>,
     ) -> Result<(), Failure> {
         let copy = &tree.copy;
+        let (name, target_name) = (child.name, child.target_name);
         let target = Entry::new(&*self.dir, target_name);
         let path = self.path.join(target_name);
-        match kind {
+        match child.kind {
             FileType::Directory => {
                 let created = claim_folder(copy.fs, target, Some(claimed))?;
                 tree.made(&path, created);
@@ -291,7 +330,7 @@ impl Made {
                         target: (self.dir.clone(), target_name.to_os_string(), created),
                         parent: self.stat,
                         path,
-                        claims: Some(self.claims),
+                        naming: self.naming,
                         mount: self.mount,
                         link_scope: self.link_scope,
                         completion: Some(group.clone()),
@@ -299,7 +338,7 @@ impl Made {
                 ));
             }
             FileType::RegularFile => {
-                let claimed = if self.claims {
+                let claimed = if child.claim {
                     let identity = claim_file(copy, target, claimed)?;
                     tree.made(&path, identity);
                     Some(identity)
@@ -315,6 +354,7 @@ impl Made {
                         target_name: target_name.to_os_string(),
                         parent: self.stat,
                         claimed,
+                        adopts: self.naming == Naming::Claim,
                         mount: self.mount,
                         path,
                         link_scope: self.link_scope,
@@ -426,13 +466,11 @@ fn claim_file(
     claimed: &HashSet<OsString>,
 ) -> Result<LocalFileIdentity, Failure> {
     let fs = copy.fs;
-    let fresh =
-        |stat: &EntryStat| stat.kind == FileType::RegularFile && stat.size == 0 && stat.nlink == 1;
     if !copy.nodes_refused.load(Ordering::Relaxed) {
         match fs.create_node(entry, Mode::from_raw_mode(0o600)) {
             Ok(()) => return Ok(fs.stat(entry, false)?.identity),
             Err(error) if taken(fs, entry, error) => {
-                return adopt(fs, entry, Some(claimed), fresh);
+                return adopt(fs, entry, Some(claimed), fresh_file);
             }
             Err(error)
                 if error == Errno::PERM || error == Errno::NOSYS || is_unsupported(error) =>
@@ -448,9 +486,14 @@ fn claim_file(
             fs.close(fd)?;
             Ok(identity)
         }
-        Err(error) if taken(fs, entry, error) => adopt(fs, entry, Some(claimed), fresh),
+        Err(error) if taken(fs, entry, error) => adopt(fs, entry, Some(claimed), fresh_file),
         Err(error) => Err(error.into()),
     }
+}
+
+/// As fresh as creating a file leaves it.
+fn fresh_file(stat: &EntryStat) -> bool {
+    stat.kind == FileType::RegularFile && stat.size == 0 && stat.nlink == 1
 }
 
 pub(super) fn read_link(fs: &dyn FsOps, at: Entry<'_>) -> Result<OsString, Failure> {
@@ -500,6 +543,8 @@ pub(super) struct File {
     parent: EntryStat,
     /// What the folder job claimed; `None` makes the file exclusively.
     claimed: Option<LocalFileIdentity>,
+    /// A taken name may be the file's own, from a lost reply.
+    adopts: bool,
     mount: Mount,
     /// Beneath the walk's root.
     path: PathBuf,
@@ -551,27 +596,24 @@ impl File {
             return Ok(role);
         }
         let target = Entry::new(&*self.target, &self.target_name);
-        let fd = match self.claimed {
-            Some(_) => fs.open_write(target).map_err(|error| match error {
-                // A pipe without a reader took the claim's place.
-                Errno::NXIO => Failure::Place(PlaceError::Changed),
-                error => error.into(),
-            })?,
-            None => fs
-                .create_exclusive(target, Mode::from_raw_mode(0o600))
-                .map_err(|error| {
-                    if taken(fs, target, error) {
-                        Failure::Place(PlaceError::Exists)
-                    } else {
-                        error.into()
-                    }
-                })?,
+        let (fd, expected) = match self.claimed {
+            Some(claimed) => (open_made(fs, target)?, Some(claimed)),
+            None => match fs.create_exclusive(target, Mode::from_raw_mode(0o600)) {
+                Ok(fd) => (fd, None),
+                Err(error) if !taken(fs, target, error) => return Err(error.into()),
+                Err(_) if self.adopts => {
+                    let identity = adopt(fs, target, Some(&HashSet::new()), fresh_file)?;
+                    tree.made(&self.path, identity);
+                    (open_made(fs, target)?, Some(identity))
+                }
+                Err(_) => return Err(Failure::Place(PlaceError::Exists)),
+            },
         };
         let created = fs.stat_fd(fd.as_fd())?;
-        match self.claimed {
-            Some(claimed) => {
+        match expected {
+            Some(expected) => {
                 let ours = if stable_inodes(self.mount.family) {
-                    created.identity == claimed
+                    created.identity == expected
                 } else {
                     created.kind == FileType::RegularFile && created.size == 0
                 };
@@ -606,6 +648,15 @@ impl File {
         }
         Ok(role)
     }
+}
+
+/// Opens a file this copy made earlier, for writing.
+fn open_made(fs: &dyn FsOps, target: Entry<'_>) -> Result<OwnedFd, Failure> {
+    fs.open_write(target).map_err(|error| match error {
+        // A pipe without a reader took the file's place.
+        Errno::NXIO => Failure::Place(PlaceError::Changed),
+        error => error.into(),
+    })
 }
 
 /// A made folder's own metadata, once its last child is done.
@@ -759,9 +810,7 @@ impl Live {
                         target: (self.dir.clone(), target_name.to_os_string(), created),
                         parent: self.stat,
                         path,
-                        // A merge that stops would leave its unfilled claims
-                        // as empty files at real names.
-                        claims: Some(false),
+                        naming: Naming::Live,
                         mount: self.mount,
                         link_scope: self.link_scope,
                         completion: None,
@@ -777,6 +826,7 @@ impl Live {
                     target_name: target_name.to_os_string(),
                     parent: self.stat,
                     claimed: None,
+                    adopts: false,
                     mount: self.mount,
                     path,
                     link_scope: self.link_scope,

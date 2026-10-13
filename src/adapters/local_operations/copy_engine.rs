@@ -432,7 +432,7 @@ fn fill(
         target: (root.parent.clone(), root.name.clone(), root.identity),
         parent,
         path: PathBuf::new(),
-        claims: None,
+        naming: tree::Naming::Decide,
         mount,
         link_scope: 0,
         completion: None,
