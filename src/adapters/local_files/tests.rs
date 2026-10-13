@@ -543,6 +543,59 @@ fn change_events_for_unnamed_temporary_files_are_ignored() -> Result<(), Box<dyn
 }
 
 #[test]
+fn a_file_linked_into_place_is_queried_once() -> Result<(), Box<dyn Error>> {
+    use std::os::fd::AsRawFd;
+
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let directory = unique_fixture_root("monitor-linked");
+    fs::create_dir_all(&directory)?;
+    let changes: Rc<RefCell<Vec<DirectoryChange>>> = Rc::default();
+    let collected = changes.clone();
+    let handle = LocalFileSource
+        .watch(
+            Location::local(&directory),
+            false,
+            Rc::new(move |change| collected.borrow_mut().push(change)),
+        )
+        .expect("the native location should be monitored");
+    let linked = Location::local(directory.join("linked.txt"));
+    let queries = || {
+        changes
+            .borrow()
+            .iter()
+            .filter(|change| matches!(change, DirectoryChange::Upsert(entry) if entry.location == linked))
+            .count()
+    };
+
+    let mut file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .mode(0o600)
+        .custom_flags(libc::O_TMPFILE)
+        .open(&directory)?;
+    file.write_all(b"contents")?;
+    rustix::fs::linkat(
+        rustix::fs::CWD,
+        format!("/proc/self/fd/{}", file.as_raw_fd()),
+        rustix::fs::CWD,
+        directory.join("linked.txt"),
+        rustix::fs::AtFlags::SYMLINK_FOLLOW,
+    )?;
+    drop(file);
+    drain_until(|| queries() > 0);
+    // GLib sends the linked name's changes-done hint two seconds later.
+    let settled = Instant::now() + Duration::from_millis(2_500);
+    drain_until(|| Instant::now() >= settled);
+    drop(handle);
+    fs::remove_dir_all(&directory)?;
+
+    assert_eq!(queries(), 1, "{:?}", changes.borrow());
+    Ok(())
+}
+
+#[test]
 fn sustained_native_monitor_bursts_flush_without_rescanning() {
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
         .lock()

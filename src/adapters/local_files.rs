@@ -1415,6 +1415,7 @@ impl FileSource for LocalFileSource {
         >::new()));
         let timeout = Rc::new(RefCell::new(None::<glib::SourceId>));
         let numbered = Rc::new(RefCell::new(NumberedNames::default()));
+        let awaited = RefCell::new(AwaitedHints::default());
         let pending_for_change = pending.clone();
         let timeout_for_change = timeout.clone();
         let cancelled_for_change = cancelled.clone();
@@ -1445,6 +1446,9 @@ impl FileSource for LocalFileSource {
                     );
                     return;
                 }
+            }
+            if !awaited.borrow_mut().needs_query(&change, event) {
+                return;
             }
             if pending_for_change.borrow().contains_key(&None) {
                 return;
@@ -2033,6 +2037,31 @@ fn visible_monitor_change(
             }
         }
         change => Some(change),
+    }
+}
+
+/// GLib follows every write with `Changed` before the `ChangesDoneHint` that ends the
+/// name's changes, so a hint after a `Created` or `Changed` this watch queried adds nothing.
+/// A file linked into place, as copies publish files, gets its hint two seconds late.
+#[derive(Default)]
+struct AwaitedHints(HashSet<Location>);
+
+impl AwaitedHints {
+    fn needs_query(&mut self, change: &PendingMonitorChange, event: gio::FileMonitorEvent) -> bool {
+        let PendingMonitorChange::Upsert(location) = change else {
+            return true;
+        };
+        if location.native_path().is_none() {
+            return true;
+        }
+        match event {
+            gio::FileMonitorEvent::Created | gio::FileMonitorEvent::Changed => {
+                self.0.insert(location.clone());
+                true
+            }
+            gio::FileMonitorEvent::ChangesDoneHint => !self.0.remove(location),
+            _ => true,
+        }
     }
 }
 
