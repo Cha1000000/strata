@@ -101,6 +101,73 @@ fn replacement_publication_preserves_concurrent_arrivals() -> Result<(), Box<dyn
 }
 
 #[test]
+fn a_replacement_reports_what_it_left_out_only_once_it_is_published() -> Result<(), Box<dyn Error>>
+{
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    for published in [true, false] {
+        let root = tempfile::tempdir()?;
+        let source = root.path().join("source");
+        let target = root.path().join("target");
+        fs::create_dir(&source)?;
+        fs::create_dir(&target)?;
+        fs::write(source.join("a.txt"), b"incoming")?;
+        fs::write(target.join("old.txt"), b"old")?;
+        let _socket = std::os::unix::net::UnixListener::bind(source.join("socket"))?;
+        let fail = if published {
+            Vec::new()
+        } else {
+            vec![(Op::Rename, ".strata-replacement-*", 0, Errno::IO)]
+        };
+        let _scope = FsQuirks::install(
+            root.path(),
+            Quirks {
+                fail,
+                ..Quirks::default()
+            },
+        );
+        let skipped = Rc::new(RefCell::new(Vec::new()));
+        let reported = skipped.clone();
+        let progress = TransferProgressTracker::new(
+            OperationRequestId(1),
+            None,
+            None,
+            Rc::new(move |event| {
+                if let OperationEvent::ItemsReported { report, .. } = event {
+                    reported.borrow_mut().extend(report.skipped);
+                }
+            }),
+        );
+
+        let result = glib::MainContext::default().block_on(replace_local_with(
+            gio::File::for_path(&source),
+            gio::File::for_path(&target),
+            false,
+            gio::Cancellable::new(),
+            None,
+            Copying {
+                progress: Some(progress),
+                fat_family: false,
+            },
+            &|_| {},
+        ));
+
+        assert_eq!(result.is_ok(), published, "{result:?}");
+        let expected = if published {
+            vec![crate::services::SkippedItem {
+                location: Location::local(target.join("socket")),
+                kind: crate::services::SpecialKind::Socket,
+            }]
+        } else {
+            Vec::new()
+        };
+        assert_eq!(*skipped.borrow(), expected, "published: {published}");
+    }
+    Ok(())
+}
+
+#[test]
 fn replacement_publication_reports_a_stage_it_cannot_remove() -> Result<(), Box<dyn Error>> {
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
         .lock()

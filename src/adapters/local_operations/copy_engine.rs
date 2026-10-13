@@ -171,14 +171,15 @@ pub(super) async fn copy_local(
 
 /// Copies the native item at `source` into a hidden sibling of `target`,
 /// which Replace publishes, and returns it with what it took from the
-/// source with [`Options::manifest`].
+/// source with [`Options::manifest`], and what to report once it is
+/// published.
 pub(super) async fn copy_to_stage(
     source: PathBuf,
     target: PathBuf,
     options: Options,
     progress: Option<Rc<TransferProgressTracker>>,
     cancellable: &gio::Cancellable,
-) -> Result<(StagedSibling, Option<Manifest>), glib::Error> {
+) -> Result<(StagedSibling, Option<Manifest>, TransferReport), glib::Error> {
     let root = target.clone();
     let followed = following(
         source,
@@ -195,8 +196,7 @@ pub(super) async fn copy_to_stage(
     )
     .await?;
     let staged = followed.value?;
-    report(progress.as_deref(), &root, followed.left);
-    Ok((staged, followed.manifest))
+    Ok((staged, followed.manifest, left_report(&root, followed.left)))
 }
 
 /// What the native item at `source` holds now, for a move that GIO copies.
@@ -259,11 +259,15 @@ fn rebase(path: &mut PathBuf, from: &Path, to: &Path) {
 
 /// Tells `progress` what the copy left inside the item at `root`.
 fn report(progress: Option<&TransferProgressTracker>, root: &Path, left: Left) {
-    let Some(progress) = progress else {
-        return;
-    };
+    if let Some(progress) = progress {
+        progress.report(left_report(root, left));
+    }
+}
+
+/// What the copy left inside the item at `root`.
+fn left_report(root: &Path, left: Left) -> TransferReport {
     let location = |path: PathBuf| Location::local(root.join(path));
-    progress.report(TransferReport {
+    TransferReport {
         renamed: left
             .renamed
             .into_iter()
@@ -282,7 +286,7 @@ fn report(progress: Option<&TransferProgressTracker>, root: &Path, left: Left) {
             })
             .collect(),
         ..TransferReport::default()
-    });
+    }
 }
 
 /// Runs `work` on a worker thread while `progress` follows it.

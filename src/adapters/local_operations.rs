@@ -3505,7 +3505,7 @@ async fn replace_through_stage(
     target_path: &Path,
     cancellable: &gio::Cancellable,
     copying: Copying,
-) -> Result<(StagedReplacement, Option<copy_engine::Manifest>), glib::Error> {
+) -> Result<(StagedReplacement, StagedCopy), glib::Error> {
     let in_trash = |error: glib::Error, removal: Removal| match removal {
         Removal::Trashed => original_in_trash(&crate::services::gio_error_detail(&error)),
         _ => error,
@@ -3515,7 +3515,7 @@ async fn replace_through_stage(
         manifest: moving,
         ..copy_engine::Options::default()
     };
-    let (staged, sources) = copy_engine::copy_to_stage(
+    let (staged, sources, report) = copy_engine::copy_to_stage(
         source_path.to_path_buf(),
         target_path.to_path_buf(),
         options,
@@ -3524,6 +3524,7 @@ async fn replace_through_stage(
     )
     .await
     .map_err(|error| in_trash(error, removal))?;
+    let copied = (sources, report);
     loop {
         let parent = staged.parent.clone();
         let step_plan = plan.clone();
@@ -3534,11 +3535,11 @@ async fn replace_through_stage(
                     original: ReplacedOriginal::Trashed(plan.trashed_original()),
                     displaced: None,
                 };
-                return Ok((replaced, sources));
+                return Ok((replaced, copied));
             }
             Removal::Without(Displacement::SetAside) => {
                 let replaced = set_aside_and_publish(plan, staged, target_path).await?;
-                return Ok((replaced, sources));
+                return Ok((replaced, copied));
             }
             Removal::Trash => {
                 let (path, cancellable) = (target_path.to_path_buf(), cancellable.clone());
@@ -3596,7 +3597,7 @@ async fn replace_through_stage(
                                 identity: plan.target.identity,
                             }),
                         };
-                        return Ok((replaced, sources));
+                        return Ok((replaced, copied));
                     }
                     Ok(Some(next)) => Ok(next),
                     Err(error) => Err(error),
@@ -3729,7 +3730,7 @@ async fn replace_local_with(
         }
     };
     let progress = copying.progress.clone();
-    let (replaced, sources) = replace_through_stage(
+    let (replaced, (sources, report)) = replace_through_stage(
         &plan,
         removal,
         (&source_path, move_source),
@@ -3739,6 +3740,9 @@ async fn replace_local_with(
     )
     .await?;
     on_replaced(replaced.original);
+    if let Some(progress) = &progress {
+        progress.report(report);
+    }
     let flushed = replaced.displaced.is_some();
     if let Some(original) = replaced.displaced {
         remove_displaced_original(original, Some(&target_path), &plan.target_display()).await?;
@@ -3760,6 +3764,10 @@ async fn publish_staged_replacement(
         .await
         .map_err(|error| original_in_trash(&crate::services::gio_error_detail(&error)))
 }
+
+/// What a Replace took from a moved source, and what to report once the
+/// replacement is published.
+type StagedCopy = (Option<copy_engine::Manifest>, TransferReport);
 
 /// How a copy reports its progress and names what it makes.
 #[derive(Clone, Default)]
