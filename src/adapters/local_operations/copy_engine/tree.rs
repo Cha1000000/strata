@@ -333,7 +333,7 @@ impl Made {
                 if tree.created.is_some() {
                     tree.made(&path, copy.fs.stat(target, false)?.identity);
                 }
-                copy.progress.add_file();
+                copy.add_file();
                 queue.complete(Some(group.clone()));
             }
         }
@@ -514,7 +514,7 @@ impl File {
         match tree.copy.with_data(|data| self.copy(tree, data)) {
             Ok(role) => {
                 if role != Role::Later {
-                    tree.copy.progress.add_file();
+                    tree.copy.add_file();
                 }
                 queue.complete(self.completion);
             }
@@ -791,7 +791,7 @@ impl Live {
                     &self.mount,
                     None,
                 )?;
-                copy.progress.add_file();
+                copy.add_file();
             }
         }
         Ok(())

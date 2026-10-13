@@ -263,7 +263,7 @@ fn copy_new(
                 &mount,
                 None,
             )?;
-            copy.progress.add_file();
+            copy.add_file();
             Ok(())
         }
         FileType::Directory => {
@@ -310,7 +310,7 @@ fn copy_stage(
                     return Err(copy.discarding(staged, error.into()));
                 }
             }
-            copy.progress.add_file();
+            copy.add_file();
             Ok(staged)
         }
         FileType::Directory => {
@@ -847,6 +847,13 @@ impl Copy {
         )
     }
 
+    /// Counts a completed file, unless this copy repeats one already counted.
+    fn add_file(&self) {
+        if self.counted {
+            self.progress.add_file();
+        }
+    }
+
     fn check_cancelled(&self) -> Result<(), Failure> {
         if self.cancelled.load(Ordering::Acquire) {
             return Err(Failure::Cancelled);
@@ -1138,7 +1145,7 @@ impl<'a> FileCopy<'a> {
             placement::remove_if_unchanged(fs, self.at(&name), created.identity, AtFlags::empty());
             return Err(error.into());
         }
-        self.copy.progress.add_file();
+        self.copy.add_file();
         Ok((name, created.identity))
     }
 
@@ -1246,7 +1253,7 @@ impl<'a> FileCopy<'a> {
             return Err(self.discard(&stage, failure));
         }
         let FileTarget::Final(name) = target else {
-            self.copy.progress.add_file();
+            self.copy.add_file();
             return Ok((stage.name, stage.created.identity));
         };
         let placed = stage::publish(fs, self.dir, &stage.name, stage.created.identity, name);
@@ -1280,7 +1287,7 @@ impl<'a> FileCopy<'a> {
             }
             Err(error) => return Err(self.discard(&stage, Failure::Place(error))),
         };
-        self.copy.progress.add_file();
+        self.copy.add_file();
         Ok((name.to_os_string(), identity))
     }
 

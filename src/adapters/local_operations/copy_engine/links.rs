@@ -198,8 +198,8 @@ impl Links {
             }
             if copy.counted {
                 copy.progress.add_bytes(name.size);
-                copy.progress.add_file();
             }
+            copy.add_file();
         }
         let stable = stable_inodes(family);
         for folder in retimed {

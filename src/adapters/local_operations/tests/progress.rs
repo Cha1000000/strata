@@ -565,6 +565,64 @@ fn linked_names_count_as_copied_before_their_folder_is_published() -> Result<(),
 }
 
 #[test]
+fn a_folder_copied_out_of_its_stage_counts_each_file_once() -> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let root = tempfile::tempdir()?;
+    let tree = root.path().join("source/tree");
+    let destination = root.path().join("destination");
+    fs::create_dir_all(tree.join("sub"))?;
+    fs::create_dir(&destination)?;
+    for index in 0..4 {
+        fs::write(tree.join(index.to_string()), b"x")?;
+        fs::write(tree.join(format!("sub/{index}")), b"y")?;
+    }
+    std::os::unix::fs::symlink("0", tree.join("link"))?;
+    // The stage cannot be placed, so it is copied to its final name.
+    let _destination = FsQuirks::install(&destination, Quirks::without_placement());
+
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let emitted = events.clone();
+    let _operation = LocalOperationProvider.paste(
+        PasteRequest {
+            id: OperationRequestId(32),
+            destination: Location::local(&destination),
+            items: vec![PasteItem {
+                source: Location::local(&tree),
+                conflict: TransferConflict::FailIfExists,
+            }],
+            move_sources: false,
+        },
+        Rc::new(move |event| emitted.borrow_mut().push(event)),
+    );
+    drive_until_transfer_settles(&events);
+
+    let events = events.borrow();
+    assert!(
+        matches!(events.last(), Some(OperationEvent::Pasted { .. })),
+        "{events:?}"
+    );
+    assert_eq!(fs::read(destination.join("tree/sub/3"))?, b"y");
+    let files = events
+        .iter()
+        .filter_map(|event| match event {
+            OperationEvent::TransferProgress {
+                completed_files,
+                total_files,
+                ..
+            } => Some((*completed_files, *total_files)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        files.iter().all(|files| *files == (files.0, Some(9)) && files.0 <= 9),
+        "{files:?}"
+    );
+    Ok(())
+}
+
+#[test]
 fn bulk_copy_preserves_symlinks_and_one_file_directories() -> Result<(), Box<dyn Error>> {
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
         .lock()
