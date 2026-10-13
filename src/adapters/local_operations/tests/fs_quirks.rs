@@ -8,7 +8,7 @@
 use std::{
     collections::{HashMap, HashSet},
     ffi::{OsStr, OsString},
-    os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd},
+    os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd, RawFd},
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex, MutexGuard,
@@ -325,6 +325,9 @@ struct State {
     written: HashSet<(u64, u64)>,
     /// Names whose entries report another inode number, as after an eviction.
     renumbered: HashSet<PathBuf>,
+    /// Writebacks lost so far, and how many each open folder has reported.
+    writebacks_lost: u64,
+    reported_losses: HashMap<RawFd, u64>,
 }
 
 static SCOPES: Mutex<Vec<Arc<Scope>>> = Mutex::new(Vec::new());
@@ -354,6 +357,8 @@ impl FsQuirks {
                 stale: HashMap::new(),
                 written: HashSet::new(),
                 renumbered: HashSet::new(),
+                writebacks_lost: 0,
+                reported_losses: HashMap::new(),
             }),
         });
         scopes().push(scope.clone());
@@ -363,6 +368,14 @@ impl FsQuirks {
 
     pub(crate) fn key(&self) -> MountKey {
         MountKey::Test(self.scope.id)
+    }
+
+    /// Loses a writeback in this scope, from a racer: as errseq does,
+    /// `syncfs` reports it once through each folder opened before, and
+    /// never through one opened after.
+    pub(crate) fn writeback_loser(&self) -> impl Fn() + Send + Sync + 'static {
+        let scope = self.scope.clone();
+        move || scope.state().writebacks_lost += 1
     }
 
     pub(crate) fn calls(&self) -> Vec<Call> {
@@ -1301,7 +1314,18 @@ impl FsOps for Scoped {
 
     fn sync_fs(&self, fd: BorrowedFd<'_>) -> Result<(), Errno> {
         assert_off_main_thread();
-        on_fd(fd, Op::SyncFs, None, |_| System.sync_fs(fd))
+        on_fd(fd, Op::SyncFs, None, |scope| {
+            if let Some(scope) = scope {
+                let mut state = scope.state();
+                let lost = state.writebacks_lost;
+                let reported = state.reported_losses.entry(fd.as_raw_fd()).or_default();
+                if lost > *reported {
+                    *reported = lost;
+                    return Err(Errno::IO);
+                }
+            }
+            System.sync_fs(fd)
+        })
     }
 
     fn sync_dir(&self, fd: BorrowedFd<'_>) -> Result<(), Errno> {
@@ -1425,7 +1449,11 @@ impl FsOps for Scoped {
         assert_off_main_thread();
         match scope_for(at.dir) {
             Some(scope) => scope.run(Op::OpenDir, &[at.name], |scope| {
-                scope.resolved(at, |at| System.open_dir(at))
+                let opened = scope.resolved(at, |at| System.open_dir(at))?;
+                let mut state = scope.state();
+                let lost = state.writebacks_lost;
+                state.reported_losses.insert(opened.as_raw_fd(), lost);
+                Ok(opened)
             }),
             None => System.open_dir(at),
         }

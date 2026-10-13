@@ -1431,3 +1431,63 @@ fn moved_files_are_synced_on_smb_whatever_the_conflict() -> Result<(), Box<dyn E
     }
     Ok(())
 }
+
+#[test]
+fn a_writeback_lost_during_a_move_keeps_every_source_it_may_hold() -> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let _limits = LimitsGuard::set(NO_LIMITS);
+    // The first copy's writeback is lost once it is published, with one
+    // item, or with a second whose barrier is opened after the loss.
+    for (id, names) in (440..).zip([&["a"][..], &["a", "b"][..]]) {
+        let root = tempfile::tempdir()?;
+        let sources = root.path().join("sources");
+        let destination = root.path().join("destination");
+        fs::create_dir(&sources)?;
+        fs::create_dir(&destination)?;
+        let mut paths = Vec::new();
+        for name in names {
+            fs::write(sources.join(name), name)?;
+            paths.push(sources.join(name));
+        }
+        let _sources = FsQuirks::install(&sources, Quirks::default());
+        let loser: Arc<std::sync::Mutex<Option<Box<dyn Fn() + Send + Sync>>>> = Arc::default();
+        let lose = loser.clone();
+        let scope = FsQuirks::install(
+            &destination,
+            Quirks {
+                after: vec![(
+                    Op::LinkFd,
+                    "*",
+                    0,
+                    Box::new(move || {
+                        if let Some(lose) = &*lose.lock().unwrap_or_else(|error| error.into_inner())
+                        {
+                            lose();
+                        }
+                    }),
+                )],
+                ..Quirks::ext4()
+            },
+        );
+        *loser.lock().unwrap_or_else(|error| error.into_inner()) =
+            Some(Box::new(scope.writeback_loser()));
+
+        let (_operation, events, early) =
+            paste_moves(id, &destination, &paths, &Barriers::new(), None);
+        pump_until_transfer(&events);
+
+        assert!(
+            matches!(terminal_transfer(&events.borrow()),
+                Some(OperationEvent::TransferFailed { message, .. })
+                if message.contains("writes may still be pending")),
+            "{names:?}: {:?}",
+            events.borrow()
+        );
+        assert!(paths.iter().all(|path| path.exists()), "{names:?}");
+        assert_eq!(moved_count(&events.borrow()), 0, "{names:?}");
+        assert!(early.borrow().is_empty(), "{names:?}");
+    }
+    Ok(())
+}
