@@ -221,13 +221,13 @@ async fn copy_new_recursively(
     copy_new_recursively_with_progress(source, target, cancellable, None).await
 }
 
-/// Copies `source` to `target` with `workers`, and returns what the copy
-/// reported.
-fn copy_reporting(
+/// Copies `source` to `destination` with `workers`, and returns how the copy
+/// ended and what it reported.
+fn reporting(
     source: &Path,
-    target: &Path,
+    destination: super::copy_engine::Destination,
     workers: Option<usize>,
-) -> Result<crate::services::TransferReport, Box<dyn Error>> {
+) -> (Result<(), glib::Error>, crate::services::TransferReport) {
     let reported = Rc::new(RefCell::new(crate::services::TransferReport::default()));
     let events = reported.clone();
     let progress = TransferProgressTracker::new(
@@ -240,17 +240,41 @@ fn copy_reporting(
             }
         }),
     );
-    glib::MainContext::default().block_on(super::copy_engine::copy_local(
+    let copied = glib::MainContext::default().block_on(super::copy_engine::copy_local(
         source.to_path_buf(),
-        super::copy_engine::Destination::New(target.to_path_buf(), Taken::Fail),
+        destination,
         super::copy_engine::Options {
             workers,
             ..super::copy_engine::Options::default()
         },
         Some(progress),
         &gio::Cancellable::new(),
-    ))?;
-    Ok(reported.take())
+    ));
+    (copied.map(drop), reported.take())
+}
+
+/// Copies `source` to `target` with `workers`, and returns what the copy
+/// reported.
+fn copy_reporting(
+    source: &Path,
+    target: &Path,
+    workers: Option<usize>,
+) -> Result<crate::services::TransferReport, Box<dyn Error>> {
+    let destination = super::copy_engine::Destination::New(target.to_path_buf(), Taken::Fail);
+    let (copied, reported) = reporting(source, destination, workers);
+    copied?;
+    Ok(reported)
+}
+
+/// Merges `source` into the folder `target` with `workers`, and returns how
+/// the merge ended and what it reported.
+fn merge_reporting(
+    source: &Path,
+    target: &Path,
+    workers: Option<usize>,
+) -> (Result<(), glib::Error>, crate::services::TransferReport) {
+    let destination = super::copy_engine::Destination::Merge(target.to_path_buf());
+    reporting(source, destination, workers)
 }
 
 fn terminal_transfer(events: &[OperationEvent]) -> Option<&OperationEvent> {

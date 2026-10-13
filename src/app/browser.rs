@@ -488,13 +488,23 @@ struct MergeUndoState {
 }
 
 impl MergeUndoState {
-    /// Undo removes what a merge created under the names it was saved as.
+    /// Undo removes what a merge created under the names it was saved as. An
+    /// overwritten original stays in Trash when its incoming copy was saved
+    /// elsewhere, as another item has its name.
     fn rename(&mut self, renamed: &[RenamedItem]) {
         for item in renamed {
             for created in &mut self.created {
                 if *created == item.requested {
                     *created = item.saved_as.clone();
                 }
+            }
+            if let Some(index) = self
+                .overwritten
+                .iter()
+                .position(|overwritten| *overwritten == item.requested)
+            {
+                self.overwritten.remove(index);
+                self.created.push(item.saved_as.clone());
             }
         }
     }

@@ -1,15 +1,16 @@
 // SPDX-License-Identifier: MIT
 
-//! Hard links within one copied item. Only the first name of a source file
-//! with several names is copied. Once every file is written, each later name
-//! is linked to that copy, or copied from it where the destination refuses.
+//! Hard links within one copied item, or one merge stage. Only the first
+//! name of a source file with several names is copied. Once every file of
+//! its scope is written, each later name is linked to that copy, or copied
+//! from it where the destination refuses.
 
 use std::{
     collections::{HashMap, HashSet, hash_map},
     ffi::OsString,
     os::fd::{AsFd, BorrowedFd, OwnedFd},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, PoisonError},
+    sync::{Arc, Mutex},
 };
 
 use rustix::{fs::AtFlags, io::Errno};
@@ -20,16 +21,19 @@ use super::{
     restrictive, stable_inodes,
     tree::{self, Names},
 };
-use crate::adapters::{
-    local_operations::{
-        LocalFileIdentity,
-        fs_ops::{Entry, FsOps},
-        placement::{self, PlaceError},
+use crate::{
+    adapters::{
+        local_operations::{
+            LocalFileIdentity,
+            fs_ops::{Entry, FsOps},
+            placement::{self, PlaceError},
+        },
+        volume::{Family, MountKey},
     },
-    volume::{Family, MountKey},
+    services::RenameCause,
 };
 
-/// A source file by device and inode, within one link scope.
+/// A source file by device and inode, within one scope.
 pub(super) type Key = (usize, u64, u64);
 
 /// How a name of a source file with several names is made.
@@ -52,8 +56,8 @@ pub(super) struct Name {
     pub(super) source: OsString,
     /// What the folder job claimed at `path`.
     pub(super) claimed: Option<LocalFileIdentity>,
-    /// The names of its folder, where this copy made it.
-    pub(super) names: Option<Arc<Names>>,
+    /// The names of its folder.
+    pub(super) names: Arc<Names>,
     pub(super) size: u64,
 }
 
@@ -64,6 +68,7 @@ struct First {
 
 /// A made folder that gains a later name after it got its times.
 struct Retimed {
+    scope: usize,
     path: PathBuf,
     identity: LocalFileIdentity,
     snapshot: Snapshot,
@@ -87,8 +92,8 @@ enum Probe {
 struct State {
     firsts: HashMap<Key, First>,
     later: Vec<Name>,
-    /// The folders later names land in.
-    folders: HashSet<PathBuf>,
+    /// The folders later names land in, by scope.
+    folders: HashSet<(usize, PathBuf)>,
     retimed: Vec<Retimed>,
 }
 
@@ -127,7 +132,7 @@ impl Links {
             }
             hash_map::Entry::Occupied(_) => {
                 if let Some(folder) = name.path.parent() {
-                    state.folders.insert(folder.to_path_buf());
+                    state.folders.insert((name.key.0, folder.to_path_buf()));
                 }
                 state.later.push(name);
                 Role::Later
@@ -142,12 +147,19 @@ impl Links {
         }
     }
 
-    /// Keeps the times of the made folder at `path` for after the links
-    /// pass, when a later name lands in it.
-    pub(super) fn retime(&self, path: &Path, identity: LocalFileIdentity, snapshot: Snapshot) {
+    /// Keeps the times of the made folder at `path` in `scope` for after
+    /// the links pass, when a later name lands in it.
+    pub(super) fn retime(
+        &self,
+        scope: usize,
+        path: &Path,
+        identity: LocalFileIdentity,
+        snapshot: Snapshot,
+    ) {
         let mut state = lock(&self.state);
-        if state.folders.contains(path) {
+        if state.folders.contains(&(scope, path.to_path_buf())) {
             state.retimed.push(Retimed {
+                scope,
                 path: path.to_path_buf(),
                 identity,
                 snapshot,
@@ -166,35 +178,46 @@ impl Links {
         lock(&self.state).later.is_empty()
     }
 
-    /// Makes every later name beneath `root`, in path order, then gives the
-    /// folders they land in their times back. Runs while every folder is
-    /// still open to its owner.
+    /// Makes every later name of `scope` beneath `root`, the folder at
+    /// `base` beneath the walk's root, in path order, then gives the folders
+    /// they land in their times back. Runs while every folder is still open
+    /// to its owner.
     pub(super) fn make(
-        self,
+        &self,
+        scope: usize,
         copy: &Copy,
         root: BorrowedFd<'_>,
+        base: &Path,
         family: Family,
         created: Option<&Created>,
     ) -> Result<(), Failure> {
-        let State {
-            firsts,
-            mut later,
-            retimed,
-            ..
-        } = self
-            .state
-            .into_inner()
-            .unwrap_or_else(PoisonError::into_inner);
+        let (mut later, firsts, retimed) = {
+            let mut state = lock(&self.state);
+            let (later, others) = std::mem::take(&mut state.later)
+                .into_iter()
+                .partition::<Vec<_>, _>(|name| name.key.0 == scope);
+            state.later = others;
+            let (retimed, others) = std::mem::take(&mut state.retimed)
+                .into_iter()
+                .partition::<Vec<_>, _>(|folder| folder.scope == scope);
+            state.retimed = others;
+            let firsts = later
+                .iter()
+                .filter_map(|name| {
+                    let written = state.firsts.get(&name.key)?.written.clone()?;
+                    Some((name.key, written))
+                })
+                .collect::<HashMap<_, _>>();
+            (later, firsts, retimed)
+        };
         later.sort_by(|left, right| left.path.cmp(&right.path));
         let mut linking = true;
         for name in &later {
             copy.check_cancelled()?;
-            let first = firsts.get(&name.key).and_then(|first| {
-                let (path, identity) = first.written.as_ref()?;
-                Some((path.as_path(), *identity))
-            });
-            let made = match first {
-                Some(first) => make(copy, root, first, name, &mut linking),
+            let made = match firsts.get(&name.key) {
+                Some((path, identity)) => {
+                    make(copy, (root, base), (path, *identity), name, &mut linking)
+                }
                 None => Err(Failure::Changed),
             };
             let (path, made) = made.map_err(|failure| failure.named(&name.source))?;
@@ -205,9 +228,8 @@ impl Links {
         }
         let stable = stable_inodes(family);
         for folder in retimed {
-            if let Some(fd) =
-                restrictive::reopen(copy.fs, root, &folder.path, folder.identity, stable)?
-            {
+            let path = beneath(base, &folder.path)?;
+            if let Some(fd) = restrictive::reopen(copy.fs, root, path, folder.identity, stable)? {
                 folder.snapshot.apply_times(copy.fs, fd.as_fd())?;
             }
         }
@@ -215,12 +237,17 @@ impl Links {
     }
 }
 
+/// `path`, beneath the walk's root, as a path beneath `base`.
+fn beneath<'a>(base: &Path, path: &'a Path) -> Result<&'a Path, Failure> {
+    path.strip_prefix(base).map_err(|_| Failure::Changed)
+}
+
 /// Links `name` to the copy at `first`, or copies that copy on the same
 /// device where the destination refuses; one refusal ends `linking`.
 /// Returns where `name` was made and what it holds.
 fn make(
     copy: &Copy,
-    root: BorrowedFd<'_>,
+    (root, base): (BorrowedFd<'_>, &Path),
     (first, identity): (&Path, LocalFileIdentity),
     name: &Name,
     linking: &mut bool,
@@ -229,8 +256,8 @@ fn make(
     let (Some(first_name), Some(file_name)) = (first.file_name(), name.path.file_name()) else {
         return Err(Failure::Changed);
     };
-    let first_dir = parent(fs, root, first)?;
-    let dir = parent(fs, root, &name.path)?;
+    let first_dir = parent(fs, root, beneath(base, first)?)?;
+    let dir = parent(fs, root, beneath(base, &name.path)?)?;
     let from = Entry::new(&first_dir, first_name);
     if let Some(claimed) = name.claimed
         && !placement::remove_if_unchanged(
@@ -244,9 +271,10 @@ fn make(
     }
     tree::make_numbered(
         copy,
-        name.names.as_deref(),
+        &name.names,
         &name.path,
         false,
+        RenameCause::Alias,
         |file_name| {
             let to = Entry::new(&dir, file_name);
             if *linking {

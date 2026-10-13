@@ -3,7 +3,9 @@
 //! Copies a folder's tree on the shared work queue. Entries are made
 //! exclusively, so in a folder this copy made a taken name is a case alias,
 //! someone else's entry, or the copy's own entry whose reply was lost. Each
-//! folder gets its metadata once its last child is done.
+//! folder gets its metadata once its last child is done. A merge builds a
+//! live folder's new children in a hidden stage inside it, and places them
+//! once they are complete.
 
 use std::{
     collections::HashSet,
@@ -25,28 +27,29 @@ use rustix::{
 };
 
 use super::{
-    Copy, Created, Failure, Mount, best_effort, changed,
+    Copy, Created, Failure, Mount, Source, best_effort, changed,
     data::Data,
-    is_fatal, is_unsupported,
+    direct_folder, from_stage, is_fatal, is_unsupported,
     links::{self, Links, Role},
     lock,
     metadata::Snapshot,
     open_file,
-    restrictive::Restrictive,
+    restrictive::{self, Restrictive},
     same_entry, stable_inodes, stage,
 };
 use crate::{
     adapters::{
         local_operations::{
-            LocalFileIdentity, cancelled_local_operation, fat_family_child_name,
+            LocalFileIdentity, StageContent, StagedSibling, cancelled_local_operation,
+            fat_family_child_name,
             fs_ops::{Entry, EntryStat, FsOps},
-            io_error, numbered_names, placement,
-            placement::PlaceError,
+            io_error, numbered_names, os_error_detail, placement,
+            placement::{COPY_PREFIX, PlaceError},
             work_queue::{self, Group, Job, WorkQueue},
         },
         volume::Family,
     },
-    services::SpecialKind,
+    services::{RenameCause, SpecialKind},
 };
 
 /// `FS_CASEFOLD_FL`, which folders made inside a casefolded one inherit.
@@ -58,11 +61,17 @@ type Completion = Option<Arc<Group<TreeJob>>>;
 /// What every job of one walk shares.
 pub(super) struct Tree {
     copy: Arc<Copy>,
-    restrictive: Mutex<Vec<Restrictive>>,
+    workers: usize,
+    /// By scope.
+    restrictive: Mutex<Vec<(usize, Restrictive)>>,
     links: Links,
-    /// The next link scope a merged folder takes.
-    link_scopes: AtomicUsize,
+    /// The next scope a merge stage takes.
+    scopes: AtomicUsize,
     created: Option<Arc<Created>>,
+    /// Merge stages not yet placed and removed.
+    stages: Mutex<Vec<StagedSibling>>,
+    /// Where the children a merge placed went, beneath the walk's root.
+    placed: Mutex<Vec<PathBuf>>,
 }
 
 impl Tree {
@@ -76,6 +85,21 @@ impl Tree {
             created.add(path.to_path_buf(), identity);
         }
     }
+
+    /// Takes the restrictive folders recorded in `scope`.
+    fn take_restrictive(&self, scope: usize) -> Vec<Restrictive> {
+        let mut recorded = lock(&self.restrictive);
+        let (taken, kept) = std::mem::take(&mut *recorded)
+            .into_iter()
+            .partition::<Vec<_>, _>(|(recorded, _)| *recorded == scope);
+        *recorded = kept;
+        taken.into_iter().map(|(_, folder)| folder).collect()
+    }
+
+    /// The stage with `identity` is placed and removed, or must be kept.
+    fn settle_stage(&self, identity: LocalFileIdentity) {
+        lock(&self.stages).retain(|staged| staged.identity != identity);
+    }
 }
 
 pub(super) enum TreeJob {
@@ -83,6 +107,7 @@ pub(super) enum TreeJob {
     File(Arc<Tree>, File),
     Finish(Arc<Tree>, Finish),
     Merge(Arc<Tree>, Merged),
+    Place(Arc<Tree>, Place),
 }
 
 impl Job for TreeJob {
@@ -97,6 +122,7 @@ impl Job for TreeJob {
             Self::File(tree, file) => file.run(&tree, queue),
             Self::Finish(tree, finish) => finish.run(&tree, queue),
             Self::Merge(tree, merged) => merged.run(&tree, queue),
+            Self::Place(tree, place) => place.run(&tree, queue),
         }
     }
 
@@ -118,33 +144,48 @@ pub(super) struct Walked {
     /// Folders left open to their owner until their exact modes are set.
     pub(super) restrictive: Vec<Restrictive>,
     pub(super) links: Links,
+    /// Merge stages a stopped merge did not place.
+    pub(super) stages: Vec<StagedSibling>,
+    /// Where the children a merge placed went.
+    pub(super) placed: Vec<PathBuf>,
 }
 
 /// Runs the walk that `root` starts on `workers` threads, recording what it
-/// makes in `created`.
+/// makes in `created`. Every descriptor the walk opened is closed when it
+/// returns.
 pub(super) fn walk(
     copy: &Arc<Copy>,
     workers: usize,
     created: Option<Arc<Created>>,
     root: impl FnOnce(Arc<Tree>) -> TreeJob,
-) -> Result<Walked, glib::Error> {
+) -> (Result<(), glib::Error>, Walked) {
     let tree = Arc::new(Tree {
         copy: copy.clone(),
+        workers: workers.max(1),
         restrictive: Mutex::default(),
         links: Links::default(),
-        link_scopes: AtomicUsize::new(0),
+        scopes: AtomicUsize::new(0),
         created,
+        stages: Mutex::default(),
+        placed: Mutex::default(),
     });
     let queue = Arc::new(Queue::new(copy.cancelled.clone()));
     queue.enqueue(root(tree.clone()));
-    work_queue::run_workers(&queue, workers.max(1), None, |work| {
+    work_queue::run_workers(&queue, tree.workers, None, |work| {
         thread::Builder::new().spawn(work)
     });
-    queue.result()?;
-    Ok(Walked {
-        restrictive: std::mem::take(&mut *lock(&tree.restrictive)),
+    let result = queue.result();
+    drop(queue);
+    let walked = Walked {
+        restrictive: std::mem::take(&mut *lock(&tree.restrictive))
+            .into_iter()
+            .map(|(_, folder)| folder)
+            .collect(),
         links: tree.links.take(),
-    })
+        stages: std::mem::take(&mut *lock(&tree.stages)),
+        placed: std::mem::take(&mut *lock(&tree.placed)),
+    };
+    (result, walked)
 }
 
 /// How the files of a made folder get their names.
@@ -159,9 +200,6 @@ pub(super) enum Naming {
     /// adopts a file its own lost reply left, as NFS creates are not
     /// idempotent.
     Claim,
-    /// A folder a merge made in the live tree, where a claim that a stopped
-    /// merge left would be an empty file at a real name.
-    Live,
 }
 
 impl Naming {
@@ -229,25 +267,25 @@ impl Names {
 }
 
 /// Makes the entry at `path`, beneath the walk's root, with `make`; where
-/// its name is taken in a folder this copy made, makes it under the next
-/// free numbered name and reports it saved there. `names` is `None` in a
-/// folder of the live tree. Returns the path the entry took.
+/// its name is taken, makes it under the next free numbered name and reports
+/// it saved there for `cause`. Returns the path the entry took.
 pub(super) fn make_numbered<T>(
     copy: &Copy,
-    names: Option<&Names>,
+    names: &Names,
     path: &Path,
     is_directory: bool,
+    cause: RenameCause,
     mut make: impl FnMut(&OsStr) -> Result<T, Failure>,
 ) -> Result<(PathBuf, T), Failure> {
     let name = path.file_name().unwrap_or_default();
-    match (make(name), names) {
-        (Err(Failure::Place(PlaceError::Exists)), Some(names)) => {
+    match make(name) {
+        Err(Failure::Place(PlaceError::Exists)) => {
             let (saved, made) = names.number(name, is_directory, make)?;
             let saved = path.with_file_name(saved);
-            copy.renamed(path.to_path_buf(), saved.clone());
+            copy.renamed(path.to_path_buf(), saved.clone(), cause);
             Ok((saved, made))
         }
-        (made, _) => made.map(|value| (path.to_path_buf(), value)),
+        made => made.map(|value| (path.to_path_buf(), value)),
     }
 }
 
@@ -264,9 +302,10 @@ pub(super) struct Folder {
     pub(super) path: PathBuf,
     pub(super) naming: Naming,
     pub(super) mount: Mount,
-    /// Names are linked only to names of the same scope: the whole made
-    /// tree, or one merged folder.
-    pub(super) link_scope: usize,
+    /// Names are linked only to names of the same scope, whose restrictive
+    /// folders get their modes together: the whole made tree, or one merge
+    /// stage.
+    pub(super) scope: usize,
     pub(super) completion: Completion,
 }
 
@@ -296,34 +335,15 @@ impl Folder {
             return Err(Failure::Place(PlaceError::Changed));
         }
         let snapshot = Snapshot::read(fs, source.as_fd(), &source_stat)?;
-        let naming = self.naming.decide(fs, self.mount.family, target.as_fd());
-        let mut used = HashSet::new();
-        let children = children(fs, source.as_fd())?
-            .into_iter()
-            .map(|(name, kind)| {
-                let target_name = fat_family_child_name(&name, copy.fat_family, &mut used);
-                (name, kind, target_name)
-            })
-            .collect::<Vec<_>>();
-        let colliding = if naming == Naming::Claim {
-            let names = children
-                .iter()
-                .map(|(_, _, name)| name.as_os_str())
-                .collect::<Vec<_>>();
-            stage::colliding(&names)
-        } else {
-            vec![false; children.len()]
-        };
-        let names = (naming != Naming::Live)
-            .then(|| Names::new(children.iter().map(|(_, _, name)| name.clone()).collect()));
+        let children = target_children(fs, source.as_fd(), copy.fat_family)?;
         let made = Made {
+            naming: self.naming.decide(fs, self.mount.family, target.as_fd()),
             dir: Arc::new(target),
             stat: target_stat,
             path: self.path,
-            naming,
-            names,
+            names: Names::new(children.iter().map(|(_, _, name)| name.clone()).collect()),
             mount: self.mount,
-            link_scope: self.link_scope,
+            scope: self.scope,
         };
         let finish = Finish {
             name: source_name.clone(),
@@ -333,6 +353,7 @@ impl Folder {
             snapshot,
             path: made.path.clone(),
             mount: made.mount,
+            scope: self.scope,
             completion: self.completion,
         };
         if children.is_empty() {
@@ -340,32 +361,37 @@ impl Folder {
             return Ok(());
         }
         let group = Group::new(children.len(), TreeJob::Finish(tree.clone(), finish));
-        let source = Arc::new(source);
-        for ((name, kind, target_name), colliding) in children.into_iter().zip(colliding) {
-            copy.check_cancelled()?;
-            let child = Child {
-                name: &name,
-                kind,
-                target_name: &target_name,
-                claim: colliding,
-            };
-            made.make(tree, queue, &source, &child, &group)
-                .map_err(|failure| failure.named(&name))?;
-        }
-        Ok(())
+        made.make_all(tree, queue, &Arc::new(source), children, &group)
     }
+}
+
+/// A source folder's children in byte order with their types, and the
+/// names they get in the target.
+fn target_children(
+    fs: &dyn FsOps,
+    source: BorrowedFd<'_>,
+    fat_family: bool,
+) -> Result<Vec<(OsString, FileType, OsString)>, Failure> {
+    let mut used = HashSet::new();
+    Ok(children(fs, source)?
+        .into_iter()
+        .map(|(name, kind)| {
+            let target_name = fat_family_child_name(&name, fat_family, &mut used);
+            (name, kind, target_name)
+        })
+        .collect())
 }
 
 /// A target folder this copy made, while its children are made.
 struct Made {
     dir: Arc<OwnedFd>,
+    /// The folder the children land in, whose setgid bit they follow.
     stat: EntryStat,
     path: PathBuf,
     naming: Naming,
-    /// `None` where the folder is in the live tree.
-    names: Option<Arc<Names>>,
+    names: Arc<Names>,
     mount: Mount,
-    link_scope: usize,
+    scope: usize,
 }
 
 /// A source folder's child and the name it gets in the made folder.
@@ -378,6 +404,39 @@ struct Child<'a> {
 }
 
 impl Made {
+    /// Makes each of `children` as a member of `group`, claiming in byte
+    /// order the names of files that may collide.
+    fn make_all(
+        &self,
+        tree: &Arc<Tree>,
+        queue: &Queue,
+        source: &Arc<OwnedFd>,
+        children: Vec<(OsString, FileType, OsString)>,
+        group: &Arc<Group<TreeJob>>,
+    ) -> Result<(), Failure> {
+        let colliding = if self.naming == Naming::Claim {
+            let names = children
+                .iter()
+                .map(|(_, _, name)| name.as_os_str())
+                .collect::<Vec<_>>();
+            stage::colliding(&names)
+        } else {
+            vec![false; children.len()]
+        };
+        for ((name, kind, target_name), colliding) in children.into_iter().zip(colliding) {
+            tree.copy.check_cancelled()?;
+            let child = Child {
+                name: &name,
+                kind,
+                target_name: &target_name,
+                claim: colliding,
+            };
+            self.make(tree, queue, source, &child, group)
+                .map_err(|failure| failure.named(&name))?;
+        }
+        Ok(())
+    }
+
     /// Makes the target of `child`: a folder, a link, or a file's claimed
     /// name, and queues what fills it.
     fn make(
@@ -392,12 +451,13 @@ impl Made {
         let fs = copy.fs;
         let name = child.name;
         let path = self.path.join(child.target_name);
-        let names = self.names.as_deref();
+        let names = &*self.names;
+        let alias = RenameCause::Alias;
         let dir = &*self.dir;
         match child.kind {
             FileType::Directory => {
-                let (path, created) = make_numbered(copy, names, &path, true, |name| {
-                    claim_folder(fs, Entry::new(dir, name), true)
+                let (path, created) = make_numbered(copy, names, &path, true, alias, |name| {
+                    claim_folder(fs, Entry::new(dir, name))
                 })?;
                 tree.made(&path, created);
                 queue.enqueue(TreeJob::Folder(
@@ -409,16 +469,17 @@ impl Made {
                         path,
                         naming: self.naming,
                         mount: self.mount,
-                        link_scope: self.link_scope,
+                        scope: self.scope,
                         completion: Some(group.clone()),
                     },
                 ));
             }
             FileType::RegularFile => {
                 let (path, claimed) = if child.claim {
-                    let (path, identity) = make_numbered(copy, names, &path, false, |name| {
-                        claim_file(copy, Entry::new(dir, name))
-                    })?;
+                    let (path, identity) =
+                        make_numbered(copy, names, &path, false, alias, |name| {
+                            claim_file(copy, Entry::new(dir, name))
+                        })?;
                     tree.made(&path, identity);
                     (path, Some(identity))
                 } else {
@@ -436,14 +497,14 @@ impl Made {
                         names: self.names.clone(),
                         mount: self.mount,
                         path,
-                        link_scope: self.link_scope,
+                        scope: self.scope,
                         completion: Some(group.clone()),
                     },
                 ));
             }
             FileType::Symlink => {
                 let source = Entry::new(&**source, name);
-                let (path, ()) = make_numbered(copy, names, &path, false, |name| {
+                let (path, ()) = make_numbered(copy, names, &path, false, alias, |name| {
                     copy_link(copy, source, Entry::new(dir, name), &self.mount, true)
                 })?;
                 if tree.created.is_some() {
@@ -454,7 +515,7 @@ impl Made {
             }
             FileType::Fifo => {
                 let source = Entry::new(&**source, name);
-                let (path, made) = make_numbered(copy, names, &path, false, |name| {
+                let (path, made) = make_numbered(copy, names, &path, false, alias, |name| {
                     copy_fifo(
                         copy,
                         source,
@@ -546,14 +607,10 @@ pub(super) fn adopt(
     ours().ok_or(Failure::Place(PlaceError::Exists))
 }
 
-fn claim_folder(
-    fs: &dyn FsOps,
-    entry: Entry<'_>,
-    made: bool,
-) -> Result<LocalFileIdentity, Failure> {
+fn claim_folder(fs: &dyn FsOps, entry: Entry<'_>) -> Result<LocalFileIdentity, Failure> {
     match fs.mkdir(entry, Mode::from_raw_mode(0o700)) {
         Ok(()) => Ok(fs.stat(entry, false)?.identity),
-        Err(error) if taken(fs, entry, error) => adopt(fs, entry, made, |stat| {
+        Err(error) if taken(fs, entry, error) => adopt(fs, entry, true, |stat| {
             stat.is_directory() && fs.names(entry).is_ok_and(|names| names.is_empty())
         }),
         Err(error) => Err(error.into()),
@@ -706,12 +763,11 @@ pub(super) struct File {
     claimed: Option<LocalFileIdentity>,
     /// A taken name may be the file's own, from a lost reply.
     adopts: bool,
-    /// The names of the folder, where this copy made it.
-    names: Option<Arc<Names>>,
+    names: Arc<Names>,
     mount: Mount,
     /// Beneath the walk's root: where it was claimed, or the name it asks for.
     path: PathBuf,
-    link_scope: usize,
+    scope: usize,
     completion: Completion,
 }
 
@@ -739,7 +795,7 @@ impl File {
         }
         let source = open_file(fs, Entry::new(&*self.source, &self.name))?;
         let key = (
-            self.link_scope,
+            self.scope,
             source.stat.identity.device,
             source.stat.identity.inode,
         );
@@ -765,19 +821,26 @@ impl File {
                 let fd = open_made(fs, Entry::new(dir, &file_name(&self.path)))?;
                 (self.path.clone(), (fd, Some(claimed)))
             }
-            None => make_numbered(copy, self.names.as_deref(), &self.path, false, |name| {
-                let target = Entry::new(dir, name);
-                match fs.create_exclusive(target, Mode::from_raw_mode(0o600)) {
-                    Ok(fd) => Ok((fd, None)),
-                    Err(error) if !taken(fs, target, error) => Err(error.into()),
-                    Err(_) if self.adopts => {
-                        let identity = adopt(fs, target, true, fresh_file)?;
-                        tree.made(&self.path.with_file_name(name), identity);
-                        Ok((open_made(fs, target)?, Some(identity)))
+            None => make_numbered(
+                copy,
+                &self.names,
+                &self.path,
+                false,
+                RenameCause::Alias,
+                |name| {
+                    let target = Entry::new(dir, name);
+                    match fs.create_exclusive(target, Mode::from_raw_mode(0o600)) {
+                        Ok(fd) => Ok((fd, None)),
+                        Err(error) if !taken(fs, target, error) => Err(error.into()),
+                        Err(_) if self.adopts => {
+                            let identity = adopt(fs, target, true, fresh_file)?;
+                            tree.made(&self.path.with_file_name(name), identity);
+                            Ok((open_made(fs, target)?, Some(identity)))
+                        }
+                        Err(_) => Err(Failure::Place(PlaceError::Exists)),
                     }
-                    Err(_) => Err(Failure::Place(PlaceError::Exists)),
-                }
-            })?,
+                },
+            )?,
         };
         let name = file_name(&path);
         let target = Entry::new(dir, &name);
@@ -841,6 +904,7 @@ pub(super) struct Finish {
     snapshot: Snapshot,
     path: PathBuf,
     mount: Mount,
+    scope: usize,
     completion: Completion,
 }
 
@@ -858,13 +922,16 @@ impl Finish {
         match applied {
             Ok(mode) => {
                 tree.links
-                    .retime(&self.path, self.created.identity, self.snapshot);
+                    .retime(self.scope, &self.path, self.created.identity, self.snapshot);
                 if let Some(mode) = mode {
-                    lock(&tree.restrictive).push(Restrictive {
-                        path: self.path,
-                        identity: self.created.identity,
-                        mode,
-                    });
+                    lock(&tree.restrictive).push((
+                        self.scope,
+                        Restrictive {
+                            path: self.path,
+                            identity: self.created.identity,
+                            mode,
+                        },
+                    ));
                 }
                 drop(self.target);
                 queue.complete(self.completion);
@@ -890,6 +957,8 @@ impl Merged {
         }
     }
 
+    /// Merges each child folder into the live folder of the same name, and
+    /// adds every other child beside them.
     fn merge(&self, tree: &Arc<Tree>, queue: &Queue) -> Result<(), Failure> {
         let copy = &tree.copy;
         let fs = copy.fs;
@@ -906,122 +975,321 @@ impl Merged {
         if expected.is_some_and(|expected| !same_entry(&target_stat, expected, mount.family)) {
             return Err(Failure::Changed);
         }
-        let children = children(fs, source.as_fd())?;
-        let (source, target) = (Arc::new(source), Arc::new(target));
-        tree.probe_links_in(&mount, target.clone());
+        let children = target_children(fs, source.as_fd(), copy.fat_family)?;
         let live = Live {
-            source,
-            dir: target,
+            names: Names::new(children.iter().map(|(_, _, name)| name.clone()).collect()),
+            source: Arc::new(source),
+            dir: Arc::new(target),
             stat: target_stat,
             mount,
-            link_scope: tree.link_scopes.fetch_add(1, Ordering::Relaxed),
+            path: self.path.clone(),
+            name: source_name.clone(),
         };
-        let mut used = HashSet::new();
-        for (name, kind) in children {
+        tree.probe_links_in(&mount, live.dir.clone());
+        let mut new = Vec::new();
+        for (name, kind, target_name) in children {
             copy.check_cancelled()?;
-            let target_name = fat_family_child_name(&name, copy.fat_family, &mut used);
-            live.merge(tree, queue, &name, kind, &target_name, &self.path)
-                .map_err(|failure| failure.named(&name))?;
+            let existing = match fs.stat(Entry::new(&*live.dir, &target_name), false) {
+                Ok(existing) => Some(existing),
+                Err(Errno::NOENT) => None,
+                Err(error) => return Err(Failure::Os(error).named(&name)),
+            };
+            match existing {
+                Some(existing) if existing.is_directory() && kind == FileType::Directory => {
+                    queue.enqueue(TreeJob::Merge(
+                        tree.clone(),
+                        Merged {
+                            source: (live.source.clone(), name),
+                            target: (
+                                live.dir.clone(),
+                                target_name.clone(),
+                                Some(existing.identity),
+                            ),
+                            path: self.path.join(target_name),
+                        },
+                    ));
+                }
+                // A name taken since the merge was planned gets a number
+                // when the child is placed.
+                _ => new.push((name, kind, target_name)),
+            }
         }
-        Ok(())
+        live.add(tree, queue, new)
     }
 }
 
-/// A live folder a merge copies into, and its source folder.
+/// A live folder a merge adds children to, and its source folder.
 struct Live {
     source: Arc<OwnedFd>,
     dir: Arc<OwnedFd>,
     stat: EntryStat,
     mount: Mount,
-    link_scope: usize,
+    /// Beneath the walk's root.
+    path: PathBuf,
+    /// What every child asks for, against which a taken name is numbered.
+    names: Arc<Names>,
+    /// The source folder's name, for errors.
+    name: OsString,
 }
 
 impl Live {
-    /// Merges a folder into a folder of the same name, and makes anything
-    /// else at a name that is free; nothing there is ever replaced.
-    fn merge(
+    /// Builds the `new` children in a stage, except folders where the mount
+    /// cannot place one, which are made at their names.
+    fn add(
         &self,
         tree: &Arc<Tree>,
         queue: &Queue,
-        name: &OsStr,
-        kind: FileType,
-        target_name: &OsStr,
-        path: &Path,
+        mut new: Vec<(OsString, FileType, OsString)>,
     ) -> Result<(), Failure> {
-        let copy = &tree.copy;
-        let fs = copy.fs;
-        let target = Entry::new(&*self.dir, target_name);
-        let path = path.join(target_name);
-        let existing = match fs.stat(target, false) {
-            Ok(existing) => Some(existing),
-            Err(Errno::NOENT) => None,
-            Err(error) => return Err(error.into()),
-        };
-        match (existing, kind) {
-            (Some(existing), FileType::Directory) if existing.is_directory() => {
-                queue.enqueue(TreeJob::Merge(
-                    tree.clone(),
-                    Merged {
-                        source: (self.source.clone(), name.to_os_string()),
-                        target: (
-                            self.dir.clone(),
-                            target_name.to_os_string(),
-                            Some(existing.identity),
-                        ),
-                        path,
-                    },
-                ));
-            }
-            (Some(_), _) => return Err(Failure::Place(PlaceError::Exists)),
-            (None, FileType::Directory) => {
-                let created = claim_folder(fs, target, false)?;
-                queue.enqueue(TreeJob::Folder(
-                    tree.clone(),
-                    Folder {
-                        source: (self.source.clone(), name.to_os_string(), None),
-                        target: (self.dir.clone(), target_name.to_os_string(), created),
-                        parent: self.stat,
-                        path,
-                        naming: Naming::Live,
-                        mount: self.mount,
-                        link_scope: self.link_scope,
-                        completion: None,
-                    },
-                ));
-            }
-            (None, FileType::RegularFile) => queue.enqueue(TreeJob::File(
-                tree.clone(),
-                File {
-                    source: self.source.clone(),
-                    name: name.to_os_string(),
-                    target: self.dir.clone(),
-                    parent: self.stat,
-                    claimed: None,
-                    adopts: false,
-                    names: None,
-                    mount: self.mount,
-                    path,
-                    link_scope: self.link_scope,
-                    completion: None,
-                },
-            )),
-            (None, FileType::Symlink) => {
-                copy_link(
-                    copy,
-                    Entry::new(&*self.source, name),
-                    target,
-                    &self.mount,
-                    false,
-                )?;
-            }
-            (None, FileType::Fifo) => {
-                let source = Entry::new(&*self.source, name);
-                if copy_fifo(copy, source, target, &self.stat, &self.mount, false)?.is_none() {
-                    copy.skip(path, SpecialKind::Pipe)?;
-                }
-            }
-            (None, kind) => copy.skip(path, special_kind(kind))?,
+        let mut in_place = Vec::new();
+        if placement::can_place(tree.copy.fs, self.dir.as_fd(), true) == Some(false) {
+            (in_place, new) = new
+                .into_iter()
+                .partition(|(_, kind, _)| *kind == FileType::Directory);
+        }
+        if !new.is_empty() {
+            self.stage(tree, queue, new)?;
+        }
+        for (name, _, target_name) in in_place {
+            self.copy_in_place(tree, &name, &target_name)
+                .map_err(|failure| failure.named(&name))?;
         }
         Ok(())
+    }
+
+    fn stage(
+        &self,
+        tree: &Arc<Tree>,
+        queue: &Queue,
+        children: Vec<(OsString, FileType, OsString)>,
+    ) -> Result<(), Failure> {
+        let fs = tree.copy.fs;
+        tree.copy.check_cancelled()?;
+        let staged = StagedSibling::create(self.dir.clone(), COPY_PREFIX, StageContent::Directory)?;
+        let (name, identity) = (staged.name.clone(), staged.identity);
+        lock(&tree.stages).push(staged);
+        let dir = fs.open_dir(Entry::new(&*self.dir, &name))?;
+        if !same_entry(&fs.stat_fd(dir.as_fd())?, identity, self.mount.family) {
+            return Err(Failure::Place(PlaceError::Changed));
+        }
+        let scope = tree.scopes.fetch_add(1, Ordering::Relaxed);
+        let made = Made {
+            naming: Naming::Decide.decide(fs, self.mount.family, dir.as_fd()),
+            dir: Arc::new(dir),
+            stat: self.stat,
+            path: self.path.clone(),
+            names: self.names.clone(),
+            mount: self.mount,
+            scope,
+        };
+        let place = Place {
+            live: self.dir.clone(),
+            stage: made.dir.clone(),
+            staged: (name, identity),
+            path: self.path.clone(),
+            names: self.names.clone(),
+            mount: self.mount,
+            scope,
+            name: self.name.clone(),
+        };
+        let group = Group::new(children.len(), TreeJob::Place(tree.clone(), place));
+        made.make_all(tree, queue, &self.source, children, &group)
+    }
+
+    /// Copies the source folder `name` to `target_name`, making each entry
+    /// at its final name and removing them again if the copy fails.
+    fn copy_in_place(&self, tree: &Tree, name: &OsStr, target_name: &OsStr) -> Result<(), Failure> {
+        let copy = &tree.copy;
+        let source = Source {
+            parent: self.source.clone(),
+            name: name.to_os_string(),
+        };
+        let expected = copy.fs.stat(source.entry(), false)?.identity;
+        if expected.kind != FileType::Directory {
+            return Err(Failure::Changed);
+        }
+        let nested = copy.nested();
+        let path = self.path.join(target_name);
+        let (path, ()) = make_numbered(
+            copy,
+            &self.names,
+            &path,
+            true,
+            RenameCause::Taken,
+            |candidate| {
+                direct_folder(
+                    &nested,
+                    &source,
+                    expected,
+                    &self.dir,
+                    candidate,
+                    tree.workers,
+                )
+            },
+        )?;
+        copy.adopt(&nested, &path);
+        lock(&tree.placed).push(path);
+        Ok(())
+    }
+}
+
+/// Puts a merge stage's children into its live folder once all of them are
+/// complete, in byte order and never over an entry, then removes the stage.
+pub(super) struct Place {
+    live: Arc<OwnedFd>,
+    stage: Arc<OwnedFd>,
+    /// The stage's name in the live folder, and its identity.
+    staged: (OsString, LocalFileIdentity),
+    /// The live folder, beneath the walk's root.
+    path: PathBuf,
+    names: Arc<Names>,
+    mount: Mount,
+    scope: usize,
+    /// The source folder's name, for errors.
+    name: OsString,
+}
+
+impl Place {
+    fn run(self, tree: &Arc<Tree>, queue: &Queue) {
+        let name = self.name.clone();
+        if let Err(failure) = self.place(tree) {
+            queue.fail(failure.into_error(&name));
+        }
+    }
+
+    fn place(self, tree: &Tree) -> Result<(), Failure> {
+        let copy = &tree.copy;
+        let fs = copy.fs;
+        tree.links.make(
+            self.scope,
+            copy,
+            self.stage.as_fd(),
+            &self.path,
+            self.mount.family,
+            None,
+        )?;
+        let mut children = fs.list(self.stage.as_fd())?;
+        children.sort_by(|(left, _), (right, _)| left.cmp(right));
+        let mut restrictive = tree.take_restrictive(self.scope);
+        let mut placed = Vec::new();
+        let mut result = Ok(());
+        for (name, kind) in &children {
+            match self.place_child(copy, name, *kind == FileType::Directory) {
+                Ok(path) => {
+                    let requested = self.path.join(name);
+                    if path != requested {
+                        copy.relocate(&requested, &path);
+                        for folder in &mut restrictive {
+                            super::rebase(&mut folder.path, &requested, &path);
+                        }
+                    }
+                    placed.push(path);
+                }
+                Err(failure) => {
+                    // Either name may hold the child, so the stage is kept.
+                    if matches!(failure, Failure::Place(PlaceError::Unconfirmed)) {
+                        tree.settle_stage(self.staged.1);
+                    }
+                    result = Err(failure.named(name));
+                    break;
+                }
+            }
+        }
+        let mut placed_folders = restrictive
+            .into_iter()
+            .filter(|folder| placed.iter().any(|path| folder.path.starts_with(path)))
+            .filter_map(|folder| {
+                let path = folder.path.strip_prefix(&self.path).ok()?.to_path_buf();
+                Some(Restrictive { path, ..folder })
+            })
+            .collect::<Vec<_>>();
+        let tightened = restrictive::tighten(
+            fs,
+            self.live.as_fd(),
+            &mut placed_folders,
+            stable_inodes(self.mount.family),
+        );
+        lock(&tree.placed).extend(placed);
+        result?;
+        tightened?;
+        self.remove_stage(tree)
+    }
+
+    /// Places the staged child `name`, under the next free number where its
+    /// name was taken meanwhile, and returns where it went.
+    fn place_child(
+        &self,
+        copy: &Arc<Copy>,
+        name: &OsStr,
+        is_directory: bool,
+    ) -> Result<PathBuf, Failure> {
+        copy.check_cancelled()?;
+        let fs = copy.fs;
+        let staged = Entry::new(&*self.stage, name);
+        let identity = fs.stat(staged, false)?.identity;
+        let path = self.path.join(name);
+        make_numbered(
+            copy,
+            &self.names,
+            &path,
+            is_directory,
+            RenameCause::Taken,
+            |candidate| {
+                let target = Entry::new(&*self.live, candidate);
+                match placement::place(fs, staged, target, Some(identity)) {
+                    Ok(_) => Ok(()),
+                    Err(PlaceError::Unsupported) => self.copy_out(copy, name, identity, candidate),
+                    Err(error) => Err(error.into()),
+                }
+            },
+        )
+        .map(|(path, ())| path)
+    }
+
+    /// Copies the staged child `name`, which the mount cannot place, to
+    /// `candidate`, then removes it from the stage.
+    fn copy_out(
+        &self,
+        copy: &Arc<Copy>,
+        name: &OsStr,
+        identity: LocalFileIdentity,
+        candidate: &OsStr,
+    ) -> Result<(), Failure> {
+        let source = Source {
+            parent: self.stage.clone(),
+            name: name.to_os_string(),
+        };
+        from_stage(&copy.uncounted(), &source, identity, &self.live, candidate)?;
+        copy.discard(StagedSibling {
+            parent: self.stage.clone(),
+            name: name.to_os_string(),
+            identity,
+            restrictive: Vec::new(),
+        })
+        .map_err(|error| Failure::Error(super::stage_left(&error)))
+    }
+
+    fn remove_stage(self, tree: &Tree) -> Result<(), Failure> {
+        let fs = tree.copy.fs;
+        let Self {
+            live,
+            stage: opened,
+            staged: (name, identity),
+            ..
+        } = self;
+        drop(opened);
+        let stage = Entry::new(&*live, &name);
+        let removed = match fs.stat(stage, true) {
+            Ok(current) if current.identity == identity => {
+                match fs.unlink(stage, AtFlags::REMOVEDIR) {
+                    Ok(()) | Err(Errno::NOENT) => Ok(()),
+                    Err(error) => Err(error),
+                }
+            }
+            _ => Ok(()),
+        };
+        tree.settle_stage(identity);
+        removed
+            .map_err(|error| Failure::Error(super::stage_left(&io_error(os_error_detail(error)))))
     }
 }

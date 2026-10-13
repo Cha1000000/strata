@@ -346,8 +346,17 @@ fn merge_places_a_read_only_incoming_folder() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+/// The names in `folder` that are not Strata's hidden ones.
+fn visible_names(folder: &Path) -> io::Result<Vec<String>> {
+    Ok(names(folder)?
+        .into_iter()
+        .filter(|name| !name.starts_with(".strata-"))
+        .collect())
+}
+
 #[test]
-fn a_merge_keeps_hard_links_only_within_one_merged_folder() -> Result<(), Box<dyn Error>> {
+fn a_merge_keeps_hard_links_only_within_one_merge_stage() -> Result<(), Box<dyn Error>> {
+    use super::fs_quirks::Racer;
     use std::os::unix::fs::MetadataExt;
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
         .lock()
@@ -362,6 +371,22 @@ fn a_merge_keeps_hard_links_only_within_one_merged_folder() -> Result<(), Box<dy
     for name in ["a2", "new/c", "sub/b"] {
         fs::hard_link(source.join("a"), source.join(name))?;
     }
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (live, seen_at_link) = (target.clone(), seen.clone());
+    let racer: Racer = Box::new(move || {
+        let names = visible_names(&live).expect("list the merged folder");
+        seen_at_link.lock().expect("record").extend(names);
+    });
+    let scope = FsQuirks::install(
+        &target,
+        Quirks {
+            before: vec![(Op::Link, "*", 0, racer)],
+            ..Quirks::default()
+        },
+    );
+    learn_mount_capability(scope.key(), |capabilities| {
+        capabilities.hard_links = Some(true);
+    });
 
     let result = glib::MainContext::default().block_on(merge_local(
         gio::File::for_path(&source),
@@ -372,6 +397,11 @@ fn a_merge_keeps_hard_links_only_within_one_merged_folder() -> Result<(), Box<dy
     ));
 
     assert!(result.is_ok(), "{result:?}");
+    assert_eq!(
+        *seen.lock().map_err(|error| error.to_string())?,
+        ["sub"],
+        "names are linked before their stage is placed"
+    );
     let [a, a2, c, b] = ["a", "a2", "new/c", "sub/b"].map(|name| {
         fs::metadata(target.join(name)).map(|metadata| (metadata.ino(), metadata.nlink()))
     });
@@ -399,10 +429,19 @@ fn a_merged_copy_replaced_before_linking_is_not_linked() -> Result<(), Box<dyn E
     fs::hard_link(source.join("a"), source.join("a2"))?;
     let live = target.clone();
     let racer: Racer = Box::new(move || {
-        for name in ["a", "a2"] {
-            if live.join(name).exists() {
-                fs::write(live.join("other"), b"other").expect("write the other item");
-                fs::rename(live.join("other"), live.join(name)).expect("replace the copy");
+        let stage = names(&live)
+            .expect("list the merged folder")
+            .into_iter()
+            .find(|name| name.starts_with(".strata-copy-"))
+            .map(|name| live.join(name));
+        for copied in stage
+            .iter()
+            .flat_map(|stage| [stage.join("a"), stage.join("a2")])
+        {
+            if copied.exists() {
+                let other = live.join("other");
+                fs::write(&other, b"other").expect("write the other item");
+                fs::rename(&other, &copied).expect("replace the copy");
             }
         }
     });
@@ -426,16 +465,155 @@ fn a_merged_copy_replaced_before_linking_is_not_linked() -> Result<(), Box<dyn E
     ));
 
     assert!(result.is_err(), "{result:?}");
-    let names = names(&target)?;
-    assert_eq!(names.len(), 1, "{names:?}");
-    assert_eq!(fs::read(target.join(&names[0]))?, b"other");
+    assert_eq!(names(&target)?, Vec::<String>::new());
     Ok(())
 }
 
 #[test]
-fn an_item_put_at_a_linked_name_right_after_the_link_is_kept() -> Result<(), Box<dyn Error>> {
+fn merge_never_overwrites_an_entry_created_during_the_merge() -> Result<(), Box<dyn Error>> {
     use super::fs_quirks::Racer;
-    use std::os::unix::fs::MetadataExt;
+    use crate::services::RenameCause;
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let rows: [(&str, &str, Preset, &[(&str, &str, RenameCause)]); 2] = [
+        (
+            "notes.txt",
+            "notes (1).txt",
+            Quirks::default,
+            &[("notes.txt", "notes (1).txt", RenameCause::Taken)],
+        ),
+        (
+            "photos",
+            "photos (1)",
+            Quirks::vfat,
+            &[
+                ("photos", "photos (1)", RenameCause::Taken),
+                (
+                    "photos (1)/makefile",
+                    "photos (1)/makefile (1)",
+                    RenameCause::Alias,
+                ),
+            ],
+        ),
+    ];
+    for (taken, saved_as, preset, reported) in rows {
+        let root = tempfile::tempdir()?;
+        let source = root.path().join("source");
+        let target = root.path().join("target");
+        fs::create_dir_all(source.join("photos"))?;
+        fs::create_dir(&target)?;
+        fs::write(source.join("notes.txt"), b"incoming")?;
+        for name in ["Makefile", "makefile"] {
+            fs::write(source.join("photos").join(name), name)?;
+        }
+        let live = target.clone();
+        let racer: Racer = Box::new(move || {
+            fs::write(live.join(taken), b"racer").expect("take the name");
+        });
+        let _scope = FsQuirks::install(
+            &target,
+            Quirks {
+                before: vec![(Op::Rename, taken, 0, racer)],
+                ..preset()
+            },
+        );
+
+        let (merged, report) = merge_reporting(&source, &target, None);
+
+        assert!(merged.is_ok(), "{taken}: {merged:?}");
+        assert_eq!(fs::read(target.join(taken))?, b"racer", "{taken}");
+        let mut expected = vec!["notes.txt", "photos", saved_as];
+        expected.sort_unstable();
+        assert_eq!(names(&target)?, expected, "{taken}");
+        let ours = target.join(saved_as);
+        if taken == "photos" {
+            assert_eq!(fs::read(ours.join("Makefile"))?, b"Makefile");
+            assert_eq!(fs::read(ours.join("makefile (1)"))?, b"makefile");
+        } else {
+            assert_eq!(fs::read(ours)?, b"incoming");
+        }
+        let reported = reported
+            .iter()
+            .map(|(requested, saved_as, cause)| {
+                (requested.to_string(), saved_as.to_string(), *cause)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(renamed_beneath(&target, &report), reported, "{taken}");
+    }
+    Ok(())
+}
+
+/// What `report` renamed, by path beneath `target`, in path order.
+fn renamed_beneath(
+    target: &Path,
+    report: &crate::services::TransferReport,
+) -> Vec<(String, String, crate::services::RenameCause)> {
+    let relative = |location: &Location| {
+        location
+            .native_path()
+            .and_then(|path| path.strip_prefix(target).ok())
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    };
+    let mut renamed = report
+        .renamed
+        .iter()
+        .map(|item| {
+            (
+                relative(&item.requested),
+                relative(&item.saved_as),
+                item.cause,
+            )
+        })
+        .collect::<Vec<_>>();
+    renamed.sort_by(|left, right| left.0.cmp(&right.0));
+    renamed
+}
+
+#[test]
+fn a_stopped_merge_reports_only_what_it_placed() -> Result<(), Box<dyn Error>> {
+    use super::fs_quirks::Racer;
+    use crate::services::RenameCause;
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let root = tempfile::tempdir()?;
+    let source = root.path().join("source");
+    let target = root.path().join("target");
+    fs::create_dir_all(source.join("z"))?;
+    fs::create_dir(&target)?;
+    fs::write(source.join("a.txt"), b"incoming")?;
+    for name in ["Makefile", "makefile"] {
+        fs::write(source.join("z").join(name), name)?;
+    }
+    let live = target.clone();
+    let racer: Racer = Box::new(move || {
+        fs::write(live.join("a.txt"), b"racer").expect("take the name");
+    });
+    let _scope = FsQuirks::install(
+        &target,
+        Quirks {
+            before: vec![(Op::Rename, "a.txt", 0, racer)],
+            fail: vec![(Op::Rename, "z", 0, Errno::IO)],
+            ..Quirks::vfat()
+        },
+    );
+
+    let (merged, report) = merge_reporting(&source, &target, None);
+
+    assert!(merged.is_err(), "{merged:?}");
+    assert_eq!(names(&target)?, ["a (1).txt", "a.txt"]);
+    assert_eq!(fs::read(target.join("a (1).txt"))?, b"incoming");
+    assert_eq!(
+        renamed_beneath(&target, &report),
+        [("a.txt".into(), "a (1).txt".into(), RenameCause::Taken)]
+    );
+    Ok(())
+}
+
+#[test]
+fn an_unconfirmed_placement_keeps_its_stage() -> Result<(), Box<dyn Error>> {
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
         .lock()
         .map_err(|error| error.to_string())?;
@@ -444,33 +622,16 @@ fn an_item_put_at_a_linked_name_right_after_the_link_is_kept() -> Result<(), Box
     let target = root.path().join("target");
     fs::create_dir(&source)?;
     fs::create_dir(&target)?;
-    fs::write(source.join("a"), b"linked")?;
-    fs::hard_link(source.join("a"), source.join("a2"))?;
-    // Either name may be the one linked; its check is its second stat.
-    let racer = |name: &'static str, other: &'static str| -> Racer {
-        let live = target.clone();
-        Box::new(move || {
-            let inode = |name| fs::metadata(live.join(name)).map(|metadata| metadata.ino());
-            let inode = |name| inode(name).ok();
-            if inode(name).is_some() && inode(name) == inode(other) {
-                fs::write(live.join("user"), b"user data").expect("write the user's item");
-                fs::rename(live.join("user"), live.join(name)).expect("replace the link");
-            }
-        })
-    };
-    let scope = FsQuirks::install(
+    fs::write(source.join("leaf"), b"incoming")?;
+    // The checks before the merge and before placing see the name; the one
+    // proving where the leaf went fails.
+    let _scope = FsQuirks::install(
         &target,
         Quirks {
-            before: vec![
-                (Op::Stat, "a", 1, racer("a", "a2")),
-                (Op::Stat, "a2", 1, racer("a2", "a")),
-            ],
+            fail: vec![(Op::Stat, "leaf", 2, Errno::IO)],
             ..Quirks::default()
         },
     );
-    learn_mount_capability(scope.key(), |capabilities| {
-        capabilities.hard_links = Some(true);
-    });
 
     let result = glib::MainContext::default().block_on(merge_local(
         gio::File::for_path(&source),
@@ -481,12 +642,178 @@ fn an_item_put_at_a_linked_name_right_after_the_link_is_kept() -> Result<(), Box
     ));
 
     assert!(result.is_err(), "{result:?}");
-    let mut contents = ["a", "a2"]
-        .map(|name| fs::read(target.join(name)))
-        .into_iter()
-        .collect::<io::Result<Vec<_>>>()?;
-    contents.sort();
-    assert_eq!(contents, [b"linked".to_vec(), b"user data".to_vec()]);
+    assert_eq!(fs::read(target.join("leaf"))?, b"incoming");
+    let names = names(&target)?;
+    assert!(
+        names.iter().any(|name| name.starts_with(".strata-copy-")),
+        "either name may hold the leaf, so the stage stays: {names:?}"
+    );
+    Ok(())
+}
+
+#[test]
+fn a_merge_copies_folders_in_place_where_the_mount_cannot_place_them() -> Result<(), Box<dyn Error>>
+{
+    use crate::services::RenameCause;
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let root = tempfile::tempdir()?;
+    let source = root.path().join("source");
+    let target = root.path().join("target");
+    fs::create_dir_all(source.join("new"))?;
+    fs::create_dir(&target)?;
+    for name in ["Makefile", "makefile"] {
+        fs::write(source.join("new").join(name), name)?;
+    }
+    fs::write(target.join("new"), b"taken")?;
+    let scope = FsQuirks::install(
+        &target,
+        Quirks {
+            case_insensitive: true,
+            ..Quirks::without_folder_placement()
+        },
+    );
+    learn_mount_capability(scope.key(), |capabilities| {
+        capabilities.no_replace = Some(false);
+        capabilities.hard_links = Some(true);
+        capabilities.rename_over_empty_directory = Some(false);
+    });
+
+    // One worker makes the folder's files last first, so `Makefile` is the
+    // alias.
+    let (merged, report) = merge_reporting(&source, &target, Some(1));
+
+    assert!(merged.is_ok(), "{merged:?}");
+    assert_eq!(names(&target)?, ["new", "new (1)"]);
+    assert_eq!(fs::read(target.join("new"))?, b"taken");
+    assert_eq!(
+        names(&target.join("new (1)"))?,
+        ["Makefile (1)", "makefile"]
+    );
+    assert_eq!(fs::read(target.join("new (1)/Makefile (1)"))?, b"Makefile");
+    assert!(!scope.used_name(".strata-*"), "{:?}", scope.calls());
+    assert_eq!(
+        renamed_beneath(&target, &report),
+        [
+            ("new".into(), "new (1)".into(), RenameCause::Taken),
+            (
+                "new (1)/Makefile".into(),
+                "new (1)/Makefile (1)".into(),
+                RenameCause::Alias
+            ),
+        ]
+    );
+    Ok(())
+}
+
+#[test]
+fn a_merged_item_is_invisible_until_complete() -> Result<(), Box<dyn Error>> {
+    use super::fs_quirks::Racer;
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    // Placed by rename, by the rungs that cannot replace, and copied out of
+    // the stage where nothing can place it.
+    let presets: [Preset; 3] = [Quirks::default, Quirks::vboxsf, Quirks::without_placement];
+    for (row, preset) in presets.into_iter().enumerate() {
+        let root = tempfile::tempdir()?;
+        let sources = root.path().join("sources");
+        let destination = root.path().join("destination");
+        let source = sources.join("folder");
+        let target = destination.join("folder");
+        fs::create_dir_all(source.join("new"))?;
+        fs::create_dir_all(&target)?;
+        fs::write(source.join("incoming.bin"), vec![0x5a; 256 * 1024])?;
+        fs::write(source.join("new/inner.bin"), vec![0xa5; 256 * 1024])?;
+        fs::write(target.join("stays.txt"), b"keep me")?;
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (live, seen_at_write) = (target.clone(), seen.clone());
+        let racer: Racer = Box::new(move || {
+            let names = visible_names(&live).expect("list the merged folder");
+            seen_at_write.lock().expect("record").extend(names);
+        });
+        // Separate mounts, so the data is written rather than cloned.
+        let _sources = FsQuirks::install(&sources, Quirks::default());
+        let _destination = FsQuirks::install(
+            &destination,
+            Quirks {
+                before: vec![(Op::Write, "*", 0, racer)],
+                ..preset()
+            },
+        );
+
+        let result = glib::MainContext::default().block_on(merge_local(
+            gio::File::for_path(&source),
+            gio::File::for_path(&target),
+            false,
+            gio::Cancellable::new(),
+            &no_plan,
+        ));
+
+        assert!(result.is_ok(), "row {row}: {result:?}");
+        assert_eq!(
+            *seen.lock().map_err(|error| error.to_string())?,
+            ["stays.txt"],
+            "row {row}"
+        );
+        assert_eq!(
+            names(&target)?,
+            ["incoming.bin", "new", "stays.txt"],
+            "row {row}"
+        );
+        assert_eq!(
+            fs::read(target.join("incoming.bin"))?,
+            vec![0x5a; 256 * 1024]
+        );
+        assert_eq!(
+            fs::read(target.join("new/inner.bin"))?,
+            vec![0xa5; 256 * 1024]
+        );
+        assert_eq!(fs::read(target.join("stays.txt"))?, b"keep me");
+    }
+    Ok(())
+}
+
+#[test]
+fn merge_does_not_follow_a_target_folder_swapped_for_a_link() -> Result<(), Box<dyn Error>> {
+    use super::fs_quirks::Racer;
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let root = tempfile::tempdir()?;
+    let source = root.path().join("source");
+    let target = root.path().join("target");
+    let outside = root.path().join("outside");
+    fs::create_dir_all(source.join("sub"))?;
+    fs::create_dir_all(target.join("sub"))?;
+    fs::create_dir(&outside)?;
+    fs::write(source.join("sub/new.txt"), b"new")?;
+    fs::write(target.join("sub/old.txt"), b"old")?;
+    let (live, elsewhere) = (target.clone(), outside.clone());
+    let racer: Racer = Box::new(move || {
+        fs::rename(live.join("sub"), live.join("moved")).expect("move the folder away");
+        std::os::unix::fs::symlink(&elsewhere, live.join("sub")).expect("link elsewhere");
+    });
+    let _scope = FsQuirks::install(
+        &target,
+        Quirks {
+            before: vec![(Op::OpenDir, "sub", 0, racer)],
+            ..Quirks::default()
+        },
+    );
+
+    let result = glib::MainContext::default().block_on(merge_local(
+        gio::File::for_path(&source),
+        gio::File::for_path(&target),
+        false,
+        gio::Cancellable::new(),
+        &no_plan,
+    ));
+
+    assert!(result.is_err(), "{result:?}");
+    assert_eq!(names(&outside)?, Vec::<String>::new());
+    assert_eq!(names(&target.join("moved"))?, ["old.txt"]);
     Ok(())
 }
 
@@ -841,6 +1168,85 @@ fn check_merge_undo_restores_staged_originals_and_removes_created() -> Result<()
         fs::read_to_string(bookmarks)?,
         format!("{}{}", pin(&shared), pin(&stays))
     );
+    Ok(())
+}
+
+#[test]
+fn undoing_a_merge_with_numbered_aliases_removes_only_its_items() -> Result<(), Box<dyn Error>> {
+    use crate::services::{RenameCause, RenamedItem};
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let root = tempfile::tempdir()?;
+    let sources = root.path().join("sources");
+    let destination = root.path().join("destination");
+    let folder = destination.join("folder");
+    fs::create_dir_all(sources.join("folder"))?;
+    fs::create_dir_all(&folder)?;
+    for name in ["Makefile", "makefile"] {
+        fs::write(sources.join("folder").join(name), name)?;
+    }
+    fs::write(folder.join("keep.txt"), b"keep me")?;
+    let _scope = FsQuirks::install(&destination, without_trash(Quirks::vfat()));
+
+    let events = run_paste(PasteRequest {
+        id: OperationRequestId(94),
+        destination: Location::local(&destination),
+        items: vec![PasteItem {
+            source: Location::local(sources.join("folder")),
+            conflict: TransferConflict::Merge,
+        }],
+        move_sources: false,
+    });
+
+    let mut created = events
+        .iter()
+        .filter_map(|event| match event {
+            OperationEvent::Merged { created, .. } => Some(created.clone()),
+            _ => None,
+        })
+        .flatten()
+        .filter_map(|location| location.native_path().map(Path::to_path_buf))
+        .collect::<Vec<_>>();
+    created.sort();
+    assert_eq!(created, [folder.join("Makefile"), folder.join("makefile")]);
+    let renamed = events
+        .iter()
+        .filter_map(|event| match event {
+            OperationEvent::ItemsReported { report, .. } => Some(report.renamed.clone()),
+            _ => None,
+        })
+        .flatten()
+        .collect::<Vec<_>>();
+    let saved_as = Location::local(folder.join("makefile (1)"));
+    assert_eq!(
+        renamed,
+        [RenamedItem {
+            requested: Location::local(folder.join("makefile")),
+            saved_as: saved_as.clone(),
+            cause: RenameCause::Alias,
+        }]
+    );
+    let undone = Rc::new(RefCell::new(Vec::new()));
+    let emitted = undone.clone();
+    glib::MainContext::default().block_on(run_merge_undo(
+        OperationRequestId(95),
+        vec![Location::local(folder.join("Makefile")), saved_as],
+        Vec::new(),
+        Rc::new(move |event| emitted.borrow_mut().push(event)),
+        gio::Cancellable::new(),
+        staged_lookup(HashMap::new()),
+    ));
+
+    assert!(
+        matches!(
+            undone.borrow().last(),
+            Some(OperationEvent::Restored { .. })
+        ),
+        "{:?}",
+        undone.borrow()
+    );
+    assert_eq!(names(&folder)?, ["keep.txt"]);
     Ok(())
 }
 

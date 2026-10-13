@@ -87,13 +87,12 @@ fn recursive_copy_preserves_nested_directory_contents() -> Result<(), Box<dyn Er
         true,
         gio::Cancellable::new(),
     ));
-    assert!(
-        merged
-            .as_ref()
-            .is_err_and(|error| error.matches(gio::IOErrorEnum::Exists)),
-        "a merge only fills names it moved out of the way: {merged:?}"
-    );
+    assert!(merged.is_ok(), "{merged:?}");
+    // A merge fills only names it moved out of the way, and numbers the rest.
     assert_eq!(fs::read(target.join("top.txt"))?, b"top");
+    assert_eq!(fs::read(target.join("top (1).txt"))?, b"replacement");
+    assert_eq!(fs::read(target.join("nested/child.txt"))?, b"child");
+    assert_eq!(fs::read(target.join("nested/child (1).txt"))?, b"child");
 
     fs::remove_dir_all(root)?;
     Ok(())
@@ -1327,17 +1326,18 @@ fn a_symlink_child_never_overwrites_an_existing_entry() -> Result<(), Box<dyn Er
     std::os::unix::fs::symlink("elsewhere", source.join("Link"))?;
     fs::write(target.join("Link"), b"existing")?;
 
-    let error = glib::MainContext::default()
-        .block_on(copy_recursively(
-            gio::File::for_path(&source),
-            gio::File::for_path(&target),
-            true,
-            gio::Cancellable::new(),
-        ))
-        .expect_err("an existing entry blocks the link");
+    glib::MainContext::default().block_on(copy_recursively(
+        gio::File::for_path(&source),
+        gio::File::for_path(&target),
+        true,
+        gio::Cancellable::new(),
+    ))?;
 
-    assert!(error.matches(gio::IOErrorEnum::Exists), "{error}");
     assert_eq!(fs::read(target.join("Link"))?, b"existing");
+    assert_eq!(
+        fs::read_link(target.join("Link (1)"))?,
+        Path::new("elsewhere")
+    );
     Ok(())
 }
 

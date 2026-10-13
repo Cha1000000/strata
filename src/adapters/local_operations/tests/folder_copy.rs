@@ -464,66 +464,118 @@ fn a_cancelled_copy_on_nfs_leaves_no_stage() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-/// The files beneath `root`, by path relative to it.
-fn files_beneath(root: &Path, relative: &Path, files: &mut Vec<PathBuf>) -> io::Result<()> {
-    for entry in fs::read_dir(root.join(relative))? {
-        let path = relative.join(entry?.file_name());
-        if fs::symlink_metadata(root.join(&path))?.is_dir() {
-            files_beneath(root, &path, files)?;
-        } else {
-            files.push(path);
+/// Asserts that every entry under `live` is one of the `existing` paths or
+/// a complete copy of the entry at the same path under `source`.
+fn assert_only_complete(
+    row: &str,
+    live: &Path,
+    source: &Path,
+    relative: &Path,
+    existing: &[&str],
+) -> Result<(), Box<dyn Error>> {
+    for name in names(&live.join(relative))? {
+        assert!(
+            !name.starts_with(".strata-"),
+            "{row}: {name} left in {relative:?}"
+        );
+        let path = relative.join(&name);
+        let is_existing = existing.iter().any(|existing| path == Path::new(existing));
+        if fs::symlink_metadata(live.join(&path))?.is_dir() {
+            if !is_existing {
+                assert_eq!(
+                    names(&live.join(&path))?,
+                    names(&source.join(&path))?,
+                    "{row}: {path:?} is incomplete"
+                );
+            }
+            assert_only_complete(row, live, source, &path, existing)?;
+        } else if !is_existing {
+            let (copied, original) = (fs::read(live.join(&path))?, fs::read(source.join(&path))?);
+            assert!(
+                copied == original,
+                "{row}: {path:?} has {} of {} bytes",
+                copied.len(),
+                original.len()
+            );
         }
     }
     Ok(())
 }
 
 #[test]
-fn a_cancelled_merge_on_nfs_leaves_no_partial_file_at_a_real_name() -> Result<(), Box<dyn Error>> {
+fn a_stopped_merge_leaves_nothing_partial_at_a_real_name() -> Result<(), Box<dyn Error>> {
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock()?;
-    let cancellable = gio::Cancellable::new();
-    let cancel = cancellable.clone();
-    let mounts = mounts(Quirks {
+    let nfs = || Quirks {
         silly_rename: true,
-        before: vec![(Op::Write, "*", 0, Box::new(move || cancel.cancel()))],
         ..Quirks::nfs3()
-    })?;
-    let source = mounts.sources.join("source");
-    fs::create_dir_all(source.join("new"))?;
-    for index in 0..8 {
-        fs::write(source.join(format!("{index}.bin")), vec![0x5a; 256 * 1024])?;
-        fs::write(
-            source.join(format!("new/{index}.bin")),
-            vec![0xa5; 256 * 1024],
-        )?;
-    }
-    let live = mounts.destination.join("live");
-    fs::create_dir(&live)?;
-    fs::write(live.join("stays.txt"), b"keep me")?;
+    };
+    // Claimed names on NFS and vfat, and folders made at their names where
+    // the mount cannot place one.
+    let presets: [(&str, Preset); 3] = [
+        ("nfs", nfs),
+        ("vfat", Quirks::vfat),
+        ("in place", Quirks::without_folder_placement),
+    ];
+    for (row, preset) in presets {
+        for cancelled in [true, false] {
+            let cancellable = gio::Cancellable::new();
+            let cancel = cancellable.clone();
+            let mut quirks = preset();
+            if cancelled {
+                quirks
+                    .before
+                    .push((Op::Write, "*", 0, Box::new(move || cancel.cancel())));
+            } else {
+                quirks.fail.push((Op::Write, "*", 0, Errno::IO));
+            }
+            let mounts = mounts(quirks)?;
+            if row == "in place" {
+                learn_mount_capability(mounts.destination_scope.key(), |capabilities| {
+                    capabilities.no_replace = Some(false);
+                    capabilities.hard_links = Some(true);
+                    capabilities.rename_over_empty_directory = Some(false);
+                });
+            }
+            let source = mounts.sources.join("source");
+            let live = mounts.destination.join("live");
+            for folder in ["new/deeper", "sub/newer"] {
+                fs::create_dir_all(source.join(folder))?;
+            }
+            for (folder, count) in [
+                ("", 8),
+                ("new", 8),
+                ("new/deeper", 4),
+                ("sub", 4),
+                ("sub/newer", 4),
+            ] {
+                for index in 0..count {
+                    let file = source.join(folder).join(format!("{index}.bin"));
+                    fs::write(file, vec![index as u8; 256 * 1024])?;
+                }
+            }
+            fs::create_dir_all(live.join("sub"))?;
+            fs::write(live.join("stays.txt"), b"keep me")?;
+            fs::write(live.join("sub/old.txt"), b"old")?;
 
-    let result = glib::MainContext::default().block_on(copy_recursively(
-        gio::File::for_path(&source),
-        gio::File::for_path(&live),
-        true,
-        cancellable,
-    ));
+            let result = glib::MainContext::default().block_on(copy_recursively(
+                gio::File::for_path(&source),
+                gio::File::for_path(&live),
+                true,
+                cancellable,
+            ));
 
-    assert!(
-        result
-            .as_ref()
-            .is_err_and(|error| error.matches(gio::IOErrorEnum::Cancelled)),
-        "{result:?}"
-    );
-    assert_eq!(fs::read(live.join("stays.txt"))?, b"keep me");
-    let mut merged = Vec::new();
-    files_beneath(&live, Path::new(""), &mut merged)?;
-    for path in merged.iter().filter(|path| *path != Path::new("stays.txt")) {
-        let (copied, original) = (fs::read(live.join(path))?, fs::read(source.join(path))?);
-        assert!(
-            copied == original,
-            "{path:?} has {} of {} bytes",
-            copied.len(),
-            original.len()
-        );
+            let row = format!("{row}, cancelled: {cancelled}");
+            assert!(
+                result.as_ref().is_err_and(|error| {
+                    error.matches(gio::IOErrorEnum::Cancelled) == cancelled
+                }),
+                "{row}: {result:?}"
+            );
+            assert_eq!(fs::read(live.join("stays.txt"))?, b"keep me", "{row}");
+            assert_eq!(fs::read(live.join("sub/old.txt"))?, b"old", "{row}");
+            let existing = ["stays.txt", "sub", "sub/old.txt"];
+            assert_only_complete(&row, &live, &source, Path::new(""), &existing)?;
+        }
     }
     Ok(())
 }
@@ -588,6 +640,54 @@ fn a_failed_copy_in_place_removes_only_what_it_made() -> Result<(), Box<dyn Erro
     assert!(result.is_err(), "{result:?}");
     assert_eq!(names(&target)?, ["user.txt"]);
     assert_eq!(fs::read(target.join("user.txt"))?, b"user data");
+    Ok(())
+}
+
+#[test]
+fn an_item_put_at_a_linked_name_right_after_the_link_is_kept() -> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock()?;
+    let root = tempfile::tempdir()?;
+    let source = root.path().join("source");
+    fs::create_dir(&source)?;
+    fs::write(source.join("a"), b"linked")?;
+    fs::hard_link(source.join("a"), source.join("a2"))?;
+    let destination = root.path().join("destination");
+    fs::create_dir(&destination)?;
+    let target = destination.join("target");
+    // Either name may be the one linked; its check is its first stat.
+    let racer = |name: &'static str, other: &'static str| -> Racer {
+        let live = target.clone();
+        Box::new(move || {
+            let inode = |name| fs::metadata(live.join(name)).map(|metadata| metadata.ino());
+            let inode = |name| inode(name).ok();
+            if inode(name).is_some() && inode(name) == inode(other) {
+                fs::write(live.join("user"), b"user data").expect("write the user's item");
+                fs::rename(live.join("user"), live.join(name)).expect("replace the link");
+            }
+        })
+    };
+    let scope = FsQuirks::install(
+        &destination,
+        Quirks {
+            before: vec![
+                (Op::Stat, "a", 0, racer("a", "a2")),
+                (Op::Stat, "a2", 0, racer("a2", "a")),
+            ],
+            ..Quirks::without_folder_placement()
+        },
+    );
+    learn_mount_capability(scope.key(), |capabilities| {
+        capabilities.no_replace = Some(false);
+        capabilities.hard_links = Some(true);
+        capabilities.rename_over_empty_directory = Some(false);
+    });
+
+    let result = copy(&source, &target);
+
+    assert!(result.is_err(), "{result:?}");
+    let names = names(&target)?;
+    assert_eq!(names.len(), 1, "{names:?}");
+    assert_eq!(fs::read(target.join(&names[0]))?, b"user data");
     Ok(())
 }
 

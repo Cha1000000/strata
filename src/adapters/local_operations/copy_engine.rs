@@ -124,6 +124,7 @@ pub(super) async fn copy_local(
 ) -> Result<Copied, glib::Error> {
     let (Destination::New(target, _) | Destination::Merge(target)) = &destination;
     let target = target.clone();
+    let merging = matches!(destination, Destination::Merge(_));
     let followed = following(
         source,
         options,
@@ -140,15 +141,26 @@ pub(super) async fn copy_local(
         },
     )
     .await?;
-    report(
-        progress.as_deref(),
-        &target.with_file_name(&followed.value),
-        followed.left,
-    );
-    Ok(Copied {
-        name: followed.value,
-        reported: followed.reported,
-    })
+    match followed.value {
+        Ok(name) => {
+            report(
+                progress.as_deref(),
+                &target.with_file_name(&name),
+                followed.left,
+            );
+            Ok(Copied {
+                name,
+                reported: followed.reported,
+            })
+        }
+        // What a stopped merge placed stays.
+        Err(error) => {
+            if merging {
+                report(progress.as_deref(), &target, followed.left);
+            }
+            Err(error)
+        }
+    }
 }
 
 /// Copies the native item at `source` into a hidden sibling of `target`,
@@ -175,14 +187,15 @@ pub(super) async fn copy_to_stage(
         },
     )
     .await?;
+    let staged = followed.value?;
     report(progress.as_deref(), &root, followed.left);
-    Ok(followed.value)
+    Ok(staged)
 }
 
-/// What a copy run by [`following`] made and added to progress, and what
-/// it left as the user would not expect.
+/// What a copy run by [`following`] made or why it stopped, what it added to
+/// progress, and what it left as the user would not expect.
 struct Followed<T> {
-    value: T,
+    value: Result<T, glib::Error>,
     reported: Reported,
     left: Left,
 }
@@ -191,8 +204,20 @@ struct Followed<T> {
 /// files it left out, by path beneath the item.
 #[derive(Default)]
 struct Left {
-    renamed: Vec<(PathBuf, PathBuf)>,
+    renamed: Vec<(PathBuf, PathBuf, RenameCause)>,
     skipped: Vec<(PathBuf, SpecialKind)>,
+}
+
+/// `path` moved with the entry at `from` to `to`, where it is that entry or
+/// beneath it.
+fn rebase(path: &mut PathBuf, from: &Path, to: &Path) {
+    if let Ok(rest) = path.strip_prefix(from) {
+        *path = if rest.as_os_str().is_empty() {
+            to.to_path_buf()
+        } else {
+            to.join(rest)
+        };
+    }
 }
 
 /// Tells `progress` what the copy left inside the item at `root`.
@@ -205,10 +230,10 @@ fn report(progress: Option<&TransferProgressTracker>, root: &Path, left: Left) {
         renamed: left
             .renamed
             .into_iter()
-            .map(|(requested, saved_as)| RenamedItem {
+            .map(|(requested, saved_as, cause)| RenamedItem {
                 requested: location(requested),
                 saved_as: location(saved_as),
-                cause: RenameCause::Alias,
+                cause,
             })
             .collect(),
         skipped: left
@@ -239,7 +264,10 @@ async fn following<T: Send + 'static>(
     });
     let counters = shared.clone();
     let copied = run_cancellable(cancellable, move |cancelled| {
-        let (parent, name) = split(&source)?;
+        let (parent, name) = match split(&source) {
+            Ok(split) => split,
+            Err(error) => return (Err(error), Left::default()),
+        };
         let source = Source { parent, name };
         let copy = Copy::new(
             fs(),
@@ -249,12 +277,12 @@ async fn following<T: Send + 'static>(
             true,
             options,
         );
-        let value = work(&copy, &source).map_err(|failure| failure.into_error(&source.name))?;
-        Ok::<_, glib::Error>((value, std::mem::take(&mut *lock(&copy.left))))
+        let value = work(&copy, &source).map_err(|failure| failure.into_error(&source.name));
+        (value, std::mem::take(&mut *lock(&copy.left)))
     })
     .await;
     let reported = follower.map_or_else(|| shared.reported(), |follower| follower.stop());
-    let (value, left) = copied.map_err(|_| io_error("Copy worker stopped unexpectedly"))??;
+    let (value, left) = copied.map_err(|_| io_error("Copy worker stopped unexpectedly"))?;
     Ok(Followed {
         value,
         reported,
@@ -526,10 +554,7 @@ fn publish_folder(
                 let discarded = copy.discard(staged);
                 return match (copied, discarded) {
                     (Ok((name, ())), Ok(())) => Ok(name),
-                    (Ok(_), Err(error)) => Err(Failure::Error(io_error(rust_i18n::t!(
-                        "The item was copied, but its staging copy could not be removed: %{error}",
-                        error = crate::services::gio_error_detail(&error)
-                    )))),
+                    (Ok(_), Err(error)) => Err(Failure::Error(stage_left(&error))),
                     (Err(failure), discarded) => Err(copy.after_cleanup(failure, discarded)),
                 };
             }
@@ -537,6 +562,14 @@ fn publish_folder(
         }
     }
     Err(copy.discarding(staged, Failure::Place(PlaceError::Exists)))
+}
+
+/// The item is complete, but the stage it was copied from is left.
+fn stage_left(error: &glib::Error) -> glib::Error {
+    io_error(rust_i18n::t!(
+        "The item was copied, but its staging copy could not be removed: %{error}",
+        error = crate::services::gio_error_detail(error)
+    ))
 }
 
 /// A folder this copy made, which only it writes into.
@@ -567,17 +600,21 @@ fn fill(
         path: PathBuf::new(),
         naming: tree::Naming::Decide,
         mount,
-        link_scope: 0,
+        scope: 0,
         completion: None,
     };
-    let tree::Walked {
-        mut restrictive,
-        links,
-    } = tree::walk(copy, workers, created.cloned(), |tree| {
+    let (
+        walked,
+        tree::Walked {
+            mut restrictive,
+            links,
+            ..
+        },
+    ) = tree::walk(copy, workers, created.cloned(), |tree| {
         tree.probe_links_in(&mount, root.parent.clone());
         tree::TreeJob::Folder(tree, folder)
-    })
-    .map_err(Failure::Error)?;
+    });
+    walked.map_err(Failure::Error)?;
     if restrictive.is_empty() && links.is_empty() {
         return Ok(restrictive);
     }
@@ -586,8 +623,10 @@ fn fill(
         return Err(Failure::Place(PlaceError::Changed));
     }
     links.make(
+        0,
         copy,
         opened.as_fd(),
+        Path::new(""),
         mount.family,
         created.map(|created| &**created),
     )?;
@@ -725,6 +764,8 @@ fn from_stage(
     }
 }
 
+/// Merges the folder `source` into the live `folder`. Only complete children
+/// appear there, and a stopped merge removes the stages it did not place.
 fn merge(
     copy: &Arc<Copy>,
     source: &Source,
@@ -735,29 +776,21 @@ fn merge(
     let workers = workers.unwrap_or_else(|| worker_count(source, &parent));
     let merged = tree::Merged {
         source: (source.parent.clone(), source.name.clone()),
-        target: (parent.clone(), name.clone(), None),
+        target: (parent, name, None),
         path: PathBuf::new(),
     };
-    let tree::Walked {
-        mut restrictive,
-        links,
-    } = tree::walk(copy, workers, None, |tree| {
+    let (walked, tree::Walked { stages, placed, .. }) = tree::walk(copy, workers, None, |tree| {
         tree::TreeJob::Merge(tree, merged)
-    })
-    .map_err(Failure::Error)?;
-    if restrictive.is_empty() && links.is_empty() {
+    });
+    let Err(error) = walked else {
         return Ok(());
+    };
+    copy.keep_left_beneath(&placed);
+    let mut cleanup = Ok(());
+    for staged in stages {
+        cleanup = cleanup.and(copy.discard(staged));
     }
-    let root = copy.fs.open_dir(Entry::new(&*parent, &name))?;
-    let family = Mount::new(copy.fs, root.as_fd()).family;
-    links.make(copy, root.as_fd(), family, None)?;
-    restrictive::tighten(
-        copy.fs,
-        root.as_fd(),
-        &mut restrictive,
-        stable_inodes(family),
-    )
-    .map_err(Failure::Os)
+    Err(copy.after_cleanup(Failure::Error(error), cleanup))
 }
 
 /// Why a copy stopped.
@@ -1000,8 +1033,63 @@ impl Copy {
         )
     }
 
-    fn renamed(&self, requested: PathBuf, saved_as: PathBuf) {
-        lock(&self.left).renamed.push((requested, saved_as));
+    /// A copy of a folder made at its own root beneath the item, sharing
+    /// this one's progress and cancel flag.
+    fn nested(&self) -> Arc<Self> {
+        let options = Options {
+            fat_family: self.fat_family,
+            workers: None,
+            moving: self.moving,
+        };
+        Self::new(
+            self.fs,
+            self.item.clone(),
+            self.cancelled.clone(),
+            self.progress.clone(),
+            self.counted,
+            options,
+        )
+    }
+
+    /// Takes what `nested`, a copy of the folder at `path`, left.
+    fn adopt(&self, nested: &Self, path: &Path) {
+        let Left { renamed, skipped } = std::mem::take(&mut *lock(&nested.left));
+        let mut left = lock(&self.left);
+        left.renamed
+            .extend(renamed.into_iter().map(|(requested, saved_as, cause)| {
+                (path.join(requested), path.join(saved_as), cause)
+            }));
+        left.skipped
+            .extend(skipped.into_iter().map(|(at, kind)| (path.join(at), kind)));
+    }
+
+    fn renamed(&self, requested: PathBuf, saved_as: PathBuf, cause: RenameCause) {
+        lock(&self.left).renamed.push((requested, saved_as, cause));
+    }
+
+    /// What was left beneath the entry at `from` went with it to `to`.
+    fn relocate(&self, from: &Path, to: &Path) {
+        let move_beneath = |path: &mut PathBuf| {
+            if path != from {
+                rebase(path, from, to);
+            }
+        };
+        let mut left = lock(&self.left);
+        for (requested, saved_as, _) in &mut left.renamed {
+            move_beneath(requested);
+            move_beneath(saved_as);
+        }
+        for (path, _) in &mut left.skipped {
+            move_beneath(path);
+        }
+    }
+
+    /// Forgets what was left anywhere but at or beneath `paths`.
+    fn keep_left_beneath(&self, paths: &[PathBuf]) {
+        let kept = |path: &Path| paths.iter().any(|placed| path.starts_with(placed));
+        let mut left = lock(&self.left);
+        left.renamed.retain(|(_, saved_as, _)| kept(saved_as));
+        left.skipped.retain(|(path, _)| kept(path));
     }
 
     /// Leaves out the special file at `path`, unless the copy is a move.
@@ -1484,10 +1572,7 @@ impl<'a> FileCopy<'a> {
                         Err(failure) => return Err(self.discard(&stage, failure)),
                     };
                     if let Err(error) = self.remove_stage(&stage) {
-                        return Err(Failure::Error(io_error(rust_i18n::t!(
-                            "The item was copied, but its staging copy could not be removed: %{error}",
-                            error = crate::services::gio_error_detail(&error)
-                        ))));
+                        return Err(Failure::Error(stage_left(&error)));
                     }
                     break created;
                 }
