@@ -361,10 +361,11 @@ fn link_reply_was_lost(fs: &dyn FsOps, to: Entry<'_>, source: &EntryStat) -> boo
 }
 
 /// Only the source's identity at the new name proves a link; a link count can
-/// be stale, or always 1 on sshfs. Where each link reports its own inode
-/// number (libfuse without `use_ino`, cifs without server inode numbers), the
-/// link is removed by the identity it reports and the mount is marked as
-/// having no usable links.
+/// be stale, or always 1 on sshfs. Another identity there is a racer's item,
+/// or a mount where each link reports its own inode number (libfuse without
+/// `use_ino`, cifs without server inode numbers). Only a probe on Strata's own
+/// names tells them apart; on such a mount the link is removed by the identity
+/// it reported and links are not used again.
 fn link_holds_source(
     fs: &dyn FsOps,
     mount: &Mount<'_>,
@@ -384,8 +385,10 @@ fn link_holds_source(
         Ok(_) => return Err(PlaceError::Changed),
         Err(_) => return Err(PlaceError::Unconfirmed),
     }
-    mount.learn(|capabilities| capabilities.hard_links = Some(false));
-    if remove_if_unchanged(fs, to, linked, AtFlags::empty()) {
+    let links_unusable = mount
+        .probe(true, false)
+        .is_ok_and(|probed| probed.hard_links == Some(false));
+    if links_unusable && remove_if_unchanged(fs, to, linked, AtFlags::empty()) {
         Ok(false)
     } else {
         Err(PlaceError::Unconfirmed)

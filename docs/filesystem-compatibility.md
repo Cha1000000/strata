@@ -194,9 +194,11 @@ Rename and link support decides which placement step runs. "Rejects flags" means
 | overlayfs | yes | yes | yes | lower-layer folders cannot be renamed without `redirect_dir` |
 
 libfuse high-level daemons without `use_ino`, sshfs among them, give each hard link its own inode
-number, so a link cannot prove that it holds the item. Strata removes such a link by the identity
-it reports and stops using links on that mount: moves copy, renames use the reserved-name step
-above, and an archive file cannot be published there.
+number, so a link cannot prove that it holds the item. Once a probe on Strata's own names confirms
+this, Strata removes such a link by the identity it reported right after linking and stops using
+links on that mount: moves copy, renames use the reserved-name step above, and an archive file
+cannot be published there. Without that confirmation, a new name reporting another identity may
+be a racer's item, so both names are kept and the result is reported as unconfirmed.
 
 ## Testing
 

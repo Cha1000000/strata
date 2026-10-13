@@ -1001,6 +1001,41 @@ fn a_hard_link_reporting_another_inode_is_rolled_back_and_never_used_again()
     Ok(())
 }
 
+#[test]
+fn a_racer_replacing_a_new_link_keeps_its_item_and_links_stay_in_use() -> Result<(), Box<dyn Error>>
+{
+    // NOSYS links before any probe; EINVAL probes first.
+    for error in [Errno::NOSYS, Errno::INVAL] {
+        let root = tempfile::tempdir()?;
+        let dir = root.path().to_path_buf();
+        let racer: Racer = Box::new(move || {
+            fs::write(dir.join("theirs"), b"theirs").expect("write");
+            fs::rename(dir.join("theirs"), dir.join("target")).expect("replace");
+        });
+        let scope = FsQuirks::install(
+            root.path(),
+            Quirks {
+                before: vec![(Op::Stat, "target", 0, racer)],
+                ..without_flags(error)
+            },
+        );
+        fs::write(root.path().join("source"), b"data")?;
+        let original = identity(&root.path().join("source"));
+
+        assert_eq!(
+            place_in(root.path(), "source", "target", None),
+            Err(PlaceError::Unconfirmed),
+            "{error:?}"
+        );
+        assert_eq!(fs::read(root.path().join("target"))?, b"theirs");
+        assert_eq!(identity(&root.path().join("source")), original);
+        assert_eq!(mount_capabilities(scope.key()).hard_links, Some(true));
+        assert_eq!(place_in(root.path(), "source", "moved", None), Ok(Placed::Linked));
+        assert_eq!(names(root.path())?, ["moved", "target"]);
+    }
+    Ok(())
+}
+
 /// No `RENAME_NOREPLACE`, and a link to `target` refused for that item alone,
 /// as `protected_hardlinks` does for another user's file.
 fn links_refused_for_the_item() -> Quirks {
