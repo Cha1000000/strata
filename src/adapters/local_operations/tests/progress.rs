@@ -565,6 +565,77 @@ fn linked_names_count_as_copied_before_their_folder_is_published() -> Result<(),
 }
 
 #[test]
+fn copied_links_count_their_bytes_as_they_are_made() -> Result<(), Box<dyn Error>> {
+    use std::sync::Mutex;
+
+    use super::fs_quirks::{Op, Racer};
+
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let root = tempfile::tempdir()?;
+    let tree = root.path().join("source/tree");
+    let destination = root.path().join("destination");
+    fs::create_dir_all(&tree)?;
+    fs::create_dir(&destination)?;
+    std::os::unix::fs::symlink("first target", tree.join("a-link"))?;
+    std::os::unix::fs::symlink("second", tree.join("b-link"))?;
+    fs::write(tree.join("file.bin"), vec![7; 64 * 1024])?;
+    let links = Arc::new(Mutex::new(None::<u64>));
+    let seen = links.clone();
+    // Holds the file until both links were reported, with the bytes so far.
+    let racer: Racer = Box::new(move || {
+        let start = Instant::now();
+        while seen.lock().expect("links").is_none() && start.elapsed() < Duration::from_secs(5) {
+            thread::sleep(Duration::from_millis(5));
+        }
+    });
+    let _destination = FsQuirks::install(
+        &destination,
+        Quirks {
+            before: vec![(Op::Write, "*", 0, racer)],
+            ..Quirks::default()
+        },
+    );
+
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let emitted = events.clone();
+    let recorded = links.clone();
+    let _operation = LocalOperationProvider.paste(
+        PasteRequest {
+            id: OperationRequestId(33),
+            destination: Location::local(&destination),
+            items: vec![PasteItem {
+                source: Location::local(&tree),
+                conflict: TransferConflict::FailIfExists,
+            }],
+            move_sources: false,
+        },
+        Rc::new(move |event| {
+            if let OperationEvent::TransferProgress {
+                completed_files: 2,
+                transferred_bytes,
+                ..
+            } = event
+            {
+                recorded.lock().expect("links").get_or_insert(transferred_bytes);
+            }
+            emitted.borrow_mut().push(event);
+        }),
+    );
+    drive_until_transfer_settles(&events);
+
+    assert!(
+        matches!(events.borrow().last(), Some(OperationEvent::Pasted { .. })),
+        "{:?}",
+        events.borrow()
+    );
+    let lengths = ("first target".len() + "second".len()) as u64;
+    assert_eq!(*links.lock().expect("links"), Some(lengths));
+    Ok(())
+}
+
+#[test]
 fn a_folder_copied_out_of_its_stage_counts_each_file_once() -> Result<(), Box<dyn Error>> {
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
         .lock()

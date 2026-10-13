@@ -196,10 +196,7 @@ impl Links {
             if let Some(created) = created {
                 created.add(name.path.clone(), made);
             }
-            if copy.counted {
-                copy.progress.add_bytes(name.size);
-            }
-            copy.add_file();
+            copy.add_file(name.size);
         }
         let stable = stable_inodes(family);
         for folder in retimed {

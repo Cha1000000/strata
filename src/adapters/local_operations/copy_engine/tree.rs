@@ -373,7 +373,6 @@ impl Made {
                 if tree.created.is_some() {
                     tree.made(&path, copy.fs.stat(target, false)?.identity);
                 }
-                copy.add_file();
                 queue.complete(Some(group.clone()));
             }
         }
@@ -503,7 +502,8 @@ pub(super) fn read_link(fs: &dyn FsOps, at: Entry<'_>) -> Result<OsString, Failu
     })
 }
 
-/// Recreates the symlink at `source` as `target`, with its times.
+/// Recreates the symlink at `source` as `target`, with its times, and
+/// counts it with its target's length as its bytes.
 pub(super) fn copy_link(
     copy: &Copy,
     source: Entry<'_>,
@@ -530,6 +530,7 @@ pub(super) fn copy_link(
     if mount.family != Family::Fuse {
         best_effort(fs.set_link_times(target, stat.atime, stat.mtime))?;
     }
+    copy.add_file(stat.size);
     Ok(())
 }
 
@@ -559,7 +560,7 @@ impl File {
         match tree.copy.with_data(|data| self.copy(tree, data)) {
             Ok(role) => {
                 if role != Role::Later {
-                    tree.copy.add_file();
+                    tree.copy.add_file(0);
                 }
                 queue.complete(self.completion);
             }
@@ -841,7 +842,6 @@ impl Live {
                     &self.mount,
                     None,
                 )?;
-                copy.add_file();
             }
         }
         Ok(())

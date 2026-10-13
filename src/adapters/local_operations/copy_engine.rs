@@ -262,9 +262,7 @@ fn copy_new(
                 Entry::new(&*parent, &name),
                 &mount,
                 None,
-            )?;
-            copy.add_file();
-            Ok(())
+            )
         }
         FileType::Directory => {
             let workers = workers.unwrap_or_else(|| worker_count(source, &parent));
@@ -310,7 +308,7 @@ fn copy_stage(
                     return Err(copy.discarding(staged, error.into()));
                 }
             }
-            copy.add_file();
+            copy.add_file(stat.size);
             Ok(staged)
         }
         FileType::Directory => {
@@ -851,9 +849,11 @@ impl Copy {
         )
     }
 
-    /// Counts a completed file, unless this copy repeats one already counted.
-    fn add_file(&self) {
+    /// Counts a completed file, with the `bytes` it made without copying
+    /// data, unless this copy repeats one already counted.
+    fn add_file(&self, bytes: u64) {
         if self.counted {
+            self.progress.add_bytes(bytes);
             self.progress.add_file();
         }
     }
@@ -1169,7 +1169,7 @@ impl<'a> FileCopy<'a> {
             placement::remove_if_unchanged(fs, self.at(&name), created.identity, AtFlags::empty());
             return Err(error.into());
         }
-        self.copy.add_file();
+        self.copy.add_file(0);
         Ok((name, created.identity))
     }
 
@@ -1277,7 +1277,7 @@ impl<'a> FileCopy<'a> {
             return Err(self.discard(&stage, failure));
         }
         let FileTarget::Final(name) = target else {
-            self.copy.add_file();
+            self.copy.add_file(0);
             return Ok((stage.name, stage.created.identity));
         };
         let placed = stage::publish(fs, self.dir, &stage.name, stage.created.identity, name);
@@ -1311,7 +1311,7 @@ impl<'a> FileCopy<'a> {
             }
             Err(error) => return Err(self.discard(&stage, Failure::Place(error))),
         };
-        self.copy.add_file();
+        self.copy.add_file(0);
         Ok((name.to_os_string(), identity))
     }
 
