@@ -1265,11 +1265,22 @@ async fn parallel_copy_plans(
         let available = thread::available_parallelism()
             .map(usize::from)
             .unwrap_or(1);
+        // A rotational disk on either side reads or writes one file at a time.
+        let source_folders: HashSet<&Path> = plans
+            .iter()
+            .filter_map(|plan| plan.source_path.parent())
+            .collect();
         let rotational = destination
             .path()
             .and_then(|path| std::fs::File::open(path).ok())
             .and_then(|directory| local_device_is_rotational(&directory))
-            .unwrap_or(fat_family);
+            .unwrap_or(fat_family)
+            || source_folders.into_iter().any(|folder| {
+                open_local_parent_directory(folder)
+                    .ok()
+                    .and_then(local_device_is_rotational)
+                    == Some(true)
+            });
         Some((plans, bounded_local_worker_count(available, rotational)))
     })
     .await
