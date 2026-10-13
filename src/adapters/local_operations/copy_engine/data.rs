@@ -182,7 +182,7 @@ impl Data {
                 Ranged::From(copied) => offset = copied,
             }
         }
-        self.read_write(fs, cancelled, (source, target), offset, &mut progress)
+        self.read_write(fs, cancelled, (source, target), (offset, size), &mut progress)
     }
 
     fn copy_ranges(
@@ -252,11 +252,13 @@ impl Data {
         fs: &dyn FsOps,
         cancelled: &AtomicBool,
         (source, target): (BorrowedFd<'_>, BorrowedFd<'_>),
-        mut offset: u64,
+        (mut offset, size): (u64, u64),
         progress: &mut impl FnMut(u64),
     ) -> Result<(), Failure> {
-        if self.buffer.is_empty() {
-            self.buffer = vec![0; MIB];
+        // Sized by the file, so copying a small one maps no large buffer.
+        let wanted = usize::try_from(size).map_or(MIB, |size| size.clamp(64 * 1024, MIB));
+        if self.buffer.len() < wanted {
+            self.buffer = vec![0; wanted];
         }
         loop {
             if cancelled.load(Ordering::Acquire) {
