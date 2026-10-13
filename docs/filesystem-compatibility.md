@@ -262,7 +262,7 @@ Rename and link support decides which placement step runs. "Rejects flags" means
 | exfat-fuse (libfuse3) | enforced by the kernel only | ignored: overwrites | no | built on libfuse2, it rejects flags and takes the [reserved-name step](#the-reserved-name-step-and-its-risk) |
 | NFS v3 and v4 | rejects flags | rejects flags | yes | unlinking an open file leaves `.nfsXXXX` until it is closed |
 | SMB/CIFS | client-side only | no | server-dependent | usually case-insensitive; open files may block rename and delete |
-| sshfs | rejects flags | rejects flags | not used | each link reports its own inode number; reports "exists" as `EPERM`; files take the [reserved-name step](#the-reserved-name-step-and-its-risk), which fails without the server's `posix-rename@openssh.com` extension |
+| sshfs | rejects flags | rejects flags | not used | each link reports its own inode number; reports "exists" as `EPERM`; files take the [reserved-name step](#the-reserved-name-step-and-its-risk); without the server's `posix-rename@openssh.com` extension its rename over the placeholder fails with `EPERM`, so moved, restored and staged files are copied, and file renames, archive publication and setting a file aside fail |
 | 9p (WSL2, QEMU), ceph, eCryptfs | rejects flags | rejects flags | yes | |
 | vboxsf, rclone, s3fs | rejects flags | rejects flags | no | files take the [reserved-name step](#the-reserved-name-step-and-its-risk) |
 | mergerfs | rejects flags | rejects flags | within a branch | |

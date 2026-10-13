@@ -1066,12 +1066,12 @@ fn rename_over_reserved_file(
     if may_have_lost_reply(error) {
         return moved_despite_lost_reply(fs, from, to, source, Placed::OverReservedFile);
     }
-    if still_reserved() == Ok(true) {
-        let _ = fs.unlink(to, AtFlags::empty());
-    }
+    let removed = still_reserved() == Ok(true) && fs.unlink(to, AtFlags::empty()).is_ok();
     Err(match error {
         Errno::INVAL => PlaceError::InvalidName,
         Errno::XDEV => PlaceError::CrossDevice,
+        // SFTP without `posix-rename@openssh.com` refuses to rename over any file.
+        Errno::PERM if removed => PlaceError::Unsupported,
         error => PlaceError::Io(error),
     })
 }

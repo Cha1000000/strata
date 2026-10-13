@@ -302,8 +302,14 @@ fn items_no_step_can_place_are_moved_by_copying() -> Result<(), Box<dyn Error>> 
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
         .lock()
         .map_err(|error| error.to_string())?;
-    let cases: [(&str, fn() -> Quirks, bool); 2] = [
+    // As SFTP without `posix-rename` refuses to rename over the reserved file.
+    let rename_over_refused = || Quirks {
+        fail: vec![(Op::Rename, "moved", 1, Errno::PERM)],
+        ..Quirks::sshfs()
+    };
+    let cases: [(&str, fn() -> Quirks, bool); 3] = [
         ("links unsettled", Quirks::without_placement, false),
+        ("rename over refused", rename_over_refused, false),
         ("folders unplaceable", Quirks::without_folder_placement, true),
     ];
     for (case, quirks, folder) in cases {

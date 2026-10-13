@@ -1285,9 +1285,12 @@ fn the_reserved_name_rung_needs_the_missing_primitives_confirmed() -> Result<(),
 #[test]
 fn a_failed_rename_over_the_reserved_file_removes_only_an_untouched_placeholder()
 -> Result<(), Box<dyn Error>> {
+    // EPERM is how SFTP without `posix-rename` refuses any existing target.
     for (error, written, expected) in [
         (Errno::ACCESS, false, PlaceError::Io(Errno::ACCESS)),
         (Errno::ACCESS, true, PlaceError::Io(Errno::ACCESS)),
+        (Errno::PERM, false, PlaceError::Unsupported),
+        (Errno::PERM, true, PlaceError::Io(Errno::PERM)),
     ] {
         let root = tempfile::tempdir()?;
         let target = root.path().join("target");
