@@ -7,7 +7,7 @@ use super::*;
 use crate::adapters::volume::learn_mount_capability;
 
 fn real_copy() -> CopyStep {
-    Rc::new(|source, target, cancellable| copy_recursively(source, target, true, cancellable))
+    super::super::merge_copy(None, false)
 }
 
 /// Substitutes Trash staging with a rename into `staging`, recording the
@@ -59,8 +59,10 @@ fn fat_merge_backs_up_sanitized_collisions_and_records_actual_paths() -> Result<
         None,
         MergeHooks {
             fat_family: true,
-            copy_into_target: Rc::new(|source, target, cancellable| {
-                copy_recursively_fat_family(source, target, true, cancellable)
+            progress: None,
+            copy_into_target: Rc::new(|source, target, _, cancellable| {
+                let copied = copy_recursively_fat_family(source, target, true, cancellable);
+                Box::pin(async move { copied.await.map(|()| None) })
             }),
             stage_overwrite: stage,
             on_merged: &on_merged,
@@ -117,6 +119,7 @@ fn merging_folders_unites_contents_and_overwrites_shared_names() -> Result<(), B
         None,
         MergeHooks {
             fat_family: false,
+            progress: None,
             copy_into_target: real_copy(),
             stage_overwrite: stage,
             on_merged: &on_merged,
@@ -172,6 +175,7 @@ fn merging_recurses_into_subdirectories_shared_by_both_sides() -> Result<(), Box
         None,
         MergeHooks {
             fat_family: false,
+            progress: None,
             copy_into_target: real_copy(),
             stage_overwrite: stage,
             on_merged: &on_merged,
@@ -280,6 +284,7 @@ fn a_staging_failure_aborts_the_merge_and_reports_only_what_was_staged()
         None,
         MergeHooks {
             fat_family: false,
+            progress: None,
             copy_into_target: real_copy(),
             stage_overwrite: stage,
             on_merged: &on_merged,
@@ -917,7 +922,8 @@ fn a_failed_merge_preserves_the_destinations_existing_contents() -> Result<(), B
         None,
         MergeHooks {
             fat_family: false,
-            copy_into_target: Rc::new(|_, target, _| {
+            progress: None,
+            copy_into_target: Rc::new(|_, target, _, _| {
                 Box::pin(async move {
                     fs::write(
                         target
@@ -1392,6 +1398,7 @@ fn merge_through_trash(
         None,
         MergeHooks {
             fat_family: false,
+            progress: None,
             copy_into_target,
             stage_overwrite: Rc::new(trash_stage_overwrite),
             on_merged: &on_merged,
@@ -1482,7 +1489,7 @@ fn a_failed_merge_without_trash_puts_back_what_it_can_and_names_the_rest()
             ],
         )?;
         let _quirks = FsQuirks::install(root.path(), without_trash(Quirks::default()));
-        let partial: CopyStep = Rc::new(move |_, target, _| {
+        let partial: CopyStep = Rc::new(move |_, target, _, _| {
             Box::pin(async move {
                 let path = target
                     .path()
@@ -1554,9 +1561,9 @@ fn a_failed_aside_puts_every_original_back_before_merging() -> Result<(), Box<dy
             &source,
             &target,
             false,
-            Rc::new(move |_, _, _| {
+            Rc::new(move |_, _, _, _| {
                 copy_observed.set(true);
-                Box::pin(async { Ok(()) })
+                Box::pin(async { Ok(None) })
             }),
         );
 

@@ -17,6 +17,7 @@ use rustix::{fs::AtFlags, io::Errno};
 
 use super::{
     Copy, Created, Failure, FileCopy, Mount, is_fatal, lock,
+    manifest::Pending,
     metadata::Snapshot,
     restrictive, stable_inodes,
     tree::{self, Names},
@@ -30,7 +31,7 @@ use crate::{
         },
         volume::{Family, MountKey},
     },
-    services::RenameCause,
+    services::{KeptCause, RenameCause},
 };
 
 /// A source file by device and inode, within one scope.
@@ -59,11 +60,16 @@ pub(super) struct Name {
     /// The names of its folder.
     pub(super) names: Arc<Names>,
     pub(super) size: u64,
+    /// Recorded once made, by a move.
+    pub(super) recorded: Option<Pending>,
 }
 
+#[derive(Default)]
 struct First {
     /// Where the copy is, once it is written.
     written: Option<(PathBuf, LocalFileIdentity)>,
+    /// It kept changing while it was read, so a move leaves every name.
+    torn: bool,
 }
 
 /// A made folder that gains a later name after it got its times.
@@ -127,7 +133,7 @@ impl Links {
         let mut state = lock(&self.state);
         match state.firsts.entry(name.key) {
             hash_map::Entry::Vacant(vacant) => {
-                vacant.insert(First { written: None });
+                vacant.insert(First::default());
                 Role::First
             }
             hash_map::Entry::Occupied(_) => {
@@ -144,6 +150,13 @@ impl Links {
     pub(super) fn written(&self, key: Key, path: PathBuf, identity: LocalFileIdentity) {
         if let Some(first) = lock(&self.state).firsts.get_mut(&key) {
             first.written = Some((path, identity));
+        }
+    }
+
+    /// The first name of `key` kept changing while it was read.
+    pub(super) fn torn(&self, key: Key) {
+        if let Some(first) = lock(&self.state).firsts.get_mut(&key) {
+            first.torn = true;
         }
     }
 
@@ -204,25 +217,36 @@ impl Links {
             let firsts = later
                 .iter()
                 .filter_map(|name| {
-                    let written = state.firsts.get(&name.key)?.written.clone()?;
-                    Some((name.key, written))
+                    let first = state.firsts.get(&name.key)?;
+                    Some((name.key, (first.written.clone(), first.torn)))
                 })
                 .collect::<HashMap<_, _>>();
             (later, firsts, retimed)
         };
         later.sort_by(|left, right| left.path.cmp(&right.path));
         let mut linking = true;
-        for name in &later {
+        for mut name in later {
             copy.check_cancelled()?;
             let made = match firsts.get(&name.key) {
-                Some((path, identity)) => {
-                    make(copy, (root, base), (path, *identity), name, &mut linking)
+                Some((Some((path, identity)), _)) => {
+                    make(copy, (root, base), (path, *identity), &name, &mut linking)
                 }
-                None => Err(Failure::Changed),
+                Some((None, true)) => {
+                    leave(copy, (root, base), &name)
+                        .map_err(|failure| failure.named(&name.source))?;
+                    if let Some(recorded) = name.recorded.take() {
+                        recorded.keep(KeptCause::Changed);
+                    }
+                    continue;
+                }
+                _ => Err(Failure::Changed),
             };
             let (path, made) = made.map_err(|failure| failure.named(&name.source))?;
             if let Some(created) = created {
                 created.add(path, made);
+            }
+            if let Some(recorded) = name.recorded.take() {
+                recorded.made();
             }
             copy.add_file(name.size);
         }
@@ -297,6 +321,25 @@ fn make(
             FileCopy::new(copy, dir.as_fd()).create_from(from, identity, None, file_name, &parent)
         },
     )
+}
+
+/// Removes what the folder job claimed for `name`, whose first name kept
+/// changing while it was read, so no name of it is copied.
+fn leave(copy: &Copy, (root, base): (BorrowedFd<'_>, &Path), name: &Name) -> Result<(), Failure> {
+    let (Some(claimed), Some(file_name)) = (name.claimed, name.path.file_name()) else {
+        return Ok(());
+    };
+    let dir = parent(copy.fs, root, beneath(base, &name.path)?)?;
+    if placement::remove_if_unchanged(
+        copy.fs,
+        Entry::new(&dir, file_name),
+        claimed,
+        AtFlags::empty(),
+    ) {
+        Ok(())
+    } else {
+        Err(Failure::Place(PlaceError::Changed))
+    }
 }
 
 /// The folder holding `path` beneath `root`.

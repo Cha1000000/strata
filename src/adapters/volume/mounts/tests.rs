@@ -23,15 +23,33 @@ fn parses_mount_points_and_filesystem_types() {
         Some("ext4")
     );
     assert_eq!(table.fs_type_for(Path::new("/mnt/nfs/docs")), Some("nfs4"));
-    assert_eq!(table.fs_type_of(41), Some("ext4"));
-    assert_eq!(table.fs_type_of(60), Some("cifs"));
-    assert_eq!(table.fs_type_of(99), None);
+    let fs_type_of = |id| table.mount_type_of(id).map(|mount| mount.fs_type.as_str());
+    assert_eq!(fs_type_of(41), Some("ext4"));
+    assert_eq!(fs_type_of(60), Some("cifs"));
+    assert_eq!(fs_type_of(99), None);
     assert_eq!(
         table.fs_type_for(Path::new(
             "/run/user/1000/gvfs/smb-share:server=host,share=s/file"
         )),
         Some("fuse.gvfsd-fuse")
     );
+}
+
+#[test]
+fn inode_numbers_are_unstable_on_fuse_and_on_cifs_without_server_inodes() {
+    let table = MountTable::parse(
+        "\
+70 22 0:60 / /mnt/a rw - cifs //server/a rw,vers=3.1.1,serverino,cache=strict
+71 22 0:61 / /mnt/b rw - cifs //server/b rw,vers=3.1.1,noserverino,cache=strict
+72 22 0:62 / /mnt/c rw - fuse.sshfs host:/ rw,user_id=1000
+73 22 0:63 / /mnt/d rw - ext4 /dev/sdc1 rw,relatime
+",
+    );
+    let stable = |id| table.mount_type_of(id).map(super::MountType::stable_inodes);
+    assert_eq!(stable(70), Some(true));
+    assert_eq!(stable(71), Some(false));
+    assert_eq!(stable(72), Some(false));
+    assert_eq!(stable(73), Some(true));
 }
 
 #[test]

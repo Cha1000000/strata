@@ -337,7 +337,7 @@ fn only_names_that_may_collide_are_claimed() -> Result<(), Box<dyn Error>> {
 fn files_are_claimed_where_nodes_are_refused() -> Result<(), Box<dyn Error>> {
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock()?;
     let mounts = mounts(Quirks {
-        mount_type: Some("fuse.example"),
+        mount_type: Some(("fuse.example", "rw")),
         node_create: Support::Rejected(Errno::NOSYS),
         ..Quirks::default()
     })?;

@@ -21,7 +21,30 @@ pub(crate) struct MountTable {
 struct MountEntry {
     id: u64,
     mount_point: PathBuf,
-    fs_type: String,
+    mount_type: MountType,
+}
+
+/// A mount's mountinfo type and superblock options.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct MountType {
+    pub fs_type: String,
+    pub super_options: String,
+}
+
+impl MountType {
+    /// Whether an entry keeps its inode number: libfuse without `use_ino`
+    /// and cifs without server inode numbers number an entry afresh once the
+    /// kernel has evicted it.
+    pub(crate) fn stable_inodes(&self) -> bool {
+        match family(&self.fs_type) {
+            Family::Fuse => false,
+            Family::Smb => !self
+                .super_options
+                .split(',')
+                .any(|option| option == "noserverino"),
+            _ => true,
+        }
+    }
 }
 
 /// Filesystems by their mountinfo type, which tells NFS versions and FUSE
@@ -86,11 +109,19 @@ impl MountTable {
                 let mut fields = front.split(|byte| *byte == b' ');
                 let id = std::str::from_utf8(fields.next()?).ok()?.parse().ok()?;
                 let mount_point = fields.nth(3)?;
-                let fs_type = std::str::from_utf8(back.split(|byte| *byte == b' ').next()?).ok()?;
+                let mut back = back.split(|byte| *byte == b' ');
+                let fs_type = std::str::from_utf8(back.next()?).ok()?;
+                let super_options = back
+                    .nth(1)
+                    .and_then(|options| std::str::from_utf8(options).ok())
+                    .unwrap_or_default();
                 Some(MountEntry {
                     id,
                     mount_point: PathBuf::from(unescape(mount_point)),
-                    fs_type: fs_type.to_owned(),
+                    mount_type: MountType {
+                        fs_type: fs_type.to_owned(),
+                        super_options: super_options.to_owned(),
+                    },
                 })
             })
             .collect::<Vec<_>>();
@@ -100,15 +131,20 @@ impl MountTable {
     }
 
     pub(crate) fn fs_type_for(&self, path: &Path) -> Option<&str> {
-        self.innermost(path).map(|entry| entry.fs_type.as_str())
+        self.mount_type_for(path)
+            .map(|mount_type| mount_type.fs_type.as_str())
     }
 
-    /// The type of the mount with this mountinfo id (`STATX_MNT_ID`).
-    pub(crate) fn fs_type_of(&self, id: u64) -> Option<&str> {
+    pub(crate) fn mount_type_for(&self, path: &Path) -> Option<&MountType> {
+        self.innermost(path).map(|entry| &entry.mount_type)
+    }
+
+    /// The mount with this mountinfo id (`STATX_MNT_ID`).
+    pub(crate) fn mount_type_of(&self, id: u64) -> Option<&MountType> {
         self.entries
             .iter()
             .find(|entry| entry.id == id)
-            .map(|entry| entry.fs_type.as_str())
+            .map(|entry| &entry.mount_type)
     }
 
     pub(super) fn is_remote_path(&self, path: &Path) -> bool {
@@ -131,10 +167,9 @@ impl MountTable {
     pub(super) fn query_may_block(&self, path: &Path) -> bool {
         // Prefix probes can trigger autofs even when a nested mount is local.
         self.is_remote_path(path)
-            || self
-                .entries
-                .iter()
-                .any(|entry| entry.fs_type == "autofs" && path.starts_with(&entry.mount_point))
+            || self.entries.iter().any(|entry| {
+                entry.mount_type.fs_type == "autofs" && path.starts_with(&entry.mount_point)
+            })
     }
 
     pub(crate) fn is_mount_point(&self, path: &Path) -> bool {
@@ -149,7 +184,7 @@ impl MountTable {
     /// Excludes virtual or potentially blocking filesystems from fallback scans.
     pub(crate) fn trash_scan_mounts(&self) -> impl Iterator<Item = &Path> {
         self.entries.iter().filter_map(|entry| {
-            is_trash_scan_fs_type(&entry.fs_type).then_some(entry.mount_point.as_path())
+            is_trash_scan_fs_type(&entry.mount_type.fs_type).then_some(entry.mount_point.as_path())
         })
     }
 

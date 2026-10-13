@@ -365,19 +365,42 @@ fn replacement_move_does_not_delete_a_substituted_source() -> Result<(), Box<dyn
         },
     );
 
-    let result = glib::MainContext::default().block_on(replace_local(
+    let reports = Rc::new(RefCell::new(Vec::new()));
+    let reported = reports.clone();
+    let progress = TransferProgressTracker::new(
+        OperationRequestId(1),
+        None,
+        None,
+        Rc::new(move |event| {
+            if let OperationEvent::ItemsReported { report, .. } = event {
+                reported.borrow_mut().extend(report.kept);
+            }
+        }),
+    );
+
+    glib::MainContext::default().block_on(replace_local_with(
         gio::File::for_path(&source),
         gio::File::for_path(&target),
         true,
         gio::Cancellable::new(),
         None,
-    ));
+        Copying {
+            progress: Some(progress),
+            fat_family: false,
+        },
+        &|_| {},
+    ))?;
 
-    let error = result.expect_err("a substituted source must fail identity validation");
-    assert!(error.to_string().contains("changed"), "{error}");
     assert_eq!(fs::read(target)?, b"replacement");
-    assert_eq!(fs::read(source)?, b"new arrival");
+    assert_eq!(fs::read(&source)?, b"new arrival");
     assert_eq!(fs::read(original_source)?, b"replacement");
+    assert_eq!(
+        *reports.borrow(),
+        [crate::services::KeptItem {
+            location: Location::local(&source),
+            cause: crate::services::KeptCause::Changed,
+        }]
+    );
     Ok(())
 }
 

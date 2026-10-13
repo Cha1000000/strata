@@ -426,7 +426,7 @@ fn a_file_that_reports_no_size_is_copied_whole() -> Result<(), Box<dyn Error>> {
     let _scope = FsQuirks::install(
         root.path(),
         Quirks {
-            mount_type: Some("fuse.lxcfs"),
+            mount_type: Some(("fuse.lxcfs", "rw")),
             virtual_sizes: true,
             ..Quirks::default()
         },

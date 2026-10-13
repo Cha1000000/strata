@@ -61,11 +61,11 @@ use crate::{
     model::{FileEntry, Location},
     services::{
         CancelledOperation, CompressRequest, CreateDirectoryRequest, CreateFileRequest,
-        DeleteRequest, ExtractRequest, LoadHandle, MoveRecord, OperationEvent, OperationProvider,
-        OperationRequestId, PasteRequest, RenameCause, RenameRequest, RenamedItem,
-        ReplacedOriginal, RestoreRequest, RestoreSource, TransferConflict, TransferReport,
-        TrashedOriginal, UndoCopyRequest, UndoMergeRequest, UndoMoveRequest, UndoRenameRequest,
-        validate_basename,
+        DeleteRequest, ExtractRequest, KeptItem, LoadHandle, MoveRecord, OperationEvent,
+        OperationProvider, OperationRequestId, PasteRequest, RenameCause, RenameRequest,
+        RenamedItem, ReplacedOriginal, RestoreRequest, RestoreSource, TransferConflict,
+        TransferReport, TrashedOriginal, UndoCopyRequest, UndoMergeRequest, UndoMoveRequest,
+        UndoRenameRequest, validate_basename,
     },
 };
 
@@ -1992,32 +1992,24 @@ fn copy_recursively(
     merge: bool,
     cancellable: gio::Cancellable,
 ) -> Pin<Box<dyn Future<Output = Result<(), glib::Error>>>> {
-    if merge {
-        return merge_copy(None, false, false)(source, target, cancellable);
-    }
     Box::pin(async move {
-        copy_new_recursively_on_filesystem(
-            source,
-            target,
-            Taken::Fail,
-            false,
-            cancellable,
-            None,
-            false,
-        )
-        .await
-        .map(drop)
+        if merge {
+            return merge_copy(None, false)(source, target, false, cancellable)
+                .await
+                .map(drop);
+        }
+        copy_new_recursively_on_filesystem(source, target, Taken::Fail, cancellable, None, false)
+            .await
+            .map(drop)
     })
 }
 
 /// Copies `source` to the free name `target`, or under [`Taken::Number`] to
 /// the first free numbered name beside it, and returns where it went.
-/// `moving` fails the copy where it would leave a special file out.
 async fn copy_new_recursively_on_filesystem(
     source: gio::File,
     target: gio::File,
     taken: Taken,
-    moving: bool,
     cancellable: gio::Cancellable,
     progress: Option<Rc<TransferProgressTracker>>,
     fat_family: bool,
@@ -2028,8 +2020,7 @@ async fn copy_new_recursively_on_filesystem(
     {
         let options = copy_engine::Options {
             fat_family,
-            workers: None,
-            moving,
+            ..copy_engine::Options::default()
         };
         let copied = copy_engine::copy_local(
             source_path,
@@ -2143,10 +2134,10 @@ async fn copy_new_recursively_on_filesystem(
 }
 
 /// How a move attempt ended: done at the given target, or the item must be
-/// copied and the source (when its identity is known) deleted afterwards.
+/// copied and the source deleted afterwards.
 enum Moved {
     Done(gio::File),
-    CopyFrom(Option<LocalFileIdentity>),
+    Copy,
 }
 
 type MoveAttempt = Rc<
@@ -2158,36 +2149,112 @@ type MoveAttempt = Rc<
     ) -> Pin<Box<dyn Future<Output = Result<Moved, glib::Error>>>>,
 >;
 
+/// Copies a move's native source to a target GIO writes, and returns where
+/// it went.
+type RemoteCopy = Rc<
+    dyn Fn(
+        gio::File,
+        gio::File,
+        Taken,
+        gio::Cancellable,
+    ) -> Pin<Box<dyn Future<Output = Result<gio::File, glib::Error>>>>,
+>;
+
+fn native_path(file: &gio::File) -> Option<PathBuf> {
+    file.is_native().then(|| file.path()).flatten()
+}
+
 /// Moves `source` to `target` as [`move_local`] does, and returns where it went.
 async fn move_local_with_progress(
     source: gio::File,
     target: gio::File,
     taken: Taken,
     cancellable: gio::Cancellable,
-    progress: Option<Rc<TransferProgressTracker>>,
-    fat_family: bool,
+    copying: Copying,
     attempt_move: MoveAttempt,
+    remote_copy: RemoteCopy,
 ) -> Result<gio::File, glib::Error> {
-    let source_identity =
-        match attempt_move(source.clone(), target.clone(), taken, cancellable.clone()).await? {
-            Moved::Done(target) => return Ok(target),
-            Moved::CopyFrom(source_identity) => source_identity,
-        };
-    let target = copy_new_recursively_on_filesystem(
-        source.clone(),
-        target,
-        taken,
-        true,
-        cancellable.clone(),
+    if let Moved::Done(target) =
+        attempt_move(source.clone(), target.clone(), taken, cancellable.clone()).await?
+    {
+        return Ok(target);
+    }
+    let Copying {
         progress,
         fat_family,
-    )
-    .await?;
+    } = copying;
+    let (target, sources) = match (native_path(&source), native_path(&target)) {
+        (Some(source_path), Some(target_path)) => {
+            let options = copy_engine::Options {
+                fat_family,
+                manifest: true,
+                ..copy_engine::Options::default()
+            };
+            let copied = copy_engine::copy_local(
+                source_path,
+                copy_engine::Destination::New(target_path.clone(), taken),
+                options,
+                progress.clone(),
+                &cancellable,
+            )
+            .await?;
+            let target = gio::File::for_path(target_path.with_file_name(copied.name));
+            (target, copied.manifest)
+        }
+        // Recorded before GIO copies it, so a change during the copy shows.
+        (Some(source_path), None) => {
+            let sources = copy_engine::snapshot(source_path, &cancellable).await?;
+            let target = remote_copy(source.clone(), target, taken, cancellable.clone()).await?;
+            (target, Some(sources))
+        }
+        _ => {
+            let target = copy_new_recursively_on_filesystem(
+                source.clone(),
+                target,
+                taken,
+                cancellable.clone(),
+                progress.clone(),
+                fat_family,
+            )
+            .await?;
+            (target, None)
+        }
+    };
     if let Some(path) = target.path() {
         flush_removable_destination(&path).await?;
     }
-    permanently_delete_maybe_local_if_unchanged(source, true, source_identity, cancellable).await?;
+    match sources {
+        Some(sources) => {
+            delete_moved_sources(&source, sources, progress.as_deref(), &cancellable).await?;
+        }
+        None => permanently_delete_maybe_local(source, true, cancellable).await?,
+    }
     Ok(target)
+}
+
+/// Deletes what the copy of `source` holds unchanged, and reports what stays.
+async fn delete_moved_sources(
+    source: &gio::File,
+    sources: copy_engine::Manifest,
+    progress: Option<&TransferProgressTracker>,
+    cancellable: &gio::Cancellable,
+) -> Result<(), glib::Error> {
+    let kept = copy_engine::delete_unchanged_sources(sources, cancellable).await?;
+    if let (Some(progress), Some(parent)) =
+        (progress, source.path().as_deref().and_then(Path::parent))
+    {
+        progress.report(TransferReport {
+            kept: kept
+                .into_iter()
+                .map(|(path, cause)| KeptItem {
+                    location: Location::local(parent.join(path)),
+                    cause,
+                })
+                .collect(),
+            ..TransferReport::default()
+        });
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -2202,9 +2269,9 @@ async fn move_local_with(
         target,
         Taken::Fail,
         cancellable,
-        None,
-        false,
+        Copying::default(),
         attempt_move,
+        remote_copy(Copying::default()),
     )
     .await
 }
@@ -2411,7 +2478,7 @@ fn move_local_path(
                             {
                                 Err(PlaceError::IntoItself)
                             }
-                            Ok(stat) => Ok(Moved::CopyFrom(Some(stat.identity))),
+                            Ok(_) => Ok(Moved::Copy),
                             Err(error) => Err(PlaceError::Io(error)),
                         }
                     }
@@ -2821,87 +2888,113 @@ async fn move_local(
     progress: Option<Rc<TransferProgressTracker>>,
     fat_family: bool,
 ) -> Result<gio::File, glib::Error> {
-    let fallback_progress = progress.clone();
+    let copying = Copying {
+        progress: progress.clone(),
+        fat_family,
+    };
     move_local_with_progress(
         source,
         target,
         taken,
         cancellable,
-        fallback_progress,
-        fat_family,
-        Rc::new(move |source, target, taken, cancellable| {
-            if source.is_native()
-                && target.is_native()
-                && let (Some(source_path), Some(target_path)) = (source.path(), target.path())
-            {
-                return move_local_path(source_path, target_path, taken, cancellable);
-            }
-            // Remote (GVfs) locations have no local descriptor to walk against, so
-            // anything not fully local keeps the GIO path-based move below rather
-            // than claiming an equivalent guarantee.
-            let move_progress = progress.as_ref().map(|progress| {
-                progress.begin_file(
-                    transfer_source_name(&source)
-                        .unwrap_or_default()
-                        .to_string_lossy()
-                        .into_owned(),
-                    true,
-                )
-            });
-            Box::pin(async move {
-                let is_directory = taken == Taken::Number
-                    && await_cancellable(&source, &cancellable, |source, cancellable, result| {
-                        source.query_info_async(
-                            "standard::type",
-                            gio::FileQueryInfoFlags::NOFOLLOW_SYMLINKS,
-                            glib::Priority::DEFAULT,
-                            Some(cancellable),
-                            move |output| result.resolve(output),
-                        );
-                    })
-                    .await?
-                    .file_type()
-                        == gio::FileType::Directory;
-                let flags =
-                    gio::FileCopyFlags::ALL_METADATA | gio::FileCopyFlags::NOFOLLOW_SYMLINKS;
-                let moved =
-                    first_free_target(&target, taken, is_directory, &cancellable, |target| {
-                        let reporter = move_progress
-                            .as_ref()
-                            .and_then(FileTransferProgress::reporter);
-                        move_file_with_progress(
-                            source.clone(),
-                            target,
-                            flags,
-                            cancellable.clone(),
-                            reporter,
-                        )
-                    })
-                    .await;
-                match moved {
-                    Ok((target, ())) => {
-                        if let Some(move_progress) = move_progress {
-                            move_progress.finish(None);
-                        }
-                        Ok(Moved::Done(target))
-                    }
-                    Err(error) if error.matches(gio::IOErrorEnum::WouldRecurse) => {
-                        let (guard_source, guard_target) = (source.clone(), target.clone());
-                        let within = run_local_fs_step(move || {
-                            Ok(target_is_within_source(&guard_source, &guard_target))
-                        })
-                        .await?;
-                        if within != Some(false) {
-                            return Err(placement_error(PlaceError::IntoItself));
-                        }
-                        Ok(Moved::CopyFrom(local_file_identity(&source).await?))
-                    }
-                    Err(error) => Err(error),
-                }
-            })
-        }),
+        copying.clone(),
+        attempt_move(progress),
+        remote_copy(copying),
     )
     .await
+}
+
+/// Moves an item in one step where that is safe, or tells it must be copied.
+fn attempt_move(progress: Option<Rc<TransferProgressTracker>>) -> MoveAttempt {
+    Rc::new(move |source, target, taken, cancellable| {
+        if let (Some(source_path), Some(target_path)) = (native_path(&source), native_path(&target))
+        {
+            return move_local_path(source_path, target_path, taken, cancellable);
+        }
+        // GIO would delete a native source itself, without checking what it copied.
+        if source.is_native() {
+            return Box::pin(async { Ok(Moved::Copy) });
+        }
+        // Remote (GVfs) sources have no local descriptor to walk against, so
+        // they keep the GIO path-based move below rather than claiming an
+        // equivalent guarantee.
+        let move_progress = progress.as_ref().map(|progress| {
+            progress.begin_file(
+                transfer_source_name(&source)
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned(),
+                true,
+            )
+        });
+        Box::pin(async move {
+            let is_directory = taken == Taken::Number
+                && await_cancellable(&source, &cancellable, |source, cancellable, result| {
+                    source.query_info_async(
+                        "standard::type",
+                        gio::FileQueryInfoFlags::NOFOLLOW_SYMLINKS,
+                        glib::Priority::DEFAULT,
+                        Some(cancellable),
+                        move |output| result.resolve(output),
+                    );
+                })
+                .await?
+                .file_type()
+                    == gio::FileType::Directory;
+            let flags = gio::FileCopyFlags::ALL_METADATA | gio::FileCopyFlags::NOFOLLOW_SYMLINKS;
+            let moved = first_free_target(&target, taken, is_directory, &cancellable, |target| {
+                let reporter = move_progress
+                    .as_ref()
+                    .and_then(FileTransferProgress::reporter);
+                move_file_with_progress(
+                    source.clone(),
+                    target,
+                    flags,
+                    cancellable.clone(),
+                    reporter,
+                )
+            })
+            .await;
+            match moved {
+                Ok((target, ())) => {
+                    if let Some(move_progress) = move_progress {
+                        move_progress.finish(None);
+                    }
+                    Ok(Moved::Done(target))
+                }
+                Err(error) if error.matches(gio::IOErrorEnum::WouldRecurse) => {
+                    let (guard_source, guard_target) = (source.clone(), target.clone());
+                    let within = run_local_fs_step(move || {
+                        Ok(target_is_within_source(&guard_source, &guard_target))
+                    })
+                    .await?;
+                    if within != Some(false) {
+                        return Err(placement_error(PlaceError::IntoItself));
+                    }
+                    Ok(Moved::Copy)
+                }
+                Err(error) => Err(error),
+            }
+        })
+    })
+}
+
+/// GIO's copy, for a native source moved to a target only GIO writes.
+fn remote_copy(copying: Copying) -> RemoteCopy {
+    Rc::new(move |source, target, taken, cancellable| {
+        let Copying {
+            progress,
+            fat_family,
+        } = copying.clone();
+        Box::pin(copy_new_recursively_on_filesystem(
+            source,
+            target,
+            taken,
+            cancellable,
+            progress,
+            fat_family,
+        ))
+    })
 }
 
 enum StageContent {
@@ -3062,13 +3155,16 @@ fn translated_io_error(message: &str) -> glib::Error {
     io_error(crate::i18n::tr(message))
 }
 
-/// Copies a source into a target, as a merge copies into its folder.
+/// Copies a source into a target, as a merge copies into its folder. A move
+/// (`true`) gets what the copy took from a native source.
 type CopyStep = Rc<
     dyn Fn(
         gio::File,
         gio::File,
+        bool,
         gio::Cancellable,
-    ) -> Pin<Box<dyn Future<Output = Result<(), glib::Error>>>>,
+    )
+        -> Pin<Box<dyn Future<Output = Result<Option<copy_engine::Manifest>, glib::Error>>>>,
 >;
 
 fn cannot_replace_safely(name: &str) -> String {
@@ -3400,7 +3496,8 @@ struct StagedReplacement {
 }
 
 /// Copies the source next to the target, then moves the original out of the
-/// way and publishes the copy. Every failure discards the stage.
+/// way and publishes the copy. Every failure discards the stage. A move also
+/// returns what the copy took from the source.
 async fn replace_through_stage(
     plan: &Arc<ReplacePlan>,
     mut removal: Removal,
@@ -3408,17 +3505,17 @@ async fn replace_through_stage(
     target_path: &Path,
     cancellable: &gio::Cancellable,
     copying: Copying,
-) -> Result<StagedReplacement, glib::Error> {
+) -> Result<(StagedReplacement, Option<copy_engine::Manifest>), glib::Error> {
     let in_trash = |error: glib::Error, removal: Removal| match removal {
         Removal::Trashed => original_in_trash(&crate::services::gio_error_detail(&error)),
         _ => error,
     };
     let options = copy_engine::Options {
         fat_family: copying.fat_family,
-        workers: None,
-        moving,
+        manifest: moving,
+        ..copy_engine::Options::default()
     };
-    let staged = copy_engine::copy_to_stage(
+    let (staged, sources) = copy_engine::copy_to_stage(
         source_path.to_path_buf(),
         target_path.to_path_buf(),
         options,
@@ -3433,13 +3530,15 @@ async fn replace_through_stage(
         let step = match removal {
             Removal::Trashed => {
                 publish_staged_replacement(staged, target_path.to_path_buf()).await?;
-                return Ok(StagedReplacement {
+                let replaced = StagedReplacement {
                     original: ReplacedOriginal::Trashed(plan.trashed_original()),
                     displaced: None,
-                });
+                };
+                return Ok((replaced, sources));
             }
             Removal::Without(Displacement::SetAside) => {
-                return set_aside_and_publish(plan, staged, target_path).await;
+                let replaced = set_aside_and_publish(plan, staged, target_path).await?;
+                return Ok((replaced, sources));
             }
             Removal::Trash => {
                 let (path, cancellable) = (target_path.to_path_buf(), cancellable.clone());
@@ -3489,14 +3588,15 @@ async fn replace_through_stage(
                 .await;
                 match exchanged {
                     Ok(None) => {
-                        return Ok(StagedReplacement {
+                        let replaced = StagedReplacement {
                             original: ReplacedOriginal::Deleted,
                             displaced: Some(DisplacedOriginal {
                                 parent: staged.parent,
                                 name: staged.name,
                                 identity: plan.target.identity,
                             }),
-                        });
+                        };
+                        return Ok((replaced, sources));
                     }
                     Ok(Some(next)) => Ok(next),
                     Err(error) => Err(error),
@@ -3628,7 +3728,8 @@ async fn replace_local_with(
             }
         }
     };
-    let replaced = replace_through_stage(
+    let progress = copying.progress.clone();
+    let (replaced, sources) = replace_through_stage(
         &plan,
         removal,
         (&source_path, move_source),
@@ -3642,17 +3743,11 @@ async fn replace_local_with(
     if let Some(original) = replaced.displaced {
         remove_displaced_original(original, Some(&target_path), &plan.target_display()).await?;
     }
-    if move_source {
+    if let Some(sources) = sources {
         if !flushed {
             flush_removable_destination(&target_path).await?;
         }
-        permanently_delete_maybe_local_if_unchanged(
-            source,
-            plan.directory(),
-            Some(plan.source.identity),
-            cancellable,
-        )
-        .await?;
+        delete_moved_sources(&source, sources, progress.as_deref(), &cancellable).await?;
     }
     Ok(())
 }
@@ -3724,6 +3819,8 @@ fn trash_stage_overwrite(
 /// The injectable steps of a merge, bundled to keep the call sites small.
 struct MergeHooks<'a> {
     fat_family: bool,
+    /// Told what a merging move left at its source.
+    progress: Option<Rc<TransferProgressTracker>>,
     copy_into_target: CopyStep,
     stage_overwrite: StageOverwrite,
     on_merged: &'a dyn Fn(MergePlan),
@@ -3859,7 +3956,6 @@ async fn merge_local_with(
     }
     let mut plan = MergePlan::default();
     classify_merge(&source, &target, &mut plan, &cancellable, hooks.fat_family).await?;
-    let source_identity = local_file_identity(&source).await?;
     let target_path = target.path();
     // Stage every overwritten original in Trash before the copy so undo can
     // restore it; on failure, report what was staged so it stays recoverable.
@@ -3905,10 +4001,12 @@ async fn merge_local_with(
         created: plan.created,
         overwritten: trashed,
     });
-    if let Err(error) = (hooks.copy_into_target)(source.clone(), target, cancellable.clone()).await
-    {
-        return Err(merge_aside::abandon(aside, error).await);
-    }
+    let copied =
+        (hooks.copy_into_target)(source.clone(), target, move_source, cancellable.clone()).await;
+    let sources = match copied {
+        Ok(sources) => sources,
+        Err(error) => return Err(merge_aside::abandon(aside, error).await),
+    };
     let flushed = merge_aside::finish(aside).await?;
     if move_source {
         if let Some(path) = target_path.as_deref()
@@ -3916,8 +4014,13 @@ async fn merge_local_with(
         {
             flush_removable_destination(path).await?;
         }
-        permanently_delete_maybe_local_if_unchanged(source, true, source_identity, cancellable)
-            .await?;
+        match sources {
+            Some(sources) => {
+                let progress = hooks.progress.as_deref();
+                delete_moved_sources(&source, sources, progress, &cancellable).await?;
+            }
+            None => permanently_delete_maybe_local(source, true, cancellable).await?,
+        }
     }
     Ok(())
 }
@@ -3925,12 +4028,12 @@ async fn merge_local_with(
 fn progress_merge_hooks(
     progress: Option<Rc<TransferProgressTracker>>,
     fat_family: bool,
-    moving: bool,
     on_merged: &dyn Fn(MergePlan),
 ) -> MergeHooks<'_> {
     MergeHooks {
         fat_family,
-        copy_into_target: merge_copy(progress, fat_family, moving),
+        progress: progress.clone(),
+        copy_into_target: merge_copy(progress, fat_family),
         stage_overwrite: Rc::new(trash_stage_overwrite),
         on_merged,
     }
@@ -3938,43 +4041,49 @@ fn progress_merge_hooks(
 
 /// Copies a folder's contents into the folder of the same name, never
 /// replacing an entry there.
-fn merge_copy(
-    progress: Option<Rc<TransferProgressTracker>>,
-    fat_family: bool,
-    moving: bool,
-) -> CopyStep {
-    Rc::new(move |source, target, cancellable| {
+fn merge_copy(progress: Option<Rc<TransferProgressTracker>>, fat_family: bool) -> CopyStep {
+    Rc::new(move |source, target, moving, cancellable| {
         let progress = progress.clone();
-        if source.is_native()
-            && target.is_native()
-            && let (Some(source_path), Some(target_path)) = (source.path(), target.path())
-        {
-            return Box::pin(async move {
-                let options = copy_engine::Options {
-                    fat_family,
-                    workers: None,
-                    moving,
-                };
-                copy_engine::copy_local(
-                    source_path,
-                    copy_engine::Destination::Merge(target_path),
-                    options,
-                    progress,
-                    &cancellable,
-                )
-                .await
-                .map(drop)
-            });
-        }
-        copy_recursively_with_progress(
-            source,
-            target,
-            CopyInto::Existing,
-            cancellable,
-            None,
-            progress,
-            fat_family,
-        )
+        Box::pin(async move {
+            match (native_path(&source), native_path(&target)) {
+                (Some(source_path), Some(target_path)) => {
+                    let options = copy_engine::Options {
+                        fat_family,
+                        manifest: moving,
+                        ..copy_engine::Options::default()
+                    };
+                    let copied = copy_engine::copy_local(
+                        source_path,
+                        copy_engine::Destination::Merge(target_path),
+                        options,
+                        progress,
+                        &cancellable,
+                    )
+                    .await?;
+                    Ok(copied.manifest)
+                }
+                (source_path, _) => {
+                    // Recorded before GIO copies it, so a change during the copy shows.
+                    let sources = match source_path.filter(|_| moving) {
+                        Some(source_path) => {
+                            Some(copy_engine::snapshot(source_path, &cancellable).await?)
+                        }
+                        None => None,
+                    };
+                    copy_recursively_with_progress(
+                        source,
+                        target,
+                        CopyInto::Existing,
+                        cancellable,
+                        None,
+                        progress,
+                        fat_family,
+                    )
+                    .await?;
+                    Ok(sources)
+                }
+            }
+        })
     })
 }
 
@@ -3992,7 +4101,7 @@ async fn merge_local(
         move_source,
         cancellable,
         None,
-        progress_merge_hooks(None, false, move_source, on_merged),
+        progress_merge_hooks(None, false, on_merged),
     )
     .await
 }
@@ -6011,7 +6120,6 @@ impl OperationProvider for LocalOperationProvider {
                         source,
                         target,
                         taken,
-                        false,
                         operation_cancellable.clone(),
                         Some(progress.clone()),
                         fat_family,
@@ -6024,19 +6132,14 @@ impl OperationProvider for LocalOperationProvider {
                         request.move_sources,
                         operation_cancellable.clone(),
                         Some(&mut affected_locations),
-                        progress_merge_hooks(
-                            Some(progress.clone()),
-                            fat_family,
-                            request.move_sources,
-                            &|plan| {
-                                emit(OperationEvent::Merged {
-                                    request_id: request.id,
-                                    source: item.source.clone(),
-                                    created: plan.created,
-                                    overwritten: plan.overwritten,
-                                });
-                            },
-                        ),
+                        progress_merge_hooks(Some(progress.clone()), fat_family, &|plan| {
+                            emit(OperationEvent::Merged {
+                                request_id: request.id,
+                                source: item.source.clone(),
+                                created: plan.created,
+                                overwritten: plan.overwritten,
+                            });
+                        }),
                     )
                     .await
                     .map(|()| target)
@@ -6102,7 +6205,6 @@ impl OperationProvider for LocalOperationProvider {
                         source,
                         target,
                         taken,
-                        false,
                         operation_cancellable.clone(),
                         Some(progress.clone()),
                         fat_family,

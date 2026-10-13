@@ -6,6 +6,7 @@ use rustix::io::Errno;
 
 use super::fs_quirks::{Op, Support};
 use super::*;
+use crate::services::{KeptCause, KeptItem, SpecialKind, TransferReport};
 
 #[test]
 fn moving_a_directory_falls_back_to_a_safe_copy_when_the_move_needs_one()
@@ -856,24 +857,68 @@ fn keep_both_move_renumbers_when_its_name_is_taken_meanwhile() -> Result<(), Box
     Ok(())
 }
 
+/// What the transfer reported about items inside the ones it moved.
+fn reported(events: &RefCell<Vec<OperationEvent>>) -> TransferReport {
+    let mut reported = TransferReport::default();
+    for event in events.borrow().iter() {
+        if let OperationEvent::ItemsReported { report, .. } = event {
+            reported.extend(report.clone());
+        }
+    }
+    reported
+}
+
+fn kept(location: PathBuf, cause: KeptCause) -> KeptItem {
+    KeptItem {
+        location: Location::local(location),
+        cause,
+    }
+}
+
+/// A destination for the move of `folder` with `conflict`, where an item of
+/// that name exists unless the move creates it.
+fn destination_for(
+    root: &Path,
+    conflict: TransferConflict,
+) -> Result<(PathBuf, FsQuirks), Box<dyn Error>> {
+    let destination = root.join("destination");
+    fs::create_dir_all(&destination)?;
+    match conflict {
+        TransferConflict::Merge => fs::create_dir(destination.join("folder"))?,
+        TransferConflict::ReplaceExisting => {
+            fs::create_dir(destination.join("folder"))?;
+            fs::write(destination.join("folder/old.txt"), b"old")?;
+        }
+        _ => {}
+    }
+    let quirks = Quirks {
+        trash: super::fs_quirks::Trash::Unsupported,
+        ..Quirks::default()
+    };
+    let scope = FsQuirks::install(&destination, quirks);
+    Ok((destination, scope))
+}
+
+const MOVES: [TransferConflict; 3] = [
+    TransferConflict::FailIfExists,
+    TransferConflict::Merge,
+    TransferConflict::ReplaceExisting,
+];
+
 #[test]
-fn a_move_keeps_a_folder_whose_special_files_cannot_be_copied() -> Result<(), Box<dyn Error>> {
+fn a_move_leaves_special_files_it_cannot_copy_at_the_source() -> Result<(), Box<dyn Error>> {
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
         .lock()
         .map_err(|error| error.to_string())?;
-    for conflict in [TransferConflict::FailIfExists, TransferConflict::Merge] {
+    for conflict in MOVES {
         let root = tempfile::tempdir()?;
         let source_dir = root.path().join("source");
-        let destination = root.path().join("destination");
         let folder = source_dir.join("folder");
         fs::create_dir_all(&folder)?;
-        fs::create_dir_all(&destination)?;
         fs::write(folder.join("notes.txt"), b"keep-me")?;
         let _socket = std::os::unix::net::UnixListener::bind(folder.join("socket"))?;
-        if conflict == TransferConflict::Merge {
-            fs::create_dir(destination.join("folder"))?;
-        }
-        let _volumes = separate_volumes(&source_dir, &destination);
+        let _source = FsQuirks::install(&source_dir, Quirks::default());
+        let (destination, _destination) = destination_for(root.path(), conflict)?;
 
         let (_operation, events) = paste_move(91, &destination, &folder, conflict);
         pump_until_transfer(&events);
@@ -881,13 +926,397 @@ fn a_move_keeps_a_folder_whose_special_files_cannot_be_copied() -> Result<(), Bo
         assert!(
             matches!(
                 terminal_transfer(&events.borrow()),
-                Some(OperationEvent::TransferFailed { .. })
+                Some(OperationEvent::Pasted { .. })
             ),
             "{conflict:?}: {:?}",
             events.borrow()
         );
-        assert_eq!(fs::read(folder.join("notes.txt"))?, b"keep-me");
-        assert!(fs::symlink_metadata(folder.join("socket")).is_ok());
+        assert_eq!(
+            names(&destination.join("folder"))?,
+            ["notes.txt"],
+            "{conflict:?}"
+        );
+        assert_eq!(names(&folder)?, ["socket"], "{conflict:?}");
+        assert_eq!(
+            reported(&events),
+            TransferReport {
+                kept: vec![kept(
+                    folder.join("socket"),
+                    KeptCause::Skipped(SpecialKind::Socket)
+                )],
+                ..TransferReport::default()
+            },
+            "{conflict:?}"
+        );
     }
+    Ok(())
+}
+
+#[test]
+fn a_move_keeps_source_entries_changed_or_added_after_their_copy() -> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    for conflict in MOVES {
+        let root = tempfile::tempdir()?;
+        let source_dir = root.path().join("source");
+        let folder = source_dir.join("folder");
+        fs::create_dir_all(folder.join("sub"))?;
+        fs::write(folder.join("a.txt"), b"a")?;
+        fs::write(folder.join("sub/b.txt"), b"b")?;
+        let changed = folder.join("sub/b.txt");
+        let added = folder.join("added.txt");
+        let (rewrite, add) = (changed.clone(), added.clone());
+        // Once the copy is done, as the deletion opens the moved folder.
+        let racer: super::fs_quirks::Racer = Box::new(move || {
+            fs::write(&rewrite, b"rewritten").expect("rewrite a copied entry");
+            fs::write(&add, b"added").expect("add an entry");
+        });
+        let _source = FsQuirks::install(
+            &source_dir,
+            Quirks {
+                before: vec![(Op::OpenDir, "folder", 1, racer)],
+                ..Quirks::default()
+            },
+        );
+        let (destination, _destination) = destination_for(root.path(), conflict)?;
+
+        let (_operation, events) = paste_move(92, &destination, &folder, conflict);
+        pump_until_transfer(&events);
+
+        assert!(
+            matches!(
+                terminal_transfer(&events.borrow()),
+                Some(OperationEvent::Pasted { .. })
+            ),
+            "{conflict:?}: {:?}",
+            events.borrow()
+        );
+        let moved = destination.join("folder");
+        assert_eq!(fs::read(moved.join("a.txt"))?, b"a", "{conflict:?}");
+        assert_eq!(fs::read(moved.join("sub/b.txt"))?, b"b", "{conflict:?}");
+        assert_eq!(names(&folder)?, ["added.txt", "sub"], "{conflict:?}");
+        assert_eq!(fs::read(&changed)?, b"rewritten", "{conflict:?}");
+        assert_eq!(fs::read(&added)?, b"added", "{conflict:?}");
+        assert_eq!(
+            reported(&events).kept,
+            [kept(changed, KeptCause::Changed)],
+            "{conflict:?}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn a_file_written_during_its_own_move_stays_at_the_source() -> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let rewrite = |path: &Path, contents: &'static [u8]| -> super::fs_quirks::Racer {
+        let path = path.to_path_buf();
+        Box::new(move || fs::write(&path, contents).expect("rewrite the source"))
+    };
+    // A linked file whose names are claimed, as names that may collide are
+    // on NFS, and the moved file itself.
+    let cases: [(&str, usize, Preset); 4] = [
+        ("in a folder", 1, Quirks::default),
+        ("in a folder", 2, Quirks::default),
+        ("linked", 2, Quirks::nfs3),
+        ("selected", 2, Quirks::default),
+    ];
+    for (kind, rewrites, destination_quirks) in cases {
+        let case = format!("{kind}, rewrites: {rewrites}");
+        let root = tempfile::tempdir()?;
+        let source_dir = root.path().join("source");
+        let folder = source_dir.join("folder");
+        fs::create_dir_all(&folder)?;
+        let db = folder.join("db");
+        fs::write(&db, b"first")?;
+        let reads = if kind == "linked" {
+            fs::hard_link(&db, folder.join("DB"))?;
+            "*"
+        } else {
+            fs::write(folder.join("notes.txt"), b"notes")?;
+            "db"
+        };
+        // Each pass reads the data, then the end of the file.
+        let mut before = vec![(Op::Read, reads, 0, rewrite(&db, b"second write"))];
+        if rewrites == 2 {
+            before.push((Op::Read, reads, 1, rewrite(&db, b"third")));
+        }
+        let _source = FsQuirks::install(
+            &source_dir,
+            Quirks {
+                before,
+                ..Quirks::default()
+            },
+        );
+        let destination = root.path().join("destination");
+        fs::create_dir_all(&destination)?;
+        let _destination = FsQuirks::install(&destination, destination_quirks());
+        let moved = if kind == "selected" { &db } else { &folder };
+
+        let (_operation, events) =
+            paste_move(93, &destination, moved, TransferConflict::FailIfExists);
+        pump_until_transfer(&events);
+
+        let terminal = terminal_transfer(&events.borrow()).cloned();
+        if kind == "selected" {
+            let Some(OperationEvent::TransferFailed { message, .. }) = terminal else {
+                panic!("{case}: {:?}", events.borrow());
+            };
+            assert_eq!(
+                message,
+                rust_i18n::t!("%{name} changed while it was being copied", name = "db"),
+                "{case}"
+            );
+            assert!(names(&destination)?.is_empty(), "{case}");
+            assert_eq!(fs::read(&db)?, b"third", "{case}");
+            continue;
+        }
+        assert!(
+            matches!(terminal, Some(OperationEvent::Pasted { .. })),
+            "{case}: {:?}",
+            events.borrow()
+        );
+        let mut left = reported(&events).kept;
+        left.sort_by_key(|item| item.location.native_path().map(Path::to_path_buf));
+        if rewrites == 1 {
+            assert_eq!(
+                fs::read(destination.join("folder/db"))?,
+                b"second write",
+                "{case}"
+            );
+            assert!(!folder.exists(), "{case}");
+            assert!(left.is_empty(), "{case}");
+        } else if kind == "linked" {
+            assert!(names(&destination.join("folder"))?.is_empty(), "{case}");
+            assert_eq!(names(&folder)?, ["DB", "db"], "{case}");
+            assert_eq!(fs::read(&db)?, b"third", "{case}");
+            let changed = |name| kept(folder.join(name), KeptCause::Changed);
+            assert_eq!(left, [changed("DB"), changed("db")], "{case}");
+        } else {
+            assert_eq!(names(&destination.join("folder"))?, ["notes.txt"], "{case}");
+            assert_eq!(names(&folder)?, ["db"], "{case}");
+            assert_eq!(fs::read(&db)?, b"third", "{case}");
+            assert_eq!(left, [kept(db.clone(), KeptCause::Changed)], "{case}");
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn moving_hard_linked_files_across_volumes_deletes_every_name() -> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let root = tempfile::tempdir()?;
+    let source_dir = root.path().join("source");
+    let folder = source_dir.join("folder");
+    fs::create_dir_all(folder.join("sub"))?;
+    fs::write(folder.join("a"), b"linked")?;
+    fs::hard_link(folder.join("a"), folder.join("sub/b"))?;
+    let outside = source_dir.join("outside");
+    fs::write(&outside, b"outside")?;
+    fs::hard_link(&outside, folder.join("c"))?;
+    let destination = root.path().join("destination");
+    fs::create_dir_all(&destination)?;
+    let _volumes = separate_volumes(&source_dir, &destination);
+
+    let (_operation, events) =
+        paste_move(94, &destination, &folder, TransferConflict::FailIfExists);
+    pump_until_transfer(&events);
+
+    assert!(matches!(
+        terminal_transfer(&events.borrow()),
+        Some(OperationEvent::Pasted { .. })
+    ));
+    let moved = destination.join("folder");
+    let (a, b) = (
+        fs::metadata(moved.join("a"))?,
+        fs::metadata(moved.join("sub/b"))?,
+    );
+    assert_eq!((a.ino(), a.nlink()), (b.ino(), 2));
+    assert_eq!(fs::read(moved.join("c"))?, b"outside");
+    assert!(!folder.exists());
+    assert_eq!(fs::metadata(&outside)?.nlink(), 1);
+    assert_eq!(reported(&events), TransferReport::default());
+    Ok(())
+}
+
+#[test]
+fn moves_compare_inode_numbers_only_where_the_source_keeps_them() -> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let cifs = |options| {
+        move || Quirks {
+            mount_type: Some(("cifs", options)),
+            ..Quirks::default()
+        }
+    };
+    let cases: [(&str, Box<dyn Fn() -> Quirks>, bool); 3] = [
+        ("sshfs", Box::new(Quirks::sshfs), false),
+        ("cifs noserverino", Box::new(cifs("rw,noserverino")), false),
+        ("cifs", Box::new(cifs("rw,serverino")), true),
+    ];
+    for (case, quirks, kept_at_source) in cases {
+        let root = tempfile::tempdir()?;
+        let source_dir = root.path().join("source");
+        let folder = source_dir.join("folder");
+        fs::create_dir_all(folder.join("sub"))?;
+        fs::write(folder.join("a.txt"), b"a")?;
+        fs::write(folder.join("sub/b.txt"), b"b")?;
+        let evicted = [
+            folder.clone(),
+            folder.join("a.txt"),
+            folder.join("sub"),
+            folder.join("sub/b.txt"),
+        ];
+        // The kernel evicts every entry between the copy and the deletion.
+        let racer: super::fs_quirks::Racer = Box::new(move || {
+            for path in &evicted {
+                super::fs_quirks::renumbered(path);
+            }
+        });
+        let _source = FsQuirks::install(
+            &source_dir,
+            Quirks {
+                before: vec![(Op::OpenDir, "folder", 1, racer)],
+                ..quirks()
+            },
+        );
+        let destination = root.path().join("destination");
+        fs::create_dir_all(&destination)?;
+        let _destination = FsQuirks::install(&destination, Quirks::default());
+
+        let (_operation, events) =
+            paste_move(95, &destination, &folder, TransferConflict::FailIfExists);
+        pump_until_transfer(&events);
+
+        assert!(
+            matches!(
+                terminal_transfer(&events.borrow()),
+                Some(OperationEvent::Pasted { .. })
+            ),
+            "{case}: {:?}",
+            events.borrow()
+        );
+        assert_eq!(
+            fs::read(destination.join("folder/sub/b.txt"))?,
+            b"b",
+            "{case}"
+        );
+        assert_eq!(folder.exists(), kept_at_source, "{case}");
+        let expected = if kept_at_source {
+            vec![kept(folder.clone(), KeptCause::Changed)]
+        } else {
+            Vec::new()
+        };
+        assert_eq!(reported(&events).kept, expected, "{case}");
+    }
+    Ok(())
+}
+
+#[test]
+fn a_source_entry_that_cannot_be_deleted_is_kept_with_the_reason() -> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let root = tempfile::tempdir()?;
+    let source_dir = root.path().join("source");
+    let folder = source_dir.join("folder");
+    fs::create_dir_all(folder.join("read-only"))?;
+    fs::write(folder.join("a.txt"), b"a")?;
+    let child = folder.join("read-only/child.txt");
+    fs::write(&child, b"child")?;
+    // As in a folder whose mode is 0555, for any user but root.
+    let _source = FsQuirks::install(
+        &source_dir,
+        Quirks {
+            fail: vec![(Op::Unlink, "child.txt", 0, Errno::ACCESS)],
+            ..Quirks::default()
+        },
+    );
+    let destination = root.path().join("destination");
+    fs::create_dir_all(&destination)?;
+    let _destination = FsQuirks::install(&destination, Quirks::default());
+
+    let (_operation, events) =
+        paste_move(96, &destination, &folder, TransferConflict::FailIfExists);
+    pump_until_transfer(&events);
+
+    assert!(matches!(
+        terminal_transfer(&events.borrow()),
+        Some(OperationEvent::Pasted { .. })
+    ));
+    assert_eq!(
+        fs::read(destination.join("folder/read-only/child.txt"))?,
+        b"child"
+    );
+    assert_eq!(names(&folder)?, ["read-only"]);
+    assert_eq!(fs::read(&child)?, b"child");
+    let reason = super::super::os_error_detail(Errno::ACCESS);
+    assert_eq!(
+        reported(&events).kept,
+        [kept(child, KeptCause::Undeletable(reason))]
+    );
+    Ok(())
+}
+
+#[test]
+fn moving_to_a_remote_target_keeps_a_source_entry_changed_during_the_copy()
+-> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let root = tempfile::tempdir()?;
+    let folder = root.path().join("folder");
+    fs::create_dir_all(&folder)?;
+    fs::write(folder.join("a.txt"), b"a")?;
+    fs::write(folder.join("b.txt"), b"b")?;
+    let stand_in = root.path().join("remote");
+    let target = gio::File::for_uri("strata-test-remote:///folder");
+    assert!(!target.is_native());
+    let (changed, copied_to) = (folder.join("b.txt"), stand_in.clone());
+    // GIO copies to the remote target, and the source changes meanwhile.
+    let remote_copy: super::super::RemoteCopy = Rc::new(move |source, target, _, cancellable| {
+        let (changed, copied_to) = (changed.clone(), copied_to.clone());
+        Box::pin(async move {
+            copy_recursively(source, gio::File::for_path(copied_to), false, cancellable).await?;
+            fs::write(&changed, b"changed").map_err(io_error)?;
+            Ok(target)
+        })
+    });
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let emitted = events.clone();
+    let progress = TransferProgressTracker::new(
+        OperationRequestId(1),
+        None,
+        None,
+        Rc::new(move |event| emitted.borrow_mut().push(event)),
+    );
+
+    let moved = glib::MainContext::default().block_on(super::super::move_local_with_progress(
+        gio::File::for_path(&folder),
+        target.clone(),
+        Taken::Fail,
+        gio::Cancellable::new(),
+        super::super::Copying {
+            progress: Some(progress),
+            fat_family: false,
+        },
+        super::super::attempt_move(None),
+        remote_copy,
+    ))?;
+
+    assert!(moved.equal(&target));
+    assert_eq!(fs::read(stand_in.join("a.txt"))?, b"a");
+    assert_eq!(fs::read(stand_in.join("b.txt"))?, b"b");
+    assert_eq!(names(&folder)?, ["b.txt"]);
+    assert_eq!(
+        reported(&events).kept,
+        [kept(folder.join("b.txt"), KeptCause::Changed)]
+    );
     Ok(())
 }

@@ -32,6 +32,7 @@ use super::{
     direct_folder, from_stage, is_fatal, is_unsupported,
     links::{self, Links, Role},
     lock,
+    manifest::{self, Pending},
     metadata::Snapshot,
     open_file,
     restrictive::{self, Restrictive},
@@ -49,7 +50,7 @@ use crate::{
         },
         volume::Family,
     },
-    services::{RenameCause, SpecialKind},
+    services::{KeptCause, RenameCause, SpecialKind},
 };
 
 /// `FS_CASEFOLD_FL`, which folders made inside a casefolded one inherit.
@@ -306,6 +307,8 @@ pub(super) struct Folder {
     /// folders get their modes together: the whole made tree, or one merge
     /// stage.
     pub(super) scope: usize,
+    /// Where the source folder is recorded, by a move.
+    pub(super) recorded_in: Option<Arc<manifest::Folder>>,
     pub(super) completion: Completion,
 }
 
@@ -344,6 +347,9 @@ impl Folder {
             names: Names::new(children.iter().map(|(_, _, name)| name.clone()).collect()),
             mount: self.mount,
             scope: self.scope,
+            recorded: self
+                .recorded_in
+                .map(|folder| folder.folder(source_name, source_stat.identity)),
         };
         let finish = Finish {
             name: source_name.clone(),
@@ -392,6 +398,8 @@ struct Made {
     names: Arc<Names>,
     mount: Mount,
     scope: usize,
+    /// Where the children's source folder is recorded, by a move.
+    recorded: Option<Arc<manifest::Folder>>,
 }
 
 /// A source folder's child and the name it gets in the made folder.
@@ -470,6 +478,7 @@ impl Made {
                         naming: self.naming,
                         mount: self.mount,
                         scope: self.scope,
+                        recorded_in: self.recorded.clone(),
                         completion: Some(group.clone()),
                     },
                 ));
@@ -498,45 +507,58 @@ impl Made {
                         mount: self.mount,
                         path,
                         scope: self.scope,
+                        recorded_in: self.recorded.clone(),
                         completion: Some(group.clone()),
                     },
                 ));
             }
             FileType::Symlink => {
                 let source = Entry::new(&**source, name);
-                let (path, ()) = make_numbered(copy, names, &path, false, alias, |name| {
+                let (path, link) = make_numbered(copy, names, &path, false, alias, |name| {
                     copy_link(copy, source, Entry::new(dir, name), &self.mount, true)
                 })?;
                 if tree.created.is_some() {
                     let made = fs.stat(Entry::new(dir, &file_name(&path)), false)?;
                     tree.made(&path, made.identity);
                 }
+                self.record(name, &link);
                 queue.complete(Some(group.clone()));
             }
             FileType::Fifo => {
                 let source = Entry::new(&**source, name);
-                let (path, made) = make_numbered(copy, names, &path, false, alias, |name| {
-                    copy_fifo(
-                        copy,
-                        source,
-                        Entry::new(dir, name),
-                        &self.stat,
-                        &self.mount,
-                        true,
-                    )
-                })?;
+                let (path, (pipe, made)) =
+                    make_numbered(copy, names, &path, false, alias, |name| {
+                        copy_fifo(
+                            copy,
+                            source,
+                            Entry::new(dir, name),
+                            &self.stat,
+                            &self.mount,
+                            true,
+                        )
+                    })?;
                 match made {
-                    Some(identity) => tree.made(&path, identity),
-                    None => copy.skip(path, SpecialKind::Pipe)?,
+                    Some(identity) => {
+                        tree.made(&path, identity);
+                        self.record(name, &pipe);
+                    }
+                    None => copy.skip(path, (name, self.recorded.as_deref()), SpecialKind::Pipe)?,
                 }
                 queue.complete(Some(group.clone()));
             }
             kind => {
-                copy.skip(path, special_kind(kind))?;
+                copy.skip(path, (name, self.recorded.as_deref()), special_kind(kind))?;
                 queue.complete(Some(group.clone()));
             }
         }
         Ok(())
+    }
+
+    /// The source child `name` was copied as `stat` describes it.
+    fn record(&self, name: &OsStr, stat: &EntryStat) {
+        if let Some(folder) = &self.recorded {
+            folder.entry(name, stat);
+        }
     }
 }
 
@@ -659,15 +681,15 @@ pub(super) fn read_link(fs: &dyn FsOps, at: Entry<'_>) -> Result<OsString, Failu
 }
 
 /// Recreates the symlink at `source` as `target`, in a folder this copy
-/// `made` or not, with its times, and counts it with its target's length
-/// as its bytes.
+/// `made` or not, with its times, counts it with its target's length as its
+/// bytes, and returns the source's stat.
 pub(super) fn copy_link(
     copy: &Copy,
     source: Entry<'_>,
     target: Entry<'_>,
     mount: &Mount,
     made: bool,
-) -> Result<(), Failure> {
+) -> Result<EntryStat, Failure> {
     let fs = copy.fs;
     let stat = fs.stat(source, false)?;
     if stat.kind != FileType::Symlink {
@@ -694,13 +716,14 @@ pub(super) fn copy_link(
         return Err(error.into());
     }
     copy.add_file(stat.size);
-    Ok(())
+    Ok(stat)
 }
 
 /// Recreates the named pipe at `source` as `target`, in a folder this copy
-/// `made` or not, with its owner, mode and times, and counts it as a file;
-/// `None` where the destination refuses named pipes. Reading the source's
-/// xattrs would open it, which lets a writer waiting on it go on.
+/// `made` or not, with its owner, mode and times, and counts it as a file.
+/// Returns the source's stat, and what was made: `None` where the
+/// destination refuses named pipes. Reading the source's xattrs would open
+/// it, which lets a writer waiting on it go on.
 pub(super) fn copy_fifo(
     copy: &Copy,
     source: Entry<'_>,
@@ -708,7 +731,7 @@ pub(super) fn copy_fifo(
     parent: &EntryStat,
     mount: &Mount,
     made: bool,
-) -> Result<Option<LocalFileIdentity>, Failure> {
+) -> Result<(EntryStat, Option<LocalFileIdentity>), Failure> {
     let fs = copy.fs;
     let stat = fs.stat(source, false)?;
     if stat.kind != FileType::Fifo {
@@ -719,7 +742,7 @@ pub(super) fn copy_fifo(
         Err(error) if taken(fs, target, error) => {
             adopt(fs, target, made, |stat| stat.kind == FileType::Fifo)?;
         }
-        Err(error) if refuses_pipes(error) => return Ok(None),
+        Err(error) if refuses_pipes(error) => return Ok((stat, None)),
         Err(error) => return Err(error.into()),
     }
     let created = match fs.open_fifo(target) {
@@ -743,7 +766,7 @@ pub(super) fn copy_fifo(
         Err(_) => fs.stat(target, false)?,
     };
     copy.add_file(0);
-    Ok(Some(created.identity))
+    Ok((stat, Some(created.identity)))
 }
 
 /// How filesystems without named pipes refuse one: vfat with `EPERM`,
@@ -768,6 +791,8 @@ pub(super) struct File {
     /// Beneath the walk's root: where it was claimed, or the name it asks for.
     path: PathBuf,
     scope: usize,
+    /// Where its source folder is recorded, by a move.
+    recorded_in: Option<Arc<manifest::Folder>>,
     completion: Completion,
 }
 
@@ -807,6 +832,10 @@ impl File {
                 claimed: self.claimed,
                 names: self.names.clone(),
                 size: source.stat.size,
+                recorded: self
+                    .recorded_in
+                    .clone()
+                    .map(|folder| Pending::new(folder, &self.name, &source.stat)),
             };
             tree.links.role(fs, &self.mount, name)
         } else {
@@ -860,24 +889,34 @@ impl File {
         }
         // Takes `fd`, so a failed file is closed before it is removed: NFS
         // renames an open file aside instead.
-        let written = (|fd: OwnedFd| -> Result<(), Failure> {
-            copy.copy_data(
-                data,
-                &self.mount,
-                (source.fd.as_fd(), &source.stat),
-                fd.as_fd(),
-                &self.parent,
-                true,
-            )?;
-            let snapshot = Snapshot::read(fs, source.fd.as_fd(), &source.stat)?;
-            copy.apply_metadata(fd.as_fd(), &created, &snapshot, &self.parent, &self.mount)?;
+        let written = (|fd: OwnedFd| -> Result<Option<EntryStat>, Failure> {
+            let parent = &self.parent;
+            let Some((snapshot, read)) =
+                copy.copy_file(data, &self.mount, &source, fd.as_fd(), parent)?
+            else {
+                return Ok(None);
+            };
+            copy.apply_metadata(fd.as_fd(), &created, &snapshot, parent, &self.mount)?;
             fs.close(fd)?;
-            copy.settle_times(target, created.identity, &snapshot, self.mount.family)
+            copy.settle_times(target, created.identity, &snapshot, self.mount.family)?;
+            Ok(Some(read))
         })(fd);
-        if written.is_err() {
+        if !matches!(written, Ok(Some(_))) {
             placement::remove_if_unchanged(fs, target, created.identity, AtFlags::empty());
         }
-        written?;
+        let Some(read) = written? else {
+            // It kept changing while it was read, so it stays at the source.
+            if let Some(folder) = &self.recorded_in {
+                folder.keep(&self.name, KeptCause::Changed);
+            }
+            if role == Role::First {
+                tree.links.torn(key);
+            }
+            return Ok(role);
+        };
+        if let Some(folder) = &self.recorded_in {
+            folder.entry(&self.name, &read);
+        }
         if role == Role::First {
             tree.links.written(key, path, created.identity);
         }
@@ -948,6 +987,8 @@ pub(super) struct Merged {
     /// The live folder's parent and name, and its identity once seen.
     pub(super) target: (Arc<OwnedFd>, OsString, Option<LocalFileIdentity>),
     pub(super) path: PathBuf,
+    /// Where the source folder is recorded, by a move.
+    pub(super) recorded_in: Option<Arc<manifest::Folder>>,
 }
 
 impl Merged {
@@ -975,6 +1016,10 @@ impl Merged {
         if expected.is_some_and(|expected| !same_entry(&target_stat, expected, mount.family)) {
             return Err(Failure::Changed);
         }
+        let recorded = match &self.recorded_in {
+            Some(folder) => Some(folder.folder(source_name, fs.stat_fd(source.as_fd())?.identity)),
+            None => None,
+        };
         let children = target_children(fs, source.as_fd(), copy.fat_family)?;
         let live = Live {
             names: Names::new(children.iter().map(|(_, _, name)| name.clone()).collect()),
@@ -984,6 +1029,7 @@ impl Merged {
             mount,
             path: self.path.clone(),
             name: source_name.clone(),
+            recorded,
         };
         tree.probe_links_in(&mount, live.dir.clone());
         let mut new = Vec::new();
@@ -1006,6 +1052,7 @@ impl Merged {
                                 Some(existing.identity),
                             ),
                             path: self.path.join(target_name),
+                            recorded_in: live.recorded.clone(),
                         },
                     ));
                 }
@@ -1030,6 +1077,8 @@ struct Live {
     names: Arc<Names>,
     /// The source folder's name, for errors.
     name: OsString,
+    /// Where the source folder is recorded, by a move.
+    recorded: Option<Arc<manifest::Folder>>,
 }
 
 impl Live {
@@ -1081,6 +1130,7 @@ impl Live {
             names: self.names.clone(),
             mount: self.mount,
             scope,
+            recorded: self.recorded.clone(),
         };
         let place = Place {
             live: self.dir.clone(),
@@ -1103,6 +1153,7 @@ impl Live {
         let source = Source {
             parent: self.source.clone(),
             name: name.to_os_string(),
+            recorded_in: self.recorded.clone(),
         };
         let expected = copy.fs.stat(source.entry(), false)?.identity;
         if expected.kind != FileType::Directory {
@@ -1258,6 +1309,7 @@ impl Place {
         let source = Source {
             parent: self.stage.clone(),
             name: name.to_os_string(),
+            recorded_in: None,
         };
         from_stage(&copy.uncounted(), &source, identity, &self.live, candidate)?;
         copy.discard(StagedSibling {

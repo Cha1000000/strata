@@ -79,21 +79,15 @@ fn copy_recursively_fat_family(
     merge: bool,
     cancellable: gio::Cancellable,
 ) -> Pin<Box<dyn Future<Output = Result<(), glib::Error>>>> {
-    if merge {
-        return super::merge_copy(None, true, false)(source, target, cancellable);
-    }
     Box::pin(async move {
-        copy_new_recursively_on_filesystem(
-            source,
-            target,
-            Taken::Fail,
-            false,
-            cancellable,
-            None,
-            true,
-        )
-        .await
-        .map(drop)
+        if merge {
+            return super::merge_copy(None, true)(source, target, false, cancellable)
+                .await
+                .map(drop);
+        }
+        copy_new_recursively_on_filesystem(source, target, Taken::Fail, cancellable, None, true)
+            .await
+            .map(drop)
     })
 }
 
@@ -200,17 +194,9 @@ async fn copy_new_recursively_with_progress(
     cancellable: gio::Cancellable,
     progress: Option<Rc<TransferProgressTracker>>,
 ) -> Result<(), glib::Error> {
-    copy_new_recursively_on_filesystem(
-        source,
-        target,
-        Taken::Fail,
-        false,
-        cancellable,
-        progress,
-        false,
-    )
-    .await
-    .map(drop)
+    copy_new_recursively_on_filesystem(source, target, Taken::Fail, cancellable, progress, false)
+        .await
+        .map(drop)
 }
 
 async fn copy_new_recursively(
@@ -378,7 +364,7 @@ fn settle_cancelled_io(context: &glib::MainContext) {
 }
 
 fn always_copy() -> super::MoveAttempt {
-    Rc::new(|_, _, _, _| Box::pin(async { Ok(super::Moved::CopyFrom(None)) }))
+    Rc::new(|_, _, _, _| Box::pin(async { Ok(super::Moved::Copy) }))
 }
 
 fn wait_for_operation(

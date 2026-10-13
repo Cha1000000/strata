@@ -6,6 +6,7 @@
 
 mod data;
 mod links;
+mod manifest;
 mod metadata;
 mod restrictive;
 pub(super) mod stage;
@@ -45,9 +46,10 @@ use crate::{
         Family, MountCapabilities, MountKey, family, learn_mount_capability, mount_capabilities,
     },
     model::Location,
-    services::{RenameCause, RenamedItem, SkippedItem, SpecialKind, TransferReport},
+    services::{KeptCause, RenameCause, RenamedItem, SkippedItem, SpecialKind, TransferReport},
 };
 use data::Data;
+pub(super) use manifest::Manifest;
 use metadata::Snapshot;
 pub(super) use restrictive::Restrictive;
 
@@ -102,6 +104,8 @@ pub(super) struct Copied {
     pub name: OsString,
     /// What the copy added to the progress it was given.
     pub reported: Reported,
+    /// What the copy took from the source, with [`Options::manifest`].
+    pub manifest: Option<Manifest>,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -109,9 +113,10 @@ pub(super) struct Options {
     pub fat_family: bool,
     /// Worked out from the source and destination devices when `None`.
     pub workers: Option<usize>,
-    /// The source is removed after the copy, so a special file that cannot
-    /// be recreated fails the copy instead of being left out.
-    pub moving: bool,
+    /// Records each source entry as the copy read it, for a move to delete
+    /// only what the copy holds. A file that changes while it is read is
+    /// read again, and left at the source if it changes again.
+    pub manifest: bool,
 }
 
 /// Copies the native item at `source`.
@@ -151,6 +156,7 @@ pub(super) async fn copy_local(
             Ok(Copied {
                 name,
                 reported: followed.reported,
+                manifest: followed.manifest,
             })
         }
         // What a stopped merge placed stays.
@@ -164,14 +170,15 @@ pub(super) async fn copy_local(
 }
 
 /// Copies the native item at `source` into a hidden sibling of `target`,
-/// which Replace publishes.
+/// which Replace publishes, and returns it with what it took from the
+/// source with [`Options::manifest`].
 pub(super) async fn copy_to_stage(
     source: PathBuf,
     target: PathBuf,
     options: Options,
     progress: Option<Rc<TransferProgressTracker>>,
     cancellable: &gio::Cancellable,
-) -> Result<StagedSibling, glib::Error> {
+) -> Result<(StagedSibling, Option<Manifest>), glib::Error> {
     let root = target.clone();
     let followed = following(
         source,
@@ -189,15 +196,45 @@ pub(super) async fn copy_to_stage(
     .await?;
     let staged = followed.value?;
     report(progress.as_deref(), &root, followed.left);
-    Ok(staged)
+    Ok((staged, followed.manifest))
+}
+
+/// What the native item at `source` holds now, for a move that GIO copies.
+pub(super) async fn snapshot(
+    source: PathBuf,
+    cancellable: &gio::Cancellable,
+) -> Result<Manifest, glib::Error> {
+    let recorded = run_cancellable(cancellable, move |cancelled| {
+        let (parent, name) = split(&source)?;
+        manifest::snapshot(fs(), parent, &name, &cancelled)
+            .map_err(|failure| failure.into_error(&name))
+    })
+    .await;
+    recorded.map_err(|_| io_error("Copy worker stopped unexpectedly"))?
+}
+
+/// Deletes each source entry `manifest` recorded that the source still holds
+/// as the copy read it, and returns what stays, by path beneath the item's
+/// parent, with why.
+pub(super) async fn delete_unchanged_sources(
+    manifest: Manifest,
+    cancellable: &gio::Cancellable,
+) -> Result<Vec<(PathBuf, KeptCause)>, glib::Error> {
+    let deleted = run_cancellable(cancellable, move |cancelled| {
+        manifest::delete(fs(), manifest, cancelled)
+    })
+    .await;
+    deleted.map_err(|_| io_error("Delete worker stopped unexpectedly"))?
 }
 
 /// What a copy run by [`following`] made or why it stopped, what it added to
-/// progress, and what it left as the user would not expect.
+/// progress, what it left as the user would not expect, and what it took
+/// from the source.
 struct Followed<T> {
     value: Result<T, glib::Error>,
     reported: Reported,
     left: Left,
+    manifest: Option<Manifest>,
 }
 
 /// Entries a copy saved under other names than they asked for, and special
@@ -244,6 +281,7 @@ fn report(progress: Option<&TransferProgressTracker>, root: &Path, left: Left) {
                 kind,
             })
             .collect(),
+        ..TransferReport::default()
     });
 }
 
@@ -266,9 +304,13 @@ async fn following<T: Send + 'static>(
     let copied = run_cancellable(cancellable, move |cancelled| {
         let (parent, name) = match split(&source) {
             Ok(split) => split,
-            Err(error) => return (Err(error), Left::default()),
+            Err(error) => return (Err(error), Left::default(), None),
         };
-        let source = Source { parent, name };
+        let source = Source {
+            parent,
+            name,
+            recorded_in: options.manifest.then(manifest::Folder::root),
+        };
         let copy = Copy::new(
             fs(),
             source.name.clone(),
@@ -278,15 +320,21 @@ async fn following<T: Send + 'static>(
             options,
         );
         let value = work(&copy, &source).map_err(|failure| failure.into_error(&source.name));
-        (value, std::mem::take(&mut *lock(&copy.left)))
+        let manifest = source.recorded_in.map(|root| Manifest {
+            parent: source.parent,
+            root,
+        });
+        (value, std::mem::take(&mut *lock(&copy.left)), manifest)
     })
     .await;
     let reported = follower.map_or_else(|| shared.reported(), |follower| follower.stop());
-    let (value, left) = copied.map_err(|_| io_error("Copy worker stopped unexpectedly"))?;
+    let (value, left, manifest) =
+        copied.map_err(|_| io_error("Copy worker stopped unexpectedly"))?;
     Ok(Followed {
         value,
         reported,
         left,
+        manifest,
     })
 }
 
@@ -299,20 +347,17 @@ pub(super) async fn copy_from_stage(
     let source = Source {
         parent: staged.parent.clone(),
         name: staged.name.clone(),
+        recorded_in: None,
     };
     let identity = staged.identity;
     let copied = run_cancellable(cancellable, move |cancelled| {
-        let options = Options {
-            moving: true,
-            ..Options::default()
-        };
         let copy = Copy::new(
             fs(),
             name.clone(),
             cancelled,
             Arc::default(),
             false,
-            options,
+            Options::default(),
         );
         let parent = source.parent.clone();
         from_stage(&copy, &source, identity, &parent, &name)
@@ -345,6 +390,8 @@ pub(super) fn unlock_stage(staged: &StagedSibling) {
 struct Source {
     parent: Arc<OwnedFd>,
     name: OsString,
+    /// Where the copy records what it took from the item.
+    recorded_in: Option<Arc<manifest::Folder>>,
 }
 
 impl Source {
@@ -387,14 +434,15 @@ fn copy_new(
 ) -> Result<OsString, Failure> {
     let (parent, name) = split(target).map_err(Failure::Error)?;
     let stat = copy.fs.stat(source.entry(), false)?;
+    let recorded_in = source.recorded_in.as_deref();
     match stat.kind {
         FileType::RegularFile => FileCopy::new(copy, parent.as_fd())
-            .copy_from(source.entry(), FileTarget::Final(&name, taken))
+            .copy_from(source.entry(), FileTarget::Final(&name, taken), recorded_in)
             .map(|(name, _)| name),
         FileType::Symlink => {
             copy.check_cancelled()?;
             let mount = Mount::new(copy.fs, parent.as_fd());
-            first_free(taken.names(&name, false), taken, |name| {
+            let (name, link) = first_free(taken.names(&name, false), taken, |name| {
                 tree::copy_link(
                     copy,
                     source.entry(),
@@ -402,8 +450,11 @@ fn copy_new(
                     &mount,
                     false,
                 )
-            })
-            .map(|(name, ())| name)
+            })?;
+            if let Some(folder) = recorded_in {
+                folder.entry(&source.name, &link);
+            }
+            Ok(name)
         }
         FileType::Directory => {
             let workers = workers.unwrap_or_else(|| worker_count(source, &parent));
@@ -420,12 +471,17 @@ fn copy_new(
             copy.check_cancelled()?;
             let mount = Mount::new(copy.fs, parent.as_fd());
             let parent_stat = copy.fs.stat_fd(parent.as_fd())?;
-            first_free(taken.names(&name, false), taken, |name| {
+            let (name, pipe) = first_free(taken.names(&name, false), taken, |name| {
                 let target = Entry::new(&*parent, name);
-                tree::copy_fifo(copy, source.entry(), target, &parent_stat, &mount, false)?
-                    .ok_or(Failure::NotCopyable)
-            })
-            .map(|(name, _)| name)
+                match tree::copy_fifo(copy, source.entry(), target, &parent_stat, &mount, false)? {
+                    (pipe, Some(_)) => Ok(pipe),
+                    (_, None) => Err(Failure::NotCopyable),
+                }
+            })?;
+            if let Some(folder) = recorded_in {
+                folder.entry(&source.name, &pipe);
+            }
+            Ok(name)
         }
         _ => Err(Failure::NotCopyable),
     }
@@ -439,10 +495,14 @@ fn copy_stage(
 ) -> Result<StagedSibling, Failure> {
     let (parent, _) = split(target).map_err(Failure::Error)?;
     let stat = copy.fs.stat(source.entry(), false)?;
+    let recorded_in = source.recorded_in.as_deref();
     match stat.kind {
         FileType::RegularFile => {
-            let (name, identity) = FileCopy::new(copy, parent.as_fd())
-                .copy_from(source.entry(), FileTarget::Hidden)?;
+            let (name, identity) = FileCopy::new(copy, parent.as_fd()).copy_from(
+                source.entry(),
+                FileTarget::Hidden,
+                recorded_in,
+            )?;
             Ok(StagedSibling {
                 parent,
                 name,
@@ -464,6 +524,9 @@ fn copy_stage(
                 }
             }
             copy.add_file(stat.size);
+            if let Some(folder) = recorded_in {
+                folder.entry(&source.name, &stat);
+            }
             Ok(staged)
         }
         FileType::Directory => {
@@ -540,6 +603,7 @@ fn publish_folder(
                 let source = Source {
                     parent: staged.parent.clone(),
                     name: staged.name.clone(),
+                    recorded_in: None,
                 };
                 let copied = first_free(std::iter::once(name).chain(names), taken, |name| {
                     direct_folder(
@@ -601,6 +665,7 @@ fn fill(
         naming: tree::Naming::Decide,
         mount,
         scope: 0,
+        recorded_in: source.recorded_in.clone(),
         completion: None,
     };
     let (
@@ -778,6 +843,7 @@ fn merge(
         source: (source.parent.clone(), source.name.clone()),
         target: (parent, name, None),
         path: PathBuf::new(),
+        recorded_in: source.recorded_in.clone(),
     };
     let (walked, tree::Walked { stages, placed, .. }) = tree::walk(copy, workers, None, |tree| {
         tree::TreeJob::Merge(tree, merged)
@@ -912,7 +978,7 @@ impl Mount {
         let family = mount_capabilities(key).family.unwrap_or_else(|| {
             let family = fs
                 .mount_type(dir)
-                .map_or(Family::Other, |fs_type| family(&fs_type));
+                .map_or(Family::Other, |mount| family(&mount.fs_type));
             learn_mount_capability(key, |capabilities| capabilities.family = Some(family));
             family
         });
@@ -980,7 +1046,8 @@ struct Copy {
     item: OsString,
     cancelled: Arc<AtomicBool>,
     progress: Arc<SharedProgress>,
-    /// False for a copy from a stage, whose bytes were counted already.
+    /// False for a copy from a stage, whose bytes were counted already and
+    /// which is removed afterwards, so the copy may leave nothing out.
     counted: bool,
     fat_family: bool,
     data: Mutex<Vec<Data>>,
@@ -988,7 +1055,8 @@ struct Copy {
     refused_xattrs: Mutex<HashSet<OsString>>,
     /// The target refused `mknodat`, so claims create and close instead.
     nodes_refused: AtomicBool,
-    moving: bool,
+    /// With [`Options::manifest`].
+    recording: bool,
     left: Mutex<Left>,
 }
 
@@ -1011,7 +1079,7 @@ impl Copy {
             data: Mutex::default(),
             refused_xattrs: Mutex::default(),
             nodes_refused: AtomicBool::new(false),
-            moving: options.moving,
+            recording: options.manifest,
             left: Mutex::default(),
         })
     }
@@ -1019,17 +1087,13 @@ impl Copy {
     /// The same copy repeating bytes it already counted, from a stage that
     /// is removed afterwards.
     fn uncounted(&self) -> Arc<Self> {
-        let options = Options {
-            moving: true,
-            ..Options::default()
-        };
         Self::new(
             self.fs,
             self.item.clone(),
             self.cancelled.clone(),
             self.progress.clone(),
             false,
-            options,
+            Options::default(),
         )
     }
 
@@ -1039,7 +1103,7 @@ impl Copy {
         let options = Options {
             fat_family: self.fat_family,
             workers: None,
-            moving: self.moving,
+            manifest: self.recording,
         };
         Self::new(
             self.fs,
@@ -1092,12 +1156,21 @@ impl Copy {
         left.skipped.retain(|(path, _)| kept(path));
     }
 
-    /// Leaves out the special file at `path`, unless the copy is a move.
-    fn skip(&self, path: PathBuf, kind: SpecialKind) -> Result<(), Failure> {
-        if self.moving {
+    /// Leaves out the special file at `path`, named `name` in its source
+    /// folder; a move keeps it there, recorded in `recorded_in`.
+    fn skip(
+        &self,
+        path: PathBuf,
+        (name, recorded_in): (&OsStr, Option<&manifest::Folder>),
+        kind: SpecialKind,
+    ) -> Result<(), Failure> {
+        if !self.counted {
             return Err(Failure::NotCopyable);
         }
-        lock(&self.left).skipped.push((path, kind));
+        match recorded_in {
+            Some(folder) => folder.keep(name, KeptCause::Skipped(kind)),
+            None => lock(&self.left).skipped.push((path, kind)),
+        }
         Ok(())
     }
 
@@ -1150,6 +1223,45 @@ impl Copy {
                 }
             },
         )
+    }
+
+    /// Copies all of `source` into `target` and reads its metadata, and
+    /// returns that with the source as read. When recording, a source that
+    /// changed meanwhile is read once more; `None` if it changed again.
+    fn copy_file(
+        &self,
+        data: &mut Data,
+        target_mount: &Mount,
+        source: &Opened,
+        target: BorrowedFd<'_>,
+        parent: &EntryStat,
+    ) -> Result<Option<(Snapshot, EntryStat)>, Failure> {
+        let mut stat = source.stat;
+        for attempt in 0..2 {
+            if attempt > 0 {
+                self.fs.set_len(target, 0)?;
+            }
+            let source_fd = source.fd.as_fd();
+            let counted = attempt == 0;
+            self.copy_data(
+                data,
+                target_mount,
+                (source_fd, &stat),
+                target,
+                parent,
+                counted,
+            )?;
+            let snapshot = Snapshot::read(self.fs, source_fd, &stat)?;
+            if !self.recording {
+                return Ok(Some((snapshot, stat)));
+            }
+            let read = self.fs.stat_fd(source_fd)?;
+            if !manifest::changed(&stat, &read) {
+                return Ok(Some((snapshot, read)));
+            }
+            stat = read;
+        }
+        Ok(None)
     }
 
     fn apply_metadata(
@@ -1306,6 +1418,8 @@ struct FileCopy<'a> {
     dir: BorrowedFd<'a>,
     target: Mount,
     data: Data,
+    /// The source as the copy read it.
+    read: Option<EntryStat>,
 }
 
 impl<'a> FileCopy<'a> {
@@ -1315,6 +1429,7 @@ impl<'a> FileCopy<'a> {
             dir,
             target: Mount::new(copy.fs, dir),
             data: Data::default(),
+            read: None,
         }
     }
 
@@ -1328,16 +1443,19 @@ impl<'a> FileCopy<'a> {
         }
     }
 
-    /// Returns the name the copy took and its identity there.
+    /// Returns the name the copy took and its identity there, and records
+    /// the source as read in `recorded_in`.
     fn copy_from(
         &mut self,
         at: Entry<'_>,
         target: FileTarget<'_>,
+        recorded_in: Option<&manifest::Folder>,
     ) -> Result<(OsString, LocalFileIdentity), Failure> {
         let fs = self.copy.fs;
         self.copy.check_cancelled()?;
         let source = open_file(fs, at)?;
         let parent = fs.stat_fd(self.dir)?;
+        let mut tmpfile = None;
         if stage::tmpfile_allowed(self.target.family)
             && self.target.capabilities().tmpfile != Some(false)
             && TMPFILE_LINK.load(Ordering::Relaxed) != TMPFILE_LINK_UNAVAILABLE
@@ -1346,7 +1464,7 @@ impl<'a> FileCopy<'a> {
                 Ok(fd) => {
                     self.target
                         .learn(|capabilities| capabilities.tmpfile = Some(true));
-                    return self.through_tmpfile(&source, fd, &parent, target);
+                    tmpfile = Some(fd);
                 }
                 // Before Linux 3.11 the flag reads as O_DIRECTORY.
                 Err(error) if is_unsupported(error) || error == Errno::ISDIR => {
@@ -1356,7 +1474,30 @@ impl<'a> FileCopy<'a> {
                 Err(error) => return Err(error.into()),
             }
         }
-        self.through_named_stage(&source, &parent, target)
+        let copied = match tmpfile {
+            Some(fd) => self.through_tmpfile(&source, fd, &parent, target),
+            None => self.through_named_stage(&source, &parent, target),
+        }?;
+        if let (Some(folder), Some(read)) = (recorded_in, &self.read) {
+            folder.entry(at.name, read);
+        }
+        Ok(copied)
+    }
+
+    /// Copies `source` into `target`, or fails if it kept changing while it
+    /// was read.
+    fn read_into(
+        &mut self,
+        source: &Opened,
+        target: BorrowedFd<'_>,
+        parent: &EntryStat,
+    ) -> Result<Snapshot, Failure> {
+        let (snapshot, read) = self
+            .copy
+            .copy_file(&mut self.data, &self.target, source, target, parent)?
+            .ok_or(Failure::Changed)?;
+        self.read = Some(read);
+        Ok(snapshot)
     }
 
     fn link(&self, tmpfile: BorrowedFd<'_>, target: FileTarget<'_>) -> Result<OsString, Errno> {
@@ -1397,15 +1538,7 @@ impl<'a> FileCopy<'a> {
         target: FileTarget<'_>,
     ) -> Result<(OsString, LocalFileIdentity), Failure> {
         let fs = self.copy.fs;
-        self.copy.copy_data(
-            &mut self.data,
-            &self.target,
-            (source.fd.as_fd(), &source.stat),
-            tmpfile.as_fd(),
-            parent,
-            true,
-        )?;
-        let snapshot = Snapshot::read(fs, source.fd.as_fd(), &source.stat)?;
+        let snapshot = self.read_into(source, tmpfile.as_fd(), parent)?;
         let created = fs.stat_fd(tmpfile.as_fd())?;
         self.copy
             .apply_metadata(tmpfile.as_fd(), &created, &snapshot, parent, &self.target)?;
@@ -1472,19 +1605,9 @@ impl<'a> FileCopy<'a> {
         parent: &EntryStat,
         target: FileTarget<'_>,
     ) -> Result<(OsString, LocalFileIdentity), Failure> {
-        let fs = self.copy.fs;
         let (fd, stage) = self.create_stage(target)?;
         let copied = self
-            .copy
-            .copy_data(
-                &mut self.data,
-                &self.target,
-                (source.fd.as_fd(), &source.stat),
-                fd.as_fd(),
-                parent,
-                true,
-            )
-            .and_then(|()| Ok(Snapshot::read(fs, source.fd.as_fd(), &source.stat)?))
+            .read_into(source, fd.as_fd(), parent)
             .and_then(|snapshot| {
                 self.copy.apply_metadata(
                     fd.as_fd(),

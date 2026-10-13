@@ -24,7 +24,7 @@ use rustix::{
 
 use super::super::copy_engine::forget_learned_copy_support;
 use super::super::fs_ops::{Entry, EntryStat, FsOps, System, assert_off_main_thread};
-use crate::adapters::volume::{MountKey, forget_test_mount_capabilities};
+use crate::adapters::volume::{MountKey, MountType, forget_test_mount_capabilities};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Op {
@@ -52,6 +52,7 @@ pub(crate) enum Op {
     CopyRange,
     Read,
     Write,
+    SetLen,
     Close,
     ChownFd,
     ChmodFd,
@@ -158,8 +159,8 @@ pub(crate) struct Quirks {
     pub fail: Vec<(Op, &'static str, usize, Errno)>,
     /// Runs once, before the matching call after skipping the given number of matches.
     pub before: Vec<(Op, &'static str, usize, Racer)>,
-    /// The mountinfo type `mount_type` reports.
-    pub mount_type: Option<&'static str>,
+    /// The mountinfo type and superblock options `mount_type` reports.
+    pub mount_type: Option<(&'static str, &'static str)>,
     pub tmpfile: Support,
     pub tmpfile_link: TmpfileLink,
     /// The most bytes one read or write moves.
@@ -233,7 +234,7 @@ impl Quirks {
 
     pub(crate) fn ext4() -> Self {
         Self {
-            mount_type: Some("ext4"),
+            mount_type: Some(("ext4", "rw")),
             fs_type: Some(0xEF53),
             ..Self::default()
         }
@@ -243,7 +244,7 @@ impl Quirks {
     /// times of a written file when it is closed.
     pub(crate) fn nfs42() -> Self {
         Self {
-            mount_type: Some("nfs4"),
+            mount_type: Some(("nfs4", "rw,vers=4.2")),
             fs_type: Some(0x6969),
             rename_flags: Support::Rejected(Errno::INVAL),
             times_reset_at_close: true,
@@ -253,7 +254,7 @@ impl Quirks {
 
     pub(crate) fn nfs3() -> Self {
         Self {
-            mount_type: Some("nfs"),
+            mount_type: Some(("nfs", "rw,vers=3")),
             times_reset_at_close: false,
             xattrs_refused: vec![("", Errno::OPNOTSUPP)],
             no_birth_time: true,
@@ -264,7 +265,7 @@ impl Quirks {
     /// No hard links, named pipes or xattrs, and names compared without case.
     pub(crate) fn vfat() -> Self {
         Self {
-            mount_type: Some("vfat"),
+            mount_type: Some(("vfat", "rw,flush")),
             fs_type: Some(0x4d44),
             links: Support::Rejected(Errno::PERM),
             fifos: Support::Rejected(Errno::PERM),
@@ -276,7 +277,7 @@ impl Quirks {
 
     pub(crate) fn sshfs() -> Self {
         Self {
-            mount_type: Some("fuse.sshfs"),
+            mount_type: Some(("fuse.sshfs", "rw")),
             fs_type: Some(0x6573_5546),
             xattrs_refused: vec![("", Errno::OPNOTSUPP)],
             rename_flags: Support::Rejected(Errno::INVAL),
@@ -313,6 +314,8 @@ struct State {
     links_made: u64,
     stale: HashMap<PathBuf, EntryStat>,
     written: HashSet<(u64, u64)>,
+    /// Names whose entries report another inode number, as after an eviction.
+    renumbered: HashSet<PathBuf>,
 }
 
 static SCOPES: Mutex<Vec<Arc<Scope>>> = Mutex::new(Vec::new());
@@ -341,6 +344,7 @@ impl FsQuirks {
                 links_made: 0,
                 stale: HashMap::new(),
                 written: HashSet::new(),
+                renumbered: HashSet::new(),
             }),
         });
         scopes().push(scope.clone());
@@ -473,6 +477,12 @@ impl Scope {
             && inode == stat.identity.inode
         {
             stat.identity.inode = reported;
+        }
+        if path
+            .as_ref()
+            .is_some_and(|path| state.renumbered.contains(path))
+        {
+            stat.identity.inode = !stat.identity.inode;
         }
         if state.quirks.single_link_count {
             stat.nlink = 1;
@@ -871,6 +881,18 @@ pub(crate) fn recreated(path: &Path) {
     }
 }
 
+/// Makes whatever is at `path` report another inode number from now on, as
+/// libfuse without `use_ino` and cifs without server inode numbers do once
+/// the kernel evicts an entry.
+pub(crate) fn renumbered(path: &Path) {
+    let (Some(scope), Some(name)) = (scope_for_path(path), path.file_name()) else {
+        return;
+    };
+    if let Some(parent) = path.parent().and_then(|parent| parent.canonicalize().ok()) {
+        scope.state().renumbered.insert(parent.join(name));
+    }
+}
+
 fn same_scope(left: &Option<Arc<Scope>>, right: &Option<Arc<Scope>>) -> bool {
     match (left, right) {
         (None, None) => true,
@@ -1217,6 +1239,11 @@ impl FsOps for Scoped {
         })
     }
 
+    fn set_len(&self, fd: BorrowedFd<'_>, len: u64) -> Result<(), Errno> {
+        assert_off_main_thread();
+        on_fd(fd, Op::SetLen, None, |_| System.set_len(fd, len))
+    }
+
     fn close(&self, fd: OwnedFd) -> Result<(), Errno> {
         assert_off_main_thread();
         let Some(scope) = scope_for(fd.as_fd()) else {
@@ -1310,14 +1337,17 @@ impl FsOps for Scoped {
         })
     }
 
-    fn mount_type(&self, fd: BorrowedFd<'_>) -> Option<String> {
+    fn mount_type(&self, fd: BorrowedFd<'_>) -> Option<MountType> {
         assert_off_main_thread();
         match scope_for(fd) {
             Some(scope) => scope
                 .run(Op::MountType, &[], |scope| {
                     Ok(scope
                         .quirk(|quirks| quirks.mount_type)
-                        .map(str::to_owned)
+                        .map(|(fs_type, super_options)| MountType {
+                            fs_type: fs_type.to_owned(),
+                            super_options: super_options.to_owned(),
+                        })
                         .or_else(|| System.mount_type(fd)))
                 })
                 .ok()

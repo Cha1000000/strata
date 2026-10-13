@@ -299,6 +299,23 @@ pub struct SkippedItem {
     pub kind: SpecialKind,
 }
 
+/// Why a move left an item it copied in its original folder.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum KeptCause {
+    /// It changed while it was copied, or after.
+    Changed,
+    /// Deleting it failed, for this reason.
+    Undeletable(String),
+    /// The destination cannot store it.
+    Skipped(SpecialKind),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct KeptItem {
+    pub location: Location,
+    pub cause: KeptCause,
+}
+
 /// What a transfer did to items inside the ones it was given, told once it
 /// ends. Keep Both numbering, which the user chose, is not reported.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -306,16 +323,19 @@ pub struct TransferReport {
     pub renamed: Vec<RenamedItem>,
     /// Left out of the copy.
     pub skipped: Vec<SkippedItem>,
+    /// Left at the source by a move.
+    pub kept: Vec<KeptItem>,
 }
 
 impl TransferReport {
     pub fn is_empty(&self) -> bool {
-        self.renamed.is_empty() && self.skipped.is_empty()
+        self.renamed.is_empty() && self.skipped.is_empty() && self.kept.is_empty()
     }
 
     pub fn extend(&mut self, other: Self) {
         self.renamed.extend(other.renamed);
         self.skipped.extend(other.skipped);
+        self.kept.extend(other.kept);
     }
 }
 

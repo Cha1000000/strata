@@ -1,12 +1,15 @@
 // SPDX-License-Identifier: MIT
 
 //! Tells the user, once a transfer ends, about items inside the ones it was
-//! given that it saved under other names or left out.
+//! given that it saved under other names or left out, and what a move left
+//! in its original folder.
 
 use std::time::Duration;
 
 use crate::model::Location;
-use crate::services::{RenameCause, RenamedItem, SkippedItem, SpecialKind, TransferReport};
+use crate::services::{
+    KeptCause, KeptItem, RenameCause, RenamedItem, SkippedItem, SpecialKind, TransferReport,
+};
 use crate::ui::browser::ViewState;
 
 #[cfg(test)]
@@ -29,7 +32,8 @@ enum Presentation {
         summary: String,
         detail: String,
     },
-    /// Items were left out, so the transfer completed with errors.
+    /// Items were left out or left behind, so the transfer completed with
+    /// errors.
     Warning {
         detail: String,
     },
@@ -59,14 +63,40 @@ fn renamed_line(item: &RenamedItem) -> String {
     .into_owned()
 }
 
-fn skipped_line(item: &SkippedItem) -> String {
-    let name = display_name(&item.location);
-    match item.kind {
+fn special_line(name: &str, kind: SpecialKind) -> String {
+    match kind {
         SpecialKind::Pipe => rust_i18n::t!("“%{name}” (named pipe)", name = name),
         SpecialKind::Socket => rust_i18n::t!("“%{name}” (socket)", name = name),
         SpecialKind::Device => rust_i18n::t!("“%{name}” (device file)", name = name),
     }
     .into_owned()
+}
+
+fn skipped_line(item: &SkippedItem) -> String {
+    special_line(&display_name(&item.location), item.kind)
+}
+
+fn kept_line(item: &KeptItem) -> String {
+    let name = display_name(&item.location);
+    match &item.cause {
+        KeptCause::Changed => rust_i18n::t!(
+            "“%{name}” changed during the move and was left in “%{folder}”",
+            name = name,
+            folder = item
+                .location
+                .parent()
+                .map(|folder| display_name(&folder))
+                .unwrap_or_default()
+        )
+        .into_owned(),
+        KeptCause::Undeletable(error) => rust_i18n::t!(
+            "Could not delete %{name}: %{error}",
+            name = name,
+            error = error
+        )
+        .into_owned(),
+        KeptCause::Skipped(kind) => special_line(&name, *kind),
+    }
 }
 
 /// The first [`LISTED_ITEMS`] lines as bullets, then how many more there are.
@@ -113,11 +143,17 @@ fn sections(sections: Vec<(String, Vec<String>)>) -> String {
 
 fn presentation(report: &TransferReport) -> Option<Presentation> {
     let mut renamed = renamed_sections(&report.renamed);
-    if !report.skipped.is_empty() {
-        let skipped = report.skipped.iter().map(skipped_line).collect::<Vec<_>>();
-        let heading =
-            crate::i18n::tr("These special files can\u{2019}t be copied and were left out");
-        renamed.push((heading, skipped));
+    if !report.skipped.is_empty() || !report.kept.is_empty() {
+        if !report.skipped.is_empty() {
+            let skipped = report.skipped.iter().map(skipped_line).collect::<Vec<_>>();
+            let heading =
+                crate::i18n::tr("These special files can\u{2019}t be copied and were left out");
+            renamed.push((heading, skipped));
+        }
+        if !report.kept.is_empty() {
+            let kept = report.kept.iter().map(kept_line).collect::<Vec<_>>();
+            renamed.push((crate::i18n::count("items_kept", kept.len()), kept));
+        }
         return Some(Presentation::Warning {
             detail: sections(renamed),
         });

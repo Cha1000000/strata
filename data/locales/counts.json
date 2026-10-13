@@ -325,6 +325,58 @@
     "ru": "%{count} элементов сохранены под новыми именами",
     "zh-CN": "%{count} 个项目已用新名称保存"
   },
+  "counts.items_kept.one": {
+    "en": "%{count} item was left in its original folder",
+    "fr": "%{count} élément est resté dans son dossier d’origine",
+    "de": "%{count} Element ist in seinem ursprünglichen Ordner geblieben",
+    "es": "%{count} elemento se quedó en su carpeta original",
+    "ja": "%{count} 個の項目が元のフォルダーに残されました",
+    "pt-BR": "%{count} item ficou na pasta original",
+    "ko": "항목 %{count}개가 원래 폴더에 남아 있습니다",
+    "vi": "%{count} mục được giữ lại trong thư mục gốc",
+    "it": "%{count} elemento è rimasto nella cartella originale",
+    "ru": "%{count} элемент остался в исходной папке",
+    "zh-CN": "%{count} 个项目留在了原来的文件夹中"
+  },
+  "counts.items_kept.other": {
+    "en": "%{count} items were left in their original folders",
+    "fr": "%{count} éléments sont restés dans leur dossier d’origine",
+    "de": "%{count} Elemente sind in ihren ursprünglichen Ordnern geblieben",
+    "es": "%{count} elementos se quedaron en sus carpetas originales",
+    "ja": "%{count} 個の項目が元のフォルダーに残されました",
+    "pt-BR": "%{count} itens ficaram nas pastas originais",
+    "ko": "항목 %{count}개가 원래 폴더에 남아 있습니다",
+    "vi": "%{count} mục được giữ lại trong thư mục gốc",
+    "it": "%{count} elementi sono rimasti nelle cartelle originali",
+    "ru": "%{count} элементов остались в исходных папках",
+    "zh-CN": "%{count} 个项目留在了原来的文件夹中"
+  },
+  "counts.items_kept.few": {
+    "en": "%{count} items were left in their original folders",
+    "fr": "%{count} éléments sont restés dans leur dossier d’origine",
+    "de": "%{count} Elemente sind in ihren ursprünglichen Ordnern geblieben",
+    "es": "%{count} elementos se quedaron en sus carpetas originales",
+    "ja": "%{count} 個の項目が元のフォルダーに残されました",
+    "pt-BR": "%{count} itens ficaram nas pastas originais",
+    "ko": "항목 %{count}개가 원래 폴더에 남아 있습니다",
+    "vi": "%{count} mục được giữ lại trong thư mục gốc",
+    "it": "%{count} elementi sono rimasti nelle cartelle originali",
+    "ru": "%{count} элемента остались в исходных папках",
+    "zh-CN": "%{count} 个项目留在了原来的文件夹中"
+  },
+  "counts.items_kept.many": {
+    "en": "%{count} items were left in their original folders",
+    "fr": "%{count} éléments sont restés dans leur dossier d’origine",
+    "de": "%{count} Elemente sind in ihren ursprünglichen Ordnern geblieben",
+    "es": "%{count} elementos se quedaron en sus carpetas originales",
+    "ja": "%{count} 個の項目が元のフォルダーに残されました",
+    "pt-BR": "%{count} itens ficaram nas pastas originais",
+    "ko": "항목 %{count}개가 원래 폴더에 남아 있습니다",
+    "vi": "%{count} mục được giữ lại trong thư mục gốc",
+    "it": "%{count} elementi sono rimasti nelle cartelle originali",
+    "ru": "%{count} элементов остались в исходных папках",
+    "zh-CN": "%{count} 个项目留在了原来的文件夹中"
+  },
   "counts.jobs_running.one": {
     "en": "%{count} job running",
     "fr": "%{count} tâche en cours",

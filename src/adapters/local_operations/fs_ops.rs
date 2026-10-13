@@ -20,7 +20,7 @@ use rustix::{
 };
 
 use super::{LocalFileIdentity, retry_local_open};
-use crate::adapters::volume::{MountKey, MountTable};
+use crate::adapters::volume::{MountKey, MountTable, MountType};
 
 /// `STATX_MNT_ID_UNIQUE` (Linux 6.8), which rustix does not name yet.
 const STATX_MNT_ID_UNIQUE: u32 = 0x4000;
@@ -50,6 +50,7 @@ pub(super) struct EntryStat {
     pub size: u64,
     pub atime: (i64, u32),
     pub mtime: (i64, u32),
+    pub ctime: (i64, u32),
     pub uid: u32,
     pub gid: u32,
 }
@@ -104,6 +105,7 @@ pub(super) trait FsOps: Send + Sync {
     ) -> Result<usize, Errno>;
     fn read_at(&self, fd: BorrowedFd<'_>, buffer: &mut [u8], offset: u64) -> Result<usize, Errno>;
     fn write_at(&self, fd: BorrowedFd<'_>, buffer: &[u8], offset: u64) -> Result<usize, Errno>;
+    fn set_len(&self, fd: BorrowedFd<'_>, len: u64) -> Result<(), Errno>;
     /// Reports what `close` returns, where NFS, SMB and FUSE fail late writes.
     fn close(&self, fd: OwnedFd) -> Result<(), Errno>;
     fn chown_fd(&self, fd: BorrowedFd<'_>, uid: Option<u32>, gid: Option<u32>)
@@ -118,8 +120,8 @@ pub(super) trait FsOps: Send + Sync {
     fn xattr_names(&self, fd: BorrowedFd<'_>) -> Result<Vec<OsString>, Errno>;
     fn get_xattr(&self, fd: BorrowedFd<'_>, name: &OsStr) -> Result<Vec<u8>, Errno>;
     fn set_xattr(&self, fd: BorrowedFd<'_>, name: &OsStr, value: &[u8]) -> Result<(), Errno>;
-    /// The mountinfo filesystem type of the mount holding `fd`.
-    fn mount_type(&self, fd: BorrowedFd<'_>) -> Option<String>;
+    /// The mountinfo type and options of the mount holding `fd`.
+    fn mount_type(&self, fd: BorrowedFd<'_>) -> Option<MountType>;
     /// The folder at `at`, which may name several components, opened
     /// without following a symlink anywhere on the way.
     fn open_dir(&self, at: Entry<'_>) -> Result<OwnedFd, Errno>;
@@ -184,6 +186,7 @@ fn entry_stat(stat: &rustix::fs::Statx) -> EntryStat {
         size: stat.stx_size,
         atime: (stat.stx_atime.tv_sec, stat.stx_atime.tv_nsec),
         mtime: (stat.stx_mtime.tv_sec, stat.stx_mtime.tv_nsec),
+        ctime: (stat.stx_ctime.tv_sec, stat.stx_ctime.tv_nsec),
         uid: stat.stx_uid,
         gid: stat.stx_gid,
     }
@@ -204,6 +207,10 @@ fn legacy_stat(stat: &rustix::fs::Stat) -> EntryStat {
             stat.st_mtime,
             u32::try_from(stat.st_mtime_nsec).unwrap_or_default(),
         ),
+        ctime: (
+            stat.st_ctime,
+            u32::try_from(stat.st_ctime_nsec).unwrap_or_default(),
+        ),
         uid: stat.st_uid,
         gid: stat.st_gid,
     }
@@ -217,6 +224,7 @@ fn statx_at(dir: BorrowedFd<'_>, name: &OsStr, flags: AtFlags) -> Result<EntrySt
         | StatxFlags::SIZE
         | StatxFlags::ATIME
         | StatxFlags::MTIME
+        | StatxFlags::CTIME
         | StatxFlags::BTIME
         | StatxFlags::UID
         | StatxFlags::GID;
@@ -503,6 +511,11 @@ impl FsOps for System {
         rustix::io::pwrite(fd, buffer, offset)
     }
 
+    fn set_len(&self, fd: BorrowedFd<'_>, len: u64) -> Result<(), Errno> {
+        assert_off_main_thread();
+        rustix::fs::ftruncate(fd, len)
+    }
+
     #[expect(
         unsafe_code,
         reason = "OwnedFd and rustix discard close errors, which report failed network writes"
@@ -579,10 +592,10 @@ impl FsOps for System {
         rustix::fs::fsetxattr(fd, name, value, rustix::fs::XattrFlags::empty())
     }
 
-    fn mount_type(&self, fd: BorrowedFd<'_>) -> Option<String> {
+    fn mount_type(&self, fd: BorrowedFd<'_>) -> Option<MountType> {
         assert_off_main_thread();
         let mounts = MountTable::current();
-        let fs_type = match rustix::fs::statx(
+        let mount_type = match rustix::fs::statx(
             fd,
             "",
             AtFlags::EMPTY_PATH | AtFlags::STATX_DONT_SYNC,
@@ -591,15 +604,15 @@ impl FsOps for System {
             Ok(stat)
                 if StatxFlags::from_bits_retain(stat.stx_mask).contains(StatxFlags::MNT_ID) =>
             {
-                mounts.fs_type_of(stat.stx_mnt_id)
+                mounts.mount_type_of(stat.stx_mnt_id)
             }
             // Before Linux 5.8.
             _ => {
                 let path = std::fs::read_link(format!("/proc/self/fd/{}", fd.as_raw_fd())).ok()?;
-                mounts.fs_type_for(&path)
+                mounts.mount_type_for(&path)
             }
         };
-        fs_type.map(str::to_owned)
+        mount_type.cloned()
     }
 
     fn open_dir(&self, at: Entry<'_>) -> Result<OwnedFd, Errno> {

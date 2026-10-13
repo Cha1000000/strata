@@ -70,24 +70,42 @@ fn renamed_items_are_grouped_by_why_they_were_renamed() {
 }
 
 #[test]
-fn items_left_out_make_the_report_a_warning() {
+fn items_left_out_or_left_behind_make_the_report_a_warning() {
     let skipped = |kind| SkippedItem {
         location: Location::local("/copy/run/socket"),
         kind,
     };
-    for renamed_count in [0, 1, 3] {
+    let kept = |cause| KeptItem {
+        location: Location::local("/source/run/data"),
+        cause,
+    };
+    let reason = "Permission denied";
+    let left_behind = vec![
+        kept(KeptCause::Changed),
+        kept(KeptCause::Undeletable(reason.to_owned())),
+        kept(KeptCause::Skipped(SpecialKind::Socket)),
+    ];
+    for (renamed_count, skipped_count, kept_count) in
+        [(0, 2, 0), (1, 2, 0), (3, 2, 0), (0, 0, 3), (1, 2, 3)]
+    {
+        let row = format!("{renamed_count}, {skipped_count}, {kept_count}");
         let report = TransferReport {
-            skipped: vec![skipped(SpecialKind::Socket), skipped(SpecialKind::Pipe)],
+            skipped: [skipped(SpecialKind::Socket), skipped(SpecialKind::Pipe)][..skipped_count]
+                .to_vec(),
+            kept: left_behind[..kept_count].to_vec(),
             ..renamed(renamed_count)
         };
         let Some(Presentation::Warning { detail }) = presentation(&report) else {
-            panic!("{renamed_count} renamed items");
+            panic!("{row}");
         };
         assert_eq!(
             detail.matches('•').count(),
-            renamed_count + 2,
-            "{renamed_count}"
+            renamed_count + skipped_count + kept_count,
+            "{row}"
         );
+        let heading = crate::i18n::count("items_kept", kept_count);
+        assert_eq!(detail.contains(&heading), kept_count > 0, "{row}");
+        assert_eq!(detail.contains(reason), kept_count > 0, "{row}");
     }
 }
 
