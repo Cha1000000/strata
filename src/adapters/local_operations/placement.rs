@@ -364,8 +364,9 @@ fn link_reply_was_lost(fs: &dyn FsOps, to: Entry<'_>, source: &EntryStat) -> boo
 /// be stale, or always 1 on sshfs. Another identity there is a racer's item,
 /// or a mount where each link reports its own inode number (libfuse without
 /// `use_ino`, cifs without server inode numbers). Only a probe on Strata's own
-/// names tells them apart; on such a mount the link is removed by the identity
-/// it reported and links are not used again.
+/// names tells them apart; on such a mount a link that matches the source's
+/// type, mode, size and time is removed by the identity it reported, and links
+/// are not used again.
 fn link_holds_source(
     fs: &dyn FsOps,
     mount: &Mount<'_>,
@@ -373,22 +374,21 @@ fn link_holds_source(
     to: Entry<'_>,
     source: &EntryStat,
 ) -> Result<bool, PlaceError> {
-    let linked = fs
-        .stat(to, true)
-        .map_err(|_| PlaceError::Unconfirmed)?
-        .identity;
-    if linked == source.identity {
+    let linked = fs.stat(to, true).map_err(|_| PlaceError::Unconfirmed)?;
+    if linked.identity == source.identity {
         return Ok(true);
     }
-    match fs.stat(from, true) {
-        Ok(current) if current.identity == source.identity => {}
+    let current = match fs.stat(from, true) {
+        Ok(current) if current.identity == source.identity => current,
         Ok(_) => return Err(PlaceError::Changed),
         Err(_) => return Err(PlaceError::Unconfirmed),
-    }
+    };
+    let alike = (linked.kind, linked.mode, linked.size, linked.mtime)
+        == (current.kind, current.mode, current.size, current.mtime);
     let links_unusable = mount
         .probe(true, false)
         .is_ok_and(|probed| probed.hard_links == Some(false));
-    if links_unusable && remove_if_unchanged(fs, to, linked, AtFlags::empty()) {
+    if links_unusable && alike && remove_if_unchanged(fs, to, linked.identity, AtFlags::empty()) {
         Ok(false)
     } else {
         Err(PlaceError::Unconfirmed)

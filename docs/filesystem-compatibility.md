@@ -195,10 +195,11 @@ Rename and link support decides which placement step runs. "Rejects flags" means
 
 libfuse high-level daemons without `use_ino`, sshfs among them, give each hard link its own inode
 number, so a link cannot prove that it holds the item. Once a probe on Strata's own names confirms
-this, Strata removes such a link by the identity it reported right after linking and stops using
-links on that mount: moves copy, renames use the reserved-name step above, and an archive file
-cannot be published there. Without that confirmation, a new name reporting another identity may
-be a racer's item, so both names are kept and the result is reported as unconfirmed.
+this, Strata stops using links on that mount: moves copy, renames use the reserved-name step above,
+and an archive file cannot be published there. The link is removed by the identity it reported
+right after linking, if its type, permissions, size and modification time match the item's.
+Otherwise, or without that confirmation, the new name may be a racer's item, so both names are
+kept and the result is reported as unconfirmed.
 
 Archive extraction never sets a symbolic link's time on FUSE, where sshfs applies it to the target.
 

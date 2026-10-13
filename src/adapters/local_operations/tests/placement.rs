@@ -1002,10 +1002,22 @@ fn a_hard_link_reporting_another_inode_is_rolled_back_and_never_used_again()
 }
 
 #[test]
-fn a_racer_replacing_a_new_link_keeps_its_item_and_links_stay_in_use() -> Result<(), Box<dyn Error>>
-{
-    // NOSYS links before any probe; EINVAL probes first.
-    for error in [Errno::NOSYS, Errno::INVAL] {
+fn a_racer_replacing_a_new_link_keeps_its_item() -> Result<(), Box<dyn Error>> {
+    // NOSYS links before any probe; EINVAL probes first. On sshfs the probe
+    // after the link finds that links renumber.
+    let cases: [(&str, fn() -> Quirks, bool); 3] = [
+        ("NOSYS", || without_flags(Errno::NOSYS), true),
+        ("INVAL", || without_flags(Errno::INVAL), true),
+        (
+            "sshfs",
+            || Quirks {
+                rename_flags: Support::Rejected(Errno::NOSYS),
+                ..Quirks::sshfs()
+            },
+            false,
+        ),
+    ];
+    for (case, quirks, links_work) in cases {
         let root = tempfile::tempdir()?;
         let dir = root.path().to_path_buf();
         let racer: Racer = Box::new(move || {
@@ -1016,7 +1028,7 @@ fn a_racer_replacing_a_new_link_keeps_its_item_and_links_stay_in_use() -> Result
             root.path(),
             Quirks {
                 before: vec![(Op::Stat, "target", 0, racer)],
-                ..without_flags(error)
+                ..quirks()
             },
         );
         fs::write(root.path().join("source"), b"data")?;
@@ -1025,16 +1037,20 @@ fn a_racer_replacing_a_new_link_keeps_its_item_and_links_stay_in_use() -> Result
         assert_eq!(
             place_in(root.path(), "source", "target", None),
             Err(PlaceError::Unconfirmed),
-            "{error:?}"
+            "{case}"
         );
         assert_eq!(fs::read(root.path().join("target"))?, b"theirs");
         assert_eq!(identity(&root.path().join("source")), original);
-        assert_eq!(mount_capabilities(scope.key()).hard_links, Some(true));
-        assert_eq!(
-            place_in(root.path(), "source", "moved", None),
-            Ok(Placed::Linked)
-        );
-        assert_eq!(names(root.path())?, ["moved", "target"]);
+        assert_eq!(mount_capabilities(scope.key()).hard_links, Some(links_work));
+        if links_work {
+            assert_eq!(
+                place_in(root.path(), "source", "moved", None),
+                Ok(Placed::Linked)
+            );
+            assert_eq!(names(root.path())?, ["moved", "target"]);
+        } else {
+            assert_eq!(names(root.path())?, ["source", "target"]);
+        }
     }
     Ok(())
 }
