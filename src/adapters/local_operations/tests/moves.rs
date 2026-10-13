@@ -255,7 +255,7 @@ fn items_without_noreplace_or_a_usable_link_are_renamed_without_copying()
         rename_flags: Support::Rejected(Errno::NOSYS),
         ..Quirks::sshfs()
     };
-    let cases: [(&str, fn() -> Quirks, bool); 6] = [
+    let cases: [(&str, Preset, bool); 6] = [
         ("refused", refused, false),
         ("sshfs", Quirks::sshfs, false),
         ("sshfs", Quirks::sshfs, true),
@@ -307,7 +307,7 @@ fn items_no_step_can_place_are_moved_by_copying() -> Result<(), Box<dyn Error>> 
         fail: vec![(Op::Rename, "moved", 1, Errno::PERM)],
         ..Quirks::sshfs()
     };
-    let cases: [(&str, fn() -> Quirks, bool); 3] = [
+    let cases: [(&str, Preset, bool); 3] = [
         ("links unsettled", Quirks::without_placement, false),
         ("rename over refused", rename_over_refused, false),
         (

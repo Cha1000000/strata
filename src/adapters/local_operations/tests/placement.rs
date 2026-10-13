@@ -157,7 +157,7 @@ fn create_destination(path: &Path, kind: &str) {
 
 #[test]
 fn the_ladder_never_replaces_an_existing_destination() -> Result<(), Box<dyn Error>> {
-    let quirk_sets: [fn() -> Quirks; 4] = [
+    let quirk_sets: [Preset; 4] = [
         Quirks::default,
         || without_flags(Errno::NOSYS),
         || Quirks {
@@ -716,7 +716,7 @@ fn set_aside_refuses_a_substituted_target() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-type ProbeCase = (fn() -> Quirks, Probed, Feasibility, Feasibility);
+type ProbeCase = (Preset, Probed, Feasibility, Feasibility);
 
 #[test]
 fn the_probe_learns_each_quirk_and_leaves_nothing_behind() -> Result<(), Box<dyn Error>> {
@@ -921,7 +921,7 @@ fn a_case_only_rename_goes_through_a_temporary_name() -> Result<(), Box<dyn Erro
         alias_inodes: true,
         ..Quirks::default()
     };
-    let shapes: [fn() -> Quirks; 4] = [Quirks::default, Quirks::vboxsf, smb, exfat_fuse];
+    let shapes: [Preset; 4] = [Quirks::default, Quirks::vboxsf, smb, exfat_fuse];
     for quirks in shapes {
         for folder in [false, true] {
             let root = tempfile::tempdir()?;
@@ -1069,7 +1069,7 @@ fn a_hard_link_reporting_another_inode_is_rolled_back_and_never_used_again()
 fn a_racer_replacing_a_new_link_keeps_its_item() -> Result<(), Box<dyn Error>> {
     // NOSYS links before any probe; EINVAL probes first. On sshfs the probe
     // after the link finds that links renumber.
-    let cases: [(&str, fn() -> Quirks, bool); 3] = [
+    let cases: [(&str, Preset, bool); 3] = [
         ("NOSYS", || without_flags(Errno::NOSYS), true),
         ("INVAL", || without_flags(Errno::INVAL), true),
         (
@@ -1132,7 +1132,7 @@ fn links_refused_for_the_item() -> Quirks {
 fn items_without_noreplace_or_a_usable_hard_link_are_placed_over_a_reserved_name()
 -> Result<(), Box<dyn Error>> {
     // The folder placeholder places folders on sshfs before links are ever probed.
-    let cases: [(fn() -> Quirks, bool, Option<bool>, Placed); 5] = [
+    let cases: [(Preset, bool, Option<bool>, Placed); 5] = [
         (Quirks::vboxsf, false, Some(false), Placed::OverReservedFile),
         (Quirks::vboxsf, true, Some(false), Placed::AfterCheck),
         (
@@ -1167,7 +1167,7 @@ fn items_without_noreplace_or_a_usable_hard_link_are_placed_over_a_reserved_name
 
 #[test]
 fn the_reserved_name_rung_never_clobbers_a_plain_creator() -> Result<(), Box<dyn Error>> {
-    let cases: [(fn() -> Quirks, bool); 4] = [
+    let cases: [(Preset, bool); 4] = [
         (Quirks::vboxsf, false),
         (Quirks::vboxsf, true),
         (links_refused_for_the_item, false),
@@ -1272,7 +1272,7 @@ fn the_reserved_name_rung_needs_the_missing_primitives_confirmed() -> Result<(),
         fail: vec![(Op::Rename, ".strata-probe-*", 0, Errno::IO)],
         ..Quirks::vboxsf()
     };
-    let links_unsettled: fn() -> Quirks = Quirks::without_placement;
+    let links_unsettled: Preset = Quirks::without_placement;
     for quirks in [links_unsettled, noreplace_unsettled] {
         let root = tempfile::tempdir()?;
         let scope = FsQuirks::install(root.path(), quirks());

@@ -560,7 +560,7 @@ fn replace_without_trash_or_exchange_sets_the_original_aside() -> Result<(), Box
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
         .lock()
         .map_err(|error| error.to_string())?;
-    let mounts: [(FsWord, fn() -> Quirks); 3] = [
+    let mounts: [(FsWord, Preset); 3] = [
         (NFS_SUPER_MAGIC, Quirks::without_rename_flags),
         (FUSE_SUPER_MAGIC, Quirks::sshfs),
         (FUSE_SUPER_MAGIC, Quirks::vboxsf),
@@ -742,7 +742,7 @@ fn a_taken_name_keeps_the_original_aside_and_names_it() -> Result<(), Box<dyn Er
         .lock()
         .map_err(|error| error.to_string())?;
     // The racer writes just before the new item is published at `target`.
-    let cases: [(fn() -> Quirks, Op, usize); 2] = [
+    let cases: [(Preset, Op, usize); 2] = [
         (Quirks::default, Op::Rename, 1),
         (Quirks::vboxsf, Op::Create, 0),
     ];
@@ -875,7 +875,7 @@ fn same_filesystem_replacing_move_places_the_source_without_a_stage() -> Result<
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
         .lock()
         .map_err(|error| error.to_string())?;
-    let mounts: [(FsWord, fn() -> Quirks); 3] = [
+    let mounts: [(FsWord, Preset); 3] = [
         (NFS_SUPER_MAGIC, Quirks::default),
         (FUSE_SUPER_MAGIC, Quirks::sshfs),
         (FUSE_SUPER_MAGIC, Quirks::vboxsf),

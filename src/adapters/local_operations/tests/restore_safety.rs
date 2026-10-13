@@ -71,7 +71,7 @@ fn restore_without_rename_flags_never_replaces_a_racing_destination() -> Result<
 #[test]
 fn restoring_without_rename_flags_moves_the_item_without_copying() -> Result<(), Box<dyn Error>> {
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock()?;
-    let presets: [fn() -> Quirks; 5] = [
+    let presets: [Preset; 5] = [
         Quirks::without_rename_flags,
         || Quirks {
             rename_flags: Support::Rejected(Errno::NOSYS),

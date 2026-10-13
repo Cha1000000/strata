@@ -23,7 +23,7 @@ use std::{
 use gtk::{gio, glib, prelude::*};
 
 use crate::test_support::ASYNC_MAIN_CONTEXT_DEFAULT;
-use fs_quirks::{FsQuirks, Quirks};
+use fs_quirks::{FsQuirks, Preset, Quirks};
 
 mod conflicts;
 mod copy;

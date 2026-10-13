@@ -321,7 +321,7 @@ fn renames_and_their_undo_keep_the_item_where_rename_flags_or_links_are_missing(
         rename_flags: Support::Rejected(Errno::NOSYS),
         ..Quirks::sshfs()
     };
-    let cases: [fn() -> Quirks; 4] = [
+    let cases: [Preset; 4] = [
         Quirks::without_rename_flags,
         Quirks::vboxsf,
         Quirks::sshfs,

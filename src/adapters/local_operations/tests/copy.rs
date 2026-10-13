@@ -782,7 +782,7 @@ fn staged_publication_without_rename_flags_places_the_stage_itself() -> Result<(
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
         .lock()
         .map_err(|error| error.to_string())?;
-    let presets: [(&str, fn() -> Quirks); 5] = [
+    let presets: [(&str, Preset); 5] = [
         ("EINVAL", Quirks::without_rename_flags),
         ("ENOSYS", || Quirks {
             rename_flags: Support::Rejected(Errno::NOSYS),

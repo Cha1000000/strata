@@ -82,6 +82,7 @@ pub(crate) enum Trash {
 }
 
 pub(crate) type Racer = Box<dyn FnMut() + Send>;
+pub(crate) type Preset = fn() -> Quirks;
 
 /// Patterns match a name exactly, or by prefix when they end in `*`.
 #[derive(Default)]

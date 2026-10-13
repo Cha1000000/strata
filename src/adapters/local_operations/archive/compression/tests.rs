@@ -9,7 +9,9 @@ use super::super::fixtures::{
 };
 use super::{ArchiveError, inspect_archive_sources, process_umask, write_staged_archive};
 use crate::{
-    adapters::local_operations::tests::fs_quirks::{FsQuirks, Op, Quirks, Trash, recreated},
+    adapters::local_operations::tests::fs_quirks::{
+        FsQuirks, Op, Preset, Quirks, Trash, recreated,
+    },
     services::{ArchiveFormat, ReplacedOriginal, TransferConflict, TrashedOriginal},
     test_support::ASYNC_MAIN_CONTEXT_DEFAULT,
 };
@@ -250,7 +252,7 @@ fn an_archive_replaced_without_trash_deletes_its_original() -> Result<(), Box<dy
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
         .lock()
         .map_err(|error| error.to_string())?;
-    let cases: [(Trash, rustix::fs::FsWord, fn() -> Quirks, bool); 5] = [
+    let cases: [(Trash, rustix::fs::FsWord, Preset, bool); 5] = [
         (Trash::Unsupported, NFS_SUPER_MAGIC, Quirks::default, true),
         (Trash::Unsupported, TMPFS_MAGIC, Quirks::default, false),
         (
