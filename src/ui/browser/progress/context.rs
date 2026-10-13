@@ -227,6 +227,11 @@ impl ViewState {
         request_id: OperationRequestId,
         event: &BrowserEvent,
     ) {
+        // It follows the event that finished the operation.
+        if let BrowserEvent::ItemsReported { report } = event {
+            self.show_transfer_report(report);
+            return;
+        }
         let background = self
             .background_file_progress
             .borrow()

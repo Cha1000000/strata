@@ -768,6 +768,15 @@ impl ViewState {
                 self.dismiss_file_operation_progress();
                 self.prune_stale_search_results();
             }
+            BrowserEvent::ItemsReported { report } => {
+                let report = report.clone();
+                let weak = Rc::downgrade(self);
+                self.dismiss_file_operation_progress_then(move || {
+                    if let Some(state) = weak.upgrade() {
+                        state.show_transfer_report(&report);
+                    }
+                });
+            }
             BrowserEvent::FolderSortChosen {
                 location,
                 sort_key,

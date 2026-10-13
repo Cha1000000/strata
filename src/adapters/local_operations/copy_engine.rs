@@ -40,8 +40,12 @@ use super::{
     placement::{COPY_PREFIX, ENOTSUPP, PlaceError, STAGE_PREFIX},
     placement_error, run_cancellable,
 };
-use crate::adapters::volume::{
-    Family, MountCapabilities, MountKey, family, learn_mount_capability, mount_capabilities,
+use crate::{
+    adapters::volume::{
+        Family, MountCapabilities, MountKey, family, learn_mount_capability, mount_capabilities,
+    },
+    model::Location,
+    services::{RenameCause, RenamedItem, TransferReport},
 };
 use data::Data;
 use metadata::Snapshot;
@@ -115,10 +119,12 @@ pub(super) async fn copy_local(
     progress: Option<Rc<TransferProgressTracker>>,
     cancellable: &gio::Cancellable,
 ) -> Result<Copied, glib::Error> {
-    let (name, reported) = following(
+    let (Destination::New(target, _) | Destination::Merge(target)) = &destination;
+    let target = target.clone();
+    let followed = following(
         source,
         options,
-        progress,
+        progress.clone(),
         cancellable,
         move |copy, source| match destination {
             Destination::New(target, taken) => {
@@ -131,7 +137,15 @@ pub(super) async fn copy_local(
         },
     )
     .await?;
-    Ok(Copied { name, reported })
+    report_renamed(
+        progress.as_deref(),
+        &target.with_file_name(&followed.value),
+        followed.renamed,
+    );
+    Ok(Copied {
+        name: followed.value,
+        reported: followed.reported,
+    })
 }
 
 /// Copies the native item at `source` into a hidden sibling of `target`,
@@ -143,10 +157,11 @@ pub(super) async fn copy_to_stage(
     progress: Option<Rc<TransferProgressTracker>>,
     cancellable: &gio::Cancellable,
 ) -> Result<StagedSibling, glib::Error> {
-    following(
+    let root = target.clone();
+    let followed = following(
         source,
         options,
-        progress,
+        progress.clone(),
         cancellable,
         move |copy, source| {
             let staged = copy_stage(copy, source, &target, options.workers)?;
@@ -156,8 +171,39 @@ pub(super) async fn copy_to_stage(
             }
         },
     )
-    .await
-    .map(|(staged, _)| staged)
+    .await?;
+    report_renamed(progress.as_deref(), &root, followed.renamed);
+    Ok(followed.value)
+}
+
+/// What a copy run by [`following`] made, added to progress, and saved
+/// under other names, by path beneath the item.
+struct Followed<T> {
+    value: T,
+    reported: Reported,
+    renamed: Vec<(PathBuf, PathBuf)>,
+}
+
+/// Tells `progress` which entries inside the item at `root` were saved under
+/// other names.
+fn report_renamed(
+    progress: Option<&TransferProgressTracker>,
+    root: &Path,
+    renamed: Vec<(PathBuf, PathBuf)>,
+) {
+    let Some(progress) = progress else {
+        return;
+    };
+    progress.report(TransferReport {
+        renamed: renamed
+            .into_iter()
+            .map(|(requested, saved_as)| RenamedItem {
+                requested: Location::local(root.join(requested)),
+                saved_as: Location::local(root.join(saved_as)),
+                cause: RenameCause::Alias,
+            })
+            .collect(),
+    });
 }
 
 /// Runs `work` on a worker thread while `progress` follows it.
@@ -167,7 +213,7 @@ async fn following<T: Send + 'static>(
     progress: Option<Rc<TransferProgressTracker>>,
     cancellable: &gio::Cancellable,
     work: impl FnOnce(&Arc<Copy>, &Source) -> Result<T, Failure> + Send + 'static,
-) -> Result<(T, Reported), glib::Error> {
+) -> Result<Followed<T>, glib::Error> {
     let shared = Arc::new(SharedProgress::default());
     let follower = progress.map(|progress| {
         if let Some(name) = source.file_name() {
@@ -187,12 +233,17 @@ async fn following<T: Send + 'static>(
             true,
             options.fat_family,
         );
-        work(&copy, &source).map_err(|failure| failure.into_error(&source.name))
+        let value = work(&copy, &source).map_err(|failure| failure.into_error(&source.name))?;
+        Ok::<_, glib::Error>((value, std::mem::take(&mut *lock(&copy.renamed))))
     })
     .await;
     let reported = follower.map_or_else(|| shared.reported(), |follower| follower.stop());
-    let copied = copied.map_err(|_| io_error("Copy worker stopped unexpectedly"))??;
-    Ok((copied, reported))
+    let (value, renamed) = copied.map_err(|_| io_error("Copy worker stopped unexpectedly"))??;
+    Ok(Followed {
+        value,
+        reported,
+        renamed,
+    })
 }
 
 /// Copies `staged` to `name` beside it, where the mount cannot place the stage.
@@ -294,7 +345,7 @@ fn copy_new(
                     source.entry(),
                     Entry::new(&*parent, name),
                     &mount,
-                    None,
+                    false,
                 )
             })
             .map(|(name, ())| name)
@@ -866,6 +917,9 @@ struct Copy {
     refused_xattrs: Mutex<HashSet<OsString>>,
     /// The target refused `mknodat`, so claims create and close instead.
     nodes_refused: AtomicBool,
+    /// Entries saved under another name than they asked for, by path
+    /// beneath the item.
+    renamed: Mutex<Vec<(PathBuf, PathBuf)>>,
 }
 
 impl Copy {
@@ -887,6 +941,7 @@ impl Copy {
             data: Mutex::default(),
             refused_xattrs: Mutex::default(),
             nodes_refused: AtomicBool::new(false),
+            renamed: Mutex::default(),
         })
     }
 
@@ -900,6 +955,10 @@ impl Copy {
             false,
             false,
         )
+    }
+
+    fn renamed(&self, requested: PathBuf, saved_as: PathBuf) {
+        lock(&self.renamed).push((requested, saved_as));
     }
 
     /// Counts a completed file, with the `bytes` it made without copying

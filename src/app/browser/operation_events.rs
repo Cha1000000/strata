@@ -305,6 +305,11 @@ impl Browser {
                 merged.overwritten.extend(overwritten.iter().cloned());
                 return true;
             }
+            OperationEvent::ItemsReported { report, .. } => {
+                self.merged_undo.borrow_mut().rename(&report.renamed);
+                self.transfer_report.borrow_mut().extend(report.clone());
+                return true;
+            }
             OperationEvent::ItemMoved { .. } | OperationEvent::ItemTrashed { .. } => return true,
             OperationEvent::ArchiveStarted { total, .. } => {
                 BrowserEvent::ArchiveStarted { total: *total }
@@ -406,6 +411,10 @@ impl Browser {
         let load = self.operation_load.take();
         drop(load);
         self.publish_operation_outcome(context, completion, event);
+        let report = self.transfer_report.take();
+        if !report.is_empty() {
+            self.emit(BrowserEvent::ItemsReported { report });
+        }
         if !refresh_depths.is_empty() {
             self.emit(BrowserEvent::OperationRefreshRequired {
                 depths: refresh_depths,
@@ -596,6 +605,7 @@ impl Browser {
             | OperationEvent::DeleteProgress { .. }
             | OperationEvent::RestoreProgress { .. }
             | OperationEvent::Merged { .. }
+            | OperationEvent::ItemsReported { .. }
             | OperationEvent::ItemMoved { .. }
             | OperationEvent::ItemTrashed { .. }
             | OperationEvent::ArchiveStarted { .. }
@@ -697,6 +707,7 @@ fn operation_event_id(event: &OperationEvent) -> OperationRequestId {
         | OperationEvent::ItemMoved { request_id, .. }
         | OperationEvent::ItemTrashed { request_id, .. }
         | OperationEvent::FlushingToDevice { request_id }
+        | OperationEvent::ItemsReported { request_id, .. }
         | OperationEvent::Merged { request_id, .. }
         | OperationEvent::TransferFailed { request_id, .. }
         | OperationEvent::TransferProgress { request_id, .. }

@@ -66,6 +66,7 @@ mod result_selection;
 mod tab_location;
 mod tab_stops;
 mod transfer;
+mod transfer_report;
 mod trash;
 
 #[cfg(test)]

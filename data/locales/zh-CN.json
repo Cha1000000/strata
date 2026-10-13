@@ -911,6 +911,7 @@
   "The connection was interrupted": "连接中断",
   "The connection was refused": "连接被拒绝",
   "The connection was reset": "连接被重置",
+  "The destination can’t tell these names apart": "目标位置无法区分这些名称",
   "The device is not available": "设备不可用",
   "The device may still be writing. Wait for the transfer to finish or fail before starting another file operation. Do not unplug until you can safely eject it.": "设备可能仍在写入数据。请等待传输完成或失败后，再开始其他文件操作。在可以安全弹出之前，请勿拔出设备。",
   "The device started, but no mountable volume appeared.": "设备已启动，但没有出现可挂载的卷。",

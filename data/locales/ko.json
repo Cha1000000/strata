@@ -911,6 +911,7 @@
   "The connection was interrupted": "연결이 중단되었습니다",
   "The connection was refused": "연결이 거부되었습니다",
   "The connection was reset": "연결이 재설정되었습니다",
+  "The destination can’t tell these names apart": "대상 위치에서 이 이름들을 구분할 수 없습니다",
   "The device is not available": "장치를 사용할 수 없습니다",
   "The device may still be writing. Wait for the transfer to finish or fail before starting another file operation. Do not unplug until you can safely eject it.": "장치가 아직 쓰는 중일 수 있습니다. 전송이 완료되거나 실패할 때까지 기다린 후 다른 파일 작업을 시작하세요. 안전하게 꺼낼 수 있을 때까지 분리하지 마세요.",
   "The device started, but no mountable volume appeared.": "장치가 시작되었지만 마운트할 수 있는 볼륨이 나타나지 않았습니다.",

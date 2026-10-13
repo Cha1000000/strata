@@ -63,8 +63,8 @@ use crate::{
         CancelledOperation, CompressRequest, CreateDirectoryRequest, CreateFileRequest,
         DeleteRequest, ExtractRequest, LoadHandle, OperationEvent, OperationProvider,
         OperationRequestId, PasteRequest, RenameRequest, ReplacedOriginal, RestoreRequest,
-        RestoreSource, TransferConflict, TrashedOriginal, UndoCopyRequest, UndoMergeRequest,
-        UndoMoveRequest, UndoRenameRequest, validate_basename,
+        RestoreSource, TransferConflict, TransferReport, TrashedOriginal, UndoCopyRequest,
+        UndoMergeRequest, UndoMoveRequest, UndoRenameRequest, validate_basename,
     },
 };
 
@@ -647,6 +647,16 @@ impl TransferProgressTracker {
             self.emit();
         } else {
             self.emit_if_due();
+        }
+    }
+
+    /// Reports what an item did to items inside it, unless nothing.
+    fn report(&self, report: TransferReport) {
+        if !report.is_empty() {
+            (self.emit)(OperationEvent::ItemsReported {
+                request_id: self.request_id,
+                report,
+            });
         }
     }
 

@@ -911,6 +911,7 @@
   "The connection was interrupted": "Соединение было прервано",
   "The connection was refused": "В подключении отказано",
   "The connection was reset": "Соединение было сброшено",
+  "The destination can’t tell these names apart": "Место назначения не различает эти имена",
   "The device is not available": "Устройство недоступно",
   "The device may still be writing. Wait for the transfer to finish or fail before starting another file operation. Do not unplug until you can safely eject it.": "Возможно, устройство всё ещё записывает данные. Дождитесь завершения или сбоя передачи, прежде чем начинать другую операцию с файлами. Не отключайте устройство, пока его нельзя будет безопасно извлечь.",
   "The device started, but no mountable volume appeared.": "Устройство запустилось, но подключаемый том не появился.",

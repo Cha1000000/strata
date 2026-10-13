@@ -15,8 +15,10 @@ use std::{
 use rustix::{fs::AtFlags, io::Errno};
 
 use super::{
-    Copy, Created, Failure, FileCopy, Mount, is_fatal, lock, metadata::Snapshot, restrictive,
-    stable_inodes, tree,
+    Copy, Created, Failure, FileCopy, Mount, is_fatal, lock,
+    metadata::Snapshot,
+    restrictive, stable_inodes,
+    tree::{self, Names},
 };
 use crate::adapters::{
     local_operations::{
@@ -50,13 +52,14 @@ pub(super) struct Name {
     pub(super) source: OsString,
     /// What the folder job claimed at `path`.
     pub(super) claimed: Option<LocalFileIdentity>,
+    /// The names of its folder, where this copy made it.
+    pub(super) names: Option<Arc<Names>>,
     pub(super) size: u64,
 }
 
 struct First {
-    path: PathBuf,
-    /// Once the copy is written.
-    identity: Option<LocalFileIdentity>,
+    /// Where the copy is, once it is written.
+    written: Option<(PathBuf, LocalFileIdentity)>,
 }
 
 /// A made folder that gains a later name after it got its times.
@@ -119,10 +122,7 @@ impl Links {
         let mut state = lock(&self.state);
         match state.firsts.entry(name.key) {
             hash_map::Entry::Vacant(vacant) => {
-                vacant.insert(First {
-                    path: name.path,
-                    identity: None,
-                });
+                vacant.insert(First { written: None });
                 Role::First
             }
             hash_map::Entry::Occupied(_) => {
@@ -135,9 +135,10 @@ impl Links {
         }
     }
 
-    pub(super) fn written(&self, key: Key, identity: LocalFileIdentity) {
+    /// The first name of `key` is written at `path`.
+    pub(super) fn written(&self, key: Key, path: PathBuf, identity: LocalFileIdentity) {
         if let Some(first) = lock(&self.state).firsts.get_mut(&key) {
-            first.identity = Some(identity);
+            first.written = Some((path, identity));
         }
     }
 
@@ -188,16 +189,17 @@ impl Links {
         let mut linking = true;
         for name in &later {
             copy.check_cancelled()?;
-            let first = firsts
-                .get(&name.key)
-                .and_then(|first| Some((first.path.as_path(), first.identity?)));
+            let first = firsts.get(&name.key).and_then(|first| {
+                let (path, identity) = first.written.as_ref()?;
+                Some((path.as_path(), *identity))
+            });
             let made = match first {
                 Some(first) => make(copy, root, first, name, &mut linking),
                 None => Err(Failure::Changed),
             };
-            let made = made.map_err(|failure| failure.named(&name.source))?;
+            let (path, made) = made.map_err(|failure| failure.named(&name.source))?;
             if let Some(created) = created {
-                created.add(name.path.clone(), made);
+                created.add(path, made);
             }
             copy.add_file(name.size);
         }
@@ -215,14 +217,14 @@ impl Links {
 
 /// Links `name` to the copy at `first`, or copies that copy on the same
 /// device where the destination refuses; one refusal ends `linking`.
-/// Returns what `name` holds.
+/// Returns where `name` was made and what it holds.
 fn make(
     copy: &Copy,
     root: BorrowedFd<'_>,
     (first, identity): (&Path, LocalFileIdentity),
     name: &Name,
     linking: &mut bool,
-) -> Result<LocalFileIdentity, Failure> {
+) -> Result<(PathBuf, LocalFileIdentity), Failure> {
     let fs = copy.fs;
     let (Some(first_name), Some(file_name)) = (first.file_name(), name.path.file_name()) else {
         return Err(Failure::Changed);
@@ -230,30 +232,43 @@ fn make(
     let first_dir = parent(fs, root, first)?;
     let dir = parent(fs, root, &name.path)?;
     let from = Entry::new(&first_dir, first_name);
-    let to = Entry::new(&dir, file_name);
     if let Some(claimed) = name.claimed
-        && !placement::remove_if_unchanged(fs, to, claimed, AtFlags::empty())
+        && !placement::remove_if_unchanged(
+            fs,
+            Entry::new(&dir, file_name),
+            claimed,
+            AtFlags::empty(),
+        )
     {
         return Err(Failure::Place(PlaceError::Changed));
     }
-    if *linking {
-        match fs.link(from, to) {
-            Ok(()) => return linked(fs, from, to, identity).map(|()| identity),
-            // Only this copy's own link, from a lost NFS reply, reports the
-            // copy's identity.
-            Err(error) if tree::taken(fs, to, error) => {
-                return tree::adopt(fs, to, Some(&HashSet::new()), |stat| {
-                    stat.identity == identity
-                });
+    tree::make_numbered(
+        copy,
+        name.names.as_deref(),
+        &name.path,
+        false,
+        |file_name| {
+            let to = Entry::new(&dir, file_name);
+            if *linking {
+                match fs.link(from, to) {
+                    Ok(()) => return linked(fs, from, to, identity).map(|()| identity),
+                    // Only this copy's own link, from a lost NFS reply, reports
+                    // the copy's identity.
+                    Err(error) if tree::taken(fs, to, error) => {
+                        return tree::adopt(fs, to, true, |stat| stat.identity == identity);
+                    }
+                    Err(error)
+                        if is_fatal(error) || matches!(error, Errno::NOSPC | Errno::DQUOT) =>
+                    {
+                        return Err(error.into());
+                    }
+                    Err(_) => *linking = false,
+                }
             }
-            Err(error) if is_fatal(error) || matches!(error, Errno::NOSPC | Errno::DQUOT) => {
-                return Err(error.into());
-            }
-            Err(_) => *linking = false,
-        }
-    }
-    let parent = fs.stat_fd(dir.as_fd())?;
-    FileCopy::new(copy, dir.as_fd()).create_from(from, identity, None, file_name, &parent)
+            let parent = fs.stat_fd(dir.as_fd())?;
+            FileCopy::new(copy, dir.as_fd()).create_from(from, identity, None, file_name, &parent)
+        },
+    )
 }
 
 /// The folder holding `path` beneath `root`.

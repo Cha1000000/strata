@@ -273,6 +273,58 @@
     "ru": "… и ещё %{count} элементов",
     "zh-CN": "… 还有 %{count} 个项目"
   },
+  "counts.items_renamed.one": {
+    "en": "%{count} item was saved under a new name",
+    "fr": "%{count} élément a été enregistré sous un nouveau nom",
+    "de": "%{count} Element wurde unter einem neuen Namen gespeichert",
+    "es": "%{count} elemento se guardó con un nombre nuevo",
+    "ja": "%{count} 個の項目が新しい名前で保存されました",
+    "pt-BR": "%{count} item foi salvo com um novo nome",
+    "ko": "항목 %{count}개가 새 이름으로 저장되었습니다",
+    "vi": "%{count} mục đã được lưu với tên mới",
+    "it": "%{count} elemento è stato salvato con un nuovo nome",
+    "ru": "%{count} элемент сохранён под новым именем",
+    "zh-CN": "%{count} 个项目已用新名称保存"
+  },
+  "counts.items_renamed.other": {
+    "en": "%{count} items were saved under new names",
+    "fr": "%{count} éléments ont été enregistrés sous de nouveaux noms",
+    "de": "%{count} Elemente wurden unter neuen Namen gespeichert",
+    "es": "%{count} elementos se guardaron con nombres nuevos",
+    "ja": "%{count} 個の項目が新しい名前で保存されました",
+    "pt-BR": "%{count} itens foram salvos com novos nomes",
+    "ko": "항목 %{count}개가 새 이름으로 저장되었습니다",
+    "vi": "%{count} mục đã được lưu với tên mới",
+    "it": "%{count} elementi sono stati salvati con nuovi nomi",
+    "ru": "%{count} элементов сохранены под новыми именами",
+    "zh-CN": "%{count} 个项目已用新名称保存"
+  },
+  "counts.items_renamed.few": {
+    "en": "%{count} items were saved under new names",
+    "fr": "%{count} éléments ont été enregistrés sous de nouveaux noms",
+    "de": "%{count} Elemente wurden unter neuen Namen gespeichert",
+    "es": "%{count} elementos se guardaron con nombres nuevos",
+    "ja": "%{count} 個の項目が新しい名前で保存されました",
+    "pt-BR": "%{count} itens foram salvos com novos nomes",
+    "ko": "항목 %{count}개가 새 이름으로 저장되었습니다",
+    "vi": "%{count} mục đã được lưu với tên mới",
+    "it": "%{count} elementi sono stati salvati con nuovi nomi",
+    "ru": "%{count} элемента сохранены под новыми именами",
+    "zh-CN": "%{count} 个项目已用新名称保存"
+  },
+  "counts.items_renamed.many": {
+    "en": "%{count} items were saved under new names",
+    "fr": "%{count} éléments ont été enregistrés sous de nouveaux noms",
+    "de": "%{count} Elemente wurden unter neuen Namen gespeichert",
+    "es": "%{count} elementos se guardaron con nombres nuevos",
+    "ja": "%{count} 個の項目が新しい名前で保存されました",
+    "pt-BR": "%{count} itens foram salvos com novos nomes",
+    "ko": "항목 %{count}개가 새 이름으로 저장되었습니다",
+    "vi": "%{count} mục đã được lưu với tên mới",
+    "it": "%{count} elementi sono stati salvati con nuovi nomi",
+    "ru": "%{count} элементов сохранены под новыми именами",
+    "zh-CN": "%{count} 个项目已用新名称保存"
+  },
   "counts.jobs_running.one": {
     "en": "%{count} job running",
     "fr": "%{count} tâche en cours",

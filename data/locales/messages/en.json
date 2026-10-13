@@ -933,6 +933,7 @@
   "“%{name}” must be a plain file name beside action.toml without a path or leading dash": "“%{name}” must be a plain file name beside action.toml without a path or leading dash",
   "“%{name}” must be a regular file, not a link or directory": "“%{name}” must be a regular file, not a link or directory",
   "“%{name}” was replaced, but its original could not be removed from “%{kept}”: %{error}": "“%{name}” was replaced, but its original could not be removed from “%{kept}”: %{error}",
+  "“%{name}” was saved as “%{new_name}”": "“%{name}” was saved as “%{new_name}”",
   "“%{path}” does not contain an action.toml file": "“%{path}” does not contain an action.toml file",
   "“%{path}” is not an absolute path, so it cannot be passed to an action": "“%{path}” is not an absolute path, so it cannot be passed to an action",
   "“%{program}” was not found on your PATH": "“%{program}” was not found on your PATH"

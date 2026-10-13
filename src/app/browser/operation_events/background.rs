@@ -6,7 +6,9 @@ use std::{
     rc::Rc,
 };
 
-use crate::services::{LoadHandle, OperationEvent, OperationRequestId, ReplacedOriginal};
+use crate::services::{
+    LoadHandle, OperationEvent, OperationRequestId, ReplacedOriginal, TransferReport,
+};
 
 use super::super::push_background_undo;
 use super::{
@@ -24,6 +26,7 @@ pub(crate) struct BackgroundOperation {
     reveal: bool,
     created: RefCell<Vec<crate::model::Location>>,
     merged: RefCell<MergeUndoState>,
+    report: RefCell<TransferReport>,
 }
 
 impl Browser {
@@ -61,6 +64,7 @@ impl Browser {
             reveal: self.transfer_reveal.replace(true),
             created: RefCell::new(self.created_locations.take()),
             merged: RefCell::new(self.merged_undo.take()),
+            report: RefCell::new(self.transfer_report.take()),
         });
         self.background_operations
             .borrow_mut()
@@ -161,6 +165,10 @@ impl Browser {
                 merged.sources.insert(source);
                 merged.created.extend(created);
                 merged.overwritten.extend(overwritten);
+            }
+            OperationEvent::ItemsReported { report, .. } => {
+                job.merged.borrow_mut().rename(&report.renamed);
+                job.report.borrow_mut().extend(report);
             }
             OperationEvent::FlushingToDevice { .. } => {
                 emit(BrowserEvent::FlushingToDevice);
@@ -300,6 +308,10 @@ impl Browser {
                             .to_owned(),
                         password_failure: None,
                     }),
+                }
+                let report = job.report.take();
+                if !report.is_empty() {
+                    emit(BrowserEvent::ItemsReported { report });
                 }
                 let load = job.load.take();
                 drop(load);

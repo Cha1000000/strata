@@ -911,6 +911,7 @@
   "The connection was interrupted": "La connexion a été interrompue",
   "The connection was refused": "La connexion a été refusée",
   "The connection was reset": "La connexion a été réinitialisée",
+  "The destination can’t tell these names apart": "La destination ne distingue pas ces noms",
   "The device is not available": "Le périphérique n’est pas disponible",
   "The device may still be writing. Wait for the transfer to finish or fail before starting another file operation. Do not unplug until you can safely eject it.": "Le périphérique écrit peut-être encore. Attendez la fin ou l’échec du transfert avant de lancer une autre opération. Ne le débranchez pas avant de pouvoir l’éjecter en toute sécurité.",
   "The device started, but no mountable volume appeared.": "Le périphérique a démarré, mais aucun volume montable n’est apparu.",

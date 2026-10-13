@@ -933,6 +933,7 @@
   "“%{name}” must be a plain file name beside action.toml without a path or leading dash": "“%{name}”必须是 action.toml 所在文件夹中的普通文件名，不能包含路径或以连字符开头",
   "“%{name}” must be a regular file, not a link or directory": "“%{name}”必须是普通文件，不能是链接或文件夹",
   "“%{name}” was replaced, but its original could not be removed from “%{kept}”: %{error}": "已替换“%{name}”，但无法从“%{kept}”中删除原项目：%{error}",
+  "“%{name}” was saved as “%{new_name}”": "“%{name}”已保存为“%{new_name}”",
   "“%{path}” does not contain an action.toml file": "“%{path}”中没有 action.toml 文件",
   "“%{path}” is not an absolute path, so it cannot be passed to an action": "“%{path}”不是绝对路径，无法传递给操作",
   "“%{program}” was not found on your PATH": "在 PATH 中找不到“%{program}”"

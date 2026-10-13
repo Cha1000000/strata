@@ -673,6 +673,24 @@ pub(super) fn show_information_dialog(parent: &impl IsA<gtk::Widget>, message: &
     );
 }
 
+/// [`show_information_dialog`] with `summary` under the title in place of
+/// the file provider attribution.
+pub(super) fn show_information_dialog_with_summary(
+    parent: &impl IsA<gtk::Widget>,
+    message: &str,
+    summary: &str,
+    detail: &str,
+) {
+    show_message_dialog(
+        parent,
+        message,
+        Some(summary),
+        detail,
+        MessageKind::Information,
+        Rc::new(|| {}),
+    );
+}
+
 pub(super) fn show_error_dialog_after_close(
     parent: &impl IsA<gtk::Widget>,
     message: &str,

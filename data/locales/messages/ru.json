@@ -933,6 +933,7 @@
   "“%{name}” must be a plain file name beside action.toml without a path or leading dash": "«%{name}» должно быть простым именем файла рядом с action.toml, без пути и начального дефиса",
   "“%{name}” must be a regular file, not a link or directory": "«%{name}» должен быть обычным файлом, а не ссылкой или папкой",
   "“%{name}” was replaced, but its original could not be removed from “%{kept}”: %{error}": "«%{name}» заменён, но не удалось удалить оригинал из «%{kept}»: %{error}",
+  "“%{name}” was saved as “%{new_name}”": "Элемент «%{name}» сохранён как «%{new_name}»",
   "“%{path}” does not contain an action.toml file": "«%{path}» не содержит файла action.toml",
   "“%{path}” is not an absolute path, so it cannot be passed to an action": "«%{path}» не является абсолютным путём, поэтому его нельзя передать действию",
   "“%{program}” was not found on your PATH": "«%{program}» не найден в PATH"

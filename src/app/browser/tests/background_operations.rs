@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 
 use super::*;
-use crate::test_support::operations::{HeldOperations, entry};
+use crate::test_support::operations::{HeldOperations, entry, operation_event};
 
 fn copy(browser: &Rc<Browser>, name: &str) -> OperationRequestId {
     browser.transfer(
@@ -357,4 +357,86 @@ fn parking_deletion_flushes_its_changes_without_flushing_the_next_deletion() {
             .count,
         0
     );
+}
+
+fn renamed(name: &str) -> crate::services::TransferReport {
+    crate::services::TransferReport {
+        renamed: vec![crate::services::RenamedItem {
+            requested: Location::local(format!("/fixture/destination/folder/{name}")),
+            saved_as: Location::local(format!("/fixture/destination/folder/{name} (1)")),
+            cause: crate::services::RenameCause::Alias,
+        }],
+    }
+}
+
+fn reported(events: &[BrowserEvent]) -> Vec<(usize, crate::services::TransferReport)> {
+    events
+        .iter()
+        .enumerate()
+        .filter_map(|(index, event)| match operation_event(event) {
+            BrowserEvent::ItemsReported { report } => Some((index, report.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_transfer_reports_its_items_once_after_it_ends() {
+    let terminals: [fn(OperationRequestId) -> OperationEvent; 3] = [
+        |request_id| OperationEvent::Pasted {
+            request_id,
+            locations: Vec::new(),
+        },
+        |request_id| OperationEvent::TransferFailed {
+            request_id,
+            completed_locations: Vec::new(),
+            message: "Failed".into(),
+        },
+        |request_id| OperationEvent::Cancelled {
+            request_id,
+            result: crate::services::CancelledOperation::default(),
+        },
+    ];
+    for background in [false, true] {
+        for terminal in terminals {
+            let browser = Browser::new(Rc::new(FakeFileSource));
+            let operations = Rc::new(HeldOperations::default());
+            browser.set_operation_provider(operations.clone());
+            let events = Rc::new(RefCell::new(Vec::new()));
+            let observed = events.clone();
+            browser.observe(move |event| observed.borrow_mut().push(event.clone()));
+            let id = copy(&browser, "folder");
+            let report = |name| OperationEvent::ItemsReported {
+                request_id: id,
+                report: renamed(name),
+            };
+            operations.emit(id, report("Makefile"));
+            if background {
+                assert!(browser.background_file_operation(id));
+            }
+            operations.emit(id, report("README"));
+            assert!(reported(&events.borrow()).is_empty(), "reported early");
+
+            operations.emit(id, terminal(id));
+
+            let events = events.borrow();
+            let mut expected = renamed("Makefile");
+            expected.extend(renamed("README"));
+            let reports = reported(&events);
+            assert_eq!(
+                reports.iter().map(|(_, report)| report).collect::<Vec<_>>(),
+                [&expected],
+                "background: {background}"
+            );
+            let ended = events.iter().position(|event| {
+                matches!(
+                    operation_event(event),
+                    BrowserEvent::TransferCompleted
+                        | BrowserEvent::OperationFailed { .. }
+                        | BrowserEvent::OperationCancelled { .. }
+                )
+            });
+            assert!(ended < Some(reports[0].0), "background: {background}");
+        }
+    }
 }

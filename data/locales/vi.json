@@ -911,6 +911,7 @@
   "The connection was interrupted": "Kết nối bị gián đoạn",
   "The connection was refused": "Kết nối bị từ chối",
   "The connection was reset": "Kết nối đã bị đặt lại",
+  "The destination can’t tell these names apart": "Đích không phân biệt được các tên này",
   "The device is not available": "Thiết bị không khả dụng",
   "The device may still be writing. Wait for the transfer to finish or fail before starting another file operation. Do not unplug until you can safely eject it.": "Thiết bị có thể vẫn đang ghi. Hãy đợi quá trình truyền hoàn tất hoặc thất bại trước khi bắt đầu thao tác tệp khác. Không rút thiết bị cho đến khi có thể đẩy ra an toàn.",
   "The device started, but no mountable volume appeared.": "Thiết bị đã khởi động nhưng không xuất hiện phân vùng có thể gắn kết.",

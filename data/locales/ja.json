@@ -911,6 +911,7 @@
   "The connection was interrupted": "接続が中断されました",
   "The connection was refused": "接続が拒否されました",
   "The connection was reset": "接続がリセットされました",
+  "The destination can’t tell these names apart": "保存先ではこれらの名前を区別できません",
   "The device is not available": "デバイスを利用できません",
   "The device may still be writing. Wait for the transfer to finish or fail before starting another file operation. Do not unplug until you can safely eject it.": "デバイスがまだ書き込み中の可能性があります。転送が完了または失敗するまで待ってから別のファイル操作を開始してください。安全に取り出せるまでは取り外さないでください。",
   "The device started, but no mountable volume appeared.": "デバイスは起動しましたが、マウント可能なボリュームがありません。",

@@ -921,6 +921,51 @@ fn a_merged_copy_records_created_and_overwritten_paths_for_undo() {
 }
 
 #[test]
+fn a_merge_undo_removes_merged_items_under_the_names_they_were_saved_as() {
+    let browser = Browser::new(Rc::new(FakeFileSource));
+    browser.set_operation_provider(Rc::new(ImmediateOperationProvider));
+    let source = Location::local("/fixture/folder");
+    let created = Location::local("/fixture/archive/folder/makefile");
+    let saved_as = Location::local("/fixture/archive/folder/makefile (1)");
+    let request_id = browser.begin_operation();
+    browser.transfer_operation.set(Some(false));
+    browser
+        .transfer_destination
+        .replace(Some(Location::local("/fixture/archive")));
+    let emit = browser.operation_callback(request_id, false, HashSet::new());
+
+    emit(OperationEvent::Merged {
+        request_id,
+        source: source.clone(),
+        created: vec![created.clone()],
+        overwritten: Vec::new(),
+    });
+    emit(OperationEvent::ItemsReported {
+        request_id,
+        report: crate::services::TransferReport {
+            renamed: vec![crate::services::RenamedItem {
+                requested: created,
+                saved_as: saved_as.clone(),
+                cause: crate::services::RenameCause::Alias,
+            }],
+        },
+    });
+    emit(OperationEvent::Pasted {
+        request_id,
+        locations: vec![source],
+    });
+
+    assert_eq!(
+        pending_undo_entry(),
+        Some(UndoEntry::Merge {
+            created: vec![saved_as],
+            overwritten: Vec::new(),
+            originals: HashMap::new(),
+        })
+    );
+}
+
+#[test]
 fn a_paste_mixing_plain_copies_and_a_merge_records_one_merge_undo() {
     let browser = Browser::new(Rc::new(FakeFileSource));
     browser.set_operation_provider(Rc::new(ImmediateOperationProvider));

@@ -71,6 +71,11 @@ pub(super) fn colliding(names: &[&OsStr]) -> Vec<bool> {
     keys.iter().map(|key| counts[key.as_str()] > 1).collect()
 }
 
+/// What any two names a filesystem may take for one share.
+pub(super) fn collision_key(name: &OsStr) -> OsString {
+    fold(name).map_or_else(|| name.to_os_string(), OsString::from)
+}
+
 /// The same for any two names a filesystem may take for one: compatibility
 /// forms decomposed, case folded, and without the trailing dots and spaces
 /// Windows drops. It may join names that differ, never split ones that alias.

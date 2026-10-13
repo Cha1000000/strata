@@ -25,6 +25,7 @@ use gtk::{gio, glib, prelude::*};
 use crate::test_support::ASYNC_MAIN_CONTEXT_DEFAULT;
 use fs_quirks::{FsQuirks, Preset, Quirks};
 
+mod aliases;
 mod conflicts;
 mod copy;
 mod create_entry;

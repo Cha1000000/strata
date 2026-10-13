@@ -264,6 +264,38 @@ pub struct CancelledOperation {
     pub affected_locations: HashSet<Location>,
 }
 
+/// Why an item inside a transfer was saved under another name.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RenameCause {
+    /// The destination takes the name for another item's, as a
+    /// case-insensitive filesystem takes `makefile` for `Makefile`.
+    Alias,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RenamedItem {
+    pub requested: Location,
+    pub saved_as: Location,
+    pub cause: RenameCause,
+}
+
+/// What a transfer did to items inside the ones it was given, told once it
+/// ends. Keep Both numbering, which the user chose, is not reported.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct TransferReport {
+    pub renamed: Vec<RenamedItem>,
+}
+
+impl TransferReport {
+    pub fn is_empty(&self) -> bool {
+        self.renamed.is_empty()
+    }
+
+    pub fn extend(&mut self, other: Self) {
+        self.renamed.extend(other.renamed);
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PasswordFailure {
     Required,
@@ -307,6 +339,11 @@ pub enum OperationEvent {
     },
     FlushingToDevice {
         request_id: OperationRequestId,
+    },
+    /// What one item of a transfer did to items inside it.
+    ItemsReported {
+        request_id: OperationRequestId,
+        report: TransferReport,
     },
     /// A folder merge finished (or staged its backups): `created` are paths
     /// the merge wrote fresh, `overwritten` are paths whose originals now

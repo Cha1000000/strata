@@ -16,10 +16,10 @@ use crate::{
         DirectoryChange, DirectoryRequest, ExtractRequest, FileSource, LoadHandle,
         LocationIdentity, LocationValidationError, MetadataOutcome, MetadataRequest, MoveRecord,
         OperationEvent, OperationProvider, OperationRequestId, PasswordFailure, PasteItem,
-        PasteRequest, RenameRecord, RenameRequest, RequestId, RestoreRequest, RestoreSource,
-        RestoreTrashItem, TransferConflict, TrashedOriginal, UndoCopyRequest, UndoMergeRequest,
-        UndoMoveItem, UndoMoveRequest, UndoRenameRequest, validate_basename,
-        validate_uri_credentials,
+        PasteRequest, RenameRecord, RenameRequest, RenamedItem, RequestId, RestoreRequest,
+        RestoreSource, RestoreTrashItem, TransferConflict, TransferReport, TrashedOriginal,
+        UndoCopyRequest, UndoMergeRequest, UndoMoveItem, UndoMoveRequest, UndoRenameRequest,
+        validate_basename, validate_uri_credentials,
     },
 };
 
@@ -254,6 +254,10 @@ pub enum BrowserEvent {
     TransferFinished {
         moved_locations: Vec<Location>,
     },
+    /// What the finished transfer did to items inside the ones it was given.
+    ItemsReported {
+        report: TransferReport,
+    },
     /// Only for remembered folders; the default sort is left unchanged.
     FolderSortChosen {
         location: Location,
@@ -481,6 +485,19 @@ struct MergeUndoState {
     sources: HashSet<Location>,
     created: Vec<Location>,
     overwritten: Vec<Location>,
+}
+
+impl MergeUndoState {
+    /// Undo removes what a merge created under the names it was saved as.
+    fn rename(&mut self, renamed: &[RenamedItem]) {
+        for item in renamed {
+            for created in &mut self.created {
+                if *created == item.requested {
+                    *created = item.saved_as.clone();
+                }
+            }
+        }
+    }
 }
 
 struct PendingUndo {
@@ -977,6 +994,7 @@ pub struct Browser {
     transfer_reveal: Cell<bool>,
     created_locations: RefCell<Vec<Location>>,
     merged_undo: RefCell<MergeUndoState>,
+    transfer_report: RefCell<TransferReport>,
     undo_claim: RefCell<Option<(u64, UndoEntry)>>,
     redo_claim: RefCell<Option<(u64, UndoEntry)>>,
     next_request: Cell<u64>,
@@ -1053,6 +1071,7 @@ impl Browser {
             transfer_reveal: Cell::new(true),
             created_locations: RefCell::new(Vec::new()),
             merged_undo: RefCell::new(MergeUndoState::default()),
+            transfer_report: RefCell::new(TransferReport::default()),
             undo_claim: RefCell::new(None),
             redo_claim: RefCell::new(None),
             next_request: Cell::new(1),
@@ -3411,6 +3430,7 @@ impl Browser {
         self.transfer_destination.replace(None);
         self.created_locations.borrow_mut().clear();
         *self.merged_undo.borrow_mut() = MergeUndoState::default();
+        self.transfer_report.take();
         self.deletion_operation.set(false);
         self.deletion_permanent.set(false);
         self.deferred_file_operation_changes.borrow_mut().clear();
