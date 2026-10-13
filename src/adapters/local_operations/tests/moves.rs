@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 
-use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::{FileTypeExt, MetadataExt};
 
 use rustix::io::Errno;
 
@@ -1106,41 +1106,280 @@ fn a_file_written_during_its_own_move_stays_at_the_source() -> Result<(), Box<dy
 }
 
 #[test]
-fn moving_hard_linked_files_across_volumes_deletes_every_name() -> Result<(), Box<dyn Error>> {
+fn moving_across_volumes_deletes_every_entry_it_copied() -> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    // A folder with linked names, a link and a named pipe, or a selected
+    // link or pipe.
+    for selected in ["folder", "link", "pipe"] {
+        let root = tempfile::tempdir()?;
+        let source_dir = root.path().join("source");
+        let folder = source_dir.join("folder");
+        fs::create_dir_all(folder.join("sub"))?;
+        fs::write(folder.join("a"), b"linked")?;
+        fs::hard_link(folder.join("a"), folder.join("sub/b"))?;
+        let outside = source_dir.join("outside");
+        fs::write(&outside, b"outside")?;
+        fs::hard_link(&outside, folder.join("c"))?;
+        std::os::unix::fs::symlink("../a", folder.join("sub/link"))?;
+        make_fifo(&folder.join("sub/pipe"))?;
+        std::os::unix::fs::symlink("folder/a", source_dir.join("link"))?;
+        make_fifo(&source_dir.join("pipe"))?;
+        let destination = root.path().join("destination");
+        fs::create_dir_all(&destination)?;
+        let _volumes = separate_volumes(&source_dir, &destination);
+        let source = source_dir.join(selected);
+
+        let (_operation, events) =
+            paste_move(94, &destination, &source, TransferConflict::FailIfExists);
+        pump_until_transfer(&events);
+
+        assert!(
+            matches!(
+                terminal_transfer(&events.borrow()),
+                Some(OperationEvent::Pasted { .. })
+            ),
+            "{selected}: {:?}",
+            events.borrow()
+        );
+        assert!(fs::symlink_metadata(&source).is_err(), "{selected}");
+        assert_eq!(reported(&events), TransferReport::default(), "{selected}");
+        let moved = destination.join(selected);
+        match selected {
+            "folder" => {
+                let (a, b) = (
+                    fs::metadata(moved.join("a"))?,
+                    fs::metadata(moved.join("sub/b"))?,
+                );
+                assert_eq!((a.ino(), a.nlink()), (b.ino(), 2));
+                assert_eq!(fs::read(moved.join("c"))?, b"outside");
+                assert_eq!(names(&moved.join("sub"))?, ["b", "link", "pipe"]);
+                assert_eq!(fs::metadata(&outside)?.nlink(), 1);
+            }
+            "link" => assert_eq!(fs::read_link(&moved)?, Path::new("folder/a")),
+            _ => assert!(fs::symlink_metadata(&moved)?.file_type().is_fifo()),
+        }
+    }
+    Ok(())
+}
+
+fn make_fifo(path: &Path) -> io::Result<()> {
+    rustix::fs::mknodat(
+        rustix::fs::CWD,
+        path,
+        rustix::fs::FileType::Fifo,
+        rustix::fs::Mode::from_raw_mode(0o600),
+        0,
+    )?;
+    Ok(())
+}
+
+/// Moves the folder `folder` from a volume with `quirks` to another one, and
+/// returns where it went and what the move reported.
+fn move_across_volumes(
+    folder: &Path,
+    quirks: Quirks,
+) -> Result<(PathBuf, TransferReport), Box<dyn Error>> {
+    let source_dir = folder.parent().ok_or("a folder in a source volume")?;
+    let destination = source_dir.with_file_name("destination");
+    fs::create_dir_all(&destination)?;
+    let _source = FsQuirks::install(source_dir, quirks);
+    let _destination = FsQuirks::install(&destination, Quirks::default());
+
+    let (_operation, events) = paste_move(97, &destination, folder, TransferConflict::FailIfExists);
+    pump_until_transfer(&events);
+
+    assert!(
+        matches!(
+            terminal_transfer(&events.borrow()),
+            Some(OperationEvent::Pasted { .. })
+        ),
+        "{:?}",
+        events.borrow()
+    );
+    Ok((destination.join("folder"), reported(&events)))
+}
+
+/// Writes `contents` over `path` as it runs.
+fn rewrite(path: &Path, contents: &'static [u8]) -> super::fs_quirks::Racer {
+    let path = path.to_path_buf();
+    Box::new(move || fs::write(&path, contents).expect("rewrite the source"))
+}
+
+#[test]
+fn a_rewrite_that_keeps_the_size_and_times_is_kept_at_the_source() -> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let unstable = || Quirks {
+        mount_type: Some(("cifs", "rw,noserverino")),
+        ..Quirks::default()
+    };
+    for (row, quirks) in [
+        ("stable", Quirks::default as Preset),
+        ("unstable", unstable),
+    ] {
+        let root = tempfile::tempdir()?;
+        let folder = root.path().join("source/folder");
+        fs::create_dir_all(&folder)?;
+        let changed = folder.join("b.txt");
+        fs::write(&changed, b"b1")?;
+        let path = changed.clone();
+        // After the copy, as the deletion opens the folder: only the change
+        // time tells.
+        let racer: super::fs_quirks::Racer = Box::new(move || {
+            let before = fs::metadata(&path).expect("stat the source");
+            fs::write(&path, b"B2").expect("rewrite the source");
+            let modified = rustix::fs::Timespec {
+                tv_sec: before.mtime(),
+                tv_nsec: before.mtime_nsec(),
+            };
+            rustix::fs::utimensat(
+                rustix::fs::CWD,
+                &path,
+                &rustix::fs::Timestamps {
+                    last_access: modified,
+                    last_modification: modified,
+                },
+                rustix::fs::AtFlags::empty(),
+            )
+            .expect("put the times back");
+        });
+        let quirks = Quirks {
+            before: vec![(Op::OpenDir, "folder", 1, racer)],
+            ..quirks()
+        };
+
+        let (moved, report) = move_across_volumes(&folder, quirks)?;
+
+        assert_eq!(fs::read(moved.join("b.txt"))?, b"b1", "{row}");
+        assert_eq!(fs::read(&changed)?, b"B2", "{row}");
+        assert_eq!(report.kept, [kept(changed, KeptCause::Changed)], "{row}");
+    }
+    Ok(())
+}
+
+#[test]
+fn a_file_rewritten_as_it_is_read_is_copied_again_whole() -> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    // Each pass reads the data, then the end of the file: rewritten at the
+    // same size there, or grown before the data and shrunk before the end.
+    for row in ["same size", "shrinks"] {
+        let root = tempfile::tempdir()?;
+        let folder = root.path().join("source/folder");
+        fs::create_dir_all(&folder)?;
+        let db = folder.join("db");
+        fs::write(&db, b"first")?;
+        let (before, expected): (
+            Vec<(Op, &'static str, usize, super::fs_quirks::Racer)>,
+            &[u8],
+        ) = if row == "same size" {
+            (vec![(Op::Read, "db", 1, rewrite(&db, b"other"))], b"other")
+        } else {
+            (
+                vec![
+                    (Op::Read, "db", 0, rewrite(&db, b"a much longer version")),
+                    (Op::Read, "db", 0, rewrite(&db, b"short")),
+                ],
+                b"short",
+            )
+        };
+        let quirks = Quirks {
+            before,
+            ..Quirks::default()
+        };
+
+        let (moved, report) = move_across_volumes(&folder, quirks)?;
+
+        assert_eq!(fs::read(moved.join("db"))?, expected, "{row}");
+        assert!(!folder.exists(), "{row}");
+        assert_eq!(report, TransferReport::default(), "{row}");
+    }
+    Ok(())
+}
+
+#[test]
+fn moves_off_mounts_without_stable_inodes_keep_only_what_changed() -> Result<(), Box<dyn Error>> {
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
         .lock()
         .map_err(|error| error.to_string())?;
     let root = tempfile::tempdir()?;
-    let source_dir = root.path().join("source");
-    let folder = source_dir.join("folder");
+    let folder = root.path().join("source/folder");
     fs::create_dir_all(folder.join("sub"))?;
-    fs::write(folder.join("a"), b"linked")?;
-    fs::hard_link(folder.join("a"), folder.join("sub/b"))?;
-    let outside = source_dir.join("outside");
-    fs::write(&outside, b"outside")?;
-    fs::hard_link(&outside, folder.join("c"))?;
-    let destination = root.path().join("destination");
-    fs::create_dir_all(&destination)?;
-    let _volumes = separate_volumes(&source_dir, &destination);
+    fs::write(folder.join("a.txt"), b"a")?;
+    fs::write(folder.join("sub/b.txt"), b"b")?;
+    // Linked pairs: left alone, rewritten at the same size, and rewritten at
+    // another size with the modification time put back. Removing a name of
+    // a file changes the other's change time, so only size and modification
+    // time tell.
+    for (first, second, contents) in [
+        ("x", "sub/y", "x"),
+        ("m", "sub/n", "m"),
+        ("p", "sub/q", "p"),
+    ] {
+        fs::write(folder.join(first), contents)?;
+        fs::hard_link(folder.join(first), folder.join(second))?;
+    }
+    let evicted = [
+        "",
+        "a.txt",
+        "sub",
+        "sub/b.txt",
+        "x",
+        "sub/y",
+        "m",
+        "sub/n",
+        "p",
+        "sub/q",
+    ]
+    .map(|path| folder.join(path));
+    let changed = folder.clone();
+    // The kernel evicts every entry between the copy and the deletion, while
+    // files are rewritten. cifs counts links, which sshfs does not.
+    let racer: super::fs_quirks::Racer = Box::new(move || {
+        fs::write(changed.join("sub/b.txt"), b"rewritten").expect("rewrite b");
+        fs::write(changed.join("m"), b"M").expect("rewrite m");
+        let resized = changed.join("p");
+        let before = fs::metadata(&resized).expect("stat p");
+        fs::write(&resized, b"longer").expect("rewrite p");
+        let modified = rustix::fs::Timespec {
+            tv_sec: before.mtime(),
+            tv_nsec: before.mtime_nsec(),
+        };
+        rustix::fs::utimensat(
+            rustix::fs::CWD,
+            &resized,
+            &rustix::fs::Timestamps {
+                last_access: modified,
+                last_modification: modified,
+            },
+            rustix::fs::AtFlags::empty(),
+        )
+        .expect("put the times back");
+        for path in &evicted {
+            super::fs_quirks::renumbered(path);
+        }
+    });
+    let quirks = Quirks {
+        mount_type: Some(("cifs", "rw,noserverino")),
+        before: vec![(Op::OpenDir, "folder", 1, racer)],
+        ..Quirks::default()
+    };
 
-    let (_operation, events) =
-        paste_move(94, &destination, &folder, TransferConflict::FailIfExists);
-    pump_until_transfer(&events);
+    let (moved, report) = move_across_volumes(&folder, quirks)?;
 
-    assert!(matches!(
-        terminal_transfer(&events.borrow()),
-        Some(OperationEvent::Pasted { .. })
-    ));
-    let moved = destination.join("folder");
-    let (a, b) = (
-        fs::metadata(moved.join("a"))?,
-        fs::metadata(moved.join("sub/b"))?,
-    );
-    assert_eq!((a.ino(), a.nlink()), (b.ino(), 2));
-    assert_eq!(fs::read(moved.join("c"))?, b"outside");
-    assert!(!folder.exists());
-    assert_eq!(fs::metadata(&outside)?.nlink(), 1);
-    assert_eq!(reported(&events), TransferReport::default());
+    assert_eq!(fs::read(moved.join("sub/b.txt"))?, b"b");
+    assert_eq!(fs::read(moved.join("sub/y"))?, b"x");
+    assert_eq!(names(&folder)?, ["m", "p", "sub"]);
+    assert_eq!(names(&folder.join("sub"))?, ["b.txt", "n", "q"]);
+    let mut left = report.kept;
+    left.sort_by_key(|item| item.location.native_path().map(Path::to_path_buf));
+    let expected = ["m", "p", "sub/b.txt", "sub/n", "sub/q"]
+        .map(|path| kept(folder.join(path), KeptCause::Changed));
+    assert_eq!(left, expected);
     Ok(())
 }
 
