@@ -48,6 +48,8 @@ fn fat_merge_backs_up_sanitized_collisions_and_records_actual_paths() -> Result<
     fs::write(source.join("nested?/a?.txt"), b"question")?;
     fs::write(source.join("nested?/a:.txt"), b"colon")?;
     fs::write(target.join("nested_/a_.txt"), b"original")?;
+    let _sources = FsQuirks::install(&source, Quirks::default());
+    let _target = FsQuirks::install(&target, Quirks::vfat());
     let staging = root.path().join("staging");
     let (stage, staged) = rename_stage(staging.clone());
     let (plans, on_merged) = recorded_plans();
