@@ -222,6 +222,7 @@ fn keep_both_retries_publication_collisions_without_encoding_again() -> Result<(
 
 const NFS_SUPER_MAGIC: rustix::fs::FsWord = 0x6969;
 const TMPFS_MAGIC: rustix::fs::FsWord = 0x0102_1994;
+const FUSE_SUPER_MAGIC: rustix::fs::FsWord = 0x6573_5546;
 
 type Compressed = Result<(String, Option<ReplacedOriginal>), ArchiveError>;
 
@@ -249,11 +250,14 @@ fn an_archive_replaced_without_trash_deletes_its_original() -> Result<(), Box<dy
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
         .lock()
         .map_err(|error| error.to_string())?;
-    for (trash, fs_type, sets_aside) in [
-        (Trash::Unsupported, NFS_SUPER_MAGIC, true),
-        (Trash::Unsupported, TMPFS_MAGIC, false),
-        (Trash::SucceedsWithoutMoving, NFS_SUPER_MAGIC, true),
-    ] {
+    let cases: [(Trash, rustix::fs::FsWord, fn() -> Quirks, bool); 5] = [
+        (Trash::Unsupported, NFS_SUPER_MAGIC, Quirks::default, true),
+        (Trash::Unsupported, TMPFS_MAGIC, Quirks::default, false),
+        (Trash::SucceedsWithoutMoving, NFS_SUPER_MAGIC, Quirks::default, true),
+        (Trash::Unsupported, FUSE_SUPER_MAGIC, Quirks::sshfs, true),
+        (Trash::Unsupported, FUSE_SUPER_MAGIC, Quirks::vboxsf, true),
+    ];
+    for (trash, fs_type, quirks, sets_aside) in cases {
         let root = tempfile::tempdir()?;
         let archive = root.path().join("existing.zip");
         fs::write(&archive, b"original")?;
@@ -263,7 +267,7 @@ fn an_archive_replaced_without_trash_deletes_its_original() -> Result<(), Box<dy
             Quirks {
                 trash,
                 fs_type: Some(fs_type),
-                ..Quirks::default()
+                ..quirks()
             },
         );
 
@@ -287,6 +291,25 @@ fn an_archive_replaced_without_trash_deletes_its_original() -> Result<(), Box<dy
 }
 
 #[test]
+fn archives_are_created_without_noreplace_or_usable_links() -> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    for quirks in [Quirks::sshfs, Quirks::vboxsf] {
+        let root = tempfile::tempdir()?;
+        let _quirks = FsQuirks::install(root.path(), quirks());
+
+        let (result, encoded) = publish_replacement(root.path(), TransferConflict::FailIfExists);
+
+        assert_eq!(result, Ok(("existing.zip".to_owned(), None)));
+        assert!(encoded);
+        assert_eq!(fs::read(root.path().join("existing.zip"))?, b"replacement");
+        assert_eq!(names(root.path())?, ["existing.zip"]);
+    }
+    Ok(())
+}
+
+#[test]
 fn replacement_fails_before_encoding_when_no_strategy_is_safe() -> Result<(), Box<dyn Error>> {
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
         .lock()
@@ -299,7 +322,7 @@ fn replacement_fails_before_encoding_when_no_strategy_is_safe() -> Result<(), Bo
         Quirks {
             trash: Trash::Unsupported,
             fs_type: Some(NFS_SUPER_MAGIC),
-            ..Quirks::vboxsf()
+            ..Quirks::without_placement()
         },
     );
 

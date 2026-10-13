@@ -71,16 +71,23 @@ fn restore_without_rename_flags_never_replaces_a_racing_destination() -> Result<
 #[test]
 fn restoring_without_rename_flags_moves_the_item_without_copying() -> Result<(), Box<dyn Error>> {
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock()?;
-    for error in [Errno::INVAL, Errno::NOSYS, Errno::OPNOTSUPP] {
+    let presets: [fn() -> Quirks; 5] = [
+        Quirks::without_rename_flags,
+        || Quirks {
+            rename_flags: Support::Rejected(Errno::NOSYS),
+            ..Quirks::default()
+        },
+        || Quirks {
+            rename_flags: Support::Rejected(Errno::OPNOTSUPP),
+            ..Quirks::default()
+        },
+        Quirks::sshfs,
+        Quirks::vboxsf,
+    ];
+    for quirks in presets {
         for directory in [false, true] {
             let fixture = tempfile::tempdir()?;
-            let _scope = FsQuirks::install(
-                fixture.path(),
-                Quirks {
-                    rename_flags: Support::Rejected(error),
-                    ..Quirks::default()
-                },
-            );
+            let _scope = FsQuirks::install(fixture.path(), quirks());
             let source = fixture.path().join("source");
             let destination = fixture.path().join("destination");
             if directory {
@@ -240,7 +247,7 @@ fn restore_exclusive_copy_handles_files_links_and_partial_failure() -> Result<()
         rustix::fs::Mode::from_raw_mode(0o600),
         0,
     )?;
-    let _scope = FsQuirks::install(fixture.path(), Quirks::vboxsf());
+    let _scope = FsQuirks::install(fixture.path(), Quirks::without_placement());
     let result = restore_path(&source, &fixture.path().join("incomplete"), fixture.path());
     let message = result.expect_err("unsupported copy source").to_string();
     assert!(
@@ -342,7 +349,7 @@ fn restore_directory_copy_preserves_permissions_times_and_xattrs() -> Result<(),
         rustix::fs::XattrFlags::empty(),
     )?;
     let destination = fixture.path().join("destination");
-    let _scope = FsQuirks::install(fixture.path(), Quirks::vboxsf());
+    let _scope = FsQuirks::install(fixture.path(), Quirks::without_placement());
     restore_path(&source, &destination, fixture.path())?;
     assert!(!source.exists());
     assert_eq!(fs::metadata(&destination)?.mode() & 0o777, 0o750);

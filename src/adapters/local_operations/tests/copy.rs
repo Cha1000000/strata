@@ -782,16 +782,23 @@ fn staged_publication_without_rename_flags_places_the_stage_itself() -> Result<(
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
         .lock()
         .map_err(|error| error.to_string())?;
-    for error in [Errno::INVAL, Errno::NOSYS, Errno::OPNOTSUPP] {
+    let presets: [(&str, fn() -> Quirks); 5] = [
+        ("EINVAL", Quirks::without_rename_flags),
+        ("ENOSYS", || Quirks {
+            rename_flags: Support::Rejected(Errno::NOSYS),
+            ..Quirks::default()
+        }),
+        ("EOPNOTSUPP", || Quirks {
+            rename_flags: Support::Rejected(Errno::OPNOTSUPP),
+            ..Quirks::default()
+        }),
+        ("sshfs", Quirks::sshfs),
+        ("vboxsf", Quirks::vboxsf),
+    ];
+    for (case, quirks) in presets {
         for directory in [false, true] {
             let root = tempfile::tempdir()?;
-            let _scope = FsQuirks::install(
-                root.path(),
-                Quirks {
-                    rename_flags: Support::Rejected(error),
-                    ..Quirks::default()
-                },
-            );
+            let _scope = FsQuirks::install(root.path(), quirks());
             let staged = stage(root.path(), directory)?;
             let staged_path = staged.path();
             let target = root.path().join("target");
@@ -805,8 +812,8 @@ fn staged_publication_without_rename_flags_places_the_stage_itself() -> Result<(
 
             publish(staged, &target)?;
 
-            assert!(!staged_path.exists(), "{error:?}");
-            assert_eq!(fs::metadata(&target)?.ino(), inode, "{error:?}");
+            assert_eq!(names(root.path())?, ["target"], "{case}");
+            assert_eq!(fs::metadata(&target)?.ino(), inode, "{case}");
             if directory {
                 assert_eq!(fs::read(target.join("nested/file.txt"))?, b"directory data");
             } else {
@@ -934,7 +941,7 @@ fn staged_fallback_removes_reserved_directory_on_copy_error() -> Result<(), Box<
         .lock()
         .map_err(|error| error.to_string())?;
     let root = tempfile::tempdir()?;
-    let _scope = FsQuirks::install(root.path(), Quirks::vboxsf());
+    let _scope = FsQuirks::install(root.path(), Quirks::without_placement());
     let staged = stage(root.path(), true)?;
     let staged_path = staged.path();
     let _socket = std::os::unix::net::UnixListener::bind(staged_path.join("unsupported.sock"))?;
@@ -965,7 +972,7 @@ fn reusing_stage_inodes(before: (Op, &'static str, usize, Racer)) -> Quirks {
         reused_inodes: Some(".strata-replacement-*"),
         no_birth_time: true,
         before: vec![before],
-        ..Quirks::vboxsf()
+        ..Quirks::without_placement()
     }
 }
 
@@ -1045,7 +1052,7 @@ fn cancelling_staged_fallback_removes_its_reserved_directory() -> Result<(), Box
         .lock()
         .map_err(|error| error.to_string())?;
     let root = tempfile::tempdir()?;
-    let scope = FsQuirks::install(root.path(), Quirks::vboxsf());
+    let scope = FsQuirks::install(root.path(), Quirks::without_placement());
     // No placeholder, so the target appears only when the copy makes it.
     learn_mount_capability(scope.key(), |capabilities| {
         capabilities.rename_over_empty_directory = Some(false);

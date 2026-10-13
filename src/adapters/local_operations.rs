@@ -3268,8 +3268,8 @@ async fn publish_staged_without_replace(
     };
     let result = match placed {
         Ok(_) => return Ok(()),
-        // Without NOREPLACE, links or a rename over an empty folder, publication
-        // falls back to exclusive creation, even though it exposes partial copies.
+        // Where the ladder cannot place the stage, publication falls back to
+        // exclusive creation, even though it exposes partial copies.
         Err(PlaceError::Unsupported) => {
             let target = gio::File::for_path(&target_path);
             let created_root = Rc::new(CreatedCopyRoot::new());

@@ -140,6 +140,25 @@ impl Quirks {
         }
     }
 
+    /// Hard links work, so folders never take the reserved-name rung, and
+    /// nothing else places a folder without `RENAME_NOREPLACE`.
+    pub(crate) fn without_folder_placement() -> Self {
+        Self {
+            rename_over_empty_dir: OverEmptyDirectory::NotEmpty,
+            ..Self::without_rename_flags()
+        }
+    }
+
+    /// No rung that cannot replace: no `RENAME_NOREPLACE` or rename over an
+    /// empty folder, and links fail with an errno that says nothing about the
+    /// mount, so the reserved-name rung stays unconfirmed.
+    pub(crate) fn without_placement() -> Self {
+        Self {
+            links: Support::Rejected(Errno::MLINK),
+            ..Self::without_folder_placement()
+        }
+    }
+
     pub(crate) fn sshfs() -> Self {
         Self {
             rename_flags: Support::Rejected(Errno::INVAL),

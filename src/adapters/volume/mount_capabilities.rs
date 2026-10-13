@@ -2,8 +2,8 @@
 
 //! What each mount was seen to support. Entries order fallback rungs and
 //! interpret ambiguous errors; every ladder rung refuses to replace on its own,
-//! so a stale entry costs speed or a refusal. The exception is the rename last
-//! rung, which an entry alone enables, with its small documented window.
+//! so a stale entry costs speed or a refusal. The exception is the
+//! reserved-name rung, which an entry alone enables, with its small window.
 
 use std::{collections::BTreeMap, sync::Mutex};
 

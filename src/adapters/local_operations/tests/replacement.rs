@@ -560,26 +560,30 @@ fn replace_without_trash_or_exchange_sets_the_original_aside() -> Result<(), Box
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
         .lock()
         .map_err(|error| error.to_string())?;
-    for directory in [false, true] {
-        let root = tempfile::tempdir()?;
-        let source = root.path().join("source");
-        let target = root.path().join("target");
-        write_item(&source, directory, b"new")?;
-        write_item(&target, directory, b"old")?;
-        let quirks = FsQuirks::install(
-            root.path(),
-            without_trash(NFS_SUPER_MAGIC, Quirks::without_rename_flags()),
-        );
+    let mounts: [(FsWord, fn() -> Quirks); 3] = [
+        (NFS_SUPER_MAGIC, Quirks::without_rename_flags),
+        (FUSE_SUPER_MAGIC, Quirks::sshfs),
+        (FUSE_SUPER_MAGIC, Quirks::vboxsf),
+    ];
+    for (fs_type, quirks) in mounts {
+        for directory in [false, true] {
+            let root = tempfile::tempdir()?;
+            let source = root.path().join("source");
+            let target = root.path().join("target");
+            write_item(&source, directory, b"new")?;
+            write_item(&target, directory, b"old")?;
+            let quirks = FsQuirks::install(root.path(), without_trash(fs_type, quirks()));
 
-        let (result, replaced) = replace_reporting(&source, &target, false);
+            let (result, replaced) = replace_reporting(&source, &target, false);
 
-        assert!(result.is_ok(), "{result:?}");
-        assert_eq!(replaced, [ReplacedOriginal::Deleted]);
-        assert_eq!(read_item(&target, directory)?, b"new");
-        assert_eq!(read_item(&source, directory)?, b"new");
-        assert_eq!(names(root.path())?, ["source", "target"]);
-        assert!(quirks.used_name(".strata-replaced-*"));
-        assert_eq!(quirks.count(Op::Exchange), 0);
+            assert!(result.is_ok(), "{result:?}");
+            assert_eq!(replaced, [ReplacedOriginal::Deleted]);
+            assert_eq!(read_item(&target, directory)?, b"new");
+            assert_eq!(read_item(&source, directory)?, b"new");
+            assert_eq!(names(root.path())?, ["source", "target"]);
+            assert!(quirks.used_name(".strata-replaced-*"));
+            assert_eq!(quirks.count(Op::Exchange), 0);
+        }
     }
     Ok(())
 }
@@ -783,7 +787,7 @@ fn replace_fails_before_staging_when_no_strategy_is_safe() -> Result<(), Box<dyn
     fs::write(&target, b"old")?;
     let _quirks = FsQuirks::install(
         root.path(),
-        without_trash(FUSE_SUPER_MAGIC, Quirks::vboxsf()),
+        without_trash(FUSE_SUPER_MAGIC, Quirks::without_placement()),
     );
     let copied = Rc::new(Cell::new(false));
     let copy_observed = copied.clone();
@@ -860,31 +864,35 @@ fn same_filesystem_replacing_move_places_the_source_without_a_stage() -> Result<
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
         .lock()
         .map_err(|error| error.to_string())?;
-    for directory in [false, true] {
-        let root = tempfile::tempdir()?;
-        let sources = root.path().join("sources");
-        let destination = root.path().join("destination");
-        fs::create_dir(&sources)?;
-        fs::create_dir(&destination)?;
-        let source = sources.join("item");
-        let target = destination.join("item");
-        write_item(&source, directory, b"new")?;
-        write_item(&target, directory, b"old")?;
-        let moved = inode(&source)?;
-        let quirks = FsQuirks::install(
-            root.path(),
-            without_trash(NFS_SUPER_MAGIC, Quirks::default()),
-        );
+    let mounts: [(FsWord, fn() -> Quirks); 3] = [
+        (NFS_SUPER_MAGIC, Quirks::default),
+        (FUSE_SUPER_MAGIC, Quirks::sshfs),
+        (FUSE_SUPER_MAGIC, Quirks::vboxsf),
+    ];
+    for (fs_type, quirks) in mounts {
+        for directory in [false, true] {
+            let root = tempfile::tempdir()?;
+            let sources = root.path().join("sources");
+            let destination = root.path().join("destination");
+            fs::create_dir(&sources)?;
+            fs::create_dir(&destination)?;
+            let source = sources.join("item");
+            let target = destination.join("item");
+            write_item(&source, directory, b"new")?;
+            write_item(&target, directory, b"old")?;
+            let moved = inode(&source)?;
+            let quirks = FsQuirks::install(root.path(), without_trash(fs_type, quirks()));
 
-        let (result, replaced) = replace_reporting(&source, &target, true);
+            let (result, replaced) = replace_reporting(&source, &target, true);
 
-        assert!(result.is_ok(), "{result:?}");
-        assert_eq!(replaced, [ReplacedOriginal::Deleted]);
-        assert_eq!(inode(&target)?, moved);
-        assert_eq!(read_item(&target, directory)?, b"new");
-        assert!(!source.exists());
-        assert_eq!(names(&destination)?, ["item"]);
-        assert!(!quirks.used_name(".strata-replacement-*"));
+            assert!(result.is_ok(), "{result:?}");
+            assert_eq!(replaced, [ReplacedOriginal::Deleted]);
+            assert_eq!(inode(&target)?, moved);
+            assert_eq!(read_item(&target, directory)?, b"new");
+            assert!(!source.exists());
+            assert_eq!(names(&destination)?, ["item"]);
+            assert!(!quirks.used_name(".strata-replacement-*"));
+        }
     }
     Ok(())
 }

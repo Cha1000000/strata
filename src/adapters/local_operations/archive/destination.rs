@@ -648,8 +648,8 @@ impl ExtractionDestination {
     }
 }
 
-/// Publishes through the shared no-clobber ladder; a file on a mount with
-/// neither `RENAME_NOREPLACE` nor hard links stays in staging.
+/// Publishes through the shared no-clobber ladder; an entry it cannot place
+/// stays in staging.
 fn place_without_replacing(
     from_directory: &OwnedFd,
     from: &OsStr,

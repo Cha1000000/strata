@@ -2,9 +2,10 @@
 
 //! Puts an entry at a new name without ever replacing whatever is there:
 //! `renameat2(NOREPLACE)`, then a hard link for files or a fresh empty
-//! placeholder for folders, then a recreated link for symlinks. Errors that
-//! may mean "unsupported" are only learned from definitive errnos or from a
-//! probe on Strata's own names, and nothing is unlinked without proof.
+//! placeholder for folders, then a recreated link for symlinks, and last a
+//! plain rename over a reserved name where the mount offers none of these.
+//! Errors that may mean "unsupported" are only learned from definitive errnos
+//! or from a probe on Strata's own names, and nothing is unlinked without proof.
 
 use std::{
     cell::Cell,
@@ -32,9 +33,9 @@ pub(super) enum Placed {
     Linked,
     ReservedDirectory,
     RecreatedSymlink,
-    /// Only from a rename: a plain rename over an empty file reserved first.
+    /// A plain rename over an empty file reserved first.
     OverReservedFile,
-    /// Only from a rename: a plain rename of a folder to a name found free.
+    /// A plain rename of a folder to a name found free.
     AfterCheck,
 }
 
@@ -90,6 +91,7 @@ struct Mount<'a> {
     fs: &'a dyn FsOps,
     dir: BorrowedFd<'a>,
     key: Cell<Option<MountKey>>,
+    probed_links: Cell<bool>,
 }
 
 impl<'a> Mount<'a> {
@@ -98,6 +100,7 @@ impl<'a> Mount<'a> {
             fs,
             dir,
             key: Cell::new(None),
+            probed_links: Cell::new(false),
         }
     }
 
@@ -121,6 +124,7 @@ impl<'a> Mount<'a> {
     /// Probes what is still unknown; a known `no_replace` skips its test.
     fn probe(&self, links: bool, folders: bool) -> Result<Probed, Errno> {
         let renames = self.capabilities().no_replace.is_none();
+        self.probed_links.set(self.probed_links.get() || links);
         let probed = probe(self.fs, self.dir, renames, links, folders)?;
         self.learn(|capabilities| {
             for (field, value) in [
@@ -137,6 +141,28 @@ impl<'a> Mount<'a> {
             }
         });
         Ok(probed)
+    }
+
+    /// Whether the reserved-name rung may run once the others gave up: only
+    /// after a probe on Strata's own names, or a definitive errno, shows that
+    /// NOREPLACE is missing and settles whether links work. Files take it where
+    /// links are missing or unusable on the mount, or refused for that one file
+    /// (`protected_hardlinks`); folders only where links are missing too.
+    fn allows_reserved_name(&self, directory: bool) -> bool {
+        let settled = |capabilities: MountCapabilities| {
+            capabilities.no_replace.is_some() && capabilities.hard_links.is_some()
+        };
+        if !settled(self.capabilities()) && !self.probed_links.get() {
+            let _ = self.probe(true, false);
+        }
+        let capabilities = self.capabilities();
+        capabilities.no_replace == Some(false)
+            && match capabilities.hard_links {
+                Some(false) => true,
+                // The link rung only gives up on a file whose own link was refused.
+                Some(true) => !directory,
+                None => false,
+            }
     }
 }
 
@@ -256,10 +282,21 @@ fn fallback(
     if expected.is_some_and(|expected| expected != source.identity) {
         return Err(PlaceError::Changed);
     }
-    if source.is_directory() {
+    let directory = source.is_directory();
+    let placed = if directory {
         place_directory(fs, &mount, from, to, &source)
     } else {
         place_non_directory(fs, &mount, from, to, &source)
+    };
+    match placed {
+        Err(PlaceError::Unsupported) if mount.allows_reserved_name(directory) => {
+            if directory {
+                rename_folder_after_check(fs, from, to, &source)
+            } else {
+                rename_over_reserved_file(fs, from, to, &source)
+            }
+        }
+        placed => placed,
     }
 }
 
@@ -827,9 +864,11 @@ pub(super) fn can_set_aside(
         } else {
             capabilities.hard_links
         };
-        match (capabilities.no_replace, fallback) {
-            (Some(true), _) | (_, Some(true)) => Some(true),
-            (Some(false), Some(false)) => Some(false),
+        match (capabilities.no_replace, fallback, capabilities.hard_links) {
+            (Some(true), _, _) | (_, Some(true), _) => Some(true),
+            // The reserved-name rung.
+            (Some(false), _, Some(false)) => Some(true),
+            (Some(false), Some(false), Some(true)) => Some(false),
             _ => None,
         }
     };
@@ -837,7 +876,7 @@ pub(super) fn can_set_aside(
     let known = match feasible(mount.capabilities()) {
         Some(known) => known,
         None => {
-            mount.probe(!directory, directory).map_err(PlaceError::Io)?;
+            mount.probe(true, directory).map_err(PlaceError::Io)?;
             feasible(mount.capabilities()) == Some(true)
         }
     };
@@ -942,8 +981,7 @@ pub(super) fn rename_in_place(
     if from.name == to.name && same_directory(fs, from.dir, to.dir) {
         return Ok(Renamed::Unchanged);
     }
-    let rename = Renaming::new(fs, to.dir);
-    match rename.place(from, to, None) {
+    match place(fs, from, to, None) {
         Err(PlaceError::Exists) => {}
         result => return result.map(Renamed::Direct).map_err(RenameFailure::Place),
     }
@@ -951,7 +989,7 @@ pub(super) fn rename_in_place(
         return Err(RenameFailure::Place(PlaceError::Exists));
     };
     let (temporary, _) = reserve_hidden_name(RENAME_PREFIX, |name| {
-        rename.place(from, at(from.dir, name), Some(identity))
+        place(fs, from, at(from.dir, name), Some(identity))
     })
     .map_err(|error| {
         RenameFailure::Place(match error {
@@ -963,9 +1001,9 @@ pub(super) fn rename_in_place(
     // The SMB client keeps answering for the lookup of `to` for about a
     // second; revalidating drops it.
     let _ = fs.stat(to, true);
-    match rename.place(parked, to, Some(identity)) {
+    match place(fs, parked, to, Some(identity)) {
         Ok(_) => Ok(Renamed::CaseOnly),
-        Err(error) => match rename.place(parked, from, Some(identity)) {
+        Err(error) => match place(fs, parked, from, Some(identity)) {
             Ok(_) => Err(RenameFailure::Place(error)),
             Err(_) => Err(RenameFailure::Stranded { temporary, error }),
         },
@@ -1011,69 +1049,6 @@ fn same_ignoring_case(left: &OsStr, right: &OsStr) -> bool {
     match (left.to_str(), right.to_str()) {
         (Some(left), Some(right)) => left.to_lowercase() == right.to_lowercase(),
         _ => left.eq_ignore_ascii_case(right),
-    }
-}
-
-/// The ladder, plus a last rung so renames still work on mounts without
-/// `RENAME_NOREPLACE` where a hard link is impossible: missing or unusable on
-/// the mount, or refused for one file (`protected_hardlinks`). That rung runs
-/// only once a probe on Strata's own names, or a definitive errno, shows
-/// NOREPLACE is missing and settles whether links work; folders need links
-/// missing too.
-struct Renaming<'a> {
-    fs: &'a dyn FsOps,
-    mount: Mount<'a>,
-    probed: Cell<bool>,
-}
-
-impl<'a> Renaming<'a> {
-    fn new(fs: &'a dyn FsOps, dir: BorrowedFd<'a>) -> Self {
-        Self {
-            fs,
-            mount: Mount::new(fs, dir),
-            probed: Cell::new(false),
-        }
-    }
-
-    fn place(
-        &self,
-        from: Entry<'_>,
-        to: Entry<'_>,
-        expected: Option<LocalFileIdentity>,
-    ) -> Result<Placed, PlaceError> {
-        match place(self.fs, from, to, expected) {
-            Err(PlaceError::Unsupported) => {}
-            result => return result,
-        }
-        let source = stat_source(self.fs, from)?;
-        if expected.is_some_and(|expected| expected != source.identity) {
-            return Err(PlaceError::Changed);
-        }
-        if !self.allows_last_rung(source.is_directory()) {
-            return Err(PlaceError::Unsupported);
-        }
-        if source.is_directory() {
-            rename_folder_after_check(self.fs, from, to, &source)
-        } else {
-            rename_over_reserved_file(self.fs, from, to, &source)
-        }
-    }
-
-    fn allows_last_rung(&self, directory: bool) -> bool {
-        let known = |capabilities: MountCapabilities| {
-            capabilities.no_replace.is_some() && capabilities.hard_links.is_some()
-        };
-        if !known(self.mount.capabilities()) && !self.probed.replace(true) {
-            let _ = self.mount.probe(true, false);
-        }
-        let capabilities = self.mount.capabilities();
-        capabilities.no_replace == Some(false)
-            && match capabilities.hard_links {
-                Some(false) => true,
-                // The ladder only gives up on a file whose own link was refused.
-                Some(true) => !directory,
-                None => false,
-            }
     }
 }
 

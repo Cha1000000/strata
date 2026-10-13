@@ -22,39 +22,45 @@ fn undoing_a_move_returns_each_item_to_its_original_directory() -> Result<(), Bo
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
         .lock()
         .map_err(|error| error.to_string())?;
-    let root = tempfile::tempdir()?;
-    let origin = root.path().join("origin");
-    let archive = root.path().join("archive");
-    fs::create_dir_all(&origin)?;
-    fs::create_dir_all(&archive)?;
-    let moved = archive.join("report.txt");
-    fs::write(&moved, b"contents")?;
+    for quirks in [Quirks::default, Quirks::sshfs, Quirks::vboxsf] {
+        let root = tempfile::tempdir()?;
+        let _scope = FsQuirks::install(root.path(), quirks());
+        let origin = root.path().join("origin");
+        let archive = root.path().join("archive");
+        fs::create_dir_all(&origin)?;
+        fs::create_dir_all(&archive)?;
+        let moved = archive.join("report.txt");
+        fs::write(&moved, b"contents")?;
+        let original = inode(&moved);
 
-    let events = Rc::new(RefCell::new(Vec::new()));
-    let emitted = events.clone();
-    let _operation = LocalOperationProvider.undo_move(
-        UndoMoveRequest {
-            cleanup_locations: Vec::new(),
-            id: OperationRequestId(40),
-            items: vec![UndoMoveItem {
-                record: MoveRecord {
-                    original: Location::local(origin.join("report.txt")),
-                    current: Location::local(&moved),
-                },
-                conflict: TransferConflict::FailIfExists,
-            }],
-        },
-        Rc::new(move |event| emitted.borrow_mut().push(event)),
-    );
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let emitted = events.clone();
+        let _operation = LocalOperationProvider.undo_move(
+            UndoMoveRequest {
+                cleanup_locations: Vec::new(),
+                id: OperationRequestId(40),
+                items: vec![UndoMoveItem {
+                    record: MoveRecord {
+                        original: Location::local(origin.join("report.txt")),
+                        current: Location::local(&moved),
+                    },
+                    conflict: TransferConflict::FailIfExists,
+                }],
+            },
+            Rc::new(move |event| emitted.borrow_mut().push(event)),
+        );
 
-    drive_until_transfer_settles(&events);
+        drive_until_transfer_settles(&events);
 
-    assert!(matches!(
-        events.borrow().last(),
-        Some(OperationEvent::Pasted { .. })
-    ));
-    assert!(!moved.exists());
-    assert_eq!(fs::read(origin.join("report.txt"))?, b"contents");
+        assert!(matches!(
+            events.borrow().last(),
+            Some(OperationEvent::Pasted { .. })
+        ));
+        assert!(names(&archive)?.is_empty());
+        assert_eq!(names(&origin)?, ["report.txt"]);
+        assert_eq!(inode(&origin.join("report.txt")), original);
+        assert_eq!(fs::read(origin.join("report.txt"))?, b"contents");
+    }
     Ok(())
 }
 

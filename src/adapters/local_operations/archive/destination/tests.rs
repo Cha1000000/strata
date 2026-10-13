@@ -530,26 +530,64 @@ fn publication_without_rename_flags_moves_unreadable_subtrees_whole() -> Result<
 }
 
 #[test]
-fn publication_without_links_or_noreplace_keeps_staging() -> Result<(), Box<dyn Error>> {
-    let root = tempfile::tempdir()?;
-    let _quirks = FsQuirks::install(root.path(), Quirks::vboxsf());
-    let destination = ExtractionDestination::open(root.path())?;
-    let (name, staging) = stage(&destination, &["readme.txt", "docs/guide.txt"])?;
+fn publication_without_links_or_noreplace_renames_over_a_reserved_name()
+-> Result<(), Box<dyn Error>> {
+    for quirks in [Quirks::sshfs, Quirks::vboxsf] {
+        let root = tempfile::tempdir()?;
+        let _quirks = FsQuirks::install(root.path(), quirks());
+        let destination = ExtractionDestination::open(root.path())?;
+        let (name, staging) = stage(&destination, &["readme.txt", "docs/guide.txt"])?;
+        let staged = root.path().join(&name);
+        let inodes = [
+            fs::metadata(staged.join("readme.txt"))?.ino(),
+            fs::metadata(staged.join("docs"))?.ino(),
+        ];
 
-    let file = destination.publish_single_root(&staging, Path::new("readme.txt"));
-    let folder = destination.publish_single_root(&staging, Path::new("docs"));
+        let file = destination.publish_single_root(&staging, Path::new("readme.txt"))?;
+        let folder = destination.publish_single_root(&staging, Path::new("docs"))?;
 
-    for result in [file, folder] {
-        let error = result.expect_err("publication must refuse an unsafe placement");
-        assert!(error.contains("guarantee"), "{error}");
+        assert_eq!([file, folder], ["readme.txt", "docs"]);
+        assert_eq!(
+            [
+                fs::metadata(root.path().join("readme.txt"))?.ino(),
+                fs::metadata(root.path().join("docs"))?.ino(),
+            ],
+            inodes
+        );
+        assert_eq!(fs::read(root.path().join("readme.txt"))?, b"readme.txt");
+        assert_eq!(
+            fs::read(root.path().join("docs/guide.txt"))?,
+            b"docs/guide.txt"
+        );
+        assert!(staged.read_dir()?.next().is_none());
     }
-    let staged = root.path().join(&name);
-    assert_eq!(fs::read(staged.join("readme.txt"))?, b"readme.txt");
-    assert_eq!(fs::read(staged.join("docs/guide.txt"))?, b"docs/guide.txt");
-    assert_eq!(
-        names(root.path())?,
-        vec![name.to_string_lossy().into_owned()]
-    );
+    Ok(())
+}
+
+#[test]
+fn publication_keeps_staging_where_no_rung_can_place() -> Result<(), Box<dyn Error>> {
+    for (quirks, member) in [
+        (Quirks::without_placement(), "readme.txt"),
+        (Quirks::without_folder_placement(), "docs"),
+    ] {
+        let root = tempfile::tempdir()?;
+        let _quirks = FsQuirks::install(root.path(), quirks);
+        let destination = ExtractionDestination::open(root.path())?;
+        let (name, staging) = stage(&destination, &["readme.txt", "docs/guide.txt"])?;
+
+        let error = destination
+            .publish_single_root(&staging, Path::new(member))
+            .expect_err("publication must refuse an unsafe placement");
+
+        assert!(error.contains("guarantee"), "{error}");
+        let staged = root.path().join(&name);
+        assert_eq!(fs::read(staged.join("readme.txt"))?, b"readme.txt");
+        assert_eq!(fs::read(staged.join("docs/guide.txt"))?, b"docs/guide.txt");
+        assert_eq!(
+            names(root.path())?,
+            vec![name.to_string_lossy().into_owned()]
+        );
+    }
     Ok(())
 }
 

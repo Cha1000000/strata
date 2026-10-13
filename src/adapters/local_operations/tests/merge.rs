@@ -825,6 +825,8 @@ fn merge_without_trash_sets_originals_aside_and_removes_them_after_success()
         (Trash::Unsupported, Quirks::default(), false),
         (Trash::Unsupported, Quirks::without_rename_flags(), true),
         (Trash::FalseWithoutError, Quirks::default(), false),
+        (Trash::Unsupported, Quirks::sshfs(), false),
+        (Trash::Unsupported, Quirks::vboxsf(), true),
     ] {
         let root = tempfile::tempdir()?;
         let source = root.path().join("source");
@@ -945,7 +947,7 @@ fn a_failed_aside_puts_every_original_back_before_merging() -> Result<(), Box<dy
         )?;
         write_files(&target, &target_files)?;
         let quirks = match case {
-            "no safe placement" => Quirks::vboxsf(),
+            "no safe placement" => Quirks::without_placement(),
             "second aside fails" => Quirks {
                 fail: vec![(Op::Rename, "*", 1, Errno::IO)],
                 ..Quirks::default()

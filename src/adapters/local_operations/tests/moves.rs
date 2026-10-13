@@ -241,39 +241,58 @@ fn same_volume_move_on_a_flag_rejecting_filesystem_never_copies() -> Result<(), 
 }
 
 #[test]
-fn a_file_without_a_usable_link_is_moved_by_copying() -> Result<(), Box<dyn Error>> {
+fn items_without_noreplace_or_a_usable_link_are_renamed_without_copying()
+-> Result<(), Box<dyn Error>> {
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
         .lock()
         .map_err(|error| error.to_string())?;
-    let cases = [
-        // As protected_hardlinks refuses another user's file that a rename could move.
-        (
-            "refused",
-            Quirks {
-                fail: vec![(Op::Link, "moved.txt", 0, Errno::PERM)],
-                ..Quirks::without_rename_flags()
-            },
-        ),
-        ("probed", Quirks::sshfs()),
-        (
-            "linked before a probe",
-            Quirks {
-                rename_flags: Support::Rejected(Errno::NOSYS),
-                ..Quirks::sshfs()
-            },
-        ),
+    // As protected_hardlinks refuses another user's file that a rename could move.
+    let refused = || Quirks {
+        fail: vec![(Op::Link, "moved", 0, Errno::PERM)],
+        ..Quirks::without_rename_flags()
+    };
+    let linked_before_a_probe = || Quirks {
+        rename_flags: Support::Rejected(Errno::NOSYS),
+        ..Quirks::sshfs()
+    };
+    let cases: [(&str, fn() -> Quirks, bool); 6] = [
+        ("refused", refused, false),
+        ("sshfs", Quirks::sshfs, false),
+        ("sshfs", Quirks::sshfs, true),
+        ("linked before a probe", linked_before_a_probe, false),
+        ("vboxsf", Quirks::vboxsf, false),
+        ("vboxsf", Quirks::vboxsf, true),
     ];
-    for (case, quirks) in cases {
+    for (case, quirks, folder) in cases {
         let root = tempfile::tempdir()?;
-        let _scope = FsQuirks::install(root.path(), quirks);
-        let source = root.path().join("notes.txt");
-        fs::write(&source, b"notes")?;
+        let _scope = FsQuirks::install(root.path(), quirks());
+        let source = root.path().join("item");
+        let moved = root.path().join("moved");
+        if folder {
+            fs::create_dir(&source)?;
+            fs::write(source.join("inside.txt"), b"inside")?;
+        } else {
+            fs::write(&source, b"notes")?;
+        }
+        let inode = fs::metadata(&source)?.ino();
+        let progress =
+            TransferProgressTracker::new(OperationRequestId(1), None, None, Rc::new(|_| {}));
 
-        move_native(&source, &root.path().join("moved.txt"))
+        glib::MainContext::default()
+            .block_on(move_local(
+                gio::File::for_path(&source),
+                gio::File::for_path(&moved),
+                gio::Cancellable::new(),
+                Some(progress.clone()),
+                false,
+            ))
             .map_err(|error| format!("{case}: {error}"))?;
 
-        assert_eq!(fs::read(root.path().join("moved.txt"))?, b"notes", "{case}");
-        assert_eq!(names(root.path())?, ["moved.txt"], "{case}");
+        let case = format!("{case}, folder: {folder}");
+        assert_eq!(fs::metadata(&moved)?.ino(), inode, "{case}");
+        assert_eq!(progress.completed_files.get(), 0, "{case}");
+        assert_eq!(progress.transferred_bytes.get(), 0, "{case}");
+        assert_eq!(names(root.path())?, ["moved"], "{case}");
     }
     Ok(())
 }
