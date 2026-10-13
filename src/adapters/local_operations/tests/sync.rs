@@ -1616,3 +1616,65 @@ fn a_failed_barrier_stops_a_bulk_move() -> Result<(), Box<dyn Error>> {
     }
     Ok(())
 }
+
+#[test]
+fn an_original_that_cannot_be_deleted_fails_its_replacing_move() -> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let root = tempfile::tempdir()?;
+    let sources = root.path().join("sources");
+    let destination = root.path().join("destination");
+    fs::create_dir(&sources)?;
+    fs::create_dir(&destination)?;
+    let source = sources.join("notes.txt");
+    fs::write(&source, b"incoming")?;
+    fs::write(destination.join("notes.txt"), b"old")?;
+    // Another program puts its own file at the original's hidden name.
+    let (watched, foreign) = (destination.clone(), root.path().join("foreign"));
+    let racer: super::fs_quirks::Racer = Box::new(move || {
+        let aside = fs::read_dir(&watched)
+            .expect("list the destination")
+            .filter_map(Result::ok)
+            .find(|entry| entry.file_name().to_string_lossy().starts_with(".strata-"))
+            .expect("the original is aside");
+        fs::write(&foreign, b"foreign").expect("write the foreign file");
+        fs::rename(&foreign, aside.path()).expect("put it at the original's name");
+    });
+    let _sources = FsQuirks::install(&sources, Quirks::default());
+    let _destination = FsQuirks::install(
+        &destination,
+        Quirks {
+            trash: super::fs_quirks::Trash::Unsupported,
+            before: vec![(Op::SyncFs, "*", 0, racer)],
+            ..Quirks::ext4()
+        },
+    );
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let emitted = events.clone();
+    let _operation = LocalOperationProvider.paste(
+        PasteRequest {
+            id: OperationRequestId(470),
+            destination: Location::local(&destination),
+            items: vec![PasteItem {
+                source: Location::local(&source),
+                conflict: TransferConflict::ReplaceExisting,
+            }],
+            move_sources: true,
+        },
+        Rc::new(move |event| emitted.borrow_mut().push(event)),
+    );
+    pump_until_transfer(&events);
+
+    assert!(
+        matches!(
+            terminal_transfer(&events.borrow()),
+            Some(OperationEvent::TransferFailed { message, .. }) if message.contains(".strata-")
+        ),
+        "{:?}",
+        events.borrow()
+    );
+    assert_eq!(fs::read(destination.join("notes.txt"))?, b"incoming");
+    assert_eq!(fs::read(&source)?, b"incoming");
+    Ok(())
+}
