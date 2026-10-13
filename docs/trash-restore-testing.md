@@ -10,16 +10,20 @@ Restore does not cross bind-mount or subvolume boundaries. Planning rejects a
 nested mount before showing confirmation, and execution retains the kernel's
 `openat2` confinement check against concurrent changes.
 
-The move never replaces an item at the destination. It uses an atomic
+The move goes through the placement routine described in
+[Filesystem compatibility](filesystem-compatibility.md#placing-an-item-without-replacing)
+and never replaces an item already at the destination. It uses an atomic
 `RENAME_NOREPLACE` where the filesystem offers one. Where it does not (some NFS
 and FUSE configurations), a file is hard-linked to the destination and its
 trash name is removed only once the link is proven, and a folder is renamed
-over an empty placeholder that Strata has just created. When neither works, the
-item is copied with exclusive creation and the trash copy is deleted afterwards.
-Checking for an absent filename and then doing an ordinary rename is never
-used: a concurrent writer could create that filename between the two
-operations. If something already exists at the destination, or the outcome
-cannot be confirmed, the payload and its trash metadata remain intact.
+over an empty placeholder that Strata has just created. Where hard links are
+unusable too, as on sshfs and vboxsf, the restore takes the
+[reserved-name step](filesystem-compatibility.md#the-reserved-name-step-and-its-risk),
+which has one narrow window. Only where no step can place the item, for example
+where a probe cannot settle what the mount supports, is it copied with exclusive
+creation and the trash copy deleted afterwards. If something already exists at
+the destination, or the outcome cannot be confirmed, the payload and its trash
+metadata remain intact.
 
 Deleting or trashing a folder in Strata removes its sidebar pin and pins inside
 it from GTK's shared bookmarks file and every open sidebar. Only confirmed

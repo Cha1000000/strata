@@ -12,12 +12,13 @@ the GVfs backend, and Strata uses GIO for them.
 ## Guarantees
 
 - **Never replace a concurrent arrival.** An item that appears at a destination while Strata is
-  working is never overwritten, with one narrow exception on mounts that offer neither
-  `RENAME_NOREPLACE` nor usable hard links, described in
+  working is never overwritten, with one narrow exception where `RENAME_NOREPLACE` is missing and
+  the item cannot be hard-linked (on mounts without usable hard links, or for a file whose own link
+  is refused), described in
   [The reserved-name step and its risk](#the-reserved-name-step-and-its-risk). Where only the
-  client kernel checks for an existing name, other clients are not covered; see the residual
-  limits below. Replace only ever removes the item the user confirmed, identified by device,
-  inode, type and, where the filesystem reports it, birth time.
+  client kernel or a FUSE daemon checks for an existing name, other clients are not covered; see
+  the residual limits below. Replace only ever removes the item the user confirmed, identified by
+  device, inode, type and, where the filesystem reports it, birth time.
 - **Never remove a name on a guess.** A name is unlinked only after Strata has proven which inode
   it holds. When the outcome of a step cannot be proven, both names are kept and the operation
   reports that the result could not be confirmed.
@@ -25,9 +26,11 @@ the GVfs backend, and Strata uses GIO for them.
   mount lookups and waits. A hung NFS or FUSE server stalls the operation, not the window.
 - **Move metadata, not data.** Renames never copy file contents. Moves within one filesystem
   rename too, including on mounts with neither `RENAME_NOREPLACE` nor usable hard links. Moves
-  copy only when crossing devices, or where no step below can place the item: on a mount whose
-  support a probe cannot settle, or for a folder on a mount without `RENAME_NOREPLACE` that has
-  hard links but cannot rename over an empty folder.
+  copy only when the kernel returns `EXDEV` (across devices, bind mounts, btrfs subvolumes or
+  overlayfs lower-layer folders), or where no step below can place the item: on a mount whose
+  support a probe cannot settle, for a folder on a mount without `RENAME_NOREPLACE` that has hard
+  links but cannot rename over an empty folder, or for a file on an SFTP server that refuses the
+  reserved-name step's rename.
 
 ## Placing an item without replacing
 
@@ -43,22 +46,24 @@ that applies:
 | 2 | files, symlinks, special files | `linkat`, then remove the old name once the new one reports the item's identity | creating a link fails if the name exists, on the server for NFS and SMB |
 | 3 | folders | create an empty placeholder folder with `mkdirat`, then rename over it | a rename can only replace an empty folder; a filled or swapped placeholder fails with `ENOTEMPTY` or `ENOTDIR` |
 | 4 | symlinks | create a symlink with the same target, then remove the old one | creating a symlink fails if the name exists |
-| 5 | files, special files and folders that no step above can place, only on mounts without `RENAME_NOREPLACE` | the [reserved-name step](#the-reserved-name-step-and-its-risk) | a file is renamed only over Strata's own empty placeholder, checked just before, and a folder only to a name just found free; see the step's narrow window |
-| 6 | — | copy, then delete | only for a cross-device move (`EXDEV`), or a move or restore from Trash that no step above can place |
+| 5 | files, symlinks and special files that steps 2 and 4 cannot place, and folders that step 3 cannot place on mounts without usable hard links, once a probe has settled that `RENAME_NOREPLACE` is missing | the [reserved-name step](#the-reserved-name-step-and-its-risk) | a file is renamed only over Strata's own empty placeholder, checked just before, and a folder only to a name just found free; see the step's narrow window |
+| 6 | — | copy, then delete | only for a cross-device move (`EXDEV`), a move or restore from Trash that no step above can place, or a staged copy whose stage no step can place, which is copied again from the stage |
 
 `EEXIST` and `ENOTEMPTY` always mean the destination is taken. `EINVAL` from step 1 has three
 possible meanings, and Strata never treats it as "copy instead":
 
-- moving a folder into itself, which is checked before any fallback;
+- moving a folder into itself, which is checked before any fallback, or found from the fallback
+  step's own `EINVAL` once `RENAME_NOREPLACE` is known to be missing;
 - an invalid name on this filesystem (for example `:` on vfat), when `RENAME_NOREPLACE` is known to
   work here or the fallback step also returns `EINVAL`;
 - `RENAME_NOREPLACE` unsupported, otherwise.
 
 Residual limits:
 
-- On mounts with neither `RENAME_NOREPLACE` nor usable hard links, a program that overwrites a
-  destination name in the instant before Strata renames over its placeholder loses its write; see
-  [The reserved-name step and its risk](#the-reserved-name-step-and-its-risk).
+- Where `RENAME_NOREPLACE` is missing and an item cannot be hard-linked, a program that overwrites
+  a destination name just before Strata renames over its placeholder loses its write, and so does
+  an item created at the name, even exclusively, after something else removed the placeholder in
+  that window; see [The reserved-name step and its risk](#the-reserved-name-step-and-its-risk).
 - ext4, ntfs3, NFS and SMB give a freed inode number straight to the next item created. Where no
   birth time is reported (NFSv3, ntfs-3g, exfat-fuse), an item deleted and recreated at the same
   name with the same type passes for the original.
@@ -71,6 +76,8 @@ Residual limits:
 - On SMB2/3, gvfsd-fuse and FUSE daemons that ignore rename flags, the no-replace check is made
   by the client kernel, so it protects against local processes but not against another client
   creating the same name at the same moment.
+- On rclone, s3fs and other FUSE daemons whose exclusive create is not enforced by the server, the
+  reserved-name step's placeholder protects only against local processes.
 - On a case-insensitive SMB share without POSIX extensions, the Linux cifs client turns server
   inode numbers off for the whole mount once a folder is looked up under a second spelling, as the
   check before a case-only folder rename does ("Autodisabling the use of server inode numbers" in
@@ -97,13 +104,15 @@ definitive errno, has shown that the mount lacks `RENAME_NOREPLACE` and has sett
 links work. Then:
 
 - a file or special file takes it when hard links are missing or unusable on the mount, or
-  refused for that one file, for example by `fs.protected_hardlinks`;
+  refused for that one file, for example by `fs.protected_hardlinks`, and so does a symlink that
+  step 4 cannot recreate either;
 - a folder takes it only when the mount has no usable hard links and refuses to rename over the
   placeholder folder of step 3.
 
-Mounts with `RENAME_NOREPLACE`, such as local disks, removable media with kernel drivers and SMB,
-never take it. Mounts without it whose hard links work, such as NFS, take it only for a file whose
-own link is refused. Where a probe cannot settle what a mount supports, the step does not run.
+Mounts with `RENAME_NOREPLACE`, such as most local disks, removable media with kernel drivers and
+SMB, never take it. Mounts without it whose hard links work, such as NFS, OpenZFS 2.1 and earlier,
+ntfs-3g and 9p, take it only for a file whose own link is refused. Where a probe cannot settle what
+a mount supports, the step does not run.
 
 For a file, Strata creates an empty placeholder at the destination with `O_CREAT | O_EXCL`, checks
 that the name still holds that placeholder (same inode, a regular file, still empty), then renames
@@ -123,19 +132,27 @@ What it risks, and why that is low:
   old name or its new one. A failed step leaves it where it was; one whose reply was lost is
   reported as unconfirmed, with both names kept.
 - **An item already at the destination is never touched.** The exclusive create fails, and the
-  name counts as taken. A program that creates the name exclusively during the step gets "already
-  exists" and loses nothing.
-- **The only loss is a concurrent overwrite.** A program that overwrites that exact name between
-  the check and the rename, by writing into the placeholder or renaming its own file over it, has
-  its write replaced by the placed item. A write that shows before the check makes Strata treat
-  the name as taken instead. That program was itself overwriting whatever held the name, so the
-  race only decides which of the two writes survives.
-- **The window is one rename call**, one network round trip on sshfs. Where `RENAME_NOREPLACE` is
-  missing, GLib (and so Nautilus) and `mv -n` check that the name is free and then rename: any
-  item created at the name in between is replaced, even by a program that creates it exclusively.
+  name counts as taken. A program that creates the name exclusively while the placeholder stands
+  gets "already exists" and loses nothing.
+- **The only loss is a concurrent overwrite.** A program that overwrites that exact name before
+  the rename, by writing into the placeholder or renaming its own file over it, has its write
+  replaced by the placed item. That program was itself overwriting whatever held the name, so the
+  race only decides which of the two writes survives. An item created at the name after something
+  else removed the placeholder in that window is replaced too, even if it was created exclusively.
+- **The window is one rename call** for processes using the same mount, one network round trip on
+  sshfs: a change they make before the check makes Strata treat the name as taken. A writer on the
+  server or on another client shows only by a change of type or size, because vboxsf and sshfs
+  keep the placeholder's inode number for whatever the name then holds, and sshfs may answer the
+  check from its attribute cache; for such writers the window runs from the placeholder's creation
+  to the rename. Removing the placeholder after a failed rename has the same check-then-unlink
+  window. For comparison, GLib (and so Nautilus) always, and `mv -n` where `RENAME_NOREPLACE` is
+  missing, check that the name is free and then rename: any item created at the name in between is
+  replaced, even by a program that creates it exclusively.
 - **A folder is renamed only to a name just found free.** A rename cannot put a folder over a file
-  or a non-empty folder, and this mount refuses to rename over an empty one, so an item that
-  arrives in between makes the rename fail.
+  or a non-empty folder, and this mount refused to rename it over Strata's empty placeholder, so an
+  item that arrives in between makes the rename fail. An `EPERM` refusal also leads here although
+  it is not learned for the mount; if it was specific to the item, an empty folder that arrives in
+  that instant could be replaced.
 
 Copying into a name created exclusively would protect an arrival completely, but it costs more
 than it protects. Deleting the source afterwards loses writes made to it during the copy. A copy
@@ -177,7 +194,8 @@ Before copying anything, Replace chooses how to remove the original, in this ord
    identity. If placing fails, the original is put back; if its name was taken meanwhile, it is
    kept and the error names it. The original's name is briefly absent, as it is with Trash. On
    mounts with neither `RENAME_NOREPLACE` nor usable hard links, these placements use the
-   [reserved-name step](#the-reserved-name-step-and-its-risk).
+   [reserved-name step](#the-reserved-name-step-and-its-risk) for files, and for folders where
+   renaming over an empty folder is refused.
 4. Otherwise Replace fails before any data is copied. This happens only where a probe cannot
    settle what the mount supports, or for a folder on a mount without `RENAME_NOREPLACE` that has
    hard links but cannot rename over an empty folder.
@@ -208,8 +226,9 @@ Local renames go through the same routine instead of GIO's check-then-rename.
   gives each spelling its own inode number, so there the new spelling counts as the item itself
   only when the folder lists no such name, the item's own name is the only one that matches it
   ignoring case, and type, size and modification time agree.
-- On mounts with neither `RENAME_NOREPLACE` nor usable hard links, a rename takes the
-  [reserved-name step](#the-reserved-name-step-and-its-risk) like any other placement.
+- On mounts with neither `RENAME_NOREPLACE` nor usable hard links, renaming a file takes the
+  [reserved-name step](#the-reserved-name-step-and-its-risk) like any other placement, and so does
+  renaming a folder where renaming over an empty folder is refused.
 - A rename and its undo never copy. Where no step can place the item, the rename is refused.
 
 ## Trash
@@ -259,12 +278,12 @@ Rename and link support decides which placement step runs. "Rejects flags" means
 | exFAT (kernel) | yes | no | no | case-insensitive; no symlinks |
 | ntfs3, ntfs (Linux 7.1 and later) | yes | no | yes | case-sensitive unless mounted with `nocase` |
 | ntfs-3g, libfuse2 daemons | rejects flags | rejects flags | ntfs-3g: yes | the kernel refuses rename flags below FUSE protocol 7.23 |
-| exfat-fuse (libfuse3) | enforced by the kernel only | ignored: overwrites | no | built on libfuse2, it rejects flags and takes the [reserved-name step](#the-reserved-name-step-and-its-risk) |
+| exfat-fuse (libfuse3) | enforced by the kernel only | ignored: overwrites | no | built on libfuse2, it rejects flags, and files take the [reserved-name step](#the-reserved-name-step-and-its-risk) |
 | NFS v3 and v4 | rejects flags | rejects flags | yes | unlinking an open file leaves `.nfsXXXX` until it is closed |
 | SMB/CIFS | client-side only | no | server-dependent | usually case-insensitive; open files may block rename and delete |
 | sshfs | rejects flags | rejects flags | not used | each link reports its own inode number; reports "exists" as `EPERM`; files take the [reserved-name step](#the-reserved-name-step-and-its-risk); without the server's `posix-rename@openssh.com` extension its rename over the placeholder fails with `EPERM`, so moved, restored and staged files are copied, and file renames, archive publication and setting a file aside fail |
 | 9p (WSL2, QEMU), ceph, eCryptfs | rejects flags | rejects flags | yes | |
-| vboxsf, rclone, s3fs | rejects flags | rejects flags | no | files take the [reserved-name step](#the-reserved-name-step-and-its-risk) |
+| vboxsf, rclone, s3fs | rejects flags | rejects flags | no | files take the [reserved-name step](#the-reserved-name-step-and-its-risk); vboxsf refuses to rename over an empty folder, so its folders take that step too |
 | mergerfs | rejects flags | rejects flags | within a branch | |
 | overlayfs | yes | yes | yes | lower-layer folders cannot be renamed without `redirect_dir` |
 

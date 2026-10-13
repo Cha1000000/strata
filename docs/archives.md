@@ -53,9 +53,10 @@ Strata publishes the folder:
 Publication never replaces an existing entry. Where the filesystem lacks
 atomic no-replace renames, a file is published through a hard link and a
 folder is moved whole over an empty placeholder Strata has just created. Where
-it also lacks usable hard links, as on sshfs and vboxsf, a file is renamed
-over an empty file Strata has just created and checked, and a folder that
-cannot be moved over a placeholder is renamed once its name is found free.
+a file cannot be hard-linked, as on sshfs and vboxsf, it is renamed over an
+empty file Strata has just created and checked, and where hard links are
+unusable, a folder that cannot be moved over a placeholder is renamed once its
+name is found free.
 That step has one narrow window, described in
 [The reserved-name step and its risk](filesystem-compatibility.md#the-reserved-name-step-and-its-risk).
 Where none of these can place an entry, the error says so and names the hidden
@@ -189,8 +190,9 @@ Keep Both, and Replace. Keep Both publishes the next available numbered name,
 such as `archive (1).zip` or `archive (1).tar.gz`, and selects that new archive.
 It skips existing files, directories, and symlinks, including names that appear
 while encoding is running. The completed staging file is retried at each name
-at publication, never replacing anything; the sources are not compressed again
-for each collision.
+at publication, never replacing anything apart from the narrow window of the
+[reserved-name step](filesystem-compatibility.md#the-reserved-name-step-and-its-risk);
+the sources are not compressed again for each collision.
 
 Replace moves the existing archive to Trash where the location supports it,
 and Undo restores it. Elsewhere, the original is swapped out atomically on
@@ -201,8 +203,9 @@ If none of these is safe at the location, or the existing archive is replaced
 by another item while the new one is encoded, nothing is replaced; the refusal
 comes before encoding when possible.
 
-On filesystems with neither no-replace renames nor usable hard links, such as
-sshfs and vboxsf, the new archive and a set-aside original are placed with the
+On filesystems without no-replace renames where a file cannot be hard-linked,
+such as sshfs and vboxsf, the new archive and a set-aside original are placed
+with the
 [reserved-name step](filesystem-compatibility.md#the-reserved-name-step-and-its-risk).
 
 ## Feedback and cancellation
