@@ -233,6 +233,33 @@ fn a_name_taken_just_before_the_link_is_left_alone() -> Result<(), Box<dyn Error
 }
 
 #[test]
+fn a_file_put_at_the_published_name_right_after_publishing_stays_there()
+-> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock()?;
+    let elsewhere = tempfile::tempdir()?;
+    let saved = elsewhere.path().join("saved.bin");
+    fs::write(&saved, b"saved by another program")?;
+    // Without `RENAME_NOREPLACE` the stage is published by a link, then its
+    // own name is unlinked; another program renames over the name meanwhile.
+    let mounts = mounts(Quirks::default(), |destination| {
+        let over = destination.join("target.bin");
+        let racer: Racer =
+            Box::new(move || fs::rename(&saved, &over).expect("rename over the name"));
+        Quirks {
+            after: vec![(Op::Unlink, ".strata-copy-*", 0, racer)],
+            ..Quirks::nfs3()
+        }
+    })?;
+    let source = mounts.source(b"ours")?;
+
+    copy(&source, &mounts.target())?;
+
+    assert_eq!(fs::read(mounts.target())?, b"saved by another program");
+    assert_eq!(names(&mounts.destination)?, ["target.bin"]);
+    Ok(())
+}
+
+#[test]
 fn a_folder_removed_before_the_link_leaves_tmpfiles_in_use() -> Result<(), Box<dyn Error>> {
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock()?;
     let root = tempfile::tempdir()?;

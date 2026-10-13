@@ -159,6 +159,8 @@ pub(crate) struct Quirks {
     pub fail: Vec<(Op, &'static str, usize, Errno)>,
     /// Runs once, before the matching call after skipping the given number of matches.
     pub before: Vec<(Op, &'static str, usize, Racer)>,
+    /// Runs once, after the matching call after skipping the given number of matches.
+    pub after: Vec<(Op, &'static str, usize, Racer)>,
     /// The mountinfo type and superblock options `mount_type` reports.
     pub mount_type: Option<(&'static str, &'static str)>,
     pub tmpfile: Support,
@@ -389,6 +391,22 @@ impl Drop for FsQuirks {
     }
 }
 
+/// The racer for a call to `op` naming `names`, once its skips are used up.
+fn take_racer(
+    racers: &mut Vec<(Op, &'static str, usize, Racer)>,
+    op: Op,
+    names: &[&OsStr],
+) -> Option<Racer> {
+    let index = racers
+        .iter()
+        .position(|(racer_op, pattern, _, _)| *racer_op == op && matches(pattern, names))?;
+    if racers[index].2 == 0 {
+        return Some(racers.remove(index).3);
+    }
+    racers[index].2 -= 1;
+    None
+}
+
 /// A bare `*` also matches calls that name nothing.
 fn matches(pattern: &str, names: &[&OsStr]) -> bool {
     pattern == "*"
@@ -415,21 +433,7 @@ impl Scope {
                 op,
                 names: names.iter().map(|name| name.to_os_string()).collect(),
             });
-            let index = state
-                .quirks
-                .before
-                .iter()
-                .position(|(racer_op, pattern, _, _)| *racer_op == op && matches(pattern, names));
-            match index {
-                Some(index) if state.quirks.before[index].2 == 0 => {
-                    Some(state.quirks.before.remove(index).3)
-                }
-                Some(index) => {
-                    state.quirks.before[index].2 -= 1;
-                    None
-                }
-                None => None,
-            }
+            take_racer(&mut state.quirks.before, op, names)
         };
         if let Some(mut racer) = racer {
             racer();
@@ -457,6 +461,10 @@ impl Scope {
             return Err(errno);
         }
         let result = perform(self);
+        let racer = take_racer(&mut self.state().quirks.after, op, names);
+        if let Some(mut racer) = racer {
+            racer();
+        }
         if result.is_ok() {
             let mut state = self.state();
             if let Some(index) = state

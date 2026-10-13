@@ -549,6 +549,52 @@ fn merge_never_overwrites_an_entry_created_during_the_merge() -> Result<(), Box<
     Ok(())
 }
 
+#[test]
+fn an_item_put_at_a_placed_name_right_after_placing_stays_there() -> Result<(), Box<dyn Error>> {
+    use super::fs_quirks::Racer;
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    // A program that saves by renaming over the name does so as soon as the
+    // child is placed: by a rename, or by a link and the stage's unlink.
+    let rows: [(&str, Preset, Op); 2] = [
+        ("rename", Quirks::default, Op::Rename),
+        ("link", Quirks::without_rename_flags, Op::Unlink),
+    ];
+    for (row, preset, placed) in rows {
+        let root = tempfile::tempdir()?;
+        let source = root.path().join("source");
+        let target = root.path().join("target");
+        fs::create_dir(&source)?;
+        fs::create_dir(&target)?;
+        fs::write(source.join("a.txt"), b"incoming")?;
+        let saved = root.path().join("saved.txt");
+        fs::write(&saved, b"saved by another program")?;
+        let over = target.join("a.txt");
+        let racer: Racer = Box::new(move || {
+            fs::rename(&saved, &over).expect("rename over the placed name");
+        });
+        let _scope = FsQuirks::install(
+            &target,
+            Quirks {
+                after: vec![(placed, "a.txt", 0, racer)],
+                ..preset()
+            },
+        );
+
+        let (merged, _) = merge_reporting(&source, &target, None);
+
+        assert!(merged.is_ok(), "{row}: {merged:?}");
+        assert_eq!(
+            fs::read(target.join("a.txt"))?,
+            b"saved by another program",
+            "{row}"
+        );
+        assert_eq!(names(&target)?, ["a.txt"], "{row}");
+    }
+    Ok(())
+}
+
 /// What `report` renamed, by path beneath `target`, in path order.
 fn renamed_beneath(
     target: &Path,
@@ -628,12 +674,22 @@ fn an_unconfirmed_placement_keeps_its_stage() -> Result<(), Box<dyn Error>> {
     fs::create_dir(&source)?;
     fs::create_dir(&target)?;
     fs::write(source.join("leaf"), b"incoming")?;
-    // The checks before the merge and before placing see the name; the one
-    // proving where the leaf went fails.
+    // The placing rename's reply is lost, and the leaf is found at neither
+    // name: it went back into the stage under another one.
+    let live = target.clone();
+    let racer: super::fs_quirks::Racer = Box::new(move || {
+        let stage = names(&live)
+            .expect("live folder")
+            .into_iter()
+            .find(|name| name.starts_with(".strata-copy-"))
+            .expect("stage");
+        fs::rename(live.join("leaf"), live.join(stage).join("moved")).expect("move the leaf");
+    });
     let _scope = FsQuirks::install(
         &target,
         Quirks {
-            fail: vec![(Op::Stat, "leaf", 2, Errno::IO)],
+            lost_reply: vec![(Op::Rename, "leaf", Errno::IO)],
+            after: vec![(Op::Rename, "leaf", 0, racer)],
             ..Quirks::default()
         },
     );
@@ -647,12 +703,11 @@ fn an_unconfirmed_placement_keeps_its_stage() -> Result<(), Box<dyn Error>> {
     ));
 
     assert!(result.is_err(), "{result:?}");
-    assert_eq!(fs::read(target.join("leaf"))?, b"incoming");
     let names = names(&target)?;
-    assert!(
-        names.iter().any(|name| name.starts_with(".strata-copy-")),
-        "either name may hold the leaf, so the stage stays: {names:?}"
-    );
+    let [stage] = names.as_slice() else {
+        panic!("only the stage that holds the leaf stays: {names:?}");
+    };
+    assert_eq!(fs::read(target.join(stage).join("moved"))?, b"incoming");
     Ok(())
 }
 

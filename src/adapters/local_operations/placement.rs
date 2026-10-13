@@ -180,7 +180,20 @@ pub(super) fn place(
     verified(fs, from, to, expected, ladder(fs, from, to, expected))
 }
 
-/// [`place`] for a caller whose own `renameat2(NOREPLACE)` failed with `error`.
+/// Places `from`, inside a private stage, at `to`. Nothing else writes the
+/// stage, so an entry another program puts at `to` once a rung placed it
+/// there is theirs, and stays.
+pub(super) fn place_staged(
+    fs: &dyn FsOps,
+    from: Entry<'_>,
+    to: Entry<'_>,
+    expected: LocalFileIdentity,
+) -> Result<Placed, PlaceError> {
+    ladder(fs, from, to, Some(expected))
+}
+
+/// [`place_staged`] for a caller whose own `renameat2(NOREPLACE)` failed
+/// with `error`.
 pub(super) fn place_after_rename(
     fs: &dyn FsOps,
     from: Entry<'_>,
@@ -188,13 +201,7 @@ pub(super) fn place_after_rename(
     expected: Option<LocalFileIdentity>,
     error: Errno,
 ) -> Result<Placed, PlaceError> {
-    verified(
-        fs,
-        from,
-        to,
-        expected,
-        fallback(fs, from, to, expected, error),
-    )
+    fallback(fs, from, to, expected, error)
 }
 
 fn verified(

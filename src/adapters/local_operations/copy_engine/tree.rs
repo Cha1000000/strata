@@ -1287,7 +1287,7 @@ impl Place {
             RenameCause::Taken,
             |candidate| {
                 let target = Entry::new(&*self.live, candidate);
-                match placement::place(fs, staged, target, Some(identity)) {
+                match placement::place_staged(fs, staged, target, identity) {
                     Ok(_) => Ok(()),
                     Err(PlaceError::Unsupported) => self.copy_out(copy, name, identity, candidate),
                     Err(error) => Err(error.into()),
@@ -1331,7 +1331,7 @@ impl Place {
         } = self;
         drop(opened);
         let stage = Entry::new(&*live, &name);
-        let removed = match fs.stat(stage, true) {
+        let removed = match fs.stat(stage, false) {
             Ok(current) if current.identity == identity => {
                 match fs.unlink(stage, AtFlags::REMOVEDIR) {
                     Ok(()) | Err(Errno::NOENT) => Ok(()),
