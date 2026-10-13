@@ -240,7 +240,7 @@ container that mounts real kernel filesystems over loopback, then runs syscall p
 | `exfat-fuse`, `ntfs-3g` | FUSE drivers |
 | `nfs42`, `nfs3` | kernel NFS server and client over loopback |
 | `cifs`, `cifs-nocase`, `cifs-posix` | Samba with the kernel SMB 3.1.1 client |
-| `sshfs` | sshfs speaking SFTP to a loopback `sftp-server` that runs as the test user |
+| `sshfs` | sshfs speaking SFTP to a loopback `sftp-server` that runs as the test user, in a mount namespace without the client mount |
 
 ```sh
 scripts/fslab/fslab.sh up                              # build if needed, start, mount everything
@@ -281,7 +281,8 @@ Requirements and safety:
   lab's own images, deleting each image once its device is gone. If a mount or loop device stays
   busy, `down` lists what holds it and keeps the container running with that mount, its server and
   its loop device; run `down` again once those are released. `down --force` unmounts lazily
-  instead, which can pin loop devices on the host until reboot.
+  instead, which can keep loop devices attached on the host, or a tmpfs export's memory, until
+  reboot.
 - The container runs its own copy of `scripts/fslab`, refreshed by every `fslab.sh` command, so
   switching branches or rebasing while the lab is up cannot break `down`.
 - The NFS, SMB and SFTP servers share the kernel with their clients, so there is no latency,

@@ -4,9 +4,10 @@ source /opt/fslab/in/common.sh
 set +e
 
 # A lazy unmount detaches a mount the kernel still references; once the
-# container exits nothing can release it, and its loop device stays attached
-# on the host until reboot. So a busy filesystem keeps the container running,
-# unless --force accepts that risk. Everything else is still released.
+# container exits nothing can release it, so until reboot its loop device stays
+# attached on the host, or a tmpfs (the NFS exports, the sshfs server's folder)
+# keeps its memory. So a busy filesystem keeps the container running, unless
+# --force accepts that risk. Everything else is still released.
 force=0
 [[ ${1:-} == --force ]] && force=1
 BUSY=3
@@ -78,7 +79,7 @@ release() {
   done
   is_mounted "$target" || return 0
   if ((force)); then
-    log "WARNING: --force: lazily unmounting busy $target; its loop device can stay attached on the host until reboot"
+    log "WARNING: --force: lazily unmounting busy $target; until reboot it can keep its loop device attached on the host, or its memory if it is a tmpfs"
     umount -f -l "$target" && return 0
   fi
   busy+=("$target")
@@ -198,6 +199,7 @@ report_busy() {
     done
   done
   report_nfsd
+  pgrep -x socat >/dev/null && log "the SFTP server still runs; its private mount namespace holds the lab mounts made before sshfs"
   log "loop devices still attached by the lab: $(cut -d' ' -f1,3 "$STATE/loops" 2>/dev/null | tr '\n' ' ')"
   exit "$BUSY"
 }

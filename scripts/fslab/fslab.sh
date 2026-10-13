@@ -20,7 +20,8 @@ Usage: scripts/fslab/fslab.sh COMMAND
                                       releases what is free and keeps the
                                       container running while a mount stays busy,
                                       and --force unmounts lazily, which can pin
-                                      host loop devices until reboot
+                                      host loop devices or tmpfs memory until
+                                      reboot
   probe [MOUNT...]                    run fsprobe.py on every (or the named) mount
   test [--rev REV] FILTER [MOUNT...]  run test-headless.py FILTER on each mount,
                                       against the working tree or a git revision
@@ -115,7 +116,7 @@ cmd_down() {
   local status=0
   case "${1:-}" in
     "") ;;
-    --force) echo "fslab: WARNING: --force lazily unmounts busy lab filesystems; their loop devices can stay attached on the host until reboot" >&2 ;;
+    --force) echo "fslab: WARNING: --force lazily unmounts busy lab filesystems; until reboot their loop devices can stay attached on the host, and tmpfs ones keep their memory" >&2 ;;
     *) usage ;;
   esac
   if running; then
@@ -125,7 +126,7 @@ cmd_down() {
   if ((status)) && [[ "${1:-}" != --force ]]; then
     echo "fslab: teardown incomplete; the container stays running so its mounts remain reachable." >&2
     echo "fslab: once what is listed above is no longer busy, run 'scripts/fslab/fslab.sh down' again." >&2
-    echo "fslab: 'scripts/fslab/fslab.sh down --force' unmounts lazily instead and can pin loop devices until reboot." >&2
+    echo "fslab: 'scripts/fslab/fslab.sh down --force' unmounts lazily instead and can pin loop devices or tmpfs memory until reboot." >&2
     return 1
   fi
   remove_container

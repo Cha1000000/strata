@@ -228,8 +228,11 @@ start_sshfs() {
   as_test_user mkdir /srv/sshfs/tmp
   # sshfs speaks SFTP straight to a loopback sftp-server instead of through ssh.
   # The server runs as the test user, like the remote end of a user's mount, and
-  # socat serves that single connection.
-  setsid -f socat "TCP-LISTEN:$port,bind=127.0.0.1,reuseaddr" \
+  # socat serves that single connection. Like a remote host, the server must not
+  # see the client mount: following an extracted symlink back into it deadlocks
+  # the mount. So socat starts in a private mount namespace made before sshfs
+  # mounts, which holds copies of the earlier lab mounts until down stops it.
+  setsid -f unshare --mount --propagation private socat "TCP-LISTEN:$port,bind=127.0.0.1,reuseaddr" \
     EXEC:"setpriv --reuid=$TEST_UID --regid=$TEST_GID --init-groups /usr/lib/ssh/sftp-server" \
     > "$STATE/sshfs-server.log" 2>&1
   deadline=$((SECONDS + 20))
