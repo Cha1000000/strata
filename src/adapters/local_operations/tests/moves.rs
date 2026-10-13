@@ -1176,11 +1176,11 @@ fn make_fifo(path: &Path) -> io::Result<()> {
 }
 
 /// Moves the folder `folder` from a volume with `quirks` to another one, and
-/// returns where it went and what the move reported.
+/// returns where it went, what the move reported, and its events.
 fn move_across_volumes(
     folder: &Path,
     quirks: Quirks,
-) -> Result<(PathBuf, TransferReport), Box<dyn Error>> {
+) -> Result<(PathBuf, TransferReport, Vec<OperationEvent>), Box<dyn Error>> {
     let source_dir = folder.parent().ok_or("a folder in a source volume")?;
     let destination = source_dir.with_file_name("destination");
     fs::create_dir_all(&destination)?;
@@ -1198,7 +1198,8 @@ fn move_across_volumes(
         "{:?}",
         events.borrow()
     );
-    Ok((destination.join("folder"), reported(&events)))
+    let report = reported(&events);
+    Ok((destination.join("folder"), report, events.take()))
 }
 
 /// Writes `contents` over `path` as it runs.
@@ -1251,7 +1252,7 @@ fn a_rewrite_that_keeps_the_size_and_times_is_kept_at_the_source() -> Result<(),
             ..quirks()
         };
 
-        let (moved, report) = move_across_volumes(&folder, quirks)?;
+        let (moved, report, _) = move_across_volumes(&folder, quirks)?;
 
         assert_eq!(fs::read(moved.join("b.txt"))?, b"b1", "{row}");
         assert_eq!(fs::read(&changed)?, b"B2", "{row}");
@@ -1292,11 +1293,21 @@ fn a_file_rewritten_as_it_is_read_is_copied_again_whole() -> Result<(), Box<dyn 
             ..Quirks::default()
         };
 
-        let (moved, report) = move_across_volumes(&folder, quirks)?;
+        let (moved, report, events) = move_across_volumes(&folder, quirks)?;
 
         assert_eq!(fs::read(moved.join("db"))?, expected, "{row}");
         assert!(!folder.exists(), "{row}");
         assert_eq!(report, TransferReport::default(), "{row}");
+        if row == "same size" {
+            // The second read repeats bytes already counted.
+            let transferred = events.iter().rev().find_map(|event| match event {
+                OperationEvent::TransferProgress {
+                    transferred_bytes, ..
+                } => Some(*transferred_bytes),
+                _ => None,
+            });
+            assert_eq!(transferred, Some(5), "{row}");
+        }
     }
     Ok(())
 }
@@ -1369,7 +1380,7 @@ fn moves_off_mounts_without_stable_inodes_keep_only_what_changed() -> Result<(),
         ..Quirks::default()
     };
 
-    let (moved, report) = move_across_volumes(&folder, quirks)?;
+    let (moved, report, _) = move_across_volumes(&folder, quirks)?;
 
     assert_eq!(fs::read(moved.join("sub/b.txt"))?, b"b");
     assert_eq!(fs::read(moved.join("sub/y"))?, b"x");
@@ -1380,6 +1391,70 @@ fn moves_off_mounts_without_stable_inodes_keep_only_what_changed() -> Result<(),
     let expected = ["m", "p", "sub/b.txt", "sub/n", "sub/q"]
         .map(|path| kept(folder.join(path), KeptCause::Changed));
     assert_eq!(left, expected);
+    Ok(())
+}
+
+#[test]
+fn entries_swapped_or_removed_after_their_copy_are_never_deleted() -> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    // After the copy: a folder swapped for a file, an entry someone else
+    // removed, and a folder put back at the moved folder's name once its
+    // last entry went.
+    for row in ["swapped", "removed", "put back"] {
+        let root = tempfile::tempdir()?;
+        let folder = root.path().join("source/folder");
+        fs::create_dir_all(folder.join("sub"))?;
+        fs::write(folder.join("a.txt"), b"a")?;
+        fs::write(folder.join("sub/b.txt"), b"b")?;
+        let at = folder.clone();
+        let (before, after) = match row {
+            "swapped" => {
+                let racer: super::fs_quirks::Racer = Box::new(move || {
+                    fs::remove_dir_all(at.join("sub")).expect("remove the folder");
+                    fs::write(at.join("sub"), b"a file now").expect("put a file there");
+                });
+                (vec![(Op::OpenDir, "sub", 1, racer)], Vec::new())
+            }
+            "removed" => {
+                let racer: super::fs_quirks::Racer = Box::new(move || {
+                    fs::remove_file(at.join("a.txt")).expect("remove the file");
+                });
+                (vec![(Op::OpenDir, "folder", 1, racer)], Vec::new())
+            }
+            _ => {
+                let racer: super::fs_quirks::Racer = Box::new(move || {
+                    fs::rename(&at, at.with_file_name("emptied")).expect("move it");
+                    fs::create_dir(&at).expect("make another folder");
+                });
+                (Vec::new(), vec![(Op::Unlink, "a.txt", 0, racer)])
+            }
+        };
+        let quirks = Quirks {
+            before,
+            after,
+            ..Quirks::default()
+        };
+
+        let (moved, report, _) = move_across_volumes(&folder, quirks)?;
+
+        assert_eq!(fs::read(moved.join("sub/b.txt"))?, b"b", "{row}");
+        match row {
+            "swapped" => {
+                assert_eq!(fs::read(folder.join("sub"))?, b"a file now", "{row}");
+                assert_eq!(report.kept, [kept(folder.join("sub"), KeptCause::Changed)]);
+            }
+            "removed" => {
+                assert!(!folder.exists(), "{row}");
+                assert_eq!(report, TransferReport::default(), "{row}");
+            }
+            _ => {
+                assert_eq!(names(&folder)?, Vec::<String>::new(), "{row}");
+                assert_eq!(report, TransferReport::default(), "{row}");
+            }
+        }
+    }
     Ok(())
 }
 

@@ -63,6 +63,8 @@ impl SourceSnapshot {
             // Nothing tells which names of a file this deletion removed.
             return same && (current.ctime == self.ctime || self.nlink > 1);
         }
+        // Every change to an entry moves its change time; the identity and
+        // link count are defence in depth.
         same && current.identity == self.identity
             && current.nlink + unlinked == self.nlink
             && (current.ctime == self.ctime || unlinked > 0)
