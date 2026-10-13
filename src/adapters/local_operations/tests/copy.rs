@@ -692,7 +692,6 @@ fn special_files_inside_a_copied_folder_are_recreated_or_left_out_and_reported()
         .map_err(|error| error.to_string())?;
     for (row, preset, pipes) in [
         ("tmpfs", Quirks::default as Preset, true),
-        ("ext4", Quirks::ext4, true),
         ("vfat", Quirks::vfat, false),
     ] {
         let root = tempfile::tempdir()?;
@@ -763,6 +762,67 @@ fn special_files_inside_a_copied_folder_are_recreated_or_left_out_and_reported()
                 index.to_string(),
                 "{row}"
             );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn named_pipes_are_left_out_only_where_the_destination_refuses_them() -> Result<(), Box<dyn Error>>
+{
+    use rustix::io::Errno;
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    // How vfat, exfat-fuse, SMB and others refuse a pipe, and errors that
+    // stop the copy instead.
+    let rows = [
+        (Errno::PERM, true),
+        (Errno::IO, true),
+        (Errno::OPNOTSUPP, true),
+        (Errno::NOSYS, true),
+        (Errno::INVAL, true),
+        (Errno::NOSPC, false),
+        (Errno::ACCESS, false),
+    ];
+    for (errno, refused) in rows {
+        let root = tempfile::tempdir()?;
+        let source = root.path().join("source");
+        let destination = root.path().join("destination");
+        fs::create_dir_all(&source)?;
+        fs::create_dir(&destination)?;
+        make_fifo(&source.join("pipe"), 0o600)?;
+        fs::write(source.join("file.txt"), b"file")?;
+        let _destination = FsQuirks::install(
+            &destination,
+            Quirks {
+                fifos: fs_quirks::Support::Rejected(errno),
+                ..Quirks::default()
+            },
+        );
+        let target = destination.join("copy");
+
+        let copied = copy_reporting(&source, &target, None);
+
+        if refused {
+            let report = copied.map_err(|error| format!("{errno:?}: {error}"))?;
+            let skipped = report
+                .skipped
+                .into_iter()
+                .map(|item| (item.location, item.kind))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                skipped,
+                [(
+                    Location::local(target.join("pipe")),
+                    crate::services::SpecialKind::Pipe
+                )],
+                "{errno:?}"
+            );
+            assert_eq!(names(&target)?, ["file.txt"], "{errno:?}");
+        } else {
+            assert!(copied.is_err(), "{errno:?}");
+            assert_eq!(names(&destination)?, Vec::<String>::new(), "{errno:?}");
         }
     }
     Ok(())
@@ -851,9 +911,13 @@ fn a_selected_named_pipe_is_recreated_where_the_destination_can() -> Result<(), 
             );
         } else {
             let error = copied.expect_err("vfat has no named pipes");
-            assert!(
-                error.message().contains("not a regular file"),
-                "{row}: {error}"
+            assert_eq!(
+                error.message(),
+                rust_i18n::t!(
+                    "Cannot copy %{name}: it is not a regular file, directory, or symbolic link",
+                    name = "pipe"
+                ),
+                "{row}"
             );
             assert_eq!(names(&destination)?, Vec::<String>::new(), "{row}");
         }
