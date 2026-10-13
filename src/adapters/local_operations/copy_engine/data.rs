@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: MIT
 
 //! The data ladder: one clone, then `copy_file_range` in chunks, then reads
-//! and writes. Progress and cancellation are checked between calls.
+//! and writes, leaving out the holes of sparse local files. Progress and
+//! cancellation are checked between calls.
 
 use std::{
     os::fd::BorrowedFd,
@@ -87,6 +88,8 @@ pub(super) struct Route {
     clone: bool,
     /// The largest `copy_file_range` request, where it may run at all.
     copy_range: Option<usize>,
+    /// Whether the holes the source reports are left out of the copy.
+    holes: bool,
 }
 
 impl Route {
@@ -120,6 +123,67 @@ impl Route {
             } else {
                 64 * MIB
             }),
+            holes: sparse(source_stat)
+                && stores_holes(target.family)
+                && reports_holes(Mount::new(fs, source).family),
+        }
+    }
+}
+
+/// Whether a file of at least 1 MiB has fewer blocks than its size, as
+/// `cp --sparse=auto` decides.
+fn sparse(stat: &EntryStat) -> bool {
+    stat.size >= 1 << 20 && stat.blocks.saturating_mul(512) < stat.size
+}
+
+/// FAT, exFAT and ntfs3 fill a skipped hole with zeros within one call,
+/// which reports no progress and cannot be cancelled.
+fn stores_holes(family: Family) -> bool {
+    !matches!(family, Family::Fat | Family::Ntfs3)
+}
+
+/// Some ZFS releases report holes over unsynced data, also through NFS.
+fn reports_holes(family: Family) -> bool {
+    matches!(
+        family,
+        Family::Ext | Family::Xfs | Family::Btrfs | Family::Tmpfs | Family::F2fs
+    )
+}
+
+fn holes_unknown(error: Errno) -> bool {
+    matches!(error, Errno::INVAL | Errno::OPNOTSUPP | ENOTSUPP)
+}
+
+/// The two open files of one copy, and its cancel flag.
+#[derive(Clone, Copy)]
+struct Ends<'a> {
+    fs: &'a dyn FsOps,
+    cancelled: &'a AtomicBool,
+    source: BorrowedFd<'a>,
+    target: BorrowedFd<'a>,
+}
+
+impl Ends<'_> {
+    fn check_cancelled(&self) -> Result<(), Failure> {
+        if self.cancelled.load(Ordering::Acquire) {
+            return Err(Failure::Cancelled);
+        }
+        Ok(())
+    }
+}
+
+/// Where a span of the copy stops.
+#[derive(Clone, Copy)]
+enum Until {
+    At(u64),
+    /// The end of the file, expected at this offset.
+    End(u64),
+}
+
+impl Until {
+    fn expected(self) -> u64 {
+        match self {
+            Self::At(offset) | Self::End(offset) => offset,
         }
     }
 }
@@ -128,6 +192,14 @@ enum Ranged {
     Done,
     /// Reads and writes continue from this offset.
     From(u64),
+}
+
+/// How far leaving out holes took the copy.
+enum Walked {
+    /// Up to the size seen at open, with the copy given that size.
+    Done,
+    /// The source cannot tell its holes from here on.
+    Dense(u64),
 }
 
 #[derive(Default)]
@@ -168,46 +240,102 @@ impl Data {
                 }
             }
         }
+        let ends = Ends {
+            fs,
+            cancelled,
+            source,
+            target,
+        };
         let mut offset = 0;
+        if route.holes {
+            match self.copy_data_ranges(ends, route, size, &mut progress)? {
+                // On past the size, which the source may have outgrown.
+                Walked::Done => {
+                    return self.read_write(ends, size, Until::End(size), &mut progress);
+                }
+                Walked::Dense(from) => offset = from,
+            }
+        }
+        self.copy_span(ends, route, offset, Until::End(size), &mut progress)
+    }
+
+    /// Copies the data the source reports before `size` and skips its
+    /// holes, counting them as copied.
+    fn copy_data_ranges(
+        &mut self,
+        ends: Ends<'_>,
+        route: &Route,
+        size: u64,
+        progress: &mut impl FnMut(u64),
+    ) -> Result<Walked, Failure> {
+        let mut offset = 0;
+        while offset < size {
+            ends.check_cancelled()?;
+            let data = match ends.fs.seek_data(ends.source, offset) {
+                Ok(data) => data.clamp(offset, size),
+                Err(Errno::NXIO) => size,
+                Err(error) if holes_unknown(error) => return Ok(Walked::Dense(offset)),
+                Err(error) => return Err(error.into()),
+            };
+            let hole = if data < size {
+                match ends.fs.seek_hole(ends.source, data) {
+                    Ok(hole) => hole.clamp(data, size),
+                    Err(Errno::NXIO) => size,
+                    Err(error) if holes_unknown(error) => return Ok(Walked::Dense(offset)),
+                    Err(error) => return Err(error.into()),
+                }
+            } else {
+                size
+            };
+            if data == 0 && hole == size {
+                return Ok(Walked::Dense(0));
+            }
+            progress(data - offset);
+            if data < hole {
+                self.copy_span(ends, route, data, Until::At(hole), progress)?;
+            }
+            offset = hole;
+        }
+        ends.fs.set_len(ends.target, size)?;
+        Ok(Walked::Done)
+    }
+
+    /// Copies from `offset` with `copy_file_range` where it may run, then
+    /// with reads and writes.
+    fn copy_span(
+        &mut self,
+        ends: Ends<'_>,
+        route: &Route,
+        mut offset: u64,
+        until: Until,
+        progress: &mut impl FnMut(u64),
+    ) -> Result<(), Failure> {
         if let Some(largest) = route.copy_range.filter(|_| !self.copy_range_slow) {
-            match self.copy_ranges(
-                fs,
-                cancelled,
-                (source, target),
-                size,
-                largest,
-                &mut progress,
-            )? {
+            match self.copy_ranges(ends, (offset, until.expected()), largest, progress)? {
                 Ranged::Done => return Ok(()),
                 Ranged::From(copied) => offset = copied,
             }
         }
-        self.read_write(
-            fs,
-            cancelled,
-            (source, target),
-            (offset, size),
-            &mut progress,
-        )
+        self.read_write(ends, offset, until, progress)
     }
 
     fn copy_ranges(
         &mut self,
-        fs: &dyn FsOps,
-        cancelled: &AtomicBool,
-        (source, target): (BorrowedFd<'_>, BorrowedFd<'_>),
-        size: u64,
+        ends: Ends<'_>,
+        (mut offset, end): (u64, u64),
         largest: usize,
         progress: &mut impl FnMut(u64),
     ) -> Result<Ranged, Failure> {
-        let mut offset = 0;
         let mut chunk = MIB.min(largest);
         loop {
-            if cancelled.load(Ordering::Acquire) {
-                return Err(Failure::Cancelled);
-            }
+            ends.check_cancelled()?;
+            let request =
+                usize::try_from(end.saturating_sub(offset)).map_or(chunk, |left| left.min(chunk));
             let started = Instant::now();
-            let copied = match fs.copy_range(source, offset, target, offset, chunk) {
+            let copied = match ends
+                .fs
+                .copy_range(ends.source, offset, ends.target, offset, request)
+            {
                 Ok(copied) => copied,
                 Err(Errno::INTR) => continue,
                 Err(Errno::NOSYS) => {
@@ -234,7 +362,7 @@ impl Data {
             }
             offset += copied as u64;
             progress(copied as u64);
-            if offset >= size {
+            if offset >= end {
                 return Ok(Ranged::Done);
             }
             if elapsed > Duration::from_secs(1) && chunk <= 2 * MIB {
@@ -251,22 +379,31 @@ impl Data {
 
     fn read_write(
         &mut self,
-        fs: &dyn FsOps,
-        cancelled: &AtomicBool,
-        (source, target): (BorrowedFd<'_>, BorrowedFd<'_>),
-        (mut offset, size): (u64, u64),
+        ends: Ends<'_>,
+        mut offset: u64,
+        until: Until,
         progress: &mut impl FnMut(u64),
     ) -> Result<(), Failure> {
-        // Sized by the file, so copying a small one maps no large buffer.
-        let wanted = usize::try_from(size).map_or(MIB, |size| size.clamp(64 * 1024, MIB));
+        // Sized by what is left, so copying a small file maps no large buffer.
+        let wanted = usize::try_from(until.expected().saturating_sub(offset))
+            .map_or(MIB, |left| left.clamp(64 * 1024, MIB));
         if self.buffer.len() < wanted {
             self.buffer = vec![0; wanted];
         }
         loop {
-            if cancelled.load(Ordering::Acquire) {
-                return Err(Failure::Cancelled);
+            ends.check_cancelled()?;
+            let limit = match until {
+                Until::At(end) => usize::try_from(end.saturating_sub(offset))
+                    .map_or(self.buffer.len(), |left| left.min(self.buffer.len())),
+                Until::End(_) => self.buffer.len(),
+            };
+            if limit == 0 {
+                return Ok(());
             }
-            let read = match fs.read_at(source, &mut self.buffer, offset) {
+            let read = match ends
+                .fs
+                .read_at(ends.source, &mut self.buffer[..limit], offset)
+            {
                 Ok(read) => read,
                 Err(Errno::INTR) => continue,
                 Err(error) => return Err(error.into()),
@@ -276,7 +413,11 @@ impl Data {
             }
             let mut written = 0;
             while written < read {
-                match fs.write_at(target, &self.buffer[written..read], offset + written as u64) {
+                match ends.fs.write_at(
+                    ends.target,
+                    &self.buffer[written..read],
+                    offset + written as u64,
+                ) {
                     Ok(0) => return Err(Errno::IO.into()),
                     Ok(count) => written += count,
                     Err(Errno::INTR) => {}

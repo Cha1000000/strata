@@ -53,6 +53,8 @@ pub(crate) enum Op {
     Read,
     Write,
     SetLen,
+    SeekData,
+    SeekHole,
     SyncData,
     SyncFs,
     SyncDir,
@@ -1259,6 +1261,16 @@ impl FsOps for Scoped {
     fn set_len(&self, fd: BorrowedFd<'_>, len: u64) -> Result<(), Errno> {
         assert_off_main_thread();
         on_fd(fd, Op::SetLen, None, |_| System.set_len(fd, len))
+    }
+
+    fn seek_data(&self, fd: BorrowedFd<'_>, offset: u64) -> Result<u64, Errno> {
+        assert_off_main_thread();
+        on_fd(fd, Op::SeekData, None, |_| System.seek_data(fd, offset))
+    }
+
+    fn seek_hole(&self, fd: BorrowedFd<'_>, offset: u64) -> Result<u64, Errno> {
+        assert_off_main_thread();
+        on_fd(fd, Op::SeekHole, None, |_| System.seek_hole(fd, offset))
     }
 
     fn sync_data(&self, fd: BorrowedFd<'_>) -> Result<(), Errno> {

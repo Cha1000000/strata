@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: MIT
 
 use std::{
-    os::unix::fs::{MetadataExt, PermissionsExt},
+    io::Write,
+    os::unix::fs::{FileExt, MetadataExt, PermissionsExt},
     sync::Mutex,
 };
 
@@ -483,6 +484,119 @@ fn copy_range_refused_across_mounts_continues_with_reads_and_writes() -> Result<
         .ok_or("copy_file_range was not tried")?;
     assert!(calls[range..].contains(&Op::Write), "{calls:?}");
     assert_eq!(fs::read(mounts.target())?, contents);
+    Ok(())
+}
+
+/// Writes a 64 KiB run of data, a 16 MiB hole, another run and a 1 MiB
+/// hole, and returns the size.
+fn write_sparse(path: &Path) -> io::Result<u64> {
+    let run = patterned(64 * 1024);
+    let second = run.len() as u64 + 16 * 1024 * 1024;
+    let size = second + run.len() as u64 + 1024 * 1024;
+    let file = fs::File::create(path)?;
+    file.write_all_at(&run, 0)?;
+    file.write_all_at(&run, second)?;
+    file.set_len(size)?;
+    Ok(size)
+}
+
+fn append_to(path: &Path) -> Racer {
+    let path = path.to_path_buf();
+    Box::new(move || {
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .and_then(|mut file| file.write_all(&[7; 64 * 1024]))
+            .expect("grow the source");
+    })
+}
+
+#[test]
+fn sparse_files_keep_their_holes_where_both_ends_can() -> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock()?;
+    let (ext4, vfat): (Preset, Preset) = (Quirks::ext4, Quirks::vfat);
+    let zfs: Preset = || Quirks {
+        mount_type: Some(("zfs", "rw")),
+        ..Quirks::default()
+    };
+    let holes_unknown: Preset = || Quirks {
+        fail: vec![(Op::SeekData, "*", 0, Errno::OPNOTSUPP)],
+        ..Quirks::ext4()
+    };
+    for (case, source_preset, destination_preset, grows, kept) in [
+        ("one mount", ext4, None, false, true),
+        ("two mounts", ext4, Some(ext4), false, true),
+        ("grown meanwhile", ext4, Some(ext4), true, true),
+        ("FAT target", ext4, Some(vfat), false, false),
+        ("ZFS source", zfs, Some(ext4), false, false),
+        ("holes unknown", holes_unknown, Some(ext4), false, false),
+    ] {
+        let root = tempfile::tempdir()?;
+        let sources = root.path().join("sources");
+        let destination = root.path().join("destination");
+        fs::create_dir(&sources)?;
+        fs::create_dir(&destination)?;
+        let source = sources.join("source.img");
+        let size = write_sparse(&source)?;
+        let mut quirks = Quirks {
+            reflink: Support::Rejected(Errno::OPNOTSUPP),
+            ..source_preset()
+        };
+        if grows {
+            quirks
+                .before
+                .push((Op::SeekHole, "source.img", 0, append_to(&source)));
+        }
+        let _scopes = match destination_preset {
+            None => vec![FsQuirks::install(root.path(), quirks)],
+            Some(preset) => vec![
+                FsQuirks::install(&sources, quirks),
+                FsQuirks::install(&destination, preset()),
+            ],
+        };
+
+        let events = run_paste(PasteRequest {
+            id: OperationRequestId(1),
+            destination: Location::local(&destination),
+            items: vec![PasteItem {
+                source: Location::local(&source),
+                conflict: TransferConflict::FailIfExists,
+            }],
+            move_sources: false,
+        });
+
+        let copy = destination.join("source.img");
+        assert!(
+            fs::read(&copy)? == fs::read(&source)?,
+            "{case}: the copy differs"
+        );
+        let allocated = fs::metadata(&copy)?.blocks() * 512;
+        if kept {
+            let source_allocated = fs::metadata(&source)?.blocks() * 512;
+            assert!(
+                allocated <= 2 * source_allocated,
+                "{case}: {allocated} bytes allocated for {source_allocated} of data"
+            );
+        } else {
+            assert!(
+                allocated >= size,
+                "{case}: {allocated} of {size} bytes allocated"
+            );
+        }
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                OperationEvent::TransferProgress {
+                    completed_items: 0,
+                    completed_files: 1,
+                    transferred_bytes,
+                    total_bytes: Some(total),
+                    ..
+                } if transferred_bytes == total
+            )),
+            "{case}: the file was not counted whole: {events:?}"
+        );
+    }
     Ok(())
 }
 

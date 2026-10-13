@@ -15,7 +15,9 @@ use std::{
 use gtk::{gio, glib, prelude::*};
 
 use rustix::{
-    fs::{AtFlags, FileType, FsWord, Mode, OFlags, RenameFlags, ResolveFlags, StatxFlags},
+    fs::{
+        AtFlags, FileType, FsWord, Mode, OFlags, RenameFlags, ResolveFlags, SeekFrom, StatxFlags,
+    },
     io::Errno,
 };
 
@@ -48,6 +50,8 @@ pub(super) struct EntryStat {
     pub mode: u32,
     pub nlink: u64,
     pub size: u64,
+    /// 512-byte blocks allocated.
+    pub blocks: u64,
     pub atime: (i64, u32),
     pub mtime: (i64, u32),
     pub ctime: (i64, u32),
@@ -106,6 +110,11 @@ pub(super) trait FsOps: Send + Sync {
     fn read_at(&self, fd: BorrowedFd<'_>, buffer: &mut [u8], offset: u64) -> Result<usize, Errno>;
     fn write_at(&self, fd: BorrowedFd<'_>, buffer: &[u8], offset: u64) -> Result<usize, Errno>;
     fn set_len(&self, fd: BorrowedFd<'_>, len: u64) -> Result<(), Errno>;
+    /// Where the first data at or after `offset` starts (`SEEK_DATA`).
+    fn seek_data(&self, fd: BorrowedFd<'_>, offset: u64) -> Result<u64, Errno>;
+    /// Where the first hole at or after `offset` starts (`SEEK_HOLE`); the
+    /// end of the file counts as one.
+    fn seek_hole(&self, fd: BorrowedFd<'_>, offset: u64) -> Result<u64, Errno>;
     /// `fdatasync`.
     fn sync_data(&self, fd: BorrowedFd<'_>) -> Result<(), Errno>;
     /// `syncfs`, which reports the writeback errors since `fd` was opened.
@@ -190,6 +199,7 @@ fn entry_stat(stat: &rustix::fs::Statx) -> EntryStat {
         mode: u32::from(stat.stx_mode) & 0o7777,
         nlink: u64::from(stat.stx_nlink),
         size: stat.stx_size,
+        blocks: stat.stx_blocks,
         atime: (stat.stx_atime.tv_sec, stat.stx_atime.tv_nsec),
         mtime: (stat.stx_mtime.tv_sec, stat.stx_mtime.tv_nsec),
         ctime: (stat.stx_ctime.tv_sec, stat.stx_ctime.tv_nsec),
@@ -205,6 +215,7 @@ fn legacy_stat(stat: &rustix::fs::Stat) -> EntryStat {
         mode: stat.st_mode & 0o7777,
         nlink: stat.st_nlink,
         size: u64::try_from(stat.st_size).unwrap_or(u64::MAX),
+        blocks: u64::try_from(stat.st_blocks).unwrap_or_default(),
         atime: (
             stat.st_atime,
             u32::try_from(stat.st_atime_nsec).unwrap_or_default(),
@@ -228,6 +239,7 @@ fn statx_at(dir: BorrowedFd<'_>, name: &OsStr, flags: AtFlags) -> Result<EntrySt
         | StatxFlags::INO
         | StatxFlags::NLINK
         | StatxFlags::SIZE
+        | StatxFlags::BLOCKS
         | StatxFlags::ATIME
         | StatxFlags::MTIME
         | StatxFlags::CTIME
@@ -520,6 +532,16 @@ impl FsOps for System {
     fn set_len(&self, fd: BorrowedFd<'_>, len: u64) -> Result<(), Errno> {
         assert_off_main_thread();
         rustix::fs::ftruncate(fd, len)
+    }
+
+    fn seek_data(&self, fd: BorrowedFd<'_>, offset: u64) -> Result<u64, Errno> {
+        assert_off_main_thread();
+        rustix::fs::seek(fd, SeekFrom::Data(offset))
+    }
+
+    fn seek_hole(&self, fd: BorrowedFd<'_>, offset: u64) -> Result<u64, Errno> {
+        assert_off_main_thread();
+        rustix::fs::seek(fd, SeekFrom::Hole(offset))
     }
 
     fn sync_data(&self, fd: BorrowedFd<'_>) -> Result<(), Errno> {
