@@ -352,6 +352,26 @@ fn connection_loss_while_copying_metadata_fails_the_copy() -> Result<(), Box<dyn
 }
 
 #[test]
+fn a_link_whose_times_fail_with_eio_is_not_left_behind() -> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock()?;
+    let root = tempfile::tempdir()?;
+    let source = root.path().join("source");
+    std::os::unix::fs::symlink("elsewhere", &source)?;
+    let _scope = FsQuirks::install(
+        root.path(),
+        Quirks {
+            fail: vec![(Op::SetLinkTimes, "*", 0, Errno::IO)],
+            ..Quirks::default()
+        },
+    );
+
+    copy(&source, &root.path().join("target")).expect_err("the device fails");
+
+    assert_eq!(names(root.path())?, ["source"]);
+    Ok(())
+}
+
+#[test]
 fn a_clone_failing_with_eio_is_not_retried() -> Result<(), Box<dyn Error>> {
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock()?;
     let root = tempfile::tempdir()?;

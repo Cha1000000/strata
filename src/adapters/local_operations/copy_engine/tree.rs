@@ -527,8 +527,14 @@ pub(super) fn copy_link(
         })?;
     }
     // sshfs sets a link's times on what it points to.
-    if mount.family != Family::Fuse {
-        best_effort(fs.set_link_times(target, stat.atime, stat.mtime))?;
+    if mount.family != Family::Fuse
+        && let Err(error) = best_effort(fs.set_link_times(target, stat.atime, stat.mtime))
+    {
+        // The copy failed, so its link must not stay at a real name.
+        if fs.readlink(target).is_ok_and(|current| current == link) {
+            let _ = fs.unlink(target, AtFlags::empty());
+        }
+        return Err(error.into());
     }
     copy.add_file(stat.size);
     Ok(())
