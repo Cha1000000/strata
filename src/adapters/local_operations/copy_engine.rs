@@ -931,13 +931,33 @@ impl Copy {
         if !lost {
             return Ok(());
         }
-        let reopened = match self.fs.open_source(entry) {
+        let fs = self.fs;
+        let reopened = match fs.open_source(entry) {
+            // A mode that gives the owner no read, as a copy of another
+            // user's file readable through its group or others may have.
+            Err(Errno::ACCESS) => fs.open_write(entry).and_then(|fd| {
+                let stat = fs.stat_fd(fd.as_fd())?;
+                Ok(Some((fd, stat)))
+            }),
+            opened => opened,
+        };
+        let reopened = match reopened {
             Ok(Some((fd, stat))) if same_entry(&stat, identity, family) => fd,
+            // Setting times by name needs only ownership.
+            Err(Errno::ACCESS) => {
+                return match fs.stat(entry, true) {
+                    Ok(current) if same_entry(&current, identity, family) => {
+                        Ok(snapshot.apply_times_at(fs, entry)?)
+                    }
+                    Err(error) if is_fatal(error) => Err(error.into()),
+                    _ => Ok(()),
+                };
+            }
             Err(error) if is_fatal(error) => return Err(error.into()),
             _ => return Ok(()),
         };
-        snapshot.apply_times(self.fs, reopened.as_fd())?;
-        match self.fs.close(reopened) {
+        snapshot.apply_times(fs, reopened.as_fd())?;
+        match fs.close(reopened) {
             Err(error) if is_fatal(error) => Err(error.into()),
             _ => Ok(()),
         }

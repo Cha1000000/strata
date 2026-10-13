@@ -15,7 +15,7 @@ use rustix::io::Errno;
 
 use super::{Mount, best_effort, is_fatal, is_unsupported, lock};
 use crate::adapters::{
-    local_operations::fs_ops::{EntryStat, FsOps},
+    local_operations::fs_ops::{Entry, EntryStat, FsOps},
     volume::XattrNamespace,
 };
 
@@ -178,6 +178,10 @@ impl Snapshot {
 
     pub(super) fn apply_times(&self, fs: &dyn FsOps, fd: BorrowedFd<'_>) -> Result<(), Errno> {
         best_effort(fs.set_times_fd(fd, self.atime, self.mtime))
+    }
+
+    pub(super) fn apply_times_at(&self, fs: &dyn FsOps, entry: Entry<'_>) -> Result<(), Errno> {
+        best_effort(fs.set_link_times(entry, self.atime, self.mtime))
     }
 
     pub(super) fn times_match(&self, current: &EntryStat) -> bool {

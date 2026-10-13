@@ -183,6 +183,9 @@ pub(crate) struct Quirks {
     pub virtual_sizes: bool,
     /// `FICLONE`, which btrfs and XFS hosts would otherwise perform.
     pub reflink: Support,
+    /// Entries matching the name report this mode, as another user's file
+    /// readable through its group or others does to the user copying it.
+    pub reported_mode: Option<(&'static str, u32)>,
 }
 
 impl Quirks {
@@ -466,6 +469,13 @@ impl Scope {
         }
         if state.quirks.single_link_count {
             stat.nlink = 1;
+        }
+        if let (Some((pattern, mode)), Some(name)) = (
+            state.quirks.reported_mode,
+            path.as_deref().and_then(Path::file_name),
+        ) && matches(pattern, &[name])
+        {
+            stat.mode = mode;
         }
         if let (Some(pattern), Some(path)) = (state.quirks.reused_inodes, path)
             && path

@@ -424,6 +424,31 @@ fn times_survive_filesystems_that_reset_them() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
+fn copies_their_owner_cannot_read_keep_their_times_on_nfs4() -> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock()?;
+    // The owner may only write the first copy, and neither read nor write the second.
+    for mode in [0o244, 0o044] {
+        let mounts = mounts(
+            Quirks {
+                reported_mode: Some(("source.bin", mode)),
+                ..Quirks::default()
+            },
+            |_| Quirks::nfs42(),
+        )?;
+        let source = mounts.source(b"contents")?;
+        let modified = SystemTime::UNIX_EPOCH + Duration::from_secs(1_600_000_000);
+        fs::File::open(&source)?.set_modified(modified)?;
+
+        copy(&source, &mounts.target())?;
+
+        let copied = fs::metadata(mounts.target())?;
+        assert_eq!(copied.mode() & 0o777, mode, "{mode:o}");
+        assert_eq!(copied.modified()?, modified, "{mode:o}");
+    }
+    Ok(())
+}
+
+#[test]
 fn special_bits_are_dropped_when_the_owner_cannot_be_kept() -> Result<(), Box<dyn Error>> {
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock()?;
     for (case, mode, shared_destination) in [
