@@ -332,6 +332,61 @@ fn a_failed_restore_copy_removes_only_what_it_made() -> Result<(), Box<dyn Error
 }
 
 #[test]
+fn a_failed_restore_copy_of_a_file_leaves_nothing_at_its_name() -> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock()?;
+    let fixture = tempfile::tempdir()?;
+    let source = fixture.path().join("source");
+    fs::write(&source, b"original")?;
+    let destination = fixture.path().join("destination");
+    let _scope = FsQuirks::install(
+        fixture.path(),
+        Quirks {
+            fail: vec![(Op::SetTimes, "destination", 0, Errno::IO)],
+            ..Quirks::without_placement()
+        },
+    );
+
+    assert!(restore_path(&source, &destination, fixture.path()).is_err());
+
+    assert!(fs::symlink_metadata(&destination).is_err());
+    assert_eq!(fs::read(&source)?, b"original");
+    Ok(())
+}
+
+#[test]
+fn a_restore_cancelled_once_its_copy_is_complete_finishes() -> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock()?;
+    let fixture = tempfile::tempdir()?;
+    let source = fixture.path().join("source");
+    fs::create_dir(&source)?;
+    fs::write(source.join("contents"), b"original")?;
+    let destination = fixture.path().join("destination");
+    let cancellable = gio::Cancellable::new();
+    let cancel = cancellable.clone();
+    let racer: Racer = Box::new(move || cancel.cancel());
+    let _scope = FsQuirks::install(
+        fixture.path(),
+        Quirks {
+            mount_type: Some(("ext4", "rw")),
+            before: vec![(Op::SyncFs, "*", 0, racer)],
+            ..Quirks::without_placement()
+        },
+    );
+
+    glib::MainContext::default().block_on(move_restore_path(
+        source.clone(),
+        destination.clone(),
+        fixture.path().to_path_buf(),
+        Arc::default(),
+        cancellable,
+    ))?;
+
+    assert_eq!(fs::read(destination.join("contents"))?, b"original");
+    assert!(fs::symlink_metadata(&source).is_err());
+    Ok(())
+}
+
+#[test]
 fn restore_copies_keep_the_metadata_the_destination_takes() -> Result<(), Box<dyn Error>> {
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock()?;
     let refusing = || Quirks {
