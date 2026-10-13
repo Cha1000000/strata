@@ -23,18 +23,33 @@ fn renamed(count: usize) -> TransferReport {
 }
 
 #[test]
-fn a_few_renamed_items_get_a_notice_and_more_get_a_dialog() {
+fn one_short_renamed_line_gets_a_notice_and_anything_more_a_dialog() {
     assert_eq!(presentation(&TransferReport::default(), false), None);
-    for (count, listed) in [(1, 1), (2, 2), (3, 3), (9, LISTED_ITEMS)] {
-        match presentation(&renamed(count), false) {
+    let long = "a name long enough that the notice would cut its line short";
+    let long = TransferReport {
+        renamed: vec![RenamedItem {
+            requested: Location::local(format!("/copy/{long}")),
+            saved_as: Location::local(format!("/copy/{long} (1)")),
+            cause: RenameCause::Alias,
+        }],
+        ..TransferReport::default()
+    };
+    for (report, notice, listed) in [
+        (renamed(1), true, 1),
+        (long, false, 1),
+        (renamed(2), false, 2),
+        (renamed(9), false, LISTED_ITEMS),
+    ] {
+        let count = report.renamed.len();
+        match presentation(&report, false) {
             Some(Presentation::Notice { text, .. }) => {
-                assert!(count <= NOTICE_ITEMS, "{count}");
-                assert_eq!(text.lines().count(), listed);
+                assert!(notice, "{count}");
+                assert_eq!(text, renamed_line(&report.renamed[0]));
             }
             Some(Presentation::Information {
                 message, detail, ..
             }) => {
-                assert!(count > NOTICE_ITEMS, "{count}");
+                assert!(!notice, "{count}");
                 assert_eq!(message, crate::i18n::count("items_renamed", count));
                 assert_eq!(detail.matches('•').count(), listed, "{count}");
                 assert_eq!(
@@ -157,9 +172,21 @@ fn items_left_out_or_left_behind_make_the_report_a_warning() {
 }
 
 fn shows(overlay: &gtk::Overlay, class: &str) -> bool {
+    shows_widget(overlay, |widget| widget.has_css_class(class))
+}
+
+fn shows_text(overlay: &gtk::Overlay, text: &str) -> bool {
+    shows_widget(overlay, |widget| {
+        widget
+            .downcast_ref::<gtk::Label>()
+            .is_some_and(|label| label.label() == text)
+    })
+}
+
+fn shows_widget(overlay: &gtk::Overlay, found: impl Fn(&gtk::Widget) -> bool) -> bool {
     let mut stack = vec![overlay.clone().upcast::<gtk::Widget>()];
     while let Some(widget) = stack.pop() {
-        if widget.has_css_class(class) {
+        if found(&widget) {
             return true;
         }
         let mut child = widget.first_child();
@@ -186,7 +213,7 @@ fn a_report_after_a_transfer_shows_its_notice_or_dialog() {
             for (report, background, dialog) in [
                 (renamed(1), false, false),
                 (renamed(3), false, true),
-                (renamed(2), true, false),
+                (renamed(1), true, false),
                 (renamed(3), true, true),
                 (left_out, false, true),
             ] {
@@ -198,6 +225,9 @@ fn a_report_after_a_transfer_shows_its_notice_or_dialog() {
                 let overlay = view.overlay();
                 let window = gtk::Window::builder().child(&overlay).build();
                 window.present();
+                // The notice a Send to that finished quickly shows.
+                let sent = "Copied to USB";
+                crate::ui::notice::show_notice(&overlay, None, sent, NOTICE_DURATION);
                 let event = BrowserEvent::ItemsReported {
                     report,
                     stopped: false,
@@ -217,8 +247,10 @@ fn a_report_after_a_transfer_shows_its_notice_or_dialog() {
                 while context.pending() {
                     context.iteration(false);
                 }
-                assert_eq!(shows(&overlay, "overlay-notice"), !dialog, "{row}");
+                let report_notice = shows_text(&overlay, &renamed_line(&renamed(1).renamed[0]));
+                assert_eq!(report_notice, !dialog, "{row}");
                 assert_eq!(shows(&overlay, "app-modal-layer"), dialog, "{row}");
+                assert!(shows_text(&overlay, sent), "{row}");
                 window.destroy();
             }
         },

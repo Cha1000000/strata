@@ -18,8 +18,9 @@ mod tests;
 const NOTICE_DURATION: Duration = Duration::from_secs(6);
 /// Items a dialog lists before it counts the rest.
 const LISTED_ITEMS: usize = 8;
-/// Items a notice lists; more go to a dialog.
-const NOTICE_ITEMS: usize = 2;
+/// The longest line a notice shows whole, in characters; more items, or a
+/// longer line, go to a dialog.
+const NOTICE_CHARS: usize = 120;
 
 #[derive(Debug, Eq, PartialEq)]
 enum Presentation {
@@ -200,10 +201,12 @@ fn presentation(report: &TransferReport, stopped: bool) -> Option<Presentation> 
         });
     }
     let (heading, lines) = renamed.pop()?;
-    if lines.len() <= NOTICE_ITEMS {
+    if let [line] = lines.as_slice()
+        && line.chars().count() <= NOTICE_CHARS
+    {
         return Some(Presentation::Notice {
             heading,
-            text: lines.join("\n"),
+            text: line.clone(),
         });
     }
     Some(Presentation::Information {
@@ -216,12 +219,9 @@ fn presentation(report: &TransferReport, stopped: bool) -> Option<Presentation> 
 impl ViewState {
     pub(super) fn show_transfer_report(&self, report: &TransferReport, stopped: bool) {
         match presentation(report, stopped) {
-            Some(Presentation::Notice { heading, text }) => crate::ui::notice::show_notice(
-                &self.overlay,
-                Some(&heading),
-                &text,
-                NOTICE_DURATION,
-            ),
+            Some(Presentation::Notice { heading, text }) => {
+                crate::ui::notice::add_notice(&self.overlay, Some(&heading), &text, NOTICE_DURATION)
+            }
             Some(Presentation::Information {
                 message,
                 summary,

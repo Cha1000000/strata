@@ -12,13 +12,36 @@ pub(super) fn show_notice(
     text: &str,
     duration: Duration,
 ) {
+    show(overlay, heading, text, duration, true);
+}
+
+/// [`show_notice`] beside any notice still visible, as one about the same
+/// operation.
+pub(super) fn add_notice(
+    overlay: &gtk::Overlay,
+    heading: Option<&str>,
+    text: &str,
+    duration: Duration,
+) {
+    show(overlay, heading, text, duration, false);
+}
+
+fn show(
+    overlay: &gtk::Overlay,
+    heading: Option<&str>,
+    text: &str,
+    duration: Duration,
+    replace: bool,
+) {
     let overlay = &super::modal::window_overlay(overlay).unwrap_or_else(|| overlay.clone());
     let (dock, list) = super::progress_dock::dock(overlay);
-    let mut child = list.first_child();
-    while let Some(widget) = child {
-        child = widget.next_sibling();
-        if widget.has_css_class(NOTICE_CLASS) {
-            list.remove(&widget);
+    if replace {
+        let mut child = list.first_child();
+        while let Some(widget) = child {
+            child = widget.next_sibling();
+            if widget.has_css_class(NOTICE_CLASS) {
+                list.remove(&widget);
+            }
         }
     }
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
