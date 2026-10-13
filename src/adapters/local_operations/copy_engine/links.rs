@@ -180,7 +180,10 @@ impl Links {
             mut later,
             retimed,
             ..
-        } = self.state.into_inner().unwrap_or_else(PoisonError::into_inner);
+        } = self
+            .state
+            .into_inner()
+            .unwrap_or_else(PoisonError::into_inner);
         later.sort_by(|left, right| left.path.cmp(&right.path));
         let mut linking = true;
         for name in &later {

@@ -450,7 +450,12 @@ fn fill(
     if !same_entry(&fs.stat_fd(opened.as_fd())?, root.identity, mount.family) {
         return Err(Failure::Place(PlaceError::Changed));
     }
-    links.make(copy, opened.as_fd(), mount.family, created.map(|created| &**created))?;
+    links.make(
+        copy,
+        opened.as_fd(),
+        mount.family,
+        created.map(|created| &**created),
+    )?;
     let stable = stable_inodes(mount.family);
     if let Err(error) = restrictive::tighten(fs, opened.as_fd(), &mut restrictive, stable) {
         restrictive::loosen(fs, opened.as_fd(), &restrictive, stable);
@@ -601,8 +606,10 @@ fn merge(
     let tree::Walked {
         mut restrictive,
         links,
-    } = tree::walk(copy, workers, None, |tree| tree::TreeJob::Merge(tree, merged))
-        .map_err(Failure::Error)?;
+    } = tree::walk(copy, workers, None, |tree| {
+        tree::TreeJob::Merge(tree, merged)
+    })
+    .map_err(Failure::Error)?;
     if restrictive.is_empty() && links.is_empty() {
         return Ok(());
     }

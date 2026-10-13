@@ -245,7 +245,12 @@ fn cancelling_as_the_replacement_is_staged_keeps_the_destination() -> Result<(),
             Quirks {
                 before: vec![
                     (Op::Close, "#*", 0, cancel(cancellable.clone())),
-                    (Op::Close, ".strata-replacement-*", 0, cancel(cancellable.clone())),
+                    (
+                        Op::Close,
+                        ".strata-replacement-*",
+                        0,
+                        cancel(cancellable.clone()),
+                    ),
                 ],
                 ..Quirks::default()
             },

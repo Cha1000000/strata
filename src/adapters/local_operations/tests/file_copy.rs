@@ -416,7 +416,8 @@ fn a_file_that_reports_no_size_is_copied_whole() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn copy_range_refused_across_mounts_continues_with_reads_and_writes() -> Result<(), Box<dyn Error>> {
+fn copy_range_refused_across_mounts_continues_with_reads_and_writes() -> Result<(), Box<dyn Error>>
+{
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock()?;
     let mounts = mounts(Quirks::default(), |_| Quirks::default())?;
     let contents = patterned(3 * 1024 * 1024);

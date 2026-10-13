@@ -2775,7 +2775,8 @@ impl StagedSibling {
                 Err(rustix::io::Errno::EXIST) => {
                     placement::left_by_lost_reply(fs(), entry, |stat| match &content {
                         StageContent::Directory => {
-                            stat.is_directory() && fs().names(entry).is_ok_and(|names| names.is_empty())
+                            stat.is_directory()
+                                && fs().names(entry).is_ok_and(|names| names.is_empty())
                         }
                         StageContent::Symlink(link) => {
                             stat.kind == rustix::fs::FileType::Symlink

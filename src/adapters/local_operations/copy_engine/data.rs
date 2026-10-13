@@ -182,7 +182,13 @@ impl Data {
                 Ranged::From(copied) => offset = copied,
             }
         }
-        self.read_write(fs, cancelled, (source, target), (offset, size), &mut progress)
+        self.read_write(
+            fs,
+            cancelled,
+            (source, target),
+            (offset, size),
+            &mut progress,
+        )
     }
 
     fn copy_ranges(

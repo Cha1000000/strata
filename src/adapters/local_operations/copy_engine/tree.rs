@@ -223,9 +223,7 @@ impl Folder {
             return Err(Failure::Place(PlaceError::Changed));
         }
         let snapshot = Snapshot::read(fs, source.as_fd(), &source_stat)?;
-        let naming = self
-            .naming
-            .decide(fs, self.mount.family, target.as_fd());
+        let naming = self.naming.decide(fs, self.mount.family, target.as_fd());
         let mut used = HashSet::new();
         let children = children(fs, source.as_fd())?
             .into_iter()

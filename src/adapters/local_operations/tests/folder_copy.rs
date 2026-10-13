@@ -297,9 +297,15 @@ fn only_names_that_may_collide_are_claimed() -> Result<(), Box<dyn Error>> {
             &["Makefile", "makefile", "notes.txt", "readme."][..],
             &["Makefile", "makefile"][..],
         ),
-        (&["caf\u{e9}", "cafe\u{301}", "data.bin"], &["cafe\u{301}", "caf\u{e9}"]),
+        (
+            &["caf\u{e9}", "cafe\u{301}", "data.bin"],
+            &["cafe\u{301}", "caf\u{e9}"],
+        ),
         // A FAT short name may stand for any long name.
-        (&["PROGRA~1", "Program Files"], &["PROGRA~1", "Program Files"]),
+        (
+            &["PROGRA~1", "Program Files"],
+            &["PROGRA~1", "Program Files"],
+        ),
     ] {
         let mounts = mounts(Quirks::nfs3())?;
         let source = mounts.sources.join("source");
@@ -414,7 +420,10 @@ fn a_claimed_name_swapped_for_a_pipe_fails_without_waiting() -> Result<(), Box<d
     let result = copy(&sources.join("source"), &destination.join("target"));
     let _ = done.send(());
 
-    assert!(!rescue.join().expect("rescue"), "the copy waited on the pipe");
+    assert!(
+        !rescue.join().expect("rescue"),
+        "the copy waited on the pipe"
+    );
     assert!(result.is_err(), "{result:?}");
     assert_eq!(names(&destination)?, Vec::<String>::new());
     Ok(())
@@ -707,7 +716,10 @@ fn a_claimed_name_is_linked_when_the_reply_to_removing_its_claim_is_lost()
 -> Result<(), Box<dyn Error>> {
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock()?;
     let mounts = mounts(Quirks {
-        lost_reply: vec![(Op::Unlink, "x", Errno::NOENT), (Op::Unlink, "y", Errno::NOENT)],
+        lost_reply: vec![
+            (Op::Unlink, "x", Errno::NOENT),
+            (Op::Unlink, "y", Errno::NOENT),
+        ],
         ..Quirks::nfs3()
     })?;
     learn_mount_capability(mounts.destination_scope.key(), |capabilities| {

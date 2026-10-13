@@ -455,7 +455,11 @@ fn a_stage_name_left_by_a_lost_reply_is_adopted_and_a_taken_one_is_not()
                 .filter(|name| is_stage(&name.to_string_lossy()))
                 .collect::<HashSet<_>>();
             assert_eq!(stages.len(), if taken { 2 } else { 1 }, "{row}");
-            let copy = if folder { target.join("inner.txt") } else { target };
+            let copy = if folder {
+                target.join("inner.txt")
+            } else {
+                target
+            };
             assert_eq!(fs::read(copy)?, b"copied", "{row}");
             let left = names(root.path())?
                 .into_iter()
@@ -465,7 +469,11 @@ fn a_stage_name_left_by_a_lost_reply_is_adopted_and_a_taken_one_is_not()
             match left.as_slice() {
                 [] => assert!(!taken, "{row}"),
                 [theirs] => {
-                    let theirs = if folder { theirs.join("theirs") } else { theirs.clone() };
+                    let theirs = if folder {
+                        theirs.join("theirs")
+                    } else {
+                        theirs.clone()
+                    };
                     assert!(taken, "{row}");
                     assert_eq!(fs::read(theirs)?, b"theirs", "{row}");
                 }

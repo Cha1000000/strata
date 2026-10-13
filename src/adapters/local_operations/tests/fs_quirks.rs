@@ -1144,10 +1144,11 @@ impl FsOps for Scoped {
 
     fn reflink(&self, target: BorrowedFd<'_>, source: BorrowedFd<'_>) -> Result<(), Errno> {
         assert_off_main_thread();
-        let refused = scope_for(target).and_then(|scope| match scope.quirk(|quirks| quirks.reflink) {
-            Support::Rejected(error) => Some(error),
-            Support::Supported => None,
-        });
+        let refused =
+            scope_for(target).and_then(|scope| match scope.quirk(|quirks| quirks.reflink) {
+                Support::Rejected(error) => Some(error),
+                Support::Supported => None,
+            });
         between(Op::Clone, source, target, || match refused {
             Some(error) => Err(error),
             None => System.reflink(target, source).map(|()| 0),

@@ -57,7 +57,10 @@ pub(super) fn colliding(names: &[&OsStr]) -> Vec<bool> {
             .windows(2)
             .any(|pair| pair[0] == b'~' && pair[1].is_ascii_digit())
     };
-    let keys = names.iter().map(|name| fold(name)).collect::<Option<Vec<_>>>();
+    let keys = names
+        .iter()
+        .map(|name| fold(name))
+        .collect::<Option<Vec<_>>>();
     let Some(keys) = keys.filter(|_| !names.iter().any(short_name)) else {
         return vec![true; names.len()];
     };

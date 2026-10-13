@@ -618,7 +618,10 @@ fn copied_links_count_their_bytes_as_they_are_made() -> Result<(), Box<dyn Error
                 ..
             } = event
             {
-                recorded.lock().expect("links").get_or_insert(transferred_bytes);
+                recorded
+                    .lock()
+                    .expect("links")
+                    .get_or_insert(transferred_bytes);
             }
             emitted.borrow_mut().push(event);
         }),
@@ -687,7 +690,9 @@ fn a_folder_copied_out_of_its_stage_counts_each_file_once() -> Result<(), Box<dy
         })
         .collect::<Vec<_>>();
     assert!(
-        files.iter().all(|files| *files == (files.0, Some(9)) && files.0 <= 9),
+        files
+            .iter()
+            .all(|files| *files == (files.0, Some(9)) && files.0 <= 9),
         "{files:?}"
     );
     Ok(())
