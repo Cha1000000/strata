@@ -4186,8 +4186,7 @@ async fn merge_local_with(
         overwritten: trashed,
     });
     if let Err(error) =
-        (hooks.copy_into_target)(source.clone(), target, StageRoot::Made, cancellable.clone())
-            .await
+        (hooks.copy_into_target)(source.clone(), target, StageRoot::Made, cancellable.clone()).await
     {
         return Err(merge_aside::abandon(aside, error).await);
     }

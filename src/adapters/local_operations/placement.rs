@@ -709,8 +709,11 @@ fn remove_probe_file(fs: &dyn FsOps, entry: Entry<'_>, made: LocalFileIdentity) 
         return;
     };
     let born_with_it = current.identity.birth.is_some()
-        && (current.identity.device, current.identity.kind, current.identity.birth)
-            == (made.device, made.kind, made.birth);
+        && (
+            current.identity.device,
+            current.identity.kind,
+            current.identity.birth,
+        ) == (made.device, made.kind, made.birth);
     if (current.identity == made || born_with_it) && current.size == 0 {
         let _ = fs.unlink(entry, AtFlags::empty());
     }

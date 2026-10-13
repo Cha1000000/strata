@@ -314,7 +314,12 @@ impl Scope {
             // cifs reports the server's creation time, which every name of a file shares.
             let inode = stat.identity.inode;
             stat.identity.birth = stat.identity.birth.or(Some((inode as i64, 0)));
-            if *state.first_names.entry(inode).or_insert_with(|| path.clone()) != *path {
+            if *state
+                .first_names
+                .entry(inode)
+                .or_insert_with(|| path.clone())
+                != *path
+            {
                 stat.identity.inode = !inode;
             }
         }
@@ -323,7 +328,10 @@ impl Scope {
                 .file_name()
                 .is_some_and(|name| matches(pattern, &[name]))
         {
-            stat.identity.inode = *state.inodes.entry(path.clone()).or_insert(stat.identity.inode);
+            stat.identity.inode = *state
+                .inodes
+                .entry(path.clone())
+                .or_insert(stat.identity.inode);
             stat.identity.birth = Some((*state.births.entry(path).or_default(), 0));
         }
         if state.quirks.no_birth_time {
