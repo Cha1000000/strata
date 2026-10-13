@@ -290,6 +290,51 @@ pub(super) async fn delete_unchanged_sources(
     })
 }
 
+/// Syncs each file in the trees at `paths`, which GIO wrote, for a barrier
+/// that does not reach them.
+pub(super) async fn sync_files(
+    paths: Vec<PathBuf>,
+    cancellable: &gio::Cancellable,
+) -> Result<(), glib::Error> {
+    let synced = run_cancellable(cancellable, move |cancelled| {
+        for path in paths {
+            let (parent, name) = split(&path)?;
+            sync_tree(fs(), Entry::new(&*parent, &name), &cancelled)
+                .map_err(|failure| failure.into_error(&name))?;
+        }
+        Ok(())
+    })
+    .await;
+    synced.map_err(|_| io_error("Copy worker stopped unexpectedly"))?
+}
+
+fn sync_tree(fs: &dyn FsOps, at: Entry<'_>, cancelled: &AtomicBool) -> Result<(), Failure> {
+    if cancelled.load(Ordering::Acquire) {
+        return Err(Failure::Cancelled);
+    }
+    match fs.stat(at, false)?.kind {
+        FileType::Directory => {
+            let dir = fs.open_dir(at)?;
+            for (name, _) in fs.list(dir.as_fd())? {
+                sync_tree(fs, Entry::new(&dir, &name), cancelled)
+                    .map_err(|failure| failure.named(&name))?;
+            }
+        }
+        FileType::RegularFile => {
+            // An SMB server flushes only for a handle that may write.
+            let file = match fs.open_write(at) {
+                Err(Errno::ACCESS | Errno::PERM) => fs.open_source(at, true)?.map(|(file, _)| file),
+                opened => Some(opened?),
+            };
+            if let Some(file) = file {
+                fs.sync_data(file.as_fd())?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 /// Where a move published its copy, as `name` in `parent` is now.
 pub(super) async fn published(
     parent: Arc<OwnedFd>,

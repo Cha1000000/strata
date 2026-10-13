@@ -2155,6 +2155,14 @@ async fn move_local_owing(
                 fat_family,
             )
             .await?;
+            if let Some(path) = native_path(&target)
+                && owed
+                    .barrier
+                    .as_ref()
+                    .is_some_and(copy_engine::Barrier::syncs_each_file)
+            {
+                copy_engine::sync_files(vec![path], &cancellable).await?;
+            }
             (target, Reported::default(), Deletion::Source(source))
         }
     };
@@ -3798,6 +3806,13 @@ async fn merge_owing(
             return Err(merge_aside::abandon(aside, error).await);
         }
     }
+    // What GIO writes here, for a barrier that does not reach it.
+    let written: Vec<PathBuf> = plan
+        .created
+        .iter()
+        .chain(&plan.overwritten)
+        .filter_map(|location| location.native_path().map(Path::to_path_buf))
+        .collect();
     (hooks.on_merged)(MergePlan {
         created: plan.created,
         overwritten: trashed,
@@ -3819,6 +3834,15 @@ async fn merge_owing(
         Ok(copied) => copied,
         Err(error) => return Err(merge_aside::abandon(aside, error).await),
     };
+    if native_path(&source).is_none()
+        && owed
+            .barrier
+            .as_ref()
+            .is_some_and(copy_engine::Barrier::syncs_each_file)
+        && let Err(error) = copy_engine::sync_files(written, cancellable).await
+    {
+        return Err(merge_aside::abandon(aside, error).await);
+    }
     owed.nested = copied.nested;
     if let Some(aside) = merge_aside::finish(aside).await? {
         owed.owe(Deletion::Aside(aside));

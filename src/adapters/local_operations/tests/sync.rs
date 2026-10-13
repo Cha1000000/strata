@@ -1133,3 +1133,48 @@ fn a_merging_move_flushes_each_filesystem_it_wrote_to_before_deleting() -> Resul
     assert!(outer.calls().iter().any(|call| call.op == Op::SyncFs));
     Ok(())
 }
+
+#[test]
+fn files_gio_wrote_are_synced_one_by_one_where_the_barrier_misses_them()
+-> Result<(), Box<dyn Error>> {
+    use std::os::unix::fs::PermissionsExt;
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let root = tempfile::tempdir()?;
+    let destination = root.path().join("destination");
+    let folder = destination.join("folder");
+    fs::create_dir_all(folder.join("sub"))?;
+    fs::write(folder.join("a.txt"), b"a")?;
+    fs::write(folder.join("sub/b.txt"), b"b")?;
+    let read_only = folder.join("read-only.txt");
+    fs::write(&read_only, b"c")?;
+    fs::set_permissions(&read_only, fs::Permissions::from_mode(0o444))?;
+    fs::write(destination.join("other.txt"), b"not written")?;
+    let scope = FsQuirks::install(
+        &destination,
+        Quirks {
+            mount_type: Some(("cifs", "rw")),
+            ..Quirks::default()
+        },
+    );
+
+    glib::MainContext::default().block_on(super::super::copy_engine::sync_files(
+        vec![folder.clone()],
+        &gio::Cancellable::new(),
+    ))?;
+
+    let mut synced: Vec<String> = scope
+        .calls()
+        .iter()
+        .filter(|call| call.op == Op::SyncData)
+        .flat_map(|call| {
+            call.names
+                .iter()
+                .map(|name| name.to_string_lossy().into_owned())
+        })
+        .collect();
+    synced.sort();
+    assert_eq!(synced, ["a.txt", "b.txt", "read-only.txt"]);
+    Ok(())
+}
