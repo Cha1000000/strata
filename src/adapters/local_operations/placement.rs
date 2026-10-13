@@ -857,6 +857,16 @@ fn placeable(capabilities: MountCapabilities, directory: bool) -> Option<bool> {
     }
 }
 
+/// Whether a hard link made in `dir` reports what it links, probing the mount
+/// on Strata's own names when that is not known yet.
+pub(super) fn links_hold(fs: &dyn FsOps, dir: BorrowedFd<'_>) -> bool {
+    let mount = Mount::new(fs, dir);
+    if mount.capabilities().hard_links.is_none() {
+        let _ = mount.probe(true, false);
+    }
+    mount.capabilities().hard_links == Some(true)
+}
+
 /// Whether a staged entry could be placed in `dir`; `None` until the mount
 /// is known, without probing it.
 pub(super) fn can_place(fs: &dyn FsOps, dir: BorrowedFd<'_>, directory: bool) -> Option<bool> {

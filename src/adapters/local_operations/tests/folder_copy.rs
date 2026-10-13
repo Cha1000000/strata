@@ -6,7 +6,7 @@ use rustix::io::Errno;
 
 use super::fs_quirks::{Op, Racer, Support};
 use super::*;
-use crate::adapters::volume::learn_mount_capability;
+use crate::adapters::volume::{MountCapabilities, learn_mount_capability};
 
 /// A source folder and a destination folder, each with its own quirks, so
 /// they act as separate mounts.
@@ -14,7 +14,7 @@ struct Mounts {
     _root: tempfile::TempDir,
     sources: PathBuf,
     destination: PathBuf,
-    _source_scope: FsQuirks,
+    source_scope: FsQuirks,
     destination_scope: FsQuirks,
 }
 
@@ -25,7 +25,7 @@ fn mounts(destination: Quirks) -> Result<Mounts, Box<dyn Error>> {
     fs::create_dir(&sources)?;
     fs::create_dir(&target)?;
     Ok(Mounts {
-        _source_scope: FsQuirks::install(&sources, Quirks::default()),
+        source_scope: FsQuirks::install(&sources, Quirks::default()),
         destination_scope: FsQuirks::install(&target, destination),
         _root: root,
         sources,
@@ -58,6 +58,23 @@ fn unlock(root: &Path) -> io::Result<()> {
     for entry in fs::read_dir(root)? {
         unlock(&entry?.path())?;
     }
+    Ok(())
+}
+
+fn set_mtime(path: &Path, seconds: i64) -> io::Result<()> {
+    let time = rustix::fs::Timespec {
+        tv_sec: seconds,
+        tv_nsec: 0,
+    };
+    rustix::fs::utimensat(
+        rustix::fs::CWD,
+        path,
+        &rustix::fs::Timestamps {
+            last_access: time,
+            last_modification: time,
+        },
+        rustix::fs::AtFlags::empty(),
+    )?;
     Ok(())
 }
 
@@ -429,5 +446,106 @@ fn a_stage_with_read_only_folders_is_removed_when_it_cannot_be_published()
     );
     assert_eq!(names(&destination)?, ["target"]);
     assert_eq!(names(&destination.join("target"))?, Vec::<String>::new());
+    Ok(())
+}
+
+#[test]
+fn a_copied_folder_keeps_its_hard_links_where_the_destination_can() -> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock()?;
+    let in_place: fn(&mut MountCapabilities) = |capabilities| {
+        capabilities.no_replace = Some(false);
+        capabilities.hard_links = Some(true);
+        capabilities.rename_over_empty_directory = Some(false);
+    };
+    let rows: [(&str, Preset, Option<fn(&mut MountCapabilities)>, bool); 6] = [
+        ("tmpfs", Quirks::default, None, true),
+        ("ext4", Quirks::ext4, None, true),
+        ("claimed names", Quirks::nfs3, None, true),
+        (
+            "in place",
+            Quirks::without_folder_placement,
+            Some(in_place),
+            true,
+        ),
+        ("vfat", Quirks::vfat, None, false),
+        ("sshfs", Quirks::sshfs, None, false),
+    ];
+    for (row, preset, learned, linked) in rows {
+        let mounts = mounts(preset())?;
+        if let Some(learned) = learned {
+            learn_mount_capability(mounts.destination_scope.key(), learned);
+        }
+        let source = mounts.sources.join("source");
+        fs::create_dir_all(source.join("sub"))?;
+        fs::write(source.join("a"), b"linked")?;
+        fs::hard_link(source.join("a"), source.join("sub/b"))?;
+        fs::write(source.join("c"), b"single")?;
+        fs::hard_link(source.join("c"), mounts.sources.join("outside"))?;
+        let folders = [("sub", 1_000_000_000), ("", 1_100_000_000)];
+        for (folder, seconds) in folders {
+            set_mtime(&source.join(folder), seconds)?;
+        }
+        let target = mounts.destination.join("target");
+
+        copy(&source, &target)?;
+
+        let [a, b, c] = ["a", "sub/b", "c"].map(|name| fs::metadata(target.join(name)));
+        let (a, b, c) = (a?, b?, c?);
+        assert_eq!(a.ino() == b.ino(), linked, "{row}");
+        let links = if linked { 2 } else { 1 };
+        assert_eq!(
+            (a.nlink(), b.nlink(), c.nlink()),
+            (links, links, 1),
+            "{row}"
+        );
+        assert_ne!(c.ino(), a.ino(), "{row}");
+        assert_eq!(fs::read(target.join("a"))?, b"linked", "{row}");
+        assert_eq!(fs::read(target.join("sub/b"))?, b"linked", "{row}");
+        assert_eq!(fs::read(target.join("c"))?, b"single", "{row}");
+        for (folder, seconds) in folders {
+            let mtime = fs::metadata(target.join(folder))?.mtime();
+            assert_eq!(mtime, seconds, "{row}: {folder:?}");
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn a_refused_link_is_copied_from_the_first_copy_and_ends_linking() -> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock()?;
+    let mounts = mounts(Quirks {
+        fail: vec![(Op::Link, "*", 0, Errno::MLINK)],
+        ..Quirks::default()
+    })?;
+    learn_mount_capability(mounts.destination_scope.key(), |capabilities| {
+        capabilities.hard_links = Some(true);
+    });
+    let source = mounts.sources.join("source");
+    fs::create_dir(&source)?;
+    fs::write(source.join("a"), b"linked")?;
+    for name in ["b", "d"] {
+        fs::hard_link(source.join("a"), source.join(name))?;
+    }
+    let target = mounts.destination.join("target");
+
+    copy(&source, &target)?;
+
+    let mut inodes = HashSet::new();
+    for name in ["a", "b", "d"] {
+        let metadata = fs::metadata(target.join(name))?;
+        assert_eq!(metadata.nlink(), 1, "{name}");
+        inodes.insert(metadata.ino());
+        assert_eq!(fs::read(target.join(name))?, b"linked", "{name}");
+    }
+    assert_eq!(inodes.len(), 3);
+    assert_eq!(mounts.destination_scope.count(Op::Link), 1);
+    let read = mounts
+        .source_scope
+        .calls()
+        .into_iter()
+        .filter(|call| call.op == Op::Read)
+        .flat_map(|call| call.names)
+        .collect::<HashSet<_>>();
+    assert_eq!(read.len(), 1, "the source is read once: {read:?}");
     Ok(())
 }

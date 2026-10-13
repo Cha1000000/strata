@@ -6,6 +6,7 @@
 
 use std::{
     cmp::Reverse,
+    ffi::OsStr,
     os::fd::{AsFd, BorrowedFd, OwnedFd},
     path::{Path, PathBuf},
 };
@@ -32,28 +33,25 @@ impl Restrictive {
     }
 }
 
-/// The recorded folder, unless something else is there now.
-fn reopen(
+/// The folder at `path` beneath `root`, unless something other than
+/// `identity` is there now.
+pub(super) fn reopen(
     fs: &dyn FsOps,
     root: BorrowedFd<'_>,
-    folder: &Restrictive,
+    path: &Path,
+    identity: LocalFileIdentity,
     stable_inodes: bool,
 ) -> Result<Option<OwnedFd>, Errno> {
-    let path = if folder.path.as_os_str().is_empty() {
-        Path::new(".")
-    } else {
-        &folder.path
-    };
     let opened = fs
         .open_dir(Entry {
             dir: root,
-            name: path.as_os_str(),
+            name: beneath(path),
         })
         .and_then(|fd| fs.stat_fd(fd.as_fd()).map(|stat| (fd, stat)));
     match opened {
         Ok((fd, current)) => {
             let same = if stable_inodes {
-                current.identity == folder.identity
+                current.identity == identity
             } else {
                 current.is_directory()
             };
@@ -61,6 +59,15 @@ fn reopen(
         }
         Err(error) if is_fatal(error) => Err(error),
         Err(_) => Ok(None),
+    }
+}
+
+/// `path` as a name `open_dir` resolves beneath a folder; empty is the folder.
+pub(super) fn beneath(path: &Path) -> &OsStr {
+    if path.as_os_str().is_empty() {
+        OsStr::new(".")
+    } else {
+        path.as_os_str()
     }
 }
 
@@ -74,7 +81,7 @@ pub(super) fn tighten(
 ) -> Result<(), Errno> {
     folders.sort_by_key(|folder| Reverse(folder.depth()));
     for folder in folders.iter() {
-        if let Some(fd) = reopen(fs, root, folder, stable_inodes)? {
+        if let Some(fd) = reopen(fs, root, &folder.path, folder.identity, stable_inodes)? {
             best_effort(fs.chmod_fd(fd.as_fd(), folder.mode))?;
         }
     }
@@ -91,7 +98,7 @@ pub(super) fn loosen(
     let mut folders = folders.iter().collect::<Vec<_>>();
     folders.sort_by_key(|folder| folder.depth());
     for folder in folders {
-        if let Ok(Some(fd)) = reopen(fs, root, folder, stable_inodes) {
+        if let Ok(Some(fd)) = reopen(fs, root, &folder.path, folder.identity, stable_inodes) {
             let _ = fs.chmod_fd(fd.as_fd(), folder.mode | 0o700);
         }
     }

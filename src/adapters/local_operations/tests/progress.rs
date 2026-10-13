@@ -476,6 +476,95 @@ fn bulk_copy_reports_bytes_before_each_file_completes() -> Result<(), Box<dyn Er
 }
 
 #[test]
+fn linked_names_count_as_copied_before_their_folder_is_published() -> Result<(), Box<dyn Error>> {
+    use std::{
+        os::unix::fs::MetadataExt,
+        sync::atomic::{AtomicBool, Ordering},
+    };
+
+    use super::fs_quirks::{Op, Racer};
+
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let root = tempfile::tempdir()?;
+    let tree = root.path().join("source/tree");
+    let destination = root.path().join("destination");
+    fs::create_dir_all(tree.join("sub"))?;
+    fs::create_dir(&destination)?;
+    let size = 1024 * 1024;
+    fs::write(tree.join("a"), vec![7; size])?;
+    fs::hard_link(tree.join("a"), tree.join("sub/b"))?;
+    let counted = Arc::new(AtomicBool::new(false));
+    let waiting = counted.clone();
+    // Holds the publish until both names were reported as copied.
+    let racer: Racer = Box::new(move || {
+        let start = Instant::now();
+        while !waiting.load(Ordering::Acquire) && start.elapsed() < Duration::from_secs(5) {
+            thread::sleep(Duration::from_millis(5));
+        }
+    });
+    let _destination = FsQuirks::install(
+        &destination,
+        Quirks {
+            before: vec![(Op::Rename, ".strata-copy-*", 0, racer)],
+            ..Quirks::default()
+        },
+    );
+
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let emitted = events.clone();
+    let _operation = LocalOperationProvider.paste(
+        PasteRequest {
+            id: OperationRequestId(31),
+            destination: Location::local(&destination),
+            items: vec![PasteItem {
+                source: Location::local(&tree),
+                conflict: TransferConflict::FailIfExists,
+            }],
+            move_sources: false,
+        },
+        Rc::new(move |event| {
+            if let OperationEvent::TransferProgress {
+                completed_items: 0,
+                transferred_bytes,
+                ..
+            } = event
+                && transferred_bytes == 2 * size as u64
+            {
+                counted.store(true, Ordering::Release);
+            }
+            emitted.borrow_mut().push(event);
+        }),
+    );
+    drive_until_transfer_settles(&events);
+
+    let events = events.borrow();
+    assert!(
+        matches!(events.last(), Some(OperationEvent::Pasted { .. })),
+        "{events:?}"
+    );
+    let copied = destination.join("tree");
+    let (a, b) = (
+        fs::metadata(copied.join("a"))?,
+        fs::metadata(copied.join("sub/b"))?,
+    );
+    assert_eq!((a.ino(), a.nlink()), (b.ino(), 2));
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            OperationEvent::TransferProgress {
+                completed_items: 0,
+                transferred_bytes,
+                ..
+            } if *transferred_bytes == 2 * size as u64
+        )),
+        "{events:?}"
+    );
+    Ok(())
+}
+
+#[test]
 fn bulk_copy_preserves_symlinks_and_one_file_directories() -> Result<(), Box<dyn Error>> {
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
         .lock()

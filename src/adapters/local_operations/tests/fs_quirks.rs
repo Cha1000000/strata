@@ -247,6 +247,19 @@ impl Quirks {
         }
     }
 
+    /// No hard links, `mknod` or xattrs, and names compared without case.
+    pub(crate) fn vfat() -> Self {
+        Self {
+            mount_type: Some("vfat"),
+            fs_type: Some(0x4d44),
+            links: Support::Rejected(Errno::PERM),
+            case_insensitive: true,
+            node_create: Support::Rejected(Errno::PERM),
+            xattrs_refused: vec![("", Errno::OPNOTSUPP)],
+            ..Self::default()
+        }
+    }
+
     pub(crate) fn sshfs() -> Self {
         Self {
             mount_type: Some("fuse.sshfs"),

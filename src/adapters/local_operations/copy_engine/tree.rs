@@ -11,7 +11,10 @@ use std::{
     io,
     os::fd::{AsFd, BorrowedFd, OwnedFd},
     path::PathBuf,
-    sync::{Arc, Mutex, atomic::Ordering},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
     thread,
 };
 
@@ -22,8 +25,15 @@ use rustix::{
 };
 
 use super::{
-    Copy, Failure, Mount, best_effort, changed, data::Data, is_unsupported, lock,
-    metadata::Snapshot, open_file, restrictive::Restrictive, same_entry, stable_inodes, stage,
+    Copy, Failure, Mount, best_effort, changed,
+    data::Data,
+    is_unsupported,
+    links::{self, Links, Role},
+    lock,
+    metadata::Snapshot,
+    open_file,
+    restrictive::Restrictive,
+    same_entry, stable_inodes, stage,
 };
 use crate::adapters::{
     local_operations::{
@@ -46,6 +56,9 @@ type Completion = Option<Arc<Group<TreeJob>>>;
 pub(super) struct Tree {
     copy: Arc<Copy>,
     restrictive: Mutex<Vec<Restrictive>>,
+    links: Links,
+    /// The next link scope a merged folder takes.
+    link_scopes: AtomicUsize,
 }
 
 pub(super) enum TreeJob {
@@ -83,16 +96,24 @@ impl Job for TreeJob {
     }
 }
 
-/// Runs the walk that `root` starts on `workers` threads, and returns the
-/// folders left open to their owner until their exact modes are set.
+/// What a walk leaves for the passes after it.
+pub(super) struct Walked {
+    /// Folders left open to their owner until their exact modes are set.
+    pub(super) restrictive: Vec<Restrictive>,
+    pub(super) links: Links,
+}
+
+/// Runs the walk that `root` starts on `workers` threads.
 pub(super) fn walk(
     copy: &Arc<Copy>,
     workers: usize,
     root: impl FnOnce(Arc<Tree>) -> TreeJob,
-) -> Result<Vec<Restrictive>, glib::Error> {
+) -> Result<Walked, glib::Error> {
     let tree = Arc::new(Tree {
         copy: copy.clone(),
         restrictive: Mutex::default(),
+        links: Links::default(),
+        link_scopes: AtomicUsize::new(0),
     });
     let queue = Arc::new(Queue::new(copy.cancelled.clone()));
     queue.enqueue(root(tree.clone()));
@@ -100,7 +121,10 @@ pub(super) fn walk(
         thread::Builder::new().spawn(work)
     });
     queue.result()?;
-    Ok(std::mem::take(&mut *lock(&tree.restrictive)))
+    Ok(Walked {
+        restrictive: std::mem::take(&mut *lock(&tree.restrictive)),
+        links: tree.links.take(),
+    })
 }
 
 /// Whether names in a made folder are claimed one by one, in byte order,
@@ -126,6 +150,9 @@ pub(super) struct Folder {
     /// Decided from the made folder itself when `None`.
     pub(super) claims: Option<bool>,
     pub(super) mount: Mount,
+    /// Names are linked only to names of the same scope: the whole made
+    /// tree, or one merged folder.
+    pub(super) link_scope: usize,
     pub(super) completion: Completion,
 }
 
@@ -165,6 +192,7 @@ impl Folder {
             path: self.path,
             claims,
             mount: self.mount,
+            link_scope: self.link_scope,
         };
         let finish = Finish {
             name: source_name.clone(),
@@ -211,6 +239,7 @@ struct Made {
     path: PathBuf,
     claims: bool,
     mount: Mount,
+    link_scope: usize,
 }
 
 impl Made {
@@ -245,6 +274,7 @@ impl Made {
                         path: self.path.join(target_name),
                         claims: Some(self.claims),
                         mount: self.mount,
+                        link_scope: self.link_scope,
                         completion: Some(group.clone()),
                     },
                 ));
@@ -265,6 +295,8 @@ impl Made {
                         parent: self.stat,
                         claimed,
                         mount: self.mount,
+                        path: self.path.join(target_name),
+                        link_scope: self.link_scope,
                         completion: Some(group.clone()),
                     },
                 ));
@@ -324,7 +356,7 @@ pub(super) fn taken(fs: &dyn FsOps, entry: Entry<'_>, error: Errno) -> bool {
 /// creations are not idempotent: listed under exactly that name, never
 /// claimed in this folder before, and still as fresh as a claim leaves it.
 /// `None` for `claimed` is a folder this copy did not make.
-fn adopt(
+pub(super) fn adopt(
     fs: &dyn FsOps,
     entry: Entry<'_>,
     claimed: Option<&HashSet<OsString>>,
@@ -445,6 +477,9 @@ pub(super) struct File {
     /// What the folder job claimed; `None` makes the file exclusively.
     claimed: Option<LocalFileIdentity>,
     mount: Mount,
+    /// Beneath the walk's root.
+    path: PathBuf,
+    link_scope: usize,
     completion: Completion,
 }
 
@@ -452,22 +487,45 @@ impl File {
     fn run(self, tree: &Arc<Tree>, queue: &Queue) {
         #[cfg(test)]
         let _activity = crate::adapters::local_operations::tests::CopyActivity::start();
-        match tree.copy.with_data(|data| self.copy(&tree.copy, data)) {
-            Ok(()) => {
-                tree.copy.progress.add_file();
+        match tree.copy.with_data(|data| self.copy(tree, data)) {
+            Ok(role) => {
+                if role != Role::Later {
+                    tree.copy.progress.add_file();
+                }
                 queue.complete(self.completion);
             }
             Err(failure) => queue.fail(failure.into_error(&self.name)),
         }
     }
 
-    fn copy(&self, copy: &Copy, data: &mut Data) -> Result<(), Failure> {
+    fn copy(&self, tree: &Tree, data: &mut Data) -> Result<Role, Failure> {
+        let copy = &*tree.copy;
         let fs = copy.fs;
         copy.check_cancelled()?;
         if copy.counted {
             copy.progress.start_file(&self.name);
         }
         let source = open_file(fs, Entry::new(&*self.source, &self.name))?;
+        let key = (
+            self.link_scope,
+            source.stat.identity.device,
+            source.stat.identity.inode,
+        );
+        let role = if source.stat.nlink > 1 {
+            let name = links::Name {
+                key,
+                path: self.path.clone(),
+                source: self.name.clone(),
+                claimed: self.claimed,
+                size: source.stat.size,
+            };
+            tree.links.role(fs, &self.mount, self.target.as_fd(), name)
+        } else {
+            Role::Copied
+        };
+        if role == Role::Later {
+            return Ok(role);
+        }
         let target = Entry::new(&*self.target, &self.target_name);
         let fd = match self.claimed {
             Some(_) => fs.open_write(target)?,
@@ -511,7 +569,11 @@ impl File {
         if written.is_err() {
             placement::remove_if_unchanged(fs, target, created.identity, AtFlags::empty());
         }
-        written
+        written?;
+        if role == Role::First {
+            tree.links.written(key, created.identity);
+        }
+        Ok(role)
     }
 }
 
@@ -541,6 +603,8 @@ impl Finish {
         );
         match applied {
             Ok(mode) => {
+                tree.links
+                    .retime(&self.path, self.created.identity, self.snapshot);
                 if let Some(mode) = mode {
                     lock(&tree.restrictive).push(Restrictive {
                         path: self.path,
@@ -595,6 +659,7 @@ impl Merged {
             dir: target,
             stat: target_stat,
             mount,
+            link_scope: tree.link_scopes.fetch_add(1, Ordering::Relaxed),
         };
         let mut used = HashSet::new();
         for (name, kind) in children {
@@ -613,6 +678,7 @@ struct Live {
     dir: Arc<OwnedFd>,
     stat: EntryStat,
     mount: Mount,
+    link_scope: usize,
 }
 
 impl Live {
@@ -663,6 +729,7 @@ impl Live {
                         path,
                         claims: None,
                         mount: self.mount,
+                        link_scope: self.link_scope,
                         completion: None,
                     },
                 ));
@@ -677,6 +744,8 @@ impl Live {
                     parent: self.stat,
                     claimed: None,
                     mount: self.mount,
+                    path,
+                    link_scope: self.link_scope,
                     completion: None,
                 },
             )),

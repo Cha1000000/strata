@@ -5,6 +5,7 @@
 //! where the destination cannot place a stage.
 
 mod data;
+mod links;
 mod metadata;
 mod restrictive;
 pub(super) mod stage;
@@ -412,8 +413,9 @@ struct Root {
     identity: LocalFileIdentity,
 }
 
-/// Copies the folder `source` into the empty folder `root`, then gives the
-/// folders that would lock their owner out their exact modes.
+/// Copies the folder `source` into the empty folder `root`, links the later
+/// names of linked files, then gives the folders that would lock their owner
+/// out their exact modes.
 fn fill(
     copy: &Arc<Copy>,
     source: &Source,
@@ -431,17 +433,22 @@ fn fill(
         path: PathBuf::new(),
         claims: None,
         mount,
+        link_scope: 0,
         completion: None,
     };
-    let mut restrictive = tree::walk(copy, workers, |tree| tree::TreeJob::Folder(tree, folder))
+    let tree::Walked {
+        mut restrictive,
+        links,
+    } = tree::walk(copy, workers, |tree| tree::TreeJob::Folder(tree, folder))
         .map_err(Failure::Error)?;
-    if restrictive.is_empty() {
+    if restrictive.is_empty() && links.is_empty() {
         return Ok(restrictive);
     }
     let opened = fs.open_dir(Entry::new(&*root.parent, &root.name))?;
     if !same_entry(&fs.stat_fd(opened.as_fd())?, root.identity, mount.family) {
         return Err(Failure::Place(PlaceError::Changed));
     }
+    links.make(copy, opened.as_fd(), mount.family)?;
     let stable = stable_inodes(mount.family);
     if let Err(error) = restrictive::tighten(fs, opened.as_fd(), &mut restrictive, stable) {
         restrictive::loosen(fs, opened.as_fd(), &restrictive, stable);
@@ -533,14 +540,24 @@ fn merge(
         target: (parent.clone(), name.clone(), None),
         path: PathBuf::new(),
     };
-    let mut restrictive = tree::walk(copy, workers, |tree| tree::TreeJob::Merge(tree, merged))
+    let tree::Walked {
+        mut restrictive,
+        links,
+    } = tree::walk(copy, workers, |tree| tree::TreeJob::Merge(tree, merged))
         .map_err(Failure::Error)?;
-    if restrictive.is_empty() {
+    if restrictive.is_empty() && links.is_empty() {
         return Ok(());
     }
     let root = copy.fs.open_dir(Entry::new(&*parent, &name))?;
-    let stable = stable_inodes(Mount::new(copy.fs, root.as_fd()).family);
-    restrictive::tighten(copy.fs, root.as_fd(), &mut restrictive, stable).map_err(Failure::Os)
+    let family = Mount::new(copy.fs, root.as_fd()).family;
+    links.make(copy, root.as_fd(), family)?;
+    restrictive::tighten(
+        copy.fs,
+        root.as_fd(),
+        &mut restrictive,
+        stable_inodes(family),
+    )
+    .map_err(Failure::Os)
 }
 
 /// Why a copy stopped.

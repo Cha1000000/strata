@@ -347,6 +347,92 @@ fn merge_places_a_read_only_incoming_folder() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
+fn a_merge_keeps_hard_links_only_within_one_merged_folder() -> Result<(), Box<dyn Error>> {
+    use std::os::unix::fs::MetadataExt;
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let root = tempfile::tempdir()?;
+    let source = root.path().join("source");
+    let target = root.path().join("target");
+    fs::create_dir_all(source.join("new"))?;
+    fs::create_dir_all(source.join("sub"))?;
+    fs::create_dir_all(target.join("sub"))?;
+    fs::write(source.join("a"), b"linked")?;
+    for name in ["a2", "new/c", "sub/b"] {
+        fs::hard_link(source.join("a"), source.join(name))?;
+    }
+
+    let result = glib::MainContext::default().block_on(merge_local(
+        gio::File::for_path(&source),
+        gio::File::for_path(&target),
+        false,
+        gio::Cancellable::new(),
+        &no_plan,
+    ));
+
+    assert!(result.is_ok(), "{result:?}");
+    let [a, a2, c, b] = ["a", "a2", "new/c", "sub/b"].map(|name| {
+        fs::metadata(target.join(name)).map(|metadata| (metadata.ino(), metadata.nlink()))
+    });
+    let (a, b) = (a?, b?);
+    assert_eq!((a2?, c?), (a, a));
+    assert_eq!(a.1, 3);
+    assert_ne!(b.0, a.0);
+    assert_eq!(b.1, 1);
+    assert_eq!(fs::read(target.join("sub/b"))?, b"linked");
+    Ok(())
+}
+
+#[test]
+fn a_merged_copy_replaced_before_linking_is_not_linked() -> Result<(), Box<dyn Error>> {
+    use super::fs_quirks::Racer;
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let root = tempfile::tempdir()?;
+    let source = root.path().join("source");
+    let target = root.path().join("target");
+    fs::create_dir(&source)?;
+    fs::create_dir(&target)?;
+    fs::write(source.join("a"), b"linked")?;
+    fs::hard_link(source.join("a"), source.join("a2"))?;
+    let live = target.clone();
+    let racer: Racer = Box::new(move || {
+        for name in ["a", "a2"] {
+            if live.join(name).exists() {
+                fs::write(live.join("other"), b"other").expect("write the other item");
+                fs::rename(live.join("other"), live.join(name)).expect("replace the copy");
+            }
+        }
+    });
+    let scope = FsQuirks::install(
+        &target,
+        Quirks {
+            before: vec![(Op::Link, "*", 0, racer)],
+            ..Quirks::default()
+        },
+    );
+    learn_mount_capability(scope.key(), |capabilities| {
+        capabilities.hard_links = Some(true);
+    });
+
+    let result = glib::MainContext::default().block_on(merge_local(
+        gio::File::for_path(&source),
+        gio::File::for_path(&target),
+        false,
+        gio::Cancellable::new(),
+        &no_plan,
+    ));
+
+    assert!(result.is_err(), "{result:?}");
+    let names = names(&target)?;
+    assert_eq!(names.len(), 1, "{names:?}");
+    assert_eq!(fs::read(target.join(&names[0]))?, b"other");
+    Ok(())
+}
+
+#[test]
 fn a_merge_move_removes_the_emptied_source() -> Result<(), Box<dyn Error>> {
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
         .lock()
