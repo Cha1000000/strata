@@ -505,24 +505,17 @@ fn the_barrier_before_deleting_a_moved_source_follows_the_destination_family()
         .map_err(|error| error.to_string())?;
     // The family, whether the device is removable, whether the paste
     // moves, whether each written file is synced before it is closed, and
-    // the barrier's calls.
-    let rows: [(&str, &str, bool, bool, bool, &[Op]); 7] = [
-        ("ext4", "rw", false, true, false, &[Op::SyncFs]),
-        (
-            "vfat",
-            "rw,flush",
-            false,
-            true,
-            false,
-            &[Op::SyncFs, Op::SyncDir],
-        ),
-        ("fuseblk", "rw", false, true, true, &[Op::SyncDir]),
-        ("cifs", "rw,serverino", false, true, true, &[]),
-        ("9p", "rw", false, true, true, &[Op::SyncFs]),
-        ("ext4", "rw", true, true, false, &[Op::SyncFs, Op::SyncDir]),
-        ("ext4", "rw", false, false, false, &[]),
+    // the barrier's calls. A plain copy deletes nothing, so it never syncs.
+    let rows: [(&str, bool, bool, bool, &[Op]); 7] = [
+        ("ext4", false, true, false, &[Op::SyncFs]),
+        ("vfat", false, true, false, &[Op::SyncFs, Op::SyncDir]),
+        ("fuseblk", false, true, true, &[Op::SyncDir]),
+        ("cifs", false, true, true, &[]),
+        ("9p", false, true, true, &[Op::SyncFs]),
+        ("ext4", true, true, false, &[Op::SyncFs, Op::SyncDir]),
+        ("cifs", false, false, false, &[]),
     ];
-    for (id, (fs_type, options, removable, moving, each_file, barrier)) in (300..).zip(rows) {
+    for (id, (fs_type, removable, moving, each_file, barrier)) in (300..).zip(rows) {
         let row = format!("{fs_type} removable: {removable} moving: {moving}");
         let root = tempfile::tempdir()?;
         let sources = root.path().join("sources");
@@ -536,7 +529,7 @@ fn the_barrier_before_deleting_a_moved_source_follows_the_destination_family()
         let destination_quirks = FsQuirks::install(
             &destination,
             Quirks {
-                mount_type: Some((fs_type, options)),
+                mount_type: Some((fs_type, "rw")),
                 ..Quirks::default()
             },
         );
@@ -1341,6 +1334,100 @@ fn a_barrier_needs_a_readable_folder_only_where_it_flushes_one() -> Result<(), B
             assert!(source.exists(), "{row}");
             assert!(!destination.join("a.txt").exists(), "{row}");
         }
+    }
+    Ok(())
+}
+
+#[test]
+fn moved_files_are_synced_on_smb_whatever_the_conflict() -> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    // A selected file goes through its own stage, a Replace through a stage
+    // beside the original, and a merge through a stage in the live folder.
+    let conflicts = [
+        TransferConflict::FailIfExists,
+        TransferConflict::ReplaceExisting,
+        TransferConflict::Merge,
+    ];
+    for (id, conflict) in (370..).zip(conflicts) {
+        let root = tempfile::tempdir()?;
+        let sources = root.path().join("sources");
+        let destination = root.path().join("destination");
+        fs::create_dir_all(&sources)?;
+        fs::create_dir_all(&destination)?;
+        let item = if conflict == TransferConflict::Merge {
+            fs::create_dir(sources.join("folder"))?;
+            fs::write(sources.join("folder/incoming.txt"), b"incoming")?;
+            fs::create_dir(destination.join("folder"))?;
+            sources.join("folder")
+        } else {
+            fs::write(sources.join("incoming.txt"), b"incoming")?;
+            if conflict == TransferConflict::ReplaceExisting {
+                fs::write(destination.join("incoming.txt"), b"old")?;
+            }
+            sources.join("incoming.txt")
+        };
+        let destination_quirks = FsQuirks::install(
+            &destination,
+            Quirks {
+                mount_type: Some(("cifs", "rw")),
+                trash: super::fs_quirks::Trash::Unsupported,
+                ..Quirks::default()
+            },
+        );
+        let at_first_unlink = Arc::new(std::sync::Mutex::new(None));
+        let (record, read) = (at_first_unlink.clone(), destination_quirks.reader());
+        let _sources = FsQuirks::install(
+            &sources,
+            Quirks {
+                before: vec![(
+                    Op::Unlink,
+                    "*",
+                    0,
+                    Box::new(move || {
+                        *record.lock().unwrap_or_else(|error| error.into_inner()) = Some(read());
+                    }),
+                )],
+                ..Quirks::default()
+            },
+        );
+
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let emitted = events.clone();
+        let _operation = LocalOperationProvider.paste(
+            PasteRequest {
+                id: OperationRequestId(id),
+                destination: Location::local(&destination),
+                items: vec![PasteItem {
+                    source: Location::local(&item),
+                    conflict,
+                }],
+                move_sources: true,
+            },
+            Rc::new(move |event| emitted.borrow_mut().push(event)),
+        );
+        pump_until_transfer(&events);
+
+        assert!(
+            matches!(
+                terminal_transfer(&events.borrow()),
+                Some(OperationEvent::Pasted { .. })
+            ),
+            "{conflict:?}: {:?}",
+            events.borrow()
+        );
+        assert!(!item.exists(), "{conflict:?}");
+        let calls = at_first_unlink
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take()
+            .ok_or("a source was deleted")?;
+        assert!(
+            calls.iter().any(|call| call.op == Op::SyncData),
+            "{conflict:?}: the copy is synced before its source is deleted: {:?}",
+            calls.iter().map(|call| call.op).collect::<Vec<_>>()
+        );
     }
     Ok(())
 }
