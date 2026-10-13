@@ -20,7 +20,7 @@ use std::{
 use gtk::glib;
 use rustix::{fs::AtFlags, io::Errno};
 
-use super::{Failure, lock};
+use super::{Failure, Mount, lock};
 use crate::{
     adapters::local_operations::{
         LocalFileIdentity, bounded_local_worker_count, cancelled_local_operation,
@@ -211,9 +211,7 @@ pub(super) fn delete(
     let Manifest { parent, root } = manifest;
     let deletion = Arc::new(Deletion {
         fs,
-        stable_inodes: fs
-            .mount_type(parent.as_fd())
-            .is_none_or(|mount| mount.stable_inodes()),
+        stable_inodes: Mount::keeps_inode_numbers(fs, parent.as_fd()),
         unlinked: Mutex::default(),
         kept: Mutex::default(),
     });

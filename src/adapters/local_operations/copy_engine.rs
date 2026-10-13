@@ -975,14 +975,19 @@ struct Mount {
 impl Mount {
     fn new(fs: &dyn FsOps, dir: BorrowedFd<'_>) -> Self {
         let key = fs.mount_key(dir);
-        let family = mount_capabilities(key).family.unwrap_or_else(|| {
-            let family = fs
-                .mount_type(dir)
-                .map_or(Family::Other, |mount| family(&mount.fs_type));
-            learn_mount_capability(key, |capabilities| capabilities.family = Some(family));
-            family
-        });
+        let family = mount_capabilities(key)
+            .family
+            .unwrap_or_else(|| learn_mount_type(fs, dir, key).0);
         Self { key, family }
+    }
+
+    /// Whether the mount holding `dir` keeps inode numbers, as its
+    /// mountinfo entry tells.
+    fn keeps_inode_numbers(fs: &dyn FsOps, dir: BorrowedFd<'_>) -> bool {
+        let key = fs.mount_key(dir);
+        mount_capabilities(key)
+            .stable_inodes
+            .unwrap_or_else(|| learn_mount_type(fs, dir, key).1)
     }
 
     fn capabilities(&self) -> MountCapabilities {
@@ -992,6 +997,21 @@ impl Mount {
     fn learn(&self, learn: impl FnOnce(&mut MountCapabilities)) {
         learn_mount_capability(self.key, learn);
     }
+}
+
+/// Reads what mountinfo says of the mount holding `dir` once per mount:
+/// its family, and whether it keeps inode numbers.
+fn learn_mount_type(fs: &dyn FsOps, dir: BorrowedFd<'_>, key: MountKey) -> (Family, bool) {
+    let mount_type = fs.mount_type(dir);
+    let family = mount_type
+        .as_ref()
+        .map_or(Family::Other, |mount| family(&mount.fs_type));
+    let stable = mount_type.is_none_or(|mount| mount.stable_inodes());
+    learn_mount_capability(key, |capabilities| {
+        capabilities.family = Some(family);
+        capabilities.stable_inodes = Some(stable);
+    });
+    (family, stable)
 }
 
 const TMPFILE_LINK_UNKNOWN: u8 = 0;

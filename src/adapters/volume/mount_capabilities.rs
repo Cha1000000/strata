@@ -34,6 +34,8 @@ pub(crate) struct MountCapabilities {
     pub refused_xattrs: XattrNamespaces,
     /// From mountinfo, kept here so a mount change drops it with the rest.
     pub family: Option<Family>,
+    /// Whether entries keep their inode numbers, from mountinfo too.
+    pub stable_inodes: Option<bool>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
