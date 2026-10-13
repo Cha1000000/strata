@@ -441,6 +441,7 @@ fn fill(
         mut restrictive,
         links,
     } = tree::walk(copy, workers, created.cloned(), |tree| {
+        tree.probe_links_in(&mount, root.parent.clone());
         tree::TreeJob::Folder(tree, folder)
     })
     .map_err(Failure::Error)?;

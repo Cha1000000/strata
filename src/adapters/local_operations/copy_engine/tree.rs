@@ -63,6 +63,11 @@ pub(super) struct Tree {
 }
 
 impl Tree {
+    /// Where a mount is probed for links, outside the copy.
+    pub(super) fn probe_links_in(&self, mount: &Mount, dir: Arc<OwnedFd>) {
+        self.links.probe_in(mount.key, dir);
+    }
+
     fn made(&self, path: &Path, identity: LocalFileIdentity) {
         if let Some(created) = &self.created {
             created.add(path.to_path_buf(), identity);
@@ -538,7 +543,7 @@ impl File {
                 claimed: self.claimed,
                 size: source.stat.size,
             };
-            tree.links.role(fs, &self.mount, self.target.as_fd(), name)
+            tree.links.role(fs, &self.mount, name)
         } else {
             Role::Copied
         };
@@ -680,6 +685,7 @@ impl Merged {
         }
         let children = children(fs, source.as_fd())?;
         let (source, target) = (Arc::new(source), Arc::new(target));
+        tree.probe_links_in(&mount, target.clone());
         let live = Live {
             source,
             dir: target,

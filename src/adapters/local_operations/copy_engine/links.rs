@@ -9,7 +9,7 @@ use std::{
     ffi::OsString,
     os::fd::{AsFd, BorrowedFd, OwnedFd},
     path::{Path, PathBuf},
-    sync::{Mutex, PoisonError},
+    sync::{Arc, Mutex, PoisonError},
 };
 
 use rustix::{fs::AtFlags, io::Errno};
@@ -67,12 +67,21 @@ struct Retimed {
 }
 
 #[derive(Default)]
-pub(super) struct Links(Mutex<State>);
+pub(super) struct Links {
+    state: Mutex<State>,
+    probes: Mutex<HashMap<MountKey, Probe>>,
+}
+
+/// Whether a mount keeps links, where it has not learned that.
+enum Probe {
+    /// To be probed in this folder, outside the copy.
+    In(Arc<OwnedFd>),
+    /// Probed by this copy, without learning anything.
+    Found(bool),
+}
 
 #[derive(Default)]
 struct State {
-    /// Mounts probed by this copy, where nothing was learned.
-    probed: HashMap<MountKey, bool>,
     firsts: HashMap<Key, First>,
     later: Vec<Name>,
     /// The folders later names land in.
@@ -81,25 +90,33 @@ struct State {
 }
 
 impl Links {
-    /// Decides how `name`, to be made in `dir`, is made, and records it.
-    pub(super) fn role(
-        &self,
-        fs: &dyn FsOps,
-        mount: &Mount,
-        dir: BorrowedFd<'_>,
-        name: Name,
-    ) -> Role {
-        let mut state = lock(&self.0);
-        // A probe rules out links that report another inode, as on sshfs.
-        let kept = mount.capabilities().hard_links.unwrap_or_else(|| {
-            *state
-                .probed
-                .entry(mount.key)
-                .or_insert_with(|| placement::links_hold(fs, dir))
-        });
-        if !kept {
+    /// Probes `mount`, if it must be, in `dir`: a folder of the destination
+    /// that the copy does not make, so nothing a probe leaves ends up in it.
+    pub(super) fn probe_in(&self, mount: MountKey, dir: Arc<OwnedFd>) {
+        lock(&self.probes).entry(mount).or_insert(Probe::In(dir));
+    }
+
+    /// A probe rules out links that report another inode, as on sshfs.
+    fn kept(&self, fs: &dyn FsOps, mount: &Mount) -> bool {
+        if let Some(kept) = mount.capabilities().hard_links {
+            return kept;
+        }
+        let mut probes = lock(&self.probes);
+        let kept = match probes.get(&mount.key) {
+            Some(Probe::Found(kept)) => return *kept,
+            Some(Probe::In(dir)) => placement::links_hold(fs, dir.as_fd()),
+            None => false,
+        };
+        probes.insert(mount.key, Probe::Found(kept));
+        kept
+    }
+
+    /// Decides how `name` is made, and records it.
+    pub(super) fn role(&self, fs: &dyn FsOps, mount: &Mount, name: Name) -> Role {
+        if !self.kept(fs, mount) {
             return Role::Copied;
         }
+        let mut state = lock(&self.state);
         match state.firsts.entry(name.key) {
             hash_map::Entry::Vacant(vacant) => {
                 vacant.insert(First {
@@ -119,7 +136,7 @@ impl Links {
     }
 
     pub(super) fn written(&self, key: Key, identity: LocalFileIdentity) {
-        if let Some(first) = lock(&self.0).firsts.get_mut(&key) {
+        if let Some(first) = lock(&self.state).firsts.get_mut(&key) {
             first.identity = Some(identity);
         }
     }
@@ -127,7 +144,7 @@ impl Links {
     /// Keeps the times of the made folder at `path` for after the links
     /// pass, when a later name lands in it.
     pub(super) fn retime(&self, path: &Path, identity: LocalFileIdentity, snapshot: Snapshot) {
-        let mut state = lock(&self.0);
+        let mut state = lock(&self.state);
         if state.folders.contains(path) {
             state.retimed.push(Retimed {
                 path: path.to_path_buf(),
@@ -138,11 +155,14 @@ impl Links {
     }
 
     pub(super) fn take(&self) -> Self {
-        Self(Mutex::new(std::mem::take(&mut *lock(&self.0))))
+        Self {
+            state: Mutex::new(std::mem::take(&mut *lock(&self.state))),
+            probes: Mutex::default(),
+        }
     }
 
     pub(super) fn is_empty(&self) -> bool {
-        lock(&self.0).later.is_empty()
+        lock(&self.state).later.is_empty()
     }
 
     /// Makes every later name beneath `root`, in path order, then gives the
@@ -160,7 +180,7 @@ impl Links {
             mut later,
             retimed,
             ..
-        } = self.0.into_inner().unwrap_or_else(PoisonError::into_inner);
+        } = self.state.into_inner().unwrap_or_else(PoisonError::into_inner);
         later.sort_by(|left, right| left.path.cmp(&right.path));
         let mut linking = true;
         for name in &later {

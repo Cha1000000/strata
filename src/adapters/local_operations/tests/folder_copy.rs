@@ -629,6 +629,30 @@ fn a_copied_folder_keeps_its_hard_links_where_the_destination_can() -> Result<()
 }
 
 #[test]
+fn probing_for_hard_links_leaves_nothing_in_the_copy() -> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock()?;
+    // The probe's link is made, but its reply is lost, so it tries another name.
+    let mounts = mounts(Quirks {
+        lost_reply: vec![(Op::Link, ".strata-probe-*", Errno::EXIST)],
+        ..Quirks::nfs3()
+    })?;
+    let source = mounts.sources.join("source");
+    fs::create_dir(&source)?;
+    fs::write(source.join("a"), b"linked")?;
+    fs::hard_link(source.join("a"), source.join("b"))?;
+    let target = mounts.destination.join("target");
+
+    copy(&source, &target)?;
+
+    assert_eq!(names(&target)?, ["a", "b"]);
+    assert_eq!(
+        fs::metadata(target.join("a"))?.ino(),
+        fs::metadata(target.join("b"))?.ino()
+    );
+    Ok(())
+}
+
+#[test]
 fn a_refused_link_is_copied_from_the_first_copy_and_ends_linking() -> Result<(), Box<dyn Error>> {
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock()?;
     let mounts = mounts(Quirks {
