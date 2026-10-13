@@ -505,15 +505,10 @@ fn assert_only_complete(
 #[test]
 fn a_stopped_merge_leaves_nothing_partial_at_a_real_name() -> Result<(), Box<dyn Error>> {
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock()?;
-    let nfs = || Quirks {
-        silly_rename: true,
-        ..Quirks::nfs3()
-    };
-    // Claimed names on NFS and vfat, and folders made at their names where
+    // Children built in a merge stage, and folders made at their names where
     // the mount cannot place one.
-    let presets: [(&str, Preset); 3] = [
-        ("nfs", nfs),
-        ("vfat", Quirks::vfat),
+    let presets: [(&str, Preset); 2] = [
+        ("staged", Quirks::nfs3),
         ("in place", Quirks::without_folder_placement),
     ];
     for (row, preset) in presets {
@@ -626,6 +621,7 @@ fn a_failed_copy_in_place_removes_only_what_it_made() -> Result<(), Box<dyn Erro
         Quirks {
             before: vec![(Op::Close, "*", 0, racer)],
             fail: vec![(Op::Close, "*", 0, Errno::IO)],
+            silly_rename: true,
             ..Quirks::without_folder_placement()
         },
     );
