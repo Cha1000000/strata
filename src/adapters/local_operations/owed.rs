@@ -101,6 +101,16 @@ impl Owed {
     }
 }
 
+/// Reaches `barrier`, or tells why the device could not finish writing.
+pub(super) async fn flush(barrier: Barrier) -> Result<(), String> {
+    let removable = !removable_roots_for_paths(std::slice::from_ref(&barrier.path))
+        .await
+        .is_empty();
+    copy_engine::reach(barrier, removable)
+        .await
+        .map_err(|error| device_flush_failure(&error))
+}
+
 /// When a batch closes, besides at the end of its paste.
 #[derive(Clone, Copy)]
 pub(super) struct Limits {
@@ -186,14 +196,7 @@ impl<T> Batch<T> {
         cancellable: &gio::Cancellable,
     ) -> Vec<(T, Result<(), glib::Error>)> {
         let flushed = match self.barrier {
-            Some(barrier) => {
-                let removable = !removable_roots_for_paths(std::slice::from_ref(&barrier.path))
-                    .await
-                    .is_empty();
-                copy_engine::reach(barrier, removable)
-                    .await
-                    .map_err(|error| device_flush_failure(&error))
-            }
+            Some(barrier) => flush(barrier).await,
             None => Ok(()),
         };
         let mut settled = Vec::with_capacity(self.entries.len());

@@ -299,7 +299,8 @@ pub struct SkippedItem {
     pub kind: SpecialKind,
 }
 
-/// Why a move left an item it copied in its original folder.
+/// Why a move left an item it copied in its original folder, or a restore
+/// in the Trash.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum KeptCause {
     /// It changed while it was copied, or after.
@@ -325,17 +326,23 @@ pub struct TransferReport {
     pub skipped: Vec<SkippedItem>,
     /// Left at the source by a move.
     pub kept: Vec<KeptItem>,
+    /// Left in the Trash by a restore.
+    pub kept_in_trash: Vec<KeptItem>,
 }
 
 impl TransferReport {
     pub fn is_empty(&self) -> bool {
-        self.renamed.is_empty() && self.skipped.is_empty() && self.kept.is_empty()
+        self.renamed.is_empty()
+            && self.skipped.is_empty()
+            && self.kept.is_empty()
+            && self.kept_in_trash.is_empty()
     }
 
     pub fn extend(&mut self, other: Self) {
         self.renamed.extend(other.renamed);
         self.skipped.extend(other.skipped);
         self.kept.extend(other.kept);
+        self.kept_in_trash.extend(other.kept_in_trash);
     }
 }
 

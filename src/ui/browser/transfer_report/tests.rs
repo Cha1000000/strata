@@ -128,6 +128,10 @@ fn items_left_out_or_left_behind_make_the_report_a_warning() {
         location: Location::local("/source/run/data"),
         cause,
     };
+    let in_trash = |cause| KeptItem {
+        location: Location::local("/trash/files/run/data"),
+        cause,
+    };
     let denied = rustix::io::Errno::ACCESS.raw_os_error();
     let reason = crate::services::io_error_detail(&std::io::Error::from_raw_os_error(denied));
     let left_behind = vec![
@@ -135,21 +139,28 @@ fn items_left_out_or_left_behind_make_the_report_a_warning() {
         kept(KeptCause::Undeletable(denied)),
         kept(KeptCause::Skipped(SpecialKind::Socket)),
     ];
+    let left_in_trash = vec![
+        in_trash(KeptCause::Changed),
+        in_trash(KeptCause::Undeletable(denied)),
+    ];
     // A transfer that failed or was cancelled afterwards is not called
     // complete.
-    for (renamed_count, skipped_count, kept_count, stopped) in [
-        (0, 2, 0, false),
-        (1, 2, 0, false),
-        (3, 2, 0, false),
-        (0, 0, 3, false),
-        (1, 2, 3, false),
-        (1, 2, 3, true),
+    for (renamed_count, skipped_count, kept_count, in_trash_count, stopped) in [
+        (0, 2, 0, 0, false),
+        (1, 2, 0, 0, false),
+        (3, 2, 0, 0, false),
+        (0, 0, 3, 0, false),
+        (1, 2, 3, 0, false),
+        (1, 2, 3, 0, true),
+        (0, 0, 0, 2, false),
     ] {
-        let row = format!("{renamed_count}, {skipped_count}, {kept_count}, {stopped}");
+        let row =
+            format!("{renamed_count}, {skipped_count}, {kept_count}, {in_trash_count}, {stopped}");
         let report = TransferReport {
             skipped: [skipped(SpecialKind::Socket), skipped(SpecialKind::Pipe)][..skipped_count]
                 .to_vec(),
             kept: left_behind[..kept_count].to_vec(),
+            kept_in_trash: left_in_trash[..in_trash_count].to_vec(),
             ..renamed(renamed_count)
         };
         let Some(Presentation::Warning { title, detail }) = presentation(&report, stopped) else {
@@ -163,7 +174,7 @@ fn items_left_out_or_left_behind_make_the_report_a_warning() {
         assert_eq!(title, expected, "{row}");
         assert_eq!(
             detail.matches('•').count(),
-            renamed_count + skipped_count + kept_count,
+            renamed_count + skipped_count + kept_count + in_trash_count,
             "{row}"
         );
         let heading = crate::i18n::count("items_kept", kept_count);
@@ -174,7 +185,18 @@ fn items_left_out_or_left_behind_make_the_report_a_warning() {
             folder = "run"
         );
         assert_eq!(detail.contains(&*changed), kept_count > 0, "{row}");
-        assert_eq!(detail.contains(&reason), kept_count > 0, "{row}");
+        let heading = crate::i18n::count("items_kept_in_trash", in_trash_count);
+        assert_eq!(detail.contains(&heading), in_trash_count > 0, "{row}");
+        let changed = rust_i18n::t!(
+            "“%{name}” changed during the restore and was left in the Trash",
+            name = "data"
+        );
+        assert_eq!(detail.contains(&*changed), in_trash_count > 0, "{row}");
+        assert_eq!(
+            detail.contains(&reason),
+            kept_count + in_trash_count > 0,
+            "{row}"
+        );
     }
 }
 

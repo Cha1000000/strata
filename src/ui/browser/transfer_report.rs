@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
 
 //! Tells the user, once a transfer ends, about items inside the ones it was
-//! given that it saved under other names or left out, and what a move left
-//! in its original folder.
+//! given that it saved under other names or left out, what a move left in
+//! its original folder, and what a restore left in the Trash.
 
 use std::time::Duration;
 
@@ -77,9 +77,16 @@ fn skipped_line(item: &SkippedItem) -> String {
     special_line(&display_name(&item.location), item.kind)
 }
 
-fn kept_line(item: &KeptItem) -> String {
+/// What happened to `item`, which a restore left `in_trash` or a move at its
+/// source.
+fn kept_line(item: &KeptItem, in_trash: bool) -> String {
     let name = display_name(&item.location);
     match &item.cause {
+        KeptCause::Changed if in_trash => rust_i18n::t!(
+            "“%{name}” changed during the restore and was left in the Trash",
+            name = name
+        )
+        .into_owned(),
         KeptCause::Changed => rust_i18n::t!(
             "“%{name}” changed during the move and was left in “%{folder}”",
             name = name,
@@ -170,16 +177,24 @@ fn sections(sections: Vec<(String, Vec<String>)>) -> String {
 fn presentation(report: &TransferReport, stopped: bool) -> Option<Presentation> {
     let followed = followed(&report.renamed);
     let mut renamed = renamed_sections(&followed);
-    if !report.skipped.is_empty() || !report.kept.is_empty() {
+    if !report.skipped.is_empty() || !report.kept.is_empty() || !report.kept_in_trash.is_empty() {
         if !report.skipped.is_empty() {
             let skipped = report.skipped.iter().map(skipped_line).collect::<Vec<_>>();
             let heading =
                 crate::i18n::tr("These special files can\u{2019}t be copied and were left out");
             renamed.push((heading, skipped));
         }
-        if !report.kept.is_empty() {
-            let kept = report.kept.iter().map(kept_line).collect::<Vec<_>>();
-            renamed.push((crate::i18n::count("items_kept", kept.len()), kept));
+        for (kept, heading, in_trash) in [
+            (&report.kept, "items_kept", false),
+            (&report.kept_in_trash, "items_kept_in_trash", true),
+        ] {
+            if !kept.is_empty() {
+                let lines = kept
+                    .iter()
+                    .map(|item| kept_line(item, in_trash))
+                    .collect::<Vec<_>>();
+                renamed.push((crate::i18n::count(heading, lines.len()), lines));
+            }
         }
         // A transfer that failed or was cancelled did not complete.
         let title = if stopped {

@@ -1,12 +1,17 @@
 // SPDX-License-Identifier: MIT
 
-use super::super::{copy_restore_entry, discard_restore_copy, move_restore_path};
-use super::fs_quirks::{Op, Support};
+use super::super::move_restore_path;
+use super::fs_quirks::{Op, Racer, Support};
 use super::*;
+use crate::services::{KeptCause, KeptItem, SpecialKind, TransferReport};
 use rustix::io::Errno;
-use std::os::unix::fs::{MetadataExt, symlink};
+use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt, symlink};
 
-fn restore_path(source: &Path, destination: &Path, allowed: &Path) -> Result<(), glib::Error> {
+fn restore_path(
+    source: &Path,
+    destination: &Path,
+    allowed: &Path,
+) -> Result<TransferReport, glib::Error> {
     glib::MainContext::default().block_on(move_restore_path(
         source.to_path_buf(),
         destination.to_path_buf(),
@@ -19,7 +24,28 @@ fn restore_path(source: &Path, destination: &Path, allowed: &Path) -> Result<(),
 fn restore_without_rename_flags_never_replaces_a_racing_destination() -> Result<(), Box<dyn Error>>
 {
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock()?;
-    for error in [Errno::INVAL, Errno::NOSYS, Errno::OPNOTSUPP] {
+    // The name is taken just before the step that would take it: the
+    // fallback rung, or the copy made where nothing can place the item,
+    // whose barrier is opened before it writes.
+    let rows: [(Preset, Option<(Op, &str)>); 4] = [
+        (Quirks::without_rename_flags, None),
+        (
+            || Quirks {
+                rename_flags: Support::Rejected(Errno::NOSYS),
+                ..Quirks::default()
+            },
+            None,
+        ),
+        (
+            || Quirks {
+                rename_flags: Support::Rejected(Errno::OPNOTSUPP),
+                ..Quirks::default()
+            },
+            None,
+        ),
+        (Quirks::without_placement, Some((Op::OpenDir, "."))),
+    ];
+    for (quirks, copying) in rows {
         for directory in [false, true] {
             let fixture = tempfile::tempdir()?;
             let source = fixture.path().join("source");
@@ -31,20 +57,19 @@ fn restore_without_rename_flags_never_replaces_a_racing_destination() -> Result<
                 fs::write(&source, b"original")?;
             }
             let raced = destination.clone();
-            let fallback = if directory { Op::Mkdir } else { Op::Link };
+            let (op, pattern) = copying.unwrap_or(if directory {
+                (Op::Mkdir, "destination")
+            } else {
+                (Op::Link, "destination")
+            });
+            let racer: Racer = Box::new(move || {
+                fs::write(&raced, b"concurrent user data").expect("racing destination")
+            });
             let _scope = FsQuirks::install(
                 fixture.path(),
                 Quirks {
-                    rename_flags: Support::Rejected(error),
-                    before: vec![(
-                        fallback,
-                        "destination",
-                        0,
-                        Box::new(move || {
-                            fs::write(&raced, b"concurrent user data").expect("racing destination")
-                        }),
-                    )],
-                    ..Quirks::default()
+                    before: vec![(op, pattern, 0, racer)],
+                    ..quirks()
                 },
             );
 
@@ -200,46 +225,14 @@ fn restore_without_rename_flags_preserves_a_replaced_source() -> Result<(), Box<
 }
 
 #[test]
-fn restore_exclusive_copy_handles_files_links_and_partial_failure() -> Result<(), Box<dyn Error>> {
+fn restore_copies_files_links_and_named_pipes_where_nothing_can_place_them()
+-> Result<(), Box<dyn Error>> {
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock()?;
     let fixture = tempfile::tempdir()?;
     let source = fixture.path().join("source");
     fs::create_dir(&source)?;
     fs::write(source.join("contents"), b"original")?;
     symlink("missing", source.join("link"))?;
-    let parent = std::sync::Arc::new(super::super::open_local_parent_directory(fixture.path())?);
-    glib::MainContext::default().block_on(copy_restore_entry(
-        parent.clone(),
-        "source".into(),
-        parent.clone(),
-        "destination".into(),
-        None,
-        gio::Cancellable::new(),
-        Rc::new(RefCell::new(Vec::new())),
-    ))?;
-    assert_eq!(
-        fs::read(fixture.path().join("destination/contents"))?,
-        b"original"
-    );
-    assert_eq!(
-        fs::read_link(fixture.path().join("destination/link"))?,
-        Path::new("missing")
-    );
-    fs::write(fixture.path().join("occupied"), b"unrelated")?;
-    assert!(
-        glib::MainContext::default()
-            .block_on(copy_restore_entry(
-                parent.clone(),
-                "source".into(),
-                parent,
-                "occupied".into(),
-                None,
-                gio::Cancellable::new(),
-                Rc::new(RefCell::new(Vec::new())),
-            ))
-            .is_err()
-    );
-    assert_eq!(fs::read(fixture.path().join("occupied"))?, b"unrelated");
     rustix::fs::mknodat(
         rustix::fs::CWD,
         source.join("fifo"),
@@ -247,81 +240,314 @@ fn restore_exclusive_copy_handles_files_links_and_partial_failure() -> Result<()
         rustix::fs::Mode::from_raw_mode(0o600),
         0,
     )?;
-    let _scope = FsQuirks::install(fixture.path(), Quirks::without_placement());
-    let result = restore_path(&source, &fixture.path().join("incomplete"), fixture.path());
-    let message = result.expect_err("unsupported copy source").to_string();
-    assert!(
-        message.contains("incomplete copy could not be removed"),
-        "{message}"
-    );
-    assert!(fixture.path().join("incomplete").is_dir());
-    assert!(!fixture.path().join("incomplete/contents").exists());
-    assert_eq!(fs::read(source.join("contents"))?, b"original");
-    assert!(fs::symlink_metadata(source.join("fifo")).is_ok());
-    Ok(())
-}
-
-#[test]
-fn restore_copy_rechecks_the_opened_source_before_creating_output() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock()?;
-    let fixture = tempfile::tempdir()?;
-    let source = fixture.path().join("source");
-    fs::write(&source, b"original")?;
-    let identity = glib::MainContext::default().block_on(super::super::local_file_identity(
-        &gio::File::for_path(&source),
-    ))?;
-    fs::rename(&source, fixture.path().join("original"))?;
-    fs::write(&source, b"replacement")?;
-    let parent = std::sync::Arc::new(super::super::open_local_parent_directory(fixture.path())?);
-    let result = glib::MainContext::default().block_on(copy_restore_entry(
-        parent.clone(),
-        "source".into(),
-        parent,
-        "destination".into(),
-        identity,
-        gio::Cancellable::new(),
-        Rc::new(RefCell::new(Vec::new())),
-    ));
-    assert!(result.is_err());
-    assert!(!fixture.path().join("destination").exists());
-    assert_eq!(fs::read(source)?, b"replacement");
-    assert_eq!(fs::read(fixture.path().join("original"))?, b"original");
-    Ok(())
-}
-
-#[test]
-fn restore_copy_rollback_preserves_foreign_and_replaced_entries() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock()?;
-    let fixture = tempfile::tempdir()?;
-    let source = fixture.path().join("source");
-    fs::create_dir(&source)?;
-    fs::write(source.join("contents"), b"original")?;
-    let parent = std::sync::Arc::new(super::super::open_local_parent_directory(fixture.path())?);
-    let journal = Rc::new(RefCell::new(Vec::new()));
-    glib::MainContext::default().block_on(copy_restore_entry(
-        parent.clone(),
-        "source".into(),
-        parent,
-        "destination".into(),
-        None,
-        gio::Cancellable::new(),
-        journal.clone(),
-    ))?;
+    fs::set_permissions(source.join("fifo"), fs::Permissions::from_mode(0o640))?;
     let destination = fixture.path().join("destination");
-    fs::write(destination.join("foreign"), b"unrelated")?;
-    fs::rename(
-        destination.join("contents"),
-        fixture.path().join("old-copy"),
-    )?;
-    fs::write(destination.join("contents"), b"replacement")?;
-    assert!(
-        glib::MainContext::default()
-            .block_on(discard_restore_copy(journal))
-            .is_err()
+    let scope = FsQuirks::install(fixture.path(), Quirks::without_placement());
+
+    let report = restore_path(&source, &destination, fixture.path())?;
+
+    assert!(!scope.used_name(".strata-copy-*"), "nothing is staged");
+    assert_eq!(report, TransferReport::default());
+    assert_eq!(fs::read(destination.join("contents"))?, b"original");
+    assert_eq!(
+        fs::read_link(destination.join("link"))?,
+        Path::new("missing")
     );
+    let pipe = fs::symlink_metadata(destination.join("fifo"))?;
+    assert!(pipe.file_type().is_fifo());
+    assert_eq!(pipe.mode() & 0o777, 0o640);
+    assert!(!source.exists());
+    Ok(())
+}
+
+#[test]
+fn restore_copy_refuses_a_trash_item_replaced_after_it_was_checked() -> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock()?;
+    // Replaced before the copy starts, and between the copy's check of the
+    // name and its open of the file.
+    for (op, pattern) in [(Op::OpenDir, "."), (Op::OpenSource, "source")] {
+        let fixture = tempfile::tempdir()?;
+        let source = fixture.path().join("source");
+        let original = fixture.path().join("original");
+        let destination = fixture.path().join("destination");
+        fs::write(&source, b"original")?;
+        let (raced, retained) = (source.clone(), original.clone());
+        let racer: Racer = Box::new(move || {
+            fs::rename(&raced, &retained).expect("retain original source");
+            fs::write(&raced, b"replacement").expect("replace source");
+        });
+        let _scope = FsQuirks::install(
+            fixture.path(),
+            Quirks {
+                before: vec![(op, pattern, 0, racer)],
+                ..Quirks::without_placement()
+            },
+        );
+
+        let result = restore_path(&source, &destination, fixture.path());
+
+        assert!(result.is_err(), "{op:?}");
+        assert!(!destination.exists(), "{op:?}");
+        assert_eq!(fs::read(&source)?, b"replacement");
+        assert_eq!(fs::read(&original)?, b"original");
+    }
+    Ok(())
+}
+
+#[test]
+fn a_failed_restore_copy_removes_only_what_it_made() -> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock()?;
+    let fixture = tempfile::tempdir()?;
+    let source = fixture.path().join("source");
+    fs::create_dir_all(source.join("sub"))?;
+    fs::write(source.join("contents"), b"original")?;
+    fs::write(source.join("sub/nested"), b"nested")?;
+    let destination = fixture.path().join("destination");
+    let (copy, aside) = (destination.clone(), fixture.path().join("old-copy"));
+    // Once every entry is copied, another program adds one and replaces
+    // one of the copy's, then setting the folder's own times fails.
+    let racer: Racer = Box::new(move || {
+        fs::write(copy.join("foreign"), b"unrelated").expect("add a foreign entry");
+        fs::rename(copy.join("contents"), &aside).expect("move a copied entry aside");
+        fs::write(copy.join("contents"), b"replacement").expect("replace a copied entry");
+    });
+    let _scope = FsQuirks::install(
+        fixture.path(),
+        Quirks {
+            before: vec![(Op::SetTimes, "destination", 0, racer)],
+            fail: vec![(Op::SetTimes, "destination", 0, Errno::IO)],
+            ..Quirks::without_placement()
+        },
+    );
+
+    assert!(restore_path(&source, &destination, fixture.path()).is_err());
+
     assert_eq!(fs::read(destination.join("foreign"))?, b"unrelated");
     assert_eq!(fs::read(destination.join("contents"))?, b"replacement");
+    assert!(!destination.join("sub").exists());
     assert_eq!(fs::read(source.join("contents"))?, b"original");
+    assert_eq!(fs::read(source.join("sub/nested"))?, b"nested");
+    Ok(())
+}
+
+#[test]
+fn restore_copies_keep_the_metadata_the_destination_takes() -> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock()?;
+    let refusing = || Quirks {
+        extra_xattrs: vec![("security.strata-test", b"label")],
+        xattrs_refused: vec![("security.", Errno::PERM)],
+        ..Quirks::without_placement()
+    };
+    // Read-only items keep the xattrs set before their mode, and an xattr
+    // the destination refuses is left out.
+    let rows: [(bool, u32, Preset); 3] = [
+        (false, 0o444, Quirks::without_placement),
+        (true, 0o555, Quirks::without_placement),
+        (false, 0o640, refusing),
+    ];
+    for (directory, mode, quirks) in rows {
+        let row = format!("directory: {directory}, mode: {mode:o}");
+        let fixture = tempfile::tempdir()?;
+        let source = fixture.path().join("source");
+        if directory {
+            fs::create_dir(&source)?;
+        } else {
+            fs::write(&source, b"original")?;
+        }
+        let opened = fs::File::open(&source)?;
+        rustix::fs::fsetxattr(
+            &opened,
+            "user.strata-test",
+            b"metadata",
+            rustix::fs::XattrFlags::empty(),
+        )?;
+        let modified = SystemTime::UNIX_EPOCH + Duration::from_secs(1_600_000_000);
+        opened.set_times(fs::FileTimes::new().set_modified(modified))?;
+        fs::set_permissions(&source, fs::Permissions::from_mode(mode))?;
+        let destination = fixture.path().join("destination");
+        let _scope = FsQuirks::install(fixture.path(), quirks());
+
+        restore_path(&source, &destination, fixture.path())?;
+
+        let restored = fs::symlink_metadata(&destination)?;
+        assert_eq!(restored.mode() & 0o777, mode, "{row}");
+        assert_eq!(restored.modified()?, modified, "{row}");
+        let mut value = [0u8; 32];
+        let count = rustix::fs::getxattr(&destination, "user.strata-test", &mut value[..])?;
+        assert_eq!(&value[..count], b"metadata", "{row}");
+        assert!(fs::symlink_metadata(&source).is_err(), "{row}");
+    }
+    Ok(())
+}
+
+#[test]
+fn restore_deletes_the_trash_copy_only_once_its_copy_is_flushed() -> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock()?;
+    // The family, how its barrier is reached, whether each restored file is
+    // synced before it is closed, and whether the flush fails.
+    let rows = [
+        ("ext4", Op::SyncFs, false, false),
+        ("ext4", Op::SyncFs, false, true),
+        ("fuseblk", Op::SyncDir, true, false),
+    ];
+    for (fs_type, flush, each_file, failing) in rows {
+        let row = format!("{fs_type}, failing: {failing}");
+        let fixture = tempfile::tempdir()?;
+        let source = fixture.path().join("source");
+        fs::create_dir(&source)?;
+        fs::write(source.join("contents"), b"original")?;
+        let destination = fixture.path().join("destination");
+        let fail = if failing {
+            vec![(flush, "*", 0, Errno::IO)]
+        } else {
+            Vec::new()
+        };
+        let scope = FsQuirks::install(
+            fixture.path(),
+            Quirks {
+                mount_type: Some((fs_type, "rw")),
+                fail,
+                ..Quirks::without_placement()
+            },
+        );
+
+        let restored = restore_path(&source, &destination, fixture.path());
+
+        let calls = scope.calls();
+        let first = |op: Op| {
+            calls
+                .iter()
+                .position(|call| call.op == op && call.names.iter().any(|n| n == "contents"))
+        };
+        let flushed = calls.iter().position(|call| call.op == flush);
+        assert!(flushed.is_some(), "{row}");
+        let synced = first(Op::SyncData);
+        assert_eq!(synced.is_some(), each_file, "{row}");
+        assert!(synced < first(Op::Close), "{row}");
+        assert_eq!(fs::read(destination.join("contents"))?, b"original");
+        let deleted = first(Op::Unlink);
+        if failing {
+            let message = restored.expect_err("the flush failed").to_string();
+            assert!(message.contains("could not finish writing"), "{message}");
+            assert_eq!(deleted, None, "{row}");
+            assert_eq!(fs::read(source.join("contents"))?, b"original");
+        } else {
+            restored?;
+            assert!(deleted > flushed, "{row}");
+            assert!(!source.exists(), "{row}");
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn restore_leaves_in_the_trash_what_it_cannot_copy_or_finds_changed() -> Result<(), Box<dyn Error>>
+{
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock()?;
+    let uid = rustix::process::getuid().as_raw();
+    // Whether the Trash copy changes, and whether a merge undo restores it.
+    for (changed, merge_undo) in [(false, false), (true, false), (false, true)] {
+        let fixture = tempfile::tempdir()?;
+        let trash = fixture.path().join(format!(".Trash-{uid}"));
+        let item = trash.join("files/report");
+        fs::create_dir_all(&item)?;
+        fs::create_dir_all(trash.join("info"))?;
+        fs::create_dir(fixture.path().join("Documents"))?;
+        fs::write(item.join("notes.txt"), b"notes")?;
+        let info = trash.join("info/report.trashinfo");
+        fs::write(
+            &info,
+            "[Trash Info]\nPath=Documents/report\nDeletionDate=2026-01-01T00:00:00\n",
+        )?;
+        let (name, cause) = if changed {
+            ("notes.txt", KeptCause::Changed)
+        } else {
+            std::os::unix::net::UnixListener::bind(item.join("socket"))?;
+            ("socket", KeptCause::Skipped(SpecialKind::Socket))
+        };
+        // Rewritten in the Trash once it is copied, before the copy is flushed.
+        let rewritten = item.join("notes.txt");
+        let racer: Racer = Box::new(move || {
+            fs::write(&rewritten, b"rewritten notes").expect("rewrite the Trash copy")
+        });
+        let _scope = FsQuirks::install(
+            fixture.path(),
+            Quirks {
+                mount_type: Some(("ext4", "rw")),
+                before: if changed {
+                    vec![(Op::SyncFs, "*", 0, racer)]
+                } else {
+                    Vec::new()
+                },
+                ..Quirks::without_placement()
+            },
+        );
+        let destination = fixture.path().canonicalize()?.join("Documents/report");
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let emitted = events.clone();
+        let emit = Rc::new(move |event| emitted.borrow_mut().push(event));
+
+        if merge_undo {
+            let staged = RefCell::new(Some(RestoreEntry {
+                source: Location::local(&item),
+                display_name: "report".to_owned(),
+                original_target: Some(Location::local(&destination)),
+                trash_info: Some(info.clone()),
+                confirmed_destination: None,
+                physical_path: Some(item.clone()),
+            }));
+            let lookup: StagedOriginalLookup = Rc::new(move |_, _| {
+                let staged = staged.borrow_mut().take();
+                Box::pin(async move { staged.ok_or_else(|| io_error("staged once")) })
+            });
+            glib::MainContext::default().block_on(run_merge_undo(
+                OperationRequestId(504),
+                Vec::new(),
+                vec![Location::local(&destination)],
+                emit,
+                gio::Cancellable::new(),
+                lookup,
+            ));
+        } else {
+            let _operation = LocalOperationProvider.restore(
+                RestoreRequest {
+                    id: OperationRequestId(503),
+                    source: RestoreSource::TrashEntries(vec![RestoreTrashItem {
+                        entry: directory_entry(&item),
+                        destination: destination.clone(),
+                    }]),
+                },
+                emit,
+            );
+            wait_for_restore(&events);
+        }
+
+        let events = events.borrow();
+        assert!(
+            matches!(events.last(), Some(OperationEvent::Restored { .. })),
+            "{events:?}"
+        );
+        let kept = events
+            .iter()
+            .filter_map(|event| match event {
+                OperationEvent::ItemsReported { report, .. } => Some(report.kept_in_trash.clone()),
+                _ => None,
+            })
+            .flatten()
+            .collect::<Vec<_>>();
+        assert_eq!(
+            kept,
+            vec![KeptItem {
+                location: Location::local(item.join(name)),
+                cause,
+            }]
+        );
+        assert!(fs::symlink_metadata(item.join(name)).is_ok());
+        assert!(info.exists(), "the Trash entry stays restorable");
+        assert_eq!(fs::read(destination.join("notes.txt"))?, b"notes");
+        assert!(fs::symlink_metadata(destination.join("socket")).is_err());
+        assert_eq!(item.join("notes.txt").exists(), changed);
+    }
     Ok(())
 }
 

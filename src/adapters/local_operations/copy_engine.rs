@@ -14,6 +14,7 @@ pub(super) mod stage;
 mod tree;
 
 use std::{
+    borrow::Borrow,
     collections::HashSet,
     ffi::{OsStr, OsString},
     os::fd::{AsFd, BorrowedFd, OwnedFd},
@@ -136,13 +137,15 @@ pub(super) async fn copy_local(
     let target = target.clone();
     let merging = matches!(destination, Destination::Merge(_));
     let followed = following(
-        source,
+        Item::Path(source),
         options,
         progress.clone(),
         cancellable,
         move |copy, source| match destination {
             Destination::New(target, taken) => {
-                copy_new(copy, source, &target, taken, options.workers)
+                let (parent, name) = split(&target).map_err(Failure::Error)?;
+                let new = NewItem::Published(taken);
+                copy_new(copy, source, (&parent, &name), new, options.workers)
             }
             Destination::Merge(folder) => {
                 let name = folder.file_name().unwrap_or_default().to_os_string();
@@ -187,7 +190,7 @@ pub(super) async fn copy_to_stage(
 ) -> Result<(StagedSibling, Option<Manifest>, TransferReport), glib::Error> {
     let root = target.clone();
     let followed = following(
-        source,
+        Item::Path(source),
         options,
         progress.clone(),
         cancellable,
@@ -202,6 +205,42 @@ pub(super) async fn copy_to_stage(
     .await?;
     let staged = followed.value?;
     Ok((staged, followed.manifest, left_report(&root, followed.left)))
+}
+
+/// Copies the item `source` names in its pinned parent, which must still be
+/// `expected`, to the free name of `target` in its pinned parent, making each
+/// entry at its final name: for a mount that can place neither the item nor
+/// a stage. A failed copy removes only what it made. Returns what it took
+/// from the source, which it always records, and what to report about it.
+pub(super) async fn copy_in_place(
+    (source, name, expected): (Arc<OwnedFd>, OsString, LocalFileIdentity),
+    (parent, target): (Arc<OwnedFd>, PathBuf),
+    options: Options,
+    cancellable: &gio::Cancellable,
+) -> Result<(Manifest, TransferReport), glib::Error> {
+    let Some(target_name) = target.file_name().map(OsStr::to_os_string) else {
+        return Err(io_error(crate::i18n::tr("Invalid local filesystem target")));
+    };
+    let options = Options {
+        manifest: true,
+        ..options
+    };
+    let followed = following(
+        Item::Pinned(source, name),
+        options,
+        None,
+        cancellable,
+        move |copy, source| {
+            let new = NewItem::InPlace(expected);
+            copy_new(copy, source, (&parent, &target_name), new, options.workers)
+        },
+    )
+    .await?;
+    followed.value?;
+    let manifest = followed
+        .manifest
+        .ok_or_else(|| io_error("Copy worker stopped unexpectedly"))?;
+    Ok((manifest, left_report(&target, followed.left)))
 }
 
 /// What the native item at `source` holds now, for a move that GIO copies.
@@ -315,9 +354,16 @@ fn left_report(root: &Path, left: Left) -> TransferReport {
     }
 }
 
+/// What a copy reads: the item at a path, or one by name in a folder
+/// pinned earlier.
+enum Item {
+    Path(PathBuf),
+    Pinned(Arc<OwnedFd>, OsString),
+}
+
 /// Runs `work` on a worker thread while `progress` follows it.
 async fn following<T: Send + 'static>(
-    source: PathBuf,
+    item: Item,
     options: Options,
     progress: Option<Rc<TransferProgressTracker>>,
     cancellable: &gio::Cancellable,
@@ -325,16 +371,23 @@ async fn following<T: Send + 'static>(
 ) -> Result<Followed<T>, glib::Error> {
     let shared = Arc::new(SharedProgress::default());
     let follower = progress.map(|progress| {
-        if let Some(name) = source.file_name() {
+        let name = match &item {
+            Item::Path(path) => path.file_name(),
+            Item::Pinned(_, name) => Some(name.as_os_str()),
+        };
+        if let Some(name) = name {
             progress.set_current_file(name.to_string_lossy().into_owned());
         }
         progress.follow(&shared)
     });
     let counters = shared.clone();
     let copied = run_cancellable(cancellable, move |cancelled| {
-        let (parent, name) = match split(&source) {
-            Ok(split) => split,
-            Err(error) => return (Err(error), Left::default(), None),
+        let (parent, name) = match item {
+            Item::Path(path) => match split(&path) {
+                Ok(split) => split,
+                Err(error) => return (Err(error), Left::default(), None),
+            },
+            Item::Pinned(parent, name) => (parent, name),
         };
         let source = Source {
             parent,
@@ -458,29 +511,48 @@ fn first_free<T>(
     Err(Failure::Place(PlaceError::Exists))
 }
 
-/// Copies `source` to `target`, and returns the name it took.
+/// How a new item takes its name.
+#[derive(Clone, Copy)]
+enum NewItem {
+    /// Published from a stage, or under [`Taken::Number`] at the first free
+    /// numbered name.
+    Published(Taken),
+    /// Made entry by entry at its final name, from a source that must still
+    /// be this.
+    InPlace(LocalFileIdentity),
+}
+
+/// Copies `source` to `name` in `parent`, and returns the name it took.
 fn copy_new(
     copy: &Arc<Copy>,
     source: &Source,
-    target: &Path,
-    taken: Taken,
+    (parent, name): (&Arc<OwnedFd>, &OsStr),
+    new: NewItem,
     workers: Option<usize>,
 ) -> Result<OsString, Failure> {
-    let (parent, name) = split(target).map_err(Failure::Error)?;
     let stat = copy.fs.stat(source.entry(), false)?;
+    let taken = match new {
+        NewItem::Published(taken) => taken,
+        NewItem::InPlace(expected) if expected == stat.identity => Taken::Fail,
+        NewItem::InPlace(_) => return Err(Failure::Changed),
+    };
+    let in_place = matches!(new, NewItem::InPlace(_));
     let recorded_in = source.recorded_in.as_deref();
     match stat.kind {
+        FileType::RegularFile if in_place => FileCopy::new(copy, parent.as_fd())
+            .in_place(source.entry(), stat.identity, name, recorded_in)
+            .map(|_| name.to_os_string()),
         FileType::RegularFile => FileCopy::new(copy, parent.as_fd())
-            .copy_from(source.entry(), FileTarget::Final(&name, taken), recorded_in)
+            .copy_from(source.entry(), FileTarget::Final(name, taken), recorded_in)
             .map(|(name, _)| name),
         FileType::Symlink => {
             copy.check_cancelled()?;
             let mount = Mount::new(copy.fs, parent.as_fd());
-            let (name, link) = first_free(taken.names(&name, false), taken, |name| {
+            let (name, link) = first_free(taken.names(name, false), taken, |name| {
                 tree::copy_link(
                     copy,
                     source.entry(),
-                    Entry::new(&*parent, name),
+                    Entry::new(&**parent, name),
                     &mount,
                     None,
                 )
@@ -491,22 +563,22 @@ fn copy_new(
             Ok(name)
         }
         FileType::Directory => {
-            let workers = workers.unwrap_or_else(|| worker_count(source, &parent));
-            if placement::can_place(copy.fs, parent.as_fd(), true) == Some(false) {
-                return first_free(taken.names(&name, true), taken, |name| {
-                    direct_folder(copy, source, stat.identity, &parent, name, workers)
+            let workers = workers.unwrap_or_else(|| worker_count(source, parent));
+            if in_place || placement::can_place(copy.fs, parent.as_fd(), true) == Some(false) {
+                return first_free(taken.names(name, true), taken, |name| {
+                    direct_folder(copy, source, stat.identity, parent, name, workers)
                 })
                 .map(|(name, ())| name);
             }
-            let staged = stage_folder(copy, source, stat.identity, &parent, COPY_PREFIX, workers)?;
-            publish_folder(copy, staged, &name, taken, workers)
+            let staged = stage_folder(copy, source, stat.identity, parent, COPY_PREFIX, workers)?;
+            publish_folder(copy, staged, name, taken, workers)
         }
         FileType::Fifo => {
             copy.check_cancelled()?;
             let mount = Mount::new(copy.fs, parent.as_fd());
             let parent_stat = copy.fs.stat_fd(parent.as_fd())?;
-            let (name, pipe) = first_free(taken.names(&name, false), taken, |name| {
-                let target = Entry::new(&*parent, name);
+            let (name, pipe) = first_free(taken.names(name, false), taken, |name| {
+                let target = Entry::new(&**parent, name);
                 match tree::copy_fifo(copy, source.entry(), target, &parent_stat, &mount, None)? {
                     (pipe, Some(_)) => Ok(pipe),
                     (_, None) => Err(Failure::NotCopyable),
@@ -1553,6 +1625,33 @@ impl<'a> FileCopy<'a> {
         Ok(copied)
     }
 
+    /// Creates `name` exclusively and fills it from the file at `at`, which
+    /// must still be `expected`, where the mount cannot place a stage; returns
+    /// its identity, and records the source as read in `recorded_in`.
+    fn in_place(
+        &mut self,
+        at: Entry<'_>,
+        expected: LocalFileIdentity,
+        name: &OsStr,
+        recorded_in: Option<&manifest::Folder>,
+    ) -> Result<LocalFileIdentity, Failure> {
+        let fs = self.copy.fs;
+        self.copy.check_cancelled()?;
+        let source = open_file(fs, at)?;
+        if source.stat.identity != expected {
+            return Err(Failure::Changed);
+        }
+        let parent = fs.stat_fd(self.dir)?;
+        let identity = self.create(name, &parent, |file, fd| {
+            file.read_into(&source, fd, &parent)
+        })?;
+        if let (Some(folder), Some(read)) = (recorded_in, &self.read) {
+            folder.entry(at.name, read);
+        }
+        self.copy.add_file(0);
+        Ok(identity)
+    }
+
     /// Copies `source` into `target`, or fails if it kept changing while it
     /// was read.
     fn read_into(
@@ -1801,6 +1900,24 @@ impl<'a> FileCopy<'a> {
                 &read
             }
         };
+        self.create(name, parent, |file, fd| {
+            let from = (source.fd.as_fd(), &source.stat);
+            file.copy
+                .copy_data(&mut file.data, &file.target, from, fd, parent, false)?;
+            Ok(snapshot)
+        })
+    }
+
+    /// Creates `name` exclusively, has `write` fill it and return the
+    /// metadata to give it, then closes it and settles its times. A file
+    /// that fails is removed.
+    fn create<S: Borrow<Snapshot>>(
+        &mut self,
+        name: &OsStr,
+        parent: &EntryStat,
+        write: impl FnOnce(&mut Self, BorrowedFd<'_>) -> Result<S, Failure>,
+    ) -> Result<LocalFileIdentity, Failure> {
+        let fs = self.copy.fs;
         let target = self.at(name);
         let fd = fs
             .create_exclusive(target, Mode::from_raw_mode(0o600))
@@ -1809,14 +1926,8 @@ impl<'a> FileCopy<'a> {
         // Takes `fd`, so a failed file is closed before it is removed: NFS
         // renames an open file aside instead.
         let filled = (|fd: OwnedFd| -> Result<(), Failure> {
-            self.copy.copy_data(
-                &mut self.data,
-                &self.target,
-                (source.fd.as_fd(), &source.stat),
-                fd.as_fd(),
-                parent,
-                false,
-            )?;
+            let written = write(self, fd.as_fd())?;
+            let snapshot: &Snapshot = written.borrow();
             self.copy
                 .apply_metadata(fd.as_fd(), &created, snapshot, parent, &self.target)?;
             self.copy.sync_written(fd.as_fd(), self.target.family)?;

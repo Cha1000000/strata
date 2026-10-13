@@ -377,6 +377,58 @@
     "ru": "%{count} элементов осталось в исходных папках",
     "zh-CN": "%{count} 个项目留在了原来的文件夹中"
   },
+  "counts.items_kept_in_trash.one": {
+    "en": "%{count} item was left in the Trash",
+    "fr": "%{count} élément est resté dans la corbeille",
+    "de": "%{count} Element ist im Papierkorb geblieben",
+    "es": "%{count} elemento se quedó en la papelera",
+    "ja": "%{count} 個の項目がゴミ箱に残されました",
+    "pt-BR": "%{count} item ficou na Lixeira",
+    "ko": "항목 %{count}개가 휴지통에 남아 있습니다",
+    "vi": "%{count} mục được giữ lại trong Thùng rác",
+    "it": "%{count} elemento è rimasto nel cestino",
+    "ru": "%{count} элемент остался в корзине",
+    "zh-CN": "%{count} 个项目留在了回收站中"
+  },
+  "counts.items_kept_in_trash.other": {
+    "en": "%{count} items were left in the Trash",
+    "fr": "%{count} éléments sont restés dans la corbeille",
+    "de": "%{count} Elemente sind im Papierkorb geblieben",
+    "es": "%{count} elementos se quedaron en la papelera",
+    "ja": "%{count} 個の項目がゴミ箱に残されました",
+    "pt-BR": "%{count} itens ficaram na Lixeira",
+    "ko": "항목 %{count}개가 휴지통에 남아 있습니다",
+    "vi": "%{count} mục được giữ lại trong Thùng rác",
+    "it": "%{count} elementi sono rimasti nel cestino",
+    "ru": "%{count} элементов осталось в корзине",
+    "zh-CN": "%{count} 个项目留在了回收站中"
+  },
+  "counts.items_kept_in_trash.few": {
+    "en": "%{count} items were left in the Trash",
+    "fr": "%{count} éléments sont restés dans la corbeille",
+    "de": "%{count} Elemente sind im Papierkorb geblieben",
+    "es": "%{count} elementos se quedaron en la papelera",
+    "ja": "%{count} 個の項目がゴミ箱に残されました",
+    "pt-BR": "%{count} itens ficaram na Lixeira",
+    "ko": "항목 %{count}개가 휴지통에 남아 있습니다",
+    "vi": "%{count} mục được giữ lại trong Thùng rác",
+    "it": "%{count} elementi sono rimasti nel cestino",
+    "ru": "%{count} элемента остались в корзине",
+    "zh-CN": "%{count} 个项目留在了回收站中"
+  },
+  "counts.items_kept_in_trash.many": {
+    "en": "%{count} items were left in the Trash",
+    "fr": "%{count} éléments sont restés dans la corbeille",
+    "de": "%{count} Elemente sind im Papierkorb geblieben",
+    "es": "%{count} elementos se quedaron en la papelera",
+    "ja": "%{count} 個の項目がゴミ箱に残されました",
+    "pt-BR": "%{count} itens ficaram na Lixeira",
+    "ko": "항목 %{count}개가 휴지통에 남아 있습니다",
+    "vi": "%{count} mục được giữ lại trong Thùng rác",
+    "it": "%{count} elementi sono rimasti nel cestino",
+    "ru": "%{count} элементов осталось в корзине",
+    "zh-CN": "%{count} 个项目留在了回收站中"
+  },
   "counts.jobs_running.one": {
     "en": "%{count} job running",
     "fr": "%{count} tâche en cours",
