@@ -448,10 +448,12 @@ impl At {
     fn rmdir(&self, opened: Arc<OwnedFd>) {
         let deletion = &self.deletion;
         let fs = deletion.fs;
+        // An open folder keeps its inode number even where numbers change
+        // between the copy and the deletion, so the name must report it.
         let still = fs
             .stat(self.entry_at(), false)
             .and_then(|named| Ok((named, fs.stat_fd(opened.as_fd())?)))
-            .is_ok_and(|(named, opened)| deletion.same(&named, Some(opened.identity)));
+            .is_ok_and(|(named, opened)| named.identity == opened.identity);
         drop(opened);
         if !still {
             return;

@@ -1401,8 +1401,19 @@ fn entries_swapped_or_removed_after_their_copy_are_never_deleted() -> Result<(),
         .map_err(|error| error.to_string())?;
     // After the copy: a folder swapped for a file, an entry someone else
     // removed, and a folder put back at the moved folder's name once its
-    // last entry went.
-    for row in ["swapped", "removed", "put back"] {
+    // last entry went, also where inode numbers may change between the copy
+    // and the deletion.
+    let vfat = || Quirks {
+        mount_type: Some(("vfat", "rw")),
+        ..Quirks::default()
+    };
+    let rows: [(&str, Preset); 4] = [
+        ("swapped", Quirks::default),
+        ("removed", Quirks::default),
+        ("put back", Quirks::default),
+        ("put back", vfat),
+    ];
+    for (row, source) in rows {
         let root = tempfile::tempdir()?;
         let folder = root.path().join("source/folder");
         fs::create_dir_all(folder.join("sub"))?;
@@ -1434,7 +1445,7 @@ fn entries_swapped_or_removed_after_their_copy_are_never_deleted() -> Result<(),
         let quirks = Quirks {
             before,
             after,
-            ..Quirks::default()
+            ..source()
         };
 
         let (moved, report, _) = move_across_volumes(&folder, quirks)?;
