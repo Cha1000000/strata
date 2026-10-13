@@ -71,6 +71,39 @@ fn renamed_items_are_grouped_by_why_they_were_renamed() {
 }
 
 #[test]
+fn an_item_saved_under_two_names_in_turn_is_reported_once() {
+    let item = |requested: &str, saved_as: &str, cause| RenamedItem {
+        requested: Location::local(format!("/copy/{requested}")),
+        saved_as: Location::local(format!("/copy/{saved_as}")),
+        cause,
+    };
+    // An alias numbered in a merge stage, whose number was taken in the
+    // merged folder, reported in either order.
+    let alias = item("makefile", "makefile (1)", RenameCause::Alias);
+    let taken = item("makefile (1)", "makefile (2)", RenameCause::Taken);
+    for renamed in [vec![alias.clone(), taken.clone()], vec![taken, alias]] {
+        let report = TransferReport {
+            renamed,
+            ..TransferReport::default()
+        };
+
+        let Some(Presentation::Notice {
+            heading: shown,
+            text,
+        }) = presentation(&report, false)
+        else {
+            panic!("one renamed item gets a notice");
+        };
+
+        assert_eq!(shown, heading(RenameCause::Alias));
+        assert_eq!(
+            text,
+            renamed_line(&item("makefile", "makefile (2)", RenameCause::Alias))
+        );
+    }
+}
+
+#[test]
 fn items_left_out_or_left_behind_make_the_report_a_warning() {
     let skipped = |kind| SkippedItem {
         location: Location::local("/copy/run/socket"),

@@ -117,6 +117,30 @@ fn bullets(lines: &[String]) -> String {
     text
 }
 
+/// The renamed items, where one was saved again under another name as one:
+/// as an alias numbered inside a merge stage meets a taken name when it is
+/// placed. Each keeps the cause of the name first asked for.
+fn followed(renamed: &[RenamedItem]) -> Vec<RenamedItem> {
+    let mut items = Vec::<RenamedItem>::new();
+    for item in renamed {
+        if let Some(earlier) = items
+            .iter_mut()
+            .find(|earlier| earlier.saved_as == item.requested)
+        {
+            earlier.saved_as = item.saved_as.clone();
+        } else if let Some(later) = items
+            .iter_mut()
+            .find(|later| later.requested == item.saved_as)
+        {
+            later.requested = item.requested.clone();
+            later.cause = item.cause;
+        } else {
+            items.push(item.clone());
+        }
+    }
+    items
+}
+
 /// The renamed items' lines under the heading of their cause, in the
 /// order the causes first appear.
 fn renamed_sections(renamed: &[RenamedItem]) -> Vec<(String, Vec<String>)> {
@@ -143,7 +167,8 @@ fn sections(sections: Vec<(String, Vec<String>)>) -> String {
 
 /// How `report` is shown, once its transfer completed or `stopped`.
 fn presentation(report: &TransferReport, stopped: bool) -> Option<Presentation> {
-    let mut renamed = renamed_sections(&report.renamed);
+    let followed = followed(&report.renamed);
+    let mut renamed = renamed_sections(&followed);
     if !report.skipped.is_empty() || !report.kept.is_empty() {
         if !report.skipped.is_empty() {
             let skipped = report.skipped.iter().map(skipped_line).collect::<Vec<_>>();
@@ -166,7 +191,7 @@ fn presentation(report: &TransferReport, stopped: bool) -> Option<Presentation> 
             detail: sections(renamed),
         });
     }
-    let message = crate::i18n::count("items_renamed", report.renamed.len());
+    let message = crate::i18n::count("items_renamed", followed.len());
     if renamed.len() > 1 {
         return Some(Presentation::Information {
             message,
