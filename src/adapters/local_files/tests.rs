@@ -7,10 +7,10 @@ use std::{
     error::Error,
     ffi::OsString,
     fs,
-    io::ErrorKind,
+    io::{ErrorKind, Write},
     os::unix::{
         ffi::{OsStrExt, OsStringExt},
-        fs::PermissionsExt,
+        fs::{OpenOptionsExt, PermissionsExt},
     },
     process::Command,
     time::{Instant, SystemTime},
@@ -472,6 +472,74 @@ fn a_directory_reporting_changes_against_itself_is_not_its_own_child() {
         ),
         Some(child)
     );
+}
+
+#[test]
+fn change_events_for_unnamed_temporary_files_are_ignored() -> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let directory = unique_fixture_root("monitor-unnamed");
+    fs::create_dir_all(&directory)?;
+    let listed = directory.join("#1234");
+    let arrived = directory.join("#5678");
+    fs::write(&listed, b"a")?;
+    let changes: Rc<RefCell<Vec<DirectoryChange>>> = Rc::default();
+    let collected = changes.clone();
+    let handle = LocalFileSource
+        .watch(
+            Location::local(&directory),
+            false,
+            Rc::new(move |change| collected.borrow_mut().push(change)),
+        )
+        .expect("the native location should be monitored");
+    let write_unnamed = || -> Result<Location, Box<dyn Error>> {
+        let mut file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .mode(0o600)
+            .custom_flags(libc::O_TMPFILE)
+            .open(&directory)?;
+        file.write_all(b"never linked")?;
+        file.set_permissions(fs::Permissions::from_mode(0o644))?;
+        Ok(Location::local(
+            directory.join(format!("#{}", file.metadata()?.ino())),
+        ))
+    };
+    let upserted = |path: &Path, size: u64| {
+        let location = Location::local(path);
+        let changes = changes.clone();
+        move || {
+            changes.borrow().iter().any(|change| {
+                matches!(change, DirectoryChange::Upsert(entry)
+                    if entry.location == location && entry.size == MetadataValue::Known(size))
+            })
+        }
+    };
+
+    let mut unnamed = vec![write_unnamed()?];
+    fs::write(&listed, b"updated")?;
+    drain_until(upserted(&listed, 7));
+    unnamed.push(write_unnamed()?);
+    fs::write(&arrived, b"")?;
+    drain_until(upserted(&arrived, 0));
+    fs::write(&arrived, b"grown")?;
+    drain_until(upserted(&arrived, 5));
+    let settled = Instant::now() + Duration::from_millis(300);
+    drain_until(|| Instant::now() >= settled);
+    drop(handle);
+    fs::remove_dir_all(&directory)?;
+
+    let changes = changes.borrow();
+    assert!(
+        changes.iter().all(|change| match change {
+            DirectoryChange::Upsert(entry) => !unnamed.contains(&entry.location),
+            DirectoryChange::Remove(location) => !unnamed.contains(location),
+            DirectoryChange::Move { .. } | DirectoryChange::Rescan => false,
+        }),
+        "only the named files should be queried: {changes:?}"
+    );
+    Ok(())
 }
 
 #[test]
@@ -2042,7 +2110,7 @@ fn drain_until(done: impl Fn() -> bool) {
     }
     assert!(
         done(),
-        "the removal task did not complete within the deadline"
+        "the awaited event did not arrive within the deadline"
     );
 }
 

@@ -3,6 +3,7 @@
 use std::{
     cell::{Cell, RefCell},
     collections::{HashMap, HashSet, VecDeque},
+    ffi::{OsStr, OsString},
     fs,
     future::Future,
     io::ErrorKind,
@@ -1413,14 +1414,12 @@ impl FileSource for LocalFileSource {
             PendingMonitorChange,
         >::new()));
         let timeout = Rc::new(RefCell::new(None::<glib::SourceId>));
+        let numbered = Rc::new(RefCell::new(NumberedNames::default()));
         let pending_for_change = pending.clone();
         let timeout_for_change = timeout.clone();
         let cancelled_for_change = cancelled.clone();
         let watched = location.clone();
         monitor.connect_changed(move |_, file, other_file, event| {
-            if pending_for_change.borrow().contains_key(&None) {
-                return;
-            }
             let change = pending_monitor_change(
                 &watched,
                 location_for_file(file),
@@ -1432,6 +1431,24 @@ impl FileSource for LocalFileSource {
             else {
                 return;
             };
+            // Arrivals are learned even while a rescan is pending.
+            let admission = numbered.borrow_mut().admit(&change, event);
+            match admission {
+                NumberedAdmission::Queue => {}
+                NumberedAdmission::Skip => return,
+                NumberedAdmission::Read(folder) => {
+                    read_numbered_names(
+                        numbered.clone(),
+                        folder,
+                        notify.clone(),
+                        cancelled_for_change.clone(),
+                    );
+                    return;
+                }
+            }
+            if pending_for_change.borrow().contains_key(&None) {
+                return;
+            }
             if matches!(change, PendingMonitorChange::Rescan) {
                 tracing::debug!(?event, "directory monitor requested reconciliation");
             }
@@ -2017,6 +2034,144 @@ fn visible_monitor_change(
         }
         change => Some(change),
     }
+}
+
+/// Writes to an `O_TMPFILE` reach its folder's watch under the name `#<inode>`, which no
+/// listing holds, so changes to such names are queried only once the folder shows them.
+#[derive(Default)]
+struct NumberedNames {
+    known: HashSet<OsString>,
+    listing: NumberedListing,
+}
+
+#[derive(Default)]
+enum NumberedListing {
+    #[default]
+    Unread,
+    /// Changes that arrived while the folder was being read.
+    Reading(HashSet<Location>),
+    Read,
+    Unavailable,
+}
+
+enum NumberedAdmission {
+    Queue,
+    Skip,
+    Read(PathBuf),
+}
+
+fn is_numbered_name(name: &OsStr) -> bool {
+    match name.as_encoded_bytes() {
+        [b'#', digits @ ..] => !digits.is_empty() && digits.iter().all(u8::is_ascii_digit),
+        _ => false,
+    }
+}
+
+fn numbered_name(location: &Location) -> Option<&OsStr> {
+    location
+        .native_path()
+        .and_then(Path::file_name)
+        .filter(|name| is_numbered_name(name))
+}
+
+impl NumberedNames {
+    fn admit(
+        &mut self,
+        change: &PendingMonitorChange,
+        event: gio::FileMonitorEvent,
+    ) -> NumberedAdmission {
+        let (location, arrived) = match change {
+            PendingMonitorChange::Upsert(location) => (
+                location,
+                matches!(
+                    event,
+                    gio::FileMonitorEvent::Created
+                        | gio::FileMonitorEvent::MovedIn
+                        | gio::FileMonitorEvent::Moved
+                        | gio::FileMonitorEvent::Renamed
+                ),
+            ),
+            PendingMonitorChange::Move { to, .. } => (to, true),
+            PendingMonitorChange::Remove(_) | PendingMonitorChange::Rescan => {
+                return NumberedAdmission::Queue;
+            }
+        };
+        let Some(name) = numbered_name(location) else {
+            return NumberedAdmission::Queue;
+        };
+        if arrived {
+            self.known.insert(name.to_owned());
+        }
+        if self.known.contains(name) {
+            return NumberedAdmission::Queue;
+        }
+        match &mut self.listing {
+            NumberedListing::Unread => {
+                let Some(folder) = location.native_path().and_then(Path::parent) else {
+                    return NumberedAdmission::Queue;
+                };
+                self.listing = NumberedListing::Reading(HashSet::from([location.clone()]));
+                NumberedAdmission::Read(folder.to_path_buf())
+            }
+            NumberedListing::Reading(held) => {
+                held.insert(location.clone());
+                NumberedAdmission::Skip
+            }
+            NumberedListing::Read => NumberedAdmission::Skip,
+            NumberedListing::Unavailable => NumberedAdmission::Queue,
+        }
+    }
+
+    /// Returns the held changes that still need a query: every one when the folder could
+    /// not be read.
+    fn finish_reading(&mut self, names: Option<HashSet<OsString>>) -> Vec<Location> {
+        let NumberedListing::Reading(held) = std::mem::take(&mut self.listing) else {
+            return Vec::new();
+        };
+        let Some(names) = names else {
+            self.listing = NumberedListing::Unavailable;
+            return held.into_iter().collect();
+        };
+        self.known.extend(names);
+        self.listing = NumberedListing::Read;
+        held.into_iter()
+            .filter(|location| {
+                numbered_name(location).is_some_and(|name| self.known.contains(name))
+            })
+            .collect()
+    }
+}
+
+fn read_numbered_names(
+    numbered: Rc<RefCell<NumberedNames>>,
+    folder: PathBuf,
+    notify: Rc<dyn Fn(DirectoryChange)>,
+    cancelled: Rc<Cell<bool>>,
+) {
+    glib::MainContext::default().spawn_local(async move {
+        let names = gio::spawn_blocking(move || numbered_names_in(&folder))
+            .await
+            .ok()
+            .and_then(Result::ok);
+        if cancelled.get() {
+            return;
+        }
+        let listed = numbered.borrow_mut().finish_reading(names);
+        for location in listed {
+            query_monitored_entry(location, None, notify.clone(), cancelled.clone());
+        }
+    });
+}
+
+fn numbered_names_in(folder: &Path) -> std::io::Result<HashSet<OsString>> {
+    let mut names = HashSet::new();
+    for entry in fs::read_dir(folder)? {
+        let name = entry?.file_name();
+        if is_numbered_name(&name) {
+            names.insert(name);
+        }
+    }
+    Ok(names)
 }
 
 fn pending_monitor_change(
