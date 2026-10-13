@@ -611,8 +611,9 @@ impl Scope {
                 return Ok(*stat);
             }
         }
-        let Some(alias) = self.alias(at) else {
-            return System.stat(at, force_sync);
+        let exact = System.stat(at, force_sync);
+        let Some(alias) = self.alias_if_missing(at, &exact) else {
+            return exact;
         };
         let mut stat = System.stat(
             Entry {
@@ -794,14 +795,30 @@ impl Scope {
         }
     }
 
-    fn resolved<T>(&self, at: Entry<'_>, read: impl FnOnce(Entry<'_>) -> T) -> T {
-        match self.alias(at) {
+    /// Calls `read` with `at`, or with its alias where nothing has that
+    /// exact name.
+    fn resolved<T>(
+        &self,
+        at: Entry<'_>,
+        read: impl Fn(Entry<'_>) -> Result<T, Errno>,
+    ) -> Result<T, Errno> {
+        let exact = read(at);
+        match self.alias_if_missing(at, &exact) {
             Some(alias) => read(Entry {
                 dir: at.dir,
                 name: &alias,
             }),
-            None => read(at),
+            None => exact,
         }
+    }
+
+    /// The alias of `at` once a call naming it exactly found nothing. A real
+    /// case-insensitive lookup finds the entry whichever case it was renamed
+    /// to meanwhile, so the exact name is tried first.
+    fn alias_if_missing<T>(&self, at: Entry<'_>, exact: &Result<T, Errno>) -> Option<OsString> {
+        matches!(exact, Err(Errno::NOENT))
+            .then(|| self.alias(at))
+            .flatten()
     }
 }
 
