@@ -632,7 +632,6 @@ fn copying_a_tree_with_a_named_pipe_fails_instead_of_blocking() -> Result<(), Bo
         error.to_string().contains("pipe"),
         "the error should name the entry: {error}"
     );
-    glib::MainContext::default().block_on(glib::timeout_future(Duration::from_millis(20)));
     assert_eq!(
         names(root.path())?,
         ["source"],

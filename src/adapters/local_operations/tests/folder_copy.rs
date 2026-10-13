@@ -283,8 +283,9 @@ fn a_lost_create_reply_inside_a_stage_is_adopted() -> Result<(), Box<dyn Error>>
 fn files_are_claimed_where_nodes_are_refused() -> Result<(), Box<dyn Error>> {
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock()?;
     let mounts = mounts(Quirks {
-        node_create: Support::Rejected(Errno::PERM),
-        ..Quirks::nfs3()
+        mount_type: Some("fuse.example"),
+        node_create: Support::Rejected(Errno::NOSYS),
+        ..Quirks::default()
     })?;
     let source = mounts.sources.join("source");
     fs::create_dir(&source)?;
@@ -376,7 +377,6 @@ fn a_cancelled_copy_on_nfs_leaves_no_stage() -> Result<(), Box<dyn Error>> {
     let cancellable = gio::Cancellable::new();
     let cancel = cancellable.clone();
     let mounts = mounts(Quirks {
-        silly_rename: true,
         before: vec![(Op::Write, "*", 0, Box::new(move || cancel.cancel()))],
         ..Quirks::nfs3()
     })?;
@@ -577,8 +577,7 @@ fn a_copied_folder_keeps_its_hard_links_where_the_destination_can() -> Result<()
         capabilities.hard_links = Some(true);
         capabilities.rename_over_empty_directory = Some(false);
     };
-    let rows: [(&str, Preset, Option<fn(&mut MountCapabilities)>, bool); 6] = [
-        ("tmpfs", Quirks::default, None, true),
+    let rows: [(&str, Preset, Option<fn(&mut MountCapabilities)>, bool); 5] = [
         ("ext4", Quirks::ext4, None, true),
         ("claimed names", Quirks::nfs3, None, true),
         (

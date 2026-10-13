@@ -173,7 +173,7 @@ pub(crate) struct Quirks {
     pub xattrs_refused: Vec<(&'static str, Errno)>,
     /// Listed and read on every file, besides its real xattrs.
     pub extra_xattrs: Vec<(&'static str, &'static [u8])>,
-    /// `mknodat` of a regular file, which vfat and some FUSE daemons refuse.
+    /// `mknodat` of a regular file, which FUSE daemons without `mknod` refuse.
     pub node_create: Support,
     /// Unlinking a file this process holds open renames it to `.nfs*`
     /// instead, as the NFS client does until the last close.
@@ -252,14 +252,13 @@ impl Quirks {
         }
     }
 
-    /// No hard links, `mknod` or xattrs, and names compared without case.
+    /// No hard links or xattrs, and names compared without case.
     pub(crate) fn vfat() -> Self {
         Self {
             mount_type: Some("vfat"),
             fs_type: Some(0x4d44),
             links: Support::Rejected(Errno::PERM),
             case_insensitive: true,
-            node_create: Support::Rejected(Errno::PERM),
             xattrs_refused: vec![("", Errno::OPNOTSUPP)],
             ..Self::default()
         }
@@ -268,6 +267,8 @@ impl Quirks {
     pub(crate) fn sshfs() -> Self {
         Self {
             mount_type: Some("fuse.sshfs"),
+            fs_type: Some(0x6573_5546),
+            xattrs_refused: vec![("", Errno::OPNOTSUPP)],
             rename_flags: Support::Rejected(Errno::INVAL),
             collisions_as_eperm: true,
             link_inodes: true,
