@@ -296,7 +296,7 @@
     "ko": "항목 %{count}개가 새 이름으로 저장되었습니다",
     "vi": "%{count} mục đã được lưu với tên mới",
     "it": "%{count} elementi sono stati salvati con nuovi nomi",
-    "ru": "%{count} элементов сохранены под новыми именами",
+    "ru": "%{count} элементов сохранено под новыми именами",
     "zh-CN": "%{count} 个项目已用新名称保存"
   },
   "counts.items_renamed.few": {
@@ -322,7 +322,7 @@
     "ko": "항목 %{count}개가 새 이름으로 저장되었습니다",
     "vi": "%{count} mục đã được lưu với tên mới",
     "it": "%{count} elementi sono stati salvati con nuovi nomi",
-    "ru": "%{count} элементов сохранены под новыми именами",
+    "ru": "%{count} элементов сохранено под новыми именами",
     "zh-CN": "%{count} 个项目已用新名称保存"
   },
   "counts.items_kept.one": {
@@ -348,7 +348,7 @@
     "ko": "항목 %{count}개가 원래 폴더에 남아 있습니다",
     "vi": "%{count} mục được giữ lại trong thư mục gốc",
     "it": "%{count} elementi sono rimasti nelle cartelle originali",
-    "ru": "%{count} элементов остались в исходных папках",
+    "ru": "%{count} элементов осталось в исходных папках",
     "zh-CN": "%{count} 个项目留在了原来的文件夹中"
   },
   "counts.items_kept.few": {
@@ -374,7 +374,7 @@
     "ko": "항목 %{count}개가 원래 폴더에 남아 있습니다",
     "vi": "%{count} mục được giữ lại trong thư mục gốc",
     "it": "%{count} elementi sono rimasti nelle cartelle originali",
-    "ru": "%{count} элементов остались в исходных папках",
+    "ru": "%{count} элементов осталось в исходных папках",
     "zh-CN": "%{count} 个项目留在了原来的文件夹中"
   },
   "counts.jobs_running.one": {
