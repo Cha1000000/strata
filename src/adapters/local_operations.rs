@@ -9,6 +9,7 @@ mod fs_ops;
 mod merge_aside;
 mod placement;
 mod trash;
+mod work_queue;
 
 #[cfg(test)]
 pub(crate) use archive::ArchiveListing;
@@ -36,8 +37,8 @@ use std::{
     pin::Pin,
     rc::Rc,
     sync::{
-        Arc, Condvar, Mutex,
-        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+        Arc,
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     thread,
     time::{Duration, Instant},
@@ -47,6 +48,7 @@ use gtk::{gio, glib, prelude::*};
 
 use fs_ops::{Entry, EntryStat, fs};
 use placement::{Displacement, PlaceError, REPLACED_PREFIX, RenameFailure, STAGE_PREFIX};
+use work_queue::{Group, Job, WorkQueue};
 
 use crate::{
     adapters::{
@@ -4528,160 +4530,45 @@ struct LocalDeleteGuard {
     handle: Arc<OwnedFd>,
 }
 
+type LocalDeleteQueue = WorkQueue<LocalDeleteJob>;
+
 enum LocalDeleteJob {
     Entry {
         parent: Arc<OwnedFd>,
         name: OsString,
         expected: Option<LocalFileIdentity>,
         guard: Option<Arc<LocalDeleteGuard>>,
-        completion: Option<Arc<LocalDeleteGroup>>,
+        completion: Option<Arc<Group<LocalDeleteJob>>>,
     },
     RemoveDirectory {
         parent: Arc<OwnedFd>,
         name: OsString,
         handle: Arc<OwnedFd>,
-        completion: Option<Arc<LocalDeleteGroup>>,
+        completion: Option<Arc<Group<LocalDeleteJob>>>,
     },
 }
 
-struct LocalDeleteGroup {
-    remaining: AtomicUsize,
-    final_job: Mutex<Option<LocalDeleteJob>>,
-}
+impl Job for LocalDeleteJob {
+    type Error = String;
 
-struct LocalDeleteQueueState {
-    jobs: Vec<LocalDeleteJob>,
-    active: usize,
-}
-
-struct LocalDeleteQueue {
-    state: Mutex<LocalDeleteQueueState>,
-    wake: Condvar,
-    cancelled: Arc<AtomicBool>,
-    failed: AtomicBool,
-    error: Mutex<Option<String>>,
-}
-
-impl LocalDeleteQueue {
-    fn new(cancelled: Arc<AtomicBool>) -> Self {
-        Self {
-            state: Mutex::new(LocalDeleteQueueState {
-                jobs: Vec::new(),
-                active: 0,
-            }),
-            wake: Condvar::new(),
-            cancelled,
-            failed: AtomicBool::new(false),
-            error: Mutex::new(None),
-        }
+    fn run(self, queue: &LocalDeleteQueue) {
+        process_local_delete_job(queue, self);
     }
 
-    fn is_stopped(&self) -> bool {
-        self.cancelled.load(Ordering::Acquire) || self.failed.load(Ordering::Acquire)
+    fn cancelled() -> String {
+        "Delete cancelled".to_owned()
     }
 
-    fn enqueue(&self, job: LocalDeleteJob) {
-        if self.is_stopped() {
-            return;
-        }
-        let mut state = self
-            .state
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        if self.is_stopped() {
-            return;
-        }
-        state.jobs.push(job);
-        self.wake.notify_one();
+    fn panicked() -> String {
+        "Delete worker panicked".to_owned()
     }
 
-    fn fail(&self, error: String) {
-        if self.cancelled.load(Ordering::Acquire) {
-            return;
-        }
-        let mut first_error = self
-            .error
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        if first_error.is_none() {
-            *first_error = Some(error);
-        }
-        self.failed.store(true, Ordering::Release);
-        self.wake.notify_all();
-    }
-
-    fn next_job(&self) -> Option<LocalDeleteJob> {
-        let mut state = self
-            .state
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        loop {
-            if self.is_stopped() {
-                return None;
-            }
-            if let Some(job) = state.jobs.pop() {
-                state.active += 1;
-                return Some(job);
-            }
-            if state.active == 0 {
-                return None;
-            }
-            state = self
-                .wake
-                .wait_timeout(state, Duration::from_millis(10))
-                .unwrap_or_else(|poison| poison.into_inner())
-                .0;
-        }
-    }
-
-    fn result(&self) -> Result<(), String> {
-        if self.cancelled.load(Ordering::Acquire) {
-            Err("Delete cancelled".to_owned())
-        } else if let Some(error) = self
-            .error
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .clone()
-        {
-            Err(error)
-        } else {
-            Ok(())
-        }
-    }
-
-    fn finish_job(&self) {
-        let mut state = self
-            .state
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        state.active = state.active.saturating_sub(1);
-        if state.active == 0 && state.jobs.is_empty() {
-            self.wake.notify_all();
-        }
+    fn not_started(error: io::Error) -> String {
+        format!("Could not start delete worker: {error}")
     }
 }
 
-fn complete_local_delete_job(
-    queue: &Arc<LocalDeleteQueue>,
-    completion: Option<Arc<LocalDeleteGroup>>,
-) {
-    let Some(group) = completion else {
-        return;
-    };
-    if group.remaining.fetch_sub(1, Ordering::AcqRel) != 1 {
-        return;
-    }
-    let final_job = group
-        .final_job
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner())
-        .take();
-    if let Some(final_job) = final_job {
-        queue.enqueue(final_job);
-    }
-}
-
-fn process_local_delete_job(queue: &Arc<LocalDeleteQueue>, job: LocalDeleteJob) {
+fn process_local_delete_job(queue: &LocalDeleteQueue, job: LocalDeleteJob) {
     match job {
         LocalDeleteJob::Entry {
             parent,
@@ -4711,7 +4598,7 @@ fn process_local_delete_job(queue: &Arc<LocalDeleteQueue>, job: LocalDeleteJob) 
                 }
             };
             match step {
-                LocalDeleteStep::Removed => complete_local_delete_job(queue, completion),
+                LocalDeleteStep::Removed => queue.complete(completion),
                 LocalDeleteStep::Directory { handle, children } => {
                     let handle = Arc::new(handle);
                     if children.is_empty() {
@@ -4723,15 +4610,15 @@ fn process_local_delete_job(queue: &Arc<LocalDeleteQueue>, job: LocalDeleteJob) 
                         name: name.clone(),
                         handle: handle.clone(),
                     });
-                    let group = Arc::new(LocalDeleteGroup {
-                        remaining: AtomicUsize::new(children.len()),
-                        final_job: Mutex::new(Some(LocalDeleteJob::RemoveDirectory {
+                    let group = Group::new(
+                        children.len(),
+                        LocalDeleteJob::RemoveDirectory {
                             parent: parent.clone(),
                             name,
                             handle: handle.clone(),
                             completion,
-                        })),
-                    });
+                        },
+                    );
                     for child in children {
                         queue.enqueue(LocalDeleteJob::Entry {
                             parent: handle.clone(),
@@ -4754,11 +4641,11 @@ fn process_local_delete_job(queue: &Arc<LocalDeleteQueue>, job: LocalDeleteJob) 
 }
 
 fn remove_local_delete_directory(
-    queue: &Arc<LocalDeleteQueue>,
+    queue: &LocalDeleteQueue,
     parent: Arc<OwnedFd>,
     name: OsString,
     handle: Arc<OwnedFd>,
-    completion: Option<Arc<LocalDeleteGroup>>,
+    completion: Option<Arc<Group<LocalDeleteJob>>>,
 ) {
     if queue.is_stopped() {
         return;
@@ -4781,7 +4668,7 @@ fn remove_local_delete_directory(
         );
         return;
     }
-    complete_local_delete_job(queue, completion);
+    queue.complete(completion);
 }
 
 fn local_device_is_rotational(fd: impl AsFd) -> Option<bool> {
@@ -4878,36 +4765,9 @@ fn parallel_delete_local_blocking_with_workers(
 fn run_local_delete_workers(
     queue: &Arc<LocalDeleteQueue>,
     worker_count: usize,
-    mut spawn: impl FnMut(Box<dyn FnOnce() + Send>) -> std::io::Result<thread::JoinHandle<()>>,
+    spawn: impl FnMut(Box<dyn FnOnce() + Send>) -> std::io::Result<thread::JoinHandle<()>>,
 ) {
-    let mut workers = Vec::with_capacity(worker_count);
-    for _ in 0..worker_count {
-        let worker_queue = queue.clone();
-        match spawn(Box::new(move || {
-            let queue = worker_queue;
-            let _priority = rustix::process::setpriority_process(None, 10);
-            while let Some(job) = queue.next_job() {
-                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    process_local_delete_job(&queue, job);
-                }));
-                if result.is_err() {
-                    queue.fail("Delete worker panicked".to_owned());
-                }
-                queue.finish_job();
-            }
-        })) {
-            Ok(worker) => workers.push(worker),
-            Err(error) => {
-                queue.fail(format!("Could not start delete worker: {error}"));
-                break;
-            }
-        }
-    }
-    for worker in workers {
-        if worker.join().is_err() {
-            queue.fail("Delete worker panicked".to_owned());
-        }
-    }
+    work_queue::run_workers(queue, worker_count, Some(10), spawn);
 }
 
 fn parallel_delete_local(
