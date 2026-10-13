@@ -303,11 +303,17 @@ fn make(
             let to = Entry::new(&dir, file_name);
             if *linking {
                 match fs.link(from, to) {
-                    Ok(()) => return linked(fs, from, to, identity).map(|()| identity),
+                    Ok(()) => {
+                        linked(fs, from, to, identity)?;
+                        name.names.made(file_name, identity);
+                        return Ok(identity);
+                    }
                     // Only this copy's own link, from a lost NFS reply, reports
                     // the copy's identity.
                     Err(error) if tree::taken(fs, to, error) => {
-                        return tree::adopt(fs, to, true, |stat| stat.identity == identity);
+                        return tree::adopt(fs, to, Some(&name.names), |stat| {
+                            stat.identity == identity
+                        });
                     }
                     Err(error)
                         if is_fatal(error) || matches!(error, Errno::NOSPC | Errno::DQUOT) =>
@@ -318,7 +324,10 @@ fn make(
                 }
             }
             let parent = fs.stat_fd(dir.as_fd())?;
-            FileCopy::new(copy, dir.as_fd()).create_from(from, identity, None, file_name, &parent)
+            let made = FileCopy::new(copy, dir.as_fd())
+                .create_from(from, identity, None, file_name, &parent)?;
+            name.names.made(file_name, made);
+            Ok(made)
         },
     )
 }

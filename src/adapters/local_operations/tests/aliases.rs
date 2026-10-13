@@ -139,3 +139,89 @@ fn a_linked_name_that_aliases_another_is_numbered_and_reported() -> Result<(), B
     assert_eq!(fs::read(target.join("b"))?, b"other");
     Ok(())
 }
+
+#[test]
+fn two_names_are_never_taken_for_one_where_the_listing_changes_their_case()
+-> Result<(), Box<dyn Error>> {
+    use super::fs_quirks::{Op, Racer, renumbered};
+    use crate::services::{PasteItem, PasteRequest};
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock()?;
+    // Samba with `preserve case = no` and vfat with `shortname=lower` list
+    // `Makefile` as `makefile` once it is made; a racer renames it so. Where
+    // inode numbers are not kept, the entry then reports another number.
+    let fuse = || Quirks {
+        mount_type: Some(("fuse.ciopfs", "rw")),
+        case_insensitive: true,
+        ..Quirks::default()
+    };
+    let rows: [(&str, Preset, bool, bool); 3] = [
+        ("copy", Quirks::vfat, false, false),
+        ("move", Quirks::vfat, true, false),
+        ("unstable inodes", fuse, false, true),
+    ];
+    for (row, preset, moving, renumber) in rows {
+        let root = tempfile::tempdir()?;
+        let sources = root.path().join("sources");
+        let folder = sources.join("folder");
+        let destination = root.path().join("destination");
+        fs::create_dir_all(&folder)?;
+        fs::create_dir(&destination)?;
+        fs::write(folder.join("Makefile"), b"upper")?;
+        fs::write(folder.join("makefile"), b"lower")?;
+        let live = destination.clone();
+        let racer: Racer = Box::new(move || {
+            let stage = names(&live)
+                .expect("destination")
+                .into_iter()
+                .find(|name| name.starts_with(".strata-copy-"))
+                .expect("stage");
+            let lowered = live.join(stage).join("makefile");
+            fs::rename(lowered.with_file_name("Makefile"), &lowered).expect("lower the name");
+            if renumber {
+                renumbered(&lowered);
+            }
+        });
+        let _sources = FsQuirks::install(&sources, Quirks::default());
+        let _destination = FsQuirks::install(
+            &destination,
+            Quirks {
+                before: vec![(Op::CreateNode, "makefile", 0, racer)],
+                ..preset()
+            },
+        );
+
+        let events = run_paste(PasteRequest {
+            id: OperationRequestId(1),
+            destination: Location::local(&destination),
+            items: vec![PasteItem {
+                source: Location::local(&folder),
+                conflict: TransferConflict::FailIfExists,
+            }],
+            move_sources: moving,
+        });
+
+        let copied = destination.join("folder");
+        let renamed = events
+            .iter()
+            .filter_map(|event| match event {
+                OperationEvent::ItemsReported { report, .. } => Some(report.renamed.clone()),
+                _ => None,
+            })
+            .flatten()
+            .collect::<Vec<_>>();
+        assert_eq!(
+            renamed,
+            [RenamedItem {
+                requested: Location::local(copied.join("makefile")),
+                saved_as: Location::local(copied.join("makefile (1)")),
+                cause: RenameCause::Alias,
+            }],
+            "{row}"
+        );
+        assert_eq!(names(&copied)?, ["makefile", "makefile (1)"], "{row}");
+        assert_eq!(fs::read(copied.join("makefile"))?, b"upper", "{row}");
+        assert_eq!(fs::read(copied.join("makefile (1)"))?, b"lower", "{row}");
+        assert_eq!(folder.exists(), !moving, "{row}");
+    }
+    Ok(())
+}

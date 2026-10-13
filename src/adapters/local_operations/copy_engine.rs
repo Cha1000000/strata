@@ -443,13 +443,7 @@ fn copy_new(
             copy.check_cancelled()?;
             let mount = Mount::new(copy.fs, parent.as_fd());
             let (name, link) = first_free(taken.names(&name, false), taken, |name| {
-                tree::copy_link(
-                    copy,
-                    source.entry(),
-                    Entry::new(&*parent, name),
-                    &mount,
-                    false,
-                )
+                tree::copy_link(copy, source.entry(), Entry::new(&*parent, name), &mount, None)
             })?;
             if let Some(folder) = recorded_in {
                 folder.entry(&source.name, &link);
@@ -473,7 +467,7 @@ fn copy_new(
             let parent_stat = copy.fs.stat_fd(parent.as_fd())?;
             let (name, pipe) = first_free(taken.names(&name, false), taken, |name| {
                 let target = Entry::new(&*parent, name);
-                match tree::copy_fifo(copy, source.entry(), target, &parent_stat, &mount, false)? {
+                match tree::copy_fifo(copy, source.entry(), target, &parent_stat, &mount, None)? {
                     (pipe, Some(_)) => Ok(pipe),
                     (_, None) => Err(Failure::NotCopyable),
                 }
