@@ -229,12 +229,8 @@ impl Data {
             };
             let elapsed = started.elapsed();
             if copied == 0 {
-                // A read confirms an early end.
-                return Ok(if offset >= size {
-                    Ranged::Done
-                } else {
-                    Ranged::From(offset)
-                });
+                // An end before the size, which a read confirms.
+                return Ok(Ranged::From(offset));
             }
             offset += copied as u64;
             progress(copied as u64);

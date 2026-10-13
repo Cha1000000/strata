@@ -183,6 +183,9 @@ pub(crate) struct Quirks {
     pub virtual_sizes: bool,
     /// `FICLONE`, which btrfs and XFS hosts would otherwise perform.
     pub reflink: Support,
+    /// `copy_file_range` copies nothing past this offset, as when a source
+    /// shrinks after it was opened.
+    pub copy_range_end: Option<u64>,
     /// Entries matching the name report this mode, as another user's file
     /// readable through its group or others does to the user copying it.
     pub reported_mode: Option<(&'static str, u32)>,
@@ -1165,10 +1168,20 @@ impl FsOps for Scoped {
         len: usize,
     ) -> Result<usize, Errno> {
         assert_off_main_thread();
-        let virtual_size =
-            scope_for(source).is_some_and(|scope| scope.quirk(|quirks| quirks.virtual_sizes));
+        let end = scope_for(source).and_then(|scope| {
+            scope.quirk(|quirks| {
+                if quirks.virtual_sizes {
+                    Some(0)
+                } else {
+                    quirks.copy_range_end
+                }
+            })
+        });
+        let len = end.map_or(len, |end| {
+            len.min(usize::try_from(end.saturating_sub(source_offset)).unwrap_or(len))
+        });
         between(Op::CopyRange, source, target, || {
-            if virtual_size {
+            if len == 0 {
                 return Ok(0);
             }
             System.copy_range(source, source_offset, target, target_offset, len)

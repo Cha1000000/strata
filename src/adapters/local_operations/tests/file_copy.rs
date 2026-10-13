@@ -394,6 +394,30 @@ fn a_clone_failing_with_eio_is_not_retried() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
+fn a_copy_range_that_ends_early_continues_with_reads_and_writes() -> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock()?;
+    let root = tempfile::tempdir()?;
+    let source = root.path().join("source.bin");
+    let contents = patterned(2 * 1024 * 1024);
+    fs::write(&source, &contents)?;
+    let scope = FsQuirks::install(
+        root.path(),
+        Quirks {
+            reflink: Support::Rejected(Errno::OPNOTSUPP),
+            copy_range_end: Some(1024 * 1024),
+            ..Quirks::default()
+        },
+    );
+    let target = root.path().join("target.bin");
+
+    copy(&source, &target)?;
+
+    assert!(scope.count(Op::CopyRange) > 0);
+    assert!(fs::read(&target)? == contents, "the copy is not whole");
+    Ok(())
+}
+
+#[test]
 fn a_file_that_reports_no_size_is_copied_whole() -> Result<(), Box<dyn Error>> {
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock()?;
     let root = tempfile::tempdir()?;
