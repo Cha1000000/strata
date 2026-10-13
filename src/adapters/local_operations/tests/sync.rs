@@ -617,7 +617,7 @@ fn owed_deletions_close_in_batches() -> Result<(), Box<dyn Error>> {
         .lock()
         .map_err(|error| error.to_string())?;
     let names = ["a", "b", "c", "d", "e"];
-    let rows: [(&str, Limits, [usize; 5], Vec<Seen>); 4] = [
+    let rows: [(&str, Limits, [usize; 5], Vec<Seen>); 3] = [
         (
             "the end of the paste",
             NO_LIMITS,
@@ -684,22 +684,6 @@ fn owed_deletions_close_in_batches() -> Result<(), Box<dyn Error>> {
                     counted: 5,
                 },
             ],
-        ),
-        (
-            "age",
-            Limits {
-                age: Duration::ZERO,
-                ..NO_LIMITS
-            },
-            [1; 5],
-            (0..names.len())
-                .map(|index| Seen {
-                    deleted: strings(&names[..index]),
-                    copied: strings(&names[..=index]),
-                    flushing: index + 1 == names.len(),
-                    counted: index + 1,
-                })
-                .collect(),
         ),
     ];
     for (id, (row, limits, sizes, expected)) in (310..).zip(rows) {
@@ -1489,5 +1473,89 @@ fn a_writeback_lost_during_a_move_keeps_every_source_it_may_hold() -> Result<(),
         assert_eq!(moved_count(&events.borrow()), 0, "{names:?}");
         assert!(early.borrow().is_empty(), "{names:?}");
     }
+    Ok(())
+}
+
+/// Puts the batches' clock back to real time.
+struct ClockGuard;
+
+impl Drop for ClockGuard {
+    fn drop(&mut self) {
+        super::super::owed::advance_batch_clock_for_test(None);
+    }
+}
+
+#[test]
+fn a_batch_closes_once_its_first_entry_is_five_seconds_old() -> Result<(), Box<dyn Error>> {
+    use super::super::owed::{Limits, advance_batch_clock_for_test};
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let _limits = LimitsGuard::set(Limits {
+        age: Duration::from_secs(5),
+        ..NO_LIMITS
+    });
+    let _clock = ClockGuard;
+    let root = tempfile::tempdir()?;
+    let sources = root.path().join("sources");
+    let destination = root.path().join("destination");
+    fs::create_dir(&sources)?;
+    fs::create_dir(&destination)?;
+    let names = ["a", "b", "c", "d", "e"];
+    let mut paths = Vec::new();
+    for name in names {
+        fs::write(sources.join(name), name)?;
+        paths.push(sources.join(name));
+    }
+    // Three seconds pass as b is copied, and three more as d is.
+    let later = |name: &'static str| -> (Op, &'static str, usize, super::fs_quirks::Racer) {
+        (
+            Op::OpenSource,
+            name,
+            0,
+            Box::new(|| advance_batch_clock_for_test(Some(Duration::from_secs(3)))),
+        )
+    };
+    let barriers = Barriers::new();
+    let _sources = FsQuirks::install(
+        &sources,
+        Quirks {
+            before: vec![later("b"), later("d")],
+            ..Quirks::default()
+        },
+    );
+    let _destination = FsQuirks::install(
+        &destination,
+        Quirks {
+            before: barriers.racers(&sources, &names, &destination, None),
+            ..Quirks::ext4()
+        },
+    );
+
+    let (_operation, events, early) = paste_moves(450, &destination, &paths, &barriers, None);
+    pump_until_transfer(&events);
+
+    assert!(matches!(
+        terminal_transfer(&events.borrow()),
+        Some(OperationEvent::Pasted { .. })
+    ));
+    assert_eq!(
+        barriers.seen(),
+        [
+            Seen {
+                deleted: Vec::new(),
+                copied: strings(&["a", "b", "c", "d"]),
+                flushing: false,
+                counted: 4,
+            },
+            Seen {
+                deleted: strings(&["a", "b", "c", "d"]),
+                copied: strings(&names),
+                flushing: true,
+                counted: 5,
+            },
+        ]
+    );
+    assert!(early.borrow().is_empty());
     Ok(())
 }

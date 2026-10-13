@@ -150,6 +150,36 @@ fn limits() -> Limits {
     LIMITS
 }
 
+/// How far tests moved the batches' clock on, in milliseconds; racers on
+/// worker threads move it.
+#[cfg(test)]
+static TEST_CLOCK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Moves the batches' clock on by `by`, or back to real time with `None`.
+#[cfg(test)]
+pub(super) fn advance_batch_clock_for_test(by: Option<Duration>) {
+    use std::sync::atomic::Ordering;
+    match by {
+        Some(by) => {
+            let millis = u64::try_from(by.as_millis()).unwrap_or(u64::MAX);
+            TEST_CLOCK.fetch_add(millis, Ordering::SeqCst);
+        }
+        None => TEST_CLOCK.store(0, Ordering::SeqCst),
+    }
+}
+
+fn now() -> Instant {
+    #[cfg(test)]
+    {
+        let advanced = TEST_CLOCK.load(std::sync::atomic::Ordering::SeqCst);
+        Instant::now() + Duration::from_millis(advanced)
+    }
+    #[cfg(not(test))]
+    {
+        Instant::now()
+    }
+}
+
 /// Deletions owed on one destination filesystem, behind one barrier.
 struct Batch<T> {
     key: Option<MountKey>,
@@ -170,7 +200,7 @@ impl<T> Batch<T> {
             barrier: None,
             nested: Vec::new(),
             entries: Vec::new(),
-            started: Instant::now(),
+            started: now(),
             copied: 0,
         }
     }
@@ -198,7 +228,7 @@ impl<T> Batch<T> {
         self.key.is_none()
             || self.entries.len() >= limits.items
             || self.copied >= limits.bytes
-            || self.started.elapsed() >= limits.age
+            || now().saturating_duration_since(self.started) >= limits.age
     }
 
     /// Flushes once, then performs what each entry owes in order. A failed
