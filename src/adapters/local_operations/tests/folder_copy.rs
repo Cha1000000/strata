@@ -703,6 +703,38 @@ fn probing_for_hard_links_leaves_nothing_in_the_copy() -> Result<(), Box<dyn Err
 }
 
 #[test]
+fn a_claimed_name_is_linked_when_the_reply_to_removing_its_claim_is_lost()
+-> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock()?;
+    let mounts = mounts(Quirks {
+        lost_reply: vec![(Op::Unlink, "x", Errno::NOENT), (Op::Unlink, "y", Errno::NOENT)],
+        ..Quirks::nfs3()
+    })?;
+    learn_mount_capability(mounts.destination_scope.key(), |capabilities| {
+        capabilities.hard_links = Some(true);
+    });
+    // `X` and `Y` may be `x` and `y`, so all four names are claimed.
+    let source = mounts.sources.join("source");
+    fs::create_dir(&source)?;
+    fs::write(source.join("x"), b"linked")?;
+    fs::hard_link(source.join("x"), source.join("y"))?;
+    for name in ["X", "Y"] {
+        fs::write(source.join(name), name)?;
+    }
+    let target = mounts.destination.join("target");
+
+    copy(&source, &target)?;
+
+    let [x, y] = ["x", "y"].map(|name| fs::metadata(target.join(name)));
+    let (x, y) = (x?, y?);
+    assert_eq!((x.ino(), x.nlink()), (y.ino(), 2));
+    for name in ["X", "Y"] {
+        assert_eq!(fs::read_to_string(target.join(name))?, name);
+    }
+    Ok(())
+}
+
+#[test]
 fn a_refused_link_is_copied_from_the_first_copy_and_ends_linking() -> Result<(), Box<dyn Error>> {
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock()?;
     let mounts = mounts(Quirks {

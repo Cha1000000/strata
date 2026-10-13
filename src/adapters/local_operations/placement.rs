@@ -507,6 +507,8 @@ fn recreate_symlink(
     }
 }
 
+/// Removes `entry` while it still holds `identity`, and tells whether it is
+/// gone: an NFS unlink retried after its reply was lost reports `ENOENT`.
 pub(super) fn remove_if_unchanged(
     fs: &dyn FsOps,
     entry: Entry<'_>,
@@ -515,7 +517,7 @@ pub(super) fn remove_if_unchanged(
 ) -> bool {
     fs.stat(entry, true)
         .is_ok_and(|current| current.identity == identity)
-        && fs.unlink(entry, flags).is_ok()
+        && matches!(fs.unlink(entry, flags), Ok(()) | Err(Errno::NOENT))
 }
 
 fn placeholder_is_ours(fs: &dyn FsOps, to: Entry<'_>, placeholder: LocalFileIdentity) -> bool {
