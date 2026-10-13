@@ -53,9 +53,9 @@ Strata publishes the folder:
 Publication never replaces an existing entry. Where the filesystem lacks
 atomic no-replace renames, a file is published through a hard link and a
 folder is moved whole over an empty placeholder Strata has just created. Only
-a file on a filesystem with neither no-replace renames nor hard links cannot
-be published safely; the error says so and names the hidden staging folder
-holding the output.
+a file on a filesystem with neither no-replace renames nor usable hard links
+cannot be published safely; the error says so and names the hidden staging
+folder holding the output.
 
 Partial output from any other failed attempt stays in its own folder, so a
 retry never merges into it. An archive with several top-level entries is

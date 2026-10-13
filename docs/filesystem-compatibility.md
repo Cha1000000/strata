@@ -19,8 +19,9 @@ the GVfs backend, and Strata uses GIO for them.
   reports that the result could not be confirmed.
 - **Never block the interface.** No filesystem call runs on the GTK main thread, including probes,
   mount lookups and waits. A hung NFS or FUSE server stalls the operation, not the window.
-- **Move metadata, not data.** Moves and renames inside one filesystem never copy file contents,
-  whatever the mount supports. Data is copied only when crossing devices.
+- **Move metadata, not data.** Renames inside one filesystem never copy file contents, whatever
+  the mount supports. Moves copy only when crossing devices, or on a mount that offers neither
+  `RENAME_NOREPLACE` nor the fallback step below for that item.
 
 ## Placing an item without replacing
 
@@ -32,9 +33,9 @@ and stops at the first that applies:
 | Step | Applies to | Operation | Why it cannot replace |
 | --- | --- | --- | --- |
 | 1 | everything | `renameat2(RENAME_NOREPLACE)` | the kernel refuses an existing target |
-| 2 | files, symlinks, special files | `linkat`, then remove the old name after checking its identity | creating a link fails if the name exists, on the server for NFS and SMB |
+| 2 | files, symlinks, special files | `linkat`, then remove the old name once the new one reports the item's identity | creating a link fails if the name exists, on the server for NFS and SMB |
 | 3 | folders | create an empty placeholder folder with `mkdirat`, then rename over it | a rename can only replace an empty folder; a filled or swapped placeholder fails with `ENOTEMPTY` or `ENOTDIR` |
-| 4 | — | copy, then delete | only for a real cross-device move (`EXDEV`) |
+| 4 | — | copy, then delete | only for a cross-device move (`EXDEV`), or a move no step above can place |
 
 `EEXIST` and `ENOTEMPTY` always mean the destination is taken. `EINVAL` from step 1 has three
 possible meanings, and Strata never treats it as "copy instead":
@@ -61,9 +62,8 @@ Residual limits:
 - On a case-insensitive SMB share without POSIX extensions, the Linux cifs client turns server
   inode numbers off for the whole mount once a folder is looked up under a second spelling, as the
   check before a case-only folder rename does ("Autodisabling the use of server inode numbers" in
-  the kernel log). Hard links then report different inode numbers, so steps that prove a link fail
-  closed, and the capability probe proves its own files by birth time instead; `RENAME_NOREPLACE`
-  still places items there.
+  the kernel log). Hard links then report different inode numbers, so Strata stops using them
+  there, as on sshfs; `RENAME_NOREPLACE` still places items there.
 - If the reply to the placeholder `mkdir` is lost on NFS, an empty folder can remain at the
   destination name.
 
@@ -129,12 +129,12 @@ Local renames go through the same routine instead of GIO's check-then-rename.
   gives each spelling its own inode number, so there the new spelling counts as the item itself
   only when the folder lists no such name, the item's own name is the only one that matches it
   ignoring case, and type, size and modification time agree.
-- **Mounts with neither `RENAME_NOREPLACE` nor hard links** (vboxsf, rclone, s3fs, sshfs without
-  the hardlink extension), confirmed by a probe, and files that refuse a hard link on a mount
-  without `RENAME_NOREPLACE` (for example under `fs.protected_hardlinks`): a file rename first
-  reserves the new name with an exclusive empty file, then renames over it; a folder rename checks
-  that the name is free, then renames. Only a process that deletes Strata's reservation in that
-  instant could lose an item. Rename never refuses for lack of a primitive.
+- **Mounts with neither `RENAME_NOREPLACE` nor usable hard links** (vboxsf, rclone, s3fs, sshfs),
+  confirmed by a probe, and files that refuse a hard link on a mount without `RENAME_NOREPLACE`
+  (for example under `fs.protected_hardlinks`): a file rename first reserves the new name with an
+  exclusive empty file, then renames over it; a folder rename checks that the name is free, then
+  renames. Only a process that deletes Strata's reservation in that instant could lose an item.
+  Rename never refuses for lack of a primitive.
 - Undo of a rename never copies.
 
 ## Trash
@@ -187,11 +187,16 @@ Rename and link support decides which placement step runs. "Rejects flags" means
 | exfat-fuse (libfuse3) | enforced by the kernel only | ignored: overwrites | no | |
 | NFS v3 and v4 | rejects flags | rejects flags | yes | unlinking an open file leaves `.nfsXXXX` until it is closed |
 | SMB/CIFS | client-side only | no | server-dependent | usually case-insensitive; open files may block rename and delete |
-| sshfs | rejects flags | rejects flags | with `hardlink@openssh.com` | reports "exists" as `EPERM` |
+| sshfs | rejects flags | rejects flags | not used | each link reports its own inode number; reports "exists" as `EPERM` |
 | 9p (WSL2, QEMU), ceph, eCryptfs | rejects flags | rejects flags | yes | |
 | vboxsf | rejects flags | rejects flags | no | |
 | mergerfs | rejects flags | rejects flags | within a branch | |
 | overlayfs | yes | yes | yes | lower-layer folders cannot be renamed without `redirect_dir` |
+
+libfuse high-level daemons without `use_ino`, sshfs among them, give each hard link its own inode
+number, so a link cannot prove that it holds the item. Strata removes such a link by the identity
+it reports and stops using links on that mount: moves copy, renames use the reserved-name step
+above, and an archive file cannot be published there.
 
 ## Testing
 
@@ -206,9 +211,9 @@ let _quirks = FsQuirks::install(root.path(), Quirks::without_rename_flags());
 
 Quirks emulate rejected rename flags (NFS, ntfs-3g), missing hard links (vfat, vboxsf), sshfs
 collisions reported as `EPERM`, gvfsd-fuse refusing to rename over an empty folder, case-insensitive
-lookups, invalid names, unsupported or lying Trash, reused inode numbers, missing birth times, lost
-replies and racing processes. The seam
-also asserts that no call runs on the main context's thread. Run them with:
+lookups, invalid names, unsupported or lying Trash, reused inode numbers, hard links with their own
+inode numbers, missing birth times, lost replies and racing processes. The seam also asserts that
+no call runs on the main context's thread. Run them with:
 
 ```bash
 ./scripts/test-headless.py local_operations::
