@@ -233,6 +233,38 @@ fn a_name_taken_just_before_the_link_is_left_alone() -> Result<(), Box<dyn Error
 }
 
 #[test]
+fn a_folder_removed_before_the_link_leaves_tmpfiles_in_use() -> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock()?;
+    let root = tempfile::tempdir()?;
+    let source = root.path().join("source.txt");
+    fs::write(&source, b"contents")?;
+    let removed = root.path().join("removed");
+    fs::create_dir(&removed)?;
+    let folder = removed.clone();
+    let scope = FsQuirks::install(
+        root.path(),
+        Quirks {
+            before: vec![(
+                Op::LinkFd,
+                "*",
+                0,
+                Box::new(move || fs::remove_dir(&folder).expect("remove the folder")),
+            )],
+            ..Quirks::default()
+        },
+    );
+    copy(&source, &removed.join("target.txt")).expect_err("the folder is gone");
+    scope.clear_calls();
+
+    copy(&source, &root.path().join("target.txt"))?;
+
+    assert_eq!(scope.count(Op::OpenTmpfile), 1, "{:?}", scope.calls());
+    assert!(!scope.used_name(".strata-copy-*"));
+    assert_eq!(fs::read(root.path().join("target.txt"))?, b"contents");
+    Ok(())
+}
+
+#[test]
 fn running_out_of_space_leaves_nothing_behind() -> Result<(), Box<dyn Error>> {
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock()?;
     for (case, preset) in [

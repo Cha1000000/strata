@@ -788,7 +788,11 @@ fn link_tmpfile(fs: &dyn FsOps, fd: BorrowedFd<'_>, to: Entry<'_>) -> Result<(),
             TMPFILE_LINK.store(TMPFILE_LINK_PROC, Ordering::Relaxed);
             Ok(())
         }
-        Err(Errno::NOENT) if known == TMPFILE_LINK_UNKNOWN => {
+        // Unless the folder itself was removed meanwhile.
+        Err(Errno::NOENT)
+            if known == TMPFILE_LINK_UNKNOWN
+                && fs.stat_fd(to.dir).is_ok_and(|folder| folder.nlink > 0) =>
+        {
             TMPFILE_LINK.store(TMPFILE_LINK_UNAVAILABLE, Ordering::Relaxed);
             Err(Errno::NOENT)
         }
