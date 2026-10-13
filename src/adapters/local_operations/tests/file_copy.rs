@@ -203,6 +203,36 @@ fn a_tmpfile_that_cannot_be_linked_is_published_without_rereading_the_source()
 }
 
 #[test]
+fn a_name_taken_just_before_the_link_is_left_alone() -> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock()?;
+    let root = tempfile::tempdir()?;
+    let source = root.path().join("source.txt");
+    fs::write(&source, b"ours")?;
+    let target = root.path().join("target.txt");
+    let taken = target.clone();
+    let scope = FsQuirks::install(
+        root.path(),
+        Quirks {
+            before: vec![(
+                Op::LinkFd,
+                "*",
+                0,
+                Box::new(move || fs::write(&taken, b"theirs").expect("take the name")),
+            )],
+            ..Quirks::default()
+        },
+    );
+
+    let error = copy(&source, &target).expect_err("the name is taken");
+
+    assert!(error.matches(gio::IOErrorEnum::Exists), "{error}");
+    assert_eq!(scope.count(Op::LinkFd), 1);
+    assert_eq!(fs::read(&target)?, b"theirs");
+    assert_eq!(names(root.path())?, ["source.txt", "target.txt"]);
+    Ok(())
+}
+
+#[test]
 fn running_out_of_space_leaves_nothing_behind() -> Result<(), Box<dyn Error>> {
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock()?;
     for (case, preset) in [
@@ -247,37 +277,45 @@ fn short_reads_and_writes_still_copy_every_byte() -> Result<(), Box<dyn Error>> 
 #[test]
 fn a_write_error_reported_at_close_fails_the_copy() -> Result<(), Box<dyn Error>> {
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock()?;
-    let mounts = mounts(Quirks::default(), |_| Quirks {
-        fail: vec![(Op::Close, ".strata-copy-*", 0, Errno::IO)],
-        ..Quirks::nfs3()
-    })?;
-    let source = mounts.source(b"contents")?;
+    // An unnamed file is closed once linked, under its inode's name.
+    for (case, closed, preset) in [
+        ("named stage", ".strata-copy-*", Quirks::nfs3 as Preset),
+        ("unnamed file", "#*", Quirks::default),
+    ] {
+        let mounts = mounts(Quirks::default(), |_| Quirks {
+            fail: vec![(Op::Close, closed, 0, Errno::IO)],
+            ..preset()
+        })?;
+        let source = mounts.source(b"contents")?;
 
-    copy(&source, &mounts.target()).expect_err("the close fails");
+        copy(&source, &mounts.target()).expect_err("the close fails");
 
-    assert!(mounts.destination_scope.used_name(".strata-copy-*"));
-    assert!(names(&mounts.destination)?.is_empty());
+        assert!(mounts.destination_scope.used_name(closed), "{case}");
+        assert!(names(&mounts.destination)?.is_empty(), "{case}");
+    }
     Ok(())
 }
 
 #[test]
-fn connection_loss_while_setting_metadata_fails_the_copy() -> Result<(), Box<dyn Error>> {
+fn connection_loss_while_copying_metadata_fails_the_copy() -> Result<(), Box<dyn Error>> {
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock()?;
-    let root = tempfile::tempdir()?;
-    let source = root.path().join("source.txt");
-    fs::write(&source, b"contents")?;
-    let _scope = FsQuirks::install(
-        root.path(),
-        Quirks {
-            extra_xattrs: vec![("user.tag", b"value")],
-            fail: vec![(Op::SetXattr, "*", 0, Errno::NOTCONN)],
-            ..Quirks::default()
-        },
-    );
+    for op in [Op::XattrNames, Op::GetXattr, Op::SetXattr] {
+        let root = tempfile::tempdir()?;
+        let source = root.path().join("source.txt");
+        fs::write(&source, b"contents")?;
+        let _scope = FsQuirks::install(
+            root.path(),
+            Quirks {
+                extra_xattrs: vec![("user.tag", b"value")],
+                fail: vec![(op, "*", 0, Errno::NOTCONN)],
+                ..Quirks::default()
+            },
+        );
 
-    copy(&source, &root.path().join("target.txt")).expect_err("the connection is lost");
+        copy(&source, &root.path().join("target.txt")).expect_err("the connection is lost");
 
-    assert_eq!(names(root.path())?, ["source.txt"]);
+        assert_eq!(names(root.path())?, ["source.txt"], "{op:?}");
+    }
     Ok(())
 }
 

@@ -223,6 +223,55 @@ fn cancelling_staging_preserves_the_destination_and_cleans_the_partial_copy()
 }
 
 #[test]
+fn cancelling_as_the_replacement_is_staged_keeps_the_destination() -> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let root = tempfile::tempdir()?;
+    let source = root.path().join("source.txt");
+    let target = root.path().join("target.txt");
+    fs::write(&source, b"replacement")?;
+    fs::write(&target, b"original")?;
+    let cancellable = gio::Cancellable::new();
+    let cancel =
+        |cancellable: gio::Cancellable| -> Racer { Box::new(move || cancellable.cancel()) };
+    // The staged file's last step is its close: once linked, an unnamed
+    // file's close names it by its inode. Without Trash, nothing after
+    // staging checks the cancellation.
+    let _scope = FsQuirks::install(
+        root.path(),
+        without_trash(
+            TMPFS_MAGIC,
+            Quirks {
+                before: vec![
+                    (Op::Close, "#*", 0, cancel(cancellable.clone())),
+                    (Op::Close, ".strata-replacement-*", 0, cancel(cancellable.clone())),
+                ],
+                ..Quirks::default()
+            },
+        ),
+    );
+
+    let result = glib::MainContext::default().block_on(replace_local(
+        gio::File::for_path(&source),
+        gio::File::for_path(&target),
+        false,
+        cancellable,
+        None,
+    ));
+
+    assert!(
+        result
+            .as_ref()
+            .is_err_and(|error| error.matches(gio::IOErrorEnum::Cancelled)),
+        "{result:?}"
+    );
+    assert_eq!(fs::read(&target)?, b"original");
+    assert_eq!(names(root.path())?, ["source.txt", "target.txt"]);
+    Ok(())
+}
+
+#[test]
 fn staged_file_replacement_commits_then_removes_a_moved_source() -> Result<(), Box<dyn Error>> {
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
         .lock()
