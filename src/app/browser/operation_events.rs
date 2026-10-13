@@ -16,7 +16,7 @@ pub(super) use background::BackgroundOperation;
 
 use super::{
     Browser, BrowserEvent, MergeUndoState, UndoEntry, completed_replay_items, finish_replay,
-    mark_replay_item_completed, move_records, push_pending_redo, push_pending_undo,
+    mark_replay_item_completed, move_records, moved_target, push_pending_redo, push_pending_undo,
     push_regenerated_undo,
 };
 
@@ -84,7 +84,7 @@ impl OperationCompletion {
 
     fn record_transfer_undo(
         &self,
-        moved: &[Location],
+        (moved, moved_to): (&[Location], &HashMap<Location, Location>),
         created: Vec<Location>,
         merged: MergeUndoState,
         publish: fn(UndoEntry),
@@ -102,7 +102,11 @@ impl OperationCompletion {
                         .filter(|source| !merged.sources.contains(*source))
                         .cloned()
                         .collect();
-                    publish(UndoEntry::Move(move_records(&movable, destination)));
+                    publish(UndoEntry::Move(move_records(
+                        &movable,
+                        destination,
+                        moved_to,
+                    )));
                 }
             }
             Some(false) if merged.overwritten.is_empty() && merged.created.is_empty() => {
@@ -310,7 +314,17 @@ impl Browser {
                 self.transfer_report.borrow_mut().extend(report.clone());
                 return true;
             }
-            OperationEvent::ItemMoved { .. } | OperationEvent::ItemTrashed { .. } => return true,
+            OperationEvent::ItemMoved {
+                from, to, merged, ..
+            } => {
+                if !merged {
+                    self.moved_items
+                        .borrow_mut()
+                        .insert(from.clone(), to.clone());
+                }
+                return true;
+            }
+            OperationEvent::ItemTrashed { .. } => return true,
             OperationEvent::ArchiveStarted { total, .. } => {
                 BrowserEvent::ArchiveStarted { total: *total }
             }
@@ -439,11 +453,14 @@ impl Browser {
             return;
         };
         let created = self.created_locations.take();
+        let moved_to = self.moved_items.take();
         if let OperationEvent::Pasted { locations, .. } = event {
             completion.reveal_locations = if moving {
                 locations
                     .iter()
-                    .filter_map(|source| source.transfer_target(completion.destination.as_ref()?))
+                    .filter_map(|source| {
+                        moved_target(source, completion.destination.as_ref()?, &moved_to)
+                    })
                     .collect()
             } else {
                 created.clone()
@@ -458,7 +475,7 @@ impl Browser {
             .borrow_mut()
             .retain_selectionless_removals(moved.iter().cloned());
         completion.record_transfer_undo(
-            &moved,
+            (&moved, &moved_to),
             created,
             self.merged_undo.take(),
             push_pending_undo,

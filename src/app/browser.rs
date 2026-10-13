@@ -829,13 +829,30 @@ fn undo_move_parents(items: &[UndoMoveItem]) -> HashSet<Location> {
         .collect()
 }
 
+/// Where the transfer left `source`: where it was reported moved to, or its
+/// own name in `destination`.
+fn moved_target(
+    source: &Location,
+    destination: &Location,
+    moved_to: &HashMap<Location, Location>,
+) -> Option<Location> {
+    moved_to
+        .get(source)
+        .cloned()
+        .or_else(|| source.transfer_target(destination))
+}
+
 /// Pairs each moved source with where the transfer left it. Items that never
 /// left their own directory carry no undo.
-fn move_records(sources: &[Location], destination: &Location) -> Vec<MoveRecord> {
+fn move_records(
+    sources: &[Location],
+    destination: &Location,
+    moved_to: &HashMap<Location, Location>,
+) -> Vec<MoveRecord> {
     sources
         .iter()
         .filter_map(|source| {
-            let current = source.transfer_target(destination)?;
+            let current = moved_target(source, destination, moved_to)?;
             (&current != source).then(|| MoveRecord {
                 original: source.clone(),
                 current,
@@ -994,6 +1011,9 @@ pub struct Browser {
     transfer_reveal: Cell<bool>,
     created_locations: RefCell<Vec<Location>>,
     merged_undo: RefCell<MergeUndoState>,
+    /// Where each moved item went, which Keep Both or FAT names may make
+    /// differ from its name.
+    moved_items: RefCell<HashMap<Location, Location>>,
     transfer_report: RefCell<TransferReport>,
     undo_claim: RefCell<Option<(u64, UndoEntry)>>,
     redo_claim: RefCell<Option<(u64, UndoEntry)>>,
@@ -1071,6 +1091,7 @@ impl Browser {
             transfer_reveal: Cell::new(true),
             created_locations: RefCell::new(Vec::new()),
             merged_undo: RefCell::new(MergeUndoState::default()),
+            moved_items: RefCell::new(HashMap::new()),
             transfer_report: RefCell::new(TransferReport::default()),
             undo_claim: RefCell::new(None),
             redo_claim: RefCell::new(None),
@@ -3430,6 +3451,7 @@ impl Browser {
         self.transfer_destination.replace(None);
         self.created_locations.borrow_mut().clear();
         *self.merged_undo.borrow_mut() = MergeUndoState::default();
+        self.moved_items.take();
         self.transfer_report.take();
         self.deletion_operation.set(false);
         self.deletion_permanent.set(false);

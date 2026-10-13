@@ -1015,6 +1015,39 @@ fn a_paste_mixing_plain_copies_and_a_merge_records_one_merge_undo() {
 }
 
 #[test]
+fn a_move_is_undone_from_where_the_item_went() {
+    let browser = Browser::new(Rc::new(FakeFileSource));
+    browser.set_operation_provider(Rc::new(ImmediateOperationProvider));
+    let source = Location::local("/fixture/report.txt");
+    let kept_both = Location::local("/fixture/archive/report (1).txt");
+    let request_id = browser.begin_operation();
+    browser.transfer_operation.set(Some(true));
+    browser
+        .transfer_destination
+        .replace(Some(Location::local("/fixture/archive")));
+    let emit = browser.operation_callback(request_id, false, HashSet::new());
+
+    emit(OperationEvent::ItemMoved {
+        request_id,
+        from: source.clone(),
+        to: kept_both.clone(),
+        merged: false,
+    });
+    emit(OperationEvent::Pasted {
+        request_id,
+        locations: vec![source.clone()],
+    });
+
+    assert_eq!(
+        pending_undo_entry(),
+        Some(UndoEntry::Move(vec![MoveRecord {
+            original: source,
+            current: kept_both,
+        }]))
+    );
+}
+
+#[test]
 fn a_merged_move_source_is_excluded_from_the_move_undo() {
     let browser = Browser::new(Rc::new(FakeFileSource));
     browser.set_operation_provider(Rc::new(ImmediateOperationProvider));
