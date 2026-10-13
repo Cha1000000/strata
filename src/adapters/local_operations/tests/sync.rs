@@ -1205,3 +1205,69 @@ fn files_gio_wrote_are_synced_one_by_one_where_the_barrier_misses_them()
     assert_eq!(synced, ["a.txt", "b.txt", "read-only.txt"]);
     Ok(())
 }
+
+#[test]
+fn a_replace_on_smb_syncs_its_copy_only_where_the_original_is_deleted() -> Result<(), Box<dyn Error>>
+{
+    use super::fs_quirks::Trash;
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    // The original goes to Trash, or Trash refuses it once the copy is
+    // staged, so it is exchanged and deleted.
+    for (id, trash, synced) in [(380, Trash::Supported, false), (381, Trash::Refused, true)] {
+        let row = format!("{trash:?}");
+        let root = tempfile::tempdir()?;
+        let sources = root.path().join("sources");
+        let destination = root.path().join("destination");
+        fs::create_dir_all(sources.join("folder"))?;
+        fs::write(sources.join("folder/a.txt"), b"a")?;
+        fs::write(sources.join("folder/b.txt"), b"b")?;
+        fs::create_dir_all(destination.join("folder"))?;
+        fs::write(destination.join("folder/old.txt"), b"old")?;
+        let _sources = FsQuirks::install(&sources, Quirks::default());
+        let scope = FsQuirks::install(
+            &destination,
+            Quirks {
+                mount_type: Some(("cifs", "rw")),
+                trash,
+                ..Quirks::default()
+            },
+        );
+
+        let events = run_paste(PasteRequest {
+            id: OperationRequestId(id),
+            destination: Location::local(&destination),
+            items: vec![PasteItem {
+                source: Location::local(sources.join("folder")),
+                conflict: TransferConflict::ReplaceExisting,
+            }],
+            move_sources: false,
+        });
+
+        assert!(
+            matches!(
+                terminal_transfer(&events),
+                Some(OperationEvent::Pasted { .. })
+            ),
+            "{row}: {events:?}"
+        );
+        assert_eq!(names(&destination.join("folder"))?, ["a.txt", "b.txt"]);
+        let calls = scope.calls();
+        let synced_at: Vec<usize> = calls
+            .iter()
+            .enumerate()
+            .filter(|(_, call)| call.op == Op::SyncData)
+            .map(|(index, _)| index)
+            .collect();
+        assert_eq!(synced_at.len(), if synced { 2 } else { 0 }, "{row}");
+        let displaced = calls.iter().position(|call| call.op == Op::Exchange);
+        assert!(
+            synced_at
+                .iter()
+                .all(|synced| displaced.is_some_and(|displaced| *synced < displaced)),
+            "{row}: the copy is synced before the original is displaced"
+        );
+    }
+    Ok(())
+}

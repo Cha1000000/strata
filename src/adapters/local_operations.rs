@@ -3260,13 +3260,29 @@ struct StagedReplacement {
 /// Copies the source next to the target, then moves the original out of the
 /// way and publishes the copy. Every failure discards the stage. A move also
 /// returns what the copy took from the source.
+/// How a Replace copy reaches the disk before something only it holds is
+/// deleted.
+#[derive(Clone, Copy)]
+struct Durability {
+    /// See [`copy_engine::Options::durable`].
+    durable: bool,
+    /// The barrier reaches only files synced one by one.
+    each_file: bool,
+}
+
 async fn replace_through_stage(
     plan: &Arc<ReplacePlan>,
     mut removal: Removal,
     (source_path, moving): (&Path, bool),
     target_path: &Path,
     cancellable: &gio::Cancellable,
-    (copying, durable): (Copying, bool),
+    (
+        copying,
+        Durability {
+            mut durable,
+            each_file,
+        },
+    ): (Copying, Durability),
 ) -> Result<(StagedReplacement, StagedCopy), glib::Error> {
     let in_trash = |error: glib::Error, removal: Removal| match removal {
         Removal::Trashed => original_in_trash(&crate::services::gio_error_detail(&error)),
@@ -3366,6 +3382,19 @@ async fn replace_through_stage(
                     Err(error) => Err(error),
                 }
             }
+        };
+        let step = match step {
+            // The original is deleted after all, once the stage is on disk.
+            Ok(Removal::Without(displacement))
+                if matches!(removal, Removal::Trash) && !durable && each_file =>
+            {
+                durable = true;
+                let stage = target_path.with_file_name(&staged.name);
+                copy_engine::sync_files(vec![stage], cancellable)
+                    .await
+                    .map(|()| Removal::Without(displacement))
+            }
+            step => step,
         };
         match step {
             Ok(next) => removal = next,
@@ -3507,14 +3536,21 @@ async fn replace_owing(
         owed.barrier = Some(copy_engine::barrier(split_local_path(&target_path)?.0).await?);
     }
     let progress = copying.progress.clone();
-    let durable = owed.barrier.is_some();
+    let durability = Durability {
+        // A Trash attempt that falls back syncs the stage then.
+        durable: move_source || matches!(removal, Removal::Without(_)),
+        each_file: owed
+            .barrier
+            .as_ref()
+            .is_some_and(copy_engine::Barrier::syncs_each_file),
+    };
     let (replaced, (sources, report)) = replace_through_stage(
         &plan,
         removal,
         (&source_path, move_source),
         &target_path,
         cancellable,
-        (copying, durable),
+        (copying, durability),
     )
     .await?;
     on_replaced(replaced.original);

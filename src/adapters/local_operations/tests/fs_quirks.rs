@@ -109,6 +109,8 @@ pub(crate) enum Trash {
     FalseWithoutError,
     /// TRUE, but nothing moved.
     SucceedsWithoutMoving,
+    /// Offered, but moving an item there is not supported.
+    Refused,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -1122,7 +1124,9 @@ impl FsOps for Scoped {
                     Ok(match scope.quirk(|quirks| quirks.trash) {
                         Trash::Supported => System.can_trash(path),
                         Trash::Unsupported => false,
-                        Trash::FalseWithoutError | Trash::SucceedsWithoutMoving => true,
+                        Trash::FalseWithoutError
+                        | Trash::SucceedsWithoutMoving
+                        | Trash::Refused => true,
                     })
                 })
                 .unwrap_or(false),
@@ -1140,7 +1144,7 @@ impl FsOps for Scoped {
         let _ = scope.run(Op::Trash, &[name], |scope| {
             outcome = match scope.quirk(|quirks| quirks.trash) {
                 Trash::Supported => System.trash(path, cancellable),
-                Trash::Unsupported => Err(glib::Error::new(
+                Trash::Unsupported | Trash::Refused => Err(glib::Error::new(
                     gio::IOErrorEnum::NotSupported,
                     "Trash is not supported here",
                 )),
