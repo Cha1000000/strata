@@ -1619,6 +1619,66 @@ fn a_source_entry_that_cannot_be_deleted_is_kept_with_the_reason() -> Result<(),
 }
 
 #[test]
+fn a_move_cancelled_while_deleting_its_sources_reports_what_stays() -> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let root = tempfile::tempdir()?;
+    let source_dir = root.path().join("source");
+    let folder = source_dir.join("folder");
+    fs::create_dir_all(&folder)?;
+    fs::write(folder.join("a.txt"), b"a")?;
+    let _socket = std::os::unix::net::UnixListener::bind(folder.join("socket"))?;
+    let destination = root.path().join("destination");
+    fs::create_dir(&destination)?;
+    let cancellable = gio::Cancellable::new();
+    let cancel = cancellable.clone();
+    let _source = FsQuirks::install(
+        &source_dir,
+        Quirks {
+            before: vec![(Op::Unlink, "*", 0, Box::new(move || cancel.cancel()))],
+            ..Quirks::default()
+        },
+    );
+    let _destination = FsQuirks::install(&destination, Quirks::default());
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let emitted = events.clone();
+    let progress = TransferProgressTracker::new(
+        OperationRequestId(1),
+        None,
+        None,
+        Rc::new(move |event| emitted.borrow_mut().push(event)),
+    );
+    let copying = super::super::Copying {
+        progress: Some(progress),
+        fat_family: false,
+    };
+
+    let moved = glib::MainContext::default().block_on(super::super::move_local_with_progress(
+        gio::File::for_path(&folder),
+        gio::File::for_path(destination.join("folder")),
+        Taken::Fail,
+        cancellable,
+        copying.clone(),
+        super::super::attempt_move(None),
+        super::super::remote_copy(copying),
+    ));
+
+    assert!(
+        moved.is_err_and(|error| error.matches(gio::IOErrorEnum::Cancelled)),
+        "the move stops while it deletes its sources"
+    );
+    assert_eq!(
+        reported(&events).kept,
+        [kept(
+            folder.join("socket"),
+            KeptCause::Skipped(SpecialKind::Socket)
+        )]
+    );
+    Ok(())
+}
+
+#[test]
 fn moving_to_a_remote_target_keeps_a_source_entry_changed_during_the_copy()
 -> Result<(), Box<dyn Error>> {
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT

@@ -214,17 +214,22 @@ pub(super) async fn snapshot(
 }
 
 /// Deletes each source entry `manifest` recorded that the source still holds
-/// as the copy read it, and returns what stays, by path beneath the item's
-/// parent, with why.
+/// as the copy read it, and returns what it found must stay, by path
+/// beneath the item's parent, with why, even when it stopped.
 pub(super) async fn delete_unchanged_sources(
     manifest: Manifest,
     cancellable: &gio::Cancellable,
-) -> Result<Vec<(PathBuf, KeptCause)>, glib::Error> {
+) -> (Vec<(PathBuf, KeptCause)>, Result<(), glib::Error>) {
     let deleted = run_cancellable(cancellable, move |cancelled| {
         manifest::delete(fs(), manifest, cancelled)
     })
     .await;
-    deleted.map_err(|_| io_error("Delete worker stopped unexpectedly"))?
+    deleted.unwrap_or_else(|_| {
+        (
+            Vec::new(),
+            Err(io_error("Delete worker stopped unexpectedly")),
+        )
+    })
 }
 
 /// What a copy run by [`following`] made or why it stopped, what it added to

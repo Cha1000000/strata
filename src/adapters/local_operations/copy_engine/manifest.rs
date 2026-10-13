@@ -202,14 +202,15 @@ fn record(
 }
 
 /// Deletes each entry `manifest` recorded that the source still holds as
-/// recorded, then each folder left empty, and returns what stays, by path
-/// beneath the item's parent. Entries added to the source meanwhile are
-/// not recorded, so they and their folders stay.
+/// recorded, then each folder left empty, and returns what it found must
+/// stay, by path beneath the item's parent, even when it stopped. Entries
+/// added to the source meanwhile are not recorded, so they and their
+/// folders stay.
 pub(super) fn delete(
     fs: &'static dyn FsOps,
     manifest: Manifest,
     cancelled: Arc<AtomicBool>,
-) -> Result<Vec<(PathBuf, KeptCause)>, glib::Error> {
+) -> (Vec<(PathBuf, KeptCause)>, Result<(), glib::Error>) {
     let Manifest { parent, root } = manifest;
     let deletion = Arc::new(Deletion {
         fs,
@@ -239,8 +240,8 @@ pub(super) fn delete(
     work_queue::run_workers(&queue, workers, Some(10), |work| {
         thread::Builder::new().spawn(work)
     });
-    queue.result()?;
-    Ok(std::mem::take(&mut *lock(&deletion.kept)))
+    let result = queue.result();
+    (std::mem::take(&mut *lock(&deletion.kept)), result)
 }
 
 /// What every job of one deletion shares.

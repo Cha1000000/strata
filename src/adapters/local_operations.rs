@@ -2239,7 +2239,7 @@ async fn delete_moved_sources(
     progress: Option<&TransferProgressTracker>,
     cancellable: &gio::Cancellable,
 ) -> Result<(), glib::Error> {
-    let kept = copy_engine::delete_unchanged_sources(sources, cancellable).await?;
+    let (kept, deleted) = copy_engine::delete_unchanged_sources(sources, cancellable).await;
     if let (Some(progress), Some(parent)) =
         (progress, source.path().as_deref().and_then(Path::parent))
     {
@@ -2254,7 +2254,7 @@ async fn delete_moved_sources(
             ..TransferReport::default()
         });
     }
-    Ok(())
+    deleted
 }
 
 #[cfg(test)]
