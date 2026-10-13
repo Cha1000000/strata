@@ -5,8 +5,8 @@ set +e
 
 # A lazy unmount detaches a mount the kernel still references; once the
 # container exits nothing can release it, and its loop device stays attached
-# on the host until reboot. So a busy filesystem stops the teardown with the
-# container still running, unless --force accepts that risk.
+# on the host until reboot. So a busy filesystem keeps the container running,
+# unless --force accepts that risk. Everything else is still released.
 force=0
 [[ ${1:-} == --force ]] && force=1
 BUSY=3
@@ -61,8 +61,15 @@ stop_users() {
   wait_until 5 no_users "$1" || kill -9 $(users_of "$1") 2>/dev/null
 }
 
+has_submounts() { awk -v prefix="$1/" 'index($5, prefix) == 1 { found = 1 } END { exit !found }' /proc/self/mountinfo; }
+
 release() {
   local target=$1 deadline=$((SECONDS + ${2:-30}))
+  is_mounted "$target" || return 0
+  if has_submounts "$target"; then
+    busy+=("$target")
+    return 1
+  fi
   while is_mounted "$target"; do
     stop_users "$target"
     timeout -k 5 30 umount "$target" 2>/dev/null && continue
@@ -100,11 +107,80 @@ report_nfsd() {
   head -3 /proc/fs/nfsd/filecache >&2 2>/dev/null
 }
 
-# Leaves the servers and $STATE in place so that `down` can be run again.
-stop_if_busy() {
+stop_nfs() {
+  local export
+  if is_mounted /proc/fs/nfsd; then
+    # Unmounted v4.1+ clients destroy their client IDs; give that a moment to land.
+    wait_until 15 bash -c '[[ -z $(ls /proc/fs/nfsd/clients) ]]'
+    exportfs -au
+    exportfs -f
+    echo /srv/nfs > /proc/fs/nfsd/unlock_filesystem 2>/dev/null
+    [[ $(nfsd_threads) == 0 ]] || echo 0 > /proc/fs/nfsd/threads || rpc.nfsd 0
+    if ! wait_until 30 nfsd_idle; then
+      log "nfsd did not stop: threads $(nfsd_threads), clients: $(echo $(nfsd_clients))"
+      if ((!force)); then
+        busy+=(/proc/fs/nfsd)
+        return 1
+      fi
+    fi
+  fi
+  for daemon in rpc.mountd nfsdcld rpc.statd rpcbind; do stop_daemon "$daemon"; done
+  release /var/lib/nfs/rpc_pipefs
+  release /proc/fs/nfsd
+  for export in /srv/nfs/v42 /srv/nfs/v3 /srv/nfs; do release "$export"; done
+}
+
+# The recorded device may have been detached and reused by the host since up.
+backed_by() {
+  local dev=$1 image=$2
+  [[ -f $image && $(losetup -n -O BACK-FILE "$dev" 2>/dev/null) == "$image" ]] || return 1
+  [[ $(losetup -n -O BACK-INO,BACK-MAJ:MIN "$dev" | awk '{print $1, $2}') == "$(stat -c '%i %Hd:%Ld' "$image")" ]]
+}
+
+loop_released() { [[ $(losetup -n -O BACK-FILE "$1" 2>/dev/null) != "$2" ]]; }
+# A mounted block device refuses an exclusive open.
+in_use() { ! python3 -I -c 'import os, sys; os.close(os.open(sys.argv[1], os.O_RDONLY | os.O_EXCL))' "$1" 2>/dev/null; }
+not_in_use() { ! in_use "$1"; }
+
+# Detaches every recorded device that is free and deletes its image; only the
+# records of devices that stay attached are kept for the next `down`.
+detach_loops() {
+  [[ -r $STATE/loops ]] || return 0
+  local dev majmin name image pending=()
+  while read -r dev majmin name <&3; do
+    image=$IMAGES/$name.img
+    [[ -b $dev ]] || continue
+    if ! backed_by "$dev" "$image"; then
+      log "WARNING: $dev is no longer backed by $image; leaving it alone"
+      continue
+    fi
+    # A FUSE driver may close its device only after its unmount has returned.
+    if ! wait_until 10 not_in_use "$dev" && ((!force)); then
+      log "$dev ($name) is still in use"
+      busy+=("$dev")
+      pending+=("$dev $majmin $name")
+      continue
+    fi
+    # Blank the device before detaching so the detach uevent finds nothing.
+    wipefs -a -q "$dev" >/dev/null 2>&1
+    # losetup -d on a device still held only sets autoclear, so confirm it went.
+    losetup -d "$dev"
+    if wait_until 10 loop_released "$dev" "$image"; then
+      rm -f "$image"
+    else
+      log "$dev ($name) is still attached: holders $(ls "/sys/block/${dev#/dev/}/holders" 2>/dev/null)"
+      ((force)) || busy+=("$dev")
+      pending+=("$dev $majmin $name")
+    fi
+  done 3< "$STATE/loops"
+  printf '%s\n' "${pending[@]}" | grep -v '^$' > "$STATE/loops"
+}
+
+# Leaves what is busy, its servers and $STATE in place so that `down` can be run again.
+report_busy() {
   ((${#busy[@]})) || return 0
   local target pid
-  log "teardown stopped; still busy:"
+  log "teardown incomplete; everything else is released, but these stay busy:"
   for target in "${busy[@]}"; do
     if [[ $target == /dev/* ]]; then
       log "  $target, mounted at: $(findmnt -rn -S "$target" -o TARGET 2>/dev/null | tr '\n' ' ')"
@@ -116,14 +192,8 @@ stop_if_busy() {
     done
   done
   report_nfsd
+  log "loop devices still attached by the lab: $(cut -d' ' -f1,3 "$STATE/loops" 2>/dev/null | tr '\n' ' ')"
   exit "$BUSY"
-}
-
-# The recorded device may have been detached and reused by the host since up.
-backed_by() {
-  local dev=$1 image=$2
-  [[ -f $image && $(losetup -n -O BACK-FILE "$dev" 2>/dev/null) == "$image" ]] || return 1
-  [[ $(losetup -n -O BACK-INO,BACK-MAJ:MIN "$dev" | awk '{print $1, $2}') == "$(stat -c '%i %Hd:%Ld' "$image")" ]]
 }
 
 [[ -d $STATE ]] && touch "$STATE/tearing-down"
@@ -133,66 +203,22 @@ pkill -u "$TEST_UID" 2>/dev/null
 wait_until 5 bash -c "! pgrep -u $TEST_UID >/dev/null" || pkill -9 -u "$TEST_UID"
 release /work/strata
 
-# Clients go first, while their servers can still answer the unmount.
-for name in cifs-posix cifs-nocase cifs nfs3 nfs42; do release "$MNT/$name"; done
-stop_if_busy
-
-stop_daemon smbd
-
-if is_mounted /proc/fs/nfsd; then
-  # Unmounted v4.1+ clients destroy their client IDs; give that a moment to land.
-  wait_until 15 bash -c '[[ -z $(ls /proc/fs/nfsd/clients) ]]'
-  exportfs -au
-  exportfs -f
-  echo /srv/nfs > /proc/fs/nfsd/unlock_filesystem 2>/dev/null
-  [[ $(nfsd_threads) == 0 ]] || echo 0 > /proc/fs/nfsd/threads || rpc.nfsd 0
-  if ! wait_until 30 nfsd_idle; then
-    log "nfsd did not stop: threads $(nfsd_threads), clients: $(echo $(nfsd_clients))"
-    ((force)) || busy+=(/proc/fs/nfsd)
-  fi
-  stop_if_busy
+# Clients go first, while their servers can still answer the unmount; a server
+# keeps running while any of its clients stays mounted.
+smb_clients_released=1
+nfs_clients_released=1
+for name in cifs-posix cifs-nocase cifs; do release "$MNT/$name" || smb_clients_released=0; done
+for name in nfs3 nfs42; do release "$MNT/$name" || nfs_clients_released=0; done
+if ((smb_clients_released)); then
+  stop_daemon smbd
+  release /srv/smb
 fi
-for daemon in rpc.mountd nfsdcld rpc.statd rpcbind; do stop_daemon "$daemon"; done
-release /var/lib/nfs/rpc_pipefs
-release /proc/fs/nfsd
+((nfs_clients_released)) && stop_nfs
 
 for name in exfat-fuse ntfs-3g ntfs3 exfat vfat ext4-casefold ext4; do release "$MNT/$name"; done
-for target in /srv/nfs/v42 /srv/nfs/v3 /srv/nfs /srv/smb; do release "$target"; done
-stop_if_busy
-
-loop_released() { [[ $(losetup -n -O BACK-FILE "$1" 2>/dev/null) != "$2" ]]; }
-# A mounted block device refuses an exclusive open.
-in_use() { ! python3 -I -c 'import os, sys; os.close(os.open(sys.argv[1], os.O_RDONLY | os.O_EXCL))' "$1" 2>/dev/null; }
-
-if [[ -r $STATE/loops ]]; then
-  pending=()
-  while read -r dev majmin name; do
-    [[ -b $dev ]] || continue
-    if ! backed_by "$dev" "$IMAGES/$name.img"; then
-      log "WARNING: $dev is no longer backed by $IMAGES/$name.img; leaving it alone"
-      continue
-    fi
-    if in_use "$dev" && ((!force)); then
-      log "$dev ($name) is still in use"
-      busy+=("$dev")
-      pending+=("$dev $majmin $name")
-      continue
-    fi
-    # Blank the device before detaching so the detach uevent finds nothing.
-    wipefs -a -q "$dev" >/dev/null 2>&1
-    # losetup -d on a device still held only sets autoclear, so confirm it went.
-    losetup -d "$dev"
-    if ! wait_until 10 loop_released "$dev" "$IMAGES/$name.img"; then
-      log "$dev ($name) is still attached: holders $(ls "/sys/block/${dev#/dev/}/holders" 2>/dev/null)"
-      ((force)) || busy+=("$dev")
-      pending+=("$dev $majmin $name")
-    fi
-  done < "$STATE/loops"
-  ((${#pending[@]})) && printf '%s\n' "${pending[@]}" > "$STATE/loops"
-fi
-stop_if_busy
-release /var/lib/extensions
-stop_if_busy
+detach_loops
+[[ -s $STATE/loops ]] || release /var/lib/extensions
+report_busy
 rm -rf "$STATE"
 log "teardown complete; loop devices still attached in the kernel:"
 losetup -l -n -O NAME,AUTOCLEAR,BACK-FILE >&2

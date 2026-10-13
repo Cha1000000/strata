@@ -17,9 +17,10 @@ Usage: scripts/fslab/fslab.sh COMMAND
   image                               build the lab image on the pinned E2E base
   up | down [--force] | status | shell
                                       manage the privileged lab container; down
-                                      stops if a mount stays busy, and --force
-                                      unmounts lazily, which can pin host loop
-                                      devices until reboot
+                                      releases what is free and keeps the
+                                      container running while a mount stays busy,
+                                      and --force unmounts lazily, which can pin
+                                      host loop devices until reboot
   probe [MOUNT...]                    run fsprobe.py on every (or the named) mount
   test [--rev REV] FILTER [MOUNT...]  run test-headless.py FILTER on each mount,
                                       against the working tree or a git revision

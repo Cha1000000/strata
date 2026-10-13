@@ -260,10 +260,11 @@ Requirements and safety:
 - Images live on a container-private tmpfs and are attached blank, so the host's udev never sees a
   filesystem. `up`, `probe` and `test` check this. Only udiskie ignores the images' directory, so
   stop other automounters (GNOME Disks, KDE) while the lab is up.
-- `down` detaches only loop devices still backed by the lab's own images. If a mount or loop
-  device stays busy, `down` stops, lists what holds it and keeps the container running; run `down`
-  again once those are released. `down --force` unmounts lazily instead, which can pin loop devices
-  on the host until reboot.
+- `down` releases everything that is free and detaches only loop devices still backed by the
+  lab's own images, deleting each image once its device is gone. If a mount or loop device stays
+  busy, `down` lists what holds it and keeps the container running with that mount, its server and
+  its loop device; run `down` again once those are released. `down --force` unmounts lazily
+  instead, which can pin loop devices on the host until reboot.
 - The container runs its own copy of `scripts/fslab`, refreshed by every `fslab.sh` command, so
   switching branches or rebasing while the lab is up cannot break `down`.
 - The NFS and SMB servers share the kernel with their clients, so there is no latency, reconnect
