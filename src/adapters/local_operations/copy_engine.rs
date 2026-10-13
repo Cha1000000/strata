@@ -45,7 +45,8 @@ use super::{
 };
 use crate::{
     adapters::volume::{
-        Family, MountCapabilities, MountKey, family, learn_mount_capability, mount_capabilities,
+        Family, FuseFormat, MountCapabilities, MountKey, MountType, family, learn_mount_capability,
+        mount_capabilities,
     },
     model::Location,
     services::{KeptCause, RenameCause, RenamedItem, SkippedItem, SpecialKind, TransferReport},
@@ -1161,15 +1162,21 @@ fn same_entry(current: &EntryStat, identity: LocalFileIdentity, family: Family) 
 struct Mount {
     key: MountKey,
     family: Family,
+    fuse_format: Option<FuseFormat>,
 }
 
 impl Mount {
     fn new(fs: &dyn FsOps, dir: BorrowedFd<'_>) -> Self {
         let key = fs.mount_key(dir);
-        let family = mount_capabilities(key)
-            .family
-            .unwrap_or_else(|| learn_mount_type(fs, dir, key).0);
-        Self { key, family }
+        let mut capabilities = mount_capabilities(key);
+        if capabilities.family.is_none() {
+            capabilities = learn_mount_type(fs, dir, key);
+        }
+        Self {
+            key,
+            family: capabilities.family.unwrap_or(Family::Other),
+            fuse_format: capabilities.fuse_format,
+        }
     }
 
     /// Whether the mount holding `dir` keeps inode numbers, as its
@@ -1178,7 +1185,8 @@ impl Mount {
         let key = fs.mount_key(dir);
         mount_capabilities(key)
             .stable_inodes
-            .unwrap_or_else(|| learn_mount_type(fs, dir, key).1)
+            .or_else(|| learn_mount_type(fs, dir, key).stable_inodes)
+            .unwrap_or(true)
     }
 
     fn capabilities(&self) -> MountCapabilities {
@@ -1190,19 +1198,27 @@ impl Mount {
     }
 }
 
-/// Reads what mountinfo says of the mount holding `dir` once per mount:
-/// its family, and whether it keeps inode numbers.
-fn learn_mount_type(fs: &dyn FsOps, dir: BorrowedFd<'_>, key: MountKey) -> (Family, bool) {
+/// Reads what mountinfo says of the mount holding `dir` once per mount: its
+/// family, and whether it keeps inode numbers; and for a `fuseblk` mount,
+/// what udev says its device holds, which tells its daemon.
+fn learn_mount_type(fs: &dyn FsOps, dir: BorrowedFd<'_>, key: MountKey) -> MountCapabilities {
     let mount_type = fs.mount_type(dir);
     let family = mount_type
         .as_ref()
         .map_or(Family::Other, |mount| family(&mount.fs_type));
-    let stable = mount_type.is_none_or(|mount| mount.stable_inodes());
+    let stable = mount_type.as_ref().is_none_or(MountType::stable_inodes);
+    let fuse_format = mount_type
+        .filter(|mount| mount.fs_type == "fuseblk")
+        .and_then(|_| fs.device_format(dir).ok().flatten())
+        .and_then(|format| FuseFormat::of(&format));
+    let mut learned = MountCapabilities::default();
     learn_mount_capability(key, |capabilities| {
         capabilities.family = Some(family);
         capabilities.stable_inodes = Some(stable);
+        capabilities.fuse_format = fuse_format;
+        learned = *capabilities;
     });
-    (family, stable)
+    learned
 }
 
 const TMPFILE_LINK_UNKNOWN: u8 = 0;
@@ -1402,8 +1418,8 @@ impl Copy {
 
     /// Syncs a file this copy wrote before it is closed, where the
     /// destination's barrier will not reach it.
-    fn sync_written(&self, fd: BorrowedFd<'_>, family: Family) -> Result<(), Failure> {
-        if self.durable && barrier::each_file(family) {
+    fn sync_written(&self, fd: BorrowedFd<'_>, mount: &Mount) -> Result<(), Failure> {
+        if self.durable && barrier::each_file(mount) {
             self.fs.sync_data(fd)?;
         }
         Ok(())
@@ -1795,8 +1811,7 @@ impl<'a> FileCopy<'a> {
         let created = fs.stat_fd(tmpfile.as_fd())?;
         self.copy
             .apply_metadata(tmpfile.as_fd(), &created, &snapshot, parent, &self.target)?;
-        self.copy
-            .sync_written(tmpfile.as_fd(), self.target.family)?;
+        self.copy.sync_written(tmpfile.as_fd(), &self.target)?;
         self.copy.check_cancelled()?;
         let name = match self.link(tmpfile.as_fd(), target) {
             Ok(name) => name,
@@ -1901,7 +1916,7 @@ impl<'a> FileCopy<'a> {
         let fs = self.copy.fs;
         let settled = self
             .copy
-            .sync_written(fd.as_fd(), self.target.family)
+            .sync_written(fd.as_fd(), &self.target)
             .and_then(|()| fs.close(fd).map_err(Failure::Os))
             .and_then(|()| {
                 self.copy.settle_times(
@@ -2015,7 +2030,7 @@ impl<'a> FileCopy<'a> {
             let snapshot: &Snapshot = written.borrow();
             self.copy
                 .apply_metadata(fd.as_fd(), &created, snapshot, parent, &self.target)?;
-            self.copy.sync_written(fd.as_fd(), self.target.family)?;
+            self.copy.sync_written(fd.as_fd(), &self.target)?;
             fs.close(fd)?;
             self.copy
                 .settle_times(target, created.identity, snapshot, self.target.family)

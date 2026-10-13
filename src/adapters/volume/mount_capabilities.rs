@@ -7,7 +7,7 @@
 
 use std::{collections::BTreeMap, ffi::OsStr, sync::Mutex};
 
-use super::Family;
+use super::{Family, FuseFormat};
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub(crate) enum MountKey {
@@ -36,6 +36,8 @@ pub(crate) struct MountCapabilities {
     pub family: Option<Family>,
     /// Whether entries keep their inode numbers, from mountinfo too.
     pub stable_inodes: Option<bool>,
+    /// From udev, for a `fuseblk` mount; learned with `family`.
+    pub fuse_format: Option<FuseFormat>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

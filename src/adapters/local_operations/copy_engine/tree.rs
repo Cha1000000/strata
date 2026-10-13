@@ -1054,7 +1054,7 @@ impl File {
                 return Ok(None);
             };
             copy.apply_metadata(fd.as_fd(), &created, &snapshot, parent, &self.mount)?;
-            copy.sync_written(fd.as_fd(), self.mount.family)?;
+            copy.sync_written(fd.as_fd(), &self.mount)?;
             fs.close(fd)?;
             copy.settle_times(target, created.identity, &snapshot, self.mount.family)?;
             Ok(Some(read))

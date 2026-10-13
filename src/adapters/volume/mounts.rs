@@ -47,6 +47,25 @@ impl MountType {
     }
 }
 
+/// The format udev found on the device a `fuseblk` mount serves, for the
+/// daemons whose behaviour is known: ntfs-3g and exfat-fuse.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum FuseFormat {
+    Ntfs,
+    Exfat,
+}
+
+impl FuseFormat {
+    /// From the device's `ID_FS_TYPE`.
+    pub(crate) fn of(id_fs_type: &str) -> Option<Self> {
+        match id_fs_type {
+            "ntfs" => Some(Self::Ntfs),
+            "exfat" => Some(Self::Exfat),
+            _ => None,
+        }
+    }
+}
+
 /// Filesystems by their mountinfo type, which tells NFS versions and FUSE
 /// apart where the `statfs` magic cannot.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

@@ -28,7 +28,7 @@ pub(crate) use mount_capabilities::{
     MountCapabilities, MountKey, XattrNamespace, learn_mount_capability, mount_capabilities,
 };
 pub(crate) use mount_snapshot::{RemovableRoot, invalidate_mount_snapshot, with_mount_snapshot};
-pub(crate) use mounts::{Family, MountTable, MountType, family};
+pub(crate) use mounts::{Family, FuseFormat, MountTable, MountType, family};
 
 pub(crate) const REMOTE_QUERY_TIMEOUT: Duration = Duration::from_secs(2);
 

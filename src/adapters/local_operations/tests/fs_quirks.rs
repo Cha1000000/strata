@@ -66,6 +66,7 @@ pub(crate) enum Op {
     GetXattr,
     SetXattr,
     MountType,
+    DeviceFormat,
     OpenDir,
     List,
     CreateNode,
@@ -173,6 +174,8 @@ pub(crate) struct Quirks {
     pub after: Vec<(Op, &'static str, usize, Racer)>,
     /// The mountinfo type and superblock options `mount_type` reports.
     pub mount_type: Option<(&'static str, &'static str)>,
+    /// What udev's database records the scope's device as holding.
+    pub device_format: Option<&'static str>,
     pub tmpfile: Support,
     pub tmpfile_link: TmpfileLink,
     /// The most bytes one read or write moves.
@@ -1501,6 +1504,18 @@ impl FsOps for Scoped {
                 .ok()
                 .flatten(),
             None => System.mount_type(fd),
+        }
+    }
+
+    fn device_format(&self, fd: BorrowedFd<'_>) -> Result<Option<String>, Errno> {
+        assert_off_main_thread();
+        match scope_for(fd) {
+            Some(scope) => scope.run(Op::DeviceFormat, &[], |scope| {
+                Ok(scope
+                    .quirk(|quirks| quirks.device_format)
+                    .map(str::to_owned))
+            }),
+            None => System.device_format(fd),
         }
     }
 

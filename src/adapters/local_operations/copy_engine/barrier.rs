@@ -32,8 +32,8 @@ struct Plan {
 }
 
 impl Plan {
-    fn of(family: Family) -> Self {
-        let mut plan = match family {
+    fn of(mount: &Mount) -> Self {
+        let mut plan = match mount.family {
             // Their `sync_fs` writes back without flushing the device's cache,
             // which their `fsync`, of folders too, does.
             Family::Fat => Self {
@@ -41,10 +41,16 @@ impl Plan {
                 sync_dir: true,
                 ..Self::default()
             },
-            // Without FUSE_SYNCFS, `syncfs` stops in the kernel. A file's
-            // `fsync` reaches the daemon, and ntfs-3g and exfat-fuse sync and
-            // flush their whole device for a folder's, which covers the names
-            // published after the files were synced.
+            // Without FUSE_SYNCFS, `syncfs` writes back the device's cache
+            // but flushes nothing. ntfs-3g and exfat-fuse sync and flush their
+            // whole device for a folder's `fsync`, which reaches every file.
+            Family::Fuse if mount.fuse_format.is_some() => Self {
+                sync_fs: true,
+                sync_dir: true,
+                ..Self::default()
+            },
+            // Other daemons are reached by a file's `fsync`, and by a
+            // folder's for the names published after the files were synced.
             Family::Fuse => Self {
                 each_file: true,
                 sync_dir: true,
@@ -73,9 +79,9 @@ impl Plan {
     }
 }
 
-/// Whether a durable copy onto `family` syncs each file before closing it.
-pub(super) fn each_file(family: Family) -> bool {
-    Plan::of(family).each_file
+/// Whether a durable copy onto `mount` syncs each file before closing it.
+pub(super) fn each_file(mount: &Mount) -> bool {
+    Plan::of(mount).each_file
 }
 
 static OPENED: AtomicU64 = AtomicU64::new(0);
@@ -110,7 +116,7 @@ impl Barrier {
                 None => {
                     key = Some(here);
                     // Only flushing a folder or its filesystem reads it.
-                    let plan = Plan::of(Mount::new(fs, pinned.as_fd()).family);
+                    let plan = Plan::of(&Mount::new(fs, pinned.as_fd()));
                     if !plan.sync_fs && !plan.sync_dir {
                         return Ok(Self::opened(fs, pinned, path.to_path_buf()));
                     }
@@ -146,7 +152,7 @@ impl Barrier {
             dir: OffMain::new(dir),
             path,
             key: mount.key,
-            plan: Plan::of(mount.family),
+            plan: Plan::of(&mount),
             opened: OPENED.fetch_add(1, Ordering::Relaxed),
         }
     }

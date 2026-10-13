@@ -137,6 +137,9 @@ pub(super) trait FsOps: Send + Sync {
     fn set_xattr(&self, fd: BorrowedFd<'_>, name: &OsStr, value: &[u8]) -> Result<(), Errno>;
     /// The mountinfo type and options of the mount holding `fd`.
     fn mount_type(&self, fd: BorrowedFd<'_>) -> Option<MountType>;
+    /// The format udev's database records (`ID_FS_TYPE`) for the block
+    /// device holding `fd`, where it has a record.
+    fn device_format(&self, fd: BorrowedFd<'_>) -> Result<Option<String>, Errno>;
     /// The folder at `at`, which may name several components, opened
     /// without following a symlink anywhere on the way.
     fn open_dir(&self, at: Entry<'_>) -> Result<OwnedFd, Errno>;
@@ -694,6 +697,33 @@ impl FsOps for System {
             }
         };
         mount_type.cloned()
+    }
+
+    fn device_format(&self, fd: BorrowedFd<'_>) -> Result<Option<String>, Errno> {
+        assert_off_main_thread();
+        let stat = rustix::fs::statx(
+            fd,
+            "",
+            AtFlags::EMPTY_PATH | AtFlags::STATX_DONT_SYNC,
+            StatxFlags::empty(),
+        )?;
+        let record = format!(
+            "/run/udev/data/b{}:{}",
+            stat.stx_dev_major, stat.stx_dev_minor
+        );
+        let record = match std::fs::read_to_string(record) {
+            Ok(record) => record,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => {
+                return Err(error
+                    .raw_os_error()
+                    .map_or(Errno::IO, Errno::from_raw_os_error));
+            }
+        };
+        Ok(record
+            .lines()
+            .find_map(|line| line.strip_prefix("E:ID_FS_TYPE="))
+            .map(str::to_owned))
     }
 
     fn open_dir(&self, at: Entry<'_>) -> Result<OwnedFd, Errno> {
