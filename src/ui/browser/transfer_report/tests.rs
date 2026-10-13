@@ -128,10 +128,11 @@ fn items_left_out_or_left_behind_make_the_report_a_warning() {
         location: Location::local("/source/run/data"),
         cause,
     };
-    let reason = "Permission denied";
+    let denied = rustix::io::Errno::ACCESS.raw_os_error();
+    let reason = crate::services::io_error_detail(&std::io::Error::from_raw_os_error(denied));
     let left_behind = vec![
         kept(KeptCause::Changed),
-        kept(KeptCause::Undeletable(reason.to_owned())),
+        kept(KeptCause::Undeletable(denied)),
         kept(KeptCause::Skipped(SpecialKind::Socket)),
     ];
     // A transfer that failed or was cancelled afterwards is not called
@@ -167,7 +168,7 @@ fn items_left_out_or_left_behind_make_the_report_a_warning() {
         );
         let heading = crate::i18n::count("items_kept", kept_count);
         assert_eq!(detail.contains(&heading), kept_count > 0, "{row}");
-        assert_eq!(detail.contains(reason), kept_count > 0, "{row}");
+        assert_eq!(detail.contains(&reason), kept_count > 0, "{row}");
     }
 }
 

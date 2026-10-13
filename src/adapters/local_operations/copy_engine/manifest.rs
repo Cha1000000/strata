@@ -25,7 +25,7 @@ use crate::{
     adapters::local_operations::{
         LocalFileIdentity, bounded_local_worker_count, cancelled_local_operation,
         fs_ops::{Entry, EntryStat, FsOps},
-        io_error, local_device_is_rotational, os_error_detail,
+        io_error, local_device_is_rotational,
         work_queue::{self, Group, Job, WorkQueue},
     },
     services::KeptCause,
@@ -267,7 +267,7 @@ impl Deletion {
             Errno::NOENT => {
                 tracing::debug!(?path, "a moved source was gone before it was deleted");
             }
-            error => self.keep(path, KeptCause::Undeletable(os_error_detail(error))),
+            error => self.keep(path, KeptCause::Undeletable(error.raw_os_error())),
         }
     }
 

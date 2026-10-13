@@ -304,8 +304,8 @@ pub struct SkippedItem {
 pub enum KeptCause {
     /// It changed while it was copied, or after.
     Changed,
-    /// Deleting it failed, for this reason.
-    Undeletable(String),
+    /// Deleting it failed with this OS error number.
+    Undeletable(i32),
     /// The destination cannot store it.
     Skipped(SpecialKind),
 }

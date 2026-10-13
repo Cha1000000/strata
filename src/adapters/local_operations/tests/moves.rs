@@ -1610,7 +1610,7 @@ fn a_source_entry_that_cannot_be_deleted_is_kept_with_the_reason() -> Result<(),
     );
     assert_eq!(names(&folder)?, ["read-only"]);
     assert_eq!(fs::read(&child)?, b"child");
-    let reason = super::super::os_error_detail(Errno::ACCESS);
+    let reason = Errno::ACCESS.raw_os_error();
     assert_eq!(
         reported(&events).kept,
         [kept(child, KeptCause::Undeletable(reason))]

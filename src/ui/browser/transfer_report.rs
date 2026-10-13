@@ -93,7 +93,7 @@ fn kept_line(item: &KeptItem) -> String {
         KeptCause::Undeletable(error) => rust_i18n::t!(
             "Could not delete %{name}: %{error}",
             name = name,
-            error = error
+            error = crate::services::io_error_detail(&std::io::Error::from_raw_os_error(*error))
         )
         .into_owned(),
         KeptCause::Skipped(kind) => special_line(&name, *kind),
