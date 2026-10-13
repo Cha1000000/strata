@@ -1699,3 +1699,53 @@ fn linked_names_on_an_smb_source_are_never_open_at_once() -> Result<(), Box<dyn 
     assert_eq!(fs::read(moved.join("sub/c"))?, b"linked");
     Ok(())
 }
+
+#[test]
+fn a_file_put_in_a_moved_files_place_within_its_time_tick_is_kept() -> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let root = tempfile::tempdir()?;
+    let folder = root.path().join("source/folder");
+    fs::create_dir_all(&folder)?;
+    let moved_file = folder.join("a.txt");
+    fs::write(&moved_file, b"original")?;
+    // Once copied, another file of the same size takes its name, with the
+    // same modification time, as within one tick of FAT's coarse times.
+    let substituted = moved_file.clone();
+    let racer: super::fs_quirks::Racer = Box::new(move || {
+        let before = fs::metadata(&substituted).expect("stat the original");
+        let other = substituted.with_file_name("other");
+        fs::write(&other, b"newfile!").expect("write the other file");
+        let modified = rustix::fs::Timespec {
+            tv_sec: before.mtime(),
+            tv_nsec: before.mtime_nsec(),
+        };
+        rustix::fs::utimensat(
+            rustix::fs::CWD,
+            &other,
+            &rustix::fs::Timestamps {
+                last_access: modified,
+                last_modification: modified,
+            },
+            rustix::fs::AtFlags::empty(),
+        )
+        .expect("give it the same times");
+        fs::rename(&other, &substituted).expect("put it in the original's place");
+        super::fs_quirks::recreated(&substituted);
+    });
+    let fat = Quirks {
+        mount_type: Some(("vfat", "rw")),
+        ctime_is_mtime: true,
+        reused_inodes: Some("a.txt"),
+        before: vec![(Op::OpenDir, "folder", 1, racer)],
+        ..Quirks::default()
+    };
+
+    let (moved, report, _) = move_across_volumes(&folder, fat)?;
+
+    assert_eq!(fs::read(moved.join("a.txt"))?, b"original");
+    assert_eq!(fs::read(&moved_file)?, b"newfile!");
+    assert_eq!(report.kept, [kept(moved_file, KeptCause::Changed)]);
+    Ok(())
+}

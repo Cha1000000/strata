@@ -4096,19 +4096,22 @@ struct LocalFileIdentity {
 }
 
 impl PartialEq for LocalFileIdentity {
-    /// A birth time counts only when both sides have one.
     fn eq(&self, other: &Self) -> bool {
-        self.device == other.device
-            && self.inode == other.inode
-            && self.kind == other.kind
+        self.device == other.device && self.inode == other.inode && self.may_be(other)
+    }
+}
+
+impl LocalFileIdentity {
+    /// Whether `other` may be this item, by what tells them apart besides
+    /// inode numbers: the type, and the birth time where both have one.
+    fn may_be(&self, other: &Self) -> bool {
+        self.kind == other.kind
             && match (self.birth, other.birth) {
                 (Some(left), Some(right)) => left == right,
                 _ => true,
             }
     }
-}
 
-impl LocalFileIdentity {
     fn from_stat(stat: &rustix::fs::Stat) -> Self {
         Self {
             device: stat.st_dev,

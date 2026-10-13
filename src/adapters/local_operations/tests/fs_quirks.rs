@@ -160,6 +160,9 @@ pub(crate) struct Quirks {
     pub reused_inodes: Option<&'static str>,
     /// As on NFSv3, ntfs-3g and exfat-fuse.
     pub no_birth_time: bool,
+    /// The change time reports the modification time, as on FAT and exFAT,
+    /// which store none.
+    pub ctime_is_mtime: bool,
     /// Performs the call, then reports this errno once.
     pub lost_reply: Vec<(Op, &'static str, Errno)>,
     /// Fails the matching call after skipping the given number of matches, once.
@@ -548,6 +551,9 @@ impl Scope {
         }
         if state.quirks.no_birth_time {
             stat.identity.birth = None;
+        }
+        if state.quirks.ctime_is_mtime {
+            stat.ctime = stat.mtime;
         }
         if state.quirks.foreign_group {
             stat.gid = stat.gid.wrapping_add(1);

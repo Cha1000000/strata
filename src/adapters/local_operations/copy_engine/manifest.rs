@@ -63,11 +63,13 @@ impl SourceSnapshot {
     /// `unlinked` of its other names since it was taken. Removing a name
     /// changes the ctime and link count of the others.
     fn holds(&self, current: &EntryStat, stable_inodes: bool, unlinked: u64) -> bool {
-        let same = current.kind == self.identity.kind
+        let same = current.identity.may_be(&self.identity)
             && current.size == self.size
             && current.mtime == self.mtime;
         if !stable_inodes {
-            // Nothing tells which names of a file this deletion removed.
+            // Nothing tells which names of a file this deletion removed. Where
+            // times are as coarse as FAT's, only a birth time tells a file put
+            // in its place apart.
             return same && (current.ctime == self.ctime || self.nlink > 1);
         }
         // Every change to an entry moves its change time; the identity and
@@ -199,7 +201,11 @@ impl Published {
         let stable = Mount::keeps_inode_numbers(fs, parent.as_fd());
         fs.stat(Entry::new(parent, &self.name), false)
             .is_ok_and(|current| {
-                current.kind == self.identity.kind && (!stable || current.identity == self.identity)
+                if stable {
+                    current.identity == self.identity
+                } else {
+                    current.identity.may_be(&self.identity)
+                }
             })
     }
 }
@@ -386,7 +392,7 @@ impl Deletion {
             if self.stable_inodes {
                 current.identity == identity
             } else {
-                current.kind == identity.kind
+                current.identity.may_be(&identity)
             }
         })
     }
