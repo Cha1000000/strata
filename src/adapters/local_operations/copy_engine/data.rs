@@ -15,7 +15,7 @@ use std::{
 
 use rustix::io::Errno;
 
-use super::{Failure, Mount, is_fatal, is_unsupported};
+use super::{Failure, Mount, is_fatal, is_unsupported, lock};
 use crate::adapters::{
     local_operations::{
         fs_ops::{EntryStat, FsOps},
@@ -50,7 +50,21 @@ fn network(family: Family) -> Option<Network> {
     }
 }
 
+/// The kernel release tests pretend to run on, if any.
+#[cfg(test)]
+static TEST_KERNEL: std::sync::Mutex<Option<(u32, u32, u32)>> = std::sync::Mutex::new(None);
+
+/// Pretends to run on `release`, or on the real kernel with `None`.
+#[cfg(test)]
+pub(in crate::adapters::local_operations) fn set_kernel_for_test(release: Option<(u32, u32, u32)>) {
+    *lock(&TEST_KERNEL) = release;
+}
+
 pub(super) fn kernel() -> (u32, u32, u32) {
+    #[cfg(test)]
+    if let Some(release) = *lock(&TEST_KERNEL) {
+        return release;
+    }
     static KERNEL: OnceLock<(u32, u32, u32)> = OnceLock::new();
     *KERNEL.get_or_init(|| {
         let release = std::fs::read_to_string("/proc/sys/kernel/osrelease").unwrap_or_default();

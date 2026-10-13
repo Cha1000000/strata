@@ -471,6 +471,22 @@ fn moved_count(events: &[OperationEvent]) -> usize {
         .count()
 }
 
+/// Puts back the kernel release a test pretended to run on.
+struct KernelGuard;
+
+impl KernelGuard {
+    fn set(release: Option<(u32, u32, u32)>) -> Self {
+        super::super::copy_engine::set_kernel_for_test(release);
+        Self
+    }
+}
+
+impl Drop for KernelGuard {
+    fn drop(&mut self) {
+        super::super::copy_engine::set_kernel_for_test(None);
+    }
+}
+
 /// Resets the batch limits a test set.
 struct LimitsGuard;
 
@@ -503,20 +519,23 @@ fn the_barrier_before_deleting_a_moved_source_follows_the_destination_family()
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
         .lock()
         .map_err(|error| error.to_string())?;
-    // The family, whether the device is removable, whether the paste
-    // moves, whether each written file is synced before it is closed, and
-    // the barrier's calls. A plain copy deletes nothing, so it never syncs.
-    let rows: [(&str, bool, bool, bool, &[Op]); 7] = [
-        ("ext4", false, true, false, &[Op::SyncFs]),
-        ("vfat", false, true, false, &[Op::SyncFs, Op::SyncDir]),
-        ("fuseblk", false, true, true, &[Op::SyncDir]),
-        ("cifs", false, true, true, &[]),
-        ("9p", false, true, true, &[Op::SyncFs]),
-        ("ext4", true, true, false, &[Op::SyncFs, Op::SyncDir]),
-        ("cifs", false, false, false, &[]),
+    // The family, the kernel, whether the device is removable, whether the
+    // paste moves, whether each written file is synced before it is closed,
+    // and the barrier's calls. A plain copy deletes nothing, so it never
+    // syncs. Before Linux 5.8, syncfs reports no writeback errors.
+    let rows: [(&str, Option<(u32, u32, u32)>, bool, bool, bool, &[Op]); 8] = [
+        ("ext4", None, false, true, false, &[Op::SyncFs]),
+        ("vfat", None, false, true, false, &[Op::SyncFs, Op::SyncDir]),
+        ("fuseblk", None, false, true, true, &[Op::SyncDir]),
+        ("cifs", None, false, true, true, &[]),
+        ("9p", None, false, true, true, &[Op::SyncFs]),
+        ("ext4", None, true, true, false, &[Op::SyncFs, Op::SyncDir]),
+        ("cifs", None, false, false, false, &[]),
+        ("ext4", Some((5, 4, 0)), false, true, true, &[Op::SyncFs]),
     ];
-    for (id, (fs_type, removable, moving, each_file, barrier)) in (300..).zip(rows) {
-        let row = format!("{fs_type} removable: {removable} moving: {moving}");
+    for (id, (fs_type, kernel, removable, moving, each_file, barrier)) in (300..).zip(rows) {
+        let row = format!("{fs_type} on {kernel:?} removable: {removable} moving: {moving}");
+        let _kernel = KernelGuard::set(kernel);
         let root = tempfile::tempdir()?;
         let sources = root.path().join("sources");
         let folder = sources.join("folder");

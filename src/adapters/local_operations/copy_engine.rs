@@ -52,6 +52,8 @@ use crate::{
 };
 pub(super) use barrier::Barrier;
 use data::Data;
+#[cfg(test)]
+pub(super) use data::set_kernel_for_test;
 pub(super) use manifest::{Manifest, Published, Unlinks};
 use metadata::Snapshot;
 pub(super) use restrictive::Restrictive;
