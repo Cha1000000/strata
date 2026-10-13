@@ -2,7 +2,7 @@
 
 use rustix::io::Errno;
 
-use super::fs_quirks::Op;
+use super::fs_quirks::{Op, Support};
 use super::*;
 use crate::services::RenameRequest;
 
@@ -311,7 +311,17 @@ fn renames_and_their_undo_keep_the_item_where_rename_flags_or_links_are_missing(
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
         .lock()
         .map_err(|error| error.to_string())?;
-    for quirks in [Quirks::without_rename_flags, Quirks::without_placement] {
+    let linked_before_a_probe = || Quirks {
+        rename_flags: Support::Rejected(Errno::NOSYS),
+        ..Quirks::sshfs()
+    };
+    let cases: [fn() -> Quirks; 4] = [
+        Quirks::without_rename_flags,
+        Quirks::without_placement,
+        Quirks::sshfs,
+        linked_before_a_probe,
+    ];
+    for quirks in cases {
         for folder in [false, true] {
             let root = tempfile::tempdir()?;
             let _scope = FsQuirks::install(root.path(), quirks());
@@ -337,7 +347,7 @@ fn renames_and_their_undo_keep_the_item_where_rename_flags_or_links_are_missing(
                 "{events:?}"
             );
             assert_eq!(inode(&source), original);
-            assert!(!renamed.exists());
+            assert_eq!(names(root.path())?, ["item"]);
         }
     }
     Ok(())

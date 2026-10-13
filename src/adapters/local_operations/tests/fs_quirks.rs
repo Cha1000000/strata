@@ -18,7 +18,7 @@ use std::{
 
 use gtk::{gio, glib};
 use rustix::{
-    fs::{AtFlags, FileType, FsWord, Mode, RenameFlags},
+    fs::{AtFlags, FsWord, Mode, RenameFlags},
     io::Errno,
 };
 
@@ -97,9 +97,12 @@ pub(crate) struct Quirks {
     pub stale_aliases: bool,
     /// A case alias reports its own inode number, as libfuse without `use_ino` does.
     pub alias_inodes: bool,
-    /// Each further name of a hard-linked file reports its own inode number,
-    /// as cifs does once it turns server inode numbers off.
+    /// Each name a hard link adds reports its own inode number, which a rename
+    /// keeps, as libfuse without `use_ino` (sshfs) and cifs without server
+    /// inode numbers do.
     pub link_inodes: bool,
+    /// Every entry reports one link, as sshfs does, whose SFTP attributes have none.
+    pub single_link_count: bool,
     /// Names rejected with `EINVAL` by rename, mkdir, symlink and create,
     /// and with `EPERM` by link, as on vfat.
     pub invalid_name: Option<fn(&OsStr) -> bool>,
@@ -136,6 +139,17 @@ impl Quirks {
             ..Self::default()
         }
     }
+
+    pub(crate) fn sshfs() -> Self {
+        Self {
+            rename_flags: Support::Rejected(Errno::INVAL),
+            collisions_as_eperm: true,
+            link_inodes: true,
+            single_link_count: true,
+            no_birth_time: true,
+            ..Self::default()
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -155,7 +169,9 @@ struct State {
     calls: Vec<Call>,
     inodes: HashMap<PathBuf, u64>,
     births: HashMap<PathBuf, i64>,
-    first_names: HashMap<u64, PathBuf>,
+    /// Real and reported inode number per name a hard link added.
+    link_names: HashMap<PathBuf, (u64, u64)>,
+    links_made: u64,
     stale: HashMap<PathBuf, EntryStat>,
 }
 
@@ -181,7 +197,8 @@ impl FsQuirks {
                 calls: Vec::new(),
                 inodes: HashMap::new(),
                 births: HashMap::new(),
-                first_names: HashMap::new(),
+                link_names: HashMap::new(),
+                links_made: 0,
                 stale: HashMap::new(),
             }),
         });
@@ -307,21 +324,13 @@ impl Scope {
 
     fn reported(&self, path: Option<PathBuf>, mut stat: EntryStat) -> EntryStat {
         let mut state = self.state();
-        if state.quirks.link_inodes
-            && stat.kind == FileType::RegularFile
-            && let Some(path) = &path
+        if let Some(&(inode, reported)) = path.as_ref().and_then(|path| state.link_names.get(path))
+            && inode == stat.identity.inode
         {
-            // cifs reports the server's creation time, which every name of a file shares.
-            let inode = stat.identity.inode;
-            stat.identity.birth = stat.identity.birth.or(Some((inode as i64, 0)));
-            if *state
-                .first_names
-                .entry(inode)
-                .or_insert_with(|| path.clone())
-                != *path
-            {
-                stat.identity.inode = !inode;
-            }
+            stat.identity.inode = reported;
+        }
+        if state.quirks.single_link_count {
+            stat.nlink = 1;
         }
         if let (Some(pattern), Some(path)) = (state.quirks.reused_inodes, path)
             && path
@@ -510,7 +519,43 @@ impl Scope {
             } else {
                 error
             }
-        })
+        })?;
+        if self.quirk(|quirks| quirks.link_inodes)
+            && let (Some(path), Ok(stat)) = (path_of(to.dir), System.stat(to, false))
+        {
+            let mut state = self.state();
+            state.links_made += 1;
+            let reported = u64::MAX - state.links_made;
+            state
+                .link_names
+                .insert(path.join(to.name), (stat.identity.inode, reported));
+        }
+        Ok(())
+    }
+
+    /// Carries the inode number a link name reports along with a rename.
+    fn renamed(&self, from: Entry<'_>, to: Entry<'_>, flags: RenameFlags) {
+        let (Some(from), Some(to)) = (
+            path_of(from.dir).map(|dir| dir.join(from.name)),
+            path_of(to.dir).map(|dir| dir.join(to.name)),
+        ) else {
+            return;
+        };
+        let mut state = self.state();
+        let moved = state.link_names.remove(&from);
+        let displaced = state.link_names.remove(&to);
+        if let Some(moved) = moved {
+            state.link_names.insert(to, moved);
+        }
+        if let Some(displaced) = displaced.filter(|_| flags.contains(RenameFlags::EXCHANGE)) {
+            state.link_names.insert(from, displaced);
+        }
+    }
+
+    fn unlinked(&self, at: Entry<'_>) {
+        if let Some(path) = path_of(at.dir) {
+            self.state().link_names.remove(&path.join(at.name));
+        }
     }
 
     fn resolved<T>(&self, at: Entry<'_>, read: impl FnOnce(Entry<'_>) -> T) -> T {
@@ -583,7 +628,9 @@ impl FsOps for Scoped {
         };
         match target {
             Some(scope) => scope.run(op, &[from.name, to.name], |scope| {
-                scope.rename(from, to, flags)
+                scope.rename(from, to, flags)?;
+                scope.renamed(from, to, flags);
+                Ok(())
             }),
             None => System.rename(from, to, flags),
         }
@@ -608,7 +655,9 @@ impl FsOps for Scoped {
         assert_off_main_thread();
         match scope_for(at.dir) {
             Some(scope) => scope.run(Op::Unlink, &[at.name], |scope| {
-                scope.resolved(at, |at| System.unlink(at, flags))
+                scope.resolved(at, |at| System.unlink(at, flags))?;
+                scope.unlinked(at);
+                Ok(())
             }),
             None => System.unlink(at, flags),
         }

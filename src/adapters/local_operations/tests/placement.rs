@@ -676,7 +676,7 @@ type ProbeCase = (fn() -> Quirks, Probed, Feasibility, Feasibility);
 
 #[test]
 fn the_probe_learns_each_quirk_and_leaves_nothing_behind() -> Result<(), Box<dyn Error>> {
-    let cases: [ProbeCase; 7] = [
+    let cases: [ProbeCase; 8] = [
         (
             Quirks::default,
             Probed {
@@ -759,10 +759,20 @@ fn the_probe_learns_each_quirk_and_leaves_nothing_behind() -> Result<(), Box<dyn
             },
             Probed {
                 no_replace: Some(true),
-                hard_links: Some(true),
+                hard_links: Some(false),
                 rename_over_empty_directory: Some(true),
             },
             Feasibility::Yes,
+            Feasibility::Yes,
+        ),
+        (
+            Quirks::sshfs,
+            Probed {
+                no_replace: Some(false),
+                hard_links: Some(false),
+                rename_over_empty_directory: Some(true),
+            },
+            Feasibility::No,
             Feasibility::Yes,
         ),
     ];
@@ -785,19 +795,30 @@ fn the_probe_learns_each_quirk_and_leaves_nothing_behind() -> Result<(), Box<dyn
 fn the_probe_keeps_files_it_cannot_prove_are_its_own() -> Result<(), Box<dyn Error>> {
     let root = tempfile::tempdir()?;
     let parent = open_local_parent_directory(root.path())?;
+    let dir = root.path().to_path_buf();
+    let racer: Racer = Box::new(move || {
+        for name in names(&dir).expect("list") {
+            fs::write(dir.join("theirs"), b"theirs").expect("write");
+            fs::rename(dir.join("theirs"), dir.join(name)).expect("replace");
+        }
+    });
     let _scope = FsQuirks::install(
         root.path(),
         Quirks {
-            link_inodes: true,
-            no_birth_time: true,
-            ..Quirks::default()
+            // After the probe saw its link, before it removes it.
+            before: vec![(Op::Stat, ".strata-probe-*", 2, racer)],
+            ..Quirks::sshfs()
         },
     );
 
-    probe(fs(), parent.as_fd(), true, true, false)?;
+    let probed = probe(fs(), parent.as_fd(), true, true, false)?;
 
+    assert_eq!(probed.hard_links, Some(false));
     let left = names(root.path())?;
     assert_eq!(left.len(), 2, "{left:?}");
+    for name in left {
+        assert_eq!(fs::read(root.path().join(name))?, b"theirs");
+    }
     Ok(())
 }
 
@@ -943,6 +964,40 @@ fn a_failed_case_only_rename_moves_back_or_names_the_temporary() -> Result<(), B
             );
         }
     }
+    Ok(())
+}
+
+#[test]
+fn a_hard_link_reporting_another_inode_is_rolled_back_and_never_used_again()
+-> Result<(), Box<dyn Error>> {
+    let root = tempfile::tempdir()?;
+    let scope = FsQuirks::install(
+        root.path(),
+        Quirks {
+            // A definitive errno, so the ladder links before any probe.
+            rename_flags: Support::Rejected(Errno::NOSYS),
+            ..Quirks::sshfs()
+        },
+    );
+    fs::write(root.path().join("source"), b"data")?;
+    let original = identity(&root.path().join("source"));
+
+    assert_eq!(
+        place_in(root.path(), "source", "target", None),
+        Err(PlaceError::Unsupported)
+    );
+    assert_eq!(names(root.path())?, ["source"]);
+    assert_eq!(identity(&root.path().join("source")), original);
+    assert_eq!(mount_capabilities(scope.key()).hard_links, Some(false));
+
+    scope.clear_calls();
+    assert_eq!(
+        rename_in(root.path(), "source", "target"),
+        Ok(Renamed::Direct(Placed::OverReservedFile))
+    );
+    assert_eq!(scope.count(Op::Link), 0);
+    assert_eq!(names(root.path())?, ["target"]);
+    assert_eq!(identity(&root.path().join("target")), original);
     Ok(())
 }
 

@@ -307,7 +307,11 @@ fn place_non_directory(
 ) -> Result<Placed, PlaceError> {
     if mount.capabilities().hard_links != Some(false) {
         match fs.link(from, to) {
-            Ok(()) => return finish_link(fs, from, to, source),
+            Ok(()) => {
+                if link_holds_source(fs, mount, from, to, source)? {
+                    return finish_link(fs, from, to, source);
+                }
+            }
             Err(Errno::EXIST) => {
                 return if link_reply_was_lost(fs, to, source) {
                     finish_link(fs, from, to, source)
@@ -356,6 +360,39 @@ fn link_reply_was_lost(fs: &dyn FsOps, to: Entry<'_>, source: &EntryStat) -> boo
             .is_ok_and(|names| names.iter().any(|name| name == to.name))
 }
 
+/// Only the source's identity at the new name proves a link; a link count can
+/// be stale, or always 1 on sshfs. Where each link reports its own inode
+/// number (libfuse without `use_ino`, cifs without server inode numbers), the
+/// link is removed by the identity it reports and the mount is marked as
+/// having no usable links.
+fn link_holds_source(
+    fs: &dyn FsOps,
+    mount: &Mount<'_>,
+    from: Entry<'_>,
+    to: Entry<'_>,
+    source: &EntryStat,
+) -> Result<bool, PlaceError> {
+    let linked = fs
+        .stat(to, true)
+        .map_err(|_| PlaceError::Unconfirmed)?
+        .identity;
+    if linked == source.identity {
+        return Ok(true);
+    }
+    match fs.stat(from, true) {
+        Ok(current) if current.identity == source.identity => {}
+        Ok(_) => return Err(PlaceError::Changed),
+        Err(_) => return Err(PlaceError::Unconfirmed),
+    }
+    mount.learn(|capabilities| capabilities.hard_links = Some(false));
+    if remove_if_unchanged(fs, to, linked, AtFlags::empty()) {
+        Ok(false)
+    } else {
+        Err(PlaceError::Unconfirmed)
+    }
+}
+
+/// Removes the old name once the new one is known to report the source's identity.
 fn finish_link(
     fs: &dyn FsOps,
     from: Entry<'_>,
@@ -369,13 +406,6 @@ fn finish_link(
     };
     if current.identity != source.identity {
         return Err(PlaceError::Changed);
-    }
-    let proven = current.nlink >= 2
-        || fs
-            .stat(to, false)
-            .is_ok_and(|target| target.identity == source.identity);
-    if !proven {
-        return Err(PlaceError::Unconfirmed);
     }
     match fs.unlink(from, AtFlags::empty()) {
         Ok(()) => Ok(Placed::Linked),
@@ -660,7 +690,14 @@ pub(super) fn probe(
     {
         probed.hard_links = supported;
         if supported == Some(true) {
-            remove_probe_file(fs, at(dir, &linked), identity);
+            probed.hard_links = match fs.stat(at(dir, &linked), true) {
+                Ok(stat) => {
+                    remove_probe_file(fs, at(dir, &linked), stat.identity);
+                    // A link that reports another inode cannot prove a placement.
+                    Some(stat.identity == identity)
+                }
+                Err(_) => None,
+            };
         }
     }
     remove_probe_file(fs, at(dir, &current), identity);
@@ -701,20 +738,13 @@ fn probe_folders(fs: &dyn FsOps, dir: BorrowedFd<'_>) -> Option<bool> {
     result
 }
 
-/// Removes a probe file while it is still the empty file the probe made. Once
-/// cifs turns server inode numbers off, each name of a file gets its own
-/// inode number, so there a matching birth time proves it instead.
+/// Removes a probe name while it still holds the empty file seen right after
+/// the probe made that name.
 fn remove_probe_file(fs: &dyn FsOps, entry: Entry<'_>, made: LocalFileIdentity) {
-    let Ok(current) = fs.stat(entry, true) else {
-        return;
-    };
-    let born_with_it = current.identity.birth.is_some()
-        && (
-            current.identity.device,
-            current.identity.kind,
-            current.identity.birth,
-        ) == (made.device, made.kind, made.birth);
-    if (current.identity == made || born_with_it) && current.size == 0 {
+    if fs
+        .stat(entry, true)
+        .is_ok_and(|current| current.identity == made && current.size == 0)
+    {
         let _ = fs.unlink(entry, AtFlags::empty());
     }
 }
@@ -982,10 +1012,11 @@ fn same_ignoring_case(left: &OsStr, right: &OsStr) -> bool {
 }
 
 /// The ladder, plus a last rung so renames still work on mounts without
-/// `RENAME_NOREPLACE` where a hard link is impossible: missing on the mount,
-/// or refused for one file (`protected_hardlinks`). That rung runs only once a
-/// probe on Strata's own names, or a definitive errno, shows NOREPLACE is
-/// missing and settles whether links work; folders need links missing too.
+/// `RENAME_NOREPLACE` where a hard link is impossible: missing or unusable on
+/// the mount, or refused for one file (`protected_hardlinks`). That rung runs
+/// only once a probe on Strata's own names, or a definitive errno, shows
+/// NOREPLACE is missing and settles whether links work; folders need links
+/// missing too.
 struct Renaming<'a> {
     fs: &'a dyn FsOps,
     mount: Mount<'a>,

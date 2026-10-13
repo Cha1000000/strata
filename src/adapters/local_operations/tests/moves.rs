@@ -241,26 +241,34 @@ fn same_volume_move_on_a_flag_rejecting_filesystem_never_copies() -> Result<(), 
 }
 
 #[test]
-fn a_file_that_cannot_be_linked_is_moved_by_copying() -> Result<(), Box<dyn Error>> {
+fn a_file_without_a_usable_link_is_moved_by_copying() -> Result<(), Box<dyn Error>> {
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
         .lock()
         .map_err(|error| error.to_string())?;
-    let root = tempfile::tempdir()?;
-    // As protected_hardlinks refuses another user's file that a rename could move.
-    let _scope = FsQuirks::install(
-        root.path(),
-        Quirks {
+    let cases: [(&str, fn() -> Quirks); 3] = [
+        // As protected_hardlinks refuses another user's file that a rename could move.
+        ("refused", || Quirks {
             fail: vec![(Op::Link, "moved.txt", 0, Errno::PERM)],
             ..Quirks::without_rename_flags()
-        },
-    );
-    let source = root.path().join("notes.txt");
-    fs::write(&source, b"notes")?;
+        }),
+        ("probed", Quirks::sshfs),
+        ("linked before a probe", || Quirks {
+            rename_flags: Support::Rejected(Errno::NOSYS),
+            ..Quirks::sshfs()
+        }),
+    ];
+    for (case, quirks) in cases {
+        let root = tempfile::tempdir()?;
+        let _scope = FsQuirks::install(root.path(), quirks());
+        let source = root.path().join("notes.txt");
+        fs::write(&source, b"notes")?;
 
-    move_native(&source, &root.path().join("moved.txt"))?;
+        move_native(&source, &root.path().join("moved.txt"))
+            .map_err(|error| format!("{case}: {error}"))?;
 
-    assert_eq!(fs::read(root.path().join("moved.txt"))?, b"notes");
-    assert!(!source.exists());
+        assert_eq!(fs::read(root.path().join("moved.txt"))?, b"notes", "{case}");
+        assert_eq!(names(root.path())?, ["moved.txt"], "{case}");
+    }
     Ok(())
 }
 
