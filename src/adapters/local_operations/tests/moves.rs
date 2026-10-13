@@ -490,7 +490,6 @@ fn cross_volume_replacing_move_keeps_the_source_when_the_removable_flush_fails()
     fs::write(&source, b"incoming")?;
     fs::write(destination.join("notes.txt"), b"old")?;
     let _guard = RemovableFlushGuard::install(root.path(), Some(io::ErrorKind::Other));
-
     let _volumes = separate_volumes(&source_dir, &destination);
 
     let (_operation, events) =
@@ -528,7 +527,6 @@ fn cross_volume_replacing_move_flushes_the_removable_destination_before_deleting
     fs::write(destination.join("notes.txt"), b"old")?;
     let during = watch_source_during_sync(&source);
     let _guard = RemovableFlushGuard::install(root.path(), None);
-
     let _volumes = separate_volumes(&source_dir, &destination);
 
     let (_operation, events) =

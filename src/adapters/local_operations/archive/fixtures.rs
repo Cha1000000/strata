@@ -22,6 +22,8 @@ use std::{
     },
 };
 
+pub(super) use super::super::tests::names;
+
 /// GIO cannot trash test fixtures across devices into the home Trash.
 pub(super) fn tempdir_on_home_device() -> Result<tempfile::TempDir, Box<dyn Error>> {
     let home = gtk::glib::home_dir();
@@ -109,14 +111,6 @@ pub(super) fn test_file_entry(path: &Path) -> FileEntry {
 
 pub(super) const COMPRESSION_STAGE: &str = ".strata-compression-";
 pub(super) const EXTRACTION_STAGE: &str = ".strata-extraction-";
-
-pub(super) fn entry_names(directory: &Path) -> Result<Vec<String>, Box<dyn Error>> {
-    let mut names = fs::read_dir(directory)?
-        .map(|entry| Ok(entry?.file_name().to_string_lossy().into_owned()))
-        .collect::<Result<Vec<_>, std::io::Error>>()?;
-    names.sort();
-    Ok(names)
-}
 
 pub(super) fn stages(destination: &Path, prefix: &str) -> Result<Vec<OsString>, Box<dyn Error>> {
     Ok(fs::read_dir(destination)?

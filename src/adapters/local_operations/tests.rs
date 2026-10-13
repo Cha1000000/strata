@@ -160,7 +160,7 @@ impl Drop for RemovableFlushGuard {
 }
 
 /// The sorted entry names in `dir`.
-fn names(dir: &Path) -> io::Result<Vec<String>> {
+pub(super) fn names(dir: &Path) -> io::Result<Vec<String>> {
     let mut names = fs::read_dir(dir)?
         .map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned()))
         .collect::<Result<Vec<_>, _>>()?;

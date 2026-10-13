@@ -25,14 +25,6 @@ fn inode(path: &Path) -> Result<u64, io::Error> {
     Ok(fs::symlink_metadata(path)?.ino())
 }
 
-fn used_name(quirks: &FsQuirks, prefix: &str) -> bool {
-    quirks.calls().iter().any(|call| {
-        call.names
-            .iter()
-            .any(|name| name.to_string_lossy().starts_with(prefix))
-    })
-}
-
 /// Replaces `target` with `source`, returning what became of the original.
 fn replace_reporting(
     source: &Path,
@@ -586,7 +578,7 @@ fn replace_without_trash_or_exchange_sets_the_original_aside() -> Result<(), Box
         assert_eq!(read_item(&target, directory)?, b"new");
         assert_eq!(read_item(&source, directory)?, b"new");
         assert_eq!(names(root.path())?, ["source", "target"]);
-        assert!(used_name(&quirks, ".strata-replaced-"));
+        assert!(quirks.used_name(".strata-replaced-*"));
         assert_eq!(quirks.count(Op::Exchange), 0);
     }
     Ok(())
@@ -621,7 +613,7 @@ fn replace_falls_back_to_aside_when_trash_lies() -> Result<(), Box<dyn Error>> {
         assert_eq!(quirks.count(Op::Trash), 1);
         assert_eq!(replaced, [ReplacedOriginal::Deleted]);
         assert_eq!(fs::read(&target)?, b"new");
-        assert!(used_name(&quirks, ".strata-replaced-"));
+        assert!(quirks.used_name(".strata-replaced-*"));
         assert_eq!(
             names(root.path())?,
             if move_source {
@@ -732,7 +724,7 @@ fn a_failed_publication_puts_the_original_back() -> Result<(), Box<dyn Error>> {
 
         assert!(result.is_err(), "{directory} {op:?}");
         assert!(replaced.is_empty());
-        assert!(used_name(&quirks, ".strata-replaced-"));
+        assert!(quirks.used_name(".strata-replaced-*"));
         assert_eq!(inode(&target)?, original);
         assert_eq!(read_item(&target, directory)?, b"old");
         assert_eq!(names(root.path())?, ["source", "target"]);
@@ -892,7 +884,7 @@ fn same_filesystem_replacing_move_places_the_source_without_a_stage() -> Result<
         assert_eq!(read_item(&target, directory)?, b"new");
         assert!(!source.exists());
         assert_eq!(names(&destination)?, ["item"]);
-        assert!(!used_name(&quirks, ".strata-replacement-"));
+        assert!(!quirks.used_name(".strata-replacement-*"));
     }
     Ok(())
 }
@@ -967,7 +959,7 @@ fn same_filesystem_replacing_move_restores_the_original_when_placement_fails()
 
     assert!(result.is_err());
     assert!(replaced.is_empty());
-    assert!(used_name(&quirks, ".strata-replaced-"));
+    assert!(quirks.used_name(".strata-replaced-*"));
     assert_eq!(inode(&target)?, original);
     assert_eq!(fs::read(&target)?, b"old");
     assert_eq!(fs::read(&source)?, b"incoming");

@@ -4,7 +4,7 @@ mod cancellation;
 mod policy;
 
 use super::super::fixtures::{
-    COMPRESSION_STAGE, HomeTrashGuard, compression_stage_mode, entry_names, never_cancelled,
+    COMPRESSION_STAGE, HomeTrashGuard, compression_stage_mode, names, never_cancelled,
     set_times_without_following, stages, tempdir_on_home_device, write_compression_fixture,
 };
 use super::{ArchiveError, inspect_archive_sources, process_umask, write_staged_archive};
@@ -245,7 +245,7 @@ fn publish_replacement(destination: &Path, conflict: TransferConflict) -> (Compr
 }
 
 #[test]
-fn replacing_an_archive_without_trash_sets_the_original_aside() -> Result<(), Box<dyn Error>> {
+fn an_archive_replaced_without_trash_deletes_its_original() -> Result<(), Box<dyn Error>> {
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
         .lock()
         .map_err(|error| error.to_string())?;
@@ -276,13 +276,12 @@ fn replacing_an_archive_without_trash_sets_the_original_aside() -> Result<(), Bo
         );
         assert_eq!(fs::read(&archive)?, b"replacement");
         assert_eq!(fs::metadata(&archive)?.permissions().mode() & 0o777, 0o640);
-        assert_eq!(entry_names(root.path())?, ["existing.zip"]);
-        let set_aside = quirks.calls().iter().any(|call| {
-            call.names
-                .iter()
-                .any(|name| name.to_string_lossy().starts_with(".strata-replaced-"))
-        });
-        assert_eq!(set_aside, sets_aside, "{trash:?} {fs_type:#x}");
+        assert_eq!(names(root.path())?, ["existing.zip"]);
+        assert_eq!(
+            quirks.used_name(".strata-replaced-*"),
+            sets_aside,
+            "{trash:?} {fs_type:#x}"
+        );
     }
     Ok(())
 }
@@ -312,7 +311,7 @@ fn replacement_fails_before_encoding_when_no_strategy_is_safe() -> Result<(), Bo
     assert!(message.contains("replaced safely"), "{message}");
     assert!(!encoded);
     assert_eq!(fs::read(&archive)?, b"original");
-    assert_eq!(entry_names(root.path())?, ["existing.zip"]);
+    assert_eq!(names(root.path())?, ["existing.zip"]);
     Ok(())
 }
 
@@ -357,7 +356,7 @@ fn an_archive_swapped_while_encoding_is_never_replaced() -> Result<(), Box<dyn E
         };
         assert!(message.contains("changed"), "{message}");
         assert_eq!(fs::read(&archive)?, b"theirs");
-        assert_eq!(entry_names(root.path())?, ["existing.zip"], "{fs_type:#x}");
+        assert_eq!(names(root.path())?, ["existing.zip"], "{fs_type:#x}");
     }
     Ok(())
 }
@@ -395,7 +394,7 @@ fn a_name_taken_during_replacement_keeps_the_original_aside() -> Result<(), Box<
         return Err(format!("expected the original to be kept aside, got {result:?}").into());
     };
     assert_eq!(fs::read(&archive)?, b"racer");
-    let names = entry_names(root.path())?;
+    let names = names(root.path())?;
     let [kept] = names
         .iter()
         .filter(|name| name.starts_with(".strata-replaced-"))

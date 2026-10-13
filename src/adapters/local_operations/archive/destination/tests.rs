@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 
-use super::super::fixtures::entry_names;
+use super::super::fixtures::names;
 use super::{
     ExtractNameResolver, ExtractionDestination, MemberMetadata, MetadataCalls, archive_stem,
     sanitized_archive_path,
@@ -547,7 +547,7 @@ fn publication_without_links_or_noreplace_keeps_staging() -> Result<(), Box<dyn 
     assert_eq!(fs::read(staged.join("readme.txt"))?, b"readme.txt");
     assert_eq!(fs::read(staged.join("docs/guide.txt"))?, b"docs/guide.txt");
     assert_eq!(
-        entry_names(root.path())?,
+        names(root.path())?,
         vec![name.to_string_lossy().into_owned()]
     );
     Ok(())

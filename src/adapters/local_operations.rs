@@ -3219,7 +3219,6 @@ fn placement_error(error: PlaceError) -> glib::Error {
     glib::Error::new(placement_error_kind(error), &placement_reason(error))
 }
 
-/// Places a finished stage at `target_path` without replacing anything there.
 async fn publish_staged_without_replace(
     staged: StagedSibling,
     target_path: PathBuf,

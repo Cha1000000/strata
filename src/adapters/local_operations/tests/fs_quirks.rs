@@ -209,6 +209,13 @@ impl FsQuirks {
     pub(crate) fn clear_calls(&self) {
         self.scope.state().calls.clear();
     }
+
+    pub(crate) fn used_name(&self, pattern: &str) -> bool {
+        self.scope.state().calls.iter().any(|call| {
+            let names: Vec<&OsStr> = call.names.iter().map(OsString::as_os_str).collect();
+            matches(pattern, &names)
+        })
+    }
 }
 
 impl Drop for FsQuirks {

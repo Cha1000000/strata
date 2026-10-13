@@ -422,9 +422,7 @@ fn a_case_only_rename_and_its_undo_keep_the_item_or_say_where_it_was_left()
     );
     let message = failure(&rename(&source, "Report.txt"));
 
-    let left = fs::read_dir(root.path())?
-        .map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned()))
-        .collect::<Result<Vec<_>, _>>()?;
+    let left = names(root.path())?;
     let [temporary] = left.as_slice() else {
         panic!("expected one entry, got {left:?}");
     };

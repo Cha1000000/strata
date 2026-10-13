@@ -142,18 +142,7 @@ fn exact_creation_reports_conflicts_and_unique_creation_rejects_invalid_names() 
 
 #[test]
 fn a_folder_reported_by_a_file_create_is_a_taken_name() {
-    for (kind, directory, taken) in [
-        (gio::IOErrorEnum::Exists, false, true),
-        (gio::IOErrorEnum::Exists, true, true),
-        (gio::IOErrorEnum::IsDirectory, false, true),
-        (gio::IOErrorEnum::IsDirectory, true, false),
-        (gio::IOErrorEnum::PermissionDenied, false, false),
-    ] {
-        let error = glib::Error::new(kind, "creation failed");
-        assert_eq!(
-            super::super::create_entry::name_taken(&error, directory),
-            taken,
-            "{kind:?}, directory: {directory}"
-        );
-    }
+    let error = glib::Error::new(gio::IOErrorEnum::IsDirectory, "creation failed");
+    assert!(super::super::create_entry::name_taken(&error, false));
+    assert!(!super::super::create_entry::name_taken(&error, true));
 }

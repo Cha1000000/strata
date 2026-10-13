@@ -11,11 +11,11 @@ use super::super::{
     LocalFileIdentity,
     fs_ops::{Entry, fs},
     placement::{
-        Feasibility, PlaceError, Placed, Probed, RenameFailure, Renamed, can_set_aside, exchange,
-        exchange_allowed, place, probe, rename_in_place, set_aside,
+        Feasibility, PlaceError, Placed, Probed, RenameFailure, Renamed, can_set_aside, place,
+        probe, rename_in_place, set_aside,
     },
 };
-use super::fs_quirks::{Exchange, Op, OverEmptyDirectory, Racer, Support};
+use super::fs_quirks::{Op, OverEmptyDirectory, Racer, Support};
 use super::*;
 use crate::adapters::volume::{MountCapabilities, mount_capabilities};
 
@@ -308,8 +308,7 @@ fn item_level_eperm_does_not_disable_links_for_the_mount() -> Result<(), Box<dyn
     );
     fs::write(root.path().join("source"), b"data")?;
 
-    // protected_hardlinks refuses links to another user's file that a rename
-    // could still move, so a move may fall back to copying it.
+    // As protected_hardlinks refuses another user's file; a move then copies it.
     assert_eq!(
         place_in(root.path(), "source", "target", None),
         Err(PlaceError::Unsupported)
@@ -802,47 +801,6 @@ fn the_probe_keeps_files_it_cannot_prove_are_its_own() -> Result<(), Box<dyn Err
     Ok(())
 }
 
-#[test]
-fn exchange_is_allowed_only_on_listed_filesystems_until_rejected() -> Result<(), Box<dyn Error>> {
-    const TMPFS: rustix::fs::FsWord = 0x0102_1994;
-    const FUSE: rustix::fs::FsWord = 0x6573_5546;
-    let root = tempfile::tempdir()?;
-    let parent = open_local_parent_directory(root.path())?;
-    {
-        let _fuse = FsQuirks::install(
-            root.path(),
-            Quirks {
-                fs_type: Some(FUSE),
-                ..Quirks::default()
-            },
-        );
-        assert!(!exchange_allowed(fs(), parent.as_fd()));
-    }
-    let scope = FsQuirks::install(
-        root.path(),
-        Quirks {
-            fs_type: Some(TMPFS),
-            exchange: Exchange::Rejected,
-            ..Quirks::default()
-        },
-    );
-    fs::write(root.path().join("left"), b"left")?;
-    fs::write(root.path().join("right"), b"right")?;
-    assert!(exchange_allowed(fs(), parent.as_fd()));
-
-    let swapped = exchange(
-        fs(),
-        Entry::new(&parent, OsStr::new("left")),
-        Entry::new(&parent, OsStr::new("right")),
-    );
-
-    assert_eq!(swapped, Ok(false));
-    assert_eq!(fs::read(root.path().join("left"))?, b"left");
-    assert!(!exchange_allowed(fs(), parent.as_fd()));
-    assert_eq!(mount_capabilities(scope.key()).exchange, Some(false));
-    Ok(())
-}
-
 fn rename_in(dir: &Path, from: &str, to: &str) -> Result<Renamed, RenameFailure> {
     let parent = open_local_parent_directory(dir).expect("open parent");
     rename_in_place(
@@ -998,7 +956,7 @@ fn links_refused_for_the_item() -> Quirks {
 }
 
 #[test]
-fn renames_without_noreplace_or_links_reserve_the_name_first() -> Result<(), Box<dyn Error>> {
+fn renames_complete_without_noreplace_or_a_usable_hard_link() -> Result<(), Box<dyn Error>> {
     for (quirks, folder, links) in [
         (Quirks::without_placement(), false, false),
         (Quirks::without_placement(), true, false),

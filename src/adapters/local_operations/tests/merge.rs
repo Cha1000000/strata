@@ -850,7 +850,7 @@ fn merge_without_trash_sets_originals_aside_and_removes_them_after_success()
         let (result, plans) = merge_through_trash(&source, &target, move_source, real_copy());
 
         assert!(result.is_ok(), "{trash:?}: {result:?}");
-        assert!(used_aside(&quirks));
+        assert!(quirks.used_name(".strata-merge-*"));
         assert_eq!(fs::read(target.join("shared.txt"))?, b"new");
         assert_eq!(
             fs::read(target.join("nested/deep/shared.txt"))?,
@@ -870,14 +870,6 @@ fn merge_without_trash_sets_originals_aside_and_removes_them_after_success()
         );
     }
     Ok(())
-}
-
-fn used_aside(quirks: &FsQuirks) -> bool {
-    quirks.calls().iter().any(|call| {
-        call.names
-            .iter()
-            .any(|name| name.to_string_lossy().starts_with(".strata-merge-"))
-    })
 }
 
 #[test]
@@ -987,7 +979,11 @@ fn a_failed_aside_puts_every_original_back_before_merging() -> Result<(), Box<dy
             "{case}: {error}"
         );
         assert!(!copied.get(), "{case}");
-        assert_eq!(used_aside(&quirks), case != "no safe placement", "{case}");
+        assert_eq!(
+            quirks.used_name(".strata-merge-*"),
+            case != "no safe placement",
+            "{case}"
+        );
         for (path, contents) in target_files {
             assert_eq!(fs::read(target.join(path))?, contents.as_bytes(), "{case}");
         }
