@@ -1044,10 +1044,27 @@ fn move_across_volumes(
     folder: &Path,
     quirks: Quirks,
 ) -> Result<(PathBuf, TransferReport, Vec<OperationEvent>), Box<dyn Error>> {
+    move_across_volumes_logged(folder, quirks)
+        .map(|(moved, report, events, _)| (moved, report, events))
+}
+
+/// [`move_across_volumes`], also returning the source volume's calls.
+fn move_across_volumes_logged(
+    folder: &Path,
+    quirks: Quirks,
+) -> Result<
+    (
+        PathBuf,
+        TransferReport,
+        Vec<OperationEvent>,
+        Vec<super::fs_quirks::Call>,
+    ),
+    Box<dyn Error>,
+> {
     let source_dir = folder.parent().ok_or("a folder in a source volume")?;
     let destination = source_dir.with_file_name("destination");
     fs::create_dir_all(&destination)?;
-    let _source = FsQuirks::install(source_dir, quirks);
+    let source = FsQuirks::install(source_dir, quirks);
     let _destination = FsQuirks::install(&destination, Quirks::default());
 
     let (_operation, events) = paste_move(97, &destination, folder, TransferConflict::FailIfExists);
@@ -1062,7 +1079,12 @@ fn move_across_volumes(
         events.borrow()
     );
     let report = reported(&events);
-    Ok((destination.join("folder"), report, events.take()))
+    Ok((
+        destination.join("folder"),
+        report,
+        events.take(),
+        source.calls(),
+    ))
 }
 
 /// Writes `contents` over `path` as it runs.
@@ -1747,5 +1769,124 @@ fn a_file_put_in_a_moved_files_place_within_its_time_tick_is_kept() -> Result<()
     assert_eq!(fs::read(moved.join("a.txt"))?, b"original");
     assert_eq!(fs::read(&moved_file)?, b"newfile!");
     assert_eq!(report.kept, [kept(moved_file, KeptCause::Changed)]);
+    Ok(())
+}
+
+/// Puts back the real clock for the copy engine.
+struct ClockGuard;
+
+impl ClockGuard {
+    fn set(now: SystemTime) -> Self {
+        super::super::copy_engine::set_clock_for_test(Some(now));
+        Self
+    }
+}
+
+impl Drop for ClockGuard {
+    fn drop(&mut self) {
+        super::super::copy_engine::set_clock_for_test(None);
+    }
+}
+
+#[test]
+fn files_read_within_a_coarse_time_tick_are_compared_before_their_move_deletes_them()
+-> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    // FAT, exFAT, sshfs and HFS+ keep coarse times, so a rewrite of the
+    // same size within one tick shows neither in the modification time nor
+    // in the change time, which they lack or keep as coarse.
+    let vfat = || Quirks {
+        ctime_is_mtime: true,
+        ..Quirks::vfat()
+    };
+    let exfat_fuse = || Quirks {
+        mount_type: Some(("fuseblk", "rw")),
+        device_format: Some("exfat"),
+        ctime_is_mtime: true,
+        no_birth_time: true,
+        ..Quirks::default()
+    };
+    let sshfs = || Quirks {
+        ctime_is_mtime: true,
+        ..Quirks::sshfs()
+    };
+    let hfsplus = || Quirks {
+        mount_type: Some(("hfsplus", "rw")),
+        ctime_is_mtime: true,
+        ..Quirks::default()
+    };
+    let recent = Duration::from_millis(500);
+    let long_ago = Duration::from_secs(3600);
+    // The source volume, how long after its modification time the copy
+    // reads the file, whether it is then rewritten at the same size with
+    // its times put back, and whether the deletion reads it again.
+    let rows: [(&str, Preset, Duration, bool, bool); 7] = [
+        ("vfat", vfat, recent, true, true),
+        ("exfat-fuse", exfat_fuse, recent, true, true),
+        ("sshfs", sshfs, recent, true, true),
+        ("hfsplus", hfsplus, recent, true, true),
+        ("vfat, unchanged", vfat, recent, false, true),
+        ("vfat, modified long before", vfat, long_ago, false, false),
+        ("ext4", Quirks::ext4, recent, false, false),
+    ];
+    for (row, preset, read_after, rewritten, read_again) in rows {
+        let root = tempfile::tempdir()?;
+        let folder = root.path().join("source/folder");
+        fs::create_dir_all(&folder)?;
+        let file = folder.join("a.txt");
+        fs::write(&file, b"original")?;
+        let modified = fs::metadata(&file)?.modified()?;
+        let _clock = ClockGuard::set(modified + read_after);
+        let path = file.clone();
+        let racer: super::fs_quirks::Racer = Box::new(move || {
+            if !rewritten {
+                return;
+            }
+            let before = fs::metadata(&path).expect("stat the source");
+            fs::write(&path, b"ORIGINAL").expect("rewrite the source");
+            let times = rustix::fs::Timespec {
+                tv_sec: before.mtime(),
+                tv_nsec: before.mtime_nsec(),
+            };
+            rustix::fs::utimensat(
+                rustix::fs::CWD,
+                &path,
+                &rustix::fs::Timestamps {
+                    last_access: times,
+                    last_modification: times,
+                },
+                rustix::fs::AtFlags::empty(),
+            )
+            .expect("put the times back");
+        });
+        let quirks = Quirks {
+            before: vec![(Op::OpenDir, "folder", 1, racer)],
+            ..preset()
+        };
+
+        let (moved, report, _, calls) = move_across_volumes_logged(&folder, quirks)?;
+
+        assert_eq!(fs::read(moved.join("a.txt"))?, b"original", "{row}");
+        if rewritten {
+            assert_eq!(fs::read(&file)?, b"ORIGINAL", "{row}");
+            assert_eq!(report.kept, [kept(file, KeptCause::Changed)], "{row}");
+        } else {
+            assert!(!folder.exists(), "{row}");
+            assert_eq!(report.kept, [], "{row}");
+        }
+        let deleting = calls
+            .iter()
+            .enumerate()
+            .filter(|(_, call)| call.op == Op::OpenDir && call.names == ["folder"])
+            .nth(1)
+            .map(|(index, _)| index)
+            .ok_or("the deletion opened the folder")?;
+        let read = calls[deleting..]
+            .iter()
+            .any(|call| call.op == Op::Read && call.names == ["a.txt"]);
+        assert_eq!(read, read_again, "{row}");
+    }
     Ok(())
 }

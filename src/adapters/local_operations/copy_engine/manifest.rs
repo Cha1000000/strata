@@ -15,9 +15,11 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
     thread,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use gtk::glib;
+use ring::digest;
 use rustix::{fs::AtFlags, io::Errno};
 
 use super::{Failure, Mount, lock};
@@ -38,24 +40,103 @@ use crate::{
 #[derive(Default)]
 pub(in crate::adapters::local_operations) struct Unlinks(Mutex<HashMap<(u64, u64), Vec<u64>>>);
 
+/// The time tests pretend it is, which waits move on instead of sleeping.
+#[cfg(test)]
+static TEST_NOW: Mutex<Option<SystemTime>> = Mutex::new(None);
+
+/// Pretends it is `now`, or follows the real clock with `None`.
+#[cfg(test)]
+pub(in crate::adapters::local_operations) fn set_clock_for_test(now: Option<SystemTime>) {
+    *lock(&TEST_NOW) = now;
+}
+
+pub(super) fn now() -> SystemTime {
+    #[cfg(test)]
+    if let Some(now) = *lock(&TEST_NOW) {
+        return now;
+    }
+    SystemTime::now()
+}
+
+/// Waits until `until`, checking `stopped` meanwhile; false if it stopped.
+fn wait_until(until: SystemTime, stopped: &dyn Fn() -> bool) -> bool {
+    loop {
+        let left = until.duration_since(now()).unwrap_or_default();
+        if left.is_zero() {
+            return true;
+        }
+        if stopped() {
+            return false;
+        }
+        #[cfg(test)]
+        if let Some(pretended) = lock(&TEST_NOW).as_mut() {
+            *pretended = until;
+            continue;
+        }
+        thread::sleep(left.min(Duration::from_millis(50)));
+    }
+}
+
+/// Until when a rewrite of the file `stat` describes, read from `started`,
+/// may leave its modification time as it is, where the mount keeps times
+/// as coarse as `window`; `None` once any rewrite would move it.
+pub(super) fn unsettled(
+    stat: &EntryStat,
+    window: Duration,
+    started: SystemTime,
+) -> Option<SystemTime> {
+    let (seconds, nanoseconds) = stat.mtime;
+    let modified =
+        UNIX_EPOCH.checked_add(Duration::new(u64::try_from(seconds).ok()?, nanoseconds))?;
+    // A time ahead of our clock, from a server's, settles no later than one
+    // read as it was set.
+    let settled = modified
+        .checked_add(window)?
+        .min(started.checked_add(window)?);
+    (started < settled).then_some(settled)
+}
+
+/// What a copy holds of a source file whose times may not show a rewrite:
+/// a digest of the bytes it copied, which the source must still match once
+/// any rewrite would move its modification time.
+pub(super) struct Contents {
+    digest: digest::Digest,
+    settled: SystemTime,
+}
+
+impl Contents {
+    pub(super) fn new(digest: digest::Digest, settled: SystemTime) -> Self {
+        Self { digest, settled }
+    }
+}
+
+/// A source file as a copy read it.
+pub(super) struct Read {
+    pub stat: EntryStat,
+    pub contents: Option<Contents>,
+}
+
+const MIB: usize = 1 << 20;
+
 /// A source entry as the copy read it.
-#[derive(Clone, Copy)]
 struct SourceSnapshot {
     identity: LocalFileIdentity,
     nlink: u64,
     size: u64,
     mtime: (i64, u32),
     ctime: (i64, u32),
+    contents: Option<Box<Contents>>,
 }
 
 impl SourceSnapshot {
-    fn of(stat: &EntryStat) -> Self {
+    fn of(stat: &EntryStat, contents: Option<Contents>) -> Self {
         Self {
             identity: stat.identity,
             nlink: stat.nlink,
             size: stat.size,
             mtime: stat.mtime,
             ctime: stat.ctime,
+            contents: contents.map(Box::new),
         }
     }
 
@@ -120,7 +201,15 @@ impl Folder {
 
     /// The child `name` was copied as `stat` describes it.
     pub(super) fn entry(&self, name: &OsStr, stat: &EntryStat) {
-        self.add(name, Node::Entry(SourceSnapshot::of(stat)));
+        self.add(name, Node::Entry(SourceSnapshot::of(stat, None)));
+    }
+
+    /// The child file `name` was copied as `read` describes it.
+    pub(super) fn file(&self, name: &OsStr, read: Read) {
+        self.add(
+            name,
+            Node::Entry(SourceSnapshot::of(&read.stat, read.contents)),
+        );
     }
 
     /// The child `name` stays at the source.
@@ -150,7 +239,7 @@ impl Pending {
         Self {
             folder,
             name: name.to_os_string(),
-            snapshot: SourceSnapshot::of(stat),
+            snapshot: SourceSnapshot::of(stat, None),
         }
     }
 
@@ -435,7 +524,7 @@ impl Job for Removal {
         match step {
             Step::Folder(folder) => at.folder(&folder, completion, queue),
             Step::Entry(snapshot) => {
-                at.entry(snapshot);
+                at.entry(&snapshot, &|| queue.is_stopped());
                 queue.complete(completion);
             }
             Step::Rmdir(opened) => {
@@ -513,9 +602,18 @@ impl At {
         }
     }
 
-    fn entry(&self, snapshot: SourceSnapshot) {
+    fn entry(&self, snapshot: &SourceSnapshot, stopped: &dyn Fn() -> bool) {
         let deletion = &self.deletion;
         let fs = deletion.fs;
+        // Compared before the stat below, which sees any later rewrite.
+        if let Some(contents) = &snapshot.contents {
+            match self.same_contents(contents, snapshot.size, stopped) {
+                None => return,
+                Some(Ok(true)) => {}
+                Some(Ok(false)) => return deletion.keep(self.path.clone(), KeptCause::Changed),
+                Some(Err(error)) => return deletion.failed(self.path.clone(), error),
+            }
+        }
         let key = (snapshot.identity.device, snapshot.identity.inode);
         // Checking, removing and counting a name of a file with several
         // names must not interleave with another name's check.
@@ -543,6 +641,45 @@ impl At {
             Ok(_) => deletion.keep(self.path.clone(), KeptCause::Changed),
             Err(error) => deletion.failed(self.path.clone(), error),
         }
+    }
+
+    /// Whether the file still holds what the copy holds, read once any
+    /// rewrite would move its modification time; `None` if the deletion
+    /// stopped meanwhile.
+    fn same_contents(
+        &self,
+        contents: &Contents,
+        size: u64,
+        stopped: &dyn Fn() -> bool,
+    ) -> Option<Result<bool, Errno>> {
+        if !wait_until(contents.settled, stopped) {
+            return None;
+        }
+        let fs = self.deletion.fs;
+        let file = match fs.open_source(self.entry_at(), false) {
+            Ok(Some((file, _))) => file,
+            Ok(None) => return Some(Ok(false)),
+            Err(error) => return Some(Err(error)),
+        };
+        let mut buffer =
+            vec![0; usize::try_from(size).map_or(MIB, |size| size.clamp(64 << 10, MIB))];
+        let mut digest = digest::Context::new(&digest::SHA256);
+        let mut offset = 0;
+        loop {
+            if stopped() {
+                return None;
+            }
+            match fs.read_at(file.as_fd(), &mut buffer, offset) {
+                Ok(0) => break,
+                Ok(read) => {
+                    digest.update(&buffer[..read]);
+                    offset += read as u64;
+                }
+                Err(Errno::INTR) => {}
+                Err(error) => return Some(Err(error)),
+            }
+        }
+        Some(Ok(digest.finish().as_ref() == contents.digest.as_ref()))
     }
 
     fn rmdir(&self, opened: Arc<OwnedFd>) {

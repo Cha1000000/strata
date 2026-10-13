@@ -21,10 +21,11 @@ use std::{
     path::{Path, PathBuf},
     rc::Rc,
     sync::{
-        Arc, Mutex, MutexGuard,
+        Arc, Mutex, MutexGuard, OnceLock,
         atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering},
     },
     thread,
+    time::Duration,
 };
 
 use gtk::{gio, glib};
@@ -55,6 +56,8 @@ pub(super) use barrier::Barrier;
 use data::Data;
 #[cfg(test)]
 pub(super) use data::set_kernel_for_test;
+#[cfg(test)]
+pub(super) use manifest::set_clock_for_test;
 pub(super) use manifest::{Manifest, Published, Unlinks};
 use metadata::Snapshot;
 pub(super) use restrictive::Restrictive;
@@ -1163,6 +1166,7 @@ struct Mount {
     key: MountKey,
     family: Family,
     fuse_format: Option<FuseFormat>,
+    coarse_times: Option<Duration>,
 }
 
 impl Mount {
@@ -1176,6 +1180,7 @@ impl Mount {
             key,
             family: capabilities.family.unwrap_or(Family::Other),
             fuse_format: capabilities.fuse_format,
+            coarse_times: capabilities.coarse_times,
         }
     }
 
@@ -1199,8 +1204,9 @@ impl Mount {
 }
 
 /// Reads what mountinfo says of the mount holding `dir` once per mount: its
-/// family, and whether it keeps inode numbers; and for a `fuseblk` mount,
-/// what udev says its device holds, which tells its daemon.
+/// family, whether it keeps inode numbers, and how coarse its times are;
+/// and for a `fuseblk` mount, what udev says its device holds, which tells
+/// its daemon.
 fn learn_mount_type(fs: &dyn FsOps, dir: BorrowedFd<'_>, key: MountKey) -> MountCapabilities {
     let mount_type = fs.mount_type(dir);
     let family = mount_type
@@ -1208,14 +1214,17 @@ fn learn_mount_type(fs: &dyn FsOps, dir: BorrowedFd<'_>, key: MountKey) -> Mount
         .map_or(Family::Other, |mount| family(&mount.fs_type));
     let stable = mount_type.as_ref().is_none_or(MountType::stable_inodes);
     let fuse_format = mount_type
+        .as_ref()
         .filter(|mount| mount.fs_type == "fuseblk")
         .and_then(|_| fs.device_format(dir).ok().flatten())
         .and_then(|format| FuseFormat::of(&format));
+    let coarse_times = mount_type.and_then(|mount| mount.coarse_times(fuse_format));
     let mut learned = MountCapabilities::default();
     learn_mount_capability(key, |capabilities| {
         capabilities.family = Some(family);
         capabilities.stable_inodes = Some(stable);
         capabilities.fuse_format = fuse_format;
+        capabilities.coarse_times = coarse_times;
         learned = *capabilities;
     });
     learned
@@ -1284,6 +1293,9 @@ struct Copy {
     nodes_refused: AtomicBool,
     /// With [`Options::manifest`].
     recording: bool,
+    /// How coarse the source's times are, from its first file read while
+    /// recording.
+    source_times: OnceLock<Option<Duration>>,
     durable: bool,
     left: Mutex<Left>,
 }
@@ -1308,6 +1320,7 @@ impl Copy {
             refused_xattrs: Mutex::default(),
             nodes_refused: AtomicBool::new(false),
             recording: options.manifest,
+            source_times: OnceLock::new(),
             durable: options.durable,
             left: Mutex::default(),
         })
@@ -1467,9 +1480,34 @@ impl Copy {
         )
     }
 
+    /// Copies all of `source` with reads and writes, counting the bytes as
+    /// progress when `counted`, and returns a digest of what it copied.
+    fn copy_digested(
+        &self,
+        data: &mut Data,
+        (source, source_stat): (BorrowedFd<'_>, &EntryStat),
+        target: BorrowedFd<'_>,
+        counted: bool,
+    ) -> Result<ring::digest::Digest, Failure> {
+        let progress = (counted && self.counted).then_some(&*self.progress);
+        data.copy_digested(
+            self.fs,
+            &self.cancelled,
+            (source, target),
+            source_stat.size,
+            |bytes| {
+                if let Some(progress) = progress {
+                    progress.add_bytes(bytes);
+                }
+            },
+        )
+    }
+
     /// Copies all of `source` into `target` and reads its metadata, and
     /// returns that with the source as read. When recording, a source that
-    /// changed meanwhile is read once more; `None` if it changed again.
+    /// changed meanwhile is read once more; `None` if it changed again. A
+    /// source on a mount with coarse times, read within one of its ticks,
+    /// is copied with a digest that a move compares it with later.
     fn copy_file(
         &self,
         data: &mut Data,
@@ -1477,28 +1515,54 @@ impl Copy {
         source: &Opened,
         target: BorrowedFd<'_>,
         parent: &EntryStat,
-    ) -> Result<Option<(Snapshot, EntryStat)>, Failure> {
+    ) -> Result<Option<(Snapshot, manifest::Read)>, Failure> {
         let mut stat = source.stat;
+        let source_fd = source.fd.as_fd();
+        let coarse_times = self
+            .recording
+            .then(|| {
+                *self
+                    .source_times
+                    .get_or_init(|| Mount::new(self.fs, source_fd).coarse_times)
+            })
+            .flatten();
         for attempt in 0..2 {
             if attempt > 0 {
                 self.fs.set_len(target, 0)?;
             }
-            let source_fd = source.fd.as_fd();
             let counted = attempt == 0;
-            self.copy_data(
-                data,
-                target_mount,
-                (source_fd, &stat),
-                target,
-                parent,
-                counted,
-            )?;
+            let settled =
+                coarse_times.and_then(|window| manifest::unsettled(&stat, window, manifest::now()));
+            let digest = match settled {
+                Some(_) => Some(self.copy_digested(data, (source_fd, &stat), target, counted)?),
+                None => {
+                    self.copy_data(
+                        data,
+                        target_mount,
+                        (source_fd, &stat),
+                        target,
+                        parent,
+                        counted,
+                    )?;
+                    None
+                }
+            };
             let snapshot = Snapshot::read(self.fs, source_fd, &stat)?;
             if !self.recording {
-                return Ok(Some((snapshot, stat)));
+                let read = manifest::Read {
+                    stat,
+                    contents: None,
+                };
+                return Ok(Some((snapshot, read)));
             }
             let read = self.fs.stat_fd(source_fd)?;
             if !manifest::changed(&stat, &read) {
+                let read = manifest::Read {
+                    stat: read,
+                    contents: digest
+                        .zip(settled)
+                        .map(|(digest, settled)| manifest::Contents::new(digest, settled)),
+                };
                 return Ok(Some((snapshot, read)));
             }
             stat = read;
@@ -1661,7 +1725,7 @@ struct FileCopy<'a> {
     target: Mount,
     data: Data,
     /// The source as the copy read it.
-    read: Option<EntryStat>,
+    read: Option<manifest::Read>,
 }
 
 impl<'a> FileCopy<'a> {
@@ -1720,8 +1784,8 @@ impl<'a> FileCopy<'a> {
             Some(fd) => self.through_tmpfile(&source, fd, &parent, target),
             None => self.through_named_stage(&source, &parent, target),
         }?;
-        if let (Some(folder), Some(read)) = (recorded_in, &self.read) {
-            folder.entry(at.name, read);
+        if let (Some(folder), Some(read)) = (recorded_in, self.read.take()) {
+            folder.file(at.name, read);
         }
         Ok(copied)
     }
@@ -1746,8 +1810,8 @@ impl<'a> FileCopy<'a> {
         let identity = self.create(name, &parent, |file, fd| {
             file.read_into(&source, fd, &parent)
         })?;
-        if let (Some(folder), Some(read)) = (recorded_in, &self.read) {
-            folder.entry(at.name, read);
+        if let (Some(folder), Some(read)) = (recorded_in, self.read.take()) {
+            folder.file(at.name, read);
         }
         self.copy.add_file(0);
         Ok(identity)

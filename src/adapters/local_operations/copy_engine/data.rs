@@ -13,6 +13,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use ring::digest;
 use rustix::io::Errno;
 
 use super::{Failure, Mount, is_fatal, is_unsupported, lock};
@@ -266,12 +267,33 @@ impl Data {
             match self.copy_data_ranges(ends, route, size, &mut progress)? {
                 // On past the size, which the source may have outgrown.
                 Walked::Done => {
-                    return self.read_write(ends, size, Until::End(size), &mut progress);
+                    return self.read_write(ends, size, Until::End(size), &mut progress, None);
                 }
                 Walked::Dense(from) => offset = from,
             }
         }
         self.copy_span(ends, route, offset, Until::End(size), &mut progress)
+    }
+
+    /// Copies every byte with reads and writes, and returns a digest of
+    /// what it copied.
+    pub(super) fn copy_digested(
+        &mut self,
+        fs: &dyn FsOps,
+        cancelled: &AtomicBool,
+        (source, target): (BorrowedFd<'_>, BorrowedFd<'_>),
+        size: u64,
+        mut progress: impl FnMut(u64),
+    ) -> Result<digest::Digest, Failure> {
+        let ends = Ends {
+            fs,
+            cancelled,
+            source,
+            target,
+        };
+        let mut digest = digest::Context::new(&digest::SHA256);
+        self.read_write(ends, 0, Until::End(size), &mut progress, Some(&mut digest))?;
+        Ok(digest.finish())
     }
 
     /// Copies the data the source reports before `size` and skips its
@@ -338,7 +360,7 @@ impl Data {
                 (Ranged::From(copied), _) => offset = copied,
             }
         }
-        self.read_write(ends, offset, until, progress)
+        self.read_write(ends, offset, until, progress, None)
     }
 
     fn copy_ranges(
@@ -399,12 +421,14 @@ impl Data {
         }
     }
 
+    /// Also digests what it copies into `digest`.
     fn read_write(
         &mut self,
         ends: Ends<'_>,
         mut offset: u64,
         until: Until,
         progress: &mut impl FnMut(u64),
+        mut digest: Option<&mut digest::Context>,
     ) -> Result<(), Failure> {
         // Sized by what is left, so copying a small file maps no large buffer.
         let wanted = usize::try_from(until.expected().saturating_sub(offset))
@@ -432,6 +456,9 @@ impl Data {
             };
             if read == 0 {
                 return Ok(());
+            }
+            if let Some(digest) = &mut digest {
+                digest.update(&self.buffer[..read]);
             }
             let mut written = 0;
             while written < read {

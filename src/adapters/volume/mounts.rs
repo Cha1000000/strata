@@ -8,6 +8,7 @@ use std::{
     os::unix::ffi::OsStringExt,
     path::{Path, PathBuf},
     sync::Arc,
+    time::Duration,
 };
 
 use gtk::gio;
@@ -43,6 +44,22 @@ impl MountType {
                 .split(',')
                 .any(|option| option == "noserverino"),
             _ => true,
+        }
+    }
+
+    /// How long after a file's modification time a rewrite may leave that
+    /// time as it is, where the mount keeps coarse times: one timestamp
+    /// tick, and on sshfs also two seconds for the server's clock, which
+    /// sets the time, running behind ours. A server further behind can
+    /// still hide a rewrite. `None` where a rewrite always moves the time.
+    pub(crate) fn coarse_times(&self, fuse_format: Option<FuseFormat>) -> Option<Duration> {
+        match (family(&self.fs_type), self.fs_type.as_str(), fuse_format) {
+            (Family::Fat, ..) | (_, "fuseblk", Some(FuseFormat::Exfat)) => {
+                Some(Duration::from_secs(2))
+            }
+            (_, "hfs" | "hfsplus", _) => Some(Duration::from_secs(1)),
+            (_, "fuse.sshfs", _) => Some(Duration::from_secs(3)),
+            _ => None,
         }
     }
 }

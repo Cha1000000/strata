@@ -1046,7 +1046,7 @@ impl File {
         }
         // Takes `fd`, so a failed file is closed before it is removed: NFS
         // renames an open file aside instead.
-        let written = (|fd: OwnedFd| -> Result<Option<EntryStat>, Failure> {
+        let written = (|fd: OwnedFd| -> Result<Option<manifest::Read>, Failure> {
             let parent = &self.parent;
             let Some((snapshot, read)) =
                 copy.copy_file(data, &self.mount, &source, fd.as_fd(), parent)?
@@ -1073,7 +1073,7 @@ impl File {
             return Ok(role);
         };
         if let Some(folder) = &self.recorded_in {
-            folder.entry(&self.name, &read);
+            folder.file(&self.name, read);
         }
         if role == Role::First {
             tree.links.written(key, path, created.identity);
