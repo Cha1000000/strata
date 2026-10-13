@@ -349,9 +349,11 @@ fn restore_directory_copy_preserves_permissions_times_and_xattrs() -> Result<(),
         rustix::fs::XattrFlags::empty(),
     )?;
     let destination = fixture.path().join("destination");
+    let source_inode = fs::metadata(&source)?.ino();
     let _scope = FsQuirks::install(fixture.path(), Quirks::without_placement());
     restore_path(&source, &destination, fixture.path())?;
     assert!(!source.exists());
+    assert_ne!(fs::metadata(&destination)?.ino(), source_inode);
     assert_eq!(fs::metadata(&destination)?.mode() & 0o777, 0o750);
     assert_eq!(fs::metadata(&destination)?.modified()?, modified);
     assert_eq!(fs::metadata(&destination)?.accessed()?, accessed);

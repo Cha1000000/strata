@@ -526,14 +526,15 @@ fn an_empty_own_placeholder_rejected_means_unsupported() -> Result<(), Box<dyn E
 
 #[test]
 fn an_ambiguous_rename_failure_is_resolved_by_identity() -> Result<(), Box<dyn Error>> {
-    for (quirks, placed) in [
-        (Quirks::default(), Placed::Renamed),
-        (without_flags(Errno::NOSYS), Placed::ReservedDirectory),
+    for (quirks, folder, placed) in [
+        (Quirks::default(), true, Placed::Renamed),
+        (without_flags(Errno::NOSYS), true, Placed::ReservedDirectory),
+        (Quirks::vboxsf(), false, Placed::OverReservedFile),
+        (Quirks::vboxsf(), true, Placed::AfterCheck),
     ] {
         let root = tempfile::tempdir()?;
         let source = root.path().join("source");
-        fs::create_dir(&source)?;
-        fs::write(source.join("mine"), b"mine")?;
+        make(&source, folder)?;
         let original = identity(&source);
         let _scope = FsQuirks::install(
             root.path(),
@@ -548,7 +549,6 @@ fn an_ambiguous_rename_failure_is_resolved_by_identity() -> Result<(), Box<dyn E
             Ok(placed)
         );
         assert_eq!(identity(&root.path().join("target")), original);
-        assert_eq!(fs::read(root.path().join("target/mine"))?, b"mine");
         assert_eq!(names(root.path())?, ["target"]);
     }
     Ok(())
@@ -556,9 +556,12 @@ fn an_ambiguous_rename_failure_is_resolved_by_identity() -> Result<(), Box<dyn E
 
 #[test]
 fn a_source_substituted_before_it_moves_is_moved_back() -> Result<(), Box<dyn Error>> {
-    for (quirks, folder) in [
-        (Quirks::default(), false),
-        (without_flags(Errno::NOSYS), true),
+    // `skip` passes the renames into `target` that precede the one that moves it.
+    for (quirks, folder, skip) in [
+        (Quirks::default(), false, 0),
+        (without_flags(Errno::NOSYS), true, 1),
+        (Quirks::vboxsf(), false, 1),
+        (Quirks::vboxsf(), true, 2),
     ] {
         let root = tempfile::tempdir()?;
         let source = root.path().join("source");
@@ -569,8 +572,6 @@ fn a_source_substituted_before_it_moves_is_moved_back() -> Result<(), Box<dyn Er
             fs::rename(&raced, &moved).expect("move the original away");
             make(&raced, folder).expect("substitute");
         });
-        // Folders: the second rename into `target` is the one over the placeholder.
-        let skip = usize::from(folder);
         let _scope = FsQuirks::install(
             root.path(),
             Quirks {
@@ -1222,27 +1223,23 @@ fn a_reservation_swapped_before_its_check_keeps_the_swapped_in_item() -> Result<
 
 #[test]
 fn the_reserved_name_rung_needs_the_missing_primitives_confirmed() -> Result<(), Box<dyn Error>> {
-    for (quirks, folder) in [
-        (Quirks::without_placement(), false),
-        (Quirks::without_folder_placement(), true),
-        (
-            Quirks {
-                rename_over_empty_dir: OverEmptyDirectory::Eperm,
-                ..Quirks::without_rename_flags()
-            },
-            true,
-        ),
-    ] {
+    let noreplace_unsettled = || Quirks {
+        fail: vec![(Op::Rename, ".strata-probe-*", 0, Errno::IO)],
+        ..Quirks::vboxsf()
+    };
+    let links_unsettled: fn() -> Quirks = Quirks::without_placement;
+    for quirks in [links_unsettled, noreplace_unsettled] {
         let root = tempfile::tempdir()?;
-        let _scope = FsQuirks::install(root.path(), quirks);
-        make(&root.path().join("source"), folder)?;
+        let scope = FsQuirks::install(root.path(), quirks());
+        make(&root.path().join("source"), false)?;
 
         assert_eq!(
             place_in(root.path(), "source", "target", None),
-            Err(PlaceError::Unsupported),
-            "folder: {folder}"
+            Err(PlaceError::Unsupported)
         );
         assert_eq!(names(root.path())?, ["source"]);
+        // The probe runs once, however many rungs consult it.
+        assert_eq!(scope.count(Op::Create), 1);
     }
     Ok(())
 }

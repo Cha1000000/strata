@@ -298,6 +298,42 @@ fn items_without_noreplace_or_a_usable_link_are_renamed_without_copying()
 }
 
 #[test]
+fn items_no_step_can_place_are_moved_by_copying() -> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let cases: [(&str, fn() -> Quirks, bool); 2] = [
+        ("links unsettled", Quirks::without_placement, false),
+        ("folders unplaceable", Quirks::without_folder_placement, true),
+    ];
+    for (case, quirks, folder) in cases {
+        let root = tempfile::tempdir()?;
+        let _scope = FsQuirks::install(root.path(), quirks());
+        let source = root.path().join("item");
+        let moved = root.path().join("moved");
+        if folder {
+            fs::create_dir(&source)?;
+            fs::write(source.join("inside.txt"), b"inside")?;
+        } else {
+            fs::write(&source, b"inside")?;
+        }
+        let inode = fs::metadata(&source)?.ino();
+
+        move_native(&source, &moved).map_err(|error| format!("{case}: {error}"))?;
+
+        assert_ne!(fs::metadata(&moved)?.ino(), inode, "{case}");
+        let contents = if folder {
+            moved.join("inside.txt")
+        } else {
+            moved.clone()
+        };
+        assert_eq!(fs::read(contents)?, b"inside", "{case}");
+        assert_eq!(names(root.path())?, ["moved"], "{case}");
+    }
+    Ok(())
+}
+
+#[test]
 fn einval_from_every_rung_reports_an_invalid_name_and_keeps_the_source()
 -> Result<(), Box<dyn Error>> {
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
