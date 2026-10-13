@@ -178,6 +178,9 @@ pub(crate) struct Quirks {
     /// Unlinking a file this process holds open renames it to `.nfs*`
     /// instead, as the NFS client does until the last close.
     pub silly_rename: bool,
+    /// Files report a size of 0 whatever they hold, so `copy_file_range`
+    /// copies nothing from them, as virtual files on FUSE (lxcfs) do.
+    pub virtual_sizes: bool,
 }
 
 impl Quirks {
@@ -477,6 +480,9 @@ impl Scope {
         }
         if state.quirks.foreign_group {
             stat.gid = stat.gid.wrapping_add(1);
+        }
+        if state.quirks.virtual_sizes && stat.kind == FileType::RegularFile {
+            stat.size = 0;
         }
         stat
     }
@@ -1136,7 +1142,12 @@ impl FsOps for Scoped {
         len: usize,
     ) -> Result<usize, Errno> {
         assert_off_main_thread();
+        let virtual_size =
+            scope_for(source).is_some_and(|scope| scope.quirk(|quirks| quirks.virtual_sizes));
         between(Op::CopyRange, source, target, || {
+            if virtual_size {
+                return Ok(0);
+            }
             System.copy_range(source, source_offset, target, target_offset, len)
         })
     }

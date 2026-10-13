@@ -304,6 +304,28 @@ fn a_clone_failing_with_eio_is_not_retried() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
+fn a_file_that_reports_no_size_is_copied_whole() -> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock()?;
+    let root = tempfile::tempdir()?;
+    let source = root.path().join("cpuinfo");
+    fs::write(&source, b"processor : 0\n")?;
+    let _scope = FsQuirks::install(
+        root.path(),
+        Quirks {
+            mount_type: Some("fuse.lxcfs"),
+            virtual_sizes: true,
+            ..Quirks::default()
+        },
+    );
+    let target = root.path().join("copy");
+
+    copy(&source, &target)?;
+
+    assert_eq!(fs::read(&target)?, b"processor : 0\n");
+    Ok(())
+}
+
+#[test]
 fn copies_between_mounts_fall_back_to_read_write() -> Result<(), Box<dyn Error>> {
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock()?;
     let mounts = mounts(Quirks::default(), |_| Quirks::default())?;

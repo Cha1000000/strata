@@ -98,13 +98,17 @@ impl Route {
         parent: &EntryStat,
     ) -> Self {
         let target_network = network(target.family);
-        let copy_range = match target_network {
-            None => source_stat.identity.device == parent.identity.device,
-            Some(target_network) => {
-                has_copy_fixes(target_network)
-                    && network(Mount::new(fs, source).family) == Some(target_network)
+        // It stops at the reported size, which virtual files leave at 0
+        // whatever they hold.
+        let copy_range = source_stat.size > 0
+            && match target_network {
+                None => source_stat.identity.device == parent.identity.device,
+                Some(target_network) => {
+                    has_copy_fixes(target_network)
+                        && network(Mount::new(fs, source).family) == Some(target_network)
+                }
             }
-        } && !COPY_RANGE_MISSING.load(Ordering::Relaxed);
+            && !COPY_RANGE_MISSING.load(Ordering::Relaxed);
         Self {
             clone: source_stat.size > 0
                 && target.capabilities().reflink != Some(false)
