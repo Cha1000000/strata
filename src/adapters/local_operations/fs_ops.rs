@@ -633,12 +633,16 @@ impl FsOps for System {
 
     fn open_write(&self, at: Entry<'_>) -> Result<OwnedFd, Errno> {
         assert_off_main_thread();
-        rustix::fs::openat(
+        // NONBLOCK, so a pipe swapped in for the claim fails at once instead
+        // of waiting for a reader.
+        let fd = rustix::fs::openat(
             at.dir,
             at.name,
-            OFlags::WRONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            OFlags::WRONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
             Mode::empty(),
-        )
+        )?;
+        rustix::fs::fcntl_setfl(&fd, OFlags::empty())?;
+        Ok(fd)
     }
 
     fn file_flags(&self, fd: BorrowedFd<'_>) -> Result<u32, Errno> {

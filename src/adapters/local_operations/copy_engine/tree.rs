@@ -528,7 +528,11 @@ impl File {
         }
         let target = Entry::new(&*self.target, &self.target_name);
         let fd = match self.claimed {
-            Some(_) => fs.open_write(target)?,
+            Some(_) => fs.open_write(target).map_err(|error| match error {
+                // A pipe without a reader took the claim's place.
+                Errno::NXIO => Failure::Place(PlaceError::Changed),
+                error => error.into(),
+            })?,
             None => fs
                 .create_exclusive(target, Mode::from_raw_mode(0o600))
                 .map_err(|error| {

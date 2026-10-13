@@ -306,6 +306,69 @@ fn files_are_claimed_where_nodes_are_refused() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
+fn a_claimed_name_swapped_for_a_pipe_fails_without_waiting() -> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock()?;
+    let root = tempfile::tempdir()?;
+    let (sources, destination) = (root.path().join("sources"), root.path().join("destination"));
+    fs::create_dir_all(sources.join("source"))?;
+    fs::create_dir(&destination)?;
+    fs::write(sources.join("source/file.bin"), b"contents")?;
+    let pipe = Arc::new(std::sync::Mutex::new(None));
+    let racer: Racer = {
+        let (destination, pipe) = (destination.clone(), pipe.clone());
+        Box::new(move || {
+            let stage = fs::read_dir(&destination)
+                .and_then(|mut entries| entries.next().expect("the stage"))
+                .expect("list the destination")
+                .path();
+            let claimed = stage.join("file.bin");
+            fs::remove_file(&claimed).expect("remove the claim");
+            rustix::fs::mknodat(
+                rustix::fs::CWD,
+                &claimed,
+                rustix::fs::FileType::Fifo,
+                rustix::fs::Mode::from_raw_mode(0o600),
+                0,
+            )
+            .expect("make a pipe");
+            *pipe.lock().expect("pipe") = Some(claimed);
+        })
+    };
+    let _sources = FsQuirks::install(&sources, Quirks::default());
+    let _destination = FsQuirks::install(
+        &destination,
+        Quirks {
+            before: vec![(Op::OpenWrite, "file.bin", 0, racer)],
+            ..Quirks::nfs3()
+        },
+    );
+    // Without a reader a blocking open waits for ever, so a reader comes
+    // after a while to let the test end.
+    let (done, finished) = std::sync::mpsc::channel::<()>();
+    let rescue = thread::spawn(move || {
+        if finished.recv_timeout(Duration::from_secs(5)).is_ok() {
+            return false;
+        }
+        if let Some(pipe) = pipe.lock().expect("pipe").clone() {
+            let _reader = rustix::fs::open(
+                &pipe,
+                rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::NONBLOCK,
+                rustix::fs::Mode::empty(),
+            );
+        }
+        true
+    });
+
+    let result = copy(&sources.join("source"), &destination.join("target"));
+    let _ = done.send(());
+
+    assert!(!rescue.join().expect("rescue"), "the copy waited on the pipe");
+    assert!(result.is_err(), "{result:?}");
+    assert_eq!(names(&destination)?, Vec::<String>::new());
+    Ok(())
+}
+
+#[test]
 fn a_cancelled_copy_on_nfs_leaves_no_stage() -> Result<(), Box<dyn Error>> {
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock()?;
     let cancellable = gio::Cancellable::new();
