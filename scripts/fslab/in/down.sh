@@ -114,7 +114,9 @@ stop_nfs() {
     wait_until 15 bash -c '[[ -z $(ls /proc/fs/nfsd/clients) ]]'
     exportfs -au
     exportfs -f
-    echo /srv/nfs > /proc/fs/nfsd/unlock_filesystem 2>/dev/null
+    for export in /srv/nfs/v42 /srv/nfs/v3 /srv/nfs; do
+      is_mounted "$export" && echo "$export" > /proc/fs/nfsd/unlock_filesystem 2>/dev/null
+    done
     [[ $(nfsd_threads) == 0 ]] || echo 0 > /proc/fs/nfsd/threads || rpc.nfsd 0
     if ! wait_until 30 nfsd_idle; then
       log "nfsd did not stop: threads $(nfsd_threads), clients: $(echo $(nfsd_clients))"

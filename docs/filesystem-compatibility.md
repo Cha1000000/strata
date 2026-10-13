@@ -260,6 +260,11 @@ Requirements and safety:
 - Images live on a container-private tmpfs and are attached blank, so the host's udev never sees a
   filesystem. `up`, `probe` and `test` check this. Only udiskie ignores the images' directory, so
   stop other automounters (GNOME Disks, KDE) while the lab is up.
+- The NFS exports are container-private tmpfs mounts, not loop devices. After full runs,
+  Linux 7.2 kept a reference to the NFSv4.2 export after nfsd had stopped, with no client,
+  thread or process left, which pinned the export's loop device and its memory on the host until
+  reboot. A leaked tmpfs export pins only its few remaining files. tmpfs has no UUID, so each
+  export sets `fsid=`; it reports birth times, which NFSv4.2 passes on.
 - `down` releases everything that is free and detaches only loop devices still backed by the
   lab's own images, deleting each image once its device is gone. If a mount or loop device stays
   busy, `down` lists what holds it and keeps the container running with that mount, its server and

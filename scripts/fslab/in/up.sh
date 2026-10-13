@@ -112,19 +112,19 @@ mount_tmpfs() {
 }
 
 start_nfs() {
-  local dev
+  local export
+  # tmpfs, not a loop device: after nfsd stops, the kernel can keep a reference
+  # to an NFSv4.2 export, which would pin a loop device on the host until reboot.
+  # Each export is its own tmpfs, so nfsd switches to it and a leak pins only that one.
   mkdir -p /srv/nfs
-  dev=$(attach_blank srv-nfs 1G)
-  mkfs.ext4 -q -F -L FSLABNFS "$dev"
-  mount -i -t ext4 "$dev" /srv/nfs
+  mount -t tmpfs -o size=1m,mode=0755 fslab-nfs /srv/nfs
   for export in v42 v3; do
-    mkdir -p "/srv/nfs/$export/tmp"
-    chown -R "$TEST_UID:$TEST_GID" "/srv/nfs/$export"
-    # nfsd only switches to a sub-export at a mount point.
-    mount --bind "/srv/nfs/$export" "/srv/nfs/$export"
+    mkdir "/srv/nfs/$export"
+    mount -t tmpfs -o "size=1g,mode=0755,uid=$TEST_UID,gid=$TEST_GID" "fslab-nfs-$export" "/srv/nfs/$export"
+    as_test_user mkdir "/srv/nfs/$export/tmp"
   done
-  # The container root is overlayfs, which nfsd cannot export, so the NFSv4
-  # pseudo-root is pinned to the ext4 image with fsid=0.
+  # tmpfs has no UUID, so every export needs an fsid=; fsid=0 makes /srv/nfs the
+  # NFSv4 pseudo-root instead of the container's overlayfs root, which nfsd cannot export.
   cat > /etc/exports <<'EOF'
 /srv/nfs     127.0.0.1(ro,sync,no_subtree_check,no_root_squash,insecure,fsid=0)
 /srv/nfs/v42 127.0.0.1(rw,sync,no_subtree_check,no_root_squash,insecure,fsid=101)
