@@ -16,7 +16,7 @@ use crate::adapters::{
     local_operations::{
         LocalFileIdentity,
         fs_ops::{Entry, EntryStat, FsOps},
-        placement::{self, COPY_PREFIX, PlaceError, Placed},
+        placement::{self, PlaceError, Placed},
     },
     volume::Family,
 };
@@ -38,12 +38,21 @@ pub(super) fn tmpfile_allowed(family: Family) -> bool {
     )
 }
 
+/// Where two different names never collide, unless a folder is casefolded.
+pub(super) fn names_never_collide(family: Family) -> bool {
+    matches!(
+        family,
+        Family::Ext | Family::Xfs | Family::Btrfs | Family::F2fs | Family::Tmpfs
+    )
+}
+
 /// A new hidden file in `dir`, with the stat of its own descriptor.
-pub(super) fn create_file(
+pub(in crate::adapters::local_operations) fn create_file(
     fs: &dyn FsOps,
     dir: BorrowedFd<'_>,
+    prefix: &str,
 ) -> Result<(OsString, (OwnedFd, EntryStat)), PlaceError> {
-    placement::reserve_hidden_name(COPY_PREFIX, |name| {
+    placement::reserve_hidden_name(prefix, |name| {
         let fd = fs
             .create_exclusive(Entry { dir, name }, Mode::from_raw_mode(0o600))
             .map_err(placement::file_creation_error)?;

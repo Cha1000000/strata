@@ -132,7 +132,6 @@ fn isolated_trash_supports_read_copy_move_restore_and_delete() {
             gio::File::for_path(&copied),
             false,
             gio::Cancellable::new(),
-            None,
         ))
         .expect("recursive copy out of Trash");
     assert_eq!(

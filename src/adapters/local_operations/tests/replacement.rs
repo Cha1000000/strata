@@ -4,8 +4,8 @@ use std::os::unix::fs::MetadataExt;
 
 use rustix::{fs::FsWord, io::Errno};
 
-use super::super::{StageContent, StagedSibling, publish_staged_replacement, stage_copier};
-use super::fs_quirks::{Exchange, Op, Trash};
+use super::super::{Copying, StageContent, publish_staged_replacement};
+use super::fs_quirks::{Exchange, Op, Racer, Trash};
 use super::*;
 use crate::{adapters::volume::mount_capabilities, services::ReplacedOriginal};
 
@@ -38,7 +38,7 @@ fn replace_reporting(
         move_source,
         gio::Cancellable::new(),
         None,
-        stage_copier(None, false),
+        Copying::default(),
         &|original| replaced.borrow_mut().push(original),
     ));
     (result, replaced.into_inner())
@@ -70,11 +70,11 @@ fn replacement_publication_preserves_concurrent_arrivals() -> Result<(), Box<dyn
         let root = tempfile::tempdir()?;
         let target = root.path().join("target");
         let staged = if directory {
-            StagedSibling::create(root.path(), StageContent::Directory)?
+            staged(root.path(), StageContent::Directory)?
         } else {
             file_stage(root.path())?
         };
-        let staged_path = staged.path().to_owned();
+        let staged_path = root.path().join(&staged.name);
         if directory {
             fs::write(staged_path.join("incoming"), b"replacement")?;
             fs::create_dir(&target)?;
@@ -117,7 +117,7 @@ fn replacement_publication_reports_a_stage_it_cannot_remove() -> Result<(), Box<
         },
     );
     let staged = file_stage(root.path())?;
-    let staged_path = staged.path().to_owned();
+    let staged_path = root.path().join(&staged.name);
     fs::remove_file(&staged_path)?;
     fs::create_dir(&staged_path)?;
     let error = glib::MainContext::default()
@@ -139,44 +139,38 @@ fn staged_file_replacement_preserves_the_destination_on_disk_full() -> Result<()
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
         .lock()
         .map_err(|error| error.to_string())?;
-    let unique = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)?
-        .as_nanos();
-    let root = std::env::temp_dir().join(format!("strata-replacement-failure-test-{unique}"));
-    let source = root.join("source.txt");
-    let target = root.join("target.txt");
-    fs::create_dir_all(&root)?;
+    let root = tempfile::tempdir()?;
+    let source = root.path().join("source.txt");
+    let target = root.path().join("target.txt");
     fs::write(&source, b"replacement")?;
     fs::write(&target, b"original")?;
+    let _scope = FsQuirks::install(
+        root.path(),
+        Quirks {
+            fail: vec![
+                (Op::CopyRange, "*", 0, Errno::NOSPC),
+                (Op::Write, "*", 0, Errno::NOSPC),
+            ],
+            ..Quirks::default()
+        },
+    );
 
-    let result = glib::MainContext::default().block_on(replace_local_with(
+    let result = glib::MainContext::default().block_on(replace_local(
         gio::File::for_path(source),
         gio::File::for_path(&target),
         false,
         gio::Cancellable::new(),
         None,
-        Rc::new(|_, staged, _, _| {
-            Box::pin(async move {
-                fs::write(
-                    staged
-                        .path()
-                        .ok_or_else(|| super::io_error("missing stage"))?,
-                    b"partial",
-                )
-                .map_err(super::io_error)?;
-                Err(glib::Error::new(
-                    gio::IOErrorEnum::NoSpace,
-                    "injected disk-full failure",
-                ))
-            })
-        }),
-        &|_| {},
     ));
 
-    assert!(result.is_err());
+    assert!(
+        result
+            .as_ref()
+            .is_err_and(|error| error.matches(gio::IOErrorEnum::NoSpace)),
+        "{result:?}"
+    );
     assert_eq!(fs::read(&target)?, b"original");
-    assert_eq!(fs::read_dir(&root)?.count(), 2);
-    fs::remove_dir_all(root)?;
+    assert_eq!(names(root.path())?, ["source.txt", "target.txt"]);
     Ok(())
 }
 
@@ -186,58 +180,43 @@ fn cancelling_staging_preserves_the_destination_and_cleans_the_partial_copy()
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
         .lock()
         .map_err(|error| error.to_string())?;
-    let unique = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)?
-        .as_nanos();
-    let root = std::env::temp_dir().join(format!("strata-replacement-cancel-test-{unique}"));
-    let source = root.join("source.txt");
-    let target = root.join("target.txt");
-    fs::create_dir_all(&root)?;
-    fs::write(&source, b"replacement")?;
-    fs::write(&target, b"original")?;
-    let staging = Rc::new(Cell::new(false));
-    let staging_for_copy = staging.clone();
-    let cancellable = gio::Cancellable::new();
+    for directory in [false, true] {
+        let root = tempfile::tempdir()?;
+        let source = root.path().join("source");
+        let target = root.path().join("target");
+        write_item(&source, directory, &vec![0x5a; 4 * 1024 * 1024])?;
+        write_item(&target, directory, b"original")?;
+        let cancellable = gio::Cancellable::new();
+        let cancel =
+            |cancellable: gio::Cancellable| -> Racer { Box::new(move || cancellable.cancel()) };
+        let _scope = FsQuirks::install(
+            root.path(),
+            Quirks {
+                before: vec![
+                    (Op::CopyRange, "*", 0, cancel(cancellable.clone())),
+                    (Op::Write, "*", 0, cancel(cancellable.clone())),
+                ],
+                ..Quirks::default()
+            },
+        );
 
-    let task = glib::MainContext::default().spawn_local(replace_local_with(
-        gio::File::for_path(&source),
-        gio::File::for_path(&target),
-        false,
-        cancellable.clone(),
-        None,
-        Rc::new(move |_, staged, _, cancellable| {
-            let staging = staging_for_copy.clone();
-            Box::pin(async move {
-                fs::write(
-                    staged
-                        .path()
-                        .ok_or_else(|| super::io_error("missing stage"))?,
-                    b"partial",
-                )
-                .map_err(super::io_error)?;
-                staging.set(true);
-                cancellable.future().await;
-                Err(glib::Error::new(
-                    gio::IOErrorEnum::Cancelled,
-                    "injected cancellation",
-                ))
-            })
-        }),
-        &|_| {},
-    ));
-    let context = glib::MainContext::default();
-    while !staging.get() {
-        context.iteration(true);
+        let result = glib::MainContext::default().block_on(replace_local(
+            gio::File::for_path(&source),
+            gio::File::for_path(&target),
+            false,
+            cancellable,
+            None,
+        ));
+
+        assert!(
+            result
+                .as_ref()
+                .is_err_and(|error| error.matches(gio::IOErrorEnum::Cancelled)),
+            "{directory}: {result:?}"
+        );
+        assert_eq!(read_item(&target, directory)?, b"original");
+        assert_eq!(names(root.path())?, ["source", "target"], "{directory}");
     }
-    cancellable.cancel();
-    let result = context.block_on(task)?;
-    settle_cancelled_io(&context);
-
-    assert!(result.is_err_and(|error| error.matches(gio::IOErrorEnum::Cancelled)));
-    assert_eq!(fs::read(&target)?, b"original");
-    assert_eq!(fs::read(&source)?, b"replacement");
-    assert_eq!(fs::read_dir(&root)?.count(), 2);
-    fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -297,6 +276,15 @@ fn replacing_a_symlink_preserves_link_semantics() -> Result<(), Box<dyn Error>> 
     Ok(())
 }
 
+/// Moves `path` to `kept` and puts new contents at `path`, as an editor saves.
+fn substitute(path: &Path, kept: &Path) -> Racer {
+    let (path, kept) = (path.to_path_buf(), kept.to_path_buf());
+    Box::new(move || {
+        fs::rename(&path, &kept).expect("move the item away");
+        fs::write(&path, b"new arrival").expect("save a new item");
+    })
+}
+
 #[test]
 fn replacement_move_does_not_delete_a_substituted_source() -> Result<(), Box<dyn Error>> {
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
@@ -307,33 +295,26 @@ fn replacement_move_does_not_delete_a_substituted_source() -> Result<(), Box<dyn
     let destination = root.path().join("destination");
     fs::create_dir(&sources)?;
     fs::create_dir(&destination)?;
-    let _volumes = separate_volumes(&sources, &destination);
     let source = sources.join("source.txt");
     let original_source = sources.join("original-source.txt");
     let target = destination.join("target.txt");
     fs::write(&source, b"replacement")?;
     fs::write(&target, b"original target")?;
+    let _sources = FsQuirks::install(&sources, Quirks::default());
+    let _destination = FsQuirks::install(
+        &destination,
+        Quirks {
+            before: vec![(Op::Write, "*", 0, substitute(&source, &original_source))],
+            ..Quirks::default()
+        },
+    );
 
-    let replaced_source = source.clone();
-    let new_source = source.clone();
-    let preserved_source = original_source.clone();
-    let result = glib::MainContext::default().block_on(replace_local_with(
+    let result = glib::MainContext::default().block_on(replace_local(
         gio::File::for_path(&source),
         gio::File::for_path(&target),
         true,
         gio::Cancellable::new(),
         None,
-        Rc::new(move |_, staged, _, _| {
-            let replaced_source = replaced_source.clone();
-            let new_source = new_source.clone();
-            let preserved_source = preserved_source.clone();
-            Box::pin(async move {
-                fs::write(staged.path().unwrap_or_default(), b"replacement").map_err(io_error)?;
-                fs::rename(replaced_source, preserved_source).map_err(io_error)?;
-                fs::write(new_source, b"new arrival").map_err(io_error)
-            })
-        }),
-        &|_| {},
     ));
 
     let error = result.expect_err("a substituted source must fail identity validation");
@@ -384,42 +365,30 @@ fn replacement_stops_before_exchanging_a_substituted_target() -> Result<(), Box<
     let original_target = root.path().join("original-target.txt");
     fs::write(&source, b"replacement")?;
     fs::write(&target, b"original target")?;
-    let staged_path = Rc::new(RefCell::new(None));
-    let recorded_staged_path = staged_path.clone();
-    let replaced_target = target.clone();
-    let new_target = target.clone();
-    let preserved_target = original_target.clone();
+    let _scope = FsQuirks::install(
+        root.path(),
+        Quirks {
+            before: vec![(Op::Clone, "*", 0, substitute(&target, &original_target))],
+            ..Quirks::default()
+        },
+    );
 
-    let result = glib::MainContext::default().block_on(replace_local_with(
+    let result = glib::MainContext::default().block_on(replace_local(
         gio::File::for_path(&source),
         gio::File::for_path(&target),
         false,
         gio::Cancellable::new(),
         None,
-        Rc::new(move |_, staged, _, _| {
-            let staged = staged.path().unwrap_or_default();
-            *recorded_staged_path.borrow_mut() = Some(staged.clone());
-            let replaced_target = replaced_target.clone();
-            let new_target = new_target.clone();
-            let preserved_target = preserved_target.clone();
-            Box::pin(async move {
-                fs::write(&staged, b"replacement").map_err(io_error)?;
-                fs::rename(replaced_target, preserved_target).map_err(io_error)?;
-                fs::write(new_target, b"new arrival").map_err(io_error)
-            })
-        }),
-        &|_| {},
     ));
 
     let error = result.expect_err("a substituted target must fail identity validation");
     assert!(error.to_string().contains("changed"), "{error}");
     assert_eq!(fs::read(target)?, b"new arrival");
     assert_eq!(fs::read(original_target)?, b"original target");
-    let staged_path = staged_path
-        .borrow()
-        .clone()
-        .ok_or("the staging path was not recorded")?;
-    assert!(!staged_path.exists());
+    assert_eq!(
+        names(root.path())?,
+        ["original-target.txt", "source.txt", "target.txt"]
+    );
     Ok(())
 }
 
@@ -796,29 +765,22 @@ fn replace_fails_before_staging_when_no_strategy_is_safe() -> Result<(), Box<dyn
     let target = root.path().join("target");
     fs::write(&source, b"new")?;
     fs::write(&target, b"old")?;
-    let _quirks = FsQuirks::install(
+    let quirks = FsQuirks::install(
         root.path(),
         without_trash(FUSE_SUPER_MAGIC, Quirks::without_placement()),
     );
-    let copied = Rc::new(Cell::new(false));
-    let copy_observed = copied.clone();
 
-    let result = glib::MainContext::default().block_on(replace_local_with(
+    let result = glib::MainContext::default().block_on(replace_local(
         gio::File::for_path(&source),
         gio::File::for_path(&target),
         false,
         gio::Cancellable::new(),
         None,
-        Rc::new(move |_, _, _, _| {
-            copy_observed.set(true);
-            Box::pin(async { Ok(()) })
-        }),
-        &|_| {},
     ));
 
     let error = result.expect_err("no safe way to replace");
     assert!(error.message().contains("replaced safely"), "{error}");
-    assert!(!copied.get());
+    assert_eq!(quirks.count(Op::OpenSource), 0);
     assert_eq!(fs::read(&target)?, b"old");
     assert_eq!(names(root.path())?, ["source", "target"]);
     Ok(())

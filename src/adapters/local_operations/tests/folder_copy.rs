@@ -1,0 +1,433 @@
+// SPDX-License-Identifier: MIT
+
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+use rustix::io::Errno;
+
+use super::fs_quirks::{Op, Racer, Support};
+use super::*;
+use crate::adapters::volume::learn_mount_capability;
+
+/// A source folder and a destination folder, each with its own quirks, so
+/// they act as separate mounts.
+struct Mounts {
+    _root: tempfile::TempDir,
+    sources: PathBuf,
+    destination: PathBuf,
+    _source_scope: FsQuirks,
+    destination_scope: FsQuirks,
+}
+
+fn mounts(destination: Quirks) -> Result<Mounts, Box<dyn Error>> {
+    let root = tempfile::tempdir()?;
+    let sources = root.path().join("sources");
+    let target = root.path().join("destination");
+    fs::create_dir(&sources)?;
+    fs::create_dir(&target)?;
+    Ok(Mounts {
+        _source_scope: FsQuirks::install(&sources, Quirks::default()),
+        destination_scope: FsQuirks::install(&target, destination),
+        _root: root,
+        sources,
+        destination: target,
+    })
+}
+
+fn copy(source: &Path, target: &Path) -> Result<(), glib::Error> {
+    glib::MainContext::default().block_on(copy_new_recursively(
+        gio::File::for_path(source),
+        gio::File::for_path(target),
+        gio::Cancellable::new(),
+    ))
+}
+
+fn mode(path: &Path) -> io::Result<u32> {
+    Ok(fs::symlink_metadata(path)?.mode() & 0o7777)
+}
+
+fn set_mode(path: &Path, mode: u32) -> io::Result<()> {
+    fs::set_permissions(path, fs::Permissions::from_mode(mode))
+}
+
+/// Gives every folder under `root` its owner's access back, so it can be removed.
+fn unlock(root: &Path) -> io::Result<()> {
+    if !fs::symlink_metadata(root)?.is_dir() {
+        return Ok(());
+    }
+    set_mode(root, 0o755)?;
+    for entry in fs::read_dir(root)? {
+        unlock(&entry?.path())?;
+    }
+    Ok(())
+}
+
+fn calls_naming(scope: &FsQuirks, op: Op, name: &str) -> usize {
+    scope
+        .calls()
+        .into_iter()
+        .filter(|call| call.op == op && call.names.iter().any(|called| called == name))
+        .count()
+}
+
+#[test]
+fn copying_a_folder_keeps_folder_permissions_and_times() -> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock()?;
+    let root = tempfile::tempdir()?;
+    let source = root.path().join("source");
+    let target = root.path().join("target");
+    fs::create_dir_all(source.join("private"))?;
+    fs::write(source.join("private/file.txt"), b"contents")?;
+    let folders = [
+        ("private", 0o700, 1_000_000_000),
+        ("", 0o750, 1_100_000_000),
+    ];
+    for (relative, mode, seconds) in folders {
+        let folder = source.join(relative);
+        rustix::fs::setxattr(
+            &folder,
+            "user.strata-test",
+            relative.as_bytes(),
+            rustix::fs::XattrFlags::empty(),
+        )?;
+        set_mode(&folder, mode)?;
+        rustix::fs::utimensat(
+            rustix::fs::CWD,
+            &folder,
+            &rustix::fs::Timestamps {
+                last_access: rustix::fs::Timespec {
+                    tv_sec: seconds - 1_000,
+                    tv_nsec: 0,
+                },
+                last_modification: rustix::fs::Timespec {
+                    tv_sec: seconds,
+                    tv_nsec: 0,
+                },
+            },
+            rustix::fs::AtFlags::empty(),
+        )?;
+    }
+
+    copy(&source, &target)?;
+
+    for (relative, expected, seconds) in folders {
+        let folder = target.join(relative);
+        let metadata = fs::symlink_metadata(&folder)?;
+        assert_eq!(metadata.mode() & 0o7777, expected, "{relative:?}");
+        assert_eq!(metadata.mtime(), seconds, "{relative:?}");
+        assert_eq!(metadata.atime(), seconds - 1_000, "{relative:?}");
+        let mut value = [0u8; 32];
+        let length = rustix::fs::getxattr(&folder, "user.strata-test", &mut value[..])?;
+        assert_eq!(&value[..length], relative.as_bytes(), "{relative:?}");
+    }
+    assert_eq!(fs::read(target.join("private/file.txt"))?, b"contents");
+    Ok(())
+}
+
+const DESCRIPTOR_LIMIT: &str = "STRATA_TEST_DESCRIPTOR_LIMIT";
+
+#[test]
+fn copying_many_read_only_folders_needs_no_descriptor_per_folder() -> Result<(), Box<dyn Error>> {
+    let inner = "adapters::local_operations::tests::folder_copy::read_only_folders_under_a_descriptor_limit";
+    let output = std::process::Command::new(std::env::current_exe()?)
+        .args([inner, "--exact", "--ignored", "--test-threads=1"])
+        .env(DESCRIPTOR_LIMIT, "256")
+        .output()?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success() && stdout.contains("1 passed"),
+        "{stdout}{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(())
+}
+
+#[test]
+#[ignore = "run by copying_many_read_only_folders_needs_no_descriptor_per_folder"]
+fn read_only_folders_under_a_descriptor_limit() -> Result<(), Box<dyn Error>> {
+    let Some(limit) = std::env::var(DESCRIPTOR_LIMIT)
+        .ok()
+        .and_then(|limit| limit.parse().ok())
+    else {
+        return Ok(());
+    };
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock()?;
+    let root = tempfile::tempdir()?;
+    let source = root.path().join("source");
+    let target = root.path().join("target");
+    let groups = (0..40).map(|group| source.join(group.to_string()));
+    for group in groups.clone() {
+        for folder in 0..50 {
+            fs::create_dir_all(group.join(folder.to_string()))?;
+        }
+    }
+    for group in groups.clone() {
+        for folder in 0..50 {
+            set_mode(&group.join(folder.to_string()), 0o555)?;
+        }
+        set_mode(&group, 0o555)?;
+    }
+    rustix::process::setrlimit(
+        rustix::process::Resource::Nofile,
+        rustix::process::Rlimit {
+            current: Some(limit),
+            maximum: Some(limit),
+        },
+    )?;
+
+    let copied = copy(&source, &target);
+
+    let modes = (0..40)
+        .flat_map(|group| (0..50).map(move |folder| format!("{group}/{folder}")))
+        .chain((0..40).map(|group| group.to_string()))
+        .map(|folder| mode(&target.join(folder)))
+        .collect::<io::Result<HashSet<_>>>();
+    unlock(&source)?;
+    if target.exists() {
+        unlock(&target)?;
+    }
+    copied?;
+    assert_eq!(modes?, HashSet::from([0o555]));
+    Ok(())
+}
+
+#[test]
+fn copying_into_a_setgid_folder_keeps_it_shared() -> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock()?;
+    let root = tempfile::tempdir()?;
+    let (sources, shared) = (root.path().join("sources"), root.path().join("shared"));
+    fs::create_dir_all(sources.join("project/sub"))?;
+    fs::write(sources.join("project/file.txt"), b"contents")?;
+    set_mode(&sources.join("project/sub"), 0o750)?;
+    fs::create_dir(&shared)?;
+    set_mode(&shared, 0o2775)?;
+    // The source reports a group of its own, which the shared folder's replaces.
+    let _sources = FsQuirks::install(
+        &sources,
+        Quirks {
+            foreign_group: true,
+            ..Quirks::default()
+        },
+    );
+    let destination = FsQuirks::install(&shared, Quirks::default());
+
+    copy(&sources.join("project"), &shared.join("project"))?;
+
+    let group = fs::metadata(&shared)?.gid();
+    for (relative, expected) in [
+        ("project", 0o2755),
+        ("project/sub", 0o2750),
+        ("project/file.txt", 0o644),
+    ] {
+        let metadata = fs::symlink_metadata(shared.join(relative))?;
+        assert_eq!(metadata.mode() & 0o7777, expected, "{relative}");
+        assert_eq!(metadata.gid(), group, "{relative}");
+    }
+    assert_eq!(destination.count(Op::ChownFd), 0);
+    Ok(())
+}
+
+#[test]
+fn a_lost_create_reply_inside_a_stage_is_adopted() -> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock()?;
+    for (op, name) in [
+        (Op::Mkdir, "dir"),
+        (Op::CreateNode, "file.txt"),
+        (Op::Symlink, "link"),
+    ] {
+        let mounts = mounts(Quirks {
+            lost_reply: vec![(op, name, Errno::EXIST)],
+            ..Quirks::nfs3()
+        })?;
+        let source = mounts.sources.join("source");
+        fs::create_dir_all(source.join("dir"))?;
+        fs::write(source.join("dir/inner.txt"), b"inner")?;
+        fs::write(source.join("file.txt"), b"contents")?;
+        std::os::unix::fs::symlink("file.txt", source.join("link"))?;
+        let target = mounts.destination.join("target");
+
+        copy(&source, &target)?;
+
+        assert_eq!(names(&target)?, ["dir", "file.txt", "link"], "{op:?}");
+        assert_eq!(fs::read(target.join("dir/inner.txt"))?, b"inner", "{op:?}");
+        assert_eq!(fs::read(target.join("file.txt"))?, b"contents", "{op:?}");
+        assert_eq!(fs::read_link(target.join("link"))?, Path::new("file.txt"));
+        assert_eq!(
+            calls_naming(&mounts.destination_scope, op, name),
+            1,
+            "{op:?}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn files_are_claimed_where_nodes_are_refused() -> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock()?;
+    let mounts = mounts(Quirks {
+        node_create: Support::Rejected(Errno::PERM),
+        ..Quirks::nfs3()
+    })?;
+    let source = mounts.sources.join("source");
+    fs::create_dir(&source)?;
+    for index in 0..3 {
+        fs::write(source.join(format!("{index}.txt")), index.to_string())?;
+    }
+    let target = mounts.destination.join("target");
+
+    copy(&source, &target)?;
+
+    for index in 0..3 {
+        assert_eq!(
+            fs::read_to_string(target.join(format!("{index}.txt")))?,
+            index.to_string()
+        );
+    }
+    let scope = &mounts.destination_scope;
+    assert_eq!(scope.count(Op::CreateNode), 1, "learned once per copy");
+    assert_eq!(scope.count(Op::CreateReadonly), 3);
+    Ok(())
+}
+
+#[test]
+fn a_cancelled_copy_on_nfs_leaves_no_stage() -> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock()?;
+    let cancellable = gio::Cancellable::new();
+    let cancel = cancellable.clone();
+    let mounts = mounts(Quirks {
+        silly_rename: true,
+        before: vec![(Op::Write, "*", 0, Box::new(move || cancel.cancel()))],
+        ..Quirks::nfs3()
+    })?;
+    let source = mounts.sources.join("source");
+    fs::create_dir_all(source.join("nested"))?;
+    for index in 0..8 {
+        fs::write(source.join(format!("{index}.bin")), vec![0x5a; 256 * 1024])?;
+        fs::write(
+            source.join(format!("nested/{index}.bin")),
+            vec![0xa5; 256 * 1024],
+        )?;
+    }
+
+    let result = glib::MainContext::default().block_on(copy_new_recursively(
+        gio::File::for_path(&source),
+        gio::File::for_path(mounts.destination.join("target")),
+        cancellable,
+    ));
+
+    assert!(
+        result
+            .as_ref()
+            .is_err_and(|error| error.matches(gio::IOErrorEnum::Cancelled)),
+        "{result:?}"
+    );
+    assert_eq!(names(&mounts.destination)?, Vec::<String>::new());
+    Ok(())
+}
+
+#[test]
+fn a_cancelled_merge_on_nfs_leaves_no_partial_file_at_a_real_name() -> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock()?;
+    let cancellable = gio::Cancellable::new();
+    let cancel = cancellable.clone();
+    let mounts = mounts(Quirks {
+        silly_rename: true,
+        before: vec![(Op::Write, "*", 0, Box::new(move || cancel.cancel()))],
+        ..Quirks::nfs3()
+    })?;
+    let source = mounts.sources.join("source");
+    fs::create_dir(&source)?;
+    for index in 0..8 {
+        fs::write(source.join(format!("{index}.bin")), vec![0x5a; 256 * 1024])?;
+    }
+    let live = mounts.destination.join("live");
+    fs::create_dir(&live)?;
+    fs::write(live.join("stays.txt"), b"keep me")?;
+
+    let result = glib::MainContext::default().block_on(copy_recursively(
+        gio::File::for_path(&source),
+        gio::File::for_path(&live),
+        true,
+        cancellable,
+    ));
+
+    assert!(
+        result
+            .as_ref()
+            .is_err_and(|error| error.matches(gio::IOErrorEnum::Cancelled)),
+        "{result:?}"
+    );
+    assert_eq!(fs::read(live.join("stays.txt"))?, b"keep me");
+    let sources = names(&source)?;
+    for name in names(&live)?.into_iter().filter(|name| name != "stays.txt") {
+        assert!(sources.contains(&name), "{name} is not a merged item");
+        assert_eq!(
+            fs::read(live.join(&name))?,
+            fs::read(source.join(&name))?,
+            "{name} is partial"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn a_folder_is_copied_in_place_where_nothing_can_place_it() -> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock()?;
+    let root = tempfile::tempdir()?;
+    let source = root.path().join("source");
+    fs::create_dir_all(source.join("nested"))?;
+    fs::write(source.join("nested/file.txt"), b"contents")?;
+    let destination = root.path().join("destination");
+    fs::create_dir(&destination)?;
+    let scope = FsQuirks::install(&destination, Quirks::without_folder_placement());
+    learn_mount_capability(scope.key(), |capabilities| {
+        capabilities.no_replace = Some(false);
+        capabilities.hard_links = Some(true);
+        capabilities.rename_over_empty_directory = Some(false);
+    });
+
+    copy(&source, &destination.join("target"))?;
+
+    assert_eq!(names(&destination)?, ["target"]);
+    assert_eq!(
+        fs::read(destination.join("target/nested/file.txt"))?,
+        b"contents"
+    );
+    assert!(!scope.used_name(".strata-*"), "{:?}", scope.calls());
+    Ok(())
+}
+
+#[test]
+fn a_stage_with_read_only_folders_is_removed_when_it_cannot_be_published()
+-> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock()?;
+    let root = tempfile::tempdir()?;
+    let source = root.path().join("source");
+    fs::create_dir_all(source.join("sub"))?;
+    fs::write(source.join("sub/file.txt"), b"contents")?;
+    set_mode(&source.join("sub"), 0o555)?;
+    set_mode(&source, 0o555)?;
+    let destination = root.path().join("destination");
+    fs::create_dir(&destination)?;
+    let taken = destination.join("target");
+    let racer: Racer = Box::new(move || fs::create_dir(&taken).expect("take the name"));
+    let _scope = FsQuirks::install(
+        &destination,
+        Quirks {
+            before: vec![(Op::Rename, ".strata-copy-*", 0, racer)],
+            ..Quirks::default()
+        },
+    );
+
+    let result = copy(&source, &destination.join("target"));
+
+    unlock(&source)?;
+    assert!(
+        result
+            .as_ref()
+            .is_err_and(|error| error.matches(gio::IOErrorEnum::Exists)),
+        "{result:?}"
+    );
+    assert_eq!(names(&destination)?, ["target"]);
+    assert_eq!(names(&destination.join("target"))?, Vec::<String>::new());
+    Ok(())
+}

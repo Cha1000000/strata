@@ -840,6 +840,29 @@ pub(super) enum Feasibility {
     No,
 }
 
+/// Whether the ladder can place an entry without risking a clobber, from
+/// what the mount is known to support.
+fn placeable(capabilities: MountCapabilities, directory: bool) -> Option<bool> {
+    let fallback = if directory {
+        capabilities.rename_over_empty_directory
+    } else {
+        capabilities.hard_links
+    };
+    match (capabilities.no_replace, fallback, capabilities.hard_links) {
+        (Some(true), _, _) | (_, Some(true), _) => Some(true),
+        // The reserved-name rung.
+        (Some(false), _, Some(false)) => Some(true),
+        (Some(false), Some(false), Some(true)) => Some(false),
+        _ => None,
+    }
+}
+
+/// Whether a staged entry could be placed in `dir`; `None` until the mount
+/// is known, without probing it.
+pub(super) fn can_place(fs: &dyn FsOps, dir: BorrowedFd<'_>, directory: bool) -> Option<bool> {
+    placeable(Mount::new(fs, dir).capabilities(), directory)
+}
+
 /// Whether an existing entry in `dir` can be moved aside without risking a
 /// clobber, probing the mount when nothing is known yet.
 pub(super) fn can_set_aside(
@@ -847,26 +870,12 @@ pub(super) fn can_set_aside(
     dir: BorrowedFd<'_>,
     directory: bool,
 ) -> Result<Feasibility, PlaceError> {
-    let feasible = |capabilities: MountCapabilities| {
-        let fallback = if directory {
-            capabilities.rename_over_empty_directory
-        } else {
-            capabilities.hard_links
-        };
-        match (capabilities.no_replace, fallback, capabilities.hard_links) {
-            (Some(true), _, _) | (_, Some(true), _) => Some(true),
-            // The reserved-name rung.
-            (Some(false), _, Some(false)) => Some(true),
-            (Some(false), Some(false), Some(true)) => Some(false),
-            _ => None,
-        }
-    };
     let mount = Mount::new(fs, dir);
-    let known = match feasible(mount.capabilities()) {
+    let known = match placeable(mount.capabilities(), directory) {
         Some(known) => known,
         None => {
             mount.probe(true, directory).map_err(PlaceError::Io)?;
-            feasible(mount.capabilities()) == Some(true)
+            placeable(mount.capabilities(), directory) == Some(true)
         }
     };
     Ok(if known {

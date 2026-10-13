@@ -8,11 +8,12 @@ use std::{
     collections::HashSet,
     ffi::{OsStr, OsString},
     os::fd::BorrowedFd,
+    sync::Mutex,
 };
 
 use rustix::io::Errno;
 
-use super::{Mount, is_fatal, is_unsupported};
+use super::{Mount, best_effort, is_fatal, is_unsupported, lock};
 use crate::adapters::{
     local_operations::fs_ops::{EntryStat, FsOps},
     volume::XattrNamespace,
@@ -40,14 +41,6 @@ fn skipped(name: &OsStr) -> bool {
             Some(prefix) => name.starts_with(prefix.as_bytes()),
             None => name == pattern.as_bytes(),
         })
-}
-
-/// Only device, handle and connection failures stop a metadata step.
-fn best_effort(result: Result<(), Errno>) -> Result<(), Errno> {
-    match result {
-        Err(error) if is_fatal(error) => Err(error),
-        _ => Ok(()),
-    }
 }
 
 /// Within two seconds, the coarsest granularity a mount stores.
@@ -105,8 +98,45 @@ impl Snapshot {
         created: &EntryStat,
         parent: &EntryStat,
         mount: &Mount,
-        refused_names: &mut HashSet<OsString>,
+        refused_names: &Mutex<HashSet<OsString>>,
     ) -> Result<(), Errno> {
+        let mode = self.owner_and_xattrs(fs, fd, created, parent, mount, refused_names)?;
+        best_effort(fs.chmod_fd(fd, mode))?;
+        self.apply_times(fs, fd)
+    }
+
+    /// As [`Self::apply`], and a setgid parent hands its bit on. A mode that
+    /// would lock the owner out is returned instead of set, and the owner
+    /// keeps access until the copy is done.
+    pub(super) fn apply_to_folder(
+        &self,
+        fs: &dyn FsOps,
+        fd: BorrowedFd<'_>,
+        created: &EntryStat,
+        parent: &EntryStat,
+        mount: &Mount,
+        refused_names: &Mutex<HashSet<OsString>>,
+    ) -> Result<Option<u32>, Errno> {
+        let mut mode = self.owner_and_xattrs(fs, fd, created, parent, mount, refused_names)?;
+        if parent.mode & 0o2000 != 0 {
+            mode |= 0o2000;
+        }
+        let restrictive = mode & 0o700 != 0o700;
+        best_effort(fs.chmod_fd(fd, if restrictive { mode | 0o700 } else { mode }))?;
+        self.apply_times(fs, fd)?;
+        Ok(restrictive.then_some(mode))
+    }
+
+    /// Sets the owner and the xattrs, and returns the mode to set.
+    fn owner_and_xattrs(
+        &self,
+        fs: &dyn FsOps,
+        fd: BorrowedFd<'_>,
+        created: &EntryStat,
+        parent: &EntryStat,
+        mount: &Mount,
+        refused_names: &Mutex<HashSet<OsString>>,
+    ) -> Result<u32, Errno> {
         let shared_group = parent.mode & 0o2000 != 0;
         let other_group = self.gid != created.gid;
         let uid = (self.uid != created.uid).then_some(self.uid);
@@ -122,7 +152,7 @@ impl Snapshot {
         let mut refused = mount.capabilities().refused_xattrs;
         for (name, value) in &self.xattrs {
             let namespace = XattrNamespace::of(name);
-            if refused.contains(namespace) || refused_names.contains(name) {
+            if refused.contains(namespace) || lock(refused_names).contains(name) {
                 continue;
             }
             match fs.set_xattr(fd, name, value) {
@@ -133,19 +163,17 @@ impl Snapshot {
                     mount.learn(|capabilities| capabilities.refused_xattrs.insert(namespace));
                 }
                 Err(Errno::PERM | Errno::ACCESS | Errno::INVAL) => {
-                    refused_names.insert(name.clone());
+                    lock(refused_names).insert(name.clone());
                 }
                 Err(_) => {}
             }
         }
         // Special bits would grant another owner's or group's rights.
-        let mode = if owner_kept {
+        Ok(if owner_kept {
             self.mode
         } else {
             self.mode & !0o6000
-        };
-        best_effort(fs.chmod_fd(fd, mode))?;
-        self.apply_times(fs, fd)
+        })
     }
 
     pub(super) fn apply_times(&self, fs: &dyn FsOps, fd: BorrowedFd<'_>) -> Result<(), Errno> {

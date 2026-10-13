@@ -18,7 +18,7 @@ use std::{
 
 use gtk::{gio, glib};
 use rustix::{
-    fs::{AtFlags, FsWord, Mode, RenameFlags},
+    fs::{AtFlags, FileType, FsWord, Mode, RenameFlags},
     io::Errno,
 };
 
@@ -60,6 +60,13 @@ pub(crate) enum Op {
     GetXattr,
     SetXattr,
     MountType,
+    OpenDir,
+    List,
+    CreateNode,
+    CreateReadonly,
+    OpenWrite,
+    FileFlags,
+    SetLinkTimes,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -166,6 +173,11 @@ pub(crate) struct Quirks {
     pub xattrs_refused: Vec<(&'static str, Errno)>,
     /// Listed and read on every file, besides its real xattrs.
     pub extra_xattrs: Vec<(&'static str, &'static [u8])>,
+    /// `mknodat` of a regular file, which vfat and some FUSE daemons refuse.
+    pub node_create: Support,
+    /// Unlinking a file this process holds open renames it to `.nfs*`
+    /// instead, as the NFS client does until the last close.
+    pub silly_rename: bool,
 }
 
 impl Quirks {
@@ -725,6 +737,24 @@ impl Scope {
     }
 }
 
+/// The inode number of the regular file at `entry`, when this process holds
+/// a descriptor for it.
+fn open_in_this_process(entry: Entry<'_>) -> Option<u64> {
+    let stat = System.stat(entry, false).ok()?;
+    if stat.kind != FileType::RegularFile {
+        return None;
+    }
+    let held = std::fs::read_dir("/proc/self/fd")
+        .ok()?
+        .filter_map(Result::ok)
+        .any(|fd| {
+            rustix::fs::stat(fd.path()).is_ok_and(|open| {
+                open.st_dev == stat.identity.device && open.st_ino == stat.identity.inode
+            })
+        });
+    held.then_some(stat.identity.inode)
+}
+
 fn path_of(dir: BorrowedFd<'_>) -> Option<PathBuf> {
     std::fs::read_link(format!("/proc/self/fd/{}", dir.as_raw_fd())).ok()
 }
@@ -863,6 +893,16 @@ impl FsOps for Scoped {
         assert_off_main_thread();
         match scope_for(at.dir) {
             Some(scope) => scope.run(Op::Unlink, &[at.name], |scope| {
+                if scope.quirk(|quirks| quirks.silly_rename)
+                    && let Some(inode) = open_in_this_process(at)
+                {
+                    let aside = OsString::from(format!(".nfs{inode:016x}"));
+                    let aside = Entry {
+                        dir: at.dir,
+                        name: &aside,
+                    };
+                    return System.rename(at, aside, RenameFlags::NOREPLACE);
+                }
                 scope.resolved(at, |at| System.unlink(at, flags))?;
                 scope.unlinked(at);
                 Ok(())
@@ -1219,6 +1259,74 @@ impl FsOps for Scoped {
                 .ok()
                 .flatten(),
             None => System.mount_type(fd),
+        }
+    }
+
+    fn open_dir(&self, at: Entry<'_>) -> Result<OwnedFd, Errno> {
+        assert_off_main_thread();
+        match scope_for(at.dir) {
+            Some(scope) => scope.run(Op::OpenDir, &[at.name], |scope| {
+                scope.resolved(at, |at| System.open_dir(at))
+            }),
+            None => System.open_dir(at),
+        }
+    }
+
+    fn list(&self, dir: BorrowedFd<'_>) -> Result<Vec<(OsString, FileType)>, Errno> {
+        assert_off_main_thread();
+        on_fd(dir, Op::List, None, |_| System.list(dir))
+    }
+
+    fn create_node(&self, at: Entry<'_>, mode: Mode) -> Result<(), Errno> {
+        assert_off_main_thread();
+        match scope_for(at.dir) {
+            Some(scope) => scope.run(Op::CreateNode, &[at.name], |scope| {
+                scope.creating(at, || match scope.quirk(|quirks| quirks.node_create) {
+                    Support::Rejected(error) => Err(error),
+                    Support::Supported => System.create_node(at, mode),
+                })
+            }),
+            None => System.create_node(at, mode),
+        }
+    }
+
+    fn create_readonly(&self, at: Entry<'_>, mode: Mode) -> Result<OwnedFd, Errno> {
+        assert_off_main_thread();
+        match scope_for(at.dir) {
+            Some(scope) => scope.run(Op::CreateReadonly, &[at.name], |scope| {
+                scope.creating(at, || System.create_readonly(at, mode))
+            }),
+            None => System.create_readonly(at, mode),
+        }
+    }
+
+    fn open_write(&self, at: Entry<'_>) -> Result<OwnedFd, Errno> {
+        assert_off_main_thread();
+        match scope_for(at.dir) {
+            Some(scope) => scope.run(Op::OpenWrite, &[at.name], |scope| {
+                scope.resolved(at, |at| System.open_write(at))
+            }),
+            None => System.open_write(at),
+        }
+    }
+
+    fn file_flags(&self, fd: BorrowedFd<'_>) -> Result<u32, Errno> {
+        assert_off_main_thread();
+        on_fd(fd, Op::FileFlags, None, |_| System.file_flags(fd))
+    }
+
+    fn set_link_times(
+        &self,
+        at: Entry<'_>,
+        atime: (i64, u32),
+        mtime: (i64, u32),
+    ) -> Result<(), Errno> {
+        assert_off_main_thread();
+        match scope_for(at.dir) {
+            Some(scope) => scope.run(Op::SetLinkTimes, &[at.name], |scope| {
+                scope.resolved(at, |at| System.set_link_times(at, atime, mtime))
+            }),
+            None => System.set_link_times(at, atime, mtime),
         }
     }
 }

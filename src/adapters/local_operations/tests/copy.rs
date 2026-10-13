@@ -3,7 +3,9 @@
 use rustix::io::Errno;
 
 use super::super::{
-    StageContent, StagedSibling, copy_to_new_stage, publish_staged_without_replace, stage_copier,
+    StageContent, StagedSibling,
+    copy_engine::{Destination, Options, copy_local},
+    publish_staged_without_replace,
 };
 use super::fs_quirks::{Op, Racer, Support};
 use super::*;
@@ -24,21 +26,18 @@ fn nested_copy_shares_one_worker_budget_across_subdirectories() -> Result<(), Bo
             fs::write(directory.join(file.to_string()), format!("{folder}/{file}"))?;
         }
     }
-    COPY_ACTIVITY.with(|activity| activity.set((0, 0)));
-    glib::MainContext::default().block_on(super::super::copy_recursively_local(
-        Arc::new(open_local_parent_directory(root.path())?),
-        OsString::from("source"),
-        gio::File::for_path(&target),
-        super::super::CopyOptions {
-            into: super::super::CopyInto::New,
+    *copy_activity() = (0, 0);
+    glib::MainContext::default().block_on(copy_local(
+        source,
+        Destination::New(target.clone()),
+        Options {
             fat_family: false,
-            workers: 2,
+            workers: Some(2),
         },
-        gio::Cancellable::new(),
         None,
-        None,
+        &gio::Cancellable::new(),
     ))?;
-    let (active, peak) = COPY_ACTIVITY.with(Cell::get);
+    let (active, peak) = *copy_activity();
     assert_eq!(active, 0, "all file copies must settle before completion");
     assert!(
         peak <= 2,
@@ -75,7 +74,6 @@ fn recursive_copy_preserves_nested_directory_contents() -> Result<(), Box<dyn Er
         gio::File::for_path(&target),
         false,
         gio::Cancellable::new(),
-        None,
     ));
 
     assert!(result.is_ok());
@@ -83,15 +81,19 @@ fn recursive_copy_preserves_nested_directory_contents() -> Result<(), Box<dyn Er
     assert_eq!(fs::read(target.join("nested/child.txt"))?, b"child");
 
     fs::write(source.join("top.txt"), b"replacement")?;
-    let overwrite = glib::MainContext::default().block_on(copy_recursively(
+    let merged = glib::MainContext::default().block_on(copy_recursively(
         gio::File::for_path(&source),
         gio::File::for_path(&target),
         true,
         gio::Cancellable::new(),
-        None,
     ));
-    assert!(overwrite.is_ok());
-    assert_eq!(fs::read(target.join("top.txt"))?, b"replacement");
+    assert!(
+        merged
+            .as_ref()
+            .is_err_and(|error| error.matches(gio::IOErrorEnum::Exists)),
+        "a merge only fills names it moved out of the way: {merged:?}"
+    );
+    assert_eq!(fs::read(target.join("top.txt"))?, b"top");
 
     fs::remove_dir_all(root)?;
     Ok(())
@@ -121,7 +123,6 @@ fn copy_recursively_does_not_follow_a_symlink_nested_inside_the_tree() -> Result
         gio::File::for_path(&target),
         false,
         gio::Cancellable::new(),
-        None,
     ));
 
     assert!(result.is_ok());
@@ -165,7 +166,6 @@ fn copy_recursively_of_a_symlink_creates_a_symlink_not_a_recursive_copy()
         gio::File::for_path(&target),
         false,
         gio::Cancellable::new(),
-        None,
     ));
 
     assert!(result.is_ok());
@@ -199,7 +199,6 @@ fn copy_accepts_a_symlink_higher_in_the_sources_parent_path() -> Result<(), Box<
         gio::File::for_path(&target),
         false,
         gio::Cancellable::new(),
-        None,
     ));
 
     assert!(result.is_ok(), "{result:?}");
@@ -310,40 +309,41 @@ fn cancelling_recursive_copy_removes_only_its_staging_output() -> Result<(), Box
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
         .lock()
         .map_err(|error| error.to_string())?;
-    let unique = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)?
-        .as_nanos();
-    let root = std::env::temp_dir().join(format!("strata-copy-cancel-test-{unique}"));
-    let source = root.join("source");
-    let target = root.join("target");
+    let root = tempfile::tempdir()?;
+    let source = root.path().join("source");
+    let target = root.path().join("target");
     fs::create_dir_all(source.join("nested"))?;
     fs::write(source.join("nested/item.txt"), b"contents")?;
-    fs::write(root.join("pre-existing.txt"), b"keep")?;
-
+    fs::write(root.path().join("pre-existing.txt"), b"keep")?;
     let cancellable = gio::Cancellable::new();
-    let task = glib::MainContext::default().spawn_local(copy_new_recursively(
+    let cancel = cancellable.clone();
+    let _scope = FsQuirks::install(
+        root.path(),
+        Quirks {
+            before: vec![(
+                Op::OpenSource,
+                "item.txt",
+                0,
+                Box::new(move || cancel.cancel()),
+            )],
+            ..Quirks::default()
+        },
+    );
+
+    let result = glib::MainContext::default().block_on(copy_new_recursively(
         gio::File::for_path(&source),
         gio::File::for_path(&target),
-        cancellable.clone(),
+        cancellable,
     ));
-    let context = glib::MainContext::default();
-    loop {
-        context.iteration(true);
-        if fs::read_dir(&root)?.any(|entry| {
-            entry.is_ok_and(|entry| entry.file_name().to_string_lossy().starts_with(".strata-"))
-        }) {
-            break;
-        }
-    }
-    cancellable.cancel();
-    let result = context.block_on(task)?;
-    settle_cancelled_io(&context);
 
-    assert!(result.is_err_and(|error| error.matches(gio::IOErrorEnum::Cancelled)));
-    assert!(!target.exists());
-    assert_eq!(fs::read(root.join("pre-existing.txt"))?, b"keep");
-    assert_eq!(fs::read_dir(&root)?.count(), 2);
-    fs::remove_dir_all(root)?;
+    assert!(
+        result
+            .as_ref()
+            .is_err_and(|error| error.matches(gio::IOErrorEnum::Cancelled)),
+        "{result:?}"
+    );
+    assert_eq!(names(root.path())?, ["pre-existing.txt", "source"]);
+    assert_eq!(fs::read(root.path().join("pre-existing.txt"))?, b"keep");
     Ok(())
 }
 
@@ -481,44 +481,41 @@ fn a_stage_replaced_during_the_copy_is_kept() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn a_file_stage_turned_folder_is_kept_when_a_name_inside_it_is_taken() -> Result<(), Box<dyn Error>>
-{
+fn a_folder_swapped_for_a_link_during_the_copy_is_not_followed() -> Result<(), Box<dyn Error>> {
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
         .lock()
         .map_err(|error| error.to_string())?;
     let root = tempfile::tempdir()?;
     let source = root.path().join("source");
-    fs::create_dir(&source)?;
-    std::os::unix::fs::symlink("elsewhere", source.join("link"))?;
-    let stage_root = root.path().to_path_buf();
+    let outside = root.path().join("outside");
+    fs::create_dir_all(source.join("nested"))?;
+    fs::write(source.join("nested/inside.txt"), b"inside")?;
+    fs::create_dir(&outside)?;
+    fs::write(outside.join("secret.txt"), b"do not copy me")?;
+    let (nested, moved) = (source.join("nested"), source.join("moved"));
     let racer: Racer = Box::new(move || {
-        fs::write(only_stage(&stage_root).join("link"), b"theirs").expect("take the name")
+        fs::rename(&nested, &moved).expect("move the folder away");
+        std::os::unix::fs::symlink("../outside", &nested).expect("put a link in its place");
     });
     let _scope = FsQuirks::install(
         root.path(),
         Quirks {
-            before: vec![(Op::Symlink, "link", 0, racer)],
+            before: vec![(Op::OpenDir, "nested", 0, racer)],
             ..Quirks::default()
         },
     );
-    let (copy, cancellable) = (stage_copier(None, false), gio::Cancellable::new());
-    let source_file = gio::File::for_path(&source);
 
-    // As if the source was still a file when its type was read.
     let error = glib::MainContext::default()
-        .block_on(copy_to_new_stage(
-            &source_file,
-            gio::FileType::Regular,
-            &root.path().join("target"),
-            &cancellable,
-            &|stage, kind| copy(source_file.clone(), stage, kind, cancellable.clone()),
+        .block_on(copy_new_recursively(
+            gio::File::for_path(&source),
+            gio::File::for_path(root.path().join("target")),
+            gio::Cancellable::new(),
         ))
-        .err()
-        .ok_or("the copy failed")?;
+        .expect_err("the swapped folder is refused");
 
-    assert!(error.message().contains("was retained"), "{error}");
-    assert_eq!(names(root.path())?.len(), 2);
-    assert_eq!(fs::read(only_stage(root.path()).join("link"))?, b"theirs");
+    assert!(error.message().contains("changed"), "{error}");
+    assert_eq!(names(root.path())?, ["outside", "source"]);
+    assert_eq!(names(&outside)?, ["secret.txt"]);
     Ok(())
 }
 
@@ -542,7 +539,6 @@ fn copying_symlinks_accepts_an_aliased_destination() -> Result<(), Box<dyn Error
         gio::File::for_path(alias.join("link")),
         false,
         gio::Cancellable::new(),
-        None,
     ))?;
     assert_eq!(
         fs::read_link(actual.join("link"))?,
@@ -579,43 +575,23 @@ fn copying_a_tree_with_a_named_pipe_fails_instead_of_blocking() -> Result<(), Bo
         )?;
     }
 
-    let result = glib::MainContext::default().block_on(copy_recursively(
-        gio::File::for_path(&source),
-        gio::File::for_path(&target),
-        false,
-        gio::Cancellable::new(),
-        None,
-    ));
+    let error = glib::MainContext::default()
+        .block_on(copy_new_recursively(
+            gio::File::for_path(&source),
+            gio::File::for_path(&target),
+            gio::Cancellable::new(),
+        ))
+        .expect_err("a named pipe cannot be copied as a regular file");
 
-    let error = result.expect_err("a named pipe cannot be copied as a regular file");
     assert!(
         error.to_string().contains("pipe"),
         "the error should name the entry: {error}"
     );
-    assert!(!target.join("00-pipe").exists());
-    let entries_after_error = fs::read_dir(&target)?
-        .map(|entry| entry.map(|entry| entry.file_name()))
-        .collect::<Result<HashSet<_>, _>>()?;
     glib::MainContext::default().block_on(glib::timeout_future(Duration::from_millis(20)));
-    let entries_after_settling = fs::read_dir(&target)?
-        .map(|entry| entry.map(|entry| entry.file_name()))
-        .collect::<Result<HashSet<_>, _>>()?;
-    assert_eq!(entries_after_settling, entries_after_error);
-    fs::remove_dir_all(&target)?;
-    let staged = glib::MainContext::default().block_on(copy_new_recursively(
-        gio::File::for_path(&source),
-        gio::File::for_path(&target),
-        gio::Cancellable::new(),
-    ));
-    assert!(staged.is_err());
-    assert!(
-        !target.exists(),
-        "failed new copies must not expose partial trees"
-    );
     assert_eq!(
-        fs::read_dir(root.path())?.count(),
-        1,
-        "failed stages are removed"
+        names(root.path())?,
+        ["source"],
+        "failed new copies leave no partial tree"
     );
     Ok(())
 }
@@ -709,7 +685,6 @@ fn fat_family_copy_sanitizes_an_invalid_name_instead_of_discarding_the_whole_tre
         gio::File::for_path(&target),
         false,
         gio::Cancellable::new(),
-        None,
     ));
 
     assert!(result.is_ok(), "{result:?}");
@@ -745,7 +720,6 @@ fn fat_family_copy_disambiguates_sibling_names_that_collide_after_sanitizing()
         gio::File::for_path(&target),
         false,
         gio::Cancellable::new(),
-        None,
     ));
 
     assert!(result.is_ok(), "{result:?}");
@@ -778,7 +752,6 @@ fn non_fat_copy_leaves_invalid_characters_untouched() -> Result<(), Box<dyn Erro
         gio::File::for_path(&target),
         false,
         gio::Cancellable::new(),
-        None,
     ));
 
     assert!(result.is_ok(), "{result:?}");
@@ -787,11 +760,11 @@ fn non_fat_copy_leaves_invalid_characters_untouched() -> Result<(), Box<dyn Erro
 }
 
 fn stage(root: &Path, directory: bool) -> Result<StagedSibling, Box<dyn Error>> {
-    Ok(if directory {
-        StagedSibling::create(root, StageContent::Directory)?
+    if directory {
+        staged(root, StageContent::Directory)
     } else {
-        file_stage(root)?
-    })
+        file_stage(root)
+    }
 }
 
 fn publish(staged: StagedSibling, target: &Path) -> Result<(), glib::Error> {
@@ -826,7 +799,7 @@ fn staged_publication_without_rename_flags_places_the_stage_itself() -> Result<(
             let root = tempfile::tempdir()?;
             let _scope = FsQuirks::install(root.path(), quirks());
             let staged = stage(root.path(), directory)?;
-            let staged_path = staged.path();
+            let staged_path = root.path().join(&staged.name);
             let target = root.path().join("target");
             if directory {
                 fs::create_dir_all(staged_path.join("nested"))?;
@@ -864,7 +837,7 @@ fn staged_publication_refuses_to_overwrite_an_existing_target() -> Result<(), Bo
             let root = tempfile::tempdir()?;
             let _scope = FsQuirks::install(root.path(), quirks());
             let staged = stage(root.path(), directory)?;
-            let staged_path = staged.path();
+            let staged_path = root.path().join(&staged.name);
             let target = root.path().join("target");
             if directory {
                 fs::create_dir(&target)?;
@@ -923,7 +896,7 @@ fn staged_publication_preserves_racing_destinations() -> Result<(), Box<dyn Erro
                 },
             );
             let staged = stage(root.path(), source_directory)?;
-            let stage_path = staged.path();
+            let stage_path = root.path().join(&staged.name);
             if !source_directory {
                 fs::write(&stage_path, b"new data")?;
             }
@@ -950,8 +923,8 @@ fn staged_symlinks_are_recreated_where_links_are_missing() -> Result<(), Box<dyn
         .map_err(|error| error.to_string())?;
     let root = tempfile::tempdir()?;
     let _scope = FsQuirks::install(root.path(), Quirks::vboxsf());
-    let staged = StagedSibling::create(root.path(), StageContent::Symlink("missing".into()))?;
-    let staged_path = staged.path();
+    let staged = staged(root.path(), StageContent::Symlink("missing".into()))?;
+    let staged_path = root.path().join(&staged.name);
     let target = root.path().join("target");
 
     publish(staged, &target)?;
@@ -969,7 +942,7 @@ fn staged_fallback_removes_reserved_directory_on_copy_error() -> Result<(), Box<
     let root = tempfile::tempdir()?;
     let _scope = FsQuirks::install(root.path(), Quirks::without_placement());
     let staged = stage(root.path(), true)?;
-    let staged_path = staged.path();
+    let staged_path = root.path().join(&staged.name);
     let _socket = std::os::unix::net::UnixListener::bind(staged_path.join("unsupported.sock"))?;
     let target = root.path().join("target");
 
@@ -1018,13 +991,13 @@ fn a_stage_left_after_the_exclusive_copy_is_reported() -> Result<(), Box<dyn Err
         fs::remove_file(&stage).expect("remove file stage");
         fs::create_dir(&stage).expect("replace stage with directory");
     });
-    // One stat records the stage and two decide publication; the fourth is the discard.
+    // Two stats decide publication; the third is the discard.
     let _scope = FsQuirks::install(
         root.path(),
-        reusing_stage_inodes((Op::Stat, ".strata-replacement-*", 3, racer)),
+        reusing_stage_inodes((Op::Stat, ".strata-replacement-*", 2, racer)),
     );
     let staged = stage(root.path(), false)?;
-    let staged_path = staged.path();
+    let staged_path = root.path().join(&staged.name);
     fs::write(&staged_path, b"copied")?;
     let target = root.path().join("target");
 
@@ -1060,7 +1033,7 @@ fn a_stage_swapped_before_publication_is_neither_published_nor_deleted()
         reusing_stage_inodes((Op::Rename, ".strata-replacement-*", 0, racer)),
     );
     let staged = stage(root.path(), false)?;
-    let staged_path = staged.path();
+    let staged_path = root.path().join(&staged.name);
     let target = root.path().join("target");
 
     let error = publish(staged, &target).expect_err("a swapped stage is refused");
@@ -1082,41 +1055,45 @@ fn cancelling_staged_fallback_removes_its_reserved_directory() -> Result<(), Box
         .lock()
         .map_err(|error| error.to_string())?;
     let root = tempfile::tempdir()?;
-    let scope = FsQuirks::install(root.path(), Quirks::without_placement());
+    let target = root.path().join("target");
+    let cancellable = gio::Cancellable::new();
+    let reserved = Arc::new(AtomicBool::new(false));
+    let (seen, made, cancel) = (reserved.clone(), target.clone(), cancellable.clone());
+    let racer: Racer = Box::new(move || {
+        seen.store(made.is_dir(), std::sync::atomic::Ordering::Relaxed);
+        cancel.cancel();
+    });
+    let scope = FsQuirks::install(
+        root.path(),
+        Quirks {
+            before: vec![(Op::OpenSource, "large.bin", 0, racer)],
+            ..Quirks::without_placement()
+        },
+    );
     // No placeholder, so the target appears only when the copy makes it.
     learn_mount_capability(scope.key(), |capabilities| {
         capabilities.rename_over_empty_directory = Some(false);
     });
     let staged = stage(root.path(), true)?;
-    let staged_path = staged.path();
+    let staged_path = root.path().join(&staged.name);
     fs::File::create(staged_path.join("large.bin"))?.set_len(64 * 1024 * 1024)?;
-    let target = root.path().join("target");
-    let cancellable = gio::Cancellable::new();
-    let finished = Rc::new(Cell::new(false));
-    let completed = finished.clone();
-    let publish_target = target.clone();
-    let publish_cancellable = cancellable.clone();
-    let context = glib::MainContext::default();
-    let task = context.spawn_local(async move {
-        let result =
-            publish_staged_without_replace(staged, publish_target, publish_cancellable).await;
-        completed.set(true);
-        result
-    });
-    // The pause lets a worker make the folder before its result is
-    // dispatched, so the cancel lands in between.
-    while !target.exists() && !finished.get() {
-        context.iteration(false);
-        thread::sleep(Duration::from_millis(1));
-    }
+
+    let result = glib::MainContext::default().block_on(publish_staged_without_replace(
+        staged,
+        target.clone(),
+        cancellable,
+    ));
+
     assert!(
-        target.exists(),
+        reserved.load(std::sync::atomic::Ordering::Relaxed),
         "fallback must reserve the destination before cancellation"
     );
-    cancellable.cancel();
-    let result = context.block_on(task)?;
-    settle_cancelled_io(&context);
-    assert!(result.is_err_and(|error| error.matches(gio::IOErrorEnum::Cancelled)));
+    assert!(
+        result
+            .as_ref()
+            .is_err_and(|error| error.matches(gio::IOErrorEnum::Cancelled)),
+        "{result:?}"
+    );
     assert!(!target.exists());
     assert!(!staged_path.exists());
     Ok(())
@@ -1141,7 +1118,6 @@ fn a_symlink_child_never_overwrites_an_existing_entry() -> Result<(), Box<dyn Er
             gio::File::for_path(&target),
             true,
             gio::Cancellable::new(),
-            None,
         ))
         .expect_err("an existing entry blocks the link");
 
@@ -1156,27 +1132,41 @@ fn read_only_items_keep_their_xattrs() -> Result<(), Box<dyn Error>> {
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
         .lock()
         .map_err(|error| error.to_string())?;
-    let root = tempfile::tempdir()?;
-    let source = root.path().join("source.txt");
-    let target = root.path().join("target.txt");
-    fs::write(&source, b"contents")?;
-    rustix::fs::setxattr(
-        &source,
-        "user.strata-test",
-        b"metadata",
-        rustix::fs::XattrFlags::empty(),
-    )?;
-    fs::set_permissions(&source, fs::Permissions::from_mode(0o444))?;
+    for (directory, mode) in [(false, 0o444), (true, 0o555)] {
+        let root = tempfile::tempdir()?;
+        let source = root.path().join("source");
+        let target = root.path().join("target");
+        if directory {
+            fs::create_dir(&source)?;
+            fs::write(source.join("inside.txt"), b"contents")?;
+        } else {
+            fs::write(&source, b"contents")?;
+        }
+        rustix::fs::setxattr(
+            &source,
+            "user.strata-test",
+            b"metadata",
+            rustix::fs::XattrFlags::empty(),
+        )?;
+        fs::set_permissions(&source, fs::Permissions::from_mode(mode))?;
 
-    glib::MainContext::default().block_on(copy_new_recursively(
-        gio::File::for_path(&source),
-        gio::File::for_path(&target),
-        gio::Cancellable::new(),
-    ))?;
+        let copied = glib::MainContext::default().block_on(copy_new_recursively(
+            gio::File::for_path(&source),
+            gio::File::for_path(&target),
+            gio::Cancellable::new(),
+        ));
 
-    assert_eq!(fs::metadata(&target)?.mode() & 0o7777, 0o444);
-    let mut value = [0u8; 32];
-    let count = rustix::fs::getxattr(&target, "user.strata-test", &mut value[..])?;
-    assert_eq!(&value[..count], b"metadata");
+        let copied_mode = fs::metadata(&target).map(|metadata| metadata.mode() & 0o7777);
+        let mut value = [0u8; 32];
+        let xattr = rustix::fs::getxattr(&target, "user.strata-test", &mut value[..]);
+        for path in [&source, &target] {
+            if path.is_dir() {
+                fs::set_permissions(path, fs::Permissions::from_mode(0o755))?;
+            }
+        }
+        copied?;
+        assert_eq!(copied_mode?, mode, "{directory}");
+        assert_eq!(&value[..xattr?], b"metadata", "{directory}");
+    }
     Ok(())
 }

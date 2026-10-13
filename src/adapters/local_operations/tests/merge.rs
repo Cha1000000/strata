@@ -6,10 +6,8 @@ use super::fs_quirks::{Op, Trash};
 use super::*;
 use crate::adapters::volume::learn_mount_capability;
 
-fn real_copy() -> StageCopy {
-    Rc::new(|source, target, _directory, cancellable| {
-        copy_recursively(source, target, true, cancellable, None)
-    })
+fn real_copy() -> CopyStep {
+    Rc::new(|source, target, cancellable| copy_recursively(source, target, true, cancellable))
 }
 
 /// Substitutes Trash staging with a rename into `staging`, recording the
@@ -61,8 +59,8 @@ fn fat_merge_backs_up_sanitized_collisions_and_records_actual_paths() -> Result<
         None,
         MergeHooks {
             fat_family: true,
-            copy_into_target: Rc::new(|source, target, _, cancellable| {
-                copy_recursively_fat_family(source, target, true, cancellable, None)
+            copy_into_target: Rc::new(|source, target, cancellable| {
+                copy_recursively_fat_family(source, target, true, cancellable)
             }),
             stage_overwrite: stage,
             on_merged: &on_merged,
@@ -312,6 +310,43 @@ fn a_staging_failure_aborts_the_merge_and_reports_only_what_was_staged()
 }
 
 #[test]
+fn merge_places_a_read_only_incoming_folder() -> Result<(), Box<dyn Error>> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let root = tempfile::tempdir()?;
+    let source = root.path().join("source");
+    let target = root.path().join("target");
+    fs::create_dir_all(source.join("incoming"))?;
+    fs::create_dir_all(&target)?;
+    fs::write(source.join("incoming/file.txt"), b"new")?;
+    fs::write(target.join("stays.txt"), b"keep me")?;
+    let incoming = source.join("incoming");
+    fs::set_permissions(&incoming, fs::Permissions::from_mode(0o555))?;
+
+    let result = glib::MainContext::default().block_on(merge_local(
+        gio::File::for_path(&source),
+        gio::File::for_path(&target),
+        false,
+        gio::Cancellable::new(),
+        &no_plan,
+    ));
+
+    let placed = fs::metadata(target.join("incoming")).map(|metadata| metadata.mode() & 0o7777);
+    for folder in [&incoming, &target.join("incoming")] {
+        if folder.is_dir() {
+            fs::set_permissions(folder, fs::Permissions::from_mode(0o755))?;
+        }
+    }
+    assert!(result.is_ok(), "{result:?}");
+    assert_eq!(placed?, 0o555);
+    assert_eq!(fs::read(target.join("incoming/file.txt"))?, b"new");
+    assert_eq!(fs::read(target.join("stays.txt"))?, b"keep me");
+    Ok(())
+}
+
+#[test]
 fn a_merge_move_removes_the_emptied_source() -> Result<(), Box<dyn Error>> {
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
         .lock()
@@ -411,7 +446,7 @@ fn a_failed_merge_preserves_the_destinations_existing_contents() -> Result<(), B
         None,
         MergeHooks {
             fat_family: false,
-            copy_into_target: Rc::new(|_, target, _directory, _| {
+            copy_into_target: Rc::new(|_, target, _| {
                 Box::pin(async move {
                     fs::write(
                         target
@@ -796,7 +831,7 @@ fn merge_through_trash(
     source: &Path,
     target: &Path,
     move_source: bool,
-    copy_into_target: StageCopy,
+    copy_into_target: CopyStep,
 ) -> (Result<(), glib::Error>, Vec<MergePlan>) {
     let (plans, on_merged) = recorded_plans();
     let result = glib::MainContext::default().block_on(merge_local_with(
@@ -897,7 +932,7 @@ fn a_failed_merge_without_trash_puts_back_what_it_can_and_names_the_rest()
             ],
         )?;
         let _quirks = FsQuirks::install(root.path(), without_trash(Quirks::default()));
-        let partial: StageCopy = Rc::new(move |_, target, _, _| {
+        let partial: CopyStep = Rc::new(move |_, target, _| {
             Box::pin(async move {
                 let path = target
                     .path()
@@ -969,7 +1004,7 @@ fn a_failed_aside_puts_every_original_back_before_merging() -> Result<(), Box<dy
             &source,
             &target,
             false,
-            Rc::new(move |_, _, _, _| {
+            Rc::new(move |_, _, _| {
                 copy_observed.set(true);
                 Box::pin(async { Ok(()) })
             }),

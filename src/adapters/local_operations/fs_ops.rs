@@ -115,6 +115,27 @@ pub(super) trait FsOps: Send + Sync {
     fn set_xattr(&self, fd: BorrowedFd<'_>, name: &OsStr, value: &[u8]) -> Result<(), Errno>;
     /// The mountinfo filesystem type of the mount holding `fd`.
     fn mount_type(&self, fd: BorrowedFd<'_>) -> Option<String>;
+    /// The folder at `at`, which may name several components, opened
+    /// without following a symlink anywhere on the way.
+    fn open_dir(&self, at: Entry<'_>) -> Result<OwnedFd, Errno>;
+    /// The folder's entries with their types; `Unknown` where the
+    /// filesystem does not say.
+    fn list(&self, dir: BorrowedFd<'_>) -> Result<Vec<(OsString, FileType)>, Errno>;
+    /// Claims a regular file without opening it.
+    fn create_node(&self, at: Entry<'_>, mode: Mode) -> Result<(), Errno>;
+    /// Creates a file exclusively without opening it for writing, so its
+    /// close flushes nothing (vfat mounted with `flush` waits there).
+    fn create_readonly(&self, at: Entry<'_>, mode: Mode) -> Result<OwnedFd, Errno>;
+    /// Opens a file this copy claimed, for writing.
+    fn open_write(&self, at: Entry<'_>) -> Result<OwnedFd, Errno>;
+    /// The `FS_IOC_GETFLAGS` inode flags.
+    fn file_flags(&self, fd: BorrowedFd<'_>) -> Result<u32, Errno>;
+    fn set_link_times(
+        &self,
+        at: Entry<'_>,
+        atime: (i64, u32),
+        mtime: (i64, u32),
+    ) -> Result<(), Errno>;
 }
 
 pub(super) struct System;
@@ -564,5 +585,82 @@ impl FsOps for System {
             }
         };
         fs_type.map(str::to_owned)
+    }
+
+    fn open_dir(&self, at: Entry<'_>) -> Result<OwnedFd, Errno> {
+        assert_off_main_thread();
+        retry_local_open(|| {
+            rustix::fs::openat2(
+                at.dir,
+                at.name,
+                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+                Mode::empty(),
+                ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_MAGICLINKS,
+            )
+        })
+    }
+
+    fn list(&self, dir: BorrowedFd<'_>) -> Result<Vec<(OsString, FileType)>, Errno> {
+        assert_off_main_thread();
+        let mut entries = Vec::new();
+        for entry in rustix::fs::Dir::read_from(dir)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            if name != c"." && name != c".." {
+                entries.push((
+                    OsString::from_vec(name.to_bytes().to_vec()),
+                    entry.file_type(),
+                ));
+            }
+        }
+        Ok(entries)
+    }
+
+    fn create_node(&self, at: Entry<'_>, mode: Mode) -> Result<(), Errno> {
+        assert_off_main_thread();
+        rustix::fs::mknodat(at.dir, at.name, FileType::RegularFile, mode, 0)
+    }
+
+    fn create_readonly(&self, at: Entry<'_>, mode: Mode) -> Result<OwnedFd, Errno> {
+        assert_off_main_thread();
+        rustix::fs::openat(
+            at.dir,
+            at.name,
+            OFlags::RDONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            mode,
+        )
+    }
+
+    fn open_write(&self, at: Entry<'_>) -> Result<OwnedFd, Errno> {
+        assert_off_main_thread();
+        rustix::fs::openat(
+            at.dir,
+            at.name,
+            OFlags::WRONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+    }
+
+    fn file_flags(&self, fd: BorrowedFd<'_>) -> Result<u32, Errno> {
+        assert_off_main_thread();
+        rustix::fs::ioctl_getflags(fd).map(|flags| flags.bits())
+    }
+
+    fn set_link_times(
+        &self,
+        at: Entry<'_>,
+        atime: (i64, u32),
+        mtime: (i64, u32),
+    ) -> Result<(), Errno> {
+        assert_off_main_thread();
+        rustix::fs::utimensat(
+            at.dir,
+            at.name,
+            &rustix::fs::Timestamps {
+                last_access: timespec(atime),
+                last_modification: timespec(mtime),
+            },
+            AtFlags::SYMLINK_NOFOLLOW,
+        )
     }
 }

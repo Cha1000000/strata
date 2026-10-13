@@ -9,7 +9,7 @@ use std::{
     future::Future,
     io,
     os::{
-        fd::OwnedFd,
+        fd::{AsFd, OwnedFd},
         unix::{ffi::OsStringExt, fs::PermissionsExt},
     },
     path::{Path, PathBuf},
@@ -30,6 +30,7 @@ mod copy;
 mod create_entry;
 mod deletion;
 mod file_copy;
+mod folder_copy;
 pub(super) mod fs_quirks;
 mod merge;
 mod moves;
@@ -44,88 +45,95 @@ mod sync;
 mod trash_capabilities;
 mod undo;
 
-thread_local! {
-    static COPY_ACTIVITY: Cell<(usize, usize)> = const { Cell::new((0, 0)) };
+/// File copies running at once, and the most seen, across copy workers.
+static COPY_ACTIVITY: std::sync::Mutex<(usize, usize)> = std::sync::Mutex::new((0, 0));
+
+fn copy_activity() -> std::sync::MutexGuard<'static, (usize, usize)> {
+    COPY_ACTIVITY
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
 }
 
 pub(super) struct CopyActivity;
 
 impl CopyActivity {
     pub(super) fn start() -> Self {
-        COPY_ACTIVITY.with(|activity| {
-            let (active, peak) = activity.get();
-            activity.set((active + 1, peak.max(active + 1)));
-        });
+        let mut activity = copy_activity();
+        activity.0 += 1;
+        activity.1 = activity.1.max(activity.0);
         Self
     }
 }
 
 impl Drop for CopyActivity {
     fn drop(&mut self) {
-        COPY_ACTIVITY.with(|activity| {
-            let (active, peak) = activity.get();
-            activity.set((active - 1, peak));
-        });
+        copy_activity().0 -= 1;
     }
 }
 
+/// [`copy_recursively`] onto a FAT-like filesystem.
 fn copy_recursively_fat_family(
     source: gio::File,
     target: gio::File,
-    overwrite_existing: bool,
+    merge: bool,
     cancellable: gio::Cancellable,
-    created_root: Option<Rc<super::CreatedCopyRoot>>,
 ) -> Pin<Box<dyn Future<Output = Result<(), glib::Error>>>> {
-    copy_recursively_with_progress(
+    if merge {
+        return super::merge_copy(None, true)(source, target, cancellable);
+    }
+    Box::pin(copy_new_recursively_on_filesystem(
         source,
         target,
-        if overwrite_existing {
-            super::CopyInto::Existing
-        } else {
-            super::CopyInto::New
-        },
         cancellable,
-        created_root,
         None,
         true,
-    )
-}
-
-fn gio_error(error: io::Error) -> glib::Error {
-    glib::Error::new(
-        gio::io_error_from_errno(error.raw_os_error().unwrap_or_default()),
-        &error.to_string(),
-    )
-}
-
-/// A file stage as a completed copy into `root` leaves it.
-fn file_stage(root: &Path) -> Result<super::StagedSibling, glib::Error> {
-    glib::MainContext::default().block_on(super::copy_to_file_stage(
-        &root.join("target"),
-        &|stage, _| {
-            Box::pin(async move {
-                let path = stage.path().ok_or_else(|| io_error("missing stage path"))?;
-                fs::File::create_new(path).map(drop).map_err(gio_error)
-            })
-        },
     ))
 }
 
+/// An empty file stage in `root`, as a staged copy of a file makes it.
+fn file_stage(root: &Path) -> Result<super::StagedSibling, Box<dyn Error>> {
+    let parent = Arc::new(open_local_parent_directory(root)?);
+    let (name, (_, created)) = super::copy_engine::stage::create_file(
+        super::fs_ops::fs(),
+        parent.as_fd(),
+        super::placement::STAGE_PREFIX,
+    )
+    .map_err(|error| format!("{error:?}"))?;
+    Ok(super::StagedSibling {
+        parent,
+        name,
+        identity: created.identity,
+        restrictive: Vec::new(),
+    })
+}
+
+/// A folder or symlink stage in `root`.
+fn staged(
+    root: &Path,
+    content: super::StageContent,
+) -> Result<super::StagedSibling, Box<dyn Error>> {
+    let parent = Arc::new(open_local_parent_directory(root)?);
+    Ok(
+        super::StagedSibling::create(parent, super::placement::STAGE_PREFIX, content)
+            .map_err(|error| format!("{error:?}"))?,
+    )
+}
+
 use super::{
-    FAT32_MAX_FILE_SIZE, FailedAction, LocalFileIdentity, LocalOperationProvider, MergeHooks,
-    MergePlan, MountTable, PinnedEntry, RestoreEntry, StageCopy, StageOverwrite,
+    CopyStep, FAT32_MAX_FILE_SIZE, FailedAction, LocalFileIdentity, LocalOperationProvider,
+    MergeHooks, MergePlan, MountTable, PinnedEntry, RestoreEntry, StageOverwrite,
     StagedOriginalLookup, TRANSFER_PROGRESS_INTERVAL, TransferProgressTracker, TransferStop,
     await_cancellable, copy_failure_after_cleanup, copy_failure_on_fat32,
     copy_new_recursively_on_filesystem, copy_new_remote_file_with, copy_recursively,
-    copy_recursively_with_progress, deletion_error_message, deletion_error_summary,
-    duplicate_candidate_name, fat_sanitized_name, fat32_file_size_limit, home_trash_entries_at,
-    io_error, is_trash_unsupported_failure, join_local_tasks, local_file_identity, merge_local,
-    merge_local_with, move_local, move_local_with, open_local_parent_directory,
-    operation_error_summary, parallel_delete_local, parse_copy_suffix, permanently_delete_local,
-    permanently_delete_local_path_if_unchanged, replace_local, replace_local_with, run_merge_undo,
-    set_removable_roots_for_test, set_sync_observer, stop_transfer, sync_probe_observations,
-    target_is_fat_family, transfer_is_noop, transfer_sizes, trash_stage_overwrite,
-    unique_fat_sibling_name, validated_child, was_cancelled,
+    deletion_error_message, deletion_error_summary, duplicate_candidate_name, fat_sanitized_name,
+    fat32_file_size_limit, home_trash_entries_at, io_error, is_trash_unsupported_failure,
+    join_local_tasks, local_file_identity, merge_local, merge_local_with, move_local,
+    move_local_with, open_local_parent_directory, operation_error_summary, parallel_delete_local,
+    parse_copy_suffix, permanently_delete_local, permanently_delete_local_path_if_unchanged,
+    replace_local, replace_local_with, run_merge_undo, set_removable_roots_for_test,
+    set_sync_observer, stop_transfer, sync_probe_observations, target_is_fat_family,
+    transfer_is_noop, transfer_sizes, trash_stage_overwrite, unique_fat_sibling_name,
+    validated_child, was_cancelled,
 };
 use crate::{
     model::{EntryKind, FileEntry, Location, MetadataValue},

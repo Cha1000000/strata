@@ -31,7 +31,7 @@ use std::{
     future::Future,
     io,
     os::{
-        fd::{AsFd, AsRawFd, OwnedFd},
+        fd::{AsFd, OwnedFd},
         unix::ffi::{OsStrExt, OsStringExt},
     },
     path::{Path, PathBuf},
@@ -49,9 +49,7 @@ use gtk::{gio, glib, prelude::*};
 
 use copy_engine::SharedProgress;
 use fs_ops::{Entry, EntryStat, fs};
-use placement::{
-    COPY_PREFIX, Displacement, PlaceError, REPLACED_PREFIX, RenameFailure, STAGE_PREFIX,
-};
+use placement::{COPY_PREFIX, Displacement, PlaceError, REPLACED_PREFIX, RenameFailure};
 use work_queue::{Group, Job, WorkQueue};
 
 use crate::{
@@ -674,6 +672,9 @@ impl TransferProgressTracker {
     }
 
     fn fold(&self, shared: &SharedProgress, seen: &Cell<Reported>) {
+        if let Some(name) = shared.take_current() {
+            self.current_file.replace(Some(name));
+        }
         let now = shared.reported();
         let delta = now.since(seen.replace(now));
         if delta == Reported::default() {
@@ -1305,9 +1306,10 @@ async fn execute_parallel_copy_plans(
             .map(|plan| {
                 let (cancellable, progress) = (cancellable.clone(), progress.clone());
                 context.spawn_local(async move {
-                    copy_engine::copy_new_file(
+                    copy_engine::copy_local(
                         plan.source_path,
-                        plan.written_path,
+                        copy_engine::Destination::New(plan.written_path),
+                        copy_engine::Options::default(),
                         Some(progress),
                         &cancellable,
                     )
@@ -1470,25 +1472,16 @@ fn fat_family_child_name(name: &OsStr, fat_family: bool, used: &mut HashSet<OsSt
     }
 }
 
-/// What a recursive copy meets at its target.
+/// What a recursive GIO copy meets at its target.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum CopyInto {
     /// Nothing: every entry is created, and a taken name fails.
     New,
-    /// A fresh folder made beforehand, which is filled as `New`.
-    MadeFolder,
     /// Entries that may exist, which a merge copies over and into.
     Existing,
 }
 
 impl CopyInto {
-    fn children(self) -> Self {
-        match self {
-            Self::New | Self::MadeFolder => Self::New,
-            Self::Existing => Self::Existing,
-        }
-    }
-
     fn file_flags(self) -> gio::FileCopyFlags {
         let overwrite = if self == Self::Existing {
             gio::FileCopyFlags::OVERWRITE
@@ -1502,7 +1495,6 @@ impl CopyInto {
     async fn makes_folder(self, target: &gio::File, cancellable: &gio::Cancellable) -> bool {
         match self {
             Self::New => true,
-            Self::MadeFolder => false,
             Self::Existing => !query_exists(target, cancellable).await,
         }
     }
@@ -1521,13 +1513,6 @@ async fn query_exists(file: &gio::File, cancellable: &gio::Cancellable) -> bool 
     })
     .await
     .is_ok()
-}
-
-#[derive(Clone, Copy)]
-struct CopyOptions {
-    into: CopyInto,
-    fat_family: bool,
-    workers: usize,
 }
 
 fn target_is_fat_family(target: &gio::File, mounts: &MountTable) -> bool {
@@ -1638,14 +1623,9 @@ fn local_directory_children<Fd: AsFd>(handle: &Fd) -> Result<Vec<OsString>, Stri
 /// directory is copied as the symlink it now is instead of being opened as
 /// a directory.
 enum LocalCopySource {
-    /// An open file description for a regular file, and its size. Kept
-    /// alive until the GIO copy that reads through it has finished, so
-    /// `/proc/self/fd/<n>` always resolves to this exact file no matter what
-    /// happens to its name afterward.
-    File {
-        file: std::fs::File,
-        size: Option<u64>,
-    },
+    /// An open file description for a regular file, read through itself
+    /// whatever happens to its name afterward.
+    File { file: std::fs::File },
     /// A symlink and the path it points to, copied as a new symlink rather
     /// than by following it.
     Symlink(OsString),
@@ -1728,7 +1708,6 @@ fn open_local_copy_source<Fd: AsFd>(parent: &Fd, name: &OsStr) -> Result<LocalCo
             }
             Ok(LocalCopySource::File {
                 file: std::fs::File::from(file),
-                size: u64::try_from(opened.st_size).ok(),
             })
         }
         _ => Err(rust_i18n::t!(
@@ -1872,207 +1851,6 @@ async fn copy_new_remote_file_with(
     Ok(())
 }
 
-/// Recursively copies the entry named `name` inside `parent` to `target`,
-/// walking descriptor-relative to each already-open source directory
-/// instead of re-resolving paths, so a component swapped out from under an
-/// in-progress copy cannot redirect what gets read. Regular files are
-/// hand-ed to GIO's own copy (preserving its metadata handling and any
-/// reflink optimisation) through a `/proc/self/fd` reference pinned to the
-/// exact file just verified, rather than the original, re-resolvable path.
-fn copy_recursively_local(
-    parent: Arc<OwnedFd>,
-    name: OsString,
-    target: gio::File,
-    options: CopyOptions,
-    cancellable: gio::Cancellable,
-    created_root: Option<Rc<CreatedCopyRoot>>,
-    progress: Option<Rc<TransferProgressTracker>>,
-) -> Pin<Box<dyn Future<Output = Result<(), glib::Error>>>> {
-    Box::pin(async move {
-        if cancellable.is_cancelled() {
-            return Err(cancelled_local_operation());
-        }
-        let step_parent = parent.clone();
-        let step_name = name.clone();
-        let step =
-            run_local_fs_step(move || open_local_copy_source(&step_parent, &step_name)).await?;
-        match step {
-            LocalCopySource::Symlink(link_target) => {
-                let target_path = target
-                    .path()
-                    .ok_or_else(|| translated_io_error("Copy destination must be a local path"))?;
-                run_blocking(move || copy_local_symlink(&link_target, &target_path)).await
-            }
-            LocalCopySource::File {
-                file,
-                size: source_size,
-            } => {
-                #[cfg(test)]
-                let _activity = tests::CopyActivity::start();
-                // Deliberately no NOFOLLOW_SYMLINKS here: `/proc/self/fd/<n>`
-                // is itself reported as a symlink by lstat, even though the
-                // fd it names was already verified to be a plain file. GIO
-                // must follow it to reach that file's actual content rather
-                // than copying the magic-link's target text as a new symlink.
-                let source_ref = gio::File::for_path(format!("/proc/self/fd/{}", file.as_raw_fd()));
-                let flags = options.into.file_flags();
-                let track_bytes =
-                    source_size.is_none_or(|size| size >= BYTE_PROGRESS_MIN_FILE_SIZE);
-                let file_progress = progress.as_ref().map(|progress| {
-                    progress.begin_file(name.to_string_lossy().into_owned(), track_bytes)
-                });
-                let reporter = file_progress
-                    .as_ref()
-                    .and_then(FileTransferProgress::reporter);
-                let result = copy_file_with_progress(
-                    source_ref,
-                    target,
-                    flags,
-                    cancellable.clone(),
-                    reporter,
-                )
-                .await;
-                if result.is_ok()
-                    && let Some(file_progress) = file_progress
-                {
-                    file_progress.finish(source_size);
-                }
-                // Keeps `file` open (and its fd number stable) for the
-                // duration of the copy above; only drop it once resolved.
-                drop(file);
-                result
-            }
-            LocalCopySource::Directory {
-                handle,
-                mut children,
-            } => {
-                if options.fat_family {
-                    children.sort();
-                }
-                if options.into.makes_folder(&target, &cancellable).await {
-                    make_copy_folder(&target, &cancellable, &created_root).await?;
-                }
-                let handle = Arc::new(handle);
-                let mut used_names = HashSet::with_capacity(children.len());
-                let batch_size = children.len().min(options.workers).max(1);
-                let child_options = CopyOptions {
-                    into: options.into.children(),
-                    workers: options.workers / batch_size,
-                    ..options
-                };
-                for chunk in children.chunks(batch_size) {
-                    if cancellable.is_cancelled() {
-                        return Err(cancelled_local_operation());
-                    }
-                    if batch_size == 1 {
-                        let child_name = &chunk[0];
-                        let child_parent = handle.clone();
-                        let target_name =
-                            fat_family_child_name(child_name, options.fat_family, &mut used_names);
-                        let child_target = target.child(&target_name);
-                        copy_recursively_local(
-                            child_parent,
-                            child_name.clone(),
-                            child_target,
-                            child_options,
-                            cancellable.clone(),
-                            None,
-                            progress.clone(),
-                        )
-                        .await?;
-                    } else {
-                        let context = glib::MainContext::default();
-                        let mut tasks = Vec::with_capacity(chunk.len());
-                        for child_name in chunk {
-                            let child_parent = handle.clone();
-                            let target_name = fat_family_child_name(
-                                child_name,
-                                options.fat_family,
-                                &mut used_names,
-                            );
-                            let child_target = target.child(&target_name);
-                            let cancellable = cancellable.clone();
-                            let progress = progress.clone();
-                            let child_name = child_name.clone();
-                            let task = context.spawn_local(async move {
-                                copy_recursively_local(
-                                    child_parent,
-                                    child_name,
-                                    child_target,
-                                    child_options,
-                                    cancellable,
-                                    None,
-                                    progress,
-                                )
-                                .await
-                            });
-                            tasks.push(((), task));
-                        }
-                        let mut first_error = None;
-                        for (_, result) in join_local_tasks(tasks).await {
-                            let result = result
-                                .map_err(|_| io_error("Copy worker failed"))
-                                .and_then(std::convert::identity);
-                            if first_error.is_none()
-                                && let Err(error) = result
-                            {
-                                first_error = Some(error);
-                            }
-                        }
-                        if let Some(error) = first_error {
-                            return Err(error);
-                        }
-                    }
-                }
-                Ok(())
-            }
-        }
-    })
-}
-
-/// Entry point for locally copying a source path: opens its parent
-/// directory once, then hands off to the descriptor-relative walk in
-/// [`copy_recursively_local`] for everything below it.
-fn copy_recursively_local_path(
-    source_path: PathBuf,
-    target: gio::File,
-    into: CopyInto,
-    cancellable: gio::Cancellable,
-    created_root: Option<Rc<CreatedCopyRoot>>,
-    progress: Option<Rc<TransferProgressTracker>>,
-    fat_family: bool,
-) -> Pin<Box<dyn Future<Output = Result<(), glib::Error>>>> {
-    Box::pin(async move {
-        let Some(parent_path) = source_path.parent().map(Path::to_path_buf) else {
-            return Err(translated_io_error("Cannot copy the filesystem root"));
-        };
-        let Some(name) = source_path.file_name().map(OsStr::to_os_string) else {
-            return Err(translated_io_error("Invalid copy source"));
-        };
-        let source_parent = parent_path.clone();
-        let target_parent = target
-            .path()
-            .and_then(|path| path.parent().map(Path::to_path_buf));
-        let workers =
-            local_parent_worker_count(std::iter::once(source_parent).chain(target_parent)).await;
-        let parent = run_local_fs_step(move || open_local_parent_directory(&parent_path)).await?;
-        copy_recursively_local(
-            Arc::new(parent),
-            name,
-            target,
-            CopyOptions {
-                into,
-                fat_family,
-                workers,
-            },
-            cancellable,
-            created_root,
-            progress,
-        )
-        .await
-    })
-}
-
 fn copy_recursively_with_progress(
     source: gio::File,
     target: gio::File,
@@ -2082,23 +1860,6 @@ fn copy_recursively_with_progress(
     progress: Option<Rc<TransferProgressTracker>>,
     fat_family: bool,
 ) -> Pin<Box<dyn Future<Output = Result<(), glib::Error>>>> {
-    if source.is_native()
-        && target.is_native()
-        && let Some(source_path) = source.path()
-    {
-        // Remote (GVfs) locations have no local descriptor to walk against,
-        // so anything not fully local keeps the GIO path-based copy below
-        // rather than claiming an equivalent guarantee.
-        return copy_recursively_local_path(
-            source_path,
-            target,
-            into,
-            cancellable,
-            created_root,
-            progress,
-            fat_family,
-        );
-    }
     Box::pin(async move {
         let info = await_cancellable(&source, &cancellable, |source, cancellable, result| {
             source.query_info_async(
@@ -2138,7 +1899,7 @@ fn copy_recursively_with_progress(
                     copy_recursively_with_progress(
                         source.child(&child_name),
                         target.child(&target_name),
-                        into.children(),
+                        into,
                         cancellable.clone(),
                         None,
                         progress.clone(),
@@ -2181,27 +1942,24 @@ fn copy_recursively_with_progress(
     })
 }
 
+/// A copy to the new `target`, or with `merge` into the folder `target`.
 #[cfg(test)]
 fn copy_recursively(
     source: gio::File,
     target: gio::File,
-    overwrite_existing: bool,
+    merge: bool,
     cancellable: gio::Cancellable,
-    created_root: Option<Rc<CreatedCopyRoot>>,
 ) -> Pin<Box<dyn Future<Output = Result<(), glib::Error>>>> {
-    copy_recursively_with_progress(
+    if merge {
+        return merge_copy(None, false)(source, target, cancellable);
+    }
+    Box::pin(copy_new_recursively_on_filesystem(
         source,
         target,
-        if overwrite_existing {
-            CopyInto::Existing
-        } else {
-            CopyInto::New
-        },
         cancellable,
-        created_root,
         None,
         false,
-    )
+    ))
 }
 
 async fn copy_new_recursively_on_filesystem(
@@ -2271,45 +2029,21 @@ async fn copy_new_recursively_on_filesystem(
 
     if source.is_native()
         && target.is_native()
-        && let Some(target_path) = target.path()
+        && let (Some(source_path), Some(target_path)) = (source.path(), target.path())
     {
-        let source_type =
-            await_cancellable(&source, &cancellable, |source, cancellable, result| {
-                source.query_info_async(
-                    "standard::type",
-                    gio::FileQueryInfoFlags::NOFOLLOW_SYMLINKS,
-                    glib::Priority::DEFAULT,
-                    Some(cancellable),
-                    move |output| result.resolve(output),
-                );
-            })
-            .await?
-            .file_type();
-        if source_type == gio::FileType::Regular
-            && let Some(source_path) = source.path()
-        {
-            return copy_engine::copy_new_file(source_path, target_path, progress, &cancellable)
-                .await
-                .map(drop);
-        }
-        let staged = copy_to_new_stage(
-            &source,
-            source_type,
-            &target_path,
+        let options = copy_engine::Options {
+            fat_family,
+            workers: None,
+        };
+        return copy_engine::copy_local(
+            source_path,
+            copy_engine::Destination::New(target_path),
+            options,
+            progress,
             &cancellable,
-            &|stage, root| {
-                copy_into_stage(
-                    source.clone(),
-                    stage,
-                    root,
-                    cancellable.clone(),
-                    progress.clone(),
-                    fat_family,
-                )
-            },
         )
-        .await?;
-        return publish_staged_without_replace(staged, target_path, cancellable).await;
+        .await
+        .map(drop);
     }
 
     let created_root = Rc::new(CreatedCopyRoot::new());
@@ -2688,7 +2422,7 @@ fn copy_restore_entry(
             )?;
             let source = open_local_copy_source(&parent, &name)?;
             let opened = match &source {
-                LocalCopySource::File { file, .. } => fs().stat_fd(file.as_fd()),
+                LocalCopySource::File { file } => fs().stat_fd(file.as_fd()),
                 LocalCopySource::Directory { handle, .. } => fs().stat_fd(handle.as_fd()),
                 LocalCopySource::Symlink(_) => fs().stat(entry, false),
             }
@@ -2748,7 +2482,7 @@ fn copy_restore_entry(
                 });
                 Ok(())
             }
-            LocalCopySource::File { file, .. } => {
+            LocalCopySource::File { file } => {
                 let parent = target_parent.clone();
                 let name = target_name.clone();
                 let (target, identity) = create_restore_entry(move || {
@@ -3012,16 +2746,21 @@ enum StageContent {
 /// pinned parent; there is no `Drop` cleanup.
 struct StagedSibling {
     parent: Arc<OwnedFd>,
-    parent_path: PathBuf,
     name: OsString,
     identity: LocalFileIdentity,
+    /// Folders inside that keep their owner out, opened up again before a discard.
+    restrictive: Vec<copy_engine::Restrictive>,
 }
 
 impl StagedSibling {
-    fn create(parent_path: &Path, content: StageContent) -> io::Result<Self> {
-        let parent = open_local_parent_directory(parent_path).map_err(io::Error::other)?;
-        let (name, identity) = placement::reserve_hidden_name(STAGE_PREFIX, |name| {
-            let entry = Entry::new(&parent, name);
+    /// An empty folder or a symlink at a fresh `prefix` name in `parent`.
+    fn create(
+        parent: Arc<OwnedFd>,
+        prefix: &str,
+        content: StageContent,
+    ) -> Result<Self, PlaceError> {
+        let (name, identity) = placement::reserve_hidden_name(prefix, |name| {
+            let entry = Entry::new(&*parent, name);
             match &content {
                 StageContent::Directory => {
                     fs().mkdir(entry, rustix::fs::Mode::from_raw_mode(0o700))
@@ -3035,256 +2774,26 @@ impl StagedSibling {
             fs().stat(entry, false)
                 .map(|stat| stat.identity)
                 .map_err(PlaceError::Io)
-        })
-        .map_err(stage_name_error)?;
+        })?;
         Ok(Self {
-            parent: Arc::new(parent),
-            parent_path: parent_path.to_path_buf(),
+            parent,
             name,
             identity,
+            restrictive: Vec::new(),
         })
     }
-
-    fn kind(&self) -> rustix::fs::FileType {
-        self.identity.kind
-    }
-
-    fn path(&self) -> PathBuf {
-        self.parent_path.join(&self.name)
-    }
-}
-
-fn stage_name_error(error: PlaceError) -> io::Error {
-    match error {
-        PlaceError::Io(error) => io::Error::from(error),
-        error => io::Error::other(placement_reason(error)),
-    }
-}
-
-/// A failed file stage copy, with the partial stage left to discard.
-type FileStageFailure = (glib::Error, Option<StagedSibling>);
-
-type StageCopyFuture = Pin<Box<dyn Future<Output = Result<(), glib::Error>>>>;
-
-/// How a stage copy meets its stage.
-#[derive(Clone)]
-enum StageRoot {
-    /// A folder stage made beforehand.
-    Made,
-    /// A fresh name the copy creates, recording whether it made a folder there.
-    Fresh(Rc<CreatedCopyRoot>),
-}
-
-fn copy_into_stage(
-    source: gio::File,
-    stage: gio::File,
-    root: StageRoot,
-    cancellable: gio::Cancellable,
-    progress: Option<Rc<TransferProgressTracker>>,
-    fat_family: bool,
-) -> StageCopyFuture {
-    let (into, created_root) = match root {
-        StageRoot::Made => (CopyInto::MadeFolder, None),
-        StageRoot::Fresh(created_root) => (CopyInto::New, Some(created_root)),
-    };
-    copy_recursively_with_progress(
-        source,
-        stage,
-        into,
-        cancellable,
-        created_root,
-        progress,
-        fat_family,
-    )
-}
-
-/// What a copy left at the fresh stage name `name`. A completed copy's entry
-/// is the stage; a failed copy's is only taken as a regular file with no
-/// other name, and anything else there is kept.
-fn file_stage_after_copy(
-    parent: &Arc<OwnedFd>,
-    parent_path: &Path,
-    target_path: &Path,
-    name: OsString,
-    copied: Result<(), glib::Error>,
-) -> Result<StagedSibling, FileStageFailure> {
-    let stat = fs().stat(Entry::new(&**parent, &name), false);
-    let staged = |stat: EntryStat| StagedSibling {
-        parent: parent.clone(),
-        parent_path: parent_path.to_path_buf(),
-        name: name.clone(),
-        identity: stat.identity,
-    };
-    match (copied, stat) {
-        (Ok(()), Ok(stat)) => Ok(staged(stat)),
-        (Ok(()), Err(error)) => Err((staging_failed(target_path, error.into()), None)),
-        (Err(error), Err(rustix::io::Errno::NOENT)) => Err((error, None)),
-        (Err(error), Ok(stat))
-            if stat.kind == rustix::fs::FileType::RegularFile && stat.nlink == 1 =>
-        {
-            Err((error, Some(staged(stat))))
-        }
-        (Err(error), Ok(_)) => {
-            let kept = io_error(rust_i18n::t!(
-                "Partial entry %{name} was retained because its creation could not be verified atomically",
-                name = name.to_string_lossy()
-            ));
-            Err((copy_failure_after_cleanup(error, Err(kept)), None))
-        }
-        (Err(error), Err(stat_error)) => Err((
-            copy_failure_after_cleanup(error, Err(os_io_error(stat_error))),
-            None,
-        )),
-    }
-}
-
-/// What one copy to the fresh stage name `name` left, or `None` when the name
-/// was already taken. An `Exists` from inside a folder the copy made there is
-/// the copy's own failure.
-fn file_stage_attempt(
-    parent: &Arc<OwnedFd>,
-    parent_path: &Path,
-    target_path: &Path,
-    name: OsString,
-    copied: Result<(), glib::Error>,
-    made_root: bool,
-) -> Option<Result<StagedSibling, FileStageFailure>> {
-    let taken = !made_root
-        && copied
-            .as_ref()
-            .is_err_and(|error| error.matches(gio::IOErrorEnum::Exists));
-    (!taken).then(|| file_stage_after_copy(parent, parent_path, target_path, name, copied))
-}
-
-fn stage_parent_path(target_path: &Path) -> Result<PathBuf, glib::Error> {
-    target_path
-        .parent()
-        .map(Path::to_path_buf)
-        .ok_or_else(|| translated_io_error("The destination has no parent directory"))
-}
-
-fn stage_names_exhausted(target_path: &Path) -> glib::Error {
-    staging_failed(target_path, stage_name_error(PlaceError::Exists))
-}
-
-/// Copies a file into a fresh hidden sibling of `target_path` that the copy
-/// itself creates, so a stage is never copied over.
-async fn copy_to_file_stage(
-    target_path: &Path,
-    copy: &dyn Fn(gio::File, Rc<CreatedCopyRoot>) -> StageCopyFuture,
-) -> Result<StagedSibling, glib::Error> {
-    let parent_path = stage_parent_path(target_path)?;
-    let opened = parent_path.clone();
-    let parent = Arc::new(run_local_fs_step(move || open_local_parent_directory(&opened)).await?);
-    for name in placement::hidden_names(STAGE_PREFIX) {
-        let created_root = Rc::new(CreatedCopyRoot::new());
-        let copied = copy(
-            gio::File::for_path(parent_path.join(&name)),
-            created_root.clone(),
-        )
-        .await;
-        let made_root = created_root.was_created.get();
-        let (parent, parent_path) = (parent.clone(), parent_path.clone());
-        let target_path = target_path.to_path_buf();
-        let attempt = gio::spawn_blocking(move || {
-            file_stage_attempt(&parent, &parent_path, &target_path, name, copied, made_root)
-        })
-        .await
-        .map_err(|_| io_error("Local filesystem task panicked"))?;
-        match attempt {
-            None => {}
-            Some(Ok(staged)) => return Ok(staged),
-            Some(Err(failure)) => return Err(discard_failed_file_stage(failure).await),
-        }
-    }
-    Err(stage_names_exhausted(target_path))
-}
-
-async fn discard_failed_file_stage((error, partial): FileStageFailure) -> glib::Error {
-    match partial {
-        Some(staged) => copy_failure_after_cleanup(error, discard_incomplete_staged(staged).await),
-        None => error,
-    }
-}
-
-fn read_local_symlink(path: &Path) -> Result<OsString, String> {
-    let name = path
-        .file_name()
-        .ok_or_else(|| crate::i18n::tr("Invalid local filesystem target"))?;
-    let parent = open_local_parent_directory(path.parent().unwrap_or(Path::new("/")))?;
-    fs().readlink(Entry::new(&parent, name)).map_err(|error| {
-        rust_i18n::t!(
-            "Could not read link %{name}: %{error}",
-            name = name.to_string_lossy(),
-            error = os_error_detail(error)
-        )
-        .into_owned()
-    })
-}
-
-/// Copies `source` into a new hidden sibling of `target_path` with `copy`: a
-/// folder is copied into a stage made first, a file into one the copy
-/// creates, and a symlink is staged as the finished link.
-async fn copy_to_new_stage(
-    source: &gio::File,
-    source_type: gio::FileType,
-    target_path: &Path,
-    cancellable: &gio::Cancellable,
-    copy: &dyn Fn(gio::File, StageRoot) -> StageCopyFuture,
-) -> Result<StagedSibling, glib::Error> {
-    let link_source = (source_type == gio::FileType::SymbolicLink)
-        .then(|| source.path())
-        .flatten();
-    let staged = if link_source.is_some() || source_type == gio::FileType::Directory {
-        let parent = stage_parent_path(target_path)?;
-        let stage_target = target_path.to_path_buf();
-        let staged = run_local_fs_step(move || {
-            let content = match link_source {
-                Some(path) => StageContent::Symlink(read_local_symlink(&path)?),
-                None => StageContent::Directory,
-            };
-            StagedSibling::create(&parent, content)
-                .map_err(|error| staging_failed_message(&stage_target, error))
-        })
-        .await?;
-        if staged.kind() == rustix::fs::FileType::Directory
-            && let Err(error) = copy(gio::File::for_path(staged.path()), StageRoot::Made).await
-        {
-            let cleanup = discard_incomplete_staged(staged).await;
-            return Err(copy_failure_after_cleanup(error, cleanup));
-        }
-        staged
-    } else {
-        copy_to_file_stage(target_path, &|stage, created_root| {
-            copy(stage, StageRoot::Fresh(created_root))
-        })
-        .await?
-    };
-    if let Err(error) = cancellable.set_error_if_cancelled() {
-        let cleanup = discard_incomplete_staged(staged).await;
-        return Err(copy_failure_after_cleanup(error, cleanup));
-    }
-    Ok(staged)
-}
-
-/// The staging name is internal, so the error names the item being written instead.
-fn staging_failed_message(target_path: &Path, error: io::Error) -> String {
-    rust_i18n::t!(
-        "Could not copy %{name}: %{error}",
-        name = target_path
-            .file_name()
-            .unwrap_or(target_path.as_os_str())
-            .to_string_lossy(),
-        error = os_error_detail(error)
-    )
-    .into_owned()
-}
-
-fn staging_failed(target_path: &Path, error: io::Error) -> glib::Error {
-    io_error(staging_failed_message(target_path, error))
 }
 
 async fn discard_incomplete_staged(staged: StagedSibling) -> Result<(), glib::Error> {
+    let staged = if staged.restrictive.is_empty() {
+        staged
+    } else {
+        run_blocking(move || {
+            copy_engine::unlock_stage(&staged);
+            Ok(staged)
+        })
+        .await?
+    };
     parallel_delete_local(
         vec![PinnedEntry {
             parent: staged.parent,
@@ -3313,10 +2822,10 @@ async fn publish_staged_without_replace(
         ));
     };
     let parent = staged.parent.clone();
-    let stage_name = staged.name.clone();
+    let (stage_name, name) = (staged.name.clone(), target_name.clone());
     let recorded = staged.identity;
     let step = gio::spawn_blocking(move || {
-        copy_engine::stage::publish(fs(), parent.as_fd(), &stage_name, recorded, &target_name)
+        copy_engine::stage::publish(fs(), parent.as_fd(), &stage_name, recorded, &name)
     })
     .await;
     let placed = match step {
@@ -3334,30 +2843,7 @@ async fn publish_staged_without_replace(
         // Where the ladder cannot place the stage, publication falls back to
         // exclusive creation, even though it exposes partial copies.
         Err(PlaceError::Unsupported) => {
-            let target = gio::File::for_path(&target_path);
-            let created_root = Rc::new(CreatedCopyRoot::new());
-            let copied = copy_recursively_with_progress(
-                gio::File::for_path(staged.path()),
-                target.clone(),
-                CopyInto::New,
-                cancellable,
-                Some(created_root.clone()),
-                None,
-                false,
-            )
-            .await;
-            if copied.is_err() && created_root.was_created.get() {
-                let cleanup = permanently_delete_maybe_local_if_unchanged(
-                    target,
-                    true,
-                    created_root.identity.get(),
-                    gio::Cancellable::new(),
-                )
-                .await;
-                copied.map_err(|error| copy_failure_after_cleanup(error, cleanup))
-            } else {
-                copied
-            }
+            copy_engine::copy_from_stage(&staged, target_name, &cancellable).await
         }
         // Either name may hold the copy, so neither is removed.
         Err(PlaceError::Unconfirmed) => return Err(placement_error(PlaceError::Unconfirmed)),
@@ -3395,11 +2881,11 @@ fn translated_io_error(message: &str) -> glib::Error {
     io_error(crate::i18n::tr(message))
 }
 
-type StageCopy = Rc<
+/// Copies a source into a target, as a merge copies into its folder.
+type CopyStep = Rc<
     dyn Fn(
         gio::File,
         gio::File,
-        StageRoot,
         gio::Cancellable,
     ) -> Pin<Box<dyn Future<Output = Result<(), glib::Error>>>>,
 >;
@@ -3732,35 +3218,30 @@ struct StagedReplacement {
     displaced: Option<DisplacedOriginal>,
 }
 
-fn gio_file_type(kind: rustix::fs::FileType) -> gio::FileType {
-    match kind {
-        rustix::fs::FileType::Directory => gio::FileType::Directory,
-        rustix::fs::FileType::Symlink => gio::FileType::SymbolicLink,
-        rustix::fs::FileType::RegularFile => gio::FileType::Regular,
-        _ => gio::FileType::Special,
-    }
-}
-
 /// Copies the source next to the target, then moves the original out of the
 /// way and publishes the copy. Every failure discards the stage.
 async fn replace_through_stage(
     plan: &Arc<ReplacePlan>,
     mut removal: Removal,
-    source: &gio::File,
+    source_path: &Path,
     target_path: &Path,
     cancellable: &gio::Cancellable,
-    copy_to_stage: StageCopy,
+    copying: Copying,
 ) -> Result<StagedReplacement, glib::Error> {
     let in_trash = |error: glib::Error, removal: Removal| match removal {
         Removal::Trashed => original_in_trash(&crate::services::gio_error_detail(&error)),
         _ => error,
     };
-    let staged = copy_to_new_stage(
-        source,
-        gio_file_type(plan.source.kind),
-        target_path,
+    let options = copy_engine::Options {
+        fat_family: copying.fat_family,
+        workers: None,
+    };
+    let staged = copy_engine::copy_to_stage(
+        source_path.to_path_buf(),
+        target_path.to_path_buf(),
+        options,
+        copying.progress,
         cancellable,
-        &|stage, root| copy_to_stage(source.clone(), stage, root, cancellable.clone()),
     )
     .await
     .map_err(|error| in_trash(error, removal))?;
@@ -3914,7 +3395,7 @@ async fn replace_local_with(
     move_source: bool,
     cancellable: gio::Cancellable,
     affected_locations: Option<&mut HashSet<Location>>,
-    copy_to_stage: StageCopy,
+    copying: Copying,
     on_replaced: &dyn Fn(ReplacedOriginal),
 ) -> Result<(), glib::Error> {
     if let Some(locations) = affected_locations {
@@ -3933,7 +3414,7 @@ async fn replace_local_with(
         )
     })?;
     cancellable.set_error_if_cancelled()?;
-    let (planned_source, planned_target) = (source_path, target_path.clone());
+    let (planned_source, planned_target) = (source_path.clone(), target_path.clone());
     let Some(plan) =
         run_blocking(move || plan_replace(&planned_source, &planned_target, move_source)).await?
     else {
@@ -3968,10 +3449,10 @@ async fn replace_local_with(
     let replaced = replace_through_stage(
         &plan,
         removal,
-        &source,
+        &source_path,
         &target_path,
         &cancellable,
-        copy_to_stage,
+        copying,
     )
     .await?;
     on_replaced(replaced.original);
@@ -4003,17 +3484,11 @@ async fn publish_staged_replacement(
         .map_err(|error| original_in_trash(&crate::services::gio_error_detail(&error)))
 }
 
-fn stage_copier(progress: Option<Rc<TransferProgressTracker>>, fat_family: bool) -> StageCopy {
-    Rc::new(move |source, staged, root, cancellable| {
-        copy_into_stage(
-            source,
-            staged,
-            root,
-            cancellable,
-            progress.clone(),
-            fat_family,
-        )
-    })
+/// How a copy reports its progress and names what it makes.
+#[derive(Clone, Default)]
+struct Copying {
+    progress: Option<Rc<TransferProgressTracker>>,
+    fat_family: bool,
 }
 
 #[cfg(test)]
@@ -4030,7 +3505,7 @@ async fn replace_local(
         move_source,
         cancellable,
         affected_locations,
-        stage_copier(None, false),
+        Copying::default(),
         &|_| {},
     )
     .await
@@ -4067,7 +3542,7 @@ fn trash_stage_overwrite(
 /// The injectable steps of a merge, bundled to keep the call sites small.
 struct MergeHooks<'a> {
     fat_family: bool,
-    copy_into_target: StageCopy,
+    copy_into_target: CopyStep,
     stage_overwrite: StageOverwrite,
     on_merged: &'a dyn Fn(MergePlan),
 }
@@ -4248,8 +3723,7 @@ async fn merge_local_with(
         created: plan.created,
         overwritten: trashed,
     });
-    if let Err(error) =
-        (hooks.copy_into_target)(source.clone(), target, StageRoot::Made, cancellable.clone()).await
+    if let Err(error) = (hooks.copy_into_target)(source.clone(), target, cancellable.clone()).await
     {
         return Err(merge_aside::abandon(aside, error).await);
     }
@@ -4273,20 +3747,47 @@ fn progress_merge_hooks(
 ) -> MergeHooks<'_> {
     MergeHooks {
         fat_family,
-        copy_into_target: Rc::new(move |source, target, _, cancellable| {
-            copy_recursively_with_progress(
-                source,
-                target,
-                CopyInto::Existing,
-                cancellable,
-                None,
-                progress.clone(),
-                fat_family,
-            )
-        }),
+        copy_into_target: merge_copy(progress, fat_family),
         stage_overwrite: Rc::new(trash_stage_overwrite),
         on_merged,
     }
+}
+
+/// Copies a folder's contents into the folder of the same name, never
+/// replacing an entry there.
+fn merge_copy(progress: Option<Rc<TransferProgressTracker>>, fat_family: bool) -> CopyStep {
+    Rc::new(move |source, target, cancellable| {
+        let progress = progress.clone();
+        if source.is_native()
+            && target.is_native()
+            && let (Some(source_path), Some(target_path)) = (source.path(), target.path())
+        {
+            return Box::pin(async move {
+                let options = copy_engine::Options {
+                    fat_family,
+                    workers: None,
+                };
+                copy_engine::copy_local(
+                    source_path,
+                    copy_engine::Destination::Merge(target_path),
+                    options,
+                    progress,
+                    &cancellable,
+                )
+                .await
+                .map(drop)
+            });
+        }
+        copy_recursively_with_progress(
+            source,
+            target,
+            CopyInto::Existing,
+            cancellable,
+            None,
+            progress,
+            fat_family,
+        )
+    })
 }
 
 #[cfg(test)]
@@ -4878,38 +4379,6 @@ fn permanently_delete_local(
         }],
         cancellable,
     )
-}
-
-/// Always exclusive: stages and merges move originals away first, so a link
-/// never needs to replace an entry.
-fn copy_local_symlink(link_target: &OsStr, target_path: &Path) -> Result<(), glib::Error> {
-    let parent_path = target_path
-        .parent()
-        .ok_or_else(|| translated_io_error("The symlink destination has no parent directory"))?;
-    let target_name = target_path
-        .file_name()
-        .ok_or_else(|| translated_io_error("Invalid symlink destination"))?;
-    let parent = open_local_parent_directory(parent_path).map_err(io_error)?;
-    let target = Entry::new(&parent, target_name);
-    let Err(error) = fs().symlink(link_target, target) else {
-        return Ok(());
-    };
-    let collided = error == rustix::io::Errno::EXIST
-        || (error == rustix::io::Errno::PERM && fs().stat(target, false).is_ok());
-    if collided {
-        let message = symlink_recreate_failed(target_path, rustix::io::Errno::EXIST);
-        return Err(glib::Error::new(gio::IOErrorEnum::Exists, &message));
-    }
-    Err(io_error(symlink_recreate_failed(target_path, error)))
-}
-
-fn symlink_recreate_failed(target_path: &Path, error: rustix::io::Errno) -> String {
-    rust_i18n::t!(
-        "Could not recreate %{path}: %{error}",
-        path = target_path.display(),
-        error = os_error_detail(error)
-    )
-    .into_owned()
 }
 
 /// Resolves ordinary parent aliases in one kernel lookup and pins the directory.
@@ -6455,7 +5924,10 @@ impl OperationProvider for LocalOperationProvider {
                         request.move_sources,
                         operation_cancellable.clone(),
                         Some(&mut affected_locations),
-                        stage_copier(Some(progress.clone()), fat_family),
+                        Copying {
+                            progress: Some(progress.clone()),
+                            fat_family,
+                        },
                         &move |original| {
                             let identity = match original {
                                 ReplacedOriginal::Trashed(identity) => identity,
@@ -6673,7 +6145,10 @@ impl OperationProvider for LocalOperationProvider {
                         true,
                         operation_cancellable.clone(),
                         Some(&mut affected_locations),
-                        stage_copier(Some(progress.clone()), fat_family),
+                        Copying {
+                            progress: Some(progress.clone()),
+                            fat_family,
+                        },
                         &|original| {
                             if let ReplacedOriginal::Trashed(identity) = original {
                                 emit(OperationEvent::ItemTrashed {

@@ -1,11 +1,14 @@
 // SPDX-License-Identifier: MIT
 
-//! Copies native files through descriptors on a worker thread. A copy never
-//! replaces an entry, and never shows a partial file under its final name.
+//! Copies native items through descriptors on worker threads. A copy never
+//! replaces an entry, and shows a partial item under its final name only
+//! where the destination cannot place a stage.
 
 mod data;
 mod metadata;
+mod restrictive;
 pub(super) mod stage;
+mod tree;
 
 use std::{
     collections::HashSet,
@@ -14,22 +17,25 @@ use std::{
     path::{Path, PathBuf},
     rc::Rc,
     sync::{
-        Arc,
+        Arc, Mutex, MutexGuard,
         atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering},
     },
+    thread,
 };
 
 use gtk::{gio, glib};
 use rustix::{
-    fs::{AtFlags, Mode},
+    fs::{AtFlags, FileType, Mode},
     io::Errno,
 };
 
 use super::{
-    Reported, TransferProgressTracker, cancelled_local_operation, copy_failure_after_cleanup,
+    LocalFileIdentity, PinnedEntry, Reported, StageContent, StagedSibling, TransferProgressTracker,
+    bounded_local_worker_count, cancelled_local_operation, copy_failure_after_cleanup,
     fs_ops::{Entry, EntryStat, FsOps, fs},
-    io_error, open_local_parent_directory, os_error_detail, placement,
-    placement::{ENOTSUPP, PlaceError},
+    io_error, local_delete_worker_count, local_device_is_rotational, open_local_parent_directory,
+    os_error_detail, parallel_delete_local_blocking_with_workers, placement,
+    placement::{COPY_PREFIX, ENOTSUPP, PlaceError, STAGE_PREFIX},
     placement_error, run_cancellable,
 };
 use crate::adapters::volume::{
@@ -37,12 +43,14 @@ use crate::adapters::volume::{
 };
 use data::Data;
 use metadata::Snapshot;
+pub(super) use restrictive::Restrictive;
 
 /// Counters that workers advance and the main thread's follower reads.
 #[derive(Default)]
 pub(super) struct SharedProgress {
     bytes: AtomicU64,
     files: AtomicUsize,
+    current: Mutex<Option<String>>,
 }
 
 impl SharedProgress {
@@ -53,6 +61,11 @@ impl SharedProgress {
         }
     }
 
+    /// The file a worker started since the last call.
+    pub(super) fn take_current(&self) -> Option<String> {
+        lock(&self.current).take()
+    }
+
     fn add_bytes(&self, bytes: u64) {
         self.bytes.fetch_add(bytes, Ordering::Relaxed);
     }
@@ -60,16 +73,86 @@ impl SharedProgress {
     fn add_file(&self) {
         self.files.fetch_add(1, Ordering::Relaxed);
     }
+
+    fn start_file(&self, name: &OsStr) {
+        *lock(&self.current) = Some(name.to_string_lossy().into_owned());
+    }
 }
 
-/// Copies the regular file at `source` to `target`, a name that must be free,
-/// and returns what it added to `progress`.
-pub(super) async fn copy_new_file(
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|poison| poison.into_inner())
+}
+
+pub(super) enum Destination {
+    /// A new item at this path, which must be free.
+    New(PathBuf),
+    /// Into the existing folder at this path, without replacing its entries.
+    Merge(PathBuf),
+}
+
+#[derive(Clone, Copy, Default)]
+pub(super) struct Options {
+    pub fat_family: bool,
+    /// Worked out from the source and destination devices when `None`.
+    pub workers: Option<usize>,
+}
+
+/// Copies the native item at `source`, and returns what it added to `progress`.
+pub(super) async fn copy_local(
     source: PathBuf,
-    target: PathBuf,
+    destination: Destination,
+    options: Options,
     progress: Option<Rc<TransferProgressTracker>>,
     cancellable: &gio::Cancellable,
 ) -> Result<Reported, glib::Error> {
+    let copied = following(
+        source,
+        options,
+        progress,
+        cancellable,
+        move |copy, source| match destination {
+            Destination::New(target) => copy_new(copy, source, &target, options.workers),
+            Destination::Merge(folder) => merge(copy, source, &folder, options.workers),
+        },
+    )
+    .await?;
+    Ok(copied.1)
+}
+
+/// Copies the native item at `source` into a hidden sibling of `target`,
+/// which Replace publishes.
+pub(super) async fn copy_to_stage(
+    source: PathBuf,
+    target: PathBuf,
+    options: Options,
+    progress: Option<Rc<TransferProgressTracker>>,
+    cancellable: &gio::Cancellable,
+) -> Result<StagedSibling, glib::Error> {
+    following(
+        source,
+        options,
+        progress,
+        cancellable,
+        move |copy, source| {
+            let staged = copy_stage(copy, source, &target, options.workers)?;
+            match copy.check_cancelled() {
+                Ok(()) => Ok(staged),
+                Err(failure) => Err(copy.discarding(staged, failure)),
+            }
+        },
+    )
+    .await
+    .map(|(staged, _)| staged)
+}
+
+/// Runs `work` on a worker thread while `progress` follows it.
+async fn following<T: Send + 'static>(
+    source: PathBuf,
+    options: Options,
+    progress: Option<Rc<TransferProgressTracker>>,
+    cancellable: &gio::Cancellable,
+    work: impl FnOnce(&Arc<Copy>, &Source) -> Result<T, Failure> + Send + 'static,
+) -> Result<(T, Reported), glib::Error> {
     let shared = Arc::new(SharedProgress::default());
     let follower = progress.map(|progress| {
         if let Some(name) = source.file_name() {
@@ -79,44 +162,385 @@ pub(super) async fn copy_new_file(
     });
     let counters = shared.clone();
     let copied = run_cancellable(cancellable, move |cancelled| {
-        copy_file(fs(), &source, &target, &counters, &cancelled)
+        let (parent, name) = split(&source)?;
+        let source = Source { parent, name };
+        let copy = Copy::new(
+            fs(),
+            source.name.clone(),
+            cancelled,
+            counters,
+            true,
+            options.fat_family,
+        );
+        work(&copy, &source).map_err(|failure| failure.into_error(&source.name))
     })
     .await;
     let reported = follower.map_or_else(|| shared.reported(), |follower| follower.stop());
-    copied.map_err(|_| io_error("Copy worker stopped unexpectedly"))??;
-    Ok(reported)
+    let copied = copied.map_err(|_| io_error("Copy worker stopped unexpectedly"))??;
+    Ok((copied, reported))
 }
 
-fn split(path: &Path) -> Result<(OwnedFd, OsString), glib::Error> {
+/// Copies `staged` to `name` beside it, where the mount cannot place the stage.
+pub(super) async fn copy_from_stage(
+    staged: &StagedSibling,
+    name: OsString,
+    cancellable: &gio::Cancellable,
+) -> Result<(), glib::Error> {
+    let source = Source {
+        parent: staged.parent.clone(),
+        name: staged.name.clone(),
+    };
+    let identity = staged.identity;
+    let copied = run_cancellable(cancellable, move |cancelled| {
+        let copy = Copy::new(fs(), name.clone(), cancelled, Arc::default(), false, false);
+        let parent = source.parent.clone();
+        from_stage(&copy, &source, identity, &parent, &name)
+            .map_err(|failure| failure.into_error(&name))
+    })
+    .await;
+    copied.map_err(|_| io_error("Copy worker stopped unexpectedly"))?
+}
+
+/// Gives the owner back the folders a stage locked them out of, so the stage
+/// can be removed.
+pub(super) fn unlock_stage(staged: &StagedSibling) {
+    if staged.restrictive.is_empty() {
+        return;
+    }
+    let fs = fs();
+    let Ok(root) = fs.open_dir(Entry::new(&*staged.parent, &staged.name)) else {
+        return;
+    };
+    if fs
+        .stat_fd(root.as_fd())
+        .is_ok_and(|stat| stat.identity == staged.identity)
+    {
+        let stable = stable_inodes(Mount::new(fs, root.as_fd()).family);
+        restrictive::loosen(fs, root.as_fd(), &staged.restrictive, stable);
+    }
+}
+
+/// An item to copy, by name in its pinned parent.
+struct Source {
+    parent: Arc<OwnedFd>,
+    name: OsString,
+}
+
+impl Source {
+    fn entry(&self) -> Entry<'_> {
+        Entry::new(&*self.parent, &self.name)
+    }
+}
+
+fn split(path: &Path) -> Result<(Arc<OwnedFd>, OsString), glib::Error> {
     let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
         return Err(io_error(crate::i18n::tr("Invalid local filesystem target")));
     };
     let parent = open_local_parent_directory(parent).map_err(io_error)?;
-    Ok((parent, name.to_os_string()))
+    Ok((Arc::new(parent), name.to_os_string()))
 }
 
-fn copy_file(
-    fs: &dyn FsOps,
-    source: &Path,
+fn copy_new(
+    copy: &Arc<Copy>,
+    source: &Source,
     target: &Path,
-    progress: &SharedProgress,
-    cancelled: &AtomicBool,
-) -> Result<(), glib::Error> {
-    let (source_parent, source_name) = split(source)?;
-    let (target_parent, target_name) = split(target)?;
-    let mut job = Job {
-        fs,
-        item: &source_name,
-        dir: target_parent.as_fd(),
-        name: &target_name,
-        cancelled,
-        progress,
-        data: Data::default(),
-        target: Mount::new(fs, target_parent.as_fd()),
-        refused_xattrs: HashSet::new(),
+    workers: Option<usize>,
+) -> Result<(), Failure> {
+    let (parent, name) = split(target).map_err(Failure::Error)?;
+    let stat = copy.fs.stat(source.entry(), false)?;
+    match stat.kind {
+        FileType::RegularFile => FileCopy::new(copy, parent.as_fd())
+            .copy_from(source.entry(), FileTarget::Final(&name))
+            .map(drop),
+        FileType::Symlink => {
+            copy.check_cancelled()?;
+            let mount = Mount::new(copy.fs, parent.as_fd());
+            tree::copy_link(
+                copy,
+                source.entry(),
+                Entry::new(&*parent, &name),
+                &mount,
+                None,
+            )?;
+            copy.progress.add_file();
+            Ok(())
+        }
+        FileType::Directory => {
+            let workers = workers.unwrap_or_else(|| worker_count(source, &parent));
+            if placement::can_place(copy.fs, parent.as_fd(), true) == Some(false) {
+                return direct_folder(copy, source, stat.identity, &parent, &name, workers);
+            }
+            let staged = stage_folder(copy, source, stat.identity, &parent, COPY_PREFIX, workers)?;
+            publish_folder(copy, staged, &name, workers)
+        }
+        _ => Err(Failure::NotCopyable),
+    }
+}
+
+fn copy_stage(
+    copy: &Arc<Copy>,
+    source: &Source,
+    target: &Path,
+    workers: Option<usize>,
+) -> Result<StagedSibling, Failure> {
+    let (parent, _) = split(target).map_err(Failure::Error)?;
+    let stat = copy.fs.stat(source.entry(), false)?;
+    match stat.kind {
+        FileType::RegularFile => {
+            let (name, identity) = FileCopy::new(copy, parent.as_fd())
+                .copy_from(source.entry(), FileTarget::Hidden)?;
+            Ok(StagedSibling {
+                parent,
+                name,
+                identity,
+                restrictive: Vec::new(),
+            })
+        }
+        FileType::Symlink => {
+            copy.check_cancelled()?;
+            let link = tree::read_link(copy.fs, source.entry())?;
+            let staged = StagedSibling::create(parent, STAGE_PREFIX, StageContent::Symlink(link))?;
+            // sshfs sets a link's times on what it points to.
+            if Mount::new(copy.fs, staged.parent.as_fd()).family != Family::Fuse {
+                let link = Entry::new(&*staged.parent, &staged.name);
+                if let Err(error) =
+                    best_effort(copy.fs.set_link_times(link, stat.atime, stat.mtime))
+                {
+                    return Err(copy.discarding(staged, error.into()));
+                }
+            }
+            copy.progress.add_file();
+            Ok(staged)
+        }
+        FileType::Directory => {
+            let workers = workers.unwrap_or_else(|| worker_count(source, &parent));
+            stage_folder(copy, source, stat.identity, &parent, STAGE_PREFIX, workers)
+        }
+        _ => Err(Failure::NotCopyable),
+    }
+}
+
+fn worker_count(source: &Source, target: &OwnedFd) -> usize {
+    let available = thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(1);
+    let rotational = [source.parent.as_fd(), target.as_fd()]
+        .into_iter()
+        .any(|fd| local_device_is_rotational(fd) == Some(true));
+    bounded_local_worker_count(available, rotational)
+}
+
+/// Copies the folder `source` into a fresh hidden stage in `parent`.
+fn stage_folder(
+    copy: &Arc<Copy>,
+    source: &Source,
+    expected: LocalFileIdentity,
+    parent: &Arc<OwnedFd>,
+    prefix: &str,
+    workers: usize,
+) -> Result<StagedSibling, Failure> {
+    copy.check_cancelled()?;
+    let mut staged = StagedSibling::create(parent.clone(), prefix, StageContent::Directory)?;
+    let root = Root {
+        parent: parent.clone(),
+        name: staged.name.clone(),
+        identity: staged.identity,
     };
-    job.copy_from(Entry::new(&source_parent, &source_name))
-        .map_err(|failure| failure.into_error(&source_name))
+    match fill(copy, source, expected, &root, workers) {
+        Ok(restrictive) => {
+            staged.restrictive = restrictive;
+            Ok(staged)
+        }
+        Err(failure) => Err(copy.discarding(staged, failure)),
+    }
+}
+
+/// Puts a folder stage at `name`, or copies it there where the mount cannot
+/// place it.
+fn publish_folder(
+    copy: &Arc<Copy>,
+    staged: StagedSibling,
+    name: &OsStr,
+    workers: usize,
+) -> Result<(), Failure> {
+    if let Err(failure) = copy.check_cancelled() {
+        return Err(copy.discarding(staged, failure));
+    }
+    let placed = stage::publish(
+        copy.fs,
+        staged.parent.as_fd(),
+        &staged.name,
+        staged.identity,
+        name,
+    );
+    match placed {
+        Ok(_) => Ok(()),
+        // Either name may hold the copy, so neither is removed.
+        Err(PlaceError::Unconfirmed) => Err(Failure::Place(PlaceError::Unconfirmed)),
+        Err(PlaceError::Unsupported) => {
+            let from = copy.uncounted();
+            let source = Source {
+                parent: staged.parent.clone(),
+                name: staged.name.clone(),
+            };
+            let copied = direct_folder(
+                &from,
+                &source,
+                staged.identity,
+                &staged.parent,
+                name,
+                workers,
+            );
+            let discarded = copy.discard(staged);
+            match (copied, discarded) {
+                (Ok(()), Ok(())) => Ok(()),
+                (Ok(()), Err(error)) => Err(Failure::Error(io_error(rust_i18n::t!(
+                    "The item was copied, but its staging copy could not be removed: %{error}",
+                    error = crate::services::gio_error_detail(&error)
+                )))),
+                (Err(failure), discarded) => Err(copy.after_cleanup(failure, discarded)),
+            }
+        }
+        Err(error) => Err(copy.discarding(staged, Failure::Place(error))),
+    }
+}
+
+/// A folder this copy made, which only it writes into.
+struct Root {
+    parent: Arc<OwnedFd>,
+    name: OsString,
+    identity: LocalFileIdentity,
+}
+
+/// Copies the folder `source` into the empty folder `root`, then gives the
+/// folders that would lock their owner out their exact modes.
+fn fill(
+    copy: &Arc<Copy>,
+    source: &Source,
+    expected: LocalFileIdentity,
+    root: &Root,
+    workers: usize,
+) -> Result<Vec<Restrictive>, Failure> {
+    let fs = copy.fs;
+    let parent = fs.stat_fd(root.parent.as_fd())?;
+    let mount = Mount::new(fs, root.parent.as_fd());
+    let folder = tree::Folder {
+        source: (source.parent.clone(), source.name.clone(), Some(expected)),
+        target: (root.parent.clone(), root.name.clone(), root.identity),
+        parent,
+        path: PathBuf::new(),
+        claims: None,
+        mount,
+        completion: None,
+    };
+    let mut restrictive = tree::walk(copy, workers, |tree| tree::TreeJob::Folder(tree, folder))
+        .map_err(Failure::Error)?;
+    if restrictive.is_empty() {
+        return Ok(restrictive);
+    }
+    let opened = fs.open_dir(Entry::new(&*root.parent, &root.name))?;
+    if !same_entry(&fs.stat_fd(opened.as_fd())?, root.identity, mount.family) {
+        return Err(Failure::Place(PlaceError::Changed));
+    }
+    let stable = stable_inodes(mount.family);
+    if let Err(error) = restrictive::tighten(fs, opened.as_fd(), &mut restrictive, stable) {
+        restrictive::loosen(fs, opened.as_fd(), &restrictive, stable);
+        return Err(error.into());
+    }
+    Ok(restrictive)
+}
+
+/// Copies the folder `source` to `name`, making each entry at its final
+/// name, and removes what it made if the copy fails.
+fn direct_folder(
+    copy: &Arc<Copy>,
+    source: &Source,
+    expected: LocalFileIdentity,
+    parent: &Arc<OwnedFd>,
+    name: &OsStr,
+    workers: usize,
+) -> Result<(), Failure> {
+    let fs = copy.fs;
+    copy.check_cancelled()?;
+    let target = Entry::new(&**parent, name);
+    if let Err(error) = fs.mkdir(target, Mode::from_raw_mode(0o700)) {
+        return Err(if tree::taken(fs, target, error) {
+            Failure::Place(PlaceError::Exists)
+        } else {
+            error.into()
+        });
+    }
+    let identity = fs
+        .open_dir(target)
+        .and_then(|fd| fs.stat_fd(fd.as_fd()))?
+        .identity;
+    let root = Root {
+        parent: parent.clone(),
+        name: name.to_os_string(),
+        identity,
+    };
+    fill(copy, source, expected, &root, workers)
+        .map(drop)
+        .map_err(|failure| {
+            let removed = parallel_delete_local_blocking_with_workers(
+                vec![PinnedEntry {
+                    parent: root.parent,
+                    name: root.name,
+                    identity: Some(root.identity),
+                }],
+                Arc::new(AtomicBool::new(false)),
+                workers,
+            )
+            .map_err(io_error);
+            copy.after_cleanup(failure, removed)
+        })
+}
+
+/// The item a stage holds, copied to `name` beside it.
+fn from_stage(
+    copy: &Arc<Copy>,
+    source: &Source,
+    identity: LocalFileIdentity,
+    parent: &Arc<OwnedFd>,
+    name: &OsStr,
+) -> Result<(), Failure> {
+    match identity.kind {
+        FileType::Directory => {
+            let workers = worker_count(source, parent);
+            direct_folder(copy, source, identity, parent, name, workers)
+        }
+        FileType::RegularFile => {
+            let parent_stat = copy.fs.stat_fd(parent.as_fd())?;
+            FileCopy::new(copy, parent.as_fd())
+                .create_from(source.entry(), identity, None, name, &parent_stat)
+                .map(drop)
+        }
+        // The ladder recreates symlinks itself.
+        _ => Err(Failure::Place(PlaceError::Unsupported)),
+    }
+}
+
+fn merge(
+    copy: &Arc<Copy>,
+    source: &Source,
+    folder: &Path,
+    workers: Option<usize>,
+) -> Result<(), Failure> {
+    let (parent, name) = split(folder).map_err(Failure::Error)?;
+    let workers = workers.unwrap_or_else(|| worker_count(source, &parent));
+    let merged = tree::Merged {
+        source: (source.parent.clone(), source.name.clone()),
+        target: (parent.clone(), name.clone(), None),
+        path: PathBuf::new(),
+    };
+    let mut restrictive = tree::walk(copy, workers, |tree| tree::TreeJob::Merge(tree, merged))
+        .map_err(Failure::Error)?;
+    if restrictive.is_empty() {
+        return Ok(());
+    }
+    let root = copy.fs.open_dir(Entry::new(&*parent, &name))?;
+    let stable = stable_inodes(Mount::new(copy.fs, root.as_fd()).family);
+    restrictive::tighten(copy.fs, root.as_fd(), &mut restrictive, stable).map_err(Failure::Os)
 }
 
 /// Why a copy stopped.
@@ -125,6 +549,7 @@ enum Failure {
     Os(Errno),
     Place(PlaceError),
     Changed,
+    NotCopyable,
     Error(glib::Error),
 }
 
@@ -134,7 +559,21 @@ impl From<Errno> for Failure {
     }
 }
 
+impl From<PlaceError> for Failure {
+    fn from(error: PlaceError) -> Self {
+        match error {
+            PlaceError::Io(error) => Self::Os(error),
+            error => Self::Place(error),
+        }
+    }
+}
+
 impl Failure {
+    /// The failure as an error about `name`, a child of the item.
+    fn named(self, name: &OsStr) -> Self {
+        Self::Error(self.into_error(name))
+    }
+
     fn into_error(self, name: &OsStr) -> glib::Error {
         let name = name.to_string_lossy();
         match self {
@@ -155,6 +594,10 @@ impl Failure {
             Self::Place(error) => placement_error(error),
             Self::Changed => io_error(rust_i18n::t!(
                 "%{name} changed while it was being copied",
+                name = name
+            )),
+            Self::NotCopyable => io_error(rust_i18n::t!(
+                "Cannot copy %{name}: it is not a regular file, directory, or symbolic link",
                 name = name
             )),
             Self::Error(error) => error,
@@ -179,11 +622,35 @@ fn is_fatal(error: Errno) -> bool {
     )
 }
 
+/// Only device, handle and connection failures stop a metadata step.
+fn best_effort(result: Result<(), Errno>) -> Result<(), Errno> {
+    match result {
+        Err(error) if is_fatal(error) => Err(error),
+        _ => Ok(()),
+    }
+}
+
 fn is_unsupported(error: Errno) -> bool {
     matches!(error, Errno::OPNOTSUPP | Errno::NOTTY | ENOTSUPP)
 }
 
+/// FUSE daemons without `use_ino` number a node afresh once the kernel has
+/// evicted it.
+fn stable_inodes(family: Family) -> bool {
+    family != Family::Fuse
+}
+
+/// Whether `current` is still the entry recorded as `identity`.
+fn same_entry(current: &EntryStat, identity: LocalFileIdentity, family: Family) -> bool {
+    if stable_inodes(family) {
+        current.identity == identity
+    } else {
+        current.kind == identity.kind
+    }
+}
+
 /// A mount with what was learned about it, keyed as placement keys it.
+#[derive(Clone, Copy)]
 struct Mount {
     key: MountKey,
     family: Family,
@@ -252,34 +719,57 @@ fn link_tmpfile(fs: &dyn FsOps, fd: BorrowedFd<'_>, to: Entry<'_>) -> Result<(),
     }
 }
 
-/// An open source file and its snapshot from that descriptor.
-struct Source {
-    fd: OwnedFd,
-    stat: EntryStat,
+/// What every worker of one copy shares.
+struct Copy {
+    fs: &'static dyn FsOps,
+    /// The name errors about the item itself give.
+    item: OsString,
+    cancelled: Arc<AtomicBool>,
+    progress: Arc<SharedProgress>,
+    /// False for a copy from a stage, whose bytes were counted already.
+    counted: bool,
+    fat_family: bool,
+    data: Mutex<Vec<Data>>,
+    /// Names refused one by one, such as `security.*` as non-root.
+    refused_xattrs: Mutex<HashSet<OsString>>,
+    /// The target refused `mknodat`, so claims create and close instead.
+    nodes_refused: AtomicBool,
 }
 
-/// One top-level file copied into `dir` as `name`.
-struct Job<'a> {
-    fs: &'a dyn FsOps,
-    /// The name errors give, the item's own.
-    item: &'a OsStr,
-    dir: BorrowedFd<'a>,
-    name: &'a OsStr,
-    cancelled: &'a AtomicBool,
-    progress: &'a SharedProgress,
-    data: Data,
-    target: Mount,
-    /// Names this job saw refused one by one, such as `security.*` as non-root.
-    refused_xattrs: HashSet<OsString>,
-}
+impl Copy {
+    fn new(
+        fs: &'static dyn FsOps,
+        item: OsString,
+        cancelled: Arc<AtomicBool>,
+        progress: Arc<SharedProgress>,
+        counted: bool,
+        fat_family: bool,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            fs,
+            item,
+            cancelled,
+            progress,
+            counted,
+            fat_family,
+            data: Mutex::default(),
+            refused_xattrs: Mutex::default(),
+            nodes_refused: AtomicBool::new(false),
+        })
+    }
 
-/// A stage this job created, which only it may remove.
-struct Stage {
-    name: OsString,
-    created: EntryStat,
-}
+    /// The same copy repeating bytes it already counted, as from a stage.
+    fn uncounted(&self) -> Arc<Self> {
+        Self::new(
+            self.fs,
+            self.item.clone(),
+            self.cancelled.clone(),
+            self.progress.clone(),
+            false,
+            false,
+        )
+    }
 
-impl Job<'_> {
     fn check_cancelled(&self) -> Result<(), Failure> {
         if self.cancelled.load(Ordering::Acquire) {
             return Err(Failure::Cancelled);
@@ -287,63 +777,30 @@ impl Job<'_> {
         Ok(())
     }
 
-    fn target(&self) -> Entry<'_> {
-        Entry {
-            dir: self.dir,
-            name: self.name,
-        }
-    }
-
-    fn copy_from(&mut self, at: Entry<'_>) -> Result<(), Failure> {
-        self.check_cancelled()?;
-        let source = match self.fs.open_source(at) {
-            Ok(Some((fd, stat))) => Source { fd, stat },
-            Ok(None) => return Err(Failure::Changed),
-            Err(error) => {
-                return Err(Failure::Error(io_error(rust_i18n::t!(
-                    "%{name} changed while it was being copied: %{error}",
-                    name = at.name.to_string_lossy(),
-                    error = os_error_detail(error)
-                ))));
-            }
-        };
-        let parent = self.fs.stat_fd(self.dir)?;
-        if stage::tmpfile_allowed(self.target.family)
-            && self.target.capabilities().tmpfile != Some(false)
-            && TMPFILE_LINK.load(Ordering::Relaxed) != TMPFILE_LINK_UNAVAILABLE
-        {
-            match self.fs.open_tmpfile(self.dir, Mode::from_raw_mode(0o600)) {
-                Ok(fd) => {
-                    self.target
-                        .learn(|capabilities| capabilities.tmpfile = Some(true));
-                    return self.through_tmpfile(&source, fd, &parent);
-                }
-                // Before Linux 3.11 the flag reads as O_DIRECTORY.
-                Err(error) if is_unsupported(error) || error == Errno::ISDIR => {
-                    self.target
-                        .learn(|capabilities| capabilities.tmpfile = Some(false));
-                }
-                Err(error) => return Err(error.into()),
-            }
-        }
-        self.through_named_stage(&source, &parent)
+    /// Runs `work` with a worker's reusable data buffer.
+    fn with_data<T>(&self, work: impl FnOnce(&mut Data) -> T) -> T {
+        let mut data = lock(&self.data).pop().unwrap_or_default();
+        let result = work(&mut data);
+        lock(&self.data).push(data);
+        result
     }
 
     /// Copies all of `source`, counting the bytes as progress when `counted`.
     fn copy_data(
-        &mut self,
-        source: BorrowedFd<'_>,
-        source_stat: &EntryStat,
+        &self,
+        data: &mut Data,
+        target_mount: &Mount,
+        (source, source_stat): (BorrowedFd<'_>, &EntryStat),
         target: BorrowedFd<'_>,
         parent: &EntryStat,
         counted: bool,
     ) -> Result<(), Failure> {
-        let route = data::Route::new(self.fs, &self.target, source, source_stat, parent);
-        let progress = counted.then_some(self.progress);
-        self.data.copy(
+        let route = data::Route::new(self.fs, target_mount, source, source_stat, parent);
+        let progress = (counted && self.counted).then_some(&*self.progress);
+        data.copy(
             self.fs,
-            self.cancelled,
-            &self.target,
+            &self.cancelled,
+            target_mount,
             &route,
             (source, target),
             source_stat.size,
@@ -356,230 +813,29 @@ impl Job<'_> {
     }
 
     fn apply_metadata(
-        &mut self,
+        &self,
         fd: BorrowedFd<'_>,
         created: &EntryStat,
         snapshot: &Snapshot,
         parent: &EntryStat,
+        mount: &Mount,
     ) -> Result<(), Failure> {
         snapshot
-            .apply(
-                self.fs,
-                fd,
-                created,
-                parent,
-                &self.target,
-                &mut self.refused_xattrs,
-            )
+            .apply(self.fs, fd, created, parent, mount, &self.refused_xattrs)
             .map_err(Failure::Os)
-    }
-
-    fn through_tmpfile(
-        &mut self,
-        source: &Source,
-        tmpfile: OwnedFd,
-        parent: &EntryStat,
-    ) -> Result<(), Failure> {
-        self.copy_data(
-            source.fd.as_fd(),
-            &source.stat,
-            tmpfile.as_fd(),
-            parent,
-            true,
-        )?;
-        let snapshot = Snapshot::read(self.fs, source.fd.as_fd(), &source.stat)?;
-        let created = self.fs.stat_fd(tmpfile.as_fd())?;
-        self.apply_metadata(tmpfile.as_fd(), &created, &snapshot, parent)?;
-        self.check_cancelled()?;
-        if let Err(error) = link_tmpfile(self.fs, tmpfile.as_fd(), self.target()) {
-            return match placement::file_creation_error(error) {
-                PlaceError::Exists => Err(Failure::Place(PlaceError::Exists)),
-                _ if matches!(error, Errno::NOSPC | Errno::DQUOT) || is_fatal(error) => {
-                    Err(error.into())
-                }
-                // The written bytes are copied out on the same device, so
-                // the source is never read twice.
-                _ => self.through_stage_from_tmpfile(tmpfile, &created, &snapshot, parent),
-            };
-        }
-        if let Err(error) = self.fs.close(tmpfile) {
-            placement::remove_if_unchanged(
-                self.fs,
-                self.target(),
-                created.identity,
-                AtFlags::empty(),
-            );
-            return Err(error.into());
-        }
-        self.progress.add_file();
-        Ok(())
-    }
-
-    fn through_stage_from_tmpfile(
-        &mut self,
-        tmpfile: OwnedFd,
-        tmpfile_stat: &EntryStat,
-        snapshot: &Snapshot,
-        parent: &EntryStat,
-    ) -> Result<(), Failure> {
-        let (fd, stage) = self.create_stage()?;
-        let copied = self
-            .copy_data(tmpfile.as_fd(), tmpfile_stat, fd.as_fd(), parent, false)
-            .and_then(|()| self.apply_metadata(fd.as_fd(), &stage.created, snapshot, parent));
-        drop(tmpfile);
-        match copied {
-            Ok(()) => self.publish_stage(fd, &stage, snapshot, parent),
-            Err(failure) => {
-                drop(fd);
-                Err(self.discard(&stage, failure))
-            }
-        }
-    }
-
-    fn through_named_stage(&mut self, source: &Source, parent: &EntryStat) -> Result<(), Failure> {
-        let (fd, stage) = self.create_stage()?;
-        let copied = self
-            .copy_data(source.fd.as_fd(), &source.stat, fd.as_fd(), parent, true)
-            .and_then(|()| Ok(Snapshot::read(self.fs, source.fd.as_fd(), &source.stat)?))
-            .and_then(|snapshot| {
-                self.apply_metadata(fd.as_fd(), &stage.created, &snapshot, parent)?;
-                Ok(snapshot)
-            });
-        match copied {
-            Ok(snapshot) => self.publish_stage(fd, &stage, &snapshot, parent),
-            Err(failure) => {
-                drop(fd);
-                Err(self.discard(&stage, failure))
-            }
-        }
-    }
-
-    fn create_stage(&self) -> Result<(OwnedFd, Stage), Failure> {
-        let (name, (fd, created)) =
-            stage::create_file(self.fs, self.dir).map_err(|error| match error {
-                PlaceError::Io(error) => Failure::Os(error),
-                error => Failure::Place(error),
-            })?;
-        Ok((fd, Stage { name, created }))
-    }
-
-    /// Closes the stage, settles its times and publishes it, discarding it on failure.
-    fn publish_stage(
-        &mut self,
-        fd: OwnedFd,
-        stage: &Stage,
-        snapshot: &Snapshot,
-        parent: &EntryStat,
-    ) -> Result<(), Failure> {
-        let settled = self
-            .fs
-            .close(fd)
-            .map_err(Failure::Os)
-            .and_then(|()| self.settle_times(stage, snapshot))
-            .and_then(|()| self.check_cancelled());
-        if let Err(failure) = settled {
-            return Err(self.discard(stage, failure));
-        }
-        let placed = stage::publish(
-            self.fs,
-            self.dir,
-            &stage.name,
-            stage.created.identity,
-            self.name,
-        );
-        match placed {
-            Ok(_) => {}
-            // Either name may hold the copy, so neither is removed.
-            Err(PlaceError::Unconfirmed) => return Err(Failure::Place(PlaceError::Unconfirmed)),
-            Err(PlaceError::Unsupported) => {
-                if let Err(failure) = self.create_from_stage(stage, snapshot, parent) {
-                    return Err(self.discard(stage, failure));
-                }
-                if let Err(error) = self.remove_stage(stage) {
-                    return Err(Failure::Error(io_error(rust_i18n::t!(
-                        "The item was copied, but its staging copy could not be removed: %{error}",
-                        error = crate::services::gio_error_detail(&error)
-                    ))));
-                }
-            }
-            Err(error) => return Err(self.discard(stage, Failure::Place(error))),
-        }
-        self.progress.add_file();
-        Ok(())
-    }
-
-    /// Where nothing can place the stage, creates the final name exclusively
-    /// and fills it from the stage on the same device.
-    fn create_from_stage(
-        &mut self,
-        stage: &Stage,
-        snapshot: &Snapshot,
-        parent: &EntryStat,
-    ) -> Result<(), Failure> {
-        let staged = Entry {
-            dir: self.dir,
-            name: &stage.name,
-        };
-        let (from, from_stat) = match self.fs.open_source(staged)? {
-            Some((fd, stat)) if stat.identity == stage.created.identity => (fd, stat),
-            _ => return Err(Failure::Changed),
-        };
-        let fd = self
-            .fs
-            .create_exclusive(self.target(), Mode::from_raw_mode(0o600))
-            .map_err(|error| Failure::Place(placement::file_creation_error(error)))?;
-        let created = self.fs.stat_fd(fd.as_fd())?;
-        let filled = self
-            .copy_data(from.as_fd(), &from_stat, fd.as_fd(), parent, false)
-            .and_then(|()| self.apply_metadata(fd.as_fd(), &created, snapshot, parent))
-            .and_then(|()| self.fs.close(fd).map_err(Failure::Os));
-        if filled.is_err() {
-            placement::remove_if_unchanged(
-                self.fs,
-                self.target(),
-                created.identity,
-                AtFlags::empty(),
-            );
-        }
-        filled
-    }
-
-    /// Removes a stage this job created, unless something else took its name.
-    fn remove_stage(&self, stage: &Stage) -> Result<(), glib::Error> {
-        let entry = Entry {
-            dir: self.dir,
-            name: &stage.name,
-        };
-        match self.fs.stat(entry, true) {
-            Ok(current) if current.identity == stage.created.identity => self
-                .fs
-                .unlink(entry, AtFlags::empty())
-                .map_err(|error| io_error(os_error_detail(error))),
-            Ok(_) => Err(placement_error(PlaceError::Changed)),
-            Err(Errno::NOENT) => Ok(()),
-            Err(error) => Err(io_error(os_error_detail(error))),
-        }
-    }
-
-    fn discard(&self, stage: &Stage, failure: Failure) -> Failure {
-        match self.remove_stage(stage) {
-            Ok(()) => failure,
-            Err(cleanup) => Failure::Error(copy_failure_after_cleanup(
-                failure.into_error(self.item),
-                Err(cleanup),
-            )),
-        }
     }
 
     /// NFSv4 write delegations set the times at close, and FUSE daemons with
-    /// a writeback cache and some SMB servers may too, so a closed stage gets
+    /// a writeback cache and some SMB servers may too, so a closed file gets
     /// its times again: always on NFSv4, and where a check finds them lost.
-    fn settle_times(&self, stage: &Stage, snapshot: &Snapshot) -> Result<(), Failure> {
-        let entry = Entry {
-            dir: self.dir,
-            name: &stage.name,
-        };
-        let lost = match self.target.family {
+    fn settle_times(
+        &self,
+        entry: Entry<'_>,
+        identity: LocalFileIdentity,
+        snapshot: &Snapshot,
+        family: Family,
+    ) -> Result<(), Failure> {
+        let lost = match family {
             Family::Nfs4 => true,
             Family::Fuse | Family::Smb => match self.fs.stat(entry, true) {
                 Ok(current) => !snapshot.times_match(&current),
@@ -592,7 +848,7 @@ impl Job<'_> {
             return Ok(());
         }
         let reopened = match self.fs.open_source(entry) {
-            Ok(Some((fd, stat))) if stat.identity == stage.created.identity => fd,
+            Ok(Some((fd, stat))) if same_entry(&stat, identity, family) => fd,
             Err(error) if is_fatal(error) => return Err(error.into()),
             _ => return Ok(()),
         };
@@ -601,5 +857,423 @@ impl Job<'_> {
             Err(error) if is_fatal(error) => Err(error.into()),
             _ => Ok(()),
         }
+    }
+
+    /// Removes a folder stage this copy made, giving its locked folders back
+    /// to the owner first.
+    fn discard(&self, staged: StagedSibling) -> Result<(), glib::Error> {
+        unlock_stage(&staged);
+        let roots = vec![PinnedEntry {
+            parent: staged.parent,
+            name: staged.name,
+            identity: Some(staged.identity),
+        }];
+        let workers = local_delete_worker_count(&roots);
+        parallel_delete_local_blocking_with_workers(
+            roots,
+            Arc::new(AtomicBool::new(false)),
+            workers,
+        )
+        .map_err(io_error)
+    }
+
+    fn discarding(&self, staged: StagedSibling, failure: Failure) -> Failure {
+        let discarded = self.discard(staged);
+        self.after_cleanup(failure, discarded)
+    }
+
+    fn after_cleanup(&self, failure: Failure, cleanup: Result<(), glib::Error>) -> Failure {
+        match cleanup {
+            Ok(()) => failure,
+            Err(cleanup) => Failure::Error(copy_failure_after_cleanup(
+                failure.into_error(&self.item),
+                Err(cleanup),
+            )),
+        }
+    }
+}
+
+/// An open source file and its snapshot from that descriptor.
+struct Opened {
+    fd: OwnedFd,
+    stat: EntryStat,
+}
+
+/// `name` could not be opened as what it was listed as.
+fn changed(name: &OsStr, error: Errno) -> Failure {
+    Failure::Error(io_error(rust_i18n::t!(
+        "%{name} changed while it was being copied: %{error}",
+        name = name.to_string_lossy(),
+        error = os_error_detail(error)
+    )))
+}
+
+/// The regular file at `at`, opened without following it.
+fn open_file(fs: &dyn FsOps, at: Entry<'_>) -> Result<Opened, Failure> {
+    match fs.open_source(at) {
+        Ok(Some((fd, stat))) => Ok(Opened { fd, stat }),
+        Ok(None) => Err(Failure::Changed),
+        Err(error) => Err(changed(at.name, error)),
+    }
+}
+
+/// Where a top-level file ends up.
+#[derive(Clone, Copy)]
+enum FileTarget<'a> {
+    Final(&'a OsStr),
+    /// Under a hidden `.strata-replacement-*` name, left unpublished.
+    Hidden,
+}
+
+impl FileTarget<'_> {
+    fn stage_prefix(self) -> &'static str {
+        match self {
+            Self::Final(_) => COPY_PREFIX,
+            Self::Hidden => STAGE_PREFIX,
+        }
+    }
+}
+
+/// A stage this copy created, which only it may remove.
+struct Stage {
+    name: OsString,
+    created: EntryStat,
+}
+
+/// One top-level file copied into `dir`.
+struct FileCopy<'a> {
+    copy: &'a Copy,
+    dir: BorrowedFd<'a>,
+    target: Mount,
+    data: Data,
+}
+
+impl<'a> FileCopy<'a> {
+    fn new(copy: &'a Copy, dir: BorrowedFd<'a>) -> Self {
+        Self {
+            copy,
+            dir,
+            target: Mount::new(copy.fs, dir),
+            data: Data::default(),
+        }
+    }
+
+    fn at<'b>(&self, name: &'b OsStr) -> Entry<'b>
+    where
+        'a: 'b,
+    {
+        Entry {
+            dir: self.dir,
+            name,
+        }
+    }
+
+    /// Returns the name the copy took and its identity there.
+    fn copy_from(
+        &mut self,
+        at: Entry<'_>,
+        target: FileTarget<'_>,
+    ) -> Result<(OsString, LocalFileIdentity), Failure> {
+        let fs = self.copy.fs;
+        self.copy.check_cancelled()?;
+        let source = open_file(fs, at)?;
+        let parent = fs.stat_fd(self.dir)?;
+        if stage::tmpfile_allowed(self.target.family)
+            && self.target.capabilities().tmpfile != Some(false)
+            && TMPFILE_LINK.load(Ordering::Relaxed) != TMPFILE_LINK_UNAVAILABLE
+        {
+            match fs.open_tmpfile(self.dir, Mode::from_raw_mode(0o600)) {
+                Ok(fd) => {
+                    self.target
+                        .learn(|capabilities| capabilities.tmpfile = Some(true));
+                    return self.through_tmpfile(&source, fd, &parent, target);
+                }
+                // Before Linux 3.11 the flag reads as O_DIRECTORY.
+                Err(error) if is_unsupported(error) || error == Errno::ISDIR => {
+                    self.target
+                        .learn(|capabilities| capabilities.tmpfile = Some(false));
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+        self.through_named_stage(&source, &parent, target)
+    }
+
+    fn link(&self, tmpfile: BorrowedFd<'_>, target: FileTarget<'_>) -> Result<OsString, Errno> {
+        let fs = self.copy.fs;
+        match target {
+            FileTarget::Final(name) => {
+                link_tmpfile(fs, tmpfile, self.at(name)).map(|()| name.to_os_string())
+            }
+            FileTarget::Hidden => placement::reserve_hidden_name(STAGE_PREFIX, |name| {
+                link_tmpfile(fs, tmpfile, self.at(name)).map_err(|error| {
+                    match placement::file_creation_error(error) {
+                        PlaceError::Exists => PlaceError::Exists,
+                        _ => PlaceError::Io(error),
+                    }
+                })
+            })
+            .map(|(name, ())| name)
+            .map_err(|error| match error {
+                PlaceError::Io(error) => error,
+                _ => Errno::EXIST,
+            }),
+        }
+    }
+
+    fn through_tmpfile(
+        &mut self,
+        source: &Opened,
+        tmpfile: OwnedFd,
+        parent: &EntryStat,
+        target: FileTarget<'_>,
+    ) -> Result<(OsString, LocalFileIdentity), Failure> {
+        let fs = self.copy.fs;
+        self.copy.copy_data(
+            &mut self.data,
+            &self.target,
+            (source.fd.as_fd(), &source.stat),
+            tmpfile.as_fd(),
+            parent,
+            true,
+        )?;
+        let snapshot = Snapshot::read(fs, source.fd.as_fd(), &source.stat)?;
+        let created = fs.stat_fd(tmpfile.as_fd())?;
+        self.copy
+            .apply_metadata(tmpfile.as_fd(), &created, &snapshot, parent, &self.target)?;
+        self.copy.check_cancelled()?;
+        let name = match self.link(tmpfile.as_fd(), target) {
+            Ok(name) => name,
+            Err(error) => {
+                return match placement::file_creation_error(error) {
+                    PlaceError::Exists => Err(Failure::Place(PlaceError::Exists)),
+                    _ if matches!(error, Errno::NOSPC | Errno::DQUOT) || is_fatal(error) => {
+                        Err(error.into())
+                    }
+                    // The written bytes are copied out on the same device, so
+                    // the source is never read twice.
+                    _ => self
+                        .through_stage_from_tmpfile(tmpfile, &created, &snapshot, parent, target),
+                };
+            }
+        };
+        if let Err(error) = fs.close(tmpfile) {
+            placement::remove_if_unchanged(fs, self.at(&name), created.identity, AtFlags::empty());
+            return Err(error.into());
+        }
+        self.copy.progress.add_file();
+        Ok((name, created.identity))
+    }
+
+    fn through_stage_from_tmpfile(
+        &mut self,
+        tmpfile: OwnedFd,
+        tmpfile_stat: &EntryStat,
+        snapshot: &Snapshot,
+        parent: &EntryStat,
+        target: FileTarget<'_>,
+    ) -> Result<(OsString, LocalFileIdentity), Failure> {
+        let (fd, stage) = self.create_stage(target)?;
+        let copied = self
+            .copy
+            .copy_data(
+                &mut self.data,
+                &self.target,
+                (tmpfile.as_fd(), tmpfile_stat),
+                fd.as_fd(),
+                parent,
+                false,
+            )
+            .and_then(|()| {
+                self.copy
+                    .apply_metadata(fd.as_fd(), &stage.created, snapshot, parent, &self.target)
+            });
+        drop(tmpfile);
+        match copied {
+            Ok(()) => self.finish_stage(fd, stage, snapshot, parent, target),
+            Err(failure) => {
+                drop(fd);
+                Err(self.discard(&stage, failure))
+            }
+        }
+    }
+
+    fn through_named_stage(
+        &mut self,
+        source: &Opened,
+        parent: &EntryStat,
+        target: FileTarget<'_>,
+    ) -> Result<(OsString, LocalFileIdentity), Failure> {
+        let fs = self.copy.fs;
+        let (fd, stage) = self.create_stage(target)?;
+        let copied = self
+            .copy
+            .copy_data(
+                &mut self.data,
+                &self.target,
+                (source.fd.as_fd(), &source.stat),
+                fd.as_fd(),
+                parent,
+                true,
+            )
+            .and_then(|()| Ok(Snapshot::read(fs, source.fd.as_fd(), &source.stat)?))
+            .and_then(|snapshot| {
+                self.copy.apply_metadata(
+                    fd.as_fd(),
+                    &stage.created,
+                    &snapshot,
+                    parent,
+                    &self.target,
+                )?;
+                Ok(snapshot)
+            });
+        match copied {
+            Ok(snapshot) => self.finish_stage(fd, stage, &snapshot, parent, target),
+            Err(failure) => {
+                drop(fd);
+                Err(self.discard(&stage, failure))
+            }
+        }
+    }
+
+    fn create_stage(&self, target: FileTarget<'_>) -> Result<(OwnedFd, Stage), Failure> {
+        let (name, (fd, created)) =
+            stage::create_file(self.copy.fs, self.dir, target.stage_prefix())?;
+        Ok((fd, Stage { name, created }))
+    }
+
+    /// Closes the stage and settles its times, then publishes it at a final
+    /// name; a failure discards it.
+    fn finish_stage(
+        &mut self,
+        fd: OwnedFd,
+        stage: Stage,
+        snapshot: &Snapshot,
+        parent: &EntryStat,
+        target: FileTarget<'_>,
+    ) -> Result<(OsString, LocalFileIdentity), Failure> {
+        let fs = self.copy.fs;
+        let settled = fs
+            .close(fd)
+            .map_err(Failure::Os)
+            .and_then(|()| {
+                self.copy.settle_times(
+                    self.at(&stage.name),
+                    stage.created.identity,
+                    snapshot,
+                    self.target.family,
+                )
+            })
+            .and_then(|()| self.copy.check_cancelled());
+        if let Err(failure) = settled {
+            return Err(self.discard(&stage, failure));
+        }
+        let FileTarget::Final(name) = target else {
+            self.copy.progress.add_file();
+            return Ok((stage.name, stage.created.identity));
+        };
+        let placed = stage::publish(fs, self.dir, &stage.name, stage.created.identity, name);
+        let identity = match placed {
+            Ok(_) => stage.created.identity,
+            // Either name may hold the copy, so neither is removed.
+            Err(PlaceError::Unconfirmed) => return Err(Failure::Place(PlaceError::Unconfirmed)),
+            Err(PlaceError::Unsupported) => {
+                let dir = self.dir;
+                let staged = Entry {
+                    dir,
+                    name: &stage.name,
+                };
+                let identity = match self.create_from(
+                    staged,
+                    stage.created.identity,
+                    Some(snapshot),
+                    name,
+                    parent,
+                ) {
+                    Ok(identity) => identity,
+                    Err(failure) => return Err(self.discard(&stage, failure)),
+                };
+                if let Err(error) = self.remove_stage(&stage) {
+                    return Err(Failure::Error(io_error(rust_i18n::t!(
+                        "The item was copied, but its staging copy could not be removed: %{error}",
+                        error = crate::services::gio_error_detail(&error)
+                    ))));
+                }
+                identity
+            }
+            Err(error) => return Err(self.discard(&stage, Failure::Place(error))),
+        };
+        self.copy.progress.add_file();
+        Ok((name.to_os_string(), identity))
+    }
+
+    /// Creates `name` exclusively and fills it from the file at `from`, which
+    /// must still be `expected`: a stage the mount cannot place.
+    fn create_from(
+        &mut self,
+        from: Entry<'_>,
+        expected: LocalFileIdentity,
+        snapshot: Option<&Snapshot>,
+        name: &OsStr,
+        parent: &EntryStat,
+    ) -> Result<LocalFileIdentity, Failure> {
+        let fs = self.copy.fs;
+        let source = match fs.open_source(from)? {
+            Some((fd, stat)) if stat.identity == expected => Opened { fd, stat },
+            _ => return Err(Failure::Changed),
+        };
+        let read;
+        let snapshot = match snapshot {
+            Some(snapshot) => snapshot,
+            None => {
+                read = Snapshot::read(fs, source.fd.as_fd(), &source.stat)?;
+                &read
+            }
+        };
+        let target = self.at(name);
+        let fd = fs
+            .create_exclusive(target, Mode::from_raw_mode(0o600))
+            .map_err(|error| Failure::Place(placement::file_creation_error(error)))?;
+        let created = fs.stat_fd(fd.as_fd())?;
+        // Takes `fd`, so a failed file is closed before it is removed: NFS
+        // renames an open file aside instead.
+        let filled = (|fd: OwnedFd| -> Result<(), Failure> {
+            self.copy.copy_data(
+                &mut self.data,
+                &self.target,
+                (source.fd.as_fd(), &source.stat),
+                fd.as_fd(),
+                parent,
+                false,
+            )?;
+            self.copy
+                .apply_metadata(fd.as_fd(), &created, snapshot, parent, &self.target)?;
+            fs.close(fd)?;
+            self.copy
+                .settle_times(target, created.identity, snapshot, self.target.family)
+        })(fd);
+        if filled.is_err() {
+            placement::remove_if_unchanged(fs, target, created.identity, AtFlags::empty());
+        }
+        filled.map(|()| created.identity)
+    }
+
+    /// Removes a stage this copy created, unless something else took its name.
+    fn remove_stage(&self, stage: &Stage) -> Result<(), glib::Error> {
+        let fs = self.copy.fs;
+        let entry = self.at(&stage.name);
+        match fs.stat(entry, true) {
+            Ok(current) if current.identity == stage.created.identity => fs
+                .unlink(entry, AtFlags::empty())
+                .map_err(|error| io_error(os_error_detail(error))),
+            Ok(_) => Err(placement_error(PlaceError::Changed)),
+            Err(Errno::NOENT) => Ok(()),
+            Err(error) => Err(io_error(os_error_detail(error))),
+        }
+    }
+
+    fn discard(&self, stage: &Stage, failure: Failure) -> Failure {
+        let removed = self.remove_stage(stage);
+        self.copy.after_cleanup(failure, removed)
     }
 }
