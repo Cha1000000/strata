@@ -801,36 +801,52 @@ pub(super) fn copy_fifo(
     if stat.kind != FileType::Fifo {
         return Err(Failure::Changed);
     }
-    match fs.create_node(target, FileType::Fifo, Mode::from_raw_mode(0o600)) {
-        Ok(()) => {}
+    let identity = match fs.create_node(target, FileType::Fifo, Mode::from_raw_mode(0o600)) {
+        Ok(()) => fs.stat(target, false)?.identity,
         Err(error) if taken(fs, target, error) => {
-            adopt(fs, target, names, |stat| stat.kind == FileType::Fifo)?;
+            adopt(fs, target, names, |stat| stat.kind == FileType::Fifo)?
         }
         Err(error) if refuses_pipes(error) => return Ok((stat, None)),
         Err(error) => return Err(error.into()),
-    }
-    let created = match fs.open_fifo(target) {
-        Ok(fd) => {
-            let created = fs.stat_fd(fd.as_fd())?;
-            if created.kind != FileType::Fifo {
-                return Err(Failure::Place(PlaceError::Changed));
-            }
-            Snapshot::of(&stat).apply_to_pipe(
-                fs,
-                fd.as_fd(),
-                &created,
-                parent,
-                mount,
-                &copy.refused_xattrs,
-            )?;
-            best_effort(fs.close(fd))?;
-            created
-        }
-        Err(error) if is_fatal(error) => return Err(error.into()),
-        Err(_) => fs.stat(target, false)?,
     };
+    let finished = finish_pipe(copy, &stat, (target, identity), parent, mount);
+    // Closed by now, so the pipe is removed rather than renamed aside on NFS.
+    if finished.is_err() {
+        placement::remove_if_unchanged(fs, target, identity, AtFlags::empty());
+    }
+    finished?;
     copy.add_file(0);
-    Ok((stat, Some(created.identity)))
+    Ok((stat, Some(identity)))
+}
+
+/// Gives the pipe made as `identity` at `target` the owner, mode and times
+/// of the source pipe `stat` describes.
+fn finish_pipe(
+    copy: &Copy,
+    stat: &EntryStat,
+    (target, identity): (Entry<'_>, LocalFileIdentity),
+    parent: &EntryStat,
+    mount: &Mount,
+) -> Result<(), Failure> {
+    let fs = copy.fs;
+    let fd = match fs.open_fifo(target) {
+        Ok(fd) => fd,
+        Err(error) if is_fatal(error) => return Err(error.into()),
+        Err(_) => return Ok(()),
+    };
+    let created = fs.stat_fd(fd.as_fd())?;
+    if !same_entry(&created, identity, mount.family) {
+        return Err(Failure::Place(PlaceError::Changed));
+    }
+    Snapshot::of(stat).apply_to_pipe(
+        fs,
+        fd.as_fd(),
+        &created,
+        parent,
+        mount,
+        &copy.refused_xattrs,
+    )?;
+    best_effort(fs.close(fd)).map_err(Failure::Os)
 }
 
 /// How filesystems without named pipes refuse one: vfat with `EPERM`,

@@ -769,6 +769,57 @@ fn special_files_inside_a_copied_folder_are_recreated_or_left_out_and_reported()
 }
 
 #[test]
+fn a_named_pipe_whose_copy_fails_is_not_left_behind() -> Result<(), Box<dyn Error>> {
+    use crate::adapters::volume::learn_mount_capability;
+    use rustix::io::Errno;
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    // A selected pipe made at its final name, and a pipe in a folder made in
+    // place, where the mount cannot place a stage.
+    for selected in [true, false] {
+        let root = tempfile::tempdir()?;
+        let source = root.path().join("source");
+        let destination = root.path().join("destination");
+        fs::create_dir_all(&source)?;
+        fs::create_dir(&destination)?;
+        make_fifo(&source.join("pipe"), 0o640)?;
+        fs::write(source.join("a.txt"), b"a")?;
+        let scope = FsQuirks::install(
+            &destination,
+            Quirks {
+                fail: vec![(Op::SetTimes, "pipe", 0, Errno::IO)],
+                ..Quirks::without_folder_placement()
+            },
+        );
+        learn_mount_capability(scope.key(), |capabilities| {
+            capabilities.no_replace = Some(false);
+            capabilities.hard_links = Some(true);
+            capabilities.rename_over_empty_directory = Some(false);
+        });
+        let (from, to) = if selected {
+            (source.join("pipe"), destination.join("pipe"))
+        } else {
+            (source.clone(), destination.join("copy"))
+        };
+
+        let copied = glib::MainContext::default().block_on(copy_new_recursively(
+            gio::File::for_path(from),
+            gio::File::for_path(to),
+            gio::Cancellable::new(),
+        ));
+
+        assert!(copied.is_err(), "selected: {selected}");
+        assert_eq!(
+            names(&destination)?,
+            Vec::<String>::new(),
+            "selected: {selected}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn a_selected_named_pipe_is_recreated_where_the_destination_can() -> Result<(), Box<dyn Error>> {
     use std::os::unix::fs::FileTypeExt;
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
