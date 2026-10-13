@@ -1038,7 +1038,7 @@ fn make_fifo(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
-/// Moves the folder `folder` from a volume with `quirks` to another one, and
+/// Moves the item `folder` from a volume with `quirks` to another one, and
 /// returns where it went, what the move reported, and its events.
 fn move_across_volumes(
     folder: &Path,
@@ -1079,8 +1079,9 @@ fn move_across_volumes_logged(
         events.borrow()
     );
     let report = reported(&events);
+    let name = folder.file_name().ok_or("a named item")?;
     Ok((
-        destination.join("folder"),
+        destination.join(name),
         report,
         events.take(),
         source.calls(),
@@ -1772,6 +1773,24 @@ fn a_file_put_in_a_moved_files_place_within_its_time_tick_is_kept() -> Result<()
     Ok(())
 }
 
+/// Sets the modification and access times of `path` to `seconds`.
+fn set_times(path: &Path, seconds: u64) -> io::Result<()> {
+    let times = rustix::fs::Timespec {
+        tv_sec: i64::try_from(seconds).map_err(io::Error::other)?,
+        tv_nsec: 0,
+    };
+    rustix::fs::utimensat(
+        rustix::fs::CWD,
+        path,
+        &rustix::fs::Timestamps {
+            last_access: times,
+            last_modification: times,
+        },
+        rustix::fs::AtFlags::empty(),
+    )?;
+    Ok(())
+}
+
 /// Puts back the real clock for the copy engine.
 struct ClockGuard;
 
@@ -1818,74 +1837,128 @@ fn files_read_within_a_coarse_time_tick_are_compared_before_their_move_deletes_t
         ..Quirks::default()
     };
     let recent = Duration::from_millis(500);
+    let behind = Duration::from_millis(2500);
     let long_ago = Duration::from_secs(3600);
+    // When the file is rewritten at the same size: before the deletion
+    // opens the moved folder, or the moved file itself to compare it, both
+    // keeping its times; right after the comparison, at the time of the
+    // engine's clock then, in FAT's two-second steps; or before the
+    // deletion, after growing as the copy read it, which the copy then
+    // read again.
+    #[derive(Clone, Copy, PartialEq)]
+    enum Rewrite {
+        Never,
+        Deleting,
+        Comparing,
+        Compared,
+        Grown,
+    }
     // The source volume, how long after its modification time the copy
-    // reads the file, whether it is then rewritten at the same size with
-    // its times put back, and whether the deletion reads it again.
-    let rows: [(&str, Preset, Duration, bool, bool); 7] = [
-        ("vfat", vfat, recent, true, true),
-        ("exfat-fuse", exfat_fuse, recent, true, true),
-        ("sshfs", sshfs, recent, true, true),
-        ("hfsplus", hfsplus, recent, true, true),
-        ("vfat, unchanged", vfat, recent, false, true),
-        ("vfat, modified long before", vfat, long_ago, false, false),
-        ("ext4", Quirks::ext4, recent, false, false),
+    // reads the file (on sshfs, as with a server clock behind ours), when
+    // it is rewritten, and whether the deletion reads it again. Only the
+    // file itself is moved where it is rewritten as it is compared.
+    let rows: [(&str, Preset, Duration, Rewrite, bool); 11] = [
+        ("vfat", vfat, recent, Rewrite::Deleting, true),
+        ("exfat-fuse", exfat_fuse, recent, Rewrite::Deleting, true),
+        ("sshfs", sshfs, recent, Rewrite::Deleting, true),
+        ("sshfs, behind", sshfs, behind, Rewrite::Deleting, true),
+        ("hfsplus", hfsplus, recent, Rewrite::Deleting, true),
+        ("vfat, file", vfat, recent, Rewrite::Comparing, true),
+        ("vfat, compared", vfat, recent, Rewrite::Compared, true),
+        ("vfat, grown", vfat, recent, Rewrite::Grown, true),
+        ("vfat, unchanged", vfat, recent, Rewrite::Never, true),
+        ("vfat, long before", vfat, long_ago, Rewrite::Never, false),
+        ("ext4", Quirks::ext4, recent, Rewrite::Never, false),
     ];
-    for (row, preset, read_after, rewritten, read_again) in rows {
+    for (row, preset, read_after, rewrite, read_again) in rows {
         let root = tempfile::tempdir()?;
         let folder = root.path().join("source/folder");
         fs::create_dir_all(&folder)?;
         let file = folder.join("a.txt");
         fs::write(&file, b"original")?;
-        let modified = fs::metadata(&file)?.modified()?;
-        let _clock = ClockGuard::set(modified + read_after);
-        let path = file.clone();
-        let racer: super::fs_quirks::Racer = Box::new(move || {
-            if !rewritten {
-                return;
-            }
-            let before = fs::metadata(&path).expect("stat the source");
-            fs::write(&path, b"ORIGINAL").expect("rewrite the source");
-            let times = rustix::fs::Timespec {
-                tv_sec: before.mtime(),
-                tv_nsec: before.mtime_nsec(),
-            };
-            rustix::fs::utimensat(
-                rustix::fs::CWD,
-                &path,
-                &rustix::fs::Timestamps {
-                    last_access: times,
-                    last_modification: times,
-                },
-                rustix::fs::AtFlags::empty(),
-            )
-            .expect("put the times back");
-        });
+        let epoch = SystemTime::UNIX_EPOCH;
+        let seconds = SystemTime::now().duration_since(epoch)?.as_secs() / 2 * 2;
+        set_times(&file, seconds)?;
+        let _clock = ClockGuard::set(epoch + Duration::from_secs(seconds) + read_after);
+        let rewriter = |contents: &'static [u8], clocked: bool| -> super::fs_quirks::Racer {
+            let path = file.clone();
+            Box::new(move || {
+                fs::write(&path, contents).expect("rewrite the source");
+                let now = super::super::copy_engine::clock_for_test()
+                    .duration_since(epoch)
+                    .expect("a time after 1970");
+                let step = if clocked {
+                    now.as_secs() / 2 * 2
+                } else {
+                    seconds
+                };
+                set_times(&path, step).expect("set the times");
+            })
+        };
+        let (item, racers) = match rewrite {
+            Rewrite::Never => (&folder, Vec::new()),
+            Rewrite::Deleting => (
+                &folder,
+                vec![(Op::OpenDir, "folder", 1, rewriter(b"ORIGINAL", false))],
+            ),
+            Rewrite::Comparing => (
+                &file,
+                vec![(Op::OpenSource, "a.txt", 1, rewriter(b"ORIGINAL", false))],
+            ),
+            Rewrite::Compared => (
+                &folder,
+                vec![(Op::Stat, "a.txt", 0, rewriter(b"ORIGINAL", true))],
+            ),
+            Rewrite::Grown => (
+                &folder,
+                vec![
+                    (Op::Read, "a.txt", 0, rewriter(b"original, grown", false)),
+                    (
+                        Op::OpenDir,
+                        "folder",
+                        1,
+                        rewriter(b"ORIGINAL, GROWN", false),
+                    ),
+                ],
+            ),
+        };
         let quirks = Quirks {
-            before: vec![(Op::OpenDir, "folder", 1, racer)],
+            before: racers,
             ..preset()
         };
 
-        let (moved, report, _, calls) = move_across_volumes_logged(&folder, quirks)?;
+        let (moved, report, _, calls) = move_across_volumes_logged(item, quirks)?;
 
-        assert_eq!(fs::read(moved.join("a.txt"))?, b"original", "{row}");
-        if rewritten {
-            assert_eq!(fs::read(&file)?, b"ORIGINAL", "{row}");
-            assert_eq!(report.kept, [kept(file, KeptCause::Changed)], "{row}");
+        let copied = if item == &file {
+            moved
         } else {
-            assert!(!folder.exists(), "{row}");
+            moved.join("a.txt")
+        };
+        let grown = rewrite == Rewrite::Grown;
+        let original: &[u8] = if grown {
+            b"original, grown"
+        } else {
+            b"original"
+        };
+        assert_eq!(fs::read(copied)?, original, "{row}");
+        if rewrite == Rewrite::Never {
+            assert!(!item.exists(), "{row}");
             assert_eq!(report.kept, [], "{row}");
+        } else {
+            assert_eq!(fs::read(&file)?, original.to_ascii_uppercase(), "{row}");
+            assert_eq!(report.kept, [kept(file, KeptCause::Changed)], "{row}");
         }
-        let deleting = calls
+        let opened: Vec<usize> = calls
             .iter()
             .enumerate()
-            .filter(|(_, call)| call.op == Op::OpenDir && call.names == ["folder"])
-            .nth(1)
+            .filter(|(_, call)| call.op == Op::OpenSource && call.names == ["a.txt"])
             .map(|(index, _)| index)
-            .ok_or("the deletion opened the folder")?;
-        let read = calls[deleting..]
-            .iter()
-            .any(|call| call.op == Op::Read && call.names == ["a.txt"]);
+            .collect();
+        let read = opened.get(1).is_some_and(|&reopened| {
+            calls[reopened..]
+                .iter()
+                .any(|call| call.op == Op::Read && call.names == ["a.txt"])
+        });
         assert_eq!(read, read_again, "{row}");
     }
     Ok(())

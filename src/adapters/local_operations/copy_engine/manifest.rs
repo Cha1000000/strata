@@ -50,7 +50,7 @@ pub(in crate::adapters::local_operations) fn set_clock_for_test(now: Option<Syst
     *lock(&TEST_NOW) = now;
 }
 
-pub(super) fn now() -> SystemTime {
+pub(in crate::adapters::local_operations) fn now() -> SystemTime {
     #[cfg(test)]
     if let Some(now) = *lock(&TEST_NOW) {
         return now;

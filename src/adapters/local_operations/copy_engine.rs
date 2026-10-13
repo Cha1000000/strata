@@ -56,9 +56,9 @@ pub(super) use barrier::Barrier;
 use data::Data;
 #[cfg(test)]
 pub(super) use data::set_kernel_for_test;
-#[cfg(test)]
-pub(super) use manifest::set_clock_for_test;
 pub(super) use manifest::{Manifest, Published, Unlinks};
+#[cfg(test)]
+pub(super) use manifest::{now as clock_for_test, set_clock_for_test};
 use metadata::Snapshot;
 pub(super) use restrictive::Restrictive;
 
