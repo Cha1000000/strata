@@ -682,7 +682,7 @@ fn owed_deletions_close_in_batches() -> Result<(), Box<dyn Error>> {
                 bytes: 10,
                 ..NO_LIMITS
             },
-            [12, 1, 1, 12, 12],
+            [10, 1, 1, 8, 12],
             vec![
                 Seen {
                     deleted: Vec::new(),
