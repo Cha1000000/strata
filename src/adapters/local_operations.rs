@@ -1298,6 +1298,7 @@ async fn execute_parallel_copy_plans(
         next: 0,
         written_paths: Vec::new(),
     };
+    let last = plans.last().map(|plan| plan.index);
     while outcome.next < plans.len() && !cancellable.is_cancelled() {
         let end = (outcome.next + worker_count).min(plans.len());
         let chunk = &plans[outcome.next..end];
@@ -1348,7 +1349,8 @@ async fn execute_parallel_copy_plans(
                         moved_to: location_for_file(&transferred.target),
                     };
                     let copied = transferred.reported.bytes;
-                    settling.owe(done, transferred.owed, copied).await;
+                    let is_last = Some(plan.index) == last;
+                    settling.owe(done, transferred.owed, copied, is_last).await;
                 }
                 Ok(Err(error)) => outcome.failed.push((plan.index, error)),
                 Err(_) => outcome
@@ -5990,12 +5992,13 @@ impl OperationProvider for LocalOperationProvider {
                         .await
                         .unwrap_or(false)
                 };
+                let last = index + 1 == request.items.len();
                 if is_noop {
                     let done = Done {
                         index,
                         moved_to: None,
                     };
-                    settling.owe(done, Owed::default(), 0).await;
+                    settling.owe(done, Owed::default(), 0, last).await;
                     progress.finish_item(
                         progress.reported().since(started),
                         item_sizes[index],
@@ -6160,13 +6163,13 @@ impl OperationProvider for LocalOperationProvider {
                     moved_to: target_location,
                 };
                 let reported = progress.reported().since(started);
-                settling.owe(done, owed, reported.bytes).await;
                 progress.finish_item(
                     reported,
                     item_sizes[index],
                     item_files[index],
                     created_location,
                 );
+                settling.owe(done, owed, reported.bytes, last).await;
             }
             settling.finish().await;
             if let Some(failure) = settling.failure() {

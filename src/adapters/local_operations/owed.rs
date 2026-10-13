@@ -341,15 +341,18 @@ impl<'a> Settling<'a> {
     }
 
     /// The item, which copied `copied` bytes, is done once what it owes is
-    /// deleted; batches that are due close.
-    pub(super) async fn owe(&mut self, done: Done, owed: Owed, copied: u64) {
+    /// deleted. Batches that are due close, except after the `last` item:
+    /// [`Self::finish`] closes them, showing the device flush.
+    pub(super) async fn owe(&mut self, done: Done, owed: Owed, copied: u64, last: bool) {
         if owed.deletions.is_empty() {
             self.done(done);
             return;
         }
         self.batches.add(done, owed, copied);
-        let due = self.batches.take(Batch::due);
-        self.close(due).await;
+        if !last {
+            let due = self.batches.take(Batch::due);
+            self.close(due).await;
+        }
     }
 
     async fn close(&mut self, batches: Vec<Batch<Done>>) {

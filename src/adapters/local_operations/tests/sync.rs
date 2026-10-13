@@ -334,12 +334,15 @@ struct Seen {
     copied: Vec<String>,
     /// Whether the progress dock showed the device flush.
     flushing: bool,
+    /// The items the progress dock counted done.
+    counted: usize,
 }
 
 /// Records, at each `SyncFs` in the destination, what [`Seen`] holds.
 struct Barriers {
     seen: Arc<std::sync::Mutex<Vec<Seen>>>,
     flushing: Arc<std::sync::atomic::AtomicBool>,
+    counted: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl Barriers {
@@ -347,6 +350,7 @@ impl Barriers {
         Self {
             seen: Arc::default(),
             flushing: Arc::default(),
+            counted: Arc::default(),
         }
     }
 
@@ -360,7 +364,11 @@ impl Barriers {
     ) -> Vec<(Op, &'static str, usize, super::fs_quirks::Racer)> {
         (0..names.len())
             .map(|_| {
-                let (seen, flushing) = (self.seen.clone(), self.flushing.clone());
+                let (seen, flushing, counted) = (
+                    self.seen.clone(),
+                    self.flushing.clone(),
+                    self.counted.clone(),
+                );
                 let (sources, destination) = (sources.to_path_buf(), destination.to_path_buf());
                 let names: Vec<String> = names.iter().map(|name| (*name).to_owned()).collect();
                 let mut also = also.take();
@@ -384,6 +392,7 @@ impl Barriers {
                             deleted,
                             copied,
                             flushing: flushing.load(std::sync::atomic::Ordering::SeqCst),
+                            counted: counted.load(std::sync::atomic::Ordering::SeqCst),
                         });
                 });
                 (Op::SyncFs, "*", 0, racer)
@@ -414,7 +423,7 @@ fn paste_moves(
     let early = Rc::new(RefCell::new(Vec::new()));
     let handle = Rc::new(RefCell::new(None));
     let (emitted, reported_early, slot) = (events.clone(), early.clone(), handle.clone());
-    let flushing = barriers.flushing.clone();
+    let (flushing, counted) = (barriers.flushing.clone(), barriers.counted.clone());
     let operation = LocalOperationProvider.paste(
         PasteRequest {
             id: OperationRequestId(id),
@@ -440,8 +449,11 @@ fn paste_moves(
                 }
                 OperationEvent::TransferProgress {
                     completed_items, ..
-                } if Some(*completed_items) == cancel_after => {
-                    slot.borrow_mut().take();
+                } => {
+                    counted.store(*completed_items, std::sync::atomic::Ordering::SeqCst);
+                    if Some(*completed_items) == cancel_after {
+                        slot.borrow_mut().take();
+                    }
                 }
                 _ => {}
             }
@@ -621,6 +633,7 @@ fn owed_deletions_close_in_batches() -> Result<(), Box<dyn Error>> {
                 deleted: Vec::new(),
                 copied: strings(&names),
                 flushing: true,
+                counted: 5,
             }],
         ),
         (
@@ -635,16 +648,19 @@ fn owed_deletions_close_in_batches() -> Result<(), Box<dyn Error>> {
                     deleted: Vec::new(),
                     copied: strings(&["a", "b"]),
                     flushing: false,
+                    counted: 2,
                 },
                 Seen {
                     deleted: strings(&["a", "b"]),
                     copied: strings(&["a", "b", "c", "d"]),
                     flushing: false,
+                    counted: 4,
                 },
                 Seen {
                     deleted: strings(&["a", "b", "c", "d"]),
                     copied: strings(&names),
                     flushing: true,
+                    counted: 5,
                 },
             ],
         ),
@@ -654,22 +670,25 @@ fn owed_deletions_close_in_batches() -> Result<(), Box<dyn Error>> {
                 bytes: 10,
                 ..NO_LIMITS
             },
-            [12, 1, 1, 12, 1],
+            [12, 1, 1, 12, 12],
             vec![
                 Seen {
                     deleted: Vec::new(),
                     copied: strings(&["a"]),
                     flushing: false,
+                    counted: 1,
                 },
                 Seen {
                     deleted: strings(&["a"]),
                     copied: strings(&["a", "b", "c", "d"]),
                     flushing: false,
+                    counted: 4,
                 },
                 Seen {
                     deleted: strings(&["a", "b", "c", "d"]),
                     copied: strings(&names),
                     flushing: true,
+                    counted: 5,
                 },
             ],
         ),
@@ -684,7 +703,8 @@ fn owed_deletions_close_in_batches() -> Result<(), Box<dyn Error>> {
                 .map(|index| Seen {
                     deleted: strings(&names[..index]),
                     copied: strings(&names[..=index]),
-                    flushing: false,
+                    flushing: index + 1 == names.len(),
+                    counted: index + 1,
                 })
                 .collect(),
         ),
@@ -830,6 +850,7 @@ fn cancelling_a_move_closes_its_pending_batch() -> Result<(), Box<dyn Error>> {
             deleted: Vec::new(),
             copied: strings(&["a", "b"]),
             flushing: true,
+            counted: 2,
         }]
     );
     assert!(!paths[0].exists() && !paths[1].exists());
@@ -845,7 +866,12 @@ fn many_moved_files_are_copied_in_parallel_and_share_a_barrier() -> Result<(), B
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
         .lock()
         .map_err(|error| error.to_string())?;
-    let _limits = LimitsGuard::set(NO_LIMITS);
+    // The last item makes the batch due, which still closes as the device
+    // flush shows.
+    let _limits = LimitsGuard::set(super::super::owed::Limits {
+        items: 12,
+        ..NO_LIMITS
+    });
     let root = tempfile::tempdir()?;
     let sources = root.path().join("sources");
     let destination = root.path().join("destination");
@@ -928,6 +954,7 @@ fn many_moved_files_are_copied_in_parallel_and_share_a_barrier() -> Result<(), B
             deleted: Vec::new(),
             copied: strings(&names),
             flushing: true,
+            counted: 12,
         }]
     );
     for (name, path) in names.iter().zip(&paths) {
