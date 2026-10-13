@@ -5,7 +5,7 @@
 
 use std::{
     ffi::OsStr,
-    os::fd::{AsFd, OwnedFd},
+    os::fd::{AsFd, BorrowedFd, OwnedFd},
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
 };
@@ -114,21 +114,32 @@ impl Barrier {
                 name: OsStr::new("."),
             });
             match opened {
-                Ok(dir) => {
-                    let mount = Mount::new(fs, dir.as_fd());
-                    return Ok(Self {
-                        dir: OffMain::new(dir),
-                        path: path.to_path_buf(),
-                        key: mount.key,
-                        plan: Plan::of(mount.family),
-                        opened: OPENED.fetch_add(1, Ordering::Relaxed),
-                    });
-                }
+                Ok(dir) => return Ok(Self::opened(fs, dir, path.to_path_buf())),
                 Err(Errno::ACCESS) => {}
                 Err(error) => return Err(could_not_open(error)),
             }
         }
         Err(could_not_open(Errno::ACCESS))
+    }
+
+    /// A barrier at the folder `dir`, at `path`, which a copy opened.
+    pub(super) fn at(fs: &dyn FsOps, dir: BorrowedFd<'_>, path: PathBuf) -> Result<Self, Errno> {
+        let dir = fs.open_dir(Entry {
+            dir,
+            name: OsStr::new("."),
+        })?;
+        Ok(Self::opened(fs, dir, path))
+    }
+
+    fn opened(fs: &dyn FsOps, dir: OwnedFd, path: PathBuf) -> Self {
+        let mount = Mount::new(fs, dir.as_fd());
+        Self {
+            dir: OffMain::new(dir),
+            path,
+            key: mount.key,
+            plan: Plan::of(mount.family),
+            opened: OPENED.fetch_add(1, Ordering::Relaxed),
+        }
     }
 
     /// Whether files written beneath it are synced one by one, since

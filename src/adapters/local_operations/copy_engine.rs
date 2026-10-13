@@ -109,6 +109,9 @@ pub(super) struct Copied {
     pub reported: Reported,
     /// What the copy took from the source, with [`Options::manifest`].
     pub manifest: Option<Manifest>,
+    /// Barriers on the other filesystems a durable merge wrote to, mounted
+    /// in the merged folder.
+    pub nested: Vec<Barrier>,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -146,16 +149,17 @@ pub(super) async fn copy_local(
                 let (parent, name) = split(&target).map_err(Failure::Error)?;
                 let new = NewItem::Published(taken);
                 copy_new(copy, source, (&parent, &name), new, options.workers)
+                    .map(|name| (name, Vec::new()))
             }
             Destination::Merge(folder) => {
                 let name = folder.file_name().unwrap_or_default().to_os_string();
-                merge(copy, source, &folder, options.workers).map(|()| name)
+                merge(copy, source, &folder, options.workers).map(|nested| (name, nested))
             }
         },
     )
     .await?;
     match followed.value {
-        Ok(name) => {
+        Ok((name, nested)) => {
             report(
                 progress.as_deref(),
                 &target.with_file_name(&name),
@@ -165,6 +169,7 @@ pub(super) async fn copy_local(
                 name,
                 reported: followed.reported,
                 manifest: followed.manifest,
+                nested,
             })
         }
         // What a stopped merge placed stays.
@@ -936,14 +941,16 @@ fn from_stage(
     }
 }
 
-/// Merges the folder `source` into the live `folder`. Only complete children
-/// appear there, and a stopped merge removes the stages it did not place.
+/// Merges the folder `source` into the live `folder`, and returns barriers
+/// on the other filesystems a durable merge wrote to there. Only complete
+/// children appear there, and a stopped merge removes the stages it did not
+/// place.
 fn merge(
     copy: &Arc<Copy>,
     source: &Source,
     folder: &Path,
     workers: Option<usize>,
-) -> Result<(), Failure> {
+) -> Result<Vec<Barrier>, Failure> {
     let (parent, name) = split(folder).map_err(Failure::Error)?;
     let workers = workers.unwrap_or_else(|| worker_count(source, &parent));
     let merged = tree::Merged {
@@ -952,11 +959,22 @@ fn merge(
         path: PathBuf::new(),
         recorded_in: source.recorded_in.clone(),
     };
-    let (walked, tree::Walked { stages, placed, .. }) = tree::walk(copy, workers, None, |tree| {
+    let (
+        walked,
+        tree::Walked {
+            stages,
+            placed,
+            mut nested,
+            ..
+        },
+    ) = tree::walk(copy, workers, None, |tree| {
         tree::TreeJob::Merge(tree, merged)
     });
     let Err(error) = walked else {
-        return Ok(());
+        for barrier in &mut nested {
+            barrier.path = folder.join(&barrier.path);
+        }
+        return Ok(nested);
     };
     copy.keep_left_beneath(&placed);
     let mut cleanup = Ok(());

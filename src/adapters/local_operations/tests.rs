@@ -122,7 +122,7 @@ fn staged(
 
 use super::{
     CopyStep, FAT32_MAX_FILE_SIZE, FailedAction, LocalFileIdentity, LocalOperationProvider,
-    MergeHooks, MergePlan, MountTable, PinnedEntry, RestoreEntry, StageOverwrite,
+    MergeCopied, MergeHooks, MergePlan, MountTable, PinnedEntry, RestoreEntry, StageOverwrite,
     StagedOriginalLookup, TRANSFER_PROGRESS_INTERVAL, Taken, TransferProgressTracker, TransferStop,
     await_cancellable, copy_failure_after_cleanup, copy_failure_on_fat32,
     copy_new_recursively_on_filesystem, copy_new_remote_file_with, copy_recursively,

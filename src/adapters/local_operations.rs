@@ -2906,8 +2906,7 @@ type CopyStep = Rc<
         gio::File,
         MergeCopy,
         gio::Cancellable,
-    )
-        -> Pin<Box<dyn Future<Output = Result<Option<copy_engine::Manifest>, glib::Error>>>>,
+    ) -> Pin<Box<dyn Future<Output = Result<MergeCopied, glib::Error>>>>,
 >;
 
 /// What the deletions after a merge's copy need of it.
@@ -2917,6 +2916,15 @@ struct MergeCopy {
     moving: bool,
     /// See [`copy_engine::Options::durable`].
     durable: bool,
+}
+
+/// What a merge's copy leaves for the deletions after it.
+#[derive(Default)]
+struct MergeCopied {
+    /// What it took from the source, for a move.
+    sources: Option<copy_engine::Manifest>,
+    /// See [`copy_engine::Copied::nested`].
+    nested: Vec<copy_engine::Barrier>,
 }
 
 fn cannot_replace_safely(name: &str) -> String {
@@ -3805,15 +3813,16 @@ async fn merge_owing(
     };
     let copied =
         (hooks.copy_into_target)(source.clone(), target, copying, cancellable.clone()).await;
-    let sources = match copied {
-        Ok(sources) => sources,
+    let copied = match copied {
+        Ok(copied) => copied,
         Err(error) => return Err(merge_aside::abandon(aside, error).await),
     };
+    owed.nested = copied.nested;
     if let Some(aside) = merge_aside::finish(aside).await? {
         owed.owe(Deletion::Aside(aside));
     }
     if move_source {
-        owed.owe(match sources {
+        owed.owe(match copied.sources {
             Some(sources) => Deletion::Sources(source, sources),
             None => Deletion::Source(source),
         });
@@ -3881,7 +3890,10 @@ fn merge_copy(progress: Option<Rc<TransferProgressTracker>>, fat_family: bool) -
                             &cancellable,
                         )
                         .await?;
-                        Ok(copied.manifest)
+                        Ok(MergeCopied {
+                            sources: copied.manifest,
+                            nested: copied.nested,
+                        })
                     }
                     (source_path, _) => {
                         // Recorded before GIO copies it, so a change during the copy shows.
@@ -3901,7 +3913,10 @@ fn merge_copy(progress: Option<Rc<TransferProgressTracker>>, fat_family: bool) -
                             fat_family,
                         )
                         .await?;
-                        Ok(sources)
+                        Ok(MergeCopied {
+                            sources,
+                            ..MergeCopied::default()
+                        })
                     }
                 }
             })

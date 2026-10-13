@@ -77,6 +77,8 @@ impl Deletion {
 pub(super) struct Owed {
     /// Opened before the copy wrote; none where only GIO can reach it.
     pub barrier: Option<Barrier>,
+    /// On other filesystems the copy wrote to, mounted beneath the first.
+    pub nested: Vec<Barrier>,
     deletions: Vec<Deletion>,
 }
 
@@ -154,6 +156,8 @@ struct Batch<T> {
     /// The earliest opened of its entries' barriers, so it reports the
     /// writeback errors of every one of their copies.
     barrier: Option<Barrier>,
+    /// The same for each filesystem mounted beneath it that they wrote to.
+    nested: Vec<Barrier>,
     entries: Vec<(T, Vec<Deletion>)>,
     started: Instant,
     copied: u64,
@@ -164,6 +168,7 @@ impl<T> Batch<T> {
         Self {
             key,
             barrier: None,
+            nested: Vec::new(),
             entries: Vec::new(),
             started: Instant::now(),
             copied: 0,
@@ -172,13 +177,18 @@ impl<T> Batch<T> {
 
     fn add(&mut self, tag: T, owed: Owed, copied: u64) {
         self.copied = self.copied.saturating_add(copied);
-        if let Some(barrier) = owed.barrier
-            && self
-                .barrier
-                .as_ref()
-                .is_none_or(|kept| barrier.precedes(kept))
-        {
-            self.barrier = Some(barrier);
+        if let Some(barrier) = owed.barrier {
+            keep_earliest(&mut self.barrier, barrier);
+        }
+        for barrier in owed.nested {
+            match self.nested.iter().position(|kept| kept.key == barrier.key) {
+                Some(index) => {
+                    let mut kept = Some(self.nested.swap_remove(index));
+                    keep_earliest(&mut kept, barrier);
+                    self.nested.extend(kept);
+                }
+                None => self.nested.push(barrier),
+            }
         }
         self.entries.push((tag, owed.deletions));
     }
@@ -199,10 +209,13 @@ impl<T> Batch<T> {
         unlinks: &Arc<Unlinks>,
         cancellable: &gio::Cancellable,
     ) -> Vec<(T, Result<(), glib::Error>)> {
-        let flushed = match self.barrier {
-            Some(barrier) => flush(barrier).await,
-            None => Ok(()),
-        };
+        let mut flushed = Ok(());
+        for barrier in self.barrier.into_iter().chain(self.nested) {
+            flushed = flush(barrier).await;
+            if flushed.is_err() {
+                break;
+            }
+        }
         let mut settled = Vec::with_capacity(self.entries.len());
         for (tag, deletions) in self.entries {
             let result = match &flushed {
@@ -231,6 +244,13 @@ impl<T> Batch<T> {
             settled.push((tag, result));
         }
         settled
+    }
+}
+
+/// Keeps in `kept` whichever of it and `barrier` was opened first.
+fn keep_earliest(kept: &mut Option<Barrier>, barrier: Barrier) {
+    if kept.as_ref().is_none_or(|kept| barrier.precedes(kept)) {
+        *kept = Some(barrier);
     }
 }
 

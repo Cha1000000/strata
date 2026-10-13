@@ -63,7 +63,7 @@ fn fat_merge_backs_up_sanitized_collisions_and_records_actual_paths() -> Result<
             fat_family: true,
             copy_into_target: Rc::new(|source, target, _, cancellable| {
                 let copied = copy_recursively_fat_family(source, target, true, cancellable);
-                Box::pin(async move { copied.await.map(|()| None) })
+                Box::pin(async move { copied.await.map(|()| MergeCopied::default()) })
             }),
             stage_overwrite: stage,
             on_merged: &on_merged,
@@ -1674,7 +1674,7 @@ fn a_failed_aside_puts_every_original_back_before_merging() -> Result<(), Box<dy
             false,
             Rc::new(move |_, _, _, _| {
                 copy_observed.set(true);
-                Box::pin(async { Ok(None) })
+                Box::pin(async { Ok(MergeCopied::default()) })
             }),
         );
 

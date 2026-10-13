@@ -1054,3 +1054,82 @@ fn names_of_one_file_moved_as_separate_items_are_all_deleted() -> Result<(), Box
     }
     Ok(())
 }
+
+#[test]
+fn a_merging_move_flushes_each_filesystem_it_wrote_to_before_deleting() -> Result<(), Box<dyn Error>>
+{
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let root = tempfile::tempdir()?;
+    let sources = root.path().join("sources");
+    let destination = root.path().join("destination");
+    fs::create_dir_all(sources.join("media/sub"))?;
+    fs::create_dir_all(destination.join("media/sub"))?;
+    fs::write(sources.join("media/sub/new.bin"), b"new")?;
+    // Another filesystem is mounted in the merged folder.
+    let outer = FsQuirks::install(&destination, Quirks::ext4());
+    let nested = FsQuirks::install(&destination.join("media/sub"), Quirks::ext4());
+    let at_first_unlink = Arc::new(std::sync::Mutex::new(None));
+    let (record, read) = (at_first_unlink.clone(), nested.reader());
+    let _sources = FsQuirks::install(
+        &sources,
+        Quirks {
+            before: vec![(
+                Op::Unlink,
+                "*",
+                0,
+                Box::new(move || {
+                    *record.lock().unwrap_or_else(|error| error.into_inner()) = Some(read());
+                }),
+            )],
+            ..Quirks::default()
+        },
+    );
+
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let emitted = events.clone();
+    let _operation = LocalOperationProvider.paste(
+        PasteRequest {
+            id: OperationRequestId(360),
+            destination: Location::local(&destination),
+            items: vec![PasteItem {
+                source: Location::local(sources.join("media")),
+                conflict: TransferConflict::Merge,
+            }],
+            move_sources: true,
+        },
+        Rc::new(move |event| emitted.borrow_mut().push(event)),
+    );
+    pump_until_transfer(&events);
+
+    assert!(
+        matches!(
+            terminal_transfer(&events.borrow()),
+            Some(OperationEvent::Pasted { .. })
+        ),
+        "{:?}",
+        events.borrow()
+    );
+    assert_eq!(fs::read(destination.join("media/sub/new.bin"))?, b"new");
+    assert!(!sources.join("media").exists());
+    let calls: Vec<Op> = at_first_unlink
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .take()
+        .ok_or("a source was deleted")?
+        .iter()
+        .map(|call| call.op)
+        .collect();
+    let opened = calls.iter().position(|op| *op == Op::OpenDir);
+    let written = calls
+        .iter()
+        .position(|op| matches!(op, Op::Write | Op::CopyRange | Op::Clone));
+    assert!(
+        opened.is_some_and(|opened| written.is_some_and(|written| opened < written)),
+        "the nested filesystem's barrier is opened before the copy writes there: {calls:?}"
+    );
+    assert!(calls.contains(&Op::SyncFs), "{calls:?}");
+    assert!(outer.calls().iter().any(|call| call.op == Op::SyncFs));
+    Ok(())
+}

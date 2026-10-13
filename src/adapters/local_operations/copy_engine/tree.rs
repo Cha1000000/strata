@@ -27,7 +27,7 @@ use rustix::{
 };
 
 use super::{
-    Copy, Created, Failure, Mount, Source, best_effort, changed,
+    Barrier, Copy, Created, Failure, Mount, Source, best_effort, changed,
     data::Data,
     direct_folder, from_stage, is_fatal, is_unsupported,
     links::{self, Links, Role},
@@ -48,7 +48,7 @@ use crate::{
             placement::{COPY_PREFIX, PlaceError},
             work_queue::{self, Group, Job, WorkQueue},
         },
-        volume::Family,
+        volume::{Family, MountKey},
     },
     services::{KeptCause, RenameCause, SpecialKind},
 };
@@ -73,6 +73,15 @@ pub(super) struct Tree {
     stages: Mutex<Vec<StagedSibling>>,
     /// Where the children a merge placed went, beneath the walk's root.
     placed: Mutex<Vec<PathBuf>>,
+    nested: Mutex<Nested>,
+}
+
+/// The filesystems a durable merge reaches beneath its root's.
+#[derive(Default)]
+struct Nested {
+    root: Option<MountKey>,
+    /// One for each, at the first folder merged there, beneath the root.
+    barriers: Vec<Barrier>,
 }
 
 impl Tree {
@@ -95,6 +104,30 @@ impl Tree {
             .partition::<Vec<_>, _>(|(recorded, _)| *recorded == scope);
         *recorded = kept;
         taken.into_iter().map(|(_, folder)| folder).collect()
+    }
+
+    /// Opens a barrier on the filesystem of the live folder `dir` at `path`,
+    /// before a durable merge writes there, unless it is the root's or has one.
+    fn reach(
+        &self,
+        fs: &dyn FsOps,
+        mount: &Mount,
+        dir: BorrowedFd<'_>,
+        path: &Path,
+    ) -> Result<(), Failure> {
+        let mut nested = lock(&self.nested);
+        let root = *nested.root.get_or_insert(mount.key);
+        if mount.key != root
+            && nested
+                .barriers
+                .iter()
+                .all(|barrier| barrier.key != mount.key)
+        {
+            nested
+                .barriers
+                .push(Barrier::at(fs, dir, path.to_path_buf())?);
+        }
+        Ok(())
     }
 
     /// The stage with `identity` is placed and removed, or must be kept.
@@ -149,6 +182,9 @@ pub(super) struct Walked {
     pub(super) stages: Vec<StagedSibling>,
     /// Where the children a merge placed went.
     pub(super) placed: Vec<PathBuf>,
+    /// Barriers on the filesystems a durable merge reached beneath its
+    /// root's, at paths beneath the walk's root.
+    pub(super) nested: Vec<Barrier>,
 }
 
 /// Runs the walk that `root` starts on `workers` threads, recording what it
@@ -169,6 +205,7 @@ pub(super) fn walk(
         created,
         stages: Mutex::default(),
         placed: Mutex::default(),
+        nested: Mutex::default(),
     });
     let queue = Arc::new(Queue::new(copy.cancelled.clone()));
     queue.enqueue(root(tree.clone()));
@@ -185,6 +222,7 @@ pub(super) fn walk(
         links: tree.links.take(),
         stages: std::mem::take(&mut *lock(&tree.stages)),
         placed: std::mem::take(&mut *lock(&tree.placed)),
+        nested: std::mem::take(&mut lock(&tree.nested).barriers),
     };
     (result, walked)
 }
@@ -1101,6 +1139,9 @@ impl Merged {
         let mount = Mount::new(fs, target.as_fd());
         if expected.is_some_and(|expected| !same_entry(&target_stat, expected, mount.family)) {
             return Err(Failure::Changed);
+        }
+        if copy.durable {
+            tree.reach(fs, &mount, target.as_fd(), &self.path)?;
         }
         let recorded = match &self.recorded_in {
             Some(folder) => Some(folder.folder(source_name, fs.stat_fd(source.as_fd())?.identity)),
