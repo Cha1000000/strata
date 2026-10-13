@@ -551,7 +551,13 @@ impl Made {
             FileType::Symlink => {
                 let source = Entry::new(&**source, name);
                 let (path, link) = make_numbered(copy, names, &path, false, alias, |name| {
-                    copy_link(copy, source, Entry::new(dir, name), &self.mount, Some(names))
+                    copy_link(
+                        copy,
+                        source,
+                        Entry::new(dir, name),
+                        &self.mount,
+                        Some(names),
+                    )
                 })?;
                 if tree.created.is_some() || names.adopts() {
                     let name = file_name(&path);

@@ -443,7 +443,13 @@ fn copy_new(
             copy.check_cancelled()?;
             let mount = Mount::new(copy.fs, parent.as_fd());
             let (name, link) = first_free(taken.names(&name, false), taken, |name| {
-                tree::copy_link(copy, source.entry(), Entry::new(&*parent, name), &mount, None)
+                tree::copy_link(
+                    copy,
+                    source.entry(),
+                    Entry::new(&*parent, name),
+                    &mount,
+                    None,
+                )
             })?;
             if let Some(folder) = recorded_in {
                 folder.entry(&source.name, &link);
