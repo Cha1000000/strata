@@ -168,6 +168,12 @@ fn items_left_out_or_left_behind_make_the_report_a_warning() {
         );
         let heading = crate::i18n::count("items_kept", kept_count);
         assert_eq!(detail.contains(&heading), kept_count > 0, "{row}");
+        let changed = rust_i18n::t!(
+            "“%{name}” changed during the move and was left in “%{folder}”",
+            name = "data",
+            folder = "run"
+        );
+        assert_eq!(detail.contains(&*changed), kept_count > 0, "{row}");
         assert_eq!(detail.contains(&reason), kept_count > 0, "{row}");
     }
 }
