@@ -10,6 +10,8 @@ use std::{
     sync::Arc,
 };
 
+use gtk::gio;
+
 /// Parsed without touching mounted filesystems, including unresponsive mounts.
 #[derive(Clone)]
 pub(crate) struct MountTable {
@@ -20,6 +22,13 @@ impl MountTable {
     pub(crate) fn current() -> Self {
         std::fs::read("/proc/self/mountinfo")
             .map(Self::parse)
+            .unwrap_or_else(|_| Self::parse(b""))
+    }
+
+    /// [`Self::current`], read off the calling thread.
+    pub(crate) async fn load() -> Self {
+        gio::spawn_blocking(Self::current)
+            .await
             .unwrap_or_else(|_| Self::parse(b""))
     }
 

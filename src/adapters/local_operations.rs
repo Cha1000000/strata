@@ -328,7 +328,7 @@ async fn removable_roots_for_paths(paths: &[PathBuf]) -> Vec<PathBuf> {
     if let Some(hints) = removable_hints_for_test() {
         return removable_sync_roots(&destinations, &hints);
     }
-    let table = current_mount_table().await;
+    let table = MountTable::load().await;
     let mounts = gio::VolumeMonitor::get().mounts();
     let mut hints = Vec::new();
     for path in paths {
@@ -345,12 +345,6 @@ async fn removable_roots_for_paths(paths: &[PathBuf]) -> Vec<PathBuf> {
         hints.push(MountFlushHint { root, removable });
     }
     removable_sync_roots(&destinations, &hints)
-}
-
-async fn current_mount_table() -> MountTable {
-    gio::spawn_blocking(MountTable::current)
-        .await
-        .unwrap_or_else(|_| MountTable::parse(b""))
 }
 
 fn mount_drive_is_removable(mount: &gio::Mount) -> bool {
@@ -1027,6 +1021,7 @@ fn transfer_is_noop(source: &gio::File, destination: &gio::File, target: &gio::F
 fn target_is_within_source(source: &gio::File, target: &gio::File) -> Option<bool> {
     use std::os::unix::fs::MetadataExt;
 
+    fs_ops::assert_off_main_thread();
     let (Some(source_path), Some(target_path)) = (source.path(), target.path()) else {
         return Some(false);
     };
@@ -1073,13 +1068,15 @@ struct ParallelCopyPlan {
     written_path: PathBuf,
 }
 
-fn parallel_copy_plans(
+/// The bulk path's plans and worker count, or `None` when an item needs the
+/// sequential path.
+async fn parallel_copy_plans(
     request: &PasteRequest,
     sources: &[gio::File],
     destination: &gio::File,
-    regular_files: &[bool],
+    regular_files: Vec<bool>,
     fat_family: bool,
-) -> Option<Vec<ParallelCopyPlan>> {
+) -> Option<(Vec<ParallelCopyPlan>, usize)> {
     if request.move_sources
         || request.items.len() <= MAX_LOCAL_IO_WORKERS
         || !destination.is_native()
@@ -1091,28 +1088,43 @@ fn parallel_copy_plans(
         return None;
     }
 
-    let mut used_names = HashSet::new();
-    sources
-        .iter()
-        .enumerate()
-        .map(|(index, source)| {
-            if !source.is_native() || regular_files.get(index) != Some(&true) {
-                return None;
-            }
-            let (_, target) =
-                default_transfer_target(source, destination, fat_family, &mut used_names)?;
-            if transfer_is_noop(source, destination, &target) {
-                return None;
-            }
-            Some(ParallelCopyPlan {
-                index,
-                source: source.clone(),
-                target_location: location_for_file(&target)?,
-                written_path: target.path()?,
-                target,
+    let (sources, destination) = (sources.to_vec(), destination.clone());
+    gio::spawn_blocking(move || {
+        let mut used_names = HashSet::new();
+        let plans = sources
+            .iter()
+            .enumerate()
+            .map(|(index, source)| {
+                if !source.is_native() || regular_files.get(index) != Some(&true) {
+                    return None;
+                }
+                let (_, target) =
+                    default_transfer_target(source, &destination, fat_family, &mut used_names)?;
+                if transfer_is_noop(source, &destination, &target) {
+                    return None;
+                }
+                Some(ParallelCopyPlan {
+                    index,
+                    source: source.clone(),
+                    target_location: location_for_file(&target)?,
+                    written_path: target.path()?,
+                    target,
+                })
             })
-        })
-        .collect()
+            .collect::<Option<Vec<_>>>()?;
+        let available = thread::available_parallelism()
+            .map(usize::from)
+            .unwrap_or(1);
+        let rotational = destination
+            .path()
+            .and_then(|path| std::fs::File::open(path).ok())
+            .and_then(|directory| local_device_is_rotational(&directory))
+            .unwrap_or(fat_family);
+        Some((plans, bounded_local_worker_count(available, rotational)))
+    })
+    .await
+    .ok()
+    .flatten()
 }
 
 struct ParallelCopyOutcome {
@@ -1280,7 +1292,7 @@ fn duplicate_candidate_name(
     OsString::from_vec(candidate)
 }
 
-fn duplicate_target(
+async fn duplicate_target(
     destination: &gio::File,
     name: &Path,
     is_directory: bool,
@@ -1298,10 +1310,11 @@ fn duplicate_target(
     let (base_stem, copy_num) = parse_copy_suffix(stem);
     let start_index = copy_num.map_or(1, |number| number + 1);
     for index in start_index..=u64::MAX {
-        cancellable.set_error_if_cancelled()?;
         let candidate_name = duplicate_candidate_name(base_stem, extension, index);
         let candidate = destination.child(&candidate_name);
-        if !candidate.query_exists(Some(cancellable)) {
+        let exists = query_exists(&candidate, cancellable).await;
+        cancellable.set_error_if_cancelled()?;
+        if !exists {
             return Ok(candidate);
         }
     }
@@ -1955,11 +1968,8 @@ fn copy_recursively_local_path(
         let target_parent = target
             .path()
             .and_then(|path| path.parent().map(Path::to_path_buf));
-        let workers = gio::spawn_blocking(move || {
-            local_parent_worker_count(std::iter::once(source_parent).chain(target_parent))
-        })
-        .await
-        .map_err(|_| io_error("Copy worker stopped unexpectedly"))?;
+        let workers =
+            local_parent_worker_count(std::iter::once(source_parent).chain(target_parent)).await;
         let parent = run_local_fs_step(move || open_local_parent_directory(&parent_path)).await?;
         copy_recursively_local(
             Arc::new(parent),
@@ -4775,6 +4785,7 @@ fn remove_local_delete_directory(
 }
 
 fn local_device_is_rotational(fd: impl AsFd) -> Option<bool> {
+    fs_ops::assert_off_main_thread();
     let stat = rustix::fs::fstat(fd).ok()?;
     let device = PathBuf::from("/sys/dev/block").join(format!(
         "{}:{}",
@@ -5289,8 +5300,13 @@ impl TrashedOriginal {
         }
     }
 
-    fn matches_path(self, path: &Path) -> bool {
-        std::fs::symlink_metadata(path).is_ok_and(|metadata| self == Self::from_metadata(&metadata))
+    async fn matches_path(self, path: PathBuf) -> bool {
+        gio::spawn_blocking(move || {
+            std::fs::symlink_metadata(path)
+                .is_ok_and(|metadata| self == Self::from_metadata(&metadata))
+        })
+        .await
+        .unwrap_or(false)
     }
 }
 
@@ -5341,6 +5357,7 @@ async fn trashed_entries_for_originals(
             .collect());
     }
 
+    let context = RestoreContext::current().await;
     let trash = gio::File::for_uri("trash:///");
     let enumerator = await_cancellable(&trash, cancellable, |trash, cancellable, result| {
         trash.enumerate_children_async(
@@ -5389,16 +5406,20 @@ async fn trashed_entries_for_originals(
                 continue;
             };
             let original = Location::local(&original_path);
-            if let Some(expected) = originals.get(&original) {
-                let plan = plan_restore_for_location(
+            if let Some(&expected) = originals.get(&original) {
+                let matches = match plan_restore_for_location(
                     &location,
                     Some(&original),
                     None,
                     None,
-                    &RestoreContext::current(),
+                    &context,
                 )
-                .await;
-                if !plan.is_ok_and(|plan| expected.matches_path(&plan.source_path)) {
+                .await
+                {
+                    Ok(plan) => expected.matches_path(plan.source_path).await,
+                    Err(_) => false,
+                };
+                if !matches {
                     continue;
                 }
             }
@@ -5453,30 +5474,32 @@ fn restored_destination(entry: &RestoreEntry) -> Location {
         .unwrap_or_else(|| entry.source.clone())
 }
 
-fn local_parent_worker_count(parents: impl IntoIterator<Item = PathBuf>) -> usize {
-    let available = thread::available_parallelism()
-        .map(usize::from)
-        .unwrap_or(1);
-    let rotational = parents
-        .into_iter()
-        .collect::<HashSet<_>>()
-        .iter()
-        .any(|parent| {
+async fn local_parent_worker_count(parents: impl IntoIterator<Item = PathBuf>) -> usize {
+    let parents = parents.into_iter().collect::<HashSet<_>>();
+    gio::spawn_blocking(move || {
+        let available = thread::available_parallelism()
+            .map(usize::from)
+            .unwrap_or(1);
+        let rotational = parents.iter().any(|parent| {
             open_local_parent_directory(parent)
                 .ok()
                 .and_then(local_device_is_rotational)
                 == Some(true)
         });
-    bounded_local_worker_count(available, rotational)
+        bounded_local_worker_count(available, rotational)
+    })
+    .await
+    .unwrap_or(1)
 }
 
-fn restore_worker_count(entries: &[RestoreEntry]) -> usize {
+async fn restore_worker_count(entries: &[RestoreEntry]) -> usize {
     local_parent_worker_count(entries.iter().filter_map(|entry| {
         restored_destination(entry)
             .native_path()
             .and_then(Path::parent)
             .map(Path::to_path_buf)
     }))
+    .await
 }
 
 async fn restore_trash_entry(
@@ -5521,8 +5544,8 @@ async fn restore_trash_entry(
     let source = gio::File::for_path(&plan.source_path);
     let target = gio::File::for_path(&plan.destination);
     move_restore(source, target, plan.allowed_root, cancellable.clone()).await?;
-    if let Some(info_path) = plan.trash_info.as_ref().or(entry.trash_info.as_ref())
-        && let Err(error) = std::fs::remove_file(info_path)
+    if let Some(info_path) = plan.trash_info.or_else(|| entry.trash_info.clone())
+        && let Ok(Err(error)) = gio::spawn_blocking(move || std::fs::remove_file(info_path)).await
     {
         tracing::warn!(%error, "unable to remove restored trash metadata");
     }
@@ -5609,7 +5632,7 @@ async fn run_merge_undo(
             affected_locations.insert(parent);
         }
     }
-    let context = RestoreContext::current();
+    let context = RestoreContext::current().await;
     let mut completed_locations = Vec::new();
     let mut restored = Vec::new();
     let mut failed_locations = Vec::new();
@@ -5904,7 +5927,7 @@ impl DeletionTarget {
     }
 }
 
-fn deletion_worker_count(targets: &[DeletionTarget]) -> usize {
+async fn deletion_worker_count(targets: &[DeletionTarget]) -> usize {
     local_parent_worker_count(targets.iter().filter_map(|target| {
         target
             .location
@@ -5912,6 +5935,7 @@ fn deletion_worker_count(targets: &[DeletionTarget]) -> usize {
             .and_then(Path::parent)
             .map(Path::to_path_buf)
     }))
+    .await
 }
 
 async fn run_deletion(
@@ -5940,7 +5964,7 @@ async fn run_deletion(
     let total = targets.len();
     let mut last_progress_emit = std::time::Instant::now();
     let batch_size = if total > 32 {
-        deletion_worker_count(&targets)
+        deletion_worker_count(&targets).await
     } else {
         1
     };
@@ -6223,7 +6247,7 @@ impl OperationProvider for LocalOperationProvider {
         let operation_cancellable = cancellable.clone();
         let _task = glib::MainContext::default().spawn_local(async move {
             let destination = gio_file_for_location(&request.destination);
-            let mounts = MountTable::current();
+            let mounts = MountTable::load().await;
             let fat_family = target_is_fat_family(&destination, &mounts);
             let max_file_size = destination
                 .path()
@@ -6267,26 +6291,19 @@ impl OperationProvider for LocalOperationProvider {
             let progress =
                 TransferProgressTracker::new(request.id, total_bytes, total_files, emit.clone());
             progress.emit();
-            if let Some(plans) =
-                parallel_copy_plans(&request, &sources, &destination, &regular_files, fat_family)
+            if let Some((plans, worker_count)) =
+                parallel_copy_plans(&request, &sources, &destination, regular_files, fat_family)
+                    .await
             {
                 for plan in &plans {
                     affected_locations.insert(request.items[plan.index].source.clone());
                     affected_locations.insert(plan.target_location.clone());
                 }
-                let available = thread::available_parallelism()
-                    .map(usize::from)
-                    .unwrap_or(1);
-                let rotational = destination
-                    .path()
-                    .and_then(|path| std::fs::File::open(path).ok())
-                    .and_then(|directory| local_device_is_rotational(&directory))
-                    .unwrap_or(fat_family);
                 let outcome = execute_parallel_copy_plans(
                     &plans,
                     &item_sizes,
                     &item_files,
-                    bounded_local_worker_count(available, rotational),
+                    worker_count,
                     &operation_cancellable,
                     &progress,
                 )
@@ -6397,9 +6414,16 @@ impl OperationProvider for LocalOperationProvider {
                 let is_duplicate = !request.move_sources && source.equal(&default_target);
                 let needs_unique_target =
                     is_duplicate || item.conflict == TransferConflict::KeepBoth;
-                if (!is_duplicate && transfer_is_noop(&source, &destination, &default_target))
-                    || (is_duplicate && item.conflict == TransferConflict::ReplaceExisting)
-                {
+                let is_noop = if is_duplicate {
+                    item.conflict == TransferConflict::ReplaceExisting
+                } else {
+                    let (source, destination, target) =
+                        (source.clone(), destination.clone(), default_target.clone());
+                    gio::spawn_blocking(move || transfer_is_noop(&source, &destination, &target))
+                        .await
+                        .unwrap_or(false)
+                };
+                if is_noop {
                     completed.push(item.source.clone());
                     progress.finish_item(
                         item_started_at,
@@ -6455,7 +6479,9 @@ impl OperationProvider for LocalOperationProvider {
                         &name,
                         is_directory,
                         &operation_cancellable,
-                    ) {
+                    )
+                    .await
+                    {
                         Ok(target) => target,
                         Err(error) => {
                             let failure = (!was_cancelled(&error))
@@ -6702,7 +6728,7 @@ impl OperationProvider for LocalOperationProvider {
                         return;
                     }
                 };
-            let mounts = current_mount_table().await;
+            let mounts = MountTable::load().await;
             let progress =
                 TransferProgressTracker::new(request.id, total_bytes, total_files, emit.clone());
             progress.emit();
@@ -7025,8 +7051,8 @@ impl OperationProvider for LocalOperationProvider {
             let mut restored = Vec::new();
             let mut failed_locations = Vec::new();
             let mut affected_locations = HashSet::from([Location::uri("trash:///")]);
-            let context = RestoreContext::current();
-            let worker_count = restore_worker_count(&entries);
+            let context = RestoreContext::current().await;
+            let worker_count = restore_worker_count(&entries).await;
             let mut completed = 0;
             let mut cancelled = false;
             for chunk in entries.chunks(worker_count) {

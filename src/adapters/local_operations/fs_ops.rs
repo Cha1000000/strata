@@ -95,7 +95,7 @@ pub(super) fn fs() -> &'static dyn FsOps {
 pub(super) fn assert_off_main_thread() {
     debug_assert!(
         !glib::MainContext::default().is_owner(),
-        "filesystem placement must not run on the main thread"
+        "filesystem calls must not run on the main thread"
     );
 }
 

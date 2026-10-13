@@ -92,11 +92,11 @@ pub(crate) struct RestoreContext {
 }
 
 impl RestoreContext {
-    pub(crate) fn current() -> Self {
+    pub(crate) async fn current() -> Self {
         Self {
             home_trash_root: glib::user_data_dir().join("Trash"),
             uid: rustix::process::getuid().as_raw(),
-            mounts: MountTable::current(),
+            mounts: MountTable::load().await,
         }
     }
 }
@@ -237,7 +237,7 @@ pub(crate) async fn plan_restore_for_location(
 pub(crate) async fn restore_destinations_for_locations(
     items: Vec<(Location, Option<PathBuf>)>,
 ) -> Vec<Result<PathBuf, RestoreTargetError>> {
-    let context = RestoreContext::current();
+    let context = RestoreContext::current().await;
     resolve_batch(items, |(location, physical_path)| {
         let context = &context;
         async move {
