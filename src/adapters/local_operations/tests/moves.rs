@@ -245,21 +245,27 @@ fn a_file_without_a_usable_link_is_moved_by_copying() -> Result<(), Box<dyn Erro
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
         .lock()
         .map_err(|error| error.to_string())?;
-    let cases: [(&str, fn() -> Quirks); 3] = [
+    let cases = [
         // As protected_hardlinks refuses another user's file that a rename could move.
-        ("refused", || Quirks {
-            fail: vec![(Op::Link, "moved.txt", 0, Errno::PERM)],
-            ..Quirks::without_rename_flags()
-        }),
-        ("probed", Quirks::sshfs),
-        ("linked before a probe", || Quirks {
-            rename_flags: Support::Rejected(Errno::NOSYS),
-            ..Quirks::sshfs()
-        }),
+        (
+            "refused",
+            Quirks {
+                fail: vec![(Op::Link, "moved.txt", 0, Errno::PERM)],
+                ..Quirks::without_rename_flags()
+            },
+        ),
+        ("probed", Quirks::sshfs()),
+        (
+            "linked before a probe",
+            Quirks {
+                rename_flags: Support::Rejected(Errno::NOSYS),
+                ..Quirks::sshfs()
+            },
+        ),
     ];
     for (case, quirks) in cases {
         let root = tempfile::tempdir()?;
-        let _scope = FsQuirks::install(root.path(), quirks());
+        let _scope = FsQuirks::install(root.path(), quirks);
         let source = root.path().join("notes.txt");
         fs::write(&source, b"notes")?;
 
