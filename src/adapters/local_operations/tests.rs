@@ -81,7 +81,7 @@ fn copy_recursively_fat_family(
 ) -> Pin<Box<dyn Future<Output = Result<(), glib::Error>>>> {
     Box::pin(async move {
         if merge {
-            return super::merge_copy(None, true)(source, target, false, cancellable)
+            return super::merge_copy(None, true)(source, target, Default::default(), cancellable)
                 .await
                 .map(drop);
         }

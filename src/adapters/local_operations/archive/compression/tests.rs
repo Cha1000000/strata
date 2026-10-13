@@ -298,6 +298,94 @@ fn an_archive_replaced_without_trash_deletes_its_original() -> Result<(), Box<dy
 }
 
 #[test]
+fn an_archive_replaced_without_trash_is_on_disk_before_its_original_is_deleted()
+-> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    // The family, whether the barrier fails, and whether the archive is
+    // synced itself, as the barrier cannot reach it.
+    for (fs_type, fails, each_file) in [
+        ("ext4", false, false),
+        ("ext4", true, false),
+        ("cifs", false, true),
+    ] {
+        let row = format!("{fs_type} fails: {fails}");
+        let root = tempfile::tempdir()?;
+        let archive = root.path().join("existing.zip");
+        fs::write(&archive, b"original")?;
+        let during = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (record, watched) = (during.clone(), root.path().to_path_buf());
+        let quirks = FsQuirks::install(
+            root.path(),
+            Quirks {
+                trash: Trash::Unsupported,
+                fs_type: Some(TMPFS_MAGIC),
+                mount_type: Some((fs_type, "rw")),
+                before: vec![(
+                    Op::SyncFs,
+                    "*",
+                    0,
+                    Box::new(move || {
+                        record
+                            .lock()
+                            .unwrap_or_else(|error| error.into_inner())
+                            .push(names(&watched).map_or(0, |names| names.len()));
+                    }),
+                )],
+                fail: if fails {
+                    vec![(Op::SyncFs, "*", 0, Errno::IO)]
+                } else {
+                    Vec::new()
+                },
+                ..Quirks::default()
+            },
+        );
+
+        let (result, _) = publish_replacement(root.path(), TransferConflict::ReplaceExisting);
+
+        assert_eq!(fs::read(&archive)?, b"replacement", "{row}");
+        assert_eq!(quirks.count(Op::SyncData) == 1, each_file, "{row}");
+        if each_file {
+            assert!(
+                during
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .is_empty()
+            );
+        } else {
+            assert_eq!(
+                *during.lock().unwrap_or_else(|error| error.into_inner()),
+                [2],
+                "{row}: the original stays until the barrier"
+            );
+        }
+        if !fails {
+            assert_eq!(
+                result,
+                Ok(("existing.zip".to_owned(), Some(ReplacedOriginal::Deleted))),
+                "{row}"
+            );
+            assert_eq!(names(root.path())?, ["existing.zip"], "{row}");
+            continue;
+        }
+        let kept = names(root.path())?
+            .into_iter()
+            .find(|name| name != "existing.zip")
+            .ok_or("the original is kept")?;
+        assert_eq!(fs::read(root.path().join(&kept))?, b"original");
+        let Err(ArchiveError::Failed(message)) = result else {
+            return Err(format!("{row}: {result:?}").into());
+        };
+        assert!(
+            message.contains(&kept) && message.contains("writes may still be pending"),
+            "{message}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn archives_are_created_without_noreplace_or_usable_links() -> Result<(), Box<dyn Error>> {
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
         .lock()

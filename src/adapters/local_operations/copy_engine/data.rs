@@ -49,7 +49,7 @@ fn network(family: Family) -> Option<Network> {
     }
 }
 
-fn kernel() -> (u32, u32, u32) {
+pub(super) fn kernel() -> (u32, u32, u32) {
     static KERNEL: OnceLock<(u32, u32, u32)> = OnceLock::new();
     *KERNEL.get_or_init(|| {
         let release = std::fs::read_to_string("/proc/sys/kernel/osrelease").unwrap_or_default();

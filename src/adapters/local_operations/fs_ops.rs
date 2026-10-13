@@ -106,6 +106,12 @@ pub(super) trait FsOps: Send + Sync {
     fn read_at(&self, fd: BorrowedFd<'_>, buffer: &mut [u8], offset: u64) -> Result<usize, Errno>;
     fn write_at(&self, fd: BorrowedFd<'_>, buffer: &[u8], offset: u64) -> Result<usize, Errno>;
     fn set_len(&self, fd: BorrowedFd<'_>, len: u64) -> Result<(), Errno>;
+    /// `fdatasync`.
+    fn sync_data(&self, fd: BorrowedFd<'_>) -> Result<(), Errno>;
+    /// `syncfs`, which reports the writeback errors since `fd` was opened.
+    fn sync_fs(&self, fd: BorrowedFd<'_>) -> Result<(), Errno>;
+    /// `fsync` of a folder.
+    fn sync_dir(&self, fd: BorrowedFd<'_>) -> Result<(), Errno>;
     /// Reports what `close` returns, where NFS, SMB and FUSE fail late writes.
     fn close(&self, fd: OwnedFd) -> Result<(), Errno>;
     fn chown_fd(&self, fd: BorrowedFd<'_>, uid: Option<u32>, gid: Option<u32>)
@@ -514,6 +520,21 @@ impl FsOps for System {
     fn set_len(&self, fd: BorrowedFd<'_>, len: u64) -> Result<(), Errno> {
         assert_off_main_thread();
         rustix::fs::ftruncate(fd, len)
+    }
+
+    fn sync_data(&self, fd: BorrowedFd<'_>) -> Result<(), Errno> {
+        assert_off_main_thread();
+        rustix::fs::fdatasync(fd)
+    }
+
+    fn sync_fs(&self, fd: BorrowedFd<'_>) -> Result<(), Errno> {
+        assert_off_main_thread();
+        rustix::fs::syncfs(fd)
+    }
+
+    fn sync_dir(&self, fd: BorrowedFd<'_>) -> Result<(), Errno> {
+        assert_off_main_thread();
+        rustix::fs::fsync(fd)
     }
 
     #[expect(

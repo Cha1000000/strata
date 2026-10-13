@@ -6,16 +6,17 @@
 mod tests;
 
 use super::super::{
-    DisplacedOriginal, LocalFileIdentity, cannot_replace_safely,
+    DisplacedOriginal, LocalFileIdentity, cannot_replace_safely, copy_engine,
     fs_ops::{Entry, EntryStat, fs},
     local_directory_children, open_local_child_directory, open_local_parent_directory,
     original_kept_aside,
+    owed::{Deletion, Owed},
     placement::{
         COMPRESSION_STAGE_PREFIX, Displacement, NUMBERED_NAME_ATTEMPTS, PlaceError,
         REPLACED_PREFIX, displacement_without_trash, exchange, file_creation_error, place,
         put_back, remove_if_unchanged, reserve_hidden_name, set_aside, set_aside_if_safe,
     },
-    placement_reason, remove_displaced_original,
+    placement_reason,
     trash::trash_verified,
 };
 use super::{
@@ -47,7 +48,7 @@ use std::{
 /// replacement strategy is chosen before encoding, so an archive is never
 /// written that cannot be published: the original goes to Trash where
 /// possible, otherwise it is exchanged or set aside and deleted once the new
-/// archive is flushed. [`KeepBoth`] numbers the name without encoding again.
+/// archive is on disk. [`KeepBoth`] numbers the name without encoding again.
 /// The published mode is the replaced file's, or `0o666` masked by the umask.
 ///
 /// # Errors
@@ -74,9 +75,20 @@ where
         .and_then(OsStr::to_str)
         .ok_or_else(|| crate::i18n::tr("Archive filename must be UTF-8"))?
         .to_owned();
+    let barrier = match conflict {
+        TransferConflict::ReplaceExisting => Some(
+            copy_engine::barrier(destination.to_path_buf())
+                .await
+                .map_err(|error| archive_failed(error.message()))?,
+        ),
+        _ => None,
+    };
     let job = Publication {
         destination: destination.to_path_buf(),
         name: name.clone(),
+        sync_data: barrier
+            .as_ref()
+            .is_some_and(copy_engine::Barrier::syncs_each_file),
     };
     let published = gio::spawn_blocking(move || job.write(conflict, &cancelled, write_archive))
         .await
@@ -85,7 +97,10 @@ where
         Displaced::None => None,
         Displaced::Trashed(original) => Some(ReplacedOriginal::Trashed(original)),
         Displaced::Aside(aside) => {
-            remove_displaced_original(aside, Some(&destination.join(&published.name)), &name)
+            let mut owed = Owed::default();
+            owed.barrier = barrier;
+            owed.owe(Deletion::Displaced(aside, name));
+            owed.settle(None, &gio::Cancellable::new())
                 .await
                 .map_err(|error| archive_failed(error.message()))?;
             Some(ReplacedOriginal::Deleted)
@@ -144,6 +159,9 @@ impl Stage {
 struct Publication {
     destination: PathBuf,
     name: String,
+    /// Syncs the archive before publishing it, where what it may replace is
+    /// deleted once a barrier that cannot reach it is reached.
+    sync_data: bool,
 }
 
 impl Publication {
@@ -225,6 +243,10 @@ impl Publication {
         check_archive_cancelled(cancelled)?;
         rustix::fs::fchmod(&handle, rustix::fs::Mode::from_raw_mode(mode))
             .map_err(|error| self.creation_failed(errno_text(error)))?;
+        if self.sync_data {
+            fs().sync_data(handle.as_fd())
+                .map_err(|error| self.creation_failed(errno_text(error)))?;
+        }
         // Closed before publication so NFS never silly-renames the stage.
         drop(handle);
         self.publish(stage, strategy)

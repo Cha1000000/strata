@@ -4,6 +4,7 @@
 //! replaces an entry, and shows a partial item under its final name only
 //! where the destination cannot place a stage.
 
+mod barrier;
 mod data;
 mod links;
 mod manifest;
@@ -33,13 +34,13 @@ use rustix::{
 
 use super::{
     LocalFileIdentity, PinnedEntry, Reported, StageContent, StagedSibling, Taken,
-    TransferProgressTracker, bounded_local_worker_count, cancelled_local_operation,
-    copy_failure_after_cleanup,
+    TransferProgressTracker, blocking_join_message, bounded_local_worker_count,
+    cancelled_local_operation, copy_failure_after_cleanup,
     fs_ops::{Entry, EntryStat, FsOps, fs},
     io_error, local_delete_worker_count, local_device_is_rotational, open_local_parent_directory,
-    os_error_detail, parallel_delete_local_blocking_with_workers, placement,
+    os_error_detail, os_error_text, parallel_delete_local_blocking_with_workers, placement,
     placement::{COPY_PREFIX, ENOTSUPP, PlaceError, STAGE_PREFIX},
-    placement_error, run_cancellable,
+    placement_error, run_blocking, run_cancellable,
 };
 use crate::{
     adapters::volume::{
@@ -48,6 +49,7 @@ use crate::{
     model::Location,
     services::{KeptCause, RenameCause, RenamedItem, SkippedItem, SpecialKind, TransferReport},
 };
+pub(super) use barrier::Barrier;
 use data::Data;
 pub(super) use manifest::Manifest;
 use metadata::Snapshot;
@@ -117,6 +119,9 @@ pub(super) struct Options {
     /// only what the copy holds. A file that changes while it is read is
     /// read again, and left at the source if it changes again.
     pub manifest: bool,
+    /// Something only the copy will hold is deleted once its [`Barrier`]
+    /// is reached, so files that barrier cannot reach are synced as written.
+    pub durable: bool,
 }
 
 /// Copies the native item at `source`.
@@ -230,6 +235,22 @@ pub(super) async fn delete_unchanged_sources(
             Err(io_error("Delete worker stopped unexpectedly")),
         )
     })
+}
+
+/// A barrier at the folder `path`, which must be opened before a copy
+/// writes beneath it.
+pub(super) async fn barrier(path: PathBuf) -> Result<Barrier, glib::Error> {
+    run_blocking(move || Barrier::open(fs(), &path)).await
+}
+
+/// Puts what was written beneath `barrier` since it was opened on its
+/// device, or tells why not.
+pub(super) async fn reach(barrier: Barrier, removable: bool) -> Result<(), String> {
+    match gio::spawn_blocking(move || barrier.reach(fs(), removable)).await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(error)) => Err(os_error_text(error)),
+        Err(error) => Err(blocking_join_message(error)),
+    }
 }
 
 /// What a copy run by [`following`] made or why it stopped, what it added to
@@ -351,6 +372,7 @@ async fn following<T: Send + 'static>(
 pub(super) async fn copy_from_stage(
     staged: &StagedSibling,
     name: OsString,
+    durable: bool,
     cancellable: &gio::Cancellable,
 ) -> Result<(), glib::Error> {
     let source = Source {
@@ -366,7 +388,10 @@ pub(super) async fn copy_from_stage(
             cancelled,
             Arc::default(),
             false,
-            Options::default(),
+            Options {
+                durable,
+                ..Options::default()
+            },
         );
         let parent = source.parent.clone();
         from_stage(&copy, &source, identity, &parent, &name)
@@ -1086,6 +1111,7 @@ struct Copy {
     nodes_refused: AtomicBool,
     /// With [`Options::manifest`].
     recording: bool,
+    durable: bool,
     left: Mutex<Left>,
 }
 
@@ -1109,6 +1135,7 @@ impl Copy {
             refused_xattrs: Mutex::default(),
             nodes_refused: AtomicBool::new(false),
             recording: options.manifest,
+            durable: options.durable,
             left: Mutex::default(),
         })
     }
@@ -1122,7 +1149,10 @@ impl Copy {
             self.cancelled.clone(),
             self.progress.clone(),
             false,
-            Options::default(),
+            Options {
+                durable: self.durable,
+                ..Options::default()
+            },
         )
     }
 
@@ -1133,6 +1163,7 @@ impl Copy {
             fat_family: self.fat_family,
             workers: None,
             manifest: self.recording,
+            durable: self.durable,
         };
         Self::new(
             self.fs,
@@ -1210,6 +1241,15 @@ impl Copy {
             self.progress.add_bytes(bytes);
             self.progress.add_file();
         }
+    }
+
+    /// Syncs a file this copy wrote before it is closed, where the
+    /// destination's barrier will not reach it.
+    fn sync_written(&self, fd: BorrowedFd<'_>, family: Family) -> Result<(), Failure> {
+        if self.durable && barrier::each_file(family) {
+            self.fs.sync_data(fd)?;
+        }
+        Ok(())
     }
 
     fn check_cancelled(&self) -> Result<(), Failure> {
@@ -1571,6 +1611,8 @@ impl<'a> FileCopy<'a> {
         let created = fs.stat_fd(tmpfile.as_fd())?;
         self.copy
             .apply_metadata(tmpfile.as_fd(), &created, &snapshot, parent, &self.target)?;
+        self.copy
+            .sync_written(tmpfile.as_fd(), self.target.family)?;
         self.copy.check_cancelled()?;
         let name = match self.link(tmpfile.as_fd(), target) {
             Ok(name) => name,
@@ -1673,9 +1715,10 @@ impl<'a> FileCopy<'a> {
         target: FileTarget<'_>,
     ) -> Result<(OsString, LocalFileIdentity), Failure> {
         let fs = self.copy.fs;
-        let settled = fs
-            .close(fd)
-            .map_err(Failure::Os)
+        let settled = self
+            .copy
+            .sync_written(fd.as_fd(), self.target.family)
+            .and_then(|()| fs.close(fd).map_err(Failure::Os))
             .and_then(|()| {
                 self.copy.settle_times(
                     self.at(&stage.name),
@@ -1776,6 +1819,7 @@ impl<'a> FileCopy<'a> {
             )?;
             self.copy
                 .apply_metadata(fd.as_fd(), &created, snapshot, parent, &self.target)?;
+            self.copy.sync_written(fd.as_fd(), self.target.family)?;
             fs.close(fd)?;
             self.copy
                 .settle_times(target, created.identity, snapshot, self.target.family)

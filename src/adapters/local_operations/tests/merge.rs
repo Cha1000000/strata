@@ -61,7 +61,6 @@ fn fat_merge_backs_up_sanitized_collisions_and_records_actual_paths() -> Result<
         None,
         MergeHooks {
             fat_family: true,
-            progress: None,
             copy_into_target: Rc::new(|source, target, _, cancellable| {
                 let copied = copy_recursively_fat_family(source, target, true, cancellable);
                 Box::pin(async move { copied.await.map(|()| None) })
@@ -121,7 +120,6 @@ fn merging_folders_unites_contents_and_overwrites_shared_names() -> Result<(), B
         None,
         MergeHooks {
             fat_family: false,
-            progress: None,
             copy_into_target: real_copy(),
             stage_overwrite: stage,
             on_merged: &on_merged,
@@ -177,7 +175,6 @@ fn merging_recurses_into_subdirectories_shared_by_both_sides() -> Result<(), Box
         None,
         MergeHooks {
             fat_family: false,
-            progress: None,
             copy_into_target: real_copy(),
             stage_overwrite: stage,
             on_merged: &on_merged,
@@ -286,7 +283,6 @@ fn a_staging_failure_aborts_the_merge_and_reports_only_what_was_staged()
         None,
         MergeHooks {
             fat_family: false,
-            progress: None,
             copy_into_target: real_copy(),
             stage_overwrite: stage,
             on_merged: &on_merged,
@@ -979,7 +975,6 @@ fn a_failed_merge_preserves_the_destinations_existing_contents() -> Result<(), B
         None,
         MergeHooks {
             fat_family: false,
-            progress: None,
             copy_into_target: Rc::new(|_, target, _, _| {
                 Box::pin(async move {
                     fs::write(
@@ -1455,7 +1450,6 @@ fn merge_through_trash(
         None,
         MergeHooks {
             fat_family: false,
-            progress: None,
             copy_into_target,
             stage_overwrite: Rc::new(trash_stage_overwrite),
             on_merged: &on_merged,
@@ -1705,40 +1699,63 @@ fn a_failed_aside_puts_every_original_back_before_merging() -> Result<(), Box<dy
 }
 
 #[test]
-fn merge_originals_are_deleted_only_after_the_removable_flush() -> Result<(), Box<dyn Error>> {
+fn merge_originals_are_deleted_only_once_the_merge_is_flushed() -> Result<(), Box<dyn Error>> {
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
         .lock()
         .map_err(|error| error.to_string())?;
-    let root = tempfile::tempdir()?;
-    let source = root.path().join("source");
-    let target = root.path().join("target");
-    write_files(&source, &[("shared.txt", "new")])?;
-    write_files(&target, &[("shared.txt", "old")])?;
-    let _guard = RemovableFlushGuard::install(root.path(), None);
-    let aside_during_flush = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let record = aside_during_flush.clone();
-    let watched = target.clone();
-    set_sync_observer(Some(Arc::new(move |_| {
-        let kept = aside_folder(&watched).is_ok_and(|folder| folder.is_some());
-        record
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .push(kept);
-    })));
-    let _quirks = FsQuirks::install(root.path(), without_trash(Quirks::default()));
+    for flushed in [true, false] {
+        let root = tempfile::tempdir()?;
+        let source = root.path().join("source");
+        let target = root.path().join("target");
+        write_files(&source, &[("shared.txt", "new")])?;
+        write_files(&target, &[("shared.txt", "old")])?;
+        let aside_during_flush = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (record, watched) = (aside_during_flush.clone(), target.clone());
+        let racer: super::fs_quirks::Racer = Box::new(move || {
+            let kept = aside_folder(&watched).is_ok_and(|folder| folder.is_some());
+            record
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .push(kept);
+        });
+        let _quirks = FsQuirks::install(
+            root.path(),
+            without_trash(Quirks {
+                before: vec![(Op::SyncFs, "*", 0, racer)],
+                fail: if flushed {
+                    Vec::new()
+                } else {
+                    vec![(Op::SyncFs, "*", 0, Errno::IO)]
+                },
+                ..Quirks::default()
+            }),
+        );
 
-    let (result, _) = merge_through_trash(&source, &target, true, real_copy());
+        let (result, _) = merge_through_trash(&source, &target, true, real_copy());
 
-    assert!(result.is_ok(), "{result:?}");
-    assert_eq!(
-        *aside_during_flush
-            .lock()
-            .unwrap_or_else(|error| error.into_inner()),
-        [true],
-        "one flush before the originals are deleted, shared with the move"
-    );
-    assert_eq!(fs::read(target.join("shared.txt"))?, b"new");
-    assert_eq!(names(&target)?, ["shared.txt"]);
-    assert!(!source.exists());
+        assert_eq!(
+            *aside_during_flush
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()),
+            [true],
+            "one flush before the originals are deleted, shared with the move"
+        );
+        assert_eq!(fs::read(target.join("shared.txt"))?, b"new");
+        if flushed {
+            assert!(result.is_ok(), "{result:?}");
+            assert_eq!(names(&target)?, ["shared.txt"]);
+            assert!(!source.exists());
+            continue;
+        }
+        let aside = aside_folder(&target)?.ok_or("the originals stay aside")?;
+        assert_eq!(fs::read(target.join(&aside).join("shared.txt"))?, b"old");
+        assert_eq!(fs::read(source.join("shared.txt"))?, b"new");
+        let error = result.expect_err("the originals and the source are kept");
+        assert!(
+            error.message().contains(&aside)
+                && error.message().contains("writes may still be pending"),
+            "{error}"
+        );
+    }
     Ok(())
 }

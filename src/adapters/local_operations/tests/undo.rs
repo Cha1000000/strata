@@ -484,83 +484,68 @@ fn undo_one(
 }
 
 #[test]
-fn undoing_a_cross_volume_move_keeps_the_item_when_the_removable_flush_fails()
+fn undoing_a_cross_volume_move_deletes_the_moved_item_only_once_it_is_flushed()
 -> Result<(), Box<dyn Error>> {
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
         .lock()
         .map_err(|error| error.to_string())?;
-    let root = tempfile::tempdir()?;
-    let origin = root.path().join("usb");
-    let archive = root.path().join("archive");
-    fs::create_dir_all(&origin)?;
-    fs::create_dir_all(&archive)?;
-    let current = archive.join("report.txt");
-    fs::write(&current, b"contents")?;
-    let _guard = RemovableFlushGuard::install(root.path(), Some(io::ErrorKind::Other));
-    let _volumes = separate_volumes(&archive, &origin);
+    for (id, flushed) in [(97, true), (98, false)] {
+        let root = tempfile::tempdir()?;
+        let origin = root.path().join("usb");
+        let archive = root.path().join("archive");
+        fs::create_dir_all(&origin)?;
+        fs::create_dir_all(&archive)?;
+        let current = archive.join("report.txt");
+        fs::write(&current, b"contents")?;
+        let during = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (record, watched) = (during.clone(), current.clone());
+        let racer: super::fs_quirks::Racer = Box::new(move || {
+            record
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .push(watched.exists());
+        });
+        let _archive = FsQuirks::install(&archive, Quirks::default());
+        let _origin = FsQuirks::install(
+            &origin,
+            Quirks {
+                before: vec![(Op::SyncFs, "*", 0, racer)],
+                fail: if flushed {
+                    Vec::new()
+                } else {
+                    vec![(Op::SyncFs, "*", 0, Errno::IO)]
+                },
+                ..Quirks::ext4()
+            },
+        );
 
-    let (_operation, events) = undo_one(
-        97,
-        &origin.join("report.txt"),
-        &current,
-        TransferConflict::FailIfExists,
-    );
-    pump_until_transfer(&events);
+        let (_operation, events) = undo_one(
+            id,
+            &origin.join("report.txt"),
+            &current,
+            TransferConflict::FailIfExists,
+        );
+        pump_until_transfer(&events);
 
-    assert!(matches!(
-        terminal_transfer(&events.borrow()),
-        Some(OperationEvent::TransferFailed { .. })
-    ));
-    assert!(
-        !events
-            .borrow()
-            .iter()
-            .any(|event| matches!(event, OperationEvent::Pasted { .. }))
-    );
-    assert_eq!(fs::read(&current)?, b"contents");
-    assert_eq!(fs::read(origin.join("report.txt"))?, b"contents");
-    Ok(())
-}
-
-#[test]
-fn undoing_a_cross_volume_move_flushes_before_deleting_the_moved_item() -> Result<(), Box<dyn Error>>
-{
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
-    let root = tempfile::tempdir()?;
-    let origin = root.path().join("usb");
-    let archive = root.path().join("archive");
-    fs::create_dir_all(&origin)?;
-    fs::create_dir_all(&archive)?;
-    let current = archive.join("report.txt");
-    fs::write(&current, b"contents")?;
-    let during = watch_source_during_sync(&current);
-    let _guard = RemovableFlushGuard::install(root.path(), None);
-    let _volumes = separate_volumes(&archive, &origin);
-
-    let (_operation, events) = undo_one(
-        98,
-        &origin.join("report.txt"),
-        &current,
-        TransferConflict::FailIfExists,
-    );
-    pump_until_transfer(&events);
-    assert_eq!(
-        during
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .first()
-            .copied(),
-        Some(true)
-    );
-
-    assert!(matches!(
-        terminal_transfer(&events.borrow()),
-        Some(OperationEvent::Pasted { .. })
-    ));
-    assert!(!current.exists());
-    assert_eq!(fs::read(origin.join("report.txt"))?, b"contents");
+        assert_eq!(
+            *during.lock().unwrap_or_else(|error| error.into_inner()),
+            [true],
+            "flushed: {flushed}"
+        );
+        assert_eq!(fs::read(origin.join("report.txt"))?, b"contents");
+        if flushed {
+            assert!(matches!(
+                terminal_transfer(&events.borrow()),
+                Some(OperationEvent::Pasted { .. })
+            ));
+            assert!(!current.exists());
+            continue;
+        }
+        assert!(matches!(terminal_transfer(&events.borrow()),
+            Some(OperationEvent::TransferFailed { message, .. })
+            if message.contains("writes may still be pending")));
+        assert_eq!(fs::read(&current)?, b"contents");
+    }
     Ok(())
 }
 

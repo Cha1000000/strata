@@ -2,8 +2,8 @@
 
 //! Where Trash is unavailable, a merge moves each original it overwrites
 //! into one hidden folder inside the merge target, under its relative path,
-//! and deletes that folder only once the merge has succeeded. An original
-//! whose name the merge left free goes back to it first.
+//! and deletes that folder only once the merge has succeeded and is on
+//! disk. An original whose name the merge left free goes back to it first.
 
 use std::{
     ffi::OsString,
@@ -19,7 +19,7 @@ use rustix::{
 };
 
 use super::{
-    LocalFileIdentity, PinnedEntry, flush_removable_destination,
+    LocalFileIdentity, PinnedEntry,
     fs_ops::{Entry, fs},
     io_error, open_local_parent_directory, parallel_delete_local,
     placement::{self, Feasibility, MERGE_PREFIX, PlaceError},
@@ -297,34 +297,36 @@ impl MergeAside {
         failure
     }
 
-    /// Deletes the folder and every original in it once the merge is on
-    /// disk, flushing removable media first.
-    async fn remove(self) -> Result<(), glib::Error> {
+    /// Deletes the folder and every original in it, once the merge is on disk.
+    pub(super) async fn remove(self) -> Result<(), glib::Error> {
+        let path = self.folder_path().unwrap_or_default();
         let (Some(target), Some(folder)) = (self.target, self.folder) else {
             return Ok(());
         };
-        let path = self.target_path.join(&folder.name);
-        let removed = async {
-            flush_removable_destination(&self.target_path).await?;
-            parallel_delete_local(
-                vec![PinnedEntry {
-                    parent: target,
-                    name: folder.name,
-                    identity: Some(folder.identity),
-                }],
-                gio::Cancellable::new(),
-            )
-            .await
-        }
-        .await;
-        removed.map_err(|error| {
-            io_error(rust_i18n::t!(
-                "The folders were merged, but the replaced originals could not be removed from “%{folder}”: %{error}",
-                folder = path.display(),
-                error = crate::services::gio_error_detail(&error)
-            ))
-        })
+        parallel_delete_local(
+            vec![PinnedEntry {
+                parent: target,
+                name: folder.name,
+                identity: Some(folder.identity),
+            }],
+            gio::Cancellable::new(),
+        )
+        .await
+        .map_err(|error| not_removed(&path, &error))
     }
+
+    /// The originals stay in the folder because of `error`.
+    pub(super) fn not_removed(&self, error: &glib::Error) -> glib::Error {
+        not_removed(&self.folder_path().unwrap_or_default(), error)
+    }
+}
+
+fn not_removed(folder: &Path, error: &glib::Error) -> glib::Error {
+    io_error(rust_i18n::t!(
+        "The folders were merged, but the replaced originals could not be removed from “%{folder}”: %{error}",
+        folder = folder.display(),
+        error = crate::services::gio_error_detail(error)
+    ))
 }
 
 /// Sets the original at `path` aside off the main thread, starting the
@@ -375,12 +377,12 @@ pub(super) async fn abandon(aside: Option<MergeAside>, error: glib::Error) -> gl
     ))
 }
 
-/// Deletes the originals of a successful merge, except those it left
-/// nothing in place of. Returns whether the merged target was flushed on
-/// the way.
-pub(super) async fn finish(aside: Option<MergeAside>) -> Result<bool, glib::Error> {
+/// Puts back the originals a successful merge left nothing in place of,
+/// and returns the folder holding the others, to delete once the merge is
+/// on disk.
+pub(super) async fn finish(aside: Option<MergeAside>) -> Result<Option<MergeAside>, glib::Error> {
     let Some(mut aside) = aside.filter(MergeAside::used) else {
-        return Ok(false);
+        return Ok(None);
     };
     let (aside, put_back) = run_blocking(move || {
         let put_back = aside.put_back_unreplaced();
@@ -394,5 +396,5 @@ pub(super) async fn finish(aside: Option<MergeAside>) -> Result<bool, glib::Erro
             error = crate::services::error_detail(placement_reason(error))
         )));
     }
-    aside.remove().await.map(|()| true)
+    Ok(Some(aside))
 }

@@ -481,241 +481,101 @@ fn paste_move(
 }
 
 #[test]
-fn cross_volume_move_keeps_the_source_when_the_removable_flush_fails() -> Result<(), Box<dyn Error>>
-{
+fn moves_delete_their_sources_only_once_the_destination_is_flushed() -> Result<(), Box<dyn Error>> {
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
         .lock()
         .map_err(|error| error.to_string())?;
-    let root = tempfile::tempdir()?;
-    let source_dir = root.path().join("source");
-    let destination = root.path().join("usb");
-    fs::create_dir_all(&source_dir)?;
-    fs::create_dir_all(&destination)?;
-    let source = source_dir.join("notes.txt");
-    fs::write(&source, b"keep-me")?;
-    let _guard = RemovableFlushGuard::install(root.path(), Some(io::ErrorKind::Other));
-    let _volumes = separate_volumes(&source_dir, &destination);
-
-    let (_operation, events) =
-        paste_move(90, &destination, &source, TransferConflict::FailIfExists);
-    pump_until_transfer(&events);
-
-    let observed = sync_probe_observations();
-    assert!(
-        matches!(
-            terminal_transfer(&events.borrow()),
-            Some(OperationEvent::TransferFailed { .. })
-        ),
-        "events={:?} syncs={} source_exists={}",
-        events.borrow(),
-        observed.len(),
-        source.exists()
-    );
-    assert!(
-        !events
-            .borrow()
-            .iter()
-            .any(|event| matches!(event, OperationEvent::Pasted { .. }))
-    );
-    assert_eq!(fs::read(&source)?, b"keep-me");
-    assert_eq!(fs::read(destination.join("notes.txt"))?, b"keep-me");
-    assert!(!sync_probe_observations().is_empty());
-    Ok(())
-}
-
-#[test]
-fn cross_volume_move_flushes_the_removable_destination_before_deleting_the_source()
--> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
-    let root = tempfile::tempdir()?;
-    let source_dir = root.path().join("source");
-    let destination = root.path().join("usb");
-    fs::create_dir_all(&source_dir)?;
-    fs::create_dir_all(&destination)?;
-    let source = source_dir.join("notes.txt");
-    fs::write(&source, b"moved")?;
-    let during = watch_source_during_sync(&source);
-    let _guard = RemovableFlushGuard::install(root.path(), None);
-    let _volumes = separate_volumes(&source_dir, &destination);
-
-    let (_operation, events) =
-        paste_move(91, &destination, &source, TransferConflict::FailIfExists);
-    pump_until_transfer(&events);
-    assert_eq!(
-        during
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .first()
-            .copied(),
-        Some(true),
-        "the destination flush must start before the source is deleted"
-    );
-
-    assert!(matches!(
-        terminal_transfer(&events.borrow()),
-        Some(OperationEvent::Pasted { .. })
-    ));
-    assert!(!source.exists());
-    assert_eq!(fs::read(destination.join("notes.txt"))?, b"moved");
-    Ok(())
-}
-
-#[test]
-fn cross_volume_replacing_move_keeps_the_source_when_the_removable_flush_fails()
--> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
-    let root = tempfile::tempdir()?;
-    let source_dir = root.path().join("source");
-    let destination = root.path().join("usb");
-    fs::create_dir_all(&source_dir)?;
-    fs::create_dir_all(&destination)?;
-    let source = source_dir.join("notes.txt");
-    fs::write(&source, b"incoming")?;
-    fs::write(destination.join("notes.txt"), b"old")?;
-    let _guard = RemovableFlushGuard::install(root.path(), Some(io::ErrorKind::Other));
-    let _volumes = separate_volumes(&source_dir, &destination);
-
-    let (_operation, events) =
-        paste_move(92, &destination, &source, TransferConflict::ReplaceExisting);
-    pump_until_transfer(&events);
-
-    assert!(matches!(
-        terminal_transfer(&events.borrow()),
-        Some(OperationEvent::TransferFailed { .. })
-    ));
-    assert!(
-        !events
-            .borrow()
-            .iter()
-            .any(|event| matches!(event, OperationEvent::Pasted { .. }))
-    );
-    assert_eq!(fs::read(&source)?, b"incoming");
-    assert_eq!(fs::read(destination.join("notes.txt"))?, b"incoming");
-    Ok(())
-}
-
-#[test]
-fn cross_volume_replacing_move_flushes_the_removable_destination_before_deleting_the_source()
--> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
-    let root = tempfile::tempdir()?;
-    let source_dir = root.path().join("source");
-    let destination = root.path().join("usb");
-    fs::create_dir_all(&source_dir)?;
-    fs::create_dir_all(&destination)?;
-    let source = source_dir.join("notes.txt");
-    fs::write(&source, b"incoming")?;
-    fs::write(destination.join("notes.txt"), b"old")?;
-    let during = watch_source_during_sync(&source);
-    let _guard = RemovableFlushGuard::install(root.path(), None);
-    let _volumes = separate_volumes(&source_dir, &destination);
-
-    let (_operation, events) =
-        paste_move(93, &destination, &source, TransferConflict::ReplaceExisting);
-    pump_until_transfer(&events);
-    assert_eq!(
-        during
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .first()
-            .copied(),
-        Some(true)
-    );
-
-    assert!(matches!(
-        terminal_transfer(&events.borrow()),
-        Some(OperationEvent::Pasted { .. })
-    ));
-    assert!(!source.exists());
-    assert_eq!(fs::read(destination.join("notes.txt"))?, b"incoming");
-    Ok(())
-}
-
-#[test]
-fn merging_move_onto_removable_media_keeps_the_source_when_the_flush_fails()
--> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
-    let root = tempfile::tempdir()?;
-    let source = root.path().join("source");
-    let destination = root.path().join("usb");
-    fs::create_dir_all(source.join("folder"))?;
-    fs::create_dir_all(destination.join("folder"))?;
-    fs::write(source.join("folder/incoming.txt"), b"new")?;
-    fs::write(destination.join("folder/stays.txt"), b"keep")?;
-    let _guard = RemovableFlushGuard::install(root.path(), Some(io::ErrorKind::Other));
-
-    let (_operation, events) = paste_move(
-        94,
-        &destination,
-        &source.join("folder"),
+    let conflicts = [
+        TransferConflict::FailIfExists,
+        TransferConflict::ReplaceExisting,
         TransferConflict::Merge,
-    );
-    pump_until_transfer(&events);
+    ];
+    for (id, conflict) in (90..).zip(conflicts) {
+        for flushed in [true, false] {
+            let row = format!("{conflict:?}, flushed: {flushed}");
+            let root = tempfile::tempdir()?;
+            let source_dir = root.path().join("source");
+            let destination = root.path().join("usb");
+            let (item, incoming) = if conflict == TransferConflict::Merge {
+                (Path::new("folder"), Path::new("folder/incoming.txt"))
+            } else {
+                (Path::new("notes.txt"), Path::new("notes.txt"))
+            };
+            fs::create_dir_all(source_dir.join(incoming).parent().ok_or("a parent")?)?;
+            fs::create_dir_all(&destination)?;
+            fs::write(source_dir.join(incoming), b"incoming")?;
+            match conflict {
+                TransferConflict::ReplaceExisting => fs::write(destination.join(item), b"old")?,
+                TransferConflict::Merge => {
+                    fs::create_dir(destination.join(item))?;
+                    fs::write(destination.join("folder/stays.txt"), b"keep")?;
+                }
+                _ => {}
+            }
+            let source = source_dir.join(item);
+            let during = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let (record, watched) = (during.clone(), source.clone());
+            let racer: super::fs_quirks::Racer = Box::new(move || {
+                record
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .push(watched.exists());
+            });
+            let _source = FsQuirks::install(&source_dir, Quirks::default());
+            let _destination = FsQuirks::install(
+                &destination,
+                Quirks {
+                    before: vec![(Op::SyncFs, "*", 0, racer)],
+                    fail: if flushed {
+                        Vec::new()
+                    } else {
+                        vec![(Op::SyncFs, "*", 0, Errno::IO)]
+                    },
+                    ..Quirks::ext4()
+                },
+            );
 
-    assert!(matches!(
-        terminal_transfer(&events.borrow()),
-        Some(OperationEvent::TransferFailed { .. })
-    ));
-    assert!(
-        !events
-            .borrow()
-            .iter()
-            .any(|event| matches!(event, OperationEvent::Pasted { .. }))
-    );
-    assert_eq!(fs::read(source.join("folder/incoming.txt"))?, b"new");
-    assert_eq!(fs::read(destination.join("folder/incoming.txt"))?, b"new");
-    assert_eq!(fs::read(destination.join("folder/stays.txt"))?, b"keep");
-    Ok(())
-}
+            let (_operation, events) = paste_move(id, &destination, &source, conflict);
+            pump_until_transfer(&events);
 
-#[test]
-fn merging_move_flushes_the_removable_destination_before_deleting_the_source()
--> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
-    let root = tempfile::tempdir()?;
-    let source = root.path().join("source");
-    let destination = root.path().join("usb");
-    fs::create_dir_all(source.join("folder"))?;
-    fs::create_dir_all(destination.join("folder"))?;
-    fs::write(source.join("folder/incoming.txt"), b"new")?;
-    fs::write(destination.join("folder/stays.txt"), b"keep")?;
-    let folder = source.join("folder");
-    let during = watch_source_during_sync(&folder);
-    let _guard = RemovableFlushGuard::install(root.path(), None);
-
-    let (_operation, events) = paste_move(
-        95,
-        &destination,
-        &source.join("folder"),
-        TransferConflict::Merge,
-    );
-    pump_until_transfer(&events);
-    assert_eq!(
-        during
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .first()
-            .copied(),
-        Some(true)
-    );
-
-    assert!(matches!(
-        terminal_transfer(&events.borrow()),
-        Some(OperationEvent::Pasted { .. })
-    ));
-    assert!(!source.join("folder").exists());
-    assert_eq!(fs::read(destination.join("folder/incoming.txt"))?, b"new");
-    assert_eq!(fs::read(destination.join("folder/stays.txt"))?, b"keep");
+            assert_eq!(
+                *during.lock().unwrap_or_else(|error| error.into_inner()),
+                [true],
+                "{row}: one flush, before the source is deleted"
+            );
+            assert_eq!(fs::read(destination.join(incoming))?, b"incoming", "{row}");
+            if conflict == TransferConflict::Merge {
+                assert_eq!(fs::read(destination.join("folder/stays.txt"))?, b"keep");
+            }
+            let moved = events
+                .borrow()
+                .iter()
+                .any(|event| matches!(event, OperationEvent::ItemMoved { .. }));
+            if flushed {
+                assert!(
+                    matches!(
+                        terminal_transfer(&events.borrow()),
+                        Some(OperationEvent::Pasted { .. })
+                    ),
+                    "{row}: {:?}",
+                    events.borrow()
+                );
+                assert!(!source.exists(), "{row}");
+                assert!(moved, "{row}");
+            } else {
+                assert!(
+                    matches!(terminal_transfer(&events.borrow()),
+                        Some(OperationEvent::TransferFailed { message, completed_locations, .. })
+                        if message.contains("writes may still be pending")
+                            && completed_locations.is_empty()),
+                    "{row}: {:?}",
+                    events.borrow()
+                );
+                assert_eq!(fs::read(source_dir.join(incoming))?, b"incoming", "{row}");
+                assert!(!moved, "{row}");
+            }
+        }
+    }
     Ok(())
 }
 

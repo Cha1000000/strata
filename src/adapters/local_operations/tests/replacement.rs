@@ -82,8 +82,11 @@ fn replacement_publication_preserves_concurrent_arrivals() -> Result<(), Box<dyn
             fs::write(&staged_path, b"replacement")?;
             fs::write(&target, b"new arrival")?;
         }
-        let result = glib::MainContext::default()
-            .block_on(publish_staged_replacement(staged, target.clone()));
+        let result = glib::MainContext::default().block_on(publish_staged_replacement(
+            staged,
+            target.clone(),
+            false,
+        ));
 
         assert!(
             result.is_err(),
@@ -188,7 +191,7 @@ fn replacement_publication_reports_a_stage_it_cannot_remove() -> Result<(), Box<
     fs::remove_file(&staged_path)?;
     fs::create_dir(&staged_path)?;
     let error = glib::MainContext::default()
-        .block_on(publish_staged_replacement(staged, target.clone()))
+        .block_on(publish_staged_replacement(staged, target.clone(), false))
         .expect_err("concurrent destination prevents publication");
     assert!(
         error
@@ -933,47 +936,72 @@ fn replace_fails_before_staging_when_no_strategy_is_safe() -> Result<(), Box<dyn
 }
 
 #[test]
-fn the_original_is_deleted_only_after_the_removable_flush() -> Result<(), Box<dyn Error>> {
+fn the_original_is_deleted_only_once_its_replacement_is_flushed() -> Result<(), Box<dyn Error>> {
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
         .lock()
         .map_err(|error| error.to_string())?;
-    let root = tempfile::tempdir()?;
-    let source = root.path().join("source");
-    let target = root.path().join("target");
-    fs::write(&source, b"new")?;
-    fs::write(&target, b"old")?;
-    let _guard = RemovableFlushGuard::install(root.path(), None);
-    let aside_during_flush = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let record = aside_during_flush.clone();
-    let watched = root.path().to_path_buf();
-    set_sync_observer(Some(Arc::new(move |_| {
-        let kept = names(&watched).is_ok_and(|names| {
-            names
-                .iter()
-                .any(|name| name.starts_with(".strata-replaced-"))
+    for flushed in [true, false] {
+        let root = tempfile::tempdir()?;
+        let source = root.path().join("source");
+        let target = root.path().join("target");
+        fs::write(&source, b"new")?;
+        fs::write(&target, b"old")?;
+        let aside_during_flush = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (record, watched) = (aside_during_flush.clone(), root.path().to_path_buf());
+        let racer: super::fs_quirks::Racer = Box::new(move || {
+            let kept = names(&watched).is_ok_and(|names| {
+                names
+                    .iter()
+                    .any(|name| name.starts_with(".strata-replaced-"))
+            });
+            record
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .push(kept);
         });
-        record
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .push(kept);
-    })));
-    let _quirks = FsQuirks::install(
-        root.path(),
-        without_trash(NFS_SUPER_MAGIC, Quirks::default()),
-    );
+        let _quirks = FsQuirks::install(
+            root.path(),
+            without_trash(
+                NFS_SUPER_MAGIC,
+                Quirks {
+                    before: vec![(Op::SyncFs, "*", 0, racer)],
+                    fail: if flushed {
+                        Vec::new()
+                    } else {
+                        vec![(Op::SyncFs, "*", 0, Errno::IO)]
+                    },
+                    ..Quirks::default()
+                },
+            ),
+        );
 
-    let (result, _) = replace_reporting(&source, &target, false);
+        let (result, _) = replace_reporting(&source, &target, false);
 
-    assert!(result.is_ok(), "{result:?}");
-    assert_eq!(
-        aside_during_flush
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .first(),
-        Some(&true)
-    );
-    assert_eq!(fs::read(&target)?, b"new");
-    assert_eq!(names(root.path())?, ["source", "target"]);
+        assert_eq!(
+            *aside_during_flush
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()),
+            [true],
+            "flushed: {flushed}"
+        );
+        assert_eq!(fs::read(&target)?, b"new");
+        if flushed {
+            assert!(result.is_ok(), "{result:?}");
+            assert_eq!(names(root.path())?, ["source", "target"]);
+            continue;
+        }
+        let aside = names(root.path())?
+            .into_iter()
+            .find(|name| name.starts_with(".strata-replaced-"))
+            .ok_or("the original stays aside")?;
+        assert_eq!(fs::read(root.path().join(&aside))?, b"old");
+        let error = result.expect_err("the original is kept");
+        assert!(
+            error.message().contains(&aside)
+                && error.message().contains("writes may still be pending"),
+            "{error}"
+        );
+    }
     Ok(())
 }
 

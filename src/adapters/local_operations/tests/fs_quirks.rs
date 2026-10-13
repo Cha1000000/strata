@@ -53,6 +53,9 @@ pub(crate) enum Op {
     Read,
     Write,
     SetLen,
+    SyncData,
+    SyncFs,
+    SyncDir,
     Close,
     ChownFd,
     ChmodFd,
@@ -360,6 +363,12 @@ impl FsQuirks {
 
     pub(crate) fn calls(&self) -> Vec<Call> {
         self.scope.state().calls.clone()
+    }
+
+    /// Reads the calls logged so far, from a racer in another scope.
+    pub(crate) fn reader(&self) -> impl Fn() -> Vec<Call> + Send + Sync + 'static {
+        let scope = self.scope.clone();
+        move || scope.state().calls.clone()
     }
 
     pub(crate) fn count(&self, op: Op) -> usize {
@@ -1250,6 +1259,21 @@ impl FsOps for Scoped {
     fn set_len(&self, fd: BorrowedFd<'_>, len: u64) -> Result<(), Errno> {
         assert_off_main_thread();
         on_fd(fd, Op::SetLen, None, |_| System.set_len(fd, len))
+    }
+
+    fn sync_data(&self, fd: BorrowedFd<'_>) -> Result<(), Errno> {
+        assert_off_main_thread();
+        on_fd(fd, Op::SyncData, None, |_| System.sync_data(fd))
+    }
+
+    fn sync_fs(&self, fd: BorrowedFd<'_>) -> Result<(), Errno> {
+        assert_off_main_thread();
+        on_fd(fd, Op::SyncFs, None, |_| System.sync_fs(fd))
+    }
+
+    fn sync_dir(&self, fd: BorrowedFd<'_>) -> Result<(), Errno> {
+        assert_off_main_thread();
+        on_fd(fd, Op::SyncDir, None, |_| System.sync_dir(fd))
     }
 
     fn close(&self, fd: OwnedFd) -> Result<(), Errno> {

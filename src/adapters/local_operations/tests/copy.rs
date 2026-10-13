@@ -1103,6 +1103,7 @@ fn publish(staged: StagedSibling, target: &Path) -> Result<(), glib::Error> {
     glib::MainContext::default().block_on(publish_staged_without_replace(
         staged,
         target.to_path_buf(),
+        false,
         gio::Cancellable::new(),
     ))
 }
@@ -1413,6 +1414,7 @@ fn cancelling_staged_fallback_removes_its_reserved_directory() -> Result<(), Box
     let result = glib::MainContext::default().block_on(publish_staged_without_replace(
         staged,
         target.clone(),
+        false,
         cancellable,
     ));
 

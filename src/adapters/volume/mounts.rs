@@ -36,11 +36,8 @@ impl MountType {
     /// without `use_ino` and cifs without server inode numbers number an
     /// entry afresh once the kernel has evicted it.
     pub(crate) fn stable_inodes(&self) -> bool {
-        if matches!(self.fs_type.as_str(), "vfat" | "msdos" | "exfat") {
-            return false;
-        }
         match family(&self.fs_type) {
-            Family::Fuse => false,
+            Family::Fat | Family::Fuse => false,
             Family::Smb => !self
                 .super_options
                 .split(',')
@@ -62,6 +59,9 @@ pub(crate) enum Family {
     Bcachefs,
     Zfs,
     Overlay,
+    /// vfat, msdos and the kernel's exFAT.
+    Fat,
+    Ntfs3,
     Nfs,
     Nfs4,
     Smb,
@@ -79,6 +79,8 @@ pub(crate) fn family(fs_type: &str) -> Family {
         "bcachefs" => Family::Bcachefs,
         "zfs" => Family::Zfs,
         "overlay" => Family::Overlay,
+        "vfat" | "msdos" | "exfat" => Family::Fat,
+        "ntfs3" => Family::Ntfs3,
         "nfs" => Family::Nfs,
         "nfs4" => Family::Nfs4,
         "cifs" | "smb3" => Family::Smb,
