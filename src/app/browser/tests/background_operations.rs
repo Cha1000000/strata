@@ -444,3 +444,46 @@ fn a_transfer_reports_its_items_once_after_it_ends() {
         }
     }
 }
+
+#[test]
+fn a_background_merge_undo_removes_merged_items_under_the_names_they_were_saved_as() {
+    PENDING_UNDO.with(|pending| *pending.borrow_mut() = UndoState::default());
+    let browser = Browser::new(Rc::new(FakeFileSource));
+    let operations = Rc::new(HeldOperations::default());
+    browser.set_operation_provider(operations.clone());
+    let id = copy(&browser, "folder");
+    assert!(browser.background_file_operation(id));
+
+    operations.emit(
+        id,
+        OperationEvent::Merged {
+            request_id: id,
+            source: Location::local("/fixture/folder"),
+            created: vec![Location::local("/fixture/destination/folder/makefile")],
+            overwritten: Vec::new(),
+        },
+    );
+    operations.emit(
+        id,
+        OperationEvent::ItemsReported {
+            request_id: id,
+            report: renamed("makefile"),
+        },
+    );
+    operations.emit(
+        id,
+        OperationEvent::Pasted {
+            request_id: id,
+            locations: Vec::new(),
+        },
+    );
+
+    assert_eq!(
+        pending_undo_entry(),
+        Some(UndoEntry::Merge {
+            created: vec![Location::local("/fixture/destination/folder/makefile (1)")],
+            overwritten: Vec::new(),
+            originals: HashMap::new(),
+        })
+    );
+}

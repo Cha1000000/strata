@@ -592,6 +592,15 @@ fn successful_transfers_reveal_actual_destination_names_only_without_navigation(
                 browser.navigate(Location::local("/elsewhere"));
                 browser.navigate(root);
             }
+            if moving {
+                // Keep Both moved it under the next free number.
+                emit(OperationEvent::ItemMoved {
+                    request_id,
+                    from: Location::local("/fixture/report.txt"),
+                    to: Location::local("/fixture/archive/report (1).txt"),
+                    merged: false,
+                });
+            }
             emit(OperationEvent::Pasted {
                 request_id,
                 locations: vec![Location::local("/fixture/report.txt")],
@@ -611,7 +620,7 @@ fn successful_transfers_reveal_actual_destination_names_only_without_navigation(
                 assert!(reveals.is_empty());
             } else {
                 let name = if moving {
-                    "report.txt"
+                    "report (1).txt"
                 } else {
                     "report (copy).txt"
                 };
