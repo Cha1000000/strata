@@ -2,7 +2,8 @@
 
 //! Where Trash is unavailable, a merge moves each original it overwrites
 //! into one hidden folder inside the merge target, under its relative path,
-//! and deletes that folder only once the merge has succeeded.
+//! and deletes that folder only once the merge has succeeded. An original
+//! whose name the merge left free goes back to it first.
 
 use std::{
     ffi::OsString,
@@ -274,6 +275,28 @@ impl MergeAside {
         })
     }
 
+    /// Moves each original whose name the merge left free back to it: the
+    /// incoming item was left out, or kept at its source by a move.
+    fn put_back_unreplaced(&mut self) -> Result<(), PlaceError> {
+        let mut failure = Ok(());
+        self.moved.retain(|moved| {
+            let original = Entry::new(&*moved.parent, &moved.name);
+            if fs().stat(original, false).err() != Some(Errno::NOENT) {
+                return true;
+            }
+            let aside = Entry::new(&*moved.aside_parent, &moved.name);
+            match placement::place(fs(), aside, original, Some(moved.identity)) {
+                Ok(_) => false,
+                Err(PlaceError::Exists) => true,
+                Err(error) => {
+                    failure = failure.and(Err(error));
+                    true
+                }
+            }
+        });
+        failure
+    }
+
     /// Deletes the folder and every original in it once the merge is on
     /// disk, flushing removable media first.
     async fn remove(self) -> Result<(), glib::Error> {
@@ -352,11 +375,24 @@ pub(super) async fn abandon(aside: Option<MergeAside>, error: glib::Error) -> gl
     ))
 }
 
-/// Deletes the originals of a successful merge. Returns whether the merged
-/// target was flushed on the way.
+/// Deletes the originals of a successful merge, except those it left
+/// nothing in place of. Returns whether the merged target was flushed on
+/// the way.
 pub(super) async fn finish(aside: Option<MergeAside>) -> Result<bool, glib::Error> {
-    match aside.filter(MergeAside::used) {
-        Some(aside) => aside.remove().await.map(|()| true),
-        None => Ok(false),
+    let Some(mut aside) = aside.filter(MergeAside::used) else {
+        return Ok(false);
+    };
+    let (aside, put_back) = run_blocking(move || {
+        let put_back = aside.put_back_unreplaced();
+        Ok((aside, put_back))
+    })
+    .await?;
+    if let Err(error) = put_back {
+        return Err(io_error(rust_i18n::t!(
+            "The folders were merged, but the replaced originals could not be removed from “%{folder}”: %{error}",
+            folder = aside.folder_path().unwrap_or_default().display(),
+            error = crate::services::error_detail(placement_reason(error))
+        )));
     }
+    aside.remove().await.map(|()| true)
 }

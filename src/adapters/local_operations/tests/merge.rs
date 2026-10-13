@@ -1522,6 +1522,66 @@ fn merge_without_trash_sets_originals_aside_and_removes_them_after_success()
 }
 
 #[test]
+fn without_trash_an_original_the_merge_left_nothing_in_place_of_stays() -> Result<(), Box<dyn Error>>
+{
+    use super::fs_quirks::Racer;
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let rewrite = |path: PathBuf, contents: &'static [u8]| -> Racer {
+        Box::new(move || fs::write(&path, contents).expect("rewrite the source"))
+    };
+    // The incoming `x` is a socket, which is left out; or a file a merging
+    // move keeps at its source, as it changed again while it was read; or
+    // the socket, where moving the original back fails.
+    for row in ["left out", "kept at its source", "put back fails"] {
+        let root = tempfile::tempdir()?;
+        let source = root.path().join("source");
+        let target = root.path().join("target");
+        fs::create_dir(&source)?;
+        write_files(&target, &[("x", "original"), ("y", "kept")])?;
+        let moving = row == "kept at its source";
+        let mut source_quirks = Quirks::default();
+        let _socket = if moving {
+            fs::write(source.join("x"), b"incoming")?;
+            source_quirks.before = vec![
+                (Op::Read, "x", 0, rewrite(source.join("x"), b"second")),
+                (Op::Read, "x", 1, rewrite(source.join("x"), b"third")),
+            ];
+            None
+        } else {
+            Some(std::os::unix::net::UnixListener::bind(source.join("x"))?)
+        };
+        let mut target_quirks = without_trash(Quirks::default());
+        if row == "put back fails" {
+            target_quirks.fail = vec![(Op::Rename, "x", 1, Errno::IO)];
+        }
+        let _source = FsQuirks::install(&source, source_quirks);
+        let _target = FsQuirks::install(&target, target_quirks);
+
+        let (result, _) = merge_through_trash(&source, &target, moving, real_copy());
+
+        if row == "put back fails" {
+            let aside = aside_folder(&target)?.ok_or("the original stays aside")?;
+            assert!(result.is_err(), "{row}");
+            assert_eq!(
+                fs::read(target.join(aside).join("x"))?,
+                b"original",
+                "{row}"
+            );
+            continue;
+        }
+        assert!(result.is_ok(), "{row}: {result:?}");
+        assert_eq!(names(&target)?, ["x", "y"], "{row}");
+        assert_eq!(fs::read(target.join("x"))?, b"original", "{row}");
+        if moving {
+            assert_eq!(fs::read(source.join("x"))?, b"third", "{row}");
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn a_failed_merge_without_trash_puts_back_what_it_can_and_names_the_rest()
 -> Result<(), Box<dyn Error>> {
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
