@@ -213,6 +213,9 @@ pub(crate) struct Quirks {
     /// nothing until a stat that revalidates comes between, as the SMB
     /// client without POSIX extensions decides from attributes it cached.
     pub stale_read_only: bool,
+    /// Lists `system.*` names, such as ACLs, before the others, as tmpfs
+    /// and NFSv4 do whatever order the host's filesystem keeps.
+    pub acls_listed_first: bool,
 }
 
 impl Quirks {
@@ -1443,6 +1446,9 @@ impl FsOps for Scoped {
                 Err(error) => return Err(error),
             };
             names.extend(extra.iter().map(|(name, _)| OsString::from(name)));
+            if scope.is_some_and(|scope| scope.quirk(|quirks| quirks.acls_listed_first)) {
+                names.sort_by_key(|name| !name.as_encoded_bytes().starts_with(b"system."));
+            }
             Ok(names)
         })
     }

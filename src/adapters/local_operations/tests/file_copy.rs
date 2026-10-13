@@ -921,6 +921,13 @@ fn xattrs_are_kept_when_an_acl_takes_the_owners_write_access() -> Result<(), Box
         XattrFlags::empty(),
     )?;
     let target = root.path().join("copy.txt");
+    let _scope = FsQuirks::install(
+        root.path(),
+        Quirks {
+            acls_listed_first: true,
+            ..Quirks::default()
+        },
+    );
 
     copy(&source, &target)?;
 
