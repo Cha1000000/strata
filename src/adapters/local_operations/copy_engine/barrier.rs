@@ -157,6 +157,12 @@ impl Barrier {
         self.plan.each_file
     }
 
+    /// Whether reaching it flushes anything itself, unlike on SMB, where
+    /// each file was synced as it was written.
+    pub(in crate::adapters::local_operations) fn flushes(&self) -> bool {
+        self.plan.sync_fs || self.plan.sync_dir
+    }
+
     /// Whether this was opened first, so it reports every error `other` would.
     pub(in crate::adapters::local_operations) fn precedes(&self, other: &Self) -> bool {
         self.opened < other.opened

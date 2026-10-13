@@ -440,7 +440,14 @@ impl Settling {
     /// Closes every batch; the last barrier shows as writing to the device.
     pub(super) async fn finish(&mut self) {
         let batches = self.batches.take(|_| true);
-        if batches.iter().any(|batch| batch.barrier.is_some()) {
+        let flushing = batches.iter().any(|batch| {
+            batch
+                .barrier
+                .iter()
+                .chain(&batch.nested)
+                .any(Barrier::flushes)
+        });
+        if flushing {
             (self.emit)(OperationEvent::FlushingToDevice {
                 request_id: self.request_id,
             });

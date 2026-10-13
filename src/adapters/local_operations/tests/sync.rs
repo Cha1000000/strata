@@ -595,6 +595,15 @@ fn the_barrier_before_deleting_a_moved_source_follows_the_destination_family()
         );
         assert_eq!(fs::read(destination.join("folder/b.txt"))?, b"bb", "{row}");
         assert_eq!(folder.exists(), !moving, "{row}");
+        let flushing = events
+            .borrow()
+            .iter()
+            .any(|event| matches!(event, OperationEvent::FlushingToDevice { .. }));
+        assert_eq!(
+            flushing,
+            !barrier.is_empty(),
+            "{row}: the device flush shows"
+        );
         let calls = if moving {
             at_first_unlink
                 .lock()
