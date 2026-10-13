@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-source /lab/in/common.sh
+source /opt/fslab/in/common.sh
 [[ -e $STATE/up ]] || die "the lab is not up"
 assert_host_blind
 
@@ -37,9 +37,9 @@ for name in "${mounts[@]}"; do
   backing=$(backing_of "$name")
   [[ -n $backing ]] && args+=(--backing "$backing")
   log "probing $name"
-  as_test_user timeout -k 10 600 python3 -I /lab/fsprobe/fsprobe.py "${args[@]}" > "$out/$name.txt" 2>&1 \
+  as_test_user timeout -k 10 600 python3 -I "$LAB/fsprobe/fsprobe.py" "${args[@]}" > "$out/$name.txt" 2>&1 \
     || log "$name: fsprobe exited with $?"
 done
-python3 -I /lab/fsprobe/matrix.py "$json" "$out/mounts.txt" > "$out/matrix.md"
+python3 -I "$LAB/fsprobe/matrix.py" "$json" "$out/mounts.txt" > "$out/matrix.md"
 chown -R "$TEST_UID:$TEST_GID" "$out"
 log "matrix: target/fslab/probe/matrix.md"

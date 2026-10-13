@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # test.sh SNAPSHOT FILTER OUTDIR [MOUNT...]
-source /lab/in/common.sh
+source /opt/fslab/in/common.sh
 [[ -e $STATE/up ]] || die "the lab is not up"
 assert_host_blind
 snapshot=$1 filter=$2 out=$3
@@ -58,16 +58,16 @@ for name in "${mounts[@]}"; do
   log "$name: running test-headless.py --no-fail-fast $filter (TMPDIR=$tmp)"
   start=$SECONDS
   status=0
-  kernel=$(python3 -I /lab/in/kmsg.py last 2>/dev/null) || kernel=
+  kernel=$(python3 -I "$LAB/in/kmsg.py" last 2>/dev/null) || kernel=
   headless "$tmp" "$out/$name.log" --no-fail-fast "$filter" || status=$?
   echo "$status $((SECONDS - start))" > "$out/$name.status"
   # Kernel messages logged during this mount's run, such as cifs turning server inode numbers off.
   if [[ -n $kernel ]]; then
-    python3 -I /lab/in/kmsg.py since "$kernel" > "$out/$name.kmsg" 2>/dev/null || rm -f "$out/$name.kmsg"
+    python3 -I "$LAB/in/kmsg.py" since "$kernel" > "$out/$name.kmsg" 2>/dev/null || rm -f "$out/$name.kmsg"
   fi
   find "$tmp" -mindepth 1 -maxdepth 3 -printf '%P\n' 2>/dev/null | head -50 > "$out/$name.leftovers" || true
   find "$tmp" -mindepth 1 -delete 2>/dev/null || rm -rf "${tmp:?}"/* "${tmp:?}"/.[!.]* 2>/dev/null || true
   log "$name: exit $status in $((SECONDS - start))s"
 done
-python3 -I /lab/in/summary.py "$out" "${mounts[@]}" > "$out/summary.md"
+python3 -I "$LAB/in/summary.py" "$out" "${mounts[@]}" > "$out/summary.md"
 cat "$out/summary.md" >&2

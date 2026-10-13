@@ -6,6 +6,7 @@ repository="$(cd "$lab/../.." && pwd)"
 output="$repository/target/fslab"
 image=strata-fslab:latest
 container=strata-fslab
+lab_copy=/opt/fslab
 lab_label=org.strata.fslab.lab
 cargo_volume=strata-fslab-cargo
 target_volume=strata-fslab-target
@@ -71,7 +72,17 @@ remove_container() {
   docker rm -f "$container" >/dev/null
 }
 
-in_lab() { docker exec "$container" "$@"; }
+# The working directory is / because a lab mount may be gone by the next exec.
+in_lab() { docker exec -w / "$container" "$@"; }
+
+# The container runs its own copy of the lab scripts, refreshed by every command,
+# so a checkout that changes or vanishes while the lab is up cannot break its teardown.
+sync_scripts() {
+  in_lab bash -c "rm -rf $lab_copy.new && mkdir -p $lab_copy.new" || return
+  tar -C "$lab" -c --exclude=__pycache__ --owner=0 --group=0 -f - in fsprobe |
+    docker cp - "$container:$lab_copy.new" || return
+  in_lab bash -c "rm -rf $lab_copy.old && if [[ -e $lab_copy ]]; then mv $lab_copy $lab_copy.old; fi && mv $lab_copy.new $lab_copy && rm -rf $lab_copy.old"
+}
 
 cmd_up() {
   if ! running; then
@@ -86,13 +97,13 @@ cmd_up() {
       --tmpfs /tmp:rw,exec,mode=1777,size=16g \
       -v /lib/modules:/lib/modules:ro \
       -v /run/udev:/host-udev:ro \
-      -v "$lab:/lab:ro" \
       -v "$output:/out" \
       -v "$cargo_volume:/cache/cargo" \
       -v "$target_volume:/cache/target" \
       "$image" sleep infinity >/dev/null
   fi
-  if ! in_lab bash /lab/in/up.sh; then
+  sync_scripts
+  if ! in_lab bash "$lab_copy/in/up.sh"; then
     echo "fslab: setup failed; tearing down" >&2
     cmd_down || true
     exit 1
@@ -106,7 +117,10 @@ cmd_down() {
     --force) echo "fslab: WARNING: --force lazily unmounts busy lab filesystems; their loop devices can stay attached on the host until reboot" >&2 ;;
     *) usage ;;
   esac
-  if running; then in_lab bash /lab/in/down.sh "$@" || status=$?; fi
+  if running; then
+    sync_scripts || die "could not copy the lab scripts into $container; nothing was torn down"
+    in_lab bash "$lab_copy/in/down.sh" "$@" || status=$?
+  fi
   if ((status)) && [[ "${1:-}" != --force ]]; then
     echo "fslab: teardown incomplete; the container stays running so its mounts remain reachable." >&2
     echo "fslab: once what is listed above is no longer busy, run 'scripts/fslab/fslab.sh down' again." >&2
@@ -117,7 +131,7 @@ cmd_down() {
 }
 
 ensure_up() {
-  if ! running || ! in_lab test -e /run/fslab/up; then cmd_up; fi
+  if running && in_lab test -e /run/fslab/up; then sync_scripts; else cmd_up; fi
 }
 
 cmd_status() {
@@ -180,7 +194,7 @@ cmd_test() {
   printf 'source=%s\nfilter=%s\nmounts=%s\n' "$source" "$filter" "$*" > "$run/run.txt"
   ensure_up
   fetch_crates "$snapshot"
-  in_lab bash /lab/in/test.sh "/out/snapshots/$name" "$filter" "/out/runs/$label" "$@"
+  in_lab bash "$lab_copy/in/test.sh" "/out/snapshots/$name" "$filter" "/out/runs/$label" "$@"
   echo "fslab: results in $run/summary.md"
 }
 
@@ -190,8 +204,8 @@ case "${1:-}" in
   up) cmd_up ;;
   down) shift; cmd_down "$@" ;;
   status) cmd_status ;;
-  shell) ensure_up; docker exec -it "$container" bash ;;
-  probe) shift; ensure_up; in_lab bash /lab/in/probe.sh "$@" ;;
+  shell) ensure_up; docker exec -it -w / "$container" bash ;;
+  probe) shift; ensure_up; in_lab bash "$lab_copy/in/probe.sh" "$@" ;;
   test) shift; cmd_test "$@" ;;
   *) usage ;;
 esac

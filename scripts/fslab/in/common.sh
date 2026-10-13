@@ -1,6 +1,7 @@
 # shellcheck shell=bash
 set -euo pipefail
 
+LAB=/opt/fslab
 STATE=/run/fslab
 MNT=/mnt/fslab
 # Container-private tmpfs. Host udisks reads loop backing files relative to its

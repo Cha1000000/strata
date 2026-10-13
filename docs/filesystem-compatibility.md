@@ -264,6 +264,8 @@ Requirements and safety:
   device stays busy, `down` stops, lists what holds it and keeps the container running; run `down`
   again once those are released. `down --force` unmounts lazily instead, which can pin loop devices
   on the host until reboot.
+- The container runs its own copy of `scripts/fslab`, refreshed by every `fslab.sh` command, so
+  switching branches or rebasing while the lab is up cannot break `down`.
 - The NFS and SMB servers share the kernel with their clients, so there is no latency, reconnect
   or multi-client race. ZFS, 9p, virtiofs, eCryptfs and userspace FUSE network filesystems are not
   covered.

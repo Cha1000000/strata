@@ -21,5 +21,5 @@ RUN groupadd -o -g "${FSLAB_GID}" strata \
  && useradd -o -u "${FSLAB_UID}" -g "${FSLAB_GID}" -m -d /home/strata -s /bin/bash strata \
  && install -d -o strata -g strata /cache/cargo /cache/target
 
-WORKDIR /lab
+WORKDIR /
 CMD ["sleep", "infinity"]

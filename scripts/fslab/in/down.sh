@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # down.sh [--force]: exits 0 when everything is released, 3 when something stays busy.
-source /lab/in/common.sh
+source /opt/fslab/in/common.sh
 set +e
 
 # A lazy unmount detaches a mount the kernel still references; once the

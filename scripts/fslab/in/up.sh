@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-source /lab/in/common.sh
+source /opt/fslab/in/common.sh
 
 load_modules() {
   modprobe -a loop vfat exfat ntfs3 nfsd nfs nfsv3 nfsv4 cifs
