@@ -5,7 +5,8 @@
 Usage: fsprobe.py LABEL DIR [--other OTHER_DIR] [--backing SERVER_DIR] [--json OUT.jsonl]
 
 --backing names the server-side directory that DIR is exported from (NFS/SMB/sshfs);
-it enables the REMOTE probes, which create targets behind the client's back.
+it enables the REMOTE probes, which create targets behind the client's back, and
+lets the FLUSH probes count the flushes a share sends to the server's block device.
 
 Creates a fresh subdirectory in DIR (and OTHER_DIR), runs each probe in its
 own scratch directory, prints a table, and removes everything it created.
@@ -516,6 +517,8 @@ class Probe:
             return "listing=" + ",".join(sorted(os.listdir(d)))
         r("O_EXCL create foo when Foo exists", excl_other_case)
 
+        self.run_flush()
+
         if self.backing:
             self.run_remote()
 
@@ -588,6 +591,66 @@ class Probe:
                 return f"mkdir {errname(error.errno)}"
             return "mkdir succeeded over a server-side directory"
         remote("REMOTE mkdir placeholder after server-side mkdir", r_mkdir_placeholder)
+
+    def block_device(self, d):
+        """The block device DIR is stored on, else the one behind its server share."""
+        for path in filter(None, [d, self.backing and self.backing_of(d)]):
+            st = os.stat(path)
+            node = f"/sys/dev/block/{os.major(st.st_dev)}:{os.minor(st.st_dev)}"
+            if os.path.exists(node):
+                name = os.path.basename(os.path.realpath(node))
+                return (name if path == d else f"server {name}"), f"{node}/stat"
+        return None
+
+    def run_flush(self):
+        """Count the device cache flushes each sync call sends after a little data is written."""
+        rounds = 3
+
+        def counters(stat_path):
+            # Documentation/block/stat.rst: field 5 is write I/Os, 16 and 17 flush I/Os and ms.
+            fields = [int(value) for value in read(stat_path).split()]
+            if len(fields) < 17:
+                raise AssertionError("the kernel reports no flush counters")
+            return fields[4], fields[15], fields[16]
+
+        def measure(sync):
+            def probe(d):
+                device = self.block_device(d)
+                if device is None:
+                    return "no block device"
+                label, stat_path = device
+                flushes, writes, ms = [], [], 0
+                for n in range(rounds):
+                    dir_fd = os.open(d, os.O_RDONLY | os.O_DIRECTORY)
+                    fd = os.open(f"{d}/f{n}", os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+                    try:
+                        os.write(fd, os.urandom(16384))
+                        before = counters(stat_path)
+                        if sync is None:
+                            os.close(fd)
+                            fd = None
+                        else:
+                            sync(fd, dir_fd)
+                        after = counters(stat_path)
+                    finally:
+                        if fd is not None:
+                            os.close(fd)
+                        os.close(dir_fd)
+                    writes.append(str(after[0] - before[0]))
+                    flushes.append(str(after[1] - before[1]))
+                    ms += after[2] - before[2]
+                return f"flushes {','.join(flushes)} ({ms} ms), writes {','.join(writes)} on {label}"
+            return probe
+
+        def syncfs(_fd, dir_fd):
+            if libc.syncfs(dir_fd) != 0:
+                e = ctypes.get_errno()
+                raise OSError(e, os.strerror(e))
+
+        self.record("FLUSH close, no sync", measure(None))
+        self.record("FLUSH syncfs", measure(syncfs))
+        self.record("FLUSH fsync(dir)", measure(lambda _fd, dir_fd: os.fsync(dir_fd)))
+        self.record("FLUSH fdatasync(file)", measure(lambda fd, _dir_fd: os.fdatasync(fd)))
 
     def run_cross(self):
         r = self.record
