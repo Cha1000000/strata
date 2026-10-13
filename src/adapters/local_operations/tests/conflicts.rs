@@ -510,3 +510,172 @@ fn keep_both_copy_renumbers_when_its_name_is_taken_meanwhile() -> Result<(), Box
     }
     Ok(())
 }
+
+#[test]
+fn keep_both_takes_the_next_number_past_names_already_taken() -> Result<(), Box<dyn Error>> {
+    use crate::adapters::volume::learn_mount_capability;
+    use fs_quirks::Op;
+    use std::os::unix::fs::FileTypeExt;
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    #[derive(Clone, Copy, PartialEq)]
+    enum Kind {
+        File,
+        Folder,
+        Link,
+        Pipe,
+    }
+    /// A move renames within one volume, so its folder is numbered as one;
+    /// copies cross volumes, and a folder is made in place where the mount
+    /// is known to place none.
+    #[derive(Clone, Copy, PartialEq)]
+    enum Way {
+        Moved,
+        Copied,
+        InPlace,
+    }
+    // Where a stage cannot be placed, it is copied out to a name another
+    // program takes first.
+    let rows: [(
+        &str,
+        Kind,
+        Way,
+        Preset,
+        &[&str],
+        Option<(Op, &str, usize)>,
+        &str,
+    ); 7] = [
+        (
+            "my.photos",
+            Kind::Folder,
+            Way::Moved,
+            Quirks::default,
+            &["my.photos"],
+            None,
+            "my.photos (1)",
+        ),
+        (
+            "x (2).txt",
+            Kind::File,
+            Way::Copied,
+            Quirks::default,
+            &["x (2).txt"],
+            None,
+            "x (3).txt",
+        ),
+        (
+            "link",
+            Kind::Link,
+            Way::Copied,
+            Quirks::default,
+            &["link", "link (1)"],
+            None,
+            "link (2)",
+        ),
+        (
+            "pipe",
+            Kind::Pipe,
+            Way::Copied,
+            Quirks::default,
+            &["pipe", "pipe (1)"],
+            None,
+            "pipe (2)",
+        ),
+        (
+            "docs",
+            Kind::Folder,
+            Way::InPlace,
+            Quirks::without_folder_placement,
+            &["docs", "docs (1)"],
+            None,
+            "docs (2)",
+        ),
+        (
+            "docs",
+            Kind::Folder,
+            Way::Copied,
+            Quirks::without_placement,
+            &["docs"],
+            Some((Op::Mkdir, "docs (1)", 1)),
+            "docs (2)",
+        ),
+        (
+            "a.txt",
+            Kind::File,
+            Way::Copied,
+            Quirks::without_placement,
+            &["a.txt"],
+            Some((Op::Create, "a (1).txt", 0)),
+            "a (2).txt",
+        ),
+    ];
+    for (name, kind, way, preset, taken, racer, expected) in rows {
+        let row = format!("{name} -> {expected}");
+        let root = tempfile::tempdir()?;
+        let sources = root.path().join("sources");
+        let destination = root.path().join("destination");
+        fs::create_dir_all(&sources)?;
+        fs::create_dir_all(&destination)?;
+        let source = sources.join(name);
+        match kind {
+            Kind::File => fs::write(&source, b"incoming")?,
+            Kind::Folder => {
+                fs::create_dir(&source)?;
+                fs::write(source.join("inside.txt"), b"incoming")?;
+            }
+            Kind::Link => std::os::unix::fs::symlink("incoming", &source)?,
+            Kind::Pipe => rustix::fs::mknodat(
+                rustix::fs::CWD,
+                &source,
+                rustix::fs::FileType::Fifo,
+                rustix::fs::Mode::from_raw_mode(0o600),
+                0,
+            )?,
+        }
+        let mut existing = taken.to_vec();
+        for name in taken {
+            fs::write(destination.join(name), b"existing")?;
+        }
+        let mut quirks = preset();
+        if let Some((op, first, skip)) = racer {
+            existing.push(first);
+            quirks.before = vec![(op, first, skip, taking(&destination.join(first)))];
+        }
+        let moving = way == Way::Moved;
+        let _sources = (!moving).then(|| FsQuirks::install(&sources, Quirks::default()));
+        let scope = FsQuirks::install(if moving { root.path() } else { &destination }, quirks);
+        if way == Way::InPlace {
+            learn_mount_capability(scope.key(), |capabilities| {
+                capabilities.no_replace = Some(false);
+                capabilities.hard_links = Some(true);
+                capabilities.rename_over_empty_directory = Some(false);
+            });
+        }
+
+        run_paste(PasteRequest {
+            id: OperationRequestId(79),
+            destination: Location::local(&destination),
+            items: vec![PasteItem {
+                source: Location::local(&source),
+                conflict: TransferConflict::KeepBoth,
+            }],
+            move_sources: moving,
+        });
+
+        existing.push(expected);
+        existing.sort_unstable();
+        assert_eq!(names(&destination)?, existing, "{row}");
+        let copied = destination.join(expected);
+        match kind {
+            Kind::File => assert_eq!(fs::read(&copied)?, b"incoming", "{row}"),
+            Kind::Folder => assert_eq!(fs::read(copied.join("inside.txt"))?, b"incoming", "{row}"),
+            Kind::Link => assert_eq!(fs::read_link(&copied)?, Path::new("incoming"), "{row}"),
+            Kind::Pipe => assert!(
+                fs::symlink_metadata(&copied)?.file_type().is_fifo(),
+                "{row}"
+            ),
+        }
+    }
+    Ok(())
+}
