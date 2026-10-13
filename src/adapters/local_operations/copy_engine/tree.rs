@@ -727,7 +727,9 @@ impl Live {
                         target: (self.dir.clone(), target_name.to_os_string(), created),
                         parent: self.stat,
                         path,
-                        claims: None,
+                        // A merge that stops would leave its unfilled claims
+                        // as empty files at real names.
+                        claims: Some(false),
                         mount: self.mount,
                         link_scope: self.link_scope,
                         completion: None,

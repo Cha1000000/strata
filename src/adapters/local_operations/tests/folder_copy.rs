@@ -341,6 +341,19 @@ fn a_cancelled_copy_on_nfs_leaves_no_stage() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+/// The files beneath `root`, by path relative to it.
+fn files_beneath(root: &Path, relative: &Path, files: &mut Vec<PathBuf>) -> io::Result<()> {
+    for entry in fs::read_dir(root.join(relative))? {
+        let path = relative.join(entry?.file_name());
+        if fs::symlink_metadata(root.join(&path))?.is_dir() {
+            files_beneath(root, &path, files)?;
+        } else {
+            files.push(path);
+        }
+    }
+    Ok(())
+}
+
 #[test]
 fn a_cancelled_merge_on_nfs_leaves_no_partial_file_at_a_real_name() -> Result<(), Box<dyn Error>> {
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock()?;
@@ -352,9 +365,13 @@ fn a_cancelled_merge_on_nfs_leaves_no_partial_file_at_a_real_name() -> Result<()
         ..Quirks::nfs3()
     })?;
     let source = mounts.sources.join("source");
-    fs::create_dir(&source)?;
+    fs::create_dir_all(source.join("new"))?;
     for index in 0..8 {
         fs::write(source.join(format!("{index}.bin")), vec![0x5a; 256 * 1024])?;
+        fs::write(
+            source.join(format!("new/{index}.bin")),
+            vec![0xa5; 256 * 1024],
+        )?;
     }
     let live = mounts.destination.join("live");
     fs::create_dir(&live)?;
@@ -374,13 +391,15 @@ fn a_cancelled_merge_on_nfs_leaves_no_partial_file_at_a_real_name() -> Result<()
         "{result:?}"
     );
     assert_eq!(fs::read(live.join("stays.txt"))?, b"keep me");
-    let sources = names(&source)?;
-    for name in names(&live)?.into_iter().filter(|name| name != "stays.txt") {
-        assert!(sources.contains(&name), "{name} is not a merged item");
-        assert_eq!(
-            fs::read(live.join(&name))?,
-            fs::read(source.join(&name))?,
-            "{name} is partial"
+    let mut merged = Vec::new();
+    files_beneath(&live, Path::new(""), &mut merged)?;
+    for path in merged.iter().filter(|path| *path != Path::new("stays.txt")) {
+        let (copied, original) = (fs::read(live.join(path))?, fs::read(source.join(path))?);
+        assert!(
+            copied == original,
+            "{path:?} has {} of {} bytes",
+            copied.len(),
+            original.len()
         );
     }
     Ok(())
