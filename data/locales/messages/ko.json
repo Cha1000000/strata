@@ -227,8 +227,6 @@
   "Copy or move?": "복사할까요, 이동할까요?",
   "Copy path / name": "경로 / 이름 복사",
   "Copy path / pin a folder (type-to-search off)": "경로 복사 / 폴더 고정(입력 검색 꺼짐)",
-  "Copy source is no longer a regular file": "복사할 원본이 더 이상 일반 파일이 아닙니다",
-  "Copy source must be a local path": "복사할 원본은 로컬 경로여야 합니다",
   "Copy the selection to a folder": "선택 항목을 폴더에 복사",
   "Could not back up %{path}: %{error}": "%{path}을(를) 백업할 수 없습니다: %{error}",
   "Could not check integration status: %{error}": "통합 상태를 확인할 수 없습니다: %{error}",

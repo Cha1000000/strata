@@ -52,7 +52,8 @@ pub(super) enum PlaceError {
     Io(Errno),
 }
 
-const ENOTSUPP: Errno = Errno::from_raw_os_error(524);
+/// The kernel's own "not supported", which NFS lets reach userspace.
+pub(super) const ENOTSUPP: Errno = Errno::from_raw_os_error(524);
 
 // Hidden sibling names. These may hold the user's only copy of an item after a
 // crash, so they must never be swept: originals set aside before a replace or
@@ -65,6 +66,8 @@ pub(super) const STAGE_PREFIX: &str = ".strata-replacement-";
 pub(super) const COMPRESSION_STAGE_PREFIX: &str = ".strata-compression-";
 // Only Strata's own scratch data, which may be swept.
 pub(super) const EXTRACTION_STAGE_PREFIX: &str = ".strata-extraction-";
+/// A partial new copy.
+pub(super) const COPY_PREFIX: &str = ".strata-copy-";
 const PROBE_PREFIX: &str = ".strata-probe-";
 const NAME_ATTEMPTS: usize = 8;
 /// Bounds "name (n)" numbering, so a fault reported as `Exists` cannot loop forever.

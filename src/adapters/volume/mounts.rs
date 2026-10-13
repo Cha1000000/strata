@@ -15,7 +15,51 @@ use gtk::gio;
 /// Parsed without touching mounted filesystems, including unresponsive mounts.
 #[derive(Clone)]
 pub(crate) struct MountTable {
-    entries: Arc<[(PathBuf, String)]>,
+    entries: Arc<[MountEntry]>,
+}
+
+struct MountEntry {
+    id: u64,
+    mount_point: PathBuf,
+    fs_type: String,
+}
+
+/// Filesystems by their mountinfo type, which tells NFS versions and FUSE
+/// apart where the `statfs` magic cannot.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Family {
+    Ext,
+    Xfs,
+    Btrfs,
+    F2fs,
+    Tmpfs,
+    Bcachefs,
+    Zfs,
+    Overlay,
+    Nfs,
+    Nfs4,
+    Smb,
+    Fuse,
+    Other,
+}
+
+pub(crate) fn family(fs_type: &str) -> Family {
+    match fs_type {
+        "ext2" | "ext3" | "ext4" => Family::Ext,
+        "xfs" => Family::Xfs,
+        "btrfs" => Family::Btrfs,
+        "f2fs" => Family::F2fs,
+        "tmpfs" => Family::Tmpfs,
+        "bcachefs" => Family::Bcachefs,
+        "zfs" => Family::Zfs,
+        "overlay" => Family::Overlay,
+        "nfs" => Family::Nfs,
+        "nfs4" => Family::Nfs4,
+        "cifs" | "smb3" => Family::Smb,
+        "fuse" | "fuseblk" => Family::Fuse,
+        fs_type if fs_type.starts_with("fuse.") => Family::Fuse,
+        _ => Family::Other,
+    }
 }
 
 impl MountTable {
@@ -39,9 +83,15 @@ impl MountTable {
             .filter_map(|line| {
                 let separator = line.windows(3).position(|bytes| bytes == b" - ")?;
                 let (front, back) = (&line[..separator], &line[separator + 3..]);
-                let mount_point = front.split(|byte| *byte == b' ').nth(4)?;
+                let mut fields = front.split(|byte| *byte == b' ');
+                let id = std::str::from_utf8(fields.next()?).ok()?.parse().ok()?;
+                let mount_point = fields.nth(3)?;
                 let fs_type = std::str::from_utf8(back.split(|byte| *byte == b' ').next()?).ok()?;
-                Some((PathBuf::from(unescape(mount_point)), fs_type.to_owned()))
+                Some(MountEntry {
+                    id,
+                    mount_point: PathBuf::from(unescape(mount_point)),
+                    fs_type: fs_type.to_owned(),
+                })
             })
             .collect::<Vec<_>>();
         Self {
@@ -50,7 +100,15 @@ impl MountTable {
     }
 
     pub(crate) fn fs_type_for(&self, path: &Path) -> Option<&str> {
-        self.innermost(path).map(|(_, fs_type)| fs_type.as_str())
+        self.innermost(path).map(|entry| entry.fs_type.as_str())
+    }
+
+    /// The type of the mount with this mountinfo id (`STATX_MNT_ID`).
+    pub(crate) fn fs_type_of(&self, id: u64) -> Option<&str> {
+        self.entries
+            .iter()
+            .find(|entry| entry.id == id)
+            .map(|entry| entry.fs_type.as_str())
     }
 
     pub(super) fn is_remote_path(&self, path: &Path) -> bool {
@@ -67,7 +125,7 @@ impl MountTable {
     pub(crate) fn has_mount_inside(&self, directory: &Path) -> bool {
         self.entries
             .iter()
-            .any(|(mount_point, _)| mount_point.parent() == Some(directory))
+            .any(|entry| entry.mount_point.parent() == Some(directory))
     }
 
     pub(super) fn query_may_block(&self, path: &Path) -> bool {
@@ -76,32 +134,30 @@ impl MountTable {
             || self
                 .entries
                 .iter()
-                .any(|(mount_point, fs_type)| fs_type == "autofs" && path.starts_with(mount_point))
+                .any(|entry| entry.fs_type == "autofs" && path.starts_with(&entry.mount_point))
     }
 
     pub(crate) fn is_mount_point(&self, path: &Path) -> bool {
-        self.entries
-            .iter()
-            .any(|(mount_point, _)| mount_point == path)
+        self.entries.iter().any(|entry| entry.mount_point == path)
     }
 
     pub(crate) fn mount_point_for(&self, path: &Path) -> Option<&Path> {
         self.innermost(path)
-            .map(|(mount_point, _)| mount_point.as_path())
+            .map(|entry| entry.mount_point.as_path())
     }
 
     /// Excludes virtual or potentially blocking filesystems from fallback scans.
     pub(crate) fn trash_scan_mounts(&self) -> impl Iterator<Item = &Path> {
-        self.entries.iter().filter_map(|(mount_point, fs_type)| {
-            is_trash_scan_fs_type(fs_type).then_some(mount_point.as_path())
+        self.entries.iter().filter_map(|entry| {
+            is_trash_scan_fs_type(&entry.fs_type).then_some(entry.mount_point.as_path())
         })
     }
 
-    fn innermost(&self, path: &Path) -> Option<&(PathBuf, String)> {
+    fn innermost(&self, path: &Path) -> Option<&MountEntry> {
         self.entries
             .iter()
-            .filter(|(mount_point, _)| path.starts_with(mount_point))
-            .max_by_key(|(mount_point, _)| mount_point.as_os_str().len())
+            .filter(|entry| path.starts_with(&entry.mount_point))
+            .max_by_key(|entry| entry.mount_point.as_os_str().len())
     }
 }
 

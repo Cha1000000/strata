@@ -29,6 +29,7 @@ mod conflicts;
 mod copy;
 mod create_entry;
 mod deletion;
+mod file_copy;
 pub(super) mod fs_quirks;
 mod merge;
 mod moves;
@@ -99,11 +100,15 @@ fn gio_error(error: io::Error) -> glib::Error {
 
 /// A file stage as a completed copy into `root` leaves it.
 fn file_stage(root: &Path) -> Result<super::StagedSibling, glib::Error> {
-    super::copy_to_file_stage_blocking(&root.join("target"), |stage| {
-        let path = stage.path().ok_or_else(|| io_error("missing stage path"))?;
-        fs::File::create_new(path).map(drop).map_err(gio_error)
-    })
-    .map_err(|(error, _)| error)
+    glib::MainContext::default().block_on(super::copy_to_file_stage(
+        &root.join("target"),
+        &|stage, _| {
+            Box::pin(async move {
+                let path = stage.path().ok_or_else(|| io_error("missing stage path"))?;
+                fs::File::create_new(path).map(drop).map_err(gio_error)
+            })
+        },
+    ))
 }
 
 use super::{

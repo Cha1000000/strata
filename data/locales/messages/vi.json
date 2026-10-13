@@ -227,8 +227,6 @@
   "Copy or move?": "Sao chép hay di chuyển?",
   "Copy path / name": "Sao chép đường dẫn / tên",
   "Copy path / pin a folder (type-to-search off)": "Sao chép đường dẫn / ghim thư mục (tắt tìm kiếm khi nhập)",
-  "Copy source is no longer a regular file": "Nguồn sao chép không còn là tệp thông thường",
-  "Copy source must be a local path": "Nguồn sao chép phải là đường dẫn cục bộ",
   "Copy the selection to a folder": "Sao chép vùng chọn vào một thư mục",
   "Could not back up %{path}: %{error}": "Không thể sao lưu %{path}: %{error}",
   "Could not check integration status: %{error}": "Không thể kiểm tra trạng thái tích hợp: %{error}",

@@ -3,8 +3,7 @@
 use rustix::io::Errno;
 
 use super::super::{
-    StageContent, StagedSibling, copy_to_file_stage_blocking, copy_to_new_stage,
-    discard_failed_file_stage, publish_staged_without_replace, stage_copier,
+    StageContent, StagedSibling, copy_to_new_stage, publish_staged_without_replace, stage_copier,
 };
 use super::fs_quirks::{Op, Racer, Support};
 use super::*;
@@ -353,104 +352,131 @@ fn cancelling_a_new_file_copy_removes_the_incomplete_stage() -> Result<(), Box<d
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
         .lock()
         .map_err(|error| error.to_string())?;
-    let root = tempfile::tempdir()?;
-    let source = root.path().join("source.bin");
-    let target = root.path().join("target.bin");
-    fs::File::create(&source)?.set_len(64 * 1024 * 1024)?;
-    fs::write(root.path().join("keep.txt"), b"keep")?;
-    let cancellable = gio::Cancellable::new();
-    let cancel_on_write = cancellable.clone();
-    let progress = TransferProgressTracker::new(
-        OperationRequestId(88),
-        Some(64 * 1024 * 1024),
-        Some(1),
-        Rc::new(move |event| {
-            if matches!(
-                event,
-                OperationEvent::TransferProgress {
-                    transferred_bytes: 1..,
-                    ..
-                }
-            ) {
-                cancel_on_write.cancel();
-            }
+    for (case, preset) in [
+        ("unnamed file", Quirks::default as Preset),
+        ("named stage", || Quirks {
+            tmpfile: Support::Rejected(Errno::OPNOTSUPP),
+            ..Quirks::ext4()
         }),
-    );
-    let result = glib::MainContext::default().block_on(copy_new_recursively_with_progress(
-        gio::File::for_path(&source),
-        gio::File::for_path(&target),
-        cancellable,
-        Some(progress),
-    ));
-    assert!(
-        result
-            .as_ref()
-            .is_err_and(|error| error.matches(gio::IOErrorEnum::Cancelled)),
-        "{result:?}"
-    );
-    assert!(!target.exists());
-    assert_eq!(fs::read_dir(root.path())?.count(), 2);
-    assert_eq!(fs::read(root.path().join("keep.txt"))?, b"keep");
+    ] {
+        let root = tempfile::tempdir()?;
+        let source = root.path().join("source.bin");
+        let target = root.path().join("target.bin");
+        fs::write(&source, vec![0x5a; 4 * 1024 * 1024])?;
+        fs::write(root.path().join("keep.txt"), b"keep")?;
+        let cancellable = gio::Cancellable::new();
+        let cancel =
+            |cancellable: gio::Cancellable| -> Racer { Box::new(move || cancellable.cancel()) };
+        let _scope = FsQuirks::install(
+            root.path(),
+            Quirks {
+                before: vec![
+                    (Op::CopyRange, "*", 0, cancel(cancellable.clone())),
+                    (Op::Write, "*", 0, cancel(cancellable.clone())),
+                ],
+                ..preset()
+            },
+        );
+
+        let result = glib::MainContext::default().block_on(copy_new_recursively(
+            gio::File::for_path(&source),
+            gio::File::for_path(&target),
+            cancellable,
+        ));
+
+        assert!(
+            result
+                .as_ref()
+                .is_err_and(|error| error.matches(gio::IOErrorEnum::Cancelled)),
+            "{case}: {result:?}"
+        );
+        assert_eq!(names(root.path())?, ["keep.txt", "source.bin"], "{case}");
+    }
     Ok(())
 }
 
 #[test]
-fn a_file_stage_is_created_by_the_copy_at_a_free_name() -> Result<(), Box<dyn Error>> {
-    let root = tempfile::tempdir()?;
-    let attempts = RefCell::new(Vec::new());
-
-    let staged = copy_to_file_stage_blocking(&root.path().join("target"), |stage| {
-        let path = stage.path().ok_or_else(|| io_error("missing stage path"))?;
-        attempts.borrow_mut().push(path.clone());
-        if attempts.borrow().len() == 1 {
-            fs::write(&path, b"theirs").map_err(gio_error)?;
-            return Err(glib::Error::new(gio::IOErrorEnum::Exists, "taken"));
-        }
-        fs::File::create_new(&path)
-            .and_then(|mut file| io::Write::write_all(&mut file, b"copied"))
-            .map_err(gio_error)
-    })
-    .map_err(|(error, _)| error)?;
-
-    let attempts = attempts.into_inner();
-    assert_eq!(attempts.len(), 2);
-    assert_eq!(fs::read(&attempts[0])?, b"theirs");
-    assert_eq!(staged.path(), attempts[1]);
-    assert_eq!(fs::read(staged.path())?, b"copied");
-    Ok(())
-}
-
-#[test]
-fn a_failed_file_stage_copy_removes_only_its_own_partial_file() -> Result<(), Box<dyn Error>> {
+fn a_taken_stage_name_moves_on_to_a_fresh_one() -> Result<(), Box<dyn Error>> {
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
         .lock()
         .map_err(|error| error.to_string())?;
-    for (partial, kept) in [("file", 0), ("hard-linked file", 2), ("folder", 1)] {
-        let root = tempfile::tempdir()?;
+    let root = tempfile::tempdir()?;
+    let source = root.path().join("source.txt");
+    let target = root.path().join("target.txt");
+    fs::write(&source, b"copied")?;
+    let scope = FsQuirks::install(
+        root.path(),
+        Quirks {
+            tmpfile: Support::Rejected(Errno::OPNOTSUPP),
+            fail: vec![(Op::Create, ".strata-copy-*", 0, Errno::EXIST)],
+            ..Quirks::ext4()
+        },
+    );
 
-        let failure = copy_to_file_stage_blocking(&root.path().join("target"), |stage| {
-            let path = stage.path().ok_or_else(|| io_error("missing stage path"))?;
-            if partial == "folder" {
-                fs::create_dir(&path).map_err(gio_error)?;
-            } else {
-                fs::write(&path, b"partial").map_err(gio_error)?;
-            }
-            if partial == "hard-linked file" {
-                fs::hard_link(&path, root.path().join("other")).map_err(gio_error)?;
-            }
-            Err(glib::Error::new(gio::IOErrorEnum::Cancelled, "cancelled"))
-        })
-        .err()
-        .ok_or("the copy failed")?;
-        let error = glib::MainContext::default().block_on(discard_failed_file_stage(failure));
+    glib::MainContext::default().block_on(copy_new_recursively(
+        gio::File::for_path(&source),
+        gio::File::for_path(&target),
+        gio::Cancellable::new(),
+    ))?;
 
-        assert_eq!(fs::read_dir(root.path())?.count(), kept, "{partial}");
-        if partial == "file" {
-            assert!(error.matches(gio::IOErrorEnum::Cancelled), "{error}");
-        } else {
-            assert!(error.message().contains("was retained"), "{error}");
-        }
-    }
+    let stages = scope
+        .calls()
+        .into_iter()
+        .filter(|call| call.op == Op::Create)
+        .flat_map(|call| call.names)
+        .collect::<HashSet<_>>();
+    assert_eq!(stages.len(), 2, "{stages:?}");
+    assert_eq!(fs::read(&target)?, b"copied");
+    assert_eq!(names(root.path())?, ["source.txt", "target.txt"]);
+    Ok(())
+}
+
+#[test]
+fn a_stage_replaced_during_the_copy_is_kept() -> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let root = tempfile::tempdir()?;
+    let (sources, destination) = (root.path().join("sources"), root.path().join("destination"));
+    fs::create_dir(&sources)?;
+    fs::create_dir(&destination)?;
+    fs::write(sources.join("source.bin"), vec![1; 64 * 1024])?;
+    let stage_folder = destination.clone();
+    let racer: Racer = Box::new(move || {
+        let stage = only_entry(&stage_folder, ".strata-copy-");
+        fs::remove_file(&stage).expect("remove the stage");
+        fs::write(&stage, b"theirs").expect("take the stage name");
+    });
+    let _source = FsQuirks::install(&sources, Quirks::default());
+    let _destination = FsQuirks::install(
+        &destination,
+        Quirks {
+            tmpfile: Support::Rejected(Errno::OPNOTSUPP),
+            before: vec![(Op::Write, "*", 0, racer)],
+            fail: vec![(Op::Write, "*", 0, Errno::IO)],
+            ..Quirks::ext4()
+        },
+    );
+
+    let error = glib::MainContext::default()
+        .block_on(copy_new_recursively(
+            gio::File::for_path(sources.join("source.bin")),
+            gio::File::for_path(destination.join("target.bin")),
+            gio::Cancellable::new(),
+        ))
+        .expect_err("the write fails");
+
+    assert!(
+        error
+            .message()
+            .contains("incomplete copy could not be removed"),
+        "{error}"
+    );
+    assert_eq!(
+        fs::read(only_entry(&destination, ".strata-copy-"))?,
+        b"theirs"
+    );
+    assert_eq!(names(&destination)?.len(), 1);
     Ok(())
 }
 
@@ -954,16 +980,20 @@ fn staged_fallback_removes_reserved_directory_on_copy_error() -> Result<(), Box<
     Ok(())
 }
 
-fn only_stage(root: &Path) -> PathBuf {
-    fs::read_dir(root)
+fn only_entry(folder: &Path, prefix: &str) -> PathBuf {
+    fs::read_dir(folder)
         .expect("list the stage's folder")
         .filter_map(Result::ok)
         .map(|entry| entry.path())
         .find(|path| {
             path.file_name()
-                .is_some_and(|name| name.to_string_lossy().starts_with(".strata-replacement-"))
+                .is_some_and(|name| name.to_string_lossy().starts_with(prefix))
         })
         .expect("a stage")
+}
+
+fn only_stage(root: &Path) -> PathBuf {
+    only_entry(root, ".strata-replacement-")
 }
 
 /// A folder put at a file stage's name gets the stage's inode number back.
@@ -1117,5 +1147,36 @@ fn a_symlink_child_never_overwrites_an_existing_entry() -> Result<(), Box<dyn Er
 
     assert!(error.matches(gio::IOErrorEnum::Exists), "{error}");
     assert_eq!(fs::read(target.join("Link"))?, b"existing");
+    Ok(())
+}
+
+#[test]
+fn read_only_items_keep_their_xattrs() -> Result<(), Box<dyn Error>> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let root = tempfile::tempdir()?;
+    let source = root.path().join("source.txt");
+    let target = root.path().join("target.txt");
+    fs::write(&source, b"contents")?;
+    rustix::fs::setxattr(
+        &source,
+        "user.strata-test",
+        b"metadata",
+        rustix::fs::XattrFlags::empty(),
+    )?;
+    fs::set_permissions(&source, fs::Permissions::from_mode(0o444))?;
+
+    glib::MainContext::default().block_on(copy_new_recursively(
+        gio::File::for_path(&source),
+        gio::File::for_path(&target),
+        gio::Cancellable::new(),
+    ))?;
+
+    assert_eq!(fs::metadata(&target)?.mode() & 0o7777, 0o444);
+    let mut value = [0u8; 32];
+    let count = rustix::fs::getxattr(&target, "user.strata-test", &mut value[..])?;
+    assert_eq!(&value[..count], b"metadata");
     Ok(())
 }

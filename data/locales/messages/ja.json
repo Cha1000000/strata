@@ -227,8 +227,6 @@
   "Copy or move?": "コピーしますか、移動しますか？",
   "Copy path / name": "パス / 名前をコピー",
   "Copy path / pin a folder (type-to-search off)": "パスをコピー / フォルダーをピン留め（入力検索オフ）",
-  "Copy source is no longer a regular file": "コピー元が通常のファイルではなくなりました",
-  "Copy source must be a local path": "コピー元はローカルパスである必要があります",
   "Copy the selection to a folder": "選択項目をフォルダーにコピー",
   "Could not back up %{path}: %{error}": "%{path} をバックアップできませんでした: %{error}",
   "Could not check integration status: %{error}": "連携状態を確認できませんでした: %{error}",

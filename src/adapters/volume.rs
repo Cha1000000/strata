@@ -25,10 +25,10 @@ use crate::{
 #[cfg(test)]
 pub(crate) use mount_capabilities::forget_test_mount_capabilities;
 pub(crate) use mount_capabilities::{
-    MountCapabilities, MountKey, learn_mount_capability, mount_capabilities,
+    MountCapabilities, MountKey, XattrNamespace, learn_mount_capability, mount_capabilities,
 };
 pub(crate) use mount_snapshot::{RemovableRoot, invalidate_mount_snapshot, with_mount_snapshot};
-pub(crate) use mounts::MountTable;
+pub(crate) use mounts::{Family, MountTable, family};
 
 pub(crate) const REMOTE_QUERY_TIMEOUT: Duration = Duration::from_secs(2);
 

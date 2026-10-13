@@ -227,8 +227,6 @@
   "Copy or move?": "Copiare o spostare?",
   "Copy path / name": "Copia percorso / nome",
   "Copy path / pin a folder (type-to-search off)": "Copia percorso / fissa una cartella (ricerca durante la digitazione disattivata)",
-  "Copy source is no longer a regular file": "L’origine della copia non è più un file normale",
-  "Copy source must be a local path": "L’origine della copia deve essere un percorso locale",
   "Copy the selection to a folder": "Copia la selezione in una cartella",
   "Could not back up %{path}: %{error}": "Impossibile eseguire il backup di %{path}: %{error}",
   "Could not check integration status: %{error}": "Impossibile verificare lo stato dell’integrazione: %{error}",

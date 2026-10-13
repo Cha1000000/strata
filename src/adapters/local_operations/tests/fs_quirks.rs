@@ -6,9 +6,9 @@
 //! separate mounts.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     ffi::{OsStr, OsString},
-    os::fd::{AsRawFd, BorrowedFd, OwnedFd},
+    os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd},
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex, MutexGuard,
@@ -22,6 +22,7 @@ use rustix::{
     io::Errno,
 };
 
+use super::super::copy_engine::forget_learned_copy_support;
 use super::super::fs_ops::{Entry, EntryStat, FsOps, System, assert_off_main_thread};
 use crate::adapters::volume::{MountKey, forget_test_mount_capabilities};
 
@@ -44,6 +45,21 @@ pub(crate) enum Op {
     FsType,
     CanTrash,
     Trash,
+    OpenSource,
+    OpenTmpfile,
+    LinkFd,
+    Clone,
+    CopyRange,
+    Read,
+    Write,
+    Close,
+    ChownFd,
+    ChmodFd,
+    SetTimes,
+    XattrNames,
+    GetXattr,
+    SetXattr,
+    MountType,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -79,6 +95,16 @@ pub(crate) enum Trash {
     FalseWithoutError,
     /// TRUE, but nothing moved.
     SucceedsWithoutMoving,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) enum TmpfileLink {
+    #[default]
+    Any,
+    /// `AT_EMPTY_PATH` needs privileges, as before Linux 6.10.
+    ProcOnly,
+    /// Neither form works, as before 6.10 without `/proc`.
+    Unavailable,
 }
 
 pub(crate) type Racer = Box<dyn FnMut() + Send>;
@@ -124,6 +150,22 @@ pub(crate) struct Quirks {
     pub fail: Vec<(Op, &'static str, usize, Errno)>,
     /// Runs once, before the matching call after skipping the given number of matches.
     pub before: Vec<(Op, &'static str, usize, Racer)>,
+    /// The mountinfo type `mount_type` reports.
+    pub mount_type: Option<&'static str>,
+    pub tmpfile: Support,
+    pub tmpfile_link: TmpfileLink,
+    /// The most bytes one read or write moves.
+    pub short_io: Option<usize>,
+    /// Closing a written file sets its times to the close time, as NFSv4.2
+    /// write delegations and FUSE writeback caches do.
+    pub times_reset_at_close: bool,
+    pub chown: Support,
+    /// Entries report a group the user is not in.
+    pub foreign_group: bool,
+    /// Refuses setting xattrs whose names start with the prefix.
+    pub xattrs_refused: Vec<(&'static str, Errno)>,
+    /// Listed and read on every file, besides its real xattrs.
+    pub extra_xattrs: Vec<(&'static str, &'static [u8])>,
 }
 
 impl Quirks {
@@ -163,8 +205,39 @@ impl Quirks {
         }
     }
 
+    pub(crate) fn ext4() -> Self {
+        Self {
+            mount_type: Some("ext4"),
+            fs_type: Some(0xEF53),
+            ..Self::default()
+        }
+    }
+
+    /// NOREPLACE fails with `EINVAL`, and a write delegation sets the
+    /// times of a written file when it is closed.
+    pub(crate) fn nfs42() -> Self {
+        Self {
+            mount_type: Some("nfs4"),
+            fs_type: Some(0x6969),
+            rename_flags: Support::Rejected(Errno::INVAL),
+            times_reset_at_close: true,
+            ..Self::default()
+        }
+    }
+
+    pub(crate) fn nfs3() -> Self {
+        Self {
+            mount_type: Some("nfs"),
+            times_reset_at_close: false,
+            xattrs_refused: vec![("", Errno::OPNOTSUPP)],
+            no_birth_time: true,
+            ..Self::nfs42()
+        }
+    }
+
     pub(crate) fn sshfs() -> Self {
         Self {
+            mount_type: Some("fuse.sshfs"),
             rename_flags: Support::Rejected(Errno::INVAL),
             collisions_as_eperm: true,
             link_inodes: true,
@@ -198,6 +271,7 @@ struct State {
     link_names: HashMap<PathBuf, (u64, u64)>,
     links_made: u64,
     stale: HashMap<PathBuf, EntryStat>,
+    written: HashSet<(u64, u64)>,
 }
 
 static SCOPES: Mutex<Vec<Arc<Scope>>> = Mutex::new(Vec::new());
@@ -225,9 +299,11 @@ impl FsQuirks {
                 link_names: HashMap::new(),
                 links_made: 0,
                 stale: HashMap::new(),
+                written: HashSet::new(),
             }),
         });
         scopes().push(scope.clone());
+        forget_learned_copy_support();
         Self { scope }
     }
 
@@ -264,14 +340,17 @@ impl Drop for FsQuirks {
     fn drop(&mut self) {
         scopes().retain(|scope| !Arc::ptr_eq(scope, &self.scope));
         forget_test_mount_capabilities(self.scope.id);
+        forget_learned_copy_support();
     }
 }
 
+/// A bare `*` also matches calls that name nothing.
 fn matches(pattern: &str, names: &[&OsStr]) -> bool {
-    names.iter().any(|name| match pattern.strip_suffix('*') {
-        Some(prefix) => name.as_encoded_bytes().starts_with(prefix.as_bytes()),
-        None => name.as_encoded_bytes() == pattern.as_bytes(),
-    })
+    pattern == "*"
+        || names.iter().any(|name| match pattern.strip_suffix('*') {
+            Some(prefix) => name.as_encoded_bytes().starts_with(prefix.as_bytes()),
+            None => name.as_encoded_bytes() == pattern.as_bytes(),
+        })
 }
 
 impl Scope {
@@ -371,7 +450,42 @@ impl Scope {
         if state.quirks.no_birth_time {
             stat.identity.birth = None;
         }
+        if state.quirks.foreign_group {
+            stat.gid = stat.gid.wrapping_add(1);
+        }
         stat
+    }
+
+    fn mark_written(&self, fd: BorrowedFd<'_>) {
+        if self.quirk(|quirks| quirks.times_reset_at_close)
+            && let Ok(stat) = System.stat_fd(fd)
+        {
+            self.state()
+                .written
+                .insert((stat.identity.device, stat.identity.inode));
+        }
+    }
+
+    /// Applies `times_reset_at_close` just before `fd` is closed.
+    fn closing(&self, fd: BorrowedFd<'_>) {
+        let written = System.stat_fd(fd).is_ok_and(|stat| {
+            self.state()
+                .written
+                .remove(&(stat.identity.device, stat.identity.inode))
+        });
+        if written {
+            let now = rustix::fs::Timespec {
+                tv_sec: 0,
+                tv_nsec: rustix::fs::UTIME_NOW,
+            };
+            let _ = rustix::fs::futimens(
+                fd,
+                &rustix::fs::Timestamps {
+                    last_access: now,
+                    last_modification: now,
+                },
+            );
+        }
     }
 
     fn quirk<T>(&self, read: impl FnOnce(&Quirks) -> T) -> T {
@@ -615,6 +729,51 @@ fn path_of(dir: BorrowedFd<'_>) -> Option<PathBuf> {
     std::fs::read_link(format!("/proc/self/fd/{}", dir.as_raw_fd())).ok()
 }
 
+/// The basename an fd-only call logs; `#<inode> (deleted)` for an unnamed file.
+fn fd_name(fd: BorrowedFd<'_>) -> OsString {
+    path_of(fd)
+        .and_then(|path| path.file_name().map(OsStr::to_os_string))
+        .unwrap_or_default()
+}
+
+/// Runs an fd-only call through the scope holding `fd`, logging its name and `extra`.
+fn on_fd<T>(
+    fd: BorrowedFd<'_>,
+    op: Op,
+    extra: Option<&OsStr>,
+    perform: impl FnOnce(Option<&Scope>) -> Result<T, Errno>,
+) -> Result<T, Errno> {
+    match scope_for(fd) {
+        Some(scope) => {
+            let name = fd_name(fd);
+            let mut names = vec![name.as_os_str()];
+            names.extend(extra);
+            scope.run(op, &names, |scope| perform(Some(scope)))
+        }
+        None => perform(None),
+    }
+}
+
+/// A data call that moves bytes from `source` into `target`, which fails
+/// with `EXDEV` across scopes as it does across mounts.
+fn between(
+    op: Op,
+    source: BorrowedFd<'_>,
+    target: BorrowedFd<'_>,
+    perform: impl FnOnce() -> Result<usize, Errno>,
+) -> Result<usize, Errno> {
+    let same = same_scope(&scope_for(source), &scope_for(target));
+    on_fd(target, op, None, |scope| {
+        if !same {
+            return Err(Errno::XDEV);
+        }
+        if let Some(scope) = scope {
+            scope.mark_written(target);
+        }
+        perform()
+    })
+}
+
 fn scope_for(dir: BorrowedFd<'_>) -> Option<Arc<Scope>> {
     let path = path_of(dir)?;
     scopes()
@@ -854,5 +1013,212 @@ impl FsOps for Scoped {
             Ok(())
         });
         outcome
+    }
+
+    fn open_source(&self, at: Entry<'_>) -> Result<Option<(OwnedFd, EntryStat)>, Errno> {
+        assert_off_main_thread();
+        let Some(scope) = scope_for(at.dir) else {
+            return System.open_source(at);
+        };
+        let path = path_of(at.dir).map(|dir| dir.join(at.name));
+        let opened = scope.run(Op::OpenSource, &[at.name], |scope| {
+            scope.resolved(at, |at| System.open_source(at))
+        })?;
+        Ok(opened.map(|(fd, stat)| (fd, scope.reported(path, stat))))
+    }
+
+    fn open_tmpfile(&self, dir: BorrowedFd<'_>, mode: Mode) -> Result<OwnedFd, Errno> {
+        assert_off_main_thread();
+        match scope_for(dir) {
+            Some(scope) => scope.run(Op::OpenTmpfile, &[], |scope| {
+                match scope.quirk(|quirks| quirks.tmpfile) {
+                    Support::Rejected(error) => Err(error),
+                    Support::Supported => System.open_tmpfile(dir, mode),
+                }
+            }),
+            None => System.open_tmpfile(dir, mode),
+        }
+    }
+
+    fn link_fd(&self, fd: BorrowedFd<'_>, to: Entry<'_>, through_proc: bool) -> Result<(), Errno> {
+        assert_off_main_thread();
+        let target = scope_for(to.dir);
+        if !same_scope(&scope_for(fd), &target) {
+            return Err(Errno::XDEV);
+        }
+        let Some(scope) = target else {
+            return System.link_fd(fd, to, through_proc);
+        };
+        scope.run(Op::LinkFd, &[to.name], |scope| {
+            scope.creating(to, || {
+                let (links, tmpfile_link) =
+                    scope.quirk(|quirks| (quirks.links, quirks.tmpfile_link));
+                if let Support::Rejected(error) = links {
+                    return Err(error);
+                }
+                match (tmpfile_link, through_proc) {
+                    (TmpfileLink::ProcOnly, false) | (TmpfileLink::Unavailable, _) => {
+                        Err(Errno::NOENT)
+                    }
+                    _ => System.link_fd(fd, to, through_proc),
+                }
+            })
+        })
+    }
+
+    fn reflink(&self, target: BorrowedFd<'_>, source: BorrowedFd<'_>) -> Result<(), Errno> {
+        assert_off_main_thread();
+        between(Op::Clone, source, target, || {
+            System.reflink(target, source).map(|()| 0)
+        })
+        .map(drop)
+    }
+
+    fn copy_range(
+        &self,
+        source: BorrowedFd<'_>,
+        source_offset: u64,
+        target: BorrowedFd<'_>,
+        target_offset: u64,
+        len: usize,
+    ) -> Result<usize, Errno> {
+        assert_off_main_thread();
+        between(Op::CopyRange, source, target, || {
+            System.copy_range(source, source_offset, target, target_offset, len)
+        })
+    }
+
+    fn read_at(&self, fd: BorrowedFd<'_>, buffer: &mut [u8], offset: u64) -> Result<usize, Errno> {
+        assert_off_main_thread();
+        on_fd(fd, Op::Read, None, |scope| {
+            let limit = scope
+                .and_then(|scope| scope.quirk(|quirks| quirks.short_io))
+                .unwrap_or(buffer.len())
+                .min(buffer.len());
+            System.read_at(fd, &mut buffer[..limit], offset)
+        })
+    }
+
+    fn write_at(&self, fd: BorrowedFd<'_>, buffer: &[u8], offset: u64) -> Result<usize, Errno> {
+        assert_off_main_thread();
+        on_fd(fd, Op::Write, None, |scope| {
+            let limit = scope
+                .and_then(|scope| scope.quirk(|quirks| quirks.short_io))
+                .unwrap_or(buffer.len())
+                .min(buffer.len());
+            if let Some(scope) = scope {
+                scope.mark_written(fd);
+            }
+            System.write_at(fd, &buffer[..limit], offset)
+        })
+    }
+
+    fn close(&self, fd: OwnedFd) -> Result<(), Errno> {
+        assert_off_main_thread();
+        let Some(scope) = scope_for(fd.as_fd()) else {
+            return System.close(fd);
+        };
+        let name = fd_name(fd.as_fd());
+        // A fault leaves `fd` to its drop, which closes it.
+        scope.run(Op::Close, &[&name], move |scope| {
+            scope.closing(fd.as_fd());
+            System.close(fd)
+        })
+    }
+
+    fn chown_fd(
+        &self,
+        fd: BorrowedFd<'_>,
+        uid: Option<u32>,
+        gid: Option<u32>,
+    ) -> Result<(), Errno> {
+        assert_off_main_thread();
+        on_fd(fd, Op::ChownFd, None, |scope| {
+            match scope.map(|scope| scope.quirk(|quirks| quirks.chown)) {
+                Some(Support::Rejected(error)) => Err(error),
+                _ => System.chown_fd(fd, uid, gid),
+            }
+        })
+    }
+
+    fn chmod_fd(&self, fd: BorrowedFd<'_>, mode: u32) -> Result<(), Errno> {
+        assert_off_main_thread();
+        on_fd(fd, Op::ChmodFd, None, |_| System.chmod_fd(fd, mode))
+    }
+
+    fn set_times_fd(
+        &self,
+        fd: BorrowedFd<'_>,
+        atime: (i64, u32),
+        mtime: (i64, u32),
+    ) -> Result<(), Errno> {
+        assert_off_main_thread();
+        on_fd(fd, Op::SetTimes, None, |_| {
+            System.set_times_fd(fd, atime, mtime)
+        })
+    }
+
+    fn xattr_names(&self, fd: BorrowedFd<'_>) -> Result<Vec<OsString>, Errno> {
+        assert_off_main_thread();
+        on_fd(fd, Op::XattrNames, None, |scope| {
+            let extra = scope.map_or_else(Vec::new, |scope| {
+                scope.quirk(|quirks| quirks.extra_xattrs.clone())
+            });
+            let mut names = match System.xattr_names(fd) {
+                Ok(names) => names,
+                Err(_) if !extra.is_empty() => Vec::new(),
+                Err(error) => return Err(error),
+            };
+            names.extend(extra.iter().map(|(name, _)| OsString::from(name)));
+            Ok(names)
+        })
+    }
+
+    fn get_xattr(&self, fd: BorrowedFd<'_>, name: &OsStr) -> Result<Vec<u8>, Errno> {
+        assert_off_main_thread();
+        on_fd(fd, Op::GetXattr, Some(name), |scope| {
+            let extra = scope.and_then(|scope| {
+                scope.quirk(|quirks| {
+                    quirks
+                        .extra_xattrs
+                        .iter()
+                        .find(|(extra, _)| OsStr::new(extra) == name)
+                        .map(|(_, value)| value.to_vec())
+                })
+            });
+            extra.map_or_else(|| System.get_xattr(fd, name), Ok)
+        })
+    }
+
+    fn set_xattr(&self, fd: BorrowedFd<'_>, name: &OsStr, value: &[u8]) -> Result<(), Errno> {
+        assert_off_main_thread();
+        on_fd(fd, Op::SetXattr, Some(name), |scope| {
+            let refused = scope.and_then(|scope| {
+                scope.quirk(|quirks| {
+                    quirks
+                        .xattrs_refused
+                        .iter()
+                        .find(|(prefix, _)| name.as_encoded_bytes().starts_with(prefix.as_bytes()))
+                        .map(|(_, error)| *error)
+                })
+            });
+            refused.map_or_else(|| System.set_xattr(fd, name, value), Err)
+        })
+    }
+
+    fn mount_type(&self, fd: BorrowedFd<'_>) -> Option<String> {
+        assert_off_main_thread();
+        match scope_for(fd) {
+            Some(scope) => scope
+                .run(Op::MountType, &[], |scope| {
+                    Ok(scope
+                        .quirk(|quirks| quirks.mount_type)
+                        .map(str::to_owned)
+                        .or_else(|| System.mount_type(fd)))
+                })
+                .ok()
+                .flatten(),
+            None => System.mount_type(fd),
+        }
     }
 }

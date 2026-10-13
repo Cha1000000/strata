@@ -23,6 +23,9 @@ fn parses_mount_points_and_filesystem_types() {
         Some("ext4")
     );
     assert_eq!(table.fs_type_for(Path::new("/mnt/nfs/docs")), Some("nfs4"));
+    assert_eq!(table.fs_type_of(41), Some("ext4"));
+    assert_eq!(table.fs_type_of(60), Some("cifs"));
+    assert_eq!(table.fs_type_of(99), None);
     assert_eq!(
         table.fs_type_for(Path::new(
             "/run/user/1000/gvfs/smb-share:server=host,share=s/file"

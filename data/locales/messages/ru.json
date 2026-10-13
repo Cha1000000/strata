@@ -227,8 +227,6 @@
   "Copy or move?": "Копировать или переместить?",
   "Copy path / name": "Копировать путь / имя",
   "Copy path / pin a folder (type-to-search off)": "Копировать путь / закрепить папку (поиск при вводе отключён)",
-  "Copy source is no longer a regular file": "Источник копирования больше не является обычным файлом",
-  "Copy source must be a local path": "Источник копирования должен быть локальным путём",
   "Copy the selection to a folder": "Копировать выбранное в папку",
   "Could not back up %{path}: %{error}": "Не удалось создать резервную копию %{path}: %{error}",
   "Could not check integration status: %{error}": "Не удалось проверить состояние интеграции: %{error}",

@@ -67,7 +67,7 @@ fn transfer_progress_aggregates_file_bytes_without_emitting_per_file() -> Result
     let first = tracker.begin_file("first.iso".to_owned(), false);
     first.finish(Some(100));
     assert_eq!(events.borrow().len(), 1);
-    tracker.finish_item(0, Some(100), 0, Some(1), None);
+    tracker.finish_item(tracker.reported(), Some(100), Some(1), None);
 
     let second = tracker.begin_file("second.iso".to_owned(), false);
     second.finish(Some(50));
@@ -362,6 +362,116 @@ fn copying_many_selected_files_completes_the_bounded_bulk_path() -> Result<(), B
             index.to_string()
         );
     }
+    Ok(())
+}
+
+#[test]
+fn bulk_copy_reports_bytes_before_each_file_completes() -> Result<(), Box<dyn Error>> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use super::fs_quirks::{Op, Racer};
+
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let root = tempfile::tempdir()?;
+    let source = root.path().join("source");
+    let destination = root.path().join("destination");
+    fs::create_dir(&source)?;
+    fs::create_dir(&destination)?;
+    let large = 2 * 1024 * 1024;
+    let mut items = Vec::new();
+    for index in 0..9 {
+        let path = source.join(format!("file-{index}"));
+        fs::write(&path, vec![7; if index == 0 { large } else { 0 }])?;
+        items.push(PasteItem {
+            source: Location::local(path),
+            conflict: TransferConflict::FailIfExists,
+        });
+    }
+    let streamed = Arc::new(AtomicBool::new(false));
+    let waiting = streamed.clone();
+    // Holds the large file's second write until bytes were reported mid-item.
+    let racer: Racer = Box::new(move || {
+        let start = Instant::now();
+        while !waiting.load(Ordering::Acquire) && start.elapsed() < Duration::from_secs(5) {
+            thread::sleep(Duration::from_millis(5));
+        }
+    });
+    let _source = FsQuirks::install(&source, Quirks::default());
+    let _destination = FsQuirks::install(
+        &destination,
+        Quirks {
+            before: vec![(Op::Write, "*", 1, racer)],
+            ..Quirks::default()
+        },
+    );
+
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let emitted = events.clone();
+    let _operation = LocalOperationProvider.paste(
+        PasteRequest {
+            id: OperationRequestId(30),
+            destination: Location::local(&destination),
+            items,
+            move_sources: false,
+        },
+        Rc::new(move |event| {
+            if matches!(
+                event,
+                OperationEvent::TransferProgress {
+                    completed_items: 0,
+                    transferred_bytes: 1..,
+                    ..
+                }
+            ) {
+                streamed.store(true, Ordering::Release);
+            }
+            emitted.borrow_mut().push(event);
+        }),
+    );
+    drive_until_transfer_settles(&events);
+
+    let events = events.borrow();
+    assert!(matches!(events.last(), Some(OperationEvent::Pasted { .. })));
+    let progress = events
+        .iter()
+        .filter_map(|event| match event {
+            OperationEvent::TransferProgress {
+                completed_items,
+                completed_files,
+                total_files,
+                transferred_bytes,
+                total_bytes,
+                ..
+            } => Some((
+                *completed_items,
+                *completed_files,
+                *total_files,
+                *transferred_bytes,
+                *total_bytes,
+            )),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        progress
+            .iter()
+            .any(|(items, _, _, bytes, _)| *items == 0 && *bytes > 0),
+        "{progress:?}"
+    );
+    assert!(
+        progress
+            .iter()
+            .all(|(_, files, total_files, bytes, total_bytes)| {
+                Some(*files) <= *total_files && Some(*bytes) <= *total_bytes
+            }),
+        "{progress:?}"
+    );
+    assert_eq!(
+        progress.last(),
+        Some(&(9, 9, Some(9), large as u64, Some(large as u64)))
+    );
     Ok(())
 }
 

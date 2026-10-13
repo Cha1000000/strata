@@ -5,7 +5,9 @@
 //! so a stale entry costs speed or a refusal. The exception is the
 //! reserved-name rung, which an entry alone enables, with its small window.
 
-use std::{collections::BTreeMap, sync::Mutex};
+use std::{collections::BTreeMap, ffi::OsStr, sync::Mutex};
+
+use super::Family;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub(crate) enum MountKey {
@@ -25,6 +27,56 @@ pub(crate) struct MountCapabilities {
     pub exchange: Option<bool>,
     pub hard_links: Option<bool>,
     pub rename_over_empty_directory: Option<bool>,
+    pub tmpfile: Option<bool>,
+    pub reflink: Option<bool>,
+    /// Namespaces the mount refuses as unsupported; a refused name alone
+    /// says nothing about its namespace.
+    pub refused_xattrs: XattrNamespaces,
+    /// From mountinfo, kept here so a mount change drops it with the rest.
+    pub family: Option<Family>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum XattrNamespace {
+    User,
+    Acl,
+    Security,
+    Trusted,
+    Other,
+}
+
+impl XattrNamespace {
+    pub(crate) fn of(name: &OsStr) -> Self {
+        let name = name.as_encoded_bytes();
+        if name.starts_with(b"user.") {
+            Self::User
+        } else if name.starts_with(b"system.posix_acl_") {
+            Self::Acl
+        } else if name.starts_with(b"security.") {
+            Self::Security
+        } else if name.starts_with(b"trusted.") {
+            Self::Trusted
+        } else {
+            Self::Other
+        }
+    }
+
+    fn bit(self) -> u8 {
+        1 << self as u8
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct XattrNamespaces(u8);
+
+impl XattrNamespaces {
+    pub(crate) fn contains(self, namespace: XattrNamespace) -> bool {
+        self.0 & namespace.bit() != 0
+    }
+
+    pub(crate) fn insert(&mut self, namespace: XattrNamespace) {
+        self.0 |= namespace.bit();
+    }
 }
 
 static CAPABILITIES: Mutex<BTreeMap<MountKey, MountCapabilities>> = Mutex::new(BTreeMap::new());

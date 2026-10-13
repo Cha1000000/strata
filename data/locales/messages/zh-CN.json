@@ -227,8 +227,6 @@
   "Copy or move?": "复制还是移动？",
   "Copy path / name": "复制路径 / 名称",
   "Copy path / pin a folder (type-to-search off)": "复制路径 / 固定文件夹（关闭键入即搜索时）",
-  "Copy source is no longer a regular file": "复制源已不再是普通文件",
-  "Copy source must be a local path": "复制源必须是本地路径",
   "Copy the selection to a folder": "将所选项目复制到文件夹",
   "Could not back up %{path}: %{error}": "无法备份 %{path}：%{error}",
   "Could not check integration status: %{error}": "无法检查集成状态：%{error}",
