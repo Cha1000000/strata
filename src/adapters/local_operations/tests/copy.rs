@@ -974,11 +974,14 @@ fn fat_family_copy_disambiguates_sibling_names_that_collide_after_sanitizing()
         .map_err(|error| error.to_string())?;
     let root = tempfile::tempdir()?;
     let source = root.path().join("source");
-    let target = root.path().join("target");
+    let destination = root.path().join("destination");
+    let target = destination.join("target");
     fs::create_dir_all(&source)?;
+    fs::create_dir(&destination)?;
     fs::write(source.join("a?.txt"), b"first")?;
     fs::write(source.join("a:.txt"), b"second")?;
     fs::write(source.join("A*.txt"), b"third")?;
+    let _destination = FsQuirks::install(&destination, Quirks::vfat());
 
     let result = glib::MainContext::default().block_on(copy_recursively_fat_family(
         gio::File::for_path(&source),

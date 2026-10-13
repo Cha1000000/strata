@@ -225,3 +225,56 @@ fn two_names_are_never_taken_for_one_where_the_listing_changes_their_case()
     }
     Ok(())
 }
+
+#[test]
+fn names_a_fat_target_takes_for_one_are_numbered_and_reported() -> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock()?;
+    let root = tempfile::tempdir()?;
+    let source = root.path().join("source");
+    let destination = root.path().join("destination");
+    fs::create_dir_all(&source)?;
+    fs::create_dir(&destination)?;
+    // `a:b` is saved as `a_b`, which the real `a_b` asks for too.
+    for name in ["Makefile", "a:b", "a_b", "makefile"] {
+        fs::write(source.join(name), name)?;
+    }
+    let _sources = FsQuirks::install(&source, Quirks::default());
+    let _destination = FsQuirks::install(&destination, Quirks::vfat());
+    let target = destination.join("copy");
+    let options = super::super::copy_engine::Options {
+        fat_family: true,
+        ..super::super::copy_engine::Options::default()
+    };
+
+    let (copied, report) = reporting(
+        &source,
+        super::super::copy_engine::Destination::New(target.clone(), Taken::Fail),
+        options,
+    );
+
+    copied?;
+    let renamed = report
+        .renamed
+        .into_iter()
+        .map(|item| (item.requested, item.saved_as, item.cause))
+        .collect::<Vec<_>>();
+    let alias = |requested: &str, saved_as: &str| {
+        (
+            Location::local(target.join(requested)),
+            Location::local(target.join(saved_as)),
+            RenameCause::Alias,
+        )
+    };
+    assert_eq!(
+        renamed,
+        [alias("a_b", "a_b (1)"), alias("makefile", "makefile (1)")]
+    );
+    assert_eq!(
+        names(&target)?,
+        ["Makefile", "a_b", "a_b (1)", "makefile (1)"]
+    );
+    assert_eq!(fs::read(target.join("a_b"))?, b"a:b");
+    assert_eq!(fs::read(target.join("a_b (1)"))?, b"a_b");
+    assert_eq!(fs::read(target.join("makefile (1)"))?, b"makefile");
+    Ok(())
+}

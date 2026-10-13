@@ -207,12 +207,12 @@ async fn copy_new_recursively(
     copy_new_recursively_with_progress(source, target, cancellable, None).await
 }
 
-/// Copies `source` to `destination` with `workers`, and returns how the copy
-/// ended and what it reported.
+/// Copies `source` to `destination` with `options`, and returns how the
+/// copy ended and what it reported.
 fn reporting(
     source: &Path,
     destination: super::copy_engine::Destination,
-    workers: Option<usize>,
+    options: super::copy_engine::Options,
 ) -> (Result<(), glib::Error>, crate::services::TransferReport) {
     let reported = Rc::new(RefCell::new(crate::services::TransferReport::default()));
     let events = reported.clone();
@@ -229,10 +229,7 @@ fn reporting(
     let copied = glib::MainContext::default().block_on(super::copy_engine::copy_local(
         source.to_path_buf(),
         destination,
-        super::copy_engine::Options {
-            workers,
-            ..super::copy_engine::Options::default()
-        },
+        options,
         Some(progress),
         &gio::Cancellable::new(),
     ));
@@ -247,7 +244,7 @@ fn copy_reporting(
     workers: Option<usize>,
 ) -> Result<crate::services::TransferReport, Box<dyn Error>> {
     let destination = super::copy_engine::Destination::New(target.to_path_buf(), Taken::Fail);
-    let (copied, reported) = reporting(source, destination, workers);
+    let (copied, reported) = reporting(source, destination, workers_only(workers));
     copied?;
     Ok(reported)
 }
@@ -260,7 +257,14 @@ fn merge_reporting(
     workers: Option<usize>,
 ) -> (Result<(), glib::Error>, crate::services::TransferReport) {
     let destination = super::copy_engine::Destination::Merge(target.to_path_buf());
-    reporting(source, destination, workers)
+    reporting(source, destination, workers_only(workers))
+}
+
+fn workers_only(workers: Option<usize>) -> super::copy_engine::Options {
+    super::copy_engine::Options {
+        workers,
+        ..super::copy_engine::Options::default()
+    }
 }
 
 fn terminal_transfer(events: &[OperationEvent]) -> Option<&OperationEvent> {

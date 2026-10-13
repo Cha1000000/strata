@@ -42,7 +42,7 @@ use crate::{
     adapters::{
         local_operations::{
             LocalFileIdentity, StageContent, StagedSibling, cancelled_local_operation,
-            fat_family_child_name,
+            fat_sanitized_name,
             fs_ops::{Entry, EntryStat, FsOps},
             io_error, numbered_names, os_error_detail, placement,
             placement::{COPY_PREFIX, PlaceError},
@@ -409,17 +409,21 @@ impl Folder {
 }
 
 /// A source folder's children in byte order with their types, and the
-/// names they get in the target.
+/// names they ask for in the target. Names that FAT-like targets take for
+/// one are numbered as aliases when they are made.
 fn target_children(
     fs: &dyn FsOps,
     source: BorrowedFd<'_>,
     fat_family: bool,
 ) -> Result<Vec<(OsString, FileType, OsString)>, Failure> {
-    let mut used = HashSet::new();
     Ok(children(fs, source)?
         .into_iter()
         .map(|(name, kind)| {
-            let target_name = fat_family_child_name(&name, fat_family, &mut used);
+            let target_name = if fat_family {
+                fat_sanitized_name(&name)
+            } else {
+                name.clone()
+            };
             (name, kind, target_name)
         })
         .collect())
