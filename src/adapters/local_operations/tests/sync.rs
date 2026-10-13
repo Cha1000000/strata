@@ -1559,3 +1559,60 @@ fn a_batch_closes_once_its_first_entry_is_five_seconds_old() -> Result<(), Box<d
     assert!(early.borrow().is_empty());
     Ok(())
 }
+
+#[test]
+fn a_failed_barrier_stops_a_bulk_move() -> Result<(), Box<dyn Error>> {
+    use super::super::owed::Limits;
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    // Enough files for the bulk path, whose first barrier fails: the last,
+    // or the first of several.
+    for (id, items) in (460..).zip([usize::MAX, 3]) {
+        let _limits = LimitsGuard::set(Limits { items, ..NO_LIMITS });
+        let root = tempfile::tempdir()?;
+        let sources = root.path().join("sources");
+        let destination = root.path().join("destination");
+        fs::create_dir(&sources)?;
+        fs::create_dir(&destination)?;
+        let names: Vec<String> = (0..12).map(|index| format!("f{index:02}.txt")).collect();
+        let mut paths = Vec::new();
+        for name in &names {
+            fs::write(sources.join(name), name)?;
+            paths.push(sources.join(name));
+        }
+        let _sources = FsQuirks::install(&sources, Quirks::default());
+        let _destination = FsQuirks::install(
+            &destination,
+            Quirks {
+                fail: vec![(Op::SyncFs, "*", 0, Errno::IO)],
+                ..Quirks::ext4()
+            },
+        );
+
+        let (_operation, events, early) =
+            paste_moves(id, &destination, &paths, &Barriers::new(), None);
+        pump_until_transfer(&events);
+
+        assert!(
+            matches!(terminal_transfer(&events.borrow()),
+                Some(OperationEvent::TransferFailed { message, .. })
+                if message.contains("writes may still be pending")),
+            "{items}: {:?}",
+            events.borrow()
+        );
+        assert!(early.borrow().is_empty(), "{items}");
+        let copied = names
+            .iter()
+            .filter(|name| destination.join(name).exists())
+            .count();
+        if items == usize::MAX {
+            assert!(paths.iter().all(|path| path.exists()));
+            assert_eq!(copied, names.len());
+            assert_eq!(moved_count(&events.borrow()), 0);
+        } else {
+            assert!(copied < names.len(), "{copied} copied after the failure");
+        }
+    }
+    Ok(())
+}
