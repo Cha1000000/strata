@@ -16,7 +16,7 @@ use rustix::io::Errno;
 use super::{Mount, best_effort, is_fatal, is_unsupported, lock};
 use crate::adapters::{
     local_operations::fs_ops::{Entry, EntryStat, FsOps},
-    volume::XattrNamespace,
+    volume::{Family, XattrNamespace},
 };
 
 /// Never copied: the skip entries of libattr's `xattr.conf`, and ntfs3's
@@ -102,6 +102,11 @@ impl Snapshot {
     ) -> Result<(), Errno> {
         let mode = self.owner_and_xattrs(fs, fd, created, parent, mount, refused_names)?;
         best_effort(fs.chmod_fd(fd, mode))?;
+        // A write delegation resets them at the close, after which they are
+        // set again anyway.
+        if mount.family == Family::Nfs4 {
+            return Ok(());
+        }
         self.apply_times(fs, fd)
     }
 

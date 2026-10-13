@@ -385,16 +385,16 @@ fn copy_range_refused_across_mounts_continues_with_reads_and_writes() -> Result<
 #[test]
 fn times_survive_filesystems_that_reset_them() -> Result<(), Box<dyn Error>> {
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock()?;
-    for (case, preset, reopened) in [
-        ("NFSv4.2", Quirks::nfs42 as Preset, true),
-        ("NFSv3", Quirks::nfs3, false),
+    for (case, preset, (before, after)) in [
+        ("NFSv4.2", Quirks::nfs42 as Preset, (false, true)),
+        ("NFSv3", Quirks::nfs3, (true, false)),
         (
             "FUSE writeback cache",
             || Quirks {
                 times_reset_at_close: true,
                 ..Quirks::sshfs()
             },
-            true,
+            (true, true),
         ),
     ] {
         let mounts = mounts(Quirks::default(), |_| preset())?;
@@ -410,8 +410,11 @@ fn times_survive_filesystems_that_reset_them() -> Result<(), Box<dyn Error>> {
             .position(|op| *op == Op::Close)
             .ok_or("the stage was not closed")?;
         assert_eq!(
-            calls[closed..].contains(&Op::SetTimes),
-            reopened,
+            (
+                calls[..closed].contains(&Op::SetTimes),
+                calls[closed..].contains(&Op::SetTimes)
+            ),
+            (before, after),
             "{case}: {calls:?}"
         );
         assert_eq!(
