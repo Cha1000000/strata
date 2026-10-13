@@ -16,7 +16,7 @@ use rustix::io::Errno;
 use super::{Mount, data::kernel};
 use crate::adapters::{
     local_operations::{
-        fs_ops::{Entry, FsOps},
+        fs_ops::{Entry, FsOps, OffMain},
         io_error, open_local_parent_directory, os_error_detail,
     },
     volume::{Family, MountKey},
@@ -82,10 +82,10 @@ static OPENED: AtomicU64 = AtomicU64::new(0);
 
 /// A destination folder opened before a copy writes beneath it.
 pub(in crate::adapters::local_operations) struct Barrier {
-    dir: OwnedFd,
+    dir: OffMain<OwnedFd>,
     pub path: PathBuf,
     pub key: MountKey,
-    family: Family,
+    plan: Plan,
     opened: u64,
 }
 
@@ -117,10 +117,10 @@ impl Barrier {
                 Ok(dir) => {
                     let mount = Mount::new(fs, dir.as_fd());
                     return Ok(Self {
-                        dir,
+                        dir: OffMain::new(dir),
                         path: path.to_path_buf(),
                         key: mount.key,
-                        family: mount.family,
+                        plan: Plan::of(mount.family),
                         opened: OPENED.fetch_add(1, Ordering::Relaxed),
                     });
                 }
@@ -134,7 +134,7 @@ impl Barrier {
     /// Whether files written beneath it are synced one by one, since
     /// reaching it does not reach them.
     pub(in crate::adapters::local_operations) fn syncs_each_file(&self) -> bool {
-        each_file(self.family)
+        self.plan.each_file
     }
 
     /// Whether this was opened first, so it reports every error `other` would.
@@ -145,11 +145,10 @@ impl Barrier {
     /// Flushes the filesystem to its device; a `removable` one gets a
     /// folder `fsync` besides.
     pub(super) fn reach(&self, fs: &dyn FsOps, removable: bool) -> Result<(), Errno> {
-        let plan = Plan::of(self.family);
-        if plan.sync_fs {
+        if self.plan.sync_fs {
             fs.sync_fs(self.dir.as_fd())?;
         }
-        if plan.sync_dir || removable {
+        if self.plan.sync_dir || removable {
             fs.sync_dir(self.dir.as_fd())?;
         }
         Ok(())

@@ -20,7 +20,7 @@ use rustix::{
 
 use super::{
     LocalFileIdentity, PinnedEntry,
-    fs_ops::{Entry, fs},
+    fs_ops::{Entry, drop_off_main_thread, fs},
     io_error, open_local_parent_directory, parallel_delete_local,
     placement::{self, Feasibility, MERGE_PREFIX, PlaceError},
     placement_reason, retry_local_open, run_blocking, was_cancelled,
@@ -298,9 +298,9 @@ impl MergeAside {
     }
 
     /// Deletes the folder and every original in it, once the merge is on disk.
-    pub(super) async fn remove(self) -> Result<(), glib::Error> {
+    pub(super) async fn remove(mut self) -> Result<(), glib::Error> {
         let path = self.folder_path().unwrap_or_default();
-        let (Some(target), Some(folder)) = (self.target, self.folder) else {
+        let (Some(target), Some(folder)) = (self.target.take(), self.folder.take()) else {
             return Ok(());
         };
         parallel_delete_local(
@@ -318,6 +318,17 @@ impl MergeAside {
     /// The originals stay in the folder because of `error`.
     pub(super) fn not_removed(&self, error: &glib::Error) -> glib::Error {
         not_removed(&self.folder_path().unwrap_or_default(), error)
+    }
+}
+
+impl Drop for MergeAside {
+    fn drop(&mut self) {
+        drop_off_main_thread((
+            self.target.take(),
+            self.folder.take(),
+            std::mem::take(&mut self.mirrors),
+            std::mem::take(&mut self.moved),
+        ));
     }
 }
 

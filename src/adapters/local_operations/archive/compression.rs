@@ -7,7 +7,7 @@ mod tests;
 
 use super::super::{
     DisplacedOriginal, LocalFileIdentity, cannot_replace_safely, copy_engine,
-    fs_ops::{Entry, EntryStat, fs},
+    fs_ops::{Entry, EntryStat, OffMain, fs},
     local_directory_children, open_local_child_directory, open_local_parent_directory,
     original_kept_aside,
     owed::{Deletion, Owed},
@@ -307,7 +307,7 @@ impl Publication {
         let target = Entry::new(&*stage.parent, OsStr::new(&self.name));
         match exchange(fs(), stage.entry(), target) {
             Ok(true) => Ok(self.published(Displaced::Aside(DisplacedOriginal {
-                parent: stage.parent.clone(),
+                parent: OffMain::new(stage.parent.clone()),
                 name: stage.name.clone(),
                 identity,
             }))),
@@ -373,7 +373,7 @@ impl Publication {
         };
         match stage.place(target) {
             Ok(()) => Ok(self.published(Displaced::Aside(DisplacedOriginal {
-                parent: stage.parent.clone(),
+                parent: OffMain::new(stage.parent.clone()),
                 name: aside.name,
                 identity: aside.identity,
             }))),

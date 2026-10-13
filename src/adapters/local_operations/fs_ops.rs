@@ -183,6 +183,44 @@ pub(super) fn assert_off_main_thread() {
     );
 }
 
+/// Drops `held`, which closes descriptors, on a worker when the GTK main
+/// thread would.
+pub(super) fn drop_off_main_thread<T: Send + 'static>(held: T) {
+    if glib::MainContext::default().is_owner() {
+        drop(gio::spawn_blocking(move || drop(held)));
+    }
+}
+
+/// Holds what closes descriptors when it is dropped, which happens off the
+/// GTK main thread wherever the holder is dropped.
+pub(super) struct OffMain<T: Send + 'static>(Option<T>);
+
+impl<T: Send + 'static> OffMain<T> {
+    pub(super) fn new(held: T) -> Self {
+        Self(Some(held))
+    }
+
+    pub(super) fn into_inner(mut self) -> T {
+        self.0.take().expect("held until dropped")
+    }
+}
+
+impl<T: Send + 'static> std::ops::Deref for OffMain<T> {
+    type Target = T;
+
+    fn deref(&self) -> &T {
+        self.0.as_ref().expect("held until dropped")
+    }
+}
+
+impl<T: Send + 'static> Drop for OffMain<T> {
+    fn drop(&mut self) {
+        if let Some(held) = self.0.take() {
+            drop_off_main_thread(held);
+        }
+    }
+}
+
 fn entry_stat(stat: &rustix::fs::Statx) -> EntryStat {
     let kind = FileType::from_raw_mode(u32::from(stat.stx_mode));
     let birth = StatxFlags::from_bits_retain(stat.stx_mask)

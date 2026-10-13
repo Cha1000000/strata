@@ -37,7 +37,7 @@ use super::{
     LocalFileIdentity, PinnedEntry, Reported, StageContent, StagedSibling, Taken,
     TransferProgressTracker, blocking_join_message, bounded_local_worker_count,
     cancelled_local_operation, copy_failure_after_cleanup,
-    fs_ops::{Entry, EntryStat, FsOps, fs},
+    fs_ops::{Entry, EntryStat, FsOps, OffMain, fs},
     io_error, local_delete_worker_count, local_device_is_rotational, open_local_parent_directory,
     os_error_detail, os_error_text, parallel_delete_local_blocking_with_workers, placement,
     placement::{COPY_PREFIX, ENOTSUPP, PlaceError, STAGE_PREFIX},
@@ -405,7 +405,7 @@ async fn following<T: Send + 'static>(
         );
         let value = work(&copy, &source).map_err(|failure| failure.into_error(&source.name));
         let manifest = source.recorded_in.map(|root| Manifest {
-            parent: source.parent,
+            parent: OffMain::new(source.parent),
             root,
         });
         (value, std::mem::take(&mut *lock(&copy.left)), manifest)

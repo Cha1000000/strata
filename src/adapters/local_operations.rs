@@ -49,7 +49,7 @@ use std::{
 use gtk::{gio, glib, prelude::*};
 
 use copy_engine::SharedProgress;
-use fs_ops::{Entry, EntryStat, fs};
+use fs_ops::{Entry, EntryStat, OffMain, fs};
 use owed::{Deletion, Done, Owed, Settling};
 use placement::{COPY_PREFIX, Displacement, PlaceError, REPLACED_PREFIX, RenameFailure};
 use work_queue::{Group, Job, WorkQueue};
@@ -3145,7 +3145,7 @@ fn set_aside_failure(error: PlaceError, name: &str) -> glib::Error {
 
 /// An original kept under a hidden name until its replacement is safe on disk.
 struct DisplacedOriginal {
-    parent: Arc<OwnedFd>,
+    parent: OffMain<Arc<OwnedFd>>,
     name: OsString,
     identity: LocalFileIdentity,
 }
@@ -3158,7 +3158,7 @@ async fn remove_displaced_original(
     let kept = original.name.clone();
     parallel_delete_local(
         vec![PinnedEntry {
-            parent: original.parent,
+            parent: original.parent.into_inner(),
             name: original.name,
             identity: Some(original.identity),
         }],
@@ -3337,7 +3337,7 @@ async fn replace_through_stage(
                         let replaced = StagedReplacement {
                             original: ReplacedOriginal::Deleted,
                             displaced: Some(DisplacedOriginal {
-                                parent: staged.parent,
+                                parent: OffMain::new(staged.parent),
                                 name: staged.name,
                                 identity: plan.target.identity,
                             }),
@@ -3412,7 +3412,7 @@ async fn set_aside_and_publish(
     Ok(StagedReplacement {
         original: ReplacedOriginal::Deleted,
         displaced: Some(DisplacedOriginal {
-            parent,
+            parent: OffMain::new(parent),
             name: aside.name,
             identity: aside.identity,
         }),
@@ -3470,7 +3470,7 @@ async fn replace_owing(
                 SourcePlaced::SetAside(aside) => {
                     on_replaced(ReplacedOriginal::Deleted);
                     let original = DisplacedOriginal {
-                        parent: plan.target_parent.clone(),
+                        parent: OffMain::new(plan.target_parent.clone()),
                         name: aside.name,
                         identity: aside.identity,
                     };

@@ -24,7 +24,7 @@ use super::{Failure, Mount, lock};
 use crate::{
     adapters::local_operations::{
         LocalFileIdentity, bounded_local_worker_count, cancelled_local_operation,
-        fs_ops::{Entry, EntryStat, FsOps},
+        fs_ops::{Entry, EntryStat, FsOps, OffMain},
         io_error, local_device_is_rotational,
         work_queue::{self, Group, Job, WorkQueue},
     },
@@ -163,7 +163,7 @@ impl Pending {
 
 /// The native item a move copied, by name in its pinned parent.
 pub(in crate::adapters::local_operations) struct Manifest {
-    pub(super) parent: Arc<OwnedFd>,
+    pub(super) parent: OffMain<Arc<OwnedFd>>,
     pub(super) root: Arc<Folder>,
 }
 
@@ -177,7 +177,10 @@ pub(super) fn snapshot(
 ) -> Result<Manifest, Failure> {
     let root = Folder::root();
     record(fs, parent.as_fd(), name, &root, cancelled)?;
-    Ok(Manifest { parent, root })
+    Ok(Manifest {
+        parent: OffMain::new(parent),
+        root,
+    })
 }
 
 fn record(
@@ -220,6 +223,7 @@ pub(super) fn delete(
     cancelled: Arc<AtomicBool>,
 ) -> (Vec<(PathBuf, KeptCause)>, Result<(), glib::Error>) {
     let Manifest { parent, root } = manifest;
+    let parent = parent.into_inner();
     let deletion = Arc::new(Deletion {
         fs,
         stable_inodes: Mount::keeps_inode_numbers(fs, parent.as_fd()),
