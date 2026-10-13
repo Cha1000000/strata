@@ -1271,3 +1271,76 @@ fn a_replace_on_smb_syncs_its_copy_only_where_the_original_is_deleted() -> Resul
     }
     Ok(())
 }
+
+#[test]
+fn a_barrier_needs_a_readable_folder_only_where_it_flushes_one() -> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    // The family, whether the unreadable destination is a folder beneath
+    // the mount's root, and whether the move goes ahead.
+    let rows = [
+        ("ext4", true, true),
+        ("ext4", false, false),
+        ("cifs", false, true),
+    ];
+    for (id, (fs_type, beneath, moved)) in (390..).zip(rows) {
+        let row = format!("{fs_type}, beneath the root: {beneath}");
+        let root = tempfile::tempdir()?;
+        let sources = root.path().join("sources");
+        let mount = root.path().join("mount");
+        let destination = if beneath {
+            mount.join("drop")
+        } else {
+            mount.clone()
+        };
+        fs::create_dir_all(&sources)?;
+        fs::create_dir_all(&destination)?;
+        let source = sources.join("a.txt");
+        fs::write(&source, b"a")?;
+        let _sources = FsQuirks::install(&sources, Quirks::default());
+        let scope = FsQuirks::install(
+            &mount,
+            Quirks {
+                mount_type: Some((fs_type, "rw")),
+                fail: vec![(Op::OpenDir, ".", 0, Errno::ACCESS)],
+                ..Quirks::default()
+            },
+        );
+
+        let (_operation, events, _) =
+            paste_moves(id, &destination, &[source.clone()], &Barriers::new(), None);
+        pump_until_transfer(&events);
+
+        if moved {
+            assert!(
+                matches!(
+                    terminal_transfer(&events.borrow()),
+                    Some(OperationEvent::Pasted { .. })
+                ),
+                "{row}: {:?}",
+                events.borrow()
+            );
+            assert!(!source.exists(), "{row}");
+            let flushed: Vec<_> = scope
+                .calls()
+                .into_iter()
+                .filter(|call| matches!(call.op, Op::SyncFs | Op::SyncDir))
+                .flat_map(|call| call.names)
+                .collect();
+            let expected: &[&str] = if fs_type == "ext4" { &["mount"] } else { &[] };
+            assert_eq!(flushed, expected, "{row}");
+        } else {
+            assert!(
+                matches!(terminal_transfer(&events.borrow()),
+                    Some(OperationEvent::TransferFailed { message, .. })
+                    if message.contains("Could not safely open")),
+                "{row}: {:?}",
+                events.borrow()
+            );
+            assert!(source.exists(), "{row}");
+            assert!(!destination.join("a.txt").exists(), "{row}");
+        }
+    }
+    Ok(())
+}

@@ -106,8 +106,17 @@ impl Barrier {
         for folder in path.ancestors() {
             let pinned = open_local_parent_directory(folder).map_err(io_error)?;
             let here = fs.mount_key(pinned.as_fd());
-            if *key.get_or_insert(here) != here {
-                break;
+            match key {
+                None => {
+                    key = Some(here);
+                    // Only flushing a folder or its filesystem reads it.
+                    let plan = Plan::of(Mount::new(fs, pinned.as_fd()).family);
+                    if !plan.sync_fs && !plan.sync_dir {
+                        return Ok(Self::opened(fs, pinned, path.to_path_buf()));
+                    }
+                }
+                Some(key) if key != here => break,
+                Some(_) => {}
             }
             let opened = fs.open_dir(Entry {
                 dir: pinned.as_fd(),
