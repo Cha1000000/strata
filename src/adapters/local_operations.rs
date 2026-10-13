@@ -1229,8 +1229,7 @@ async fn parallel_copy_plans(
     regular_files: Vec<bool>,
     fat_family: bool,
 ) -> Option<(Vec<ParallelCopyPlan>, usize)> {
-    if request.move_sources
-        || request.items.len() <= MAX_LOCAL_IO_WORKERS
+    if request.items.len() <= MAX_LOCAL_IO_WORKERS
         || !destination.is_native()
         || request
             .items
@@ -1279,22 +1278,22 @@ async fn parallel_copy_plans(
 }
 
 struct ParallelCopyOutcome {
-    completed: Vec<usize>,
     failed: Vec<(usize, glib::Error)>,
     next: usize,
     written_paths: Vec<PathBuf>,
 }
 
+/// Copies or moves the planned items a chunk at a time; items done join
+/// `settling`, which stops the path when a batch it closed failed.
 async fn execute_parallel_copy_plans(
     plans: &[ParallelCopyPlan],
-    item_sizes: &[Option<u64>],
-    item_files: &[Option<usize>],
-    worker_count: usize,
+    (item_sizes, item_files): (&[Option<u64>], &[Option<usize>]),
+    (worker_count, moving): (usize, bool),
     cancellable: &gio::Cancellable,
-    progress: &Rc<TransferProgressTracker>,
+    copying: &Copying,
+    settling: &mut Settling<'_>,
 ) -> ParallelCopyOutcome {
     let mut outcome = ParallelCopyOutcome {
-        completed: Vec::new(),
         failed: Vec::new(),
         next: 0,
         written_paths: Vec::new(),
@@ -1310,29 +1309,46 @@ async fn execute_parallel_copy_plans(
             .iter()
             .cloned()
             .map(|plan| {
-                let (cancellable, progress) = (cancellable.clone(), progress.clone());
+                let (cancellable, copying) = (cancellable.clone(), copying.clone());
                 context.spawn_local(async move {
-                    copy_engine::copy_local(
+                    if moving {
+                        let source = gio::File::for_path(&plan.source_path);
+                        let target = gio::File::for_path(&plan.written_path);
+                        return move_owing(source, target, Taken::Fail, cancellable, copying).await;
+                    }
+                    let copied = copy_engine::copy_local(
                         plan.source_path,
-                        copy_engine::Destination::New(plan.written_path, Taken::Fail),
+                        copy_engine::Destination::New(plan.written_path.clone(), Taken::Fail),
                         copy_engine::Options::default(),
-                        Some(progress),
+                        copying.progress,
                         &cancellable,
                     )
-                    .await
+                    .await?;
+                    Ok(Transferred {
+                        target: gio::File::for_path(plan.written_path),
+                        reported: copied.reported,
+                        owed: Owed::default(),
+                    })
                 })
             })
             .collect::<Vec<_>>();
         for (plan, task) in chunk.iter().zip(tasks) {
             match task.await {
-                Ok(Ok(copied)) => {
-                    outcome.completed.push(plan.index);
-                    progress.finish_item(
-                        copied.reported,
-                        item_sizes[plan.index],
-                        item_files[plan.index],
-                        Some(plan.target_location.clone()),
-                    );
+                Ok(Ok(transferred)) => {
+                    if let Some(progress) = &copying.progress {
+                        progress.finish_item(
+                            transferred.reported,
+                            item_sizes[plan.index],
+                            item_files[plan.index],
+                            (!moving).then(|| plan.target_location.clone()),
+                        );
+                    }
+                    let done = Done {
+                        index: plan.index,
+                        moved_to: location_for_file(&transferred.target),
+                    };
+                    let copied = transferred.reported.bytes;
+                    settling.owe(done, transferred.owed, copied).await;
                 }
                 Ok(Err(error)) => outcome.failed.push((plan.index, error)),
                 Err(_) => outcome
@@ -1341,7 +1357,7 @@ async fn execute_parallel_copy_plans(
             }
         }
         outcome.next = end;
-        if !outcome.failed.is_empty() {
+        if !outcome.failed.is_empty() || settling.failure().is_some() {
             break;
         }
     }
@@ -2161,10 +2177,11 @@ fn native_path(file: &gio::File) -> Option<PathBuf> {
     file.is_native().then(|| file.path()).flatten()
 }
 
-/// Where one item of a transfer went, and what it owes once its copy is on
-/// disk.
+/// What one item of a transfer became, what it added to progress, and what
+/// it owes once its copy is on disk.
 struct Transferred {
     target: gio::File,
+    reported: Reported,
     owed: Owed,
 }
 
@@ -2184,6 +2201,7 @@ async fn move_local_owing(
     {
         return Ok(Transferred {
             target,
+            reported: Reported::default(),
             owed: Owed::default(),
         });
     }
@@ -2195,7 +2213,7 @@ async fn move_local_owing(
     if let Some(target_path) = native_path(&target) {
         owed.barrier = Some(copy_engine::barrier(split_local_path(&target_path)?.0).await?);
     }
-    let (target, deletion) = match (native_path(&source), native_path(&target)) {
+    let (target, reported, deletion) = match (native_path(&source), native_path(&target)) {
         (Some(source_path), Some(target_path)) => {
             let options = copy_engine::Options {
                 fat_family,
@@ -2216,13 +2234,17 @@ async fn move_local_owing(
                 Some(sources) => Deletion::Sources(source, sources),
                 None => Deletion::Source(source),
             };
-            (target, deletion)
+            (target, copied.reported, deletion)
         }
         // Recorded before GIO copies it, so a change during the copy shows.
         (Some(source_path), None) => {
             let sources = copy_engine::snapshot(source_path, &cancellable).await?;
             let target = remote_copy(source.clone(), target, taken, cancellable.clone()).await?;
-            (target, Deletion::Sources(source, sources))
+            (
+                target,
+                Reported::default(),
+                Deletion::Sources(source, sources),
+            )
         }
         _ => {
             let target = copy_new_recursively_on_filesystem(
@@ -2234,11 +2256,15 @@ async fn move_local_owing(
                 fat_family,
             )
             .await?;
-            (target, Deletion::Source(source))
+            (target, Reported::default(), Deletion::Source(source))
         }
     };
     owed.owe(deletion);
-    Ok(Transferred { target, owed })
+    Ok(Transferred {
+        target,
+        reported,
+        owed,
+    })
 }
 
 /// Moves `source` to `target` as [`move_local`] does, deletes what it owes
@@ -6093,6 +6119,11 @@ impl OperationProvider for LocalOperationProvider {
             let progress =
                 TransferProgressTracker::new(request.id, total_bytes, total_files, emit.clone());
             progress.emit();
+            let mut settling = Settling::new(&request, emit.clone(), progress.clone());
+            let copying = Copying {
+                progress: Some(progress.clone()),
+                fat_family,
+            };
             if let Some((plans, worker_count)) =
                 parallel_copy_plans(&request, &sources, &destination, regular_files, fat_family)
                     .await
@@ -6103,25 +6134,25 @@ impl OperationProvider for LocalOperationProvider {
                 }
                 let outcome = execute_parallel_copy_plans(
                     &plans,
-                    &item_sizes,
-                    &item_files,
-                    worker_count,
+                    (&item_sizes, &item_files),
+                    (worker_count, request.move_sources),
                     &operation_cancellable,
-                    &progress,
+                    &copying,
+                    &mut settling,
                 )
                 .await;
-                let mut completed_indices = outcome.completed;
-                completed_indices.sort_unstable();
-                let completed = completed_indices
-                    .into_iter()
-                    .map(|index| request.items[index].source.clone())
-                    .collect::<Vec<_>>();
-                if !outcome.failed.is_empty() || outcome.next < plans.len() {
-                    let failed = outcome
-                        .failed
-                        .iter()
-                        .map(|(index, _)| request.items[*index].source.clone())
-                        .collect();
+                settling.finish().await;
+                if !outcome.failed.is_empty()
+                    || outcome.next < plans.len()
+                    || settling.failure().is_some()
+                {
+                    let mut failed = settling.failed();
+                    failed.extend(
+                        outcome
+                            .failed
+                            .iter()
+                            .map(|(index, _)| request.items[*index].source.clone()),
+                    );
                     let failure_error = outcome
                         .failed
                         .iter()
@@ -6135,14 +6166,14 @@ impl OperationProvider for LocalOperationProvider {
                         &emit,
                         request.id,
                         TransferStop {
-                            completed,
+                            completed: settling.completed(),
                             failed,
                             not_attempted: request.items[outcome.next..]
                                 .iter()
                                 .map(|item| item.source.clone())
                                 .collect(),
                             affected_locations,
-                            failure,
+                            failure: joined_failures(failure, settling.failure()),
                             skip_flush,
                         },
                     )
@@ -6154,7 +6185,7 @@ impl OperationProvider for LocalOperationProvider {
                     &operation_cancellable,
                     &emit,
                     request.id,
-                    &completed,
+                    &settling.completed(),
                     affected_locations,
                 )
                 .await
@@ -6163,15 +6194,10 @@ impl OperationProvider for LocalOperationProvider {
                 }
                 emit(OperationEvent::Pasted {
                     request_id: request.id,
-                    locations: completed,
+                    locations: settling.completed(),
                 });
                 return;
             }
-            let mut settling = Settling::new(&request, emit.clone(), progress.clone());
-            let copying = Copying {
-                progress: Some(progress.clone()),
-                fat_family,
-            };
             let mut written_paths = Vec::new();
             for (index, item) in request.items.iter().enumerate() {
                 if operation_cancellable.is_cancelled() || settling.failure().is_some() {

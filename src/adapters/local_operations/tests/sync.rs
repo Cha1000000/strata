@@ -838,3 +838,140 @@ fn cancelling_a_move_closes_its_pending_batch() -> Result<(), Box<dyn Error>> {
     assert!(early.borrow().is_empty());
     Ok(())
 }
+
+#[test]
+fn many_moved_files_are_copied_in_parallel_and_share_a_barrier() -> Result<(), Box<dyn Error>> {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let _limits = LimitsGuard::set(NO_LIMITS);
+    let root = tempfile::tempdir()?;
+    let sources = root.path().join("sources");
+    let destination = root.path().join("destination");
+    fs::create_dir(&sources)?;
+    fs::create_dir(&destination)?;
+    let names: Vec<String> = (0..12).map(|index| format!("f{index:02}.txt")).collect();
+    let names: Vec<&str> = names.iter().map(String::as_str).collect();
+    let mut paths = Vec::new();
+    for name in &names {
+        fs::write(sources.join(name), name)?;
+        paths.push(sources.join(name));
+    }
+    // The first copy waits for a second to start, as only parallel copies can.
+    let (started, parallel) = (
+        Arc::new(AtomicUsize::new(0)),
+        Arc::new(AtomicBool::new(false)),
+    );
+    let mut opened: Vec<(Op, &'static str, usize, super::fs_quirks::Racer)> = Vec::new();
+    let (count, seen_parallel) = (started.clone(), parallel.clone());
+    opened.push((
+        Op::OpenSource,
+        "*",
+        0,
+        Box::new(move || {
+            count.fetch_add(1, Ordering::SeqCst);
+            let start = Instant::now();
+            while count.load(Ordering::SeqCst) < 2 && start.elapsed() < Duration::from_secs(3) {
+                thread::sleep(Duration::from_millis(5));
+            }
+            seen_parallel.store(count.load(Ordering::SeqCst) >= 2, Ordering::SeqCst);
+        }),
+    ));
+    for _ in 1..names.len() {
+        let count = started.clone();
+        opened.push((
+            Op::OpenSource,
+            "*",
+            0,
+            Box::new(move || {
+                count.fetch_add(1, Ordering::SeqCst);
+            }),
+        ));
+    }
+    let barriers = Barriers::new();
+    let changed = sources.join("f03.txt");
+    let rewrite: Box<dyn FnMut() + Send> =
+        Box::new(move || fs::write(&changed, b"rewritten after its copy").expect("rewrite"));
+    let _sources = FsQuirks::install(
+        &sources,
+        Quirks {
+            before: opened,
+            ..Quirks::default()
+        },
+    );
+    let _destination = FsQuirks::install(
+        &destination,
+        Quirks {
+            before: barriers.racers(&sources, &names, &destination, Some(rewrite)),
+            ..Quirks::ext4()
+        },
+    );
+
+    let (_operation, events, early) = paste_moves(340, &destination, &paths, &barriers, None);
+    pump_until_transfer(&events);
+
+    assert!(
+        matches!(
+            terminal_transfer(&events.borrow()),
+            Some(OperationEvent::Pasted { .. })
+        ),
+        "{:?}",
+        events.borrow()
+    );
+    if thread::available_parallelism().map_or(1, usize::from) > 1 {
+        assert!(parallel.load(Ordering::SeqCst), "the copies overlap");
+    }
+    assert_eq!(
+        barriers.seen(),
+        [Seen {
+            deleted: Vec::new(),
+            copied: strings(&names),
+            flushing: true,
+        }]
+    );
+    for (name, path) in names.iter().zip(&paths) {
+        assert_eq!(path.exists(), *name == "f03.txt", "{name}");
+        assert_eq!(fs::read(destination.join(name))?, name.as_bytes(), "{name}");
+    }
+    let kept: Vec<_> = events
+        .borrow()
+        .iter()
+        .filter_map(|event| match event {
+            OperationEvent::ItemsReported { report, .. } => Some(report.kept.clone()),
+            _ => None,
+        })
+        .flatten()
+        .collect();
+    assert_eq!(
+        kept,
+        [crate::services::KeptItem {
+            location: Location::local(sources.join("f03.txt")),
+            cause: crate::services::KeptCause::Changed,
+        }]
+    );
+    assert!(
+        early
+            .borrow()
+            .iter()
+            .all(|from| from == &Location::local(sources.join("f03.txt")))
+    );
+    let last = events.borrow().iter().rev().find_map(|event| match event {
+        OperationEvent::TransferProgress {
+            completed_files,
+            total_files,
+            transferred_bytes,
+            total_bytes,
+            ..
+        } => Some((
+            *completed_files,
+            *total_files,
+            *transferred_bytes,
+            *total_bytes,
+        )),
+        _ => None,
+    });
+    let bytes: u64 = names.iter().map(|name| name.len() as u64).sum();
+    assert_eq!(last, Some((12, Some(12), bytes, Some(bytes))));
+    Ok(())
+}
