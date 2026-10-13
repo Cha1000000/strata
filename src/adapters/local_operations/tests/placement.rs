@@ -1135,7 +1135,12 @@ fn items_without_noreplace_or_a_usable_hard_link_are_placed_over_a_reserved_name
     let cases: [(fn() -> Quirks, bool, Option<bool>, Placed); 5] = [
         (Quirks::vboxsf, false, Some(false), Placed::OverReservedFile),
         (Quirks::vboxsf, true, Some(false), Placed::AfterCheck),
-        (links_refused_for_the_item, false, Some(true), Placed::OverReservedFile),
+        (
+            links_refused_for_the_item,
+            false,
+            Some(true),
+            Placed::OverReservedFile,
+        ),
         (Quirks::sshfs, false, Some(false), Placed::OverReservedFile),
         (Quirks::sshfs, true, None, Placed::ReservedDirectory),
     ];

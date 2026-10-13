@@ -678,7 +678,10 @@ fn metadata_the_filesystem_cannot_store_is_skipped() -> Result<(), Box<dyn Error
 
         assert_eq!(applied, [skipped; 2], "{errno:?}");
         assert_eq!(link?, Path::new("lnk"), "{errno:?}");
-        assert_eq!(fs::read_link(root.path().join("lnk"))?, Path::new("file.txt"));
+        assert_eq!(
+            fs::read_link(root.path().join("lnk"))?,
+            Path::new("file.txt")
+        );
     }
     Ok(())
 }
@@ -698,6 +701,9 @@ fn a_link_time_is_never_set_on_fuse() -> Result<(), Box<dyn Error>> {
 
     destination.create_symlink(Path::new("lnk"), OsStr::new("target"), Some(modified))?;
 
-    assert_ne!(fs::symlink_metadata(root.path().join("lnk"))?.mtime(), 1_000_000_000);
+    assert_ne!(
+        fs::symlink_metadata(root.path().join("lnk"))?.mtime(),
+        1_000_000_000
+    );
     Ok(())
 }

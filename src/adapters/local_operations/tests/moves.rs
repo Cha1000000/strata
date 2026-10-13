@@ -310,7 +310,11 @@ fn items_no_step_can_place_are_moved_by_copying() -> Result<(), Box<dyn Error>> 
     let cases: [(&str, fn() -> Quirks, bool); 3] = [
         ("links unsettled", Quirks::without_placement, false),
         ("rename over refused", rename_over_refused, false),
-        ("folders unplaceable", Quirks::without_folder_placement, true),
+        (
+            "folders unplaceable",
+            Quirks::without_folder_placement,
+            true,
+        ),
     ];
     for (case, quirks, folder) in cases {
         let root = tempfile::tempdir()?;
@@ -325,8 +329,7 @@ fn items_no_step_can_place_are_moved_by_copying() -> Result<(), Box<dyn Error>> 
         }
         let inode = fs::metadata(&source)?.ino();
 
-        move_native(&source, &moved)
-            .map_err(|error| format!("{case}: {error}"))?;
+        move_native(&source, &moved).map_err(|error| format!("{case}: {error}"))?;
 
         assert_ne!(fs::metadata(&moved)?.ino(), inode, "{case}");
         let contents = if folder {

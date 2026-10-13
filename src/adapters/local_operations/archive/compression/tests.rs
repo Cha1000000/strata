@@ -253,7 +253,12 @@ fn an_archive_replaced_without_trash_deletes_its_original() -> Result<(), Box<dy
     let cases: [(Trash, rustix::fs::FsWord, fn() -> Quirks, bool); 5] = [
         (Trash::Unsupported, NFS_SUPER_MAGIC, Quirks::default, true),
         (Trash::Unsupported, TMPFS_MAGIC, Quirks::default, false),
-        (Trash::SucceedsWithoutMoving, NFS_SUPER_MAGIC, Quirks::default, true),
+        (
+            Trash::SucceedsWithoutMoving,
+            NFS_SUPER_MAGIC,
+            Quirks::default,
+            true,
+        ),
         (Trash::Unsupported, FUSE_SUPER_MAGIC, Quirks::sshfs, true),
         (Trash::Unsupported, FUSE_SUPER_MAGIC, Quirks::vboxsf, true),
     ];
