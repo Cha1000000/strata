@@ -1248,6 +1248,7 @@ fn a_replace_on_smb_syncs_its_copy_only_where_the_original_is_deleted() -> Resul
             &destination,
             Quirks {
                 mount_type: Some(("cifs", "rw")),
+                fs_type: Some(0xFF53_4D42),
                 trash,
                 ..Quirks::default()
             },
@@ -1279,7 +1280,9 @@ fn a_replace_on_smb_syncs_its_copy_only_where_the_original_is_deleted() -> Resul
             .map(|(index, _)| index)
             .collect();
         assert_eq!(synced_at.len(), if synced { 2 } else { 0 }, "{row}");
-        let displaced = calls.iter().position(|call| call.op == Op::Exchange);
+        let displaced = calls.iter().position(|call| {
+            call.op == Op::Rename && call.names.first().is_some_and(|name| name == "folder")
+        });
         assert!(
             synced_at
                 .iter()

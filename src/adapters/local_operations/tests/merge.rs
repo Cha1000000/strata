@@ -727,6 +727,7 @@ fn a_merge_copies_folders_in_place_where_the_mount_cannot_place_them() -> Result
     let scope = FsQuirks::install(
         &target,
         Quirks {
+            mount_type: Some(("ext4", "rw")),
             case_insensitive: true,
             ..Quirks::without_folder_placement()
         },
@@ -737,8 +738,8 @@ fn a_merge_copies_folders_in_place_where_the_mount_cannot_place_them() -> Result
         capabilities.rename_over_empty_directory = Some(false);
     });
 
-    // One worker makes the folder's files last first, so `Makefile` is the
-    // alias.
+    // Without claims, one worker makes the folder's files last first, so
+    // `Makefile` is the alias.
     let (merged, report) = merge_reporting(&source, &target, Some(1));
 
     assert!(merged.is_ok(), "{merged:?}");

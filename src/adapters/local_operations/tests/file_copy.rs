@@ -632,7 +632,9 @@ fn sparse_files_keep_their_holes_where_both_ends_can() -> Result<(), Box<dyn Err
                 allocated <= 2 * source_allocated,
                 "{case}: {allocated} bytes allocated for {source_allocated} of data"
             );
-        } else {
+        } else if destination_preset.is_some() {
+            // Within one filesystem, copy_file_range may share the source's
+            // extents, holes included (btrfs, XFS).
             assert!(
                 allocated >= size,
                 "{case}: {allocated} of {size} bytes allocated"
