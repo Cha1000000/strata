@@ -847,7 +847,10 @@ impl Scope {
 
     fn unlinked(&self, at: Entry<'_>) {
         if let Some(path) = path_of(at.dir) {
-            self.state().link_names.remove(&path.join(at.name));
+            let path = path.join(at.name);
+            let mut state = self.state();
+            state.link_names.remove(&path);
+            state.renumbered.remove(&path);
         }
     }
 
@@ -967,9 +970,9 @@ pub(crate) fn recreated(path: &Path) {
     }
 }
 
-/// Makes whatever is at `path` report another inode number from now on, as
-/// libfuse without `use_ino` and cifs without server inode numbers do once
-/// the kernel evicts an entry.
+/// Makes whatever is at `path` report another inode number until it is
+/// unlinked, as libfuse without `use_ino` and cifs without server inode
+/// numbers do once the kernel evicts an entry.
 pub(crate) fn renumbered(path: &Path) {
     let (Some(scope), Some(name)) = (scope_for_path(path), path.file_name()) else {
         return;
