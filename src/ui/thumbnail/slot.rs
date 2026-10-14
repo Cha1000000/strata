@@ -150,6 +150,28 @@ fn folder_height_scale(texture: &gdk::Texture) -> f64 {
     (19.0 / 24.0 * height as f64 / (last - first + 1) as f64).min(1.0)
 }
 
+thread_local! {
+    static FOLDER_HEIGHT_SCALES: RefCell<std::collections::HashMap<usize, (glib::WeakRef<gdk::Texture>, f64)>> =
+        RefCell::new(std::collections::HashMap::new());
+}
+
+fn cached_folder_height_scale(texture: &gdk::Texture) -> f64 {
+    let key = texture.as_ptr() as usize;
+    FOLDER_HEIGHT_SCALES.with_borrow_mut(|scales| {
+        if let Some((owner, scale)) = scales.get(&key)
+            && owner.upgrade().as_ref() == Some(texture)
+        {
+            return *scale;
+        }
+        if scales.len() >= 512 {
+            scales.retain(|_, (owner, _)| owner.upgrade().is_some());
+        }
+        let scale = folder_height_scale(texture);
+        scales.insert(key, (texture.downgrade(), scale));
+        scale
+    })
+}
+
 fn same_texture(left: Option<&gdk::Texture>, right: Option<&gdk::Texture>) -> bool {
     match (left, right) {
         (None, None) => true,
@@ -278,7 +300,7 @@ impl ThumbnailSlot {
         self.imp().texture.replace(None);
         let scale =
             if self.imp().limit_fallback_height.get() && icon != crate::assets::icons::FOLDER {
-                texture.map_or(1.0, folder_height_scale)
+                texture.map_or(1.0, cached_folder_height_scale)
             } else {
                 1.0
             };

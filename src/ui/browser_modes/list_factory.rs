@@ -146,7 +146,7 @@ impl ListFactory {
         let pending_name = state
             .as_ref()
             .and_then(|state| state.pending_rename_name(&binding.entry));
-        let edit = super::bound_edit(&self.bound_items, item);
+        let edit = super::bound_edit(item);
         if let Some(edit) = &edit {
             edit.bind(&binding.entry.location);
         }

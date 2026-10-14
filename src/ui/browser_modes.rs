@@ -2733,7 +2733,6 @@ fn build_icons_view(context: &Rc<IconsContext>, model: &impl IsA<gio::ListModel>
     let thumbnail_size_for_bind = context.thumbnail_size.clone();
     let scrolling_for_bind = context.scrolling.clone();
     let state_for_bind = context.state.clone();
-    let bound_for_bind = bound_items.clone();
     let filter_query_for_bind = context.filter_query.clone();
     factory.connect_bind(move |_, item| {
         let Some(item) = item.downcast_ref::<gtk::ListItem>() else {
@@ -2753,7 +2752,7 @@ fn build_icons_view(context: &Rc<IconsContext>, model: &impl IsA<gio::ListModel>
         let thumbnail_size = icons_card_icon_slot(thumbnail_size_for_bind.get());
         super::icons_cell::set_slot(&card, thumbnail_size);
         if let Some(entry) = entry {
-            let edit = bound_edit(&bound_for_bind, item);
+            let edit = bound_edit(item);
             if let Some(edit) = &edit {
                 edit.bind(&entry.location);
             }
@@ -3811,25 +3810,17 @@ fn pane_base(
     )
 }
 
-fn bound_edit(
-    items: &RefCell<Vec<BoundModeItem>>,
-    item: &gtk::ListItem,
-) -> Option<super::collection_edit::EditWidgets> {
-    items
-        .borrow()
-        .iter()
-        .find(|bound| bound.item.upgrade().as_ref() == Some(item))
-        .map(|bound| bound.edit.clone())
+fn bound_edit(item: &gtk::ListItem) -> Option<super::collection_edit::EditWidgets> {
+    super::collection_edit::item_edit(item)
 }
 
 fn install_edit_unbind(
     factory: &gtk::SignalListItemFactory,
     items: &Rc<RefCell<Vec<BoundModeItem>>>,
 ) {
-    let unbind = items.clone();
     factory.connect_unbind(move |_, object| {
         if let Some(item) = object.downcast_ref::<gtk::ListItem>()
-            && let Some(edit) = bound_edit(&unbind, item)
+            && let Some(edit) = bound_edit(item)
         {
             edit.unbind();
         }
@@ -3837,6 +3828,7 @@ fn install_edit_unbind(
     });
     let teardown = items.clone();
     factory.connect_teardown(move |_, object| {
+        super::collection_edit::forget_item_edit(object);
         teardown.borrow_mut().retain(|bound| {
             bound
                 .item
@@ -3859,6 +3851,7 @@ fn register_bound_mode_item(
     weak_widget.set(Some(widget.upcast_ref()));
     let weak_rename_label = glib::WeakRef::new();
     weak_rename_label.set(Some(rename_label.upcast_ref()));
+    super::collection_edit::register_item_edit(item, &edit);
     items.borrow_mut().push(BoundModeItem {
         item: weak_item,
         widget: weak_widget,

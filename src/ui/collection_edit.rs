@@ -13,6 +13,34 @@ use gtk::{glib, prelude::*};
 use std::{cell::RefCell, rc::Rc};
 
 type Cancel = Rc<dyn Fn()>;
+
+thread_local! {
+    static ITEM_EDITS: RefCell<std::collections::HashMap<usize, (glib::WeakRef<glib::Object>, EditWidgets)>> =
+        RefCell::new(std::collections::HashMap::new());
+}
+
+pub(super) fn register_item_edit(item: &impl IsA<glib::Object>, edit: &EditWidgets) {
+    let item = item.upcast_ref::<glib::Object>();
+    ITEM_EDITS.with_borrow_mut(|edits| {
+        edits.insert(item.as_ptr() as usize, (item.downgrade(), edit.clone()));
+    });
+}
+
+pub(super) fn item_edit(item: &impl IsA<glib::Object>) -> Option<EditWidgets> {
+    let item = item.upcast_ref::<glib::Object>();
+    ITEM_EDITS.with_borrow(|edits| {
+        edits
+            .get(&(item.as_ptr() as usize))
+            .filter(|(owner, _)| owner.upgrade().as_ref() == Some(item))
+            .map(|(_, edit)| edit.clone())
+    })
+}
+
+pub(super) fn forget_item_edit(item: &glib::Object) {
+    ITEM_EDITS.with_borrow_mut(|edits| {
+        edits.remove(&(item.as_ptr() as usize));
+    });
+}
 pub(super) type ActiveEdits = Rc<RefCell<Option<ActiveEdit>>>;
 pub(super) type Submit = Rc<dyn Fn(&gtk::Entry)>;
 pub(super) type Reveal = Rc<dyn Fn(&gtk::Entry)>;
