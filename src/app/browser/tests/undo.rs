@@ -1297,6 +1297,25 @@ fn a_partial_merge_undo_keeps_the_paths_still_to_revert() {
 }
 
 #[test]
+fn a_retried_merge_undo_keeps_the_records_of_what_it_created() {
+    let created = Location::local("/fixture/archive/created.txt");
+    let placed = HashMap::from([(created.clone(), PlacedSnapshot::new(()))]);
+    let entry = UndoEntry::Merge {
+        created: vec![created.clone()],
+        overwritten: Vec::new(),
+        originals: HashMap::new(),
+        placed,
+    };
+    push_pending_undo(entry.clone());
+    let (generation, _) = claim_pending_undo(None).expect("undo claim");
+
+    retain_replay_merge_items(false, generation, std::slice::from_ref(&created), &[]);
+    finish_undo(generation, false);
+
+    assert_eq!(pending_undo_entry(), Some(entry));
+}
+
+#[test]
 fn a_merge_undo_leaves_what_it_kept_out_of_undo_history() {
     let kept = Location::local("/fixture/archive/kept.txt");
     let cut = Location::local("/fixture/archive/cut.txt");
