@@ -232,7 +232,7 @@ impl Browser {
                         emit(BrowserEvent::TransferCompleted);
                     }
                     OperationEvent::Deleted { locations, .. } => {
-                        self.remove_deleted_locations(&locations);
+                        self.remove_deleted_locations(&locations, &[]);
                         emit(BrowserEvent::DeletionFinished { succeeded: true });
                     }
                     OperationEvent::CompletedWithErrors {
@@ -242,7 +242,7 @@ impl Browser {
                         message,
                         ..
                     } => {
-                        self.remove_deleted_locations(&deleted_locations);
+                        self.remove_deleted_locations(&deleted_locations, &[]);
                         emit(BrowserEvent::OperationCompletedWithErrors {
                             retryable_locations,
                             has_non_retryable_failures,
@@ -279,7 +279,7 @@ impl Browser {
                         let mut affected_locations = context.refresh_locations.clone();
                         affected_locations.extend(result.affected_locations);
                         if job.deleting {
-                            self.remove_deleted_locations(&result.completed);
+                            self.remove_deleted_locations(&result.completed, &[]);
                         }
                         emit(BrowserEvent::OperationCancelled {
                             completed: result.completed.len(),

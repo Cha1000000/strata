@@ -4493,7 +4493,9 @@ impl Browser {
         }
     }
 
-    fn remove_deleted_locations(self: &Rc<Self>, locations: &[Location]) {
+    /// Columns in `rescanning` reload once the operation ends, so a bulk
+    /// removal leaves them to that reload.
+    fn remove_deleted_locations(self: &Rc<Self>, locations: &[Location], rescanning: &[usize]) {
         let open_locations = {
             let state = self.state.borrow();
             let mut open = Vec::new();
@@ -4508,7 +4510,9 @@ impl Browser {
             if locations.len() > MAX_INCREMENTAL_OPERATION_UPDATES
                 && (watched.is_recent_root() || watched.is_camera_photo_root())
             {
-                self.refresh_column(depth);
+                if !rescanning.contains(&depth) {
+                    self.refresh_column(depth);
+                }
                 continue;
             }
             let removed = locations

@@ -896,7 +896,7 @@ fn completed_deletions_remove_entries_without_reloading_the_column() {
     let observed = events.clone();
     browser.observe(move |event| observed.borrow_mut().push(event.clone()));
 
-    browser.remove_deleted_locations(&[Location::local("/fixture/child")]);
+    browser.remove_deleted_locations(&[Location::local("/fixture/child")], &[]);
 
     assert!(browser.entry_at(0, 0).is_none());
     assert!(events.borrow().iter().any(|event| matches!(

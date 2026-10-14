@@ -442,7 +442,7 @@ impl Browser {
         let load = self.operation_load.take();
         drop(load);
         let mut report = self.transfer_report.take();
-        self.publish_operation_outcome(context, completion, event, &mut report);
+        self.publish_operation_outcome(context, completion, event, &mut report, &refresh_depths);
         if !report.is_empty() {
             self.emit(BrowserEvent::ItemsReported { report });
         }
@@ -515,6 +515,7 @@ impl Browser {
         completion: OperationCompletion,
         event: OperationEvent,
         report: &mut TransferReport,
+        rescanning: &[usize],
     ) {
         match event {
             OperationEvent::Failed { message, .. } if context.rename => {
@@ -547,7 +548,7 @@ impl Browser {
                 message,
                 ..
             } => {
-                self.remove_deleted_locations(&deleted_locations);
+                self.remove_deleted_locations(&deleted_locations, rescanning);
                 self.refresh_unmonitored_restore_locations(context, &completion);
                 self.emit(BrowserEvent::OperationCompletedWithErrors {
                     message,
@@ -557,7 +558,7 @@ impl Browser {
                 });
             }
             OperationEvent::Deleted { locations, .. } => {
-                self.remove_deleted_locations(&locations);
+                self.remove_deleted_locations(&locations, rescanning);
             }
             OperationEvent::Restored {
                 locations,
@@ -567,7 +568,7 @@ impl Browser {
                 if completion.restoring && !completion.undoing && !restored.is_empty() {
                     push_pending_undo(UndoEntry::Copy(restored));
                 }
-                self.remove_deleted_locations(&locations);
+                self.remove_deleted_locations(&locations, rescanning);
                 self.refresh_unmonitored_restore_locations(context, &completion);
             }
             OperationEvent::RestoreCompletedWithErrors {
@@ -579,7 +580,7 @@ impl Browser {
                 if completion.restoring && !completion.undoing && !restored.is_empty() {
                     push_pending_undo(UndoEntry::Copy(restored));
                 }
-                self.remove_deleted_locations(&restored_locations);
+                self.remove_deleted_locations(&restored_locations, rescanning);
                 self.refresh_unmonitored_restore_locations(context, &completion);
                 self.emit(BrowserEvent::OperationCompletedWithErrors {
                     message,
