@@ -677,12 +677,17 @@ impl At {
         let mut buffer =
             vec![0; usize::try_from(size).map_or(MIB, |size| size.clamp(64 << 10, MIB))];
         let mut digest = digest::Context::new(&digest::SHA256);
+        // A byte past what the copy holds tells a file that grew, however
+        // long it keeps growing.
+        let end = size.saturating_add(1);
         let mut offset = 0;
-        loop {
+        while offset < end {
             if stopped() {
                 return None;
             }
-            match fs.read_at(file.as_fd(), &mut buffer, offset) {
+            let wanted =
+                usize::try_from(end - offset).map_or(buffer.len(), |left| left.min(buffer.len()));
+            match fs.read_at(file.as_fd(), &mut buffer[..wanted], offset) {
                 Ok(0) => break,
                 Ok(read) => {
                     digest.update(&buffer[..read]);

@@ -2100,3 +2100,53 @@ fn files_on_a_coarse_mount_inside_a_moved_folder_are_compared() -> Result<(), Bo
     assert_eq!(report.kept, [kept(file, KeptCause::Changed)]);
     Ok(())
 }
+
+#[test]
+fn a_source_growing_as_it_is_compared_is_kept_without_reading_what_it_grew_by()
+-> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let root = tempfile::tempdir()?;
+    let folder = root.path().join("source/folder");
+    fs::create_dir_all(&folder)?;
+    let file = folder.join("a.txt");
+    fs::write(&file, b"original")?;
+    let epoch = SystemTime::UNIX_EPOCH;
+    let seconds = SystemTime::now().duration_since(epoch)?.as_secs() / 2 * 2;
+    set_times(&file, seconds)?;
+    let _clock = ClockGuard::set(epoch + Duration::from_secs(seconds) + Duration::from_millis(500));
+    let grown = 64 << 20;
+    let path = file.clone();
+    let grow: super::fs_quirks::Racer = Box::new(move || {
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .and_then(|file| file.set_len(grown))
+            .expect("grow the source");
+    });
+    let quirks = Quirks {
+        ctime_is_mtime: true,
+        after: vec![(Op::OpenSource, "a.txt", 1, grow)],
+        ..Quirks::vfat()
+    };
+
+    let (moved, report, _, calls) = move_across_volumes_logged(&folder, quirks)?;
+
+    assert_eq!(fs::read(moved.join("a.txt"))?, b"original");
+    assert_eq!(fs::metadata(&file)?.len(), grown);
+    assert_eq!(report.kept, [kept(file, KeptCause::Changed)]);
+    let reopened = calls
+        .iter()
+        .enumerate()
+        .filter(|(_, call)| call.op == Op::OpenSource && call.names == ["a.txt"])
+        .nth(1)
+        .map(|(index, _)| index)
+        .ok_or("the deletion opened the source to compare it")?;
+    let reads = calls[reopened..]
+        .iter()
+        .filter(|call| call.op == Op::Read && call.names == ["a.txt"])
+        .count();
+    assert!(reads <= 2, "{reads} reads of a source that grew by 64 MiB");
+    Ok(())
+}
