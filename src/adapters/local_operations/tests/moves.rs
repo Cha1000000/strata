@@ -1848,15 +1848,17 @@ fn files_read_within_a_coarse_time_tick_are_compared_before_their_move_deletes_t
         ..Quirks::default()
     };
     let recent = Duration::from_millis(500);
+    let past_the_tick = Duration::from_millis(2050);
     let behind = Duration::from_millis(2500);
     let long_ago = Duration::from_secs(3600);
     // When the file is rewritten at the same size: before the deletion
     // opens the moved folder, or the moved file itself to compare it, both
     // keeping its times; right after the comparison, at the time of the
-    // engine's clock then, in FAT's two-second steps; before the deletion,
-    // after growing as the copy read it, which the copy then read again;
-    // or by renaming a file with the same size and times over it as the
-    // deletion opens it to compare it.
+    // kernel's coarse clock then, a tick behind the engine's, in FAT's
+    // two-second steps; before the deletion, after growing as the copy
+    // read it, which the copy then read again; or by renaming a file with
+    // the same size and times over it as the deletion opens it to compare
+    // it.
     #[derive(Clone, Copy, PartialEq)]
     enum Rewrite {
         Never,
@@ -1867,11 +1869,19 @@ fn files_read_within_a_coarse_time_tick_are_compared_before_their_move_deletes_t
         RenamedOver,
     }
     // The source volume, how long after its modification time the copy
-    // reads the file (on sshfs, as with a server clock behind ours), when
-    // it is rewritten, and whether the deletion reads it again. Only the
+    // reads the file (on sshfs, as with a server clock behind ours; past
+    // the tick, as the coarse clock may still stamp it), when it is
+    // rewritten, and whether the deletion reads it again. Only the
     // file itself is moved where it is rewritten as it is compared.
-    let rows: [(&str, Preset, Duration, Rewrite, bool); 14] = [
+    let rows: [(&str, Preset, Duration, Rewrite, bool); 15] = [
         ("vfat", vfat, recent, Rewrite::Deleting, true),
+        (
+            "vfat, past the tick",
+            vfat,
+            past_the_tick,
+            Rewrite::Deleting,
+            true,
+        ),
         ("exfat-fuse", exfat_fuse, recent, Rewrite::Deleting, true),
         (
             "fuseblk, no record",
@@ -1918,7 +1928,7 @@ fn files_read_within_a_coarse_time_tick_are_compared_before_their_move_deletes_t
             let path = file.clone();
             Box::new(move || {
                 fs::write(&path, contents).expect("rewrite the source");
-                let now = super::super::copy_engine::clock_for_test()
+                let now = (super::super::copy_engine::clock_for_test() - Duration::from_millis(10))
                     .duration_since(epoch)
                     .expect("a time after 1970");
                 let step = if clocked {

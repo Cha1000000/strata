@@ -77,6 +77,10 @@ fn wait_until(until: SystemTime, stopped: &dyn Fn() -> bool) -> bool {
     }
 }
 
+/// How far the coarse clock filesystems stamp times with may run behind
+/// ours: a kernel tick, at most 10 ms, with room to spare.
+const COARSE_CLOCK: Duration = Duration::from_millis(100);
+
 /// Until when a rewrite of the file `stat` describes, read from `started`,
 /// may leave its modification time as it is, where the mount keeps times
 /// as coarse as `window`; `None` once any rewrite would move it.
@@ -90,9 +94,7 @@ pub(super) fn unsettled(
         UNIX_EPOCH.checked_add(Duration::new(u64::try_from(seconds).ok()?, nanoseconds))?;
     // A time ahead of our clock, from a server's, settles no later than one
     // read as it was set.
-    let settled = modified
-        .checked_add(window)?
-        .min(started.checked_add(window)?);
+    let settled = modified.min(started).checked_add(window + COARSE_CLOCK)?;
     (started < settled).then_some(settled)
 }
 
