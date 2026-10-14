@@ -407,7 +407,8 @@ pub(super) fn placed_entries() -> AtomicUsize {
 }
 
 /// Run right after placing, so that it records what was placed. Fails once
-/// the operation's records would hold more than `left` entries.
+/// the operation's records would hold more than `left` entries, and gives
+/// back what it took, as a failed record is not kept.
 pub(super) fn placed(
     fs: &dyn FsOps,
     (dir, name): (BorrowedFd<'_>, &OsStr),
@@ -415,9 +416,26 @@ pub(super) fn placed(
     left: &AtomicUsize,
 ) -> Result<Placed, Failure> {
     let root = Folder::root();
-    record(fs, dir, name, &root, cancelled, Some(left))?;
-    let (name, node) = root.take().pop().ok_or(Failure::Changed)?;
-    Ok(Placed { name, node })
+    let budget = Budget {
+        left,
+        taken: AtomicUsize::new(0),
+    };
+    let recorded = record(fs, dir, name, &root, cancelled, Some(&budget))
+        .and_then(|()| root.take().pop().ok_or(Failure::Changed));
+    match recorded {
+        Ok((name, node)) => Ok(Placed { name, node }),
+        Err(failure) => {
+            left.fetch_add(budget.taken.into_inner(), Ordering::AcqRel);
+            Err(failure)
+        }
+    }
+}
+
+/// The entries the operation's records may still hold, and how many one
+/// record took of them.
+struct Budget<'a> {
+    left: &'a AtomicUsize,
+    taken: AtomicUsize,
 }
 
 pub(super) fn of(parent: Arc<OwnedFd>, root: Arc<Folder>) -> Manifest {
@@ -436,19 +454,22 @@ fn record(
     name: &OsStr,
     folder: &Folder,
     cancelled: &AtomicBool,
-    placed: Option<&AtomicUsize>,
+    placed: Option<&Budget<'_>>,
 ) -> Result<(), Failure> {
     if cancelled.load(Ordering::Acquire) {
         return Err(Failure::Cancelled);
     }
-    if let Some(left) = placed
-        && left
+    if let Some(budget) = placed {
+        if budget
+            .left
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |left| {
                 left.checked_sub(1)
             })
             .is_err()
-    {
-        return Err(Failure::Error(io_error("Too many entries to record")));
+        {
+            return Err(Failure::Error(io_error("Too many entries to record")));
+        }
+        budget.taken.fetch_add(1, Ordering::Relaxed);
     }
     let at = Entry { dir, name };
     let stat = fs.stat(at, false)?;

@@ -2681,6 +2681,40 @@ fn an_undo_keeps_what_was_too_big_to_record() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
+fn a_created_tree_too_big_to_record_leaves_its_entries_to_the_rest() -> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let _limit = PlacedEntriesGuard::set(3);
+    let root = tempfile::tempdir()?;
+    let source = root.path().join("source");
+    let target = root.path().join("target");
+    write_files(
+        &source,
+        &[
+            ("big/1.txt", "1"),
+            ("big/2.txt", "2"),
+            ("big/3.txt", "3"),
+            ("z.txt", "incoming z"),
+        ],
+    )?;
+    write_files(&target, &[("stays.txt", "keep me")])?;
+    let _scope = FsQuirks::install(root.path(), without_trash(Quirks::default()));
+    let (merged, plans) = merge_through_trash(&source, &target, false, real_copy());
+    merged?;
+    let [big, z] = ["big", "z.txt"].map(|name| target.join(name));
+    let parts = undo_parts(plans);
+    assert_eq!(placed_paths(&parts.2), [z.clone()]);
+
+    let events = run_undo(parts, staged_lookup(HashMap::new()));
+
+    assert!(!z.exists(), "{events:?}");
+    assert_eq!(names(&big)?, ["1.txt", "2.txt", "3.txt"]);
+    assert_eq!(kept_items(&events), [Location::local(&big)]);
+    Ok(())
+}
+
+#[test]
 fn a_merge_records_what_it_creates_only_where_undo_cannot_trash_it() -> Result<(), Box<dyn Error>> {
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
         .lock()
