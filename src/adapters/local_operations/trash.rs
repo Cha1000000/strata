@@ -17,7 +17,6 @@ use crate::services::TrashedOriginal;
 
 const NOT_MOVED_REASON: &str = "Trash reported success, but the item was not moved";
 
-/// Trashes `file`; a native item also returns the identity undo restores by.
 pub(super) async fn trash_entry(
     file: &gio::File,
     cancellable: &gio::Cancellable,
@@ -49,9 +48,8 @@ pub(super) fn trash_local_blocking(
     Ok(identity.into())
 }
 
-/// Trashes `path`, which `at` names with `identity`. An item still there
-/// afterwards fails as `NotSupported`, so callers fall back as they would
-/// without Trash.
+/// An item still there afterwards fails as `NotSupported`, so callers fall
+/// back as they would without Trash.
 pub(super) fn trash_verified(
     at: Entry<'_>,
     path: &Path,

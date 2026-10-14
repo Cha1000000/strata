@@ -30,11 +30,9 @@ use crate::{
 };
 
 pub(super) enum Deletion {
-    /// What a move's copy holds of its native source.
     Sources(gio::File, Manifest),
-    /// A moved source GIO copied.
     Source(gio::File),
-    /// A Replace original moved out of the way, with the replaced item's name.
+    /// With the replaced item's name.
     Displaced(DisplacedOriginal, String),
     Aside(MergeAside),
 }
@@ -59,8 +57,6 @@ impl Deletion {
         }
     }
 
-    /// Where what it would have deleted stays, as the barrier before it
-    /// failed with `flush`.
     fn kept(&self, flush: &str) -> String {
         match self {
             Self::Sources(..) | Self::Source(_) => flush.to_owned(),
@@ -72,12 +68,10 @@ impl Deletion {
     }
 }
 
-/// What a step of a transfer deletes once its copy is on disk.
 #[derive(Default)]
 pub(super) struct Owed {
     /// Opened before the copy wrote; none where only GIO can reach it.
     pub barrier: Option<Barrier>,
-    /// On other filesystems the copy wrote to, mounted beneath the first.
     pub nested: Vec<Barrier>,
     deletions: Vec<Deletion>,
 }
@@ -87,7 +81,6 @@ impl Owed {
         self.deletions.push(deletion);
     }
 
-    /// Flushes and deletes at once, as a batch of its own.
     pub(super) async fn settle(
         self,
         progress: Option<&TransferProgressTracker>,
@@ -106,7 +99,6 @@ impl Owed {
     }
 }
 
-/// Reaches `barrier`, or tells why the device could not finish writing.
 pub(super) async fn flush(barrier: Barrier) -> Result<(), String> {
     let removable = !removable_roots_for_paths(std::slice::from_ref(&barrier.path))
         .await
@@ -116,11 +108,9 @@ pub(super) async fn flush(barrier: Barrier) -> Result<(), String> {
         .map_err(|error| device_flush_failure(&error))
 }
 
-/// When a batch closes, besides at the end of its paste.
 #[derive(Clone, Copy)]
 pub(super) struct Limits {
     pub items: usize,
-    /// Bytes its entries copied.
     pub bytes: u64,
     /// Time since its first entry, checked as items finish.
     pub age: Duration,
@@ -155,7 +145,6 @@ fn limits() -> Limits {
 #[cfg(test)]
 static TEST_CLOCK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-/// Moves the batches' clock on by `by`, or back to real time with `None`.
 #[cfg(test)]
 pub(super) fn advance_batch_clock_for_test(by: Option<Duration>) {
     use std::sync::atomic::Ordering;
@@ -180,13 +169,11 @@ fn now() -> Instant {
     }
 }
 
-/// Deletions owed on one destination filesystem, behind one barrier.
 struct Batch<T> {
     key: Option<MountKey>,
     /// The earliest opened of its entries' barriers, so it reports the
     /// writeback errors of every one of their copies.
     barrier: Option<Barrier>,
-    /// The same for each filesystem mounted beneath it that they wrote to.
     nested: Vec<Barrier>,
     entries: Vec<(T, Vec<Deletion>)>,
     started: Instant,
@@ -231,8 +218,7 @@ impl<T> Batch<T> {
             || now().saturating_duration_since(self.started) >= limits.age
     }
 
-    /// Flushes once, then performs what each entry owes in order. A failed
-    /// flush deletes nothing.
+    /// A failed flush deletes nothing.
     async fn close(
         self,
         progress: Option<&TransferProgressTracker>,
@@ -277,20 +263,17 @@ impl<T> Batch<T> {
     }
 }
 
-/// Keeps in `kept` whichever of it and `barrier` was opened first.
 fn keep_earliest(kept: &mut Option<Barrier>, barrier: Barrier) {
     if kept.as_ref().is_none_or(|kept| barrier.precedes(kept)) {
         *kept = Some(barrier);
     }
 }
 
-/// Open batches, one per destination filesystem.
 struct Batches<T> {
     open: Vec<Batch<T>>,
 }
 
 impl<T> Batches<T> {
-    /// Adds what an item that `copied` bytes owes to its filesystem's batch.
     fn add(&mut self, tag: T, owed: Owed, copied: u64) {
         let key = owed.barrier.as_ref().map(|barrier| barrier.key);
         let index = match self
@@ -316,17 +299,13 @@ impl<T> Batches<T> {
     }
 }
 
-/// A transfer item that is done once what it owes is deleted, with where a
-/// move put it.
 pub(super) struct Done {
     pub index: usize,
     pub moved_to: Option<Location>,
 }
 
-/// What a transfer item came from.
 pub(super) struct Source {
     pub location: Location,
-    /// A move merges it into the folder of its name.
     pub merged: bool,
 }
 
@@ -346,7 +325,6 @@ pub(super) struct Settling {
 }
 
 impl Settling {
-    /// Settles the items from `sources`, which are moved when `moving`.
     pub(super) fn new(
         request_id: OperationRequestId,
         (sources, moving): (Vec<Source>, bool),
@@ -367,7 +345,6 @@ impl Settling {
         }
     }
 
-    /// Settles a paste's items.
     pub(super) fn paste(
         request: &PasteRequest,
         emit: Rc<dyn Fn(OperationEvent)>,
@@ -400,9 +377,8 @@ impl Settling {
         self.completed.push(done.index);
     }
 
-    /// The item, which copied `copied` bytes, is done once what it owes is
-    /// deleted. Batches that are due close, except after the `last` item:
-    /// [`Self::finish`] closes them, showing the device flush.
+    /// Batches that are due close, except after the `last` item: [`Self::finish`]
+    /// closes them, showing the device flush.
     pub(super) async fn owe(&mut self, done: Done, owed: Owed, copied: u64, last: bool) {
         if owed.deletions.is_empty() {
             self.done(done);
@@ -471,7 +447,6 @@ impl Settling {
             .collect()
     }
 
-    /// The items done so far, in the transfer's order.
     pub(super) fn completed(&self) -> Vec<Location> {
         self.locations(&self.completed)
     }

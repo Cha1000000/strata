@@ -159,8 +159,6 @@ impl Stage {
 struct Publication {
     destination: PathBuf,
     name: String,
-    /// Syncs the archive before publishing it, where what it may replace is
-    /// deleted once a barrier that cannot reach it is reached.
     sync_data: bool,
 }
 
@@ -263,7 +261,6 @@ impl Publication {
         }
     }
 
-    /// Chooses how to move the original out of the way when Trash is unavailable.
     fn without_trash(&self, parent: &OwnedFd) -> Result<Replacement, ArchiveError> {
         match displacement_without_trash(fs(), parent.as_fd(), false) {
             Ok(Some(Displacement::Exchange)) => Ok(Replacement::Exchange),

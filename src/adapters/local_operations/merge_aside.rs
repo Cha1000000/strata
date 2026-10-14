@@ -55,7 +55,6 @@ pub(super) struct MergeAside {
     moved: Vec<Moved>,
 }
 
-/// Originals left in the folder after a failed merge.
 struct Kept {
     folder: PathBuf,
     reason: PlaceError,
@@ -156,7 +155,6 @@ impl MergeAside {
         Ok(target)
     }
 
-    /// Moves the file at `path`, inside the merge target, into the folder.
     fn set_aside(&mut self, path: &Path, name: &str) -> Result<(), glib::Error> {
         let failed = |error| could_not_set_aside(name, error);
         let (Some(relative), Some(file_name)) = (
@@ -205,7 +203,6 @@ impl MergeAside {
         Ok(())
     }
 
-    /// The folder's copy of the original's parent directory.
     fn mirror(&mut self, relative: &Path) -> Result<Arc<OwnedFd>, PlaceError> {
         let mut current = self
             .folder
@@ -240,8 +237,7 @@ impl MergeAside {
         Ok(current)
     }
 
-    /// Moves every original back, newest first, and removes the emptied
-    /// folder. An original whose name was taken meanwhile stays in it.
+    /// An original whose name was taken meanwhile stays in the folder.
     fn put_back(&mut self) -> Result<(), Kept> {
         let mut failure = None;
         for moved in std::mem::take(&mut self.moved).into_iter().rev() {
@@ -297,7 +293,6 @@ impl MergeAside {
         failure
     }
 
-    /// Deletes the folder and every original in it, once the merge is on disk.
     pub(super) async fn remove(mut self) -> Result<(), glib::Error> {
         let path = self.folder_path().unwrap_or_default();
         let (Some(target), Some(folder)) = (self.target.take(), self.folder.take()) else {
@@ -315,7 +310,6 @@ impl MergeAside {
         .map_err(|error| not_removed(&path, &error))
     }
 
-    /// The originals stay in the folder because of `error`.
     pub(super) fn not_removed(&self, error: &glib::Error) -> glib::Error {
         not_removed(&self.folder_path().unwrap_or_default(), error)
     }
@@ -340,8 +334,6 @@ fn not_removed(folder: &Path, error: &glib::Error) -> glib::Error {
     ))
 }
 
-/// Sets the original at `path` aside off the main thread, starting the
-/// folder in `root` on first use.
 pub(super) async fn set_aside(
     aside: &mut Option<MergeAside>,
     root: &Path,
@@ -361,8 +353,6 @@ pub(super) async fn set_aside(
     result
 }
 
-/// Undoes the asides of a failed merge, naming the folder that keeps any
-/// original that could not be put back.
 pub(super) async fn abandon(aside: Option<MergeAside>, error: glib::Error) -> glib::Error {
     let Some(mut aside) = aside.filter(MergeAside::used) else {
         return error;
@@ -388,9 +378,6 @@ pub(super) async fn abandon(aside: Option<MergeAside>, error: glib::Error) -> gl
     ))
 }
 
-/// Puts back the originals a successful merge left nothing in place of,
-/// and returns the folder holding the others, to delete once the merge is
-/// on disk.
 pub(super) async fn finish(aside: Option<MergeAside>) -> Result<Option<MergeAside>, glib::Error> {
     let Some(mut aside) = aside.filter(MergeAside::used) else {
         return Ok(None);

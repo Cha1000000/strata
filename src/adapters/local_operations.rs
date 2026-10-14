@@ -442,7 +442,6 @@ struct TransferStop {
     skip_flush: bool,
 }
 
-/// Both reasons a transfer stopped, as one message.
 fn joined_failures(first: Option<String>, second: Option<String>) -> Option<String> {
     match (first, second) {
         (Some(first), Some(second)) => Some(crate::i18n::join_sentences(&first, &second)),
@@ -514,7 +513,6 @@ where
     results
 }
 
-/// Runs `work` on a worker thread with a flag that follows `cancellable`.
 async fn run_cancellable<T: Send + 'static>(
     cancellable: &gio::Cancellable,
     work: impl FnOnce(Arc<AtomicBool>) -> T + Send + 'static,
@@ -534,7 +532,6 @@ const TRANSFER_PROGRESS_INTERVAL: Duration = Duration::from_millis(33);
 // Smaller copies normally finish before the first sample; keep them on GIO's lower-overhead path.
 const BYTE_PROGRESS_MIN_FILE_SIZE: u64 = 8 * 1024 * 1024;
 
-/// Bytes and files an item has added to a transfer's progress.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct Reported {
     bytes: u64,
@@ -585,8 +582,6 @@ impl TransferProgressTracker {
         })
     }
 
-    /// The estimates raised by what items reported beyond them, and never
-    /// below what was transferred.
     fn totals(&self) -> (Option<u64>, Option<usize>) {
         let excess = self.excess.get();
         (
@@ -648,7 +643,6 @@ impl TransferProgressTracker {
         }
     }
 
-    /// Reports what an item did to items inside it, unless nothing.
     fn report(&self, report: TransferReport) {
         if !report.is_empty() {
             (self.emit)(OperationEvent::ItemsReported {
@@ -663,7 +657,6 @@ impl TransferProgressTracker {
         self.emit_if_due();
     }
 
-    /// Feeds what workers report to `shared` into this tracker until stopped.
     fn follow(self: &Rc<Self>, shared: &Arc<SharedProgress>) -> ProgressFollower {
         let seen = Rc::new(Cell::new(Reported::default()));
         let (tracker, timer_shared, timer_seen) = (self.clone(), shared.clone(), seen.clone());
@@ -1220,8 +1213,6 @@ struct ParallelCopyPlan {
     written_path: PathBuf,
 }
 
-/// The bulk path's plans and worker count, or `None` when an item needs the
-/// sequential path.
 async fn parallel_copy_plans(
     request: &PasteRequest,
     sources: &[gio::File],
@@ -1294,8 +1285,6 @@ struct ParallelCopyOutcome {
     written_paths: Vec<PathBuf>,
 }
 
-/// Copies or moves the planned items a chunk at a time; items done join
-/// `settling`, which stops the path when a batch it closed failed.
 async fn execute_parallel_copy_plans(
     plans: &[ParallelCopyPlan],
     (item_sizes, item_files): (&[Option<u64>], &[Option<usize>]),
@@ -1414,9 +1403,8 @@ fn duplicate_candidate_name(
     OsString::from_vec(candidate)
 }
 
-/// Keep Both's names for `name`: "name (1)", or one past the number it has,
-/// with a file's extension kept, wrapping past the largest number; at most
-/// `NUMBERED_NAME_ATTEMPTS` of them.
+/// Keep Both's names: "name (1)", or one past the number it has, with a
+/// file's extension kept, wrapping past the largest number.
 fn numbered_names(name: &OsStr, is_directory: bool) -> impl Iterator<Item = OsString> + '_ {
     let (stem, extension) = if is_directory {
         (name, None)
@@ -1433,16 +1421,13 @@ fn numbered_names(name: &OsStr, is_directory: bool) -> impl Iterator<Item = OsSt
         .map(move |index| duplicate_candidate_name(base_stem, extension, index))
 }
 
-/// What a new item does when its name is taken.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Taken {
     Fail,
-    /// Keep Both: the item takes the first free numbered name instead.
     Number,
 }
 
 impl Taken {
-    /// The names a new item tries, in order.
     fn names(self, name: &OsStr, is_directory: bool) -> impl Iterator<Item = OsString> + '_ {
         let (plain, numbered) = match self {
             Self::Fail => (Some(name.to_os_string()), None),
@@ -1452,9 +1437,6 @@ impl Taken {
     }
 }
 
-/// Runs `attempt` at `target`, or under [`Taken::Number`] at each numbered
-/// name beside it that a probe off the main thread finds free, until one is
-/// not taken meanwhile.
 async fn first_free_target<T, F: Future<Output = Result<T, glib::Error>>>(
     target: &gio::File,
     taken: Taken,
@@ -1533,12 +1515,9 @@ fn fat_family_child_name(name: &OsStr, fat_family: bool, used: &mut HashSet<OsSt
     }
 }
 
-/// What a recursive GIO copy meets at its target.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum CopyInto {
-    /// Nothing: every entry is created, and a taken name fails.
     New,
-    /// Entries that may exist, which a merge copies over and into.
     Existing,
 }
 
@@ -1552,7 +1531,6 @@ impl CopyInto {
         gio::FileCopyFlags::ALL_METADATA | overwrite
     }
 
-    /// Whether the copy makes the target folder, probing only for a merge.
     async fn makes_folder(self, target: &gio::File, cancellable: &gio::Cancellable) -> bool {
         match self {
             Self::New => true,
@@ -1561,7 +1539,6 @@ impl CopyInto {
     }
 }
 
-/// `g_file_query_exists` off the calling thread.
 async fn query_exists(file: &gio::File, cancellable: &gio::Cancellable) -> bool {
     await_cancellable(file, cancellable, |file, cancellable, result| {
         file.query_info_async(
@@ -1692,7 +1669,6 @@ impl CreatedCopyRoot {
     }
 }
 
-/// Makes a copy's target folder, recording it when it is the copy's root.
 /// The synchronous call reports a folder it made even if the copy is
 /// cancelled meanwhile, where `make_directory_async` reports only the cancel
 /// and the folder would be left behind.
@@ -1909,7 +1885,6 @@ fn copy_recursively_with_progress(
     })
 }
 
-/// A copy to the new `target`, or with `merge` into the folder `target`.
 #[cfg(test)]
 fn copy_recursively(
     source: gio::File,
@@ -1929,8 +1904,6 @@ fn copy_recursively(
     })
 }
 
-/// Copies `source` to the free name `target`, or under [`Taken::Number`] to
-/// the first free numbered name beside it, and returns where it went.
 async fn copy_new_recursively_on_filesystem(
     source: gio::File,
     target: gio::File,
@@ -2058,8 +2031,6 @@ async fn copy_new_recursively_on_filesystem(
     Ok(copied.0)
 }
 
-/// How a move attempt ended: done at the given target, or the item must be
-/// copied and the source deleted afterwards.
 enum Moved {
     Done(gio::File),
     Copy,
@@ -2074,8 +2045,6 @@ type MoveAttempt = Rc<
     ) -> Pin<Box<dyn Future<Output = Result<Moved, glib::Error>>>>,
 >;
 
-/// Copies a move's native source to a target GIO writes, and returns where
-/// it went.
 type RemoteCopy = Rc<
     dyn Fn(
         gio::File,
@@ -2089,16 +2058,12 @@ fn native_path(file: &gio::File) -> Option<PathBuf> {
     file.is_native().then(|| file.path()).flatten()
 }
 
-/// What one item of a transfer became, what it added to progress, and what
-/// it owes once its copy is on disk.
 struct Transferred {
     target: gio::File,
     reported: Reported,
     owed: Owed,
 }
 
-/// Moves `source` to `target` as [`move_local`] does, and returns where it
-/// went with what it owes.
 async fn move_local_owing(
     source: gio::File,
     target: gio::File,
@@ -2187,8 +2152,6 @@ async fn move_local_owing(
     })
 }
 
-/// Moves `source` to `target` as [`move_local`] does, deletes what it owes
-/// at once, and returns where it went.
 async fn move_local_with_progress(
     source: gio::File,
     target: gio::File,
@@ -2213,7 +2176,6 @@ async fn move_local_with_progress(
     Ok(moved.target)
 }
 
-/// Deletes what the copy of `source` holds unchanged, and reports what stays.
 async fn delete_moved_sources(
     source: &gio::File,
     sources: copy_engine::Manifest,
@@ -2234,7 +2196,6 @@ async fn delete_moved_sources(
     deleted
 }
 
-/// What a deletion through a manifest kept, by path beneath `parent`.
 fn kept_items(parent: &Path, kept: Vec<(PathBuf, KeptCause)>) -> Vec<KeptItem> {
     kept.into_iter()
         .map(|(path, cause)| KeptItem {
@@ -2289,7 +2250,6 @@ fn placement_error_kind(error: PlaceError) -> gio::IOErrorEnum {
 
 /// A placement failure as a complete message about `name`, using `template`
 /// (with `%{name}` and `%{error}`) unless the failure has its own sentence.
-/// Its kind stays generic, so callers that reword known kinds keep the name.
 fn placement_failure(
     error: PlaceError,
     name: &str,
@@ -2319,9 +2279,6 @@ fn could_not_move(name: &str, error: &str) -> String {
     .into_owned()
 }
 
-/// Gives the entries a move saved under other names their names back, now
-/// that `record` is undone, where nothing else has taken them, and reports
-/// those that keep theirs.
 async fn restore_renamed(record: &MoveRecord, progress: &TransferProgressTracker) {
     let mut renamed = record
         .renamed
@@ -2363,7 +2320,6 @@ async fn restore_renamed(record: &MoveRecord, progress: &TransferProgressTracker
     });
 }
 
-/// Renames a native item without replacing another, in one blocking step.
 async fn rename_native(source: PathBuf, target: PathBuf) -> Result<(), glib::Error> {
     let (Some(source_parent), Some(source_name), Some(target_parent), Some(target_name)) = (
         source.parent().map(Path::to_path_buf),
@@ -2405,10 +2361,7 @@ async fn rename_native(source: PathBuf, target: PathBuf) -> Result<(), glib::Err
     }
 }
 
-/// Pins both resolved parents and places the entry through the no-clobber
-/// ladder in one blocking step, under [`Taken::Number`] at the first numbered
-/// name not taken; a copy is allowed only once the target is known to be
-/// outside the source.
+/// A copy is allowed only once the target is known to be outside the source.
 fn move_local_path(
     source_path: PathBuf,
     target_path: PathBuf,
@@ -2488,9 +2441,6 @@ fn could_not_restore(name: &str, error: &str) -> String {
     .into_owned()
 }
 
-/// Moves the Trash item at `source_path` back to the free name
-/// `target_path` beneath `allowed_root`, and returns what to report about
-/// it.
 async fn move_restore_path(
     source_path: PathBuf,
     target_path: PathBuf,
@@ -2556,8 +2506,6 @@ async fn move_restore_path(
         Err(error) => return Err(placement_failure(error, &display_name, could_not_restore)),
     }
 
-    // Nothing places the item or a stage here, so it is copied entry by
-    // entry, and the Trash copy deleted once the copy is on disk.
     let barrier = copy_engine::barrier(barrier_path).await?;
     let options = copy_engine::Options {
         durable: true,
@@ -2623,8 +2571,6 @@ async fn move_restore(
     )))
 }
 
-/// Moves `source` to the free name `target`, or under [`Taken::Number`] to
-/// the first free numbered name beside it, and returns where it went.
 async fn move_local(
     source: gio::File,
     target: gio::File,
@@ -2649,8 +2595,6 @@ async fn move_local(
     .await
 }
 
-/// Moves `source` to `target` as [`move_local`] does, and returns where it
-/// went with what it owes.
 async fn move_owing(
     source: gio::File,
     target: gio::File,
@@ -2665,7 +2609,6 @@ async fn move_owing(
     move_local_owing(source, target, taken, cancellable, copying, attempt, remote).await
 }
 
-/// Moves an item in one step where that is safe, or tells it must be copied.
 fn attempt_move(progress: Option<Rc<TransferProgressTracker>>) -> MoveAttempt {
     Rc::new(move |source, target, taken, cancellable| {
         if let (Some(source_path), Some(target_path)) = (native_path(&source), native_path(&target))
@@ -2676,9 +2619,6 @@ fn attempt_move(progress: Option<Rc<TransferProgressTracker>>) -> MoveAttempt {
         if source.is_native() {
             return Box::pin(async { Ok(Moved::Copy) });
         }
-        // Remote (GVfs) sources have no local descriptor to walk against, so
-        // they keep the GIO path-based move below rather than claiming an
-        // equivalent guarantee.
         let move_progress = progress.as_ref().map(|progress| {
             progress.begin_file(
                 transfer_source_name(&source)
@@ -2740,7 +2680,6 @@ fn attempt_move(progress: Option<Rc<TransferProgressTracker>>) -> MoveAttempt {
     })
 }
 
-/// GIO's copy, for a native source moved to a target only GIO writes.
 fn remote_copy(copying: Copying) -> RemoteCopy {
     Rc::new(move |source, target, taken, cancellable| {
         let Copying {
@@ -2763,19 +2702,15 @@ enum StageContent {
     Symlink(OsString),
 }
 
-/// A hidden sibling that a copy is written into before it is placed at its
-/// final name. Created and discarded off the main thread relative to its
-/// pinned parent; there is no `Drop` cleanup.
+/// Created and discarded off the main thread; there is no `Drop` cleanup.
 struct StagedSibling {
     parent: Arc<OwnedFd>,
     name: OsString,
     identity: LocalFileIdentity,
-    /// Folders inside that keep their owner out, opened up again before a discard.
     restrictive: Vec<copy_engine::Restrictive>,
 }
 
 impl StagedSibling {
-    /// An empty folder or a symlink at a fresh `prefix` name in `parent`.
     fn create(
         parent: Arc<OwnedFd>,
         prefix: &str,
@@ -2844,8 +2779,6 @@ fn placement_error(error: PlaceError) -> glib::Error {
     glib::Error::new(placement_error_kind(error), &placement_reason(error))
 }
 
-/// `durable`: what only the copy will hold is deleted once its barrier is
-/// reached.
 async fn publish_staged_without_replace(
     staged: StagedSibling,
     target_path: PathBuf,
@@ -2919,8 +2852,6 @@ fn translated_io_error(message: &str) -> glib::Error {
     io_error(crate::i18n::tr(message))
 }
 
-/// Copies a source into a target, as a merge copies into its folder. A move
-/// (`true`) gets what the copy took from a native source.
 type CopyStep = Rc<
     dyn Fn(
         gio::File,
@@ -2930,21 +2861,15 @@ type CopyStep = Rc<
     ) -> Pin<Box<dyn Future<Output = Result<MergeCopied, glib::Error>>>>,
 >;
 
-/// What the deletions after a merge's copy need of it.
 #[derive(Clone, Copy, Default)]
 struct MergeCopy {
-    /// The source is deleted, so the copy records what it took.
     moving: bool,
-    /// See [`copy_engine::Options::durable`].
     durable: bool,
 }
 
-/// What a merge's copy leaves for the deletions after it.
 #[derive(Default)]
 struct MergeCopied {
-    /// What it took from the source, for a move.
     sources: Option<copy_engine::Manifest>,
-    /// See [`copy_engine::Copied::nested`].
     nested: Vec<copy_engine::Barrier>,
 }
 
@@ -2995,18 +2920,15 @@ async fn run_blocking<T: Send + 'static>(
         .map_err(|_| io_error("Local filesystem task panicked"))?
 }
 
-/// How the original leaves the target name.
 #[derive(Clone, Copy)]
 enum Removal {
     Trash,
-    /// Already in Trash; only the replacement is left to place.
     Trashed,
     Without(Displacement),
 }
 
 #[derive(Clone, Copy)]
 enum ReplaceStrategy {
-    /// A move within one filesystem renames the source itself onto the target.
     PlaceSource,
     Staged(Removal),
 }
@@ -3057,8 +2979,7 @@ fn split_local_path(path: &Path) -> Result<(PathBuf, OsString), glib::Error> {
         .ok_or_else(|| translated_io_error("Invalid local filesystem target"))
 }
 
-/// Pins both parents, compares the two items and chooses how the original
-/// leaves before anything is copied. `None` means both names are one item.
+/// `None` means both names are one item.
 fn plan_replace(
     source_path: &Path,
     target_path: &Path,
@@ -3179,7 +3100,6 @@ struct DisplacedOriginal {
     identity: LocalFileIdentity,
 }
 
-/// Deletes the original `name` replaced, once nothing else needs it.
 async fn remove_displaced_original(
     original: DisplacedOriginal,
     name: &str,
@@ -3200,13 +3120,11 @@ async fn remove_displaced_original(
 enum SourcePlaced {
     Trashed,
     SetAside(placement::SetAside),
-    /// The original is in Trash, but the source must be copied into place.
     CopyAfterTrash,
     /// The original is back at its name, and the source must be copied.
     PutBack,
 }
 
-/// Moves the original out of the way and renames the source onto its name.
 fn place_source(
     plan: &ReplacePlan,
     target_path: &Path,
@@ -3268,19 +3186,13 @@ struct StagedReplacement {
     displaced: Option<DisplacedOriginal>,
 }
 
-/// How a Replace copy reaches the disk before something only it holds is
-/// deleted.
 #[derive(Clone, Copy)]
 struct Durability {
-    /// See [`copy_engine::Options::durable`].
     durable: bool,
-    /// The barrier reaches only files synced one by one.
     each_file: bool,
 }
 
-/// Copies the source next to the target, then moves the original out of the
-/// way and publishes the copy. Every failure discards the stage. A move also
-/// returns what the copy took from the source.
+/// Every failure discards the stage.
 async fn replace_through_stage(
     plan: &Arc<ReplacePlan>,
     mut removal: Removal,
@@ -3477,10 +3389,7 @@ async fn set_aside_and_publish(
     })
 }
 
-/// Replaces `target` with `source` without a window in which neither
-/// exists. The original goes to Trash where possible, otherwise it is
-/// exchanged or set aside, and owed with a moved source until the
-/// replacement is on disk.
+/// Replaces `target` with `source` without a window in which neither exists.
 async fn replace_owing(
     source: gio::File,
     target: gio::File,
@@ -3541,8 +3450,6 @@ async fn replace_owing(
         }
     };
     let mut owed = Owed::default();
-    // Unless the original is in Trash already, it may be exchanged or set
-    // aside, and then deleted.
     if move_source || !matches!(removal, Removal::Trashed) {
         owed.barrier = Some(copy_engine::barrier(split_local_path(&target_path)?.0).await?);
     }
@@ -3579,8 +3486,6 @@ async fn replace_owing(
     Ok(owed)
 }
 
-/// Replaces `target` with `source` as [`replace_owing`] does, deleting
-/// what that owes at once.
 async fn replace_local_with(
     source: gio::File,
     target: gio::File,
@@ -3615,11 +3520,8 @@ async fn publish_staged_replacement(
         .map_err(|error| original_in_trash(&crate::services::gio_error_detail(&error)))
 }
 
-/// What a Replace took from a moved source, and what to report once the
-/// replacement is published.
 type StagedCopy = (Option<copy_engine::Manifest>, TransferReport);
 
-/// How a copy reports its progress and names what it makes.
 #[derive(Clone, Default)]
 struct Copying {
     progress: Option<Rc<TransferProgressTracker>>,
@@ -3779,9 +3681,7 @@ fn classify_merge<'a>(
 /// child lands inside `target`, overwriting same-named entries, while
 /// destination-only contents stay. Unlike [`replace_owing`] this writes
 /// into the live destination, so a failed or cancelled merge leaves a
-/// partial result behind and never cleans what was already there. Returns
-/// what it owes once the merge is on disk: the originals it set aside, and
-/// a moved source.
+/// partial result behind and never cleans what was already there.
 async fn merge_owing(
     source: gio::File,
     target: gio::File,
@@ -3855,7 +3755,6 @@ async fn merge_owing(
             return Err(merge_aside::abandon(aside, error).await);
         }
     }
-    // What GIO writes here, for a barrier that does not reach it.
     let written: Vec<PathBuf> = plan
         .created
         .iter()
@@ -3905,8 +3804,6 @@ async fn merge_owing(
     Ok(owed)
 }
 
-/// Merges `source` into `target` as [`merge_owing`] does, deleting what
-/// that owes at once.
 #[cfg(test)]
 async fn merge_local_with(
     source: gio::File,
@@ -3942,8 +3839,6 @@ fn progress_merge_hooks(
     }
 }
 
-/// Copies a folder's contents into the folder of the same name, never
-/// replacing an entry there.
 fn merge_copy(progress: Option<Rc<TransferProgressTracker>>, fat_family: bool) -> CopyStep {
     Rc::new(
         move |source, target, MergeCopy { moving, durable }, cancellable| {
@@ -4102,8 +3997,6 @@ impl PartialEq for LocalFileIdentity {
 }
 
 impl LocalFileIdentity {
-    /// Whether `other` may be this item, by what tells them apart besides
-    /// inode numbers: the type, and the birth time where both have one.
     fn may_be(&self, other: &Self) -> bool {
         self.kind == other.kind
             && match (self.birth, other.birth) {
@@ -5086,8 +4979,7 @@ async fn restore_worker_count(entries: &[RestoreEntry]) -> usize {
     .await
 }
 
-/// Restores `entry`, and returns what to report about it. Its Trash
-/// metadata stays while anything of it does.
+/// The entry's Trash metadata stays while anything of it does.
 async fn restore_trash_entry(
     entry: &RestoreEntry,
     context: &RestoreContext,
@@ -5181,8 +5073,7 @@ fn trashed_merge_original(
 }
 
 /// Reverts one overwritten merge path: removes the incoming copy so the
-/// staged original can move back out of Trash, and returns what to report
-/// about the restore.
+/// staged original can move back out of Trash.
 async fn undo_merged_overwrite(
     location: &Location,
     staged: &RestoreEntry,

@@ -33,7 +33,6 @@ pub(super) enum Placed {
     Linked,
     ReservedDirectory,
     RecreatedSymlink,
-    /// A plain rename over an empty file reserved first.
     OverReservedFile,
     /// A plain rename of a folder to a name found free.
     AfterCheck,
@@ -66,7 +65,6 @@ pub(super) const STAGE_PREFIX: &str = ".strata-replacement-";
 pub(super) const COMPRESSION_STAGE_PREFIX: &str = ".strata-compression-";
 // Only Strata's own scratch data, which may be swept.
 pub(super) const EXTRACTION_STAGE_PREFIX: &str = ".strata-extraction-";
-/// A partial new copy.
 pub(super) const COPY_PREFIX: &str = ".strata-copy-";
 const PROBE_PREFIX: &str = ".strata-probe-";
 const NAME_ATTEMPTS: usize = 8;
@@ -124,7 +122,6 @@ impl<'a> Mount<'a> {
         learn_mount_capability(self.key(), learn);
     }
 
-    /// Probes what is still unknown; a known `no_replace` skips its test.
     fn probe(&self, links: bool, folders: bool) -> Result<Probed, Errno> {
         let renames = self.capabilities().no_replace.is_none();
         self.probed_links.set(self.probed_links.get() || links);
@@ -169,8 +166,8 @@ impl<'a> Mount<'a> {
     }
 }
 
-/// Places `from` at `to`. With `expected`, an entry found to be another
-/// item after it moved is moved back and reported as `Changed`.
+/// With `expected`, an entry found to be another item after it moved is
+/// moved back and reported as `Changed`.
 pub(super) fn place(
     fs: &dyn FsOps,
     from: Entry<'_>,
@@ -192,8 +189,6 @@ pub(super) fn place_staged(
     ladder(fs, from, to, Some(expected))
 }
 
-/// [`place_staged`] for a caller whose own `renameat2(NOREPLACE)` failed
-/// with `error`.
 pub(super) fn place_after_rename(
     fs: &dyn FsOps,
     from: Entry<'_>,
@@ -240,7 +235,6 @@ fn ladder(
     }
 }
 
-/// The rungs after `renameat2(NOREPLACE)` failed with `error`.
 fn fallback(
     fs: &dyn FsOps,
     from: Entry<'_>,
@@ -322,7 +316,6 @@ fn exists(fs: &dyn FsOps, entry: Entry<'_>) -> Result<bool, PlaceError> {
     }
 }
 
-/// Decides a reply that may have been lost from where the item now is.
 fn resolve(
     fs: &dyn FsOps,
     from: Entry<'_>,
@@ -442,7 +435,6 @@ fn link_holds_source(
     }
 }
 
-/// Removes the old name once the new one is known to report the source's identity.
 fn finish_link(
     fs: &dyn FsOps,
     from: Entry<'_>,
@@ -630,7 +622,6 @@ pub(super) fn contains(
     None
 }
 
-/// A bounded run of fresh fixed-length `<prefix><uuid>` names.
 pub(super) fn hidden_names(prefix: &str) -> impl Iterator<Item = OsString> + '_ {
     (0..NAME_ATTEMPTS)
         .map(move |_| OsString::from(format!("{prefix}{}", glib::uuid_string_random())))
@@ -650,7 +641,6 @@ pub(super) fn left_by_lost_reply(
         .map(|stat| stat.identity)
 }
 
-/// Tries [`hidden_names`] until `attempt` stops reporting that the name is taken.
 pub(super) fn reserve_hidden_name<T>(
     prefix: &str,
     mut attempt: impl FnMut(&OsStr) -> Result<T, PlaceError>,
@@ -790,8 +780,6 @@ fn probe_folders(fs: &dyn FsOps, dir: BorrowedFd<'_>) -> Option<bool> {
     result
 }
 
-/// Removes a probe name while it still holds the empty file seen right after
-/// the probe made that name.
 fn remove_probe_file(fs: &dyn FsOps, entry: Entry<'_>, made: LocalFileIdentity) {
     if fs
         .stat(entry, true)
@@ -808,8 +796,6 @@ pub(super) struct SetAside {
     pub identity: LocalFileIdentity,
 }
 
-/// Moves `from` to the free name `to`, refusing an entry that is no longer
-/// `expected`, and returns the identity now at `to`.
 pub(super) fn move_aside(
     fs: &dyn FsOps,
     from: Entry<'_>,
@@ -824,8 +810,6 @@ pub(super) fn move_aside(
         .map_err(|_| PlaceError::Unconfirmed)
 }
 
-/// Moves the entry at `entry` to a hidden sibling, refusing an entry that is
-/// no longer `expected`.
 pub(super) fn set_aside(
     fs: &dyn FsOps,
     entry: Entry<'_>,
@@ -863,8 +847,6 @@ pub(super) enum Feasibility {
     No,
 }
 
-/// Whether the ladder can place an entry without risking a clobber, from
-/// what the mount is known to support.
 fn placeable(capabilities: MountCapabilities, directory: bool) -> Option<bool> {
     let fallback = if directory {
         capabilities.rename_over_empty_directory
@@ -880,8 +862,6 @@ fn placeable(capabilities: MountCapabilities, directory: bool) -> Option<bool> {
     }
 }
 
-/// Whether a hard link made in `dir` reports what it links, probing the mount
-/// on Strata's own names when that is not known yet.
 pub(super) fn links_hold(fs: &dyn FsOps, dir: BorrowedFd<'_>) -> bool {
     let mount = Mount::new(fs, dir);
     if mount.capabilities().hard_links.is_none() {
@@ -953,15 +933,12 @@ pub(super) fn exchange_allowed(fs: &dyn FsOps, dir: BorrowedFd<'_>) -> bool {
         && Mount::new(fs, dir).capabilities().exchange != Some(false)
 }
 
-/// How an existing entry is moved out of the way where Trash is unavailable.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum Displacement {
     Exchange,
     SetAside,
 }
 
-/// The safe way to displace an entry in `dir` without Trash, or `None`
-/// when the mount offers none.
 pub(super) fn displacement_without_trash(
     fs: &dyn FsOps,
     dir: BorrowedFd<'_>,
@@ -973,7 +950,6 @@ pub(super) fn displacement_without_trash(
     set_aside_if_safe(fs, dir, directory)
 }
 
-/// `SetAside` where that cannot clobber, also after EXCHANGE was rejected.
 pub(super) fn set_aside_if_safe(
     fs: &dyn FsOps,
     dir: BorrowedFd<'_>,
@@ -985,7 +961,6 @@ pub(super) fn set_aside_if_safe(
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum Renamed {
     Direct(Placed),
-    /// Only the case changed, through a hidden temporary name.
     CaseOnly,
     Unchanged,
 }
@@ -993,8 +968,6 @@ pub(super) enum Renamed {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) enum RenameFailure {
     Place(PlaceError),
-    /// A case-only rename failed and the item could not be moved back from
-    /// its temporary name.
     Stranded {
         temporary: OsString,
         error: PlaceError,

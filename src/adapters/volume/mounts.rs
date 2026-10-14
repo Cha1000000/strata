@@ -25,7 +25,6 @@ struct MountEntry {
     mount_type: MountType,
 }
 
-/// A mount's mountinfo type and superblock options.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct MountType {
     pub fs_type: String,
@@ -47,9 +46,7 @@ impl MountType {
         }
     }
 
-    /// How coarse the mount's times are, where a rewrite may leave a file's
-    /// modification time as it is. A `fuseblk` mount whose device udev
-    /// cannot tell may be exFAT.
+    /// A `fuseblk` mount whose device udev cannot tell may be exFAT.
     pub(crate) fn coarse_times(&self, fuse_format: Option<FuseFormat>) -> Option<CoarseTimes> {
         let here = |seconds| CoarseTimes {
             window: Duration::from_secs(seconds),
@@ -70,18 +67,14 @@ impl MountType {
     }
 }
 
-/// A mount whose times a rewrite may leave as they are.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct CoarseTimes {
-    /// How long after a file's modification time a rewrite may leave it.
     pub window: Duration,
     /// Whether this machine's clock stamps them, as on a local disk,
     /// rather than a server's.
     pub stamped_here: bool,
 }
 
-/// The format udev found on the device a `fuseblk` mount serves, for the
-/// daemons whose behaviour is known: ntfs-3g and exfat-fuse.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum FuseFormat {
     Ntfs,
@@ -89,7 +82,6 @@ pub(crate) enum FuseFormat {
 }
 
 impl FuseFormat {
-    /// From the device's `ID_FS_TYPE`.
     pub(crate) fn of(id_fs_type: &str) -> Option<Self> {
         match id_fs_type {
             "ntfs" => Some(Self::Ntfs),
@@ -149,7 +141,6 @@ impl MountTable {
             .unwrap_or_else(|_| Self::parse(b""))
     }
 
-    /// [`Self::current`], read off the calling thread.
     pub(crate) async fn load() -> Self {
         gio::spawn_blocking(Self::current)
             .await
@@ -196,7 +187,6 @@ impl MountTable {
         self.innermost(path).map(|entry| &entry.mount_type)
     }
 
-    /// The mount with this mountinfo id (`STATX_MNT_ID`).
     pub(crate) fn mount_type_of(&self, id: u64) -> Option<&MountType> {
         self.entries
             .iter()

@@ -23,7 +23,6 @@ pub(super) trait Job: Send + Sized + 'static {
     fn not_started(error: io::Error) -> Self::Error;
 }
 
-/// Jobs that must all complete before `final_job` is queued.
 pub(super) struct Group<J> {
     remaining: AtomicUsize,
     final_job: Mutex<Option<J>>,
@@ -123,7 +122,6 @@ impl<J: Job> WorkQueue<J> {
         }
     }
 
-    /// Counts one member of `group` as done; the last one queues its final job.
     pub(super) fn complete(&self, group: Option<Arc<Group<J>>>) {
         let Some(group) = group else {
             return;
@@ -152,8 +150,6 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|poison| poison.into_inner())
 }
 
-/// Runs workers until the queue drains or stops, then joins them. `nice`
-/// sets each worker's niceness; `None` keeps the caller's priority.
 pub(super) fn run_workers<J: Job>(
     queue: &Arc<WorkQueue<J>>,
     worker_count: usize,

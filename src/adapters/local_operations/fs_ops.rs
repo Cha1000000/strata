@@ -81,7 +81,6 @@ pub(super) trait FsOps: Send + Sync {
     fn names(&self, dir: Entry<'_>) -> Result<Vec<OsString>, Errno>;
     fn mount_key(&self, dir: BorrowedFd<'_>) -> MountKey;
     fn fs_type(&self, dir: BorrowedFd<'_>) -> Option<FsWord>;
-    /// GIO's `access::can-trash` for a native item, without following it.
     fn can_trash(&self, path: &Path) -> bool;
     /// GLib's own result: `Ok(false)` is a failure without an error (GLib #4060).
     fn trash(&self, path: &Path, cancellable: &gio::Cancellable) -> Result<bool, glib::Error>;
@@ -110,16 +109,12 @@ pub(super) trait FsOps: Send + Sync {
     fn read_at(&self, fd: BorrowedFd<'_>, buffer: &mut [u8], offset: u64) -> Result<usize, Errno>;
     fn write_at(&self, fd: BorrowedFd<'_>, buffer: &[u8], offset: u64) -> Result<usize, Errno>;
     fn set_len(&self, fd: BorrowedFd<'_>, len: u64) -> Result<(), Errno>;
-    /// Where the first data at or after `offset` starts (`SEEK_DATA`).
     fn seek_data(&self, fd: BorrowedFd<'_>, offset: u64) -> Result<u64, Errno>;
-    /// Where the first hole at or after `offset` starts (`SEEK_HOLE`); the
-    /// end of the file counts as one.
+    /// The end of the file counts as a hole.
     fn seek_hole(&self, fd: BorrowedFd<'_>, offset: u64) -> Result<u64, Errno>;
-    /// `fdatasync`.
     fn sync_data(&self, fd: BorrowedFd<'_>) -> Result<(), Errno>;
     /// `syncfs`, which reports the writeback errors since `fd` was opened.
     fn sync_fs(&self, fd: BorrowedFd<'_>) -> Result<(), Errno>;
-    /// `fsync` of a folder.
     fn sync_dir(&self, fd: BorrowedFd<'_>) -> Result<(), Errno>;
     /// Reports what `close` returns, where NFS, SMB and FUSE fail late writes.
     fn close(&self, fd: OwnedFd) -> Result<(), Errno>;
@@ -135,7 +130,6 @@ pub(super) trait FsOps: Send + Sync {
     fn xattr_names(&self, fd: BorrowedFd<'_>) -> Result<Vec<OsString>, Errno>;
     fn get_xattr(&self, fd: BorrowedFd<'_>, name: &OsStr) -> Result<Vec<u8>, Errno>;
     fn set_xattr(&self, fd: BorrowedFd<'_>, name: &OsStr, value: &[u8]) -> Result<(), Errno>;
-    /// The mountinfo type and options of the mount holding `fd`.
     fn mount_type(&self, fd: BorrowedFd<'_>) -> Option<MountType>;
     /// The format udev's database records (`ID_FS_TYPE`) for the block
     /// device holding `fd`, where it has a record.
@@ -143,10 +137,7 @@ pub(super) trait FsOps: Send + Sync {
     /// The folder at `at`, which may name several components, opened
     /// without following a symlink anywhere on the way.
     fn open_dir(&self, at: Entry<'_>) -> Result<OwnedFd, Errno>;
-    /// The folder's entries with their types; `Unknown` where the
-    /// filesystem does not say.
     fn list(&self, dir: BorrowedFd<'_>) -> Result<Vec<(OsString, FileType)>, Errno>;
-    /// Makes a regular file without opening it, or a named pipe.
     fn create_node(&self, at: Entry<'_>, kind: FileType, mode: Mode) -> Result<(), Errno>;
     /// Opens the named pipe at `at` for its metadata, which never waits for
     /// a writer.
@@ -154,9 +145,7 @@ pub(super) trait FsOps: Send + Sync {
     /// Creates a file exclusively without opening it for writing, so its
     /// close flushes nothing (vfat mounted with `flush` waits there).
     fn create_readonly(&self, at: Entry<'_>, mode: Mode) -> Result<OwnedFd, Errno>;
-    /// Opens a file this copy claimed, for writing.
     fn open_write(&self, at: Entry<'_>) -> Result<OwnedFd, Errno>;
-    /// The `FS_IOC_GETFLAGS` inode flags.
     fn file_flags(&self, fd: BorrowedFd<'_>) -> Result<u32, Errno>;
     fn set_link_times(
         &self,
@@ -186,16 +175,12 @@ pub(super) fn assert_off_main_thread() {
     );
 }
 
-/// Drops `held`, which closes descriptors, on a worker when the GTK main
-/// thread would.
 pub(super) fn drop_off_main_thread<T: Send + 'static>(held: T) {
     if glib::MainContext::default().is_owner() {
         drop(gio::spawn_blocking(move || drop(held)));
     }
 }
 
-/// Holds what closes descriptors when it is dropped, which happens off the
-/// GTK main thread wherever the holder is dropped.
 pub(super) struct OffMain<T: Send + 'static>(Option<T>);
 
 impl<T: Send + 'static> OffMain<T> {
@@ -304,7 +289,6 @@ fn timespec((seconds, nanoseconds): (i64, u32)) -> rustix::fs::Timespec {
     }
 }
 
-/// Reads a variable-length list or value, retrying when it grew in between.
 fn read_sized(mut read: impl FnMut(&mut [u8]) -> Result<usize, Errno>) -> Result<Vec<u8>, Errno> {
     let mut attempts = 0;
     loop {

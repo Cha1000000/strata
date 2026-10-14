@@ -2077,7 +2077,6 @@ struct NumberedNames {
 enum NumberedListing {
     #[default]
     Unread,
-    /// Changes that arrived while the folder was being read.
     Reading(HashSet<Location>),
     Read,
     Unavailable,
@@ -2151,8 +2150,6 @@ impl NumberedNames {
         }
     }
 
-    /// Returns the held changes that still need a query: every one when the folder could
-    /// not be read.
     fn finish_reading(&mut self, names: Option<HashSet<OsString>>) -> Vec<Location> {
         let NumberedListing::Reading(held) = std::mem::take(&mut self.listing) else {
             return Vec::new();
