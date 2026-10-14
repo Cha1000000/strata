@@ -946,87 +946,91 @@ fn selected_names_of_a_linked_file_on_an_smb_share_are_opened_one_at_a_time()
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock()?;
     // The first linked name opened stays open until the other was looked
     // at, as its copy does in parallel just before opening it; small reads
-    // keep the first open while that copy would open the other.
+    // keep the first open while that copy would open the other. The client
+    // may show a link count of 1, as it does for files it listed.
     type Reader = Box<dyn Fn() -> Vec<Call> + Send + Sync>;
-    let reader: Arc<OnceLock<Reader>> = Arc::default();
-    let read = reader.clone();
-    let both_looked_at = move || {
-        read.get().is_some_and(|calls| {
-            let calls = calls();
-            ["linked-a", "linked-b"].iter().all(|name| {
-                calls
-                    .iter()
-                    .any(|call| call.op == Op::Stat && call.names == [*name])
+    for single_link_count in [false, true] {
+        let reader: Arc<OnceLock<Reader>> = Arc::default();
+        let read = reader.clone();
+        let both_looked_at = move || {
+            read.get().is_some_and(|calls| {
+                let calls = calls();
+                ["linked-a", "linked-b"].iter().all(|name| {
+                    calls
+                        .iter()
+                        .any(|call| call.op == Op::Stat && call.names == [*name])
+                })
             })
-        })
-    };
-    let timed_out = Arc::new(AtomicBool::new(false));
-    let timer = timed_out.clone();
-    let hold: Racer = Box::new(move || {
-        let start = Instant::now();
-        while !both_looked_at() {
-            if start.elapsed() > Duration::from_secs(5) {
-                timer.store(true, Ordering::Relaxed);
-                return;
+        };
+        let timed_out = Arc::new(AtomicBool::new(false));
+        let timer = timed_out.clone();
+        let hold: Racer = Box::new(move || {
+            let start = Instant::now();
+            while !both_looked_at() {
+                if start.elapsed() > Duration::from_secs(5) {
+                    timer.store(true, Ordering::Relaxed);
+                    return;
+                }
+                thread::sleep(Duration::from_millis(5));
             }
-            thread::sleep(Duration::from_millis(5));
+        });
+        let smb = Quirks {
+            mount_type: Some(("cifs", "rw")),
+            name_opens: NameOpens::OneAtATime,
+            short_io: Some(4096),
+            single_link_count,
+            after: vec![(Op::OpenSource, "linked-*", 0, hold)],
+            ..Quirks::default()
+        };
+        let mounts = mounts(smb, |_| Quirks::default())?;
+        let folder = fs::File::open(&mounts.sources)?;
+        let rotational = thread::spawn(move || local_device_is_rotational(&folder))
+            .join()
+            .map_err(|_| "reading whether the disk is rotational")?;
+        let available = thread::available_parallelism().map_or(1, usize::from);
+        if bounded_local_worker_count(available, rotational == Some(true)) < 2 {
+            eprintln!("skipped: the bulk path copies one file at a time on this machine");
+            return Ok(());
         }
-    });
-    let smb = Quirks {
-        mount_type: Some(("cifs", "rw")),
-        name_opens: NameOpens::OneAtATime,
-        short_io: Some(4096),
-        after: vec![(Op::OpenSource, "linked-*", 0, hold)],
-        ..Quirks::default()
-    };
-    let mounts = mounts(smb, |_| Quirks::default())?;
-    let folder = fs::File::open(&mounts.sources)?;
-    let rotational = thread::spawn(move || local_device_is_rotational(&folder))
-        .join()
-        .map_err(|_| "reading whether the disk is rotational")?;
-    let available = thread::available_parallelism().map_or(1, usize::from);
-    if bounded_local_worker_count(available, rotational == Some(true)) < 2 {
-        eprintln!("skipped: the bulk path copies one file at a time on this machine");
-        return Ok(());
-    }
-    let _ = reader.set(Box::new(mounts.source_scope.reader()));
-    fs::write(mounts.sources.join("linked-a"), patterned(1 << 20))?;
-    fs::hard_link(
-        mounts.sources.join("linked-a"),
-        mounts.sources.join("linked-b"),
-    )?;
-    // Enough files for the bulk path, the linked names first, so they are
-    // copied in parallel.
-    let mut names = vec!["linked-a".to_owned(), "linked-b".to_owned()];
-    for index in 0..8 {
-        let name = format!("file-{index}");
-        fs::write(mounts.sources.join(&name), &name)?;
-        names.push(name);
-    }
+        let _ = reader.set(Box::new(mounts.source_scope.reader()));
+        fs::write(mounts.sources.join("linked-a"), patterned(1 << 20))?;
+        fs::hard_link(
+            mounts.sources.join("linked-a"),
+            mounts.sources.join("linked-b"),
+        )?;
+        // Enough files for the bulk path, the linked names first, so they are
+        // copied in parallel.
+        let mut names = vec!["linked-a".to_owned(), "linked-b".to_owned()];
+        for index in 0..8 {
+            let name = format!("file-{index}");
+            fs::write(mounts.sources.join(&name), &name)?;
+            names.push(name);
+        }
 
-    run_paste(PasteRequest {
-        id: OperationRequestId(98),
-        destination: Location::local(&mounts.destination),
-        items: names
-            .iter()
-            .map(|name| PasteItem {
-                source: Location::local(mounts.sources.join(name)),
-                conflict: TransferConflict::FailIfExists,
-            })
-            .collect(),
-        move_sources: false,
-    });
+        run_paste(PasteRequest {
+            id: OperationRequestId(98 + u64::from(single_link_count)),
+            destination: Location::local(&mounts.destination),
+            items: names
+                .iter()
+                .map(|name| PasteItem {
+                    source: Location::local(mounts.sources.join(name)),
+                    conflict: TransferConflict::FailIfExists,
+                })
+                .collect(),
+            move_sources: false,
+        });
 
-    assert!(
-        !timed_out.load(Ordering::Relaxed),
-        "the other linked name was never looked at while the first was open"
-    );
-    for name in &names {
-        assert_eq!(
-            fs::read(mounts.destination.join(name))?,
-            fs::read(mounts.sources.join(name))?,
-            "{name}"
+        assert!(
+            !timed_out.load(Ordering::Relaxed),
+            "{single_link_count}: the other linked name was never looked at while the first was open"
         );
+        for name in &names {
+            assert_eq!(
+                fs::read(mounts.destination.join(name))?,
+                fs::read(mounts.sources.join(name))?,
+                "{single_link_count}: {name}"
+            );
+        }
     }
     Ok(())
 }

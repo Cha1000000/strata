@@ -1675,8 +1675,8 @@ struct Opened {
     stat: EntryStat,
 }
 
-/// A source file's descriptor, and on an SMB source the hold on a linked
-/// file, which is released only once the descriptor is closed.
+/// A source file's descriptor, and on an SMB source the hold on its file,
+/// which is released only once the descriptor is closed.
 struct SourceFd {
     fd: Option<OwnedFd>,
     held: Option<OneOpen>,
@@ -1725,13 +1725,31 @@ fn open_file(fs: &dyn FsOps, at: Entry<'_>) -> Result<Opened, Failure> {
     }
 }
 
-/// Linked files on SMB sources that a copy has a name of open, by device
-/// and inode: the SMB client takes one lease per file and refuses an open
-/// of another name meanwhile, or a Samba server defers it forever.
-static OPEN_LINKED: Mutex<BTreeSet<(u64, u64)>> = Mutex::new(BTreeSet::new());
-static OPEN_LINKED_CLOSED: Condvar = Condvar::new();
+/// The file at `at` on an SMB source, just seen as `seen`, opened once no
+/// other copy has a name of it open.
+fn open_one_name(
+    fs: &dyn FsOps,
+    at: Entry<'_>,
+    seen: &EntryStat,
+    cancelled: &AtomicBool,
+) -> Result<Opened, Failure> {
+    let held = OneOpen::wait(seen, cancelled)?;
+    let mut source = open_file(fs, at)?;
+    source.fd.held = Some(held);
+    if source.stat.identity != seen.identity {
+        return Err(Failure::Changed);
+    }
+    Ok(source)
+}
 
-/// A linked file on an SMB source that this copy has a name of open.
+/// Files on SMB sources that a copy has a name of open, by device and
+/// inode: the SMB client takes one lease per file and refuses an open of
+/// another name meanwhile, or a Samba server defers it forever. Link counts
+/// the client took from a listing say 1, so every file is held.
+static OPEN_ON_SMB: Mutex<BTreeSet<(u64, u64)>> = Mutex::new(BTreeSet::new());
+static OPEN_ON_SMB_CLOSED: Condvar = Condvar::new();
+
+/// A file on an SMB source that this copy has a name of open.
 struct OneOpen((u64, u64));
 
 impl OneOpen {
@@ -1739,12 +1757,12 @@ impl OneOpen {
     /// open, unless the copy is cancelled meanwhile.
     fn wait(seen: &EntryStat, cancelled: &AtomicBool) -> Result<Self, Failure> {
         let key = (seen.identity.device, seen.identity.inode);
-        let mut open = lock(&OPEN_LINKED);
+        let mut open = lock(&OPEN_ON_SMB);
         while !open.insert(key) {
             if cancelled.load(Ordering::Acquire) {
                 return Err(Failure::Cancelled);
             }
-            open = OPEN_LINKED_CLOSED
+            open = OPEN_ON_SMB_CLOSED
                 .wait_timeout(open, Duration::from_millis(50))
                 .map_or_else(|error| error.into_inner().0, |(open, _)| open);
         }
@@ -1754,8 +1772,8 @@ impl OneOpen {
 
 impl Drop for OneOpen {
     fn drop(&mut self) {
-        lock(&OPEN_LINKED).remove(&self.0);
-        OPEN_LINKED_CLOSED.notify_all();
+        lock(&OPEN_ON_SMB).remove(&self.0);
+        OPEN_ON_SMB_CLOSED.notify_all();
     }
 }
 
@@ -1813,21 +1831,14 @@ impl<'a> FileCopy<'a> {
         }
     }
 
-    /// The file at `at`, just seen as `seen`, opened. On an SMB source a
-    /// name of a linked file opens only while no other copy has a name of
-    /// it open.
+    /// The file at `at`, just seen as `seen`, opened, on an SMB source one
+    /// name of a file at a time.
     fn open(&self, at: Entry<'_>, seen: &EntryStat) -> Result<Opened, Failure> {
         let fs = self.copy.fs;
-        if seen.nlink < 2 || Mount::new(fs, at.dir).family != Family::Smb {
+        if Mount::new(fs, at.dir).family != Family::Smb {
             return open_file(fs, at);
         }
-        let held = OneOpen::wait(seen, &self.copy.cancelled)?;
-        let mut source = open_file(fs, at)?;
-        source.fd.held = Some(held);
-        if source.stat.identity != seen.identity {
-            return Err(Failure::Changed);
-        }
-        Ok(source)
+        open_one_name(fs, at, seen, &self.copy.cancelled)
     }
 
     /// Returns the name the copy took and its identity there, and records

@@ -34,7 +34,7 @@ use super::{
     lock,
     manifest::{self, Pending},
     metadata::Snapshot,
-    open_file,
+    open_file, open_one_name,
     restrictive::{self, Restrictive},
     same_entry, stable_inodes, stage,
 };
@@ -956,7 +956,7 @@ impl File {
         }
         let at = Entry::new(&*self.source, &self.name);
         // An SMB client opens one name of a file at a time, so a later name
-        // of a linked file is never opened there.
+        // of a linked file is never opened there, and the others take turns.
         let (opened, stat) = if tree.opens_one_name_per_file() {
             let stat = fs
                 .stat(at, false)
@@ -990,13 +990,7 @@ impl File {
         }
         let source = match opened {
             Some(opened) => opened,
-            None => {
-                let opened = open_file(fs, at)?;
-                if opened.stat.identity != stat.identity {
-                    return Err(Failure::Changed);
-                }
-                opened
-            }
+            None => open_one_name(fs, at, &stat, &copy.cancelled)?,
         };
         let dir = &*self.target;
         let (path, (fd, expected)) = match self.claimed {

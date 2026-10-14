@@ -4,7 +4,8 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
 use rustix::io::Errno;
 
-use super::fs_quirks::{Op, Racer, Support};
+use super::super::copy_engine::{Destination, Options, copy_local};
+use super::fs_quirks::{Call, NameOpens, Op, Racer, Support};
 use super::*;
 use crate::adapters::volume::{MountCapabilities, learn_mount_capability};
 
@@ -789,6 +790,87 @@ fn a_copied_folder_keeps_its_hard_links_where_the_destination_can() -> Result<()
         for (folder, seconds) in folders {
             let mtime = fs::metadata(target.join(folder))?.mtime();
             assert_eq!(mtime, seconds, "{row}: {folder:?}");
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn names_of_a_linked_file_on_an_smb_share_are_opened_one_at_a_time() -> Result<(), Box<dyn Error>> {
+    use std::sync::{OnceLock, atomic::Ordering};
+    type Reader = Box<dyn Fn() -> Vec<Call> + Send + Sync>;
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock()?;
+    // Two workers copy both names: the destination keeps no links, or the
+    // client shows a link count of 1, as it does for files it listed. The
+    // first name opened stays open until the other was looked at.
+    let rows: [(&str, bool, Preset); 2] = [
+        ("no links at the destination", false, Quirks::vfat),
+        ("listed link count", true, Quirks::default),
+    ];
+    for (row, single_link_count, destination_quirks) in rows {
+        let reader: Arc<OnceLock<Reader>> = Arc::default();
+        let read = reader.clone();
+        let both_looked_at = move || {
+            read.get().is_some_and(|calls| {
+                let calls = calls();
+                ["a", "b"].iter().all(|name| {
+                    calls
+                        .iter()
+                        .any(|call| call.op == Op::Stat && call.names == [*name])
+                })
+            })
+        };
+        let timed_out = Arc::new(AtomicBool::new(false));
+        let timer = timed_out.clone();
+        let hold: Racer = Box::new(move || {
+            let start = Instant::now();
+            while !both_looked_at() {
+                if start.elapsed() > Duration::from_secs(5) {
+                    timer.store(true, Ordering::Relaxed);
+                    return;
+                }
+                thread::sleep(Duration::from_millis(5));
+            }
+        });
+        let root = tempfile::tempdir()?;
+        let sources = root.path().join("sources");
+        let destination = root.path().join("destination");
+        let source = sources.join("folder");
+        fs::create_dir_all(&source)?;
+        fs::create_dir(&destination)?;
+        fs::write(source.join("a"), b"linked")?;
+        fs::hard_link(source.join("a"), source.join("b"))?;
+        let source_scope = FsQuirks::install(
+            &sources,
+            Quirks {
+                mount_type: Some(("cifs", "rw")),
+                name_opens: NameOpens::OneAtATime,
+                single_link_count,
+                after: vec![(Op::OpenSource, "*", 0, hold)],
+                ..Quirks::default()
+            },
+        );
+        let _destination_scope = FsQuirks::install(&destination, destination_quirks());
+        let _ = reader.set(Box::new(source_scope.reader()));
+        let target = destination.join("folder");
+
+        glib::MainContext::default().block_on(copy_local(
+            source,
+            Destination::New(target.clone(), Taken::Fail),
+            Options {
+                workers: Some(2),
+                ..Options::default()
+            },
+            None,
+            &gio::Cancellable::new(),
+        ))?;
+
+        assert!(
+            !timed_out.load(Ordering::Relaxed),
+            "{row}: the other name was never looked at"
+        );
+        for name in ["a", "b"] {
+            assert_eq!(fs::read(target.join(name))?, b"linked", "{row}: {name}");
         }
     }
     Ok(())
