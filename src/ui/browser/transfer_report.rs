@@ -1,9 +1,5 @@
 // SPDX-License-Identifier: MIT
 
-//! Tells the user, once a transfer ends, about items inside the ones it was
-//! given that it saved under other names or left out, what a move left in
-//! its original folder, and what a restore left in the Trash.
-
 use std::time::Duration;
 
 use crate::model::Location;
@@ -16,7 +12,6 @@ use crate::ui::browser::ViewState;
 mod tests;
 
 const NOTICE_DURATION: Duration = Duration::from_secs(6);
-/// Items a dialog lists before it counts the rest.
 const LISTED_ITEMS: usize = 8;
 /// The longest line a notice shows whole, in characters; more items, or a
 /// longer line, go to a dialog.
@@ -33,7 +28,6 @@ enum Presentation {
         summary: String,
         detail: String,
     },
-    /// Items were left out or left behind.
     Warning {
         title: String,
         detail: String,
@@ -77,8 +71,6 @@ fn skipped_line(item: &SkippedItem) -> String {
     special_line(&display_name(&item.location), item.kind)
 }
 
-/// What happened to `item`, which a restore left `in_trash` or a move at its
-/// source.
 fn kept_line(item: &KeptItem, in_trash: bool) -> String {
     let name = display_name(&item.location);
     let folder = || {
@@ -115,7 +107,6 @@ fn kept_line(item: &KeptItem, in_trash: bool) -> String {
     }
 }
 
-/// The first [`LISTED_ITEMS`] lines as bullets, then how many more there are.
 fn bullets(lines: &[String]) -> String {
     let mut text = lines
         .iter()
@@ -157,8 +148,6 @@ fn followed(renamed: &[RenamedItem]) -> Vec<RenamedItem> {
     items
 }
 
-/// The renamed items' lines under the heading of their cause, in the
-/// order the causes first appear.
 fn renamed_sections(renamed: &[RenamedItem]) -> Vec<(String, Vec<String>)> {
     let mut sections = Vec::<(RenameCause, Vec<String>)>::new();
     for item in renamed {
@@ -181,7 +170,6 @@ fn sections(sections: Vec<(String, Vec<String>)>) -> String {
         .join("\n\n")
 }
 
-/// How `report` is shown, once its transfer completed or `stopped`.
 fn presentation(report: &TransferReport, stopped: bool) -> Option<Presentation> {
     let followed = followed(&report.renamed);
     let mut renamed = renamed_sections(&followed);
@@ -204,7 +192,6 @@ fn presentation(report: &TransferReport, stopped: bool) -> Option<Presentation> 
                 renamed.push((crate::i18n::count(heading, lines.len()), lines));
             }
         }
-        // A transfer that failed or was cancelled did not complete.
         let title = if stopped {
             crate::i18n::tr("Some items were left out or left behind")
         } else {

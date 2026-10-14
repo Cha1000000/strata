@@ -16,7 +16,6 @@ use crate::{
 mod background;
 pub(super) use background::BackgroundOperation;
 
-/// Whether `event` ends an operation that failed or was cancelled.
 fn stopped(event: &OperationEvent) -> bool {
     matches!(
         event,

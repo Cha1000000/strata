@@ -655,7 +655,6 @@ pub(super) fn show_partial_failure_dialog(parent: &impl IsA<gtk::Widget>, detail
     show_warning_dialog(parent, &crate::i18n::tr("Completed with errors"), detail);
 }
 
-/// [`show_partial_failure_dialog`] under another title.
 pub(super) fn show_warning_dialog(parent: &impl IsA<gtk::Widget>, message: &str, detail: &str) {
     show_message_dialog(
         parent,
@@ -678,8 +677,6 @@ pub(super) fn show_information_dialog(parent: &impl IsA<gtk::Widget>, message: &
     );
 }
 
-/// [`show_information_dialog`] with `summary` under the title in place of
-/// the file provider attribution.
 pub(super) fn show_information_dialog_with_summary(
     parent: &impl IsA<gtk::Widget>,
     message: &str,

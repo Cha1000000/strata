@@ -70,8 +70,7 @@ pub struct PasteItem {
 pub struct MoveRecord {
     pub original: Location,
     pub current: Location,
-    /// Entries inside it the move saved under other names, beneath
-    /// `current`, which undoing the move gives back their names.
+    /// Entries the move saved under other names, beneath `current`.
     pub renamed: Vec<RenamedItem>,
 }
 
@@ -129,7 +128,6 @@ impl TrashedOriginal {
     }
 }
 
-/// What became of the item a pasted item or new archive replaced.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ReplacedOriginal {
     Trashed(TrashedOriginal),
@@ -267,13 +265,11 @@ pub struct CancelledOperation {
     pub affected_locations: HashSet<Location>,
 }
 
-/// Why an item inside a transfer was saved under another name.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RenameCause {
     /// The destination takes the name for another item's, as a
     /// case-insensitive filesystem takes `makefile` for `Makefile`.
     Alias,
-    /// Another item has the name.
     Taken,
 }
 
@@ -284,7 +280,6 @@ pub struct RenamedItem {
     pub cause: RenameCause,
 }
 
-/// A special file a transfer cannot recreate at its destination.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SpecialKind {
     /// A named pipe the destination refuses.
@@ -299,15 +294,11 @@ pub struct SkippedItem {
     pub kind: SpecialKind,
 }
 
-/// Why a move left an item it copied in its original folder, or a restore
-/// in the Trash.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum KeptCause {
-    /// It changed while it was copied, or after.
     Changed,
     /// Deleting it failed with this OS error number.
     Undeletable(i32),
-    /// The destination cannot store it.
     Skipped(SpecialKind),
     /// Its copy was no longer where the move put it.
     CopyGone,
@@ -319,12 +310,10 @@ pub struct KeptItem {
     pub cause: KeptCause,
 }
 
-/// What a transfer did to items inside the ones it was given, told once it
-/// ends. Keep Both numbering, which the user chose, is not reported.
+/// Keep Both numbering, which the user chose, is not reported.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct TransferReport {
     pub renamed: Vec<RenamedItem>,
-    /// Left out of the copy.
     pub skipped: Vec<SkippedItem>,
     /// Left at the source by a move.
     pub kept: Vec<KeptItem>,
@@ -392,7 +381,6 @@ pub enum OperationEvent {
     FlushingToDevice {
         request_id: OperationRequestId,
     },
-    /// What one item of a transfer did to items inside it.
     ItemsReported {
         request_id: OperationRequestId,
         report: TransferReport,
@@ -477,7 +465,6 @@ pub enum OperationEvent {
         archive_name: String,
         /// The finished archive, recorded so undo can trash it.
         archive: Location,
-        /// The archive this one replaced, if any.
         original: Option<ReplacedOriginal>,
     },
     Extracted {

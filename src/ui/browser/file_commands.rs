@@ -197,14 +197,12 @@ pub(crate) fn can_rename(entry: &FileEntry) -> bool {
     !is_trash_location(&entry.location)
 }
 
-/// A typed rename that passed validation and still needs its name checked.
 pub(crate) struct TypedRename {
     pub(crate) entry: FileEntry,
     pub(crate) name: String,
 }
 
 impl TypedRename {
-    /// The item's path and the path it would take, for a local item.
     pub(crate) fn native_paths(&self) -> Option<(PathBuf, PathBuf)> {
         let current = self.entry.location.native_path()?;
         let wanted = current.parent()?.join(&self.name);
@@ -226,8 +224,6 @@ pub(crate) fn typed_rename_is_taken(current: &std::path::Path, wanted: &std::pat
 }
 
 impl BrowserView {
-    /// Validates renaming `entry` to exactly `text`. An unchanged name needs
-    /// no rename, and an invalid one is refused.
     pub fn prepare_typed_rename(
         &self,
         entry: FileEntry,
@@ -246,8 +242,6 @@ impl BrowserView {
         }))
     }
 
-    /// Starts the rename; the operation's own failures are reported like an
-    /// inline rename's.
     pub fn start_typed_rename(&self, rename: TypedRename) {
         if let Some(request) = self.state.browser.rename(rename.entry, rename.name) {
             self.state

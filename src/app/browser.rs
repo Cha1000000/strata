@@ -254,8 +254,6 @@ pub enum BrowserEvent {
     TransferFinished {
         moved_locations: Vec<Location>,
     },
-    /// What the finished transfer did to items inside the ones it was given,
-    /// and whether it failed or was cancelled after that.
     ItemsReported {
         report: TransferReport,
         stopped: bool,
@@ -490,8 +488,7 @@ struct MergeUndoState {
 }
 
 impl MergeUndoState {
-    /// Undo removes what a merge created under the names it was saved as. An
-    /// overwritten original stays in Trash when its incoming copy was saved
+    /// An overwritten original stays in Trash when its incoming copy was saved
     /// elsewhere, as another item has its name.
     fn rename(&mut self, renamed: &[RenamedItem]) {
         for item in renamed {
@@ -842,8 +839,6 @@ fn undo_move_parents(items: &[UndoMoveItem]) -> HashSet<Location> {
         .collect()
 }
 
-/// Where the transfer left `source`: where it was reported moved to, or its
-/// own name in `destination`.
 fn moved_target(
     source: &Location,
     destination: &Location,
@@ -855,9 +850,7 @@ fn moved_target(
         .or_else(|| source.transfer_target(destination))
 }
 
-/// Pairs each moved source with where the transfer left it and the entries
-/// it renamed inside. Items that never left their own directory carry no
-/// undo.
+/// Items that never left their own directory carry no undo.
 fn move_records(
     sources: &[Location],
     destination: &Location,
