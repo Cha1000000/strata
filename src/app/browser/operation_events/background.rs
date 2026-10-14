@@ -309,8 +309,9 @@ impl Browser {
                         });
                     }
                     _ => emit(BrowserEvent::OperationFailed {
-                        message: "The background operation returned an unexpected result."
-                            .to_owned(),
+                        message: crate::i18n::tr(
+                            "The background operation returned an unexpected result.",
+                        ),
                         password_failure: None,
                         report: std::mem::take(&mut report),
                     }),

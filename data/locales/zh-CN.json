@@ -952,6 +952,7 @@
   "The next RAR volume is missing": "缺少下一个 RAR 分卷",
   "The operation could not be completed": "无法完成操作",
   "The operation could not be confirmed.": "无法确认操作。",
+  "The background operation returned an unexpected result.": "后台操作返回了意外结果。",
   "The operation timed out": "操作超时",
   "The preview renderer timed out": "预览渲染器超时",
   "The preview worker stopped unexpectedly.": "预览工作进程意外停止。",

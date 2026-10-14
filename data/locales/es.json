@@ -952,6 +952,7 @@
   "The next RAR volume is missing": "Falta el siguiente volumen RAR",
   "The operation could not be completed": "No se pudo completar la operación",
   "The operation could not be confirmed.": "No se pudo confirmar la operación.",
+  "The background operation returned an unexpected result.": "La operación en segundo plano devolvió un resultado inesperado.",
   "The operation timed out": "Se agotó el tiempo de espera de la operación",
   "The preview renderer timed out": "Se agotó el tiempo del renderizador de vista previa",
   "The preview worker stopped unexpectedly.": "El proceso de vista previa se detuvo inesperadamente.",

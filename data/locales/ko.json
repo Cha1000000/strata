@@ -952,6 +952,7 @@
   "The next RAR volume is missing": "다음 RAR 볼륨이 없습니다",
   "The operation could not be completed": "작업을 완료할 수 없습니다",
   "The operation could not be confirmed.": "작업을 확인하지 못했습니다.",
+  "The background operation returned an unexpected result.": "백그라운드 작업이 예기치 않은 결과를 반환했습니다.",
   "The operation timed out": "작업 시간이 초과되었습니다",
   "The preview renderer timed out": "미리 보기 렌더러 시간이 초과되었습니다",
   "The preview worker stopped unexpectedly.": "미리 보기 작업자가 예기치 않게 중지되었습니다.",

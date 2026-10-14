@@ -952,6 +952,7 @@
   "The next RAR volume is missing": "次の RAR ボリュームがありません",
   "The operation could not be completed": "操作を完了できませんでした",
   "The operation could not be confirmed.": "操作を確認できませんでした。",
+  "The background operation returned an unexpected result.": "バックグラウンドの操作が予期しない結果を返しました。",
   "The operation timed out": "操作がタイムアウトしました",
   "The preview renderer timed out": "プレビューレンダラーがタイムアウトしました",
   "The preview worker stopped unexpectedly.": "プレビュー処理が予期せず停止しました。",

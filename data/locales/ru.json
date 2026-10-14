@@ -952,6 +952,7 @@
   "The next RAR volume is missing": "Отсутствует следующий том RAR",
   "The operation could not be completed": "Не удалось завершить операцию",
   "The operation could not be confirmed.": "Не удалось подтвердить операцию.",
+  "The background operation returned an unexpected result.": "Фоновая операция вернула непредвиденный результат.",
   "The operation timed out": "Время ожидания операции истекло",
   "The preview renderer timed out": "Время ожидания обработчика предпросмотра истекло",
   "The preview worker stopped unexpectedly.": "Процесс предпросмотра неожиданно остановился.",

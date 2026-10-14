@@ -952,6 +952,7 @@
   "The next RAR volume is missing": "The next RAR volume is missing",
   "The operation could not be completed": "The operation could not be completed",
   "The operation could not be confirmed.": "The operation could not be confirmed.",
+  "The background operation returned an unexpected result.": "The background operation returned an unexpected result.",
   "The operation timed out": "The operation timed out",
   "The preview renderer timed out": "The preview renderer timed out",
   "The preview worker stopped unexpectedly.": "The preview worker stopped unexpectedly.",

@@ -952,6 +952,7 @@
   "The next RAR volume is missing": "Thiếu tập RAR tiếp theo",
   "The operation could not be completed": "Không thể hoàn tất thao tác",
   "The operation could not be confirmed.": "Không thể xác nhận thao tác.",
+  "The background operation returned an unexpected result.": "Thao tác nền đã trả về kết quả không mong muốn.",
   "The operation timed out": "Thao tác đã hết thời gian chờ",
   "The preview renderer timed out": "Trình kết xuất xem trước đã hết thời gian chờ",
   "The preview worker stopped unexpectedly.": "Tiến trình xem trước đã dừng đột ngột.",
