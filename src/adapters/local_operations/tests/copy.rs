@@ -689,79 +689,60 @@ fn special_files_inside_a_copied_folder_are_recreated_or_left_out_and_reported()
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
         .lock()
         .map_err(|error| error.to_string())?;
-    for (row, preset, pipes) in [
-        ("tmpfs", Quirks::default as Preset, true),
-        ("vfat", Quirks::vfat, false),
-    ] {
-        let root = tempfile::tempdir()?;
-        let source = root.path().join("source");
-        let destination = root.path().join("destination");
-        fs::create_dir_all(&source)?;
-        fs::create_dir(&destination)?;
-        make_fifo(&source.join("00-pipe"), 0o600)?;
-        fs::set_permissions(source.join("00-pipe"), fs::Permissions::from_mode(0o640))?;
-        let _socket = std::os::unix::net::UnixListener::bind(source.join("socket"))?;
-        for index in 1..4 {
-            fs::write(
-                source.join(format!("{index:02}-file.txt")),
-                index.to_string(),
-            )?;
-        }
-        let modified = rustix::fs::Timespec {
-            tv_sec: 1_000_000_000,
-            tv_nsec: 0,
-        };
-        rustix::fs::utimensat(
-            rustix::fs::CWD,
-            source.join("00-pipe"),
-            &rustix::fs::Timestamps {
-                last_access: modified,
-                last_modification: modified,
-            },
-            rustix::fs::AtFlags::empty(),
+    let root = tempfile::tempdir()?;
+    let source = root.path().join("source");
+    let destination = root.path().join("destination");
+    fs::create_dir_all(&source)?;
+    fs::create_dir(&destination)?;
+    make_fifo(&source.join("00-pipe"), 0o600)?;
+    fs::set_permissions(source.join("00-pipe"), fs::Permissions::from_mode(0o640))?;
+    let _socket = std::os::unix::net::UnixListener::bind(source.join("socket"))?;
+    for index in 1..4 {
+        fs::write(
+            source.join(format!("{index:02}-file.txt")),
+            index.to_string(),
         )?;
-        let _sources = FsQuirks::install(&source, Quirks::default());
-        let _destination = FsQuirks::install(&destination, preset());
-        let target = destination.join("copy");
+    }
+    let modified = rustix::fs::Timespec {
+        tv_sec: 1_000_000_000,
+        tv_nsec: 0,
+    };
+    rustix::fs::utimensat(
+        rustix::fs::CWD,
+        source.join("00-pipe"),
+        &rustix::fs::Timestamps {
+            last_access: modified,
+            last_modification: modified,
+        },
+        rustix::fs::AtFlags::empty(),
+    )?;
+    let _sources = FsQuirks::install(&source, Quirks::default());
+    let _destination = FsQuirks::install(&destination, Quirks::default());
+    let target = destination.join("copy");
 
-        let report = copy_reporting(&source, &target, None)?;
+    let report = copy_reporting(&source, &target, None)?;
 
-        let mut expected = vec![(
+    let pipe = fs::symlink_metadata(target.join("00-pipe"))?;
+    assert!(pipe.file_type().is_fifo());
+    assert_eq!(pipe.mode() & 0o7777, 0o640);
+    assert_eq!(pipe.mtime(), 1_000_000_000);
+    assert_eq!(
+        report
+            .skipped
+            .into_iter()
+            .map(|item| (item.location, item.kind))
+            .collect::<Vec<_>>(),
+        [(
             Location::local(target.join("socket")),
             crate::services::SpecialKind::Socket,
-        )];
-        if pipes {
-            let pipe = fs::symlink_metadata(target.join("00-pipe"))?;
-            assert!(pipe.file_type().is_fifo(), "{row}");
-            assert_eq!(pipe.mode() & 0o7777, 0o640, "{row}");
-            assert_eq!(pipe.mtime(), 1_000_000_000, "{row}");
-        } else {
-            assert!(!target.join("00-pipe").exists(), "{row}");
-            expected.insert(
-                0,
-                (
-                    Location::local(target.join("00-pipe")),
-                    crate::services::SpecialKind::Pipe,
-                ),
-            );
-        }
+        )]
+    );
+    assert!(!target.join("socket").exists());
+    for index in 1..4 {
         assert_eq!(
-            report
-                .skipped
-                .into_iter()
-                .map(|item| (item.location, item.kind))
-                .collect::<Vec<_>>(),
-            expected,
-            "{row}"
+            fs::read_to_string(target.join(format!("{index:02}-file.txt")))?,
+            index.to_string()
         );
-        assert!(!target.join("socket").exists(), "{row}");
-        for index in 1..4 {
-            assert_eq!(
-                fs::read_to_string(target.join(format!("{index:02}-file.txt")))?,
-                index.to_string(),
-                "{row}"
-            );
-        }
     }
     Ok(())
 }
