@@ -149,8 +149,10 @@ fn bulk_trash_and_restore_update_the_listing_without_loading_gaps() {
     let names = (0..OPERATION_PUBLICATION_BATCH)
         .map(|index| format!("file-{index:03}"))
         .collect::<Vec<_>>();
-    let (browser, events, _) =
-        scripted_browser(ScriptedSource::scripted(Vec::<&str>::new(), vec![]));
+    let (browser, events, _) = scripted_browser(ScriptedSource {
+        watched: true,
+        ..ScriptedSource::scripted(Vec::<&str>::new(), vec![])
+    });
     let root = Location::local("/fixture");
     browser.navigate(root.clone());
     let entries = names

@@ -1094,6 +1094,7 @@ struct ScriptedSource {
     missing: RefCell<HashSet<Location>>,
     unreachable: RefCell<HashSet<Location>>,
     identities: FolderIdentities,
+    watched: bool,
 }
 
 impl ScriptedSource {
@@ -1109,6 +1110,7 @@ impl ScriptedSource {
             missing: RefCell::new(HashSet::new()),
             unreachable: RefCell::new(HashSet::new()),
             identities: FolderIdentities::default(),
+            watched: false,
         }
     }
 
@@ -1298,7 +1300,7 @@ impl FileSource for ScriptedSource {
         _include_hidden: bool,
         _notify: Rc<dyn Fn(DirectoryChange)>,
     ) -> Option<LoadHandle> {
-        None
+        self.watched.then(|| LoadHandle::new(|| {}))
     }
 }
 
