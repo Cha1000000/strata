@@ -1530,9 +1530,9 @@ impl Copy {
                 self.fs.set_len(target, 0)?;
             }
             let counted = attempt == 0;
-            let settled =
+            let unsettled =
                 coarse_times.and_then(|window| manifest::unsettled(&stat, window, manifest::now()));
-            let digest = match settled {
+            let digest = match unsettled {
                 Some(_) => Some(self.copy_digested(data, (source_fd, &stat), target, counted)?),
                 None => {
                     self.copy_data(
@@ -1559,8 +1559,8 @@ impl Copy {
                 let read = manifest::Read {
                     stat: read,
                     contents: digest
-                        .zip(settled)
-                        .map(|(digest, settled)| manifest::Contents::new(digest, settled)),
+                        .zip(unsettled)
+                        .map(|(digest, unsettled)| manifest::Contents::new(digest, unsettled)),
                 };
                 return Ok(Some((snapshot, read)));
             }

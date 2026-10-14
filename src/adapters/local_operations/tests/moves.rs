@@ -1858,7 +1858,7 @@ fn files_read_within_a_coarse_time_tick_are_compared_before_their_move_deletes_t
     // two-second steps; before the deletion, after growing as the copy
     // read it, which the copy then read again; or by renaming a file with
     // the same size and times over it as the deletion opens it to compare
-    // it.
+    // it. Or never, with the clock set back before the deletion.
     #[derive(Clone, Copy, PartialEq)]
     enum Rewrite {
         Never,
@@ -1867,13 +1867,14 @@ fn files_read_within_a_coarse_time_tick_are_compared_before_their_move_deletes_t
         Compared,
         Grown,
         RenamedOver,
+        ClockSetBack,
     }
     // The source volume, how long after its modification time the copy
     // reads the file (on sshfs, as with a server clock behind ours; past
     // the tick, as the coarse clock may still stamp it), when it is
     // rewritten, and whether the deletion reads it again. Only the
     // file itself is moved where it is rewritten as it is compared.
-    let rows: [(&str, Preset, Duration, Rewrite, bool); 15] = [
+    let rows: [(&str, Preset, Duration, Rewrite, bool); 16] = [
         ("vfat", vfat, recent, Rewrite::Deleting, true),
         (
             "vfat, past the tick",
@@ -1911,6 +1912,13 @@ fn files_read_within_a_coarse_time_tick_are_compared_before_their_move_deletes_t
         ("vfat, compared", vfat, recent, Rewrite::Compared, true),
         ("vfat, grown", vfat, recent, Rewrite::Grown, true),
         ("vfat, unchanged", vfat, recent, Rewrite::Never, true),
+        (
+            "vfat, clock set back",
+            vfat,
+            recent,
+            Rewrite::ClockSetBack,
+            false,
+        ),
         ("vfat, long before", vfat, long_ago, Rewrite::Never, false),
         ("ext4", Quirks::ext4, recent, Rewrite::Never, false),
     ];
@@ -1982,6 +1990,17 @@ fn files_read_within_a_coarse_time_tick_are_compared_before_their_move_deletes_t
                     vec![(Op::OpenSource, "a.txt", 1, rename_over)],
                 )
             }
+            Rewrite::ClockSetBack => {
+                let set_back: super::fs_quirks::Racer = Box::new(move || {
+                    let hour_before = epoch + Duration::from_secs(seconds - 3600);
+                    super::super::copy_engine::set_clock_for_test(Some(hour_before));
+                });
+                (
+                    &folder,
+                    vec![(Op::OpenDir, "folder", 1, set_back)],
+                    Vec::new(),
+                )
+            }
         };
         let quirks = Quirks {
             before,
@@ -2003,12 +2022,19 @@ fn files_read_within_a_coarse_time_tick_are_compared_before_their_move_deletes_t
             b"original"
         };
         assert_eq!(fs::read(copied)?, original, "{row}");
-        if rewrite == Rewrite::Never {
-            assert!(!item.exists(), "{row}");
-            assert_eq!(report.kept, [], "{row}");
-        } else {
-            assert_eq!(fs::read(&file)?, original.to_ascii_uppercase(), "{row}");
-            assert_eq!(report.kept, [kept(file, KeptCause::Changed)], "{row}");
+        match rewrite {
+            Rewrite::Never => {
+                assert!(!item.exists(), "{row}");
+                assert_eq!(report.kept, [], "{row}");
+            }
+            Rewrite::ClockSetBack => {
+                assert_eq!(fs::read(&file)?, original, "{row}");
+                assert_eq!(report.kept, [kept(file, KeptCause::Changed)], "{row}");
+            }
+            _ => {
+                assert_eq!(fs::read(&file)?, original.to_ascii_uppercase(), "{row}");
+                assert_eq!(report.kept, [kept(file, KeptCause::Changed)], "{row}");
+            }
         }
         let opened: Vec<usize> = calls
             .iter()

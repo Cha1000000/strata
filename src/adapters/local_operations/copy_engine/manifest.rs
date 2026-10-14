@@ -58,19 +58,33 @@ pub(in crate::adapters::local_operations) fn now() -> SystemTime {
     SystemTime::now()
 }
 
-/// Waits until `until`, checking `stopped` meanwhile; false if it stopped.
-fn wait_until(until: SystemTime, stopped: &dyn Fn() -> bool) -> bool {
+/// How waiting for a source's times to settle ended.
+enum Waited {
+    Settled,
+    Stopped,
+    /// The clock went back to before the copy read the source: a rewrite
+    /// may then be stamped within the tick the copy read, and waiting would
+    /// last as long as it went back.
+    SetBack,
+}
+
+/// Waits until `unsettled` settles, checking `stopped` meanwhile.
+fn wait_until(unsettled: Unsettled, stopped: &dyn Fn() -> bool) -> Waited {
     loop {
-        let left = until.duration_since(now()).unwrap_or_default();
+        let now = now();
+        if now < unsettled.read {
+            return Waited::SetBack;
+        }
+        let left = unsettled.settled.duration_since(now).unwrap_or_default();
         if left.is_zero() {
-            return true;
+            return Waited::Settled;
         }
         if stopped() {
-            return false;
+            return Waited::Stopped;
         }
         #[cfg(test)]
         if let Some(pretended) = lock(&TEST_NOW).as_mut() {
-            *pretended = until;
+            *pretended = unsettled.settled;
             continue;
         }
         thread::sleep(left.min(Duration::from_millis(50)));
@@ -81,21 +95,32 @@ fn wait_until(until: SystemTime, stopped: &dyn Fn() -> bool) -> bool {
 /// ours: a kernel tick, at most 10 ms, with room to spare.
 const COARSE_CLOCK: Duration = Duration::from_millis(100);
 
-/// Until when a rewrite of the file `stat` describes, read from `started`,
-/// may leave its modification time as it is, where the mount keeps times
-/// as coarse as `window`; `None` once any rewrite would move it.
+/// When a copy read a source file whose modification time a rewrite may
+/// leave as it is, and when any rewrite would move it.
+#[derive(Clone, Copy)]
+pub(super) struct Unsettled {
+    read: SystemTime,
+    settled: SystemTime,
+}
+
+/// For the file `stat` describes, read from `started`, where the mount keeps
+/// times as coarse as `window`; `None` once any rewrite would move its
+/// modification time.
 pub(super) fn unsettled(
     stat: &EntryStat,
     window: Duration,
     started: SystemTime,
-) -> Option<SystemTime> {
+) -> Option<Unsettled> {
     let (seconds, nanoseconds) = stat.mtime;
     let modified =
         UNIX_EPOCH.checked_add(Duration::new(u64::try_from(seconds).ok()?, nanoseconds))?;
     // A time ahead of our clock, from a server's, settles no later than one
     // read as it was set.
     let settled = modified.min(started).checked_add(window + COARSE_CLOCK)?;
-    (started < settled).then_some(settled)
+    (started < settled).then_some(Unsettled {
+        read: started,
+        settled,
+    })
 }
 
 /// What a copy holds of a source file whose times may not show a rewrite:
@@ -103,12 +128,12 @@ pub(super) fn unsettled(
 /// any rewrite would move its modification time.
 pub(super) struct Contents {
     digest: digest::Digest,
-    settled: SystemTime,
+    unsettled: Unsettled,
 }
 
 impl Contents {
-    pub(super) fn new(digest: digest::Digest, settled: SystemTime) -> Self {
-        Self { digest, settled }
+    pub(super) fn new(digest: digest::Digest, unsettled: Unsettled) -> Self {
+        Self { digest, unsettled }
     }
 }
 
@@ -665,8 +690,10 @@ impl At {
         size: u64,
         stopped: &dyn Fn() -> bool,
     ) -> Option<Result<Option<OwnedFd>, Errno>> {
-        if !wait_until(contents.settled, stopped) {
-            return None;
+        match wait_until(contents.unsettled, stopped) {
+            Waited::Settled => {}
+            Waited::Stopped => return None,
+            Waited::SetBack => return Some(Ok(None)),
         }
         let fs = self.deletion.fs;
         let file = match fs.open_source(self.entry_at(), false) {
