@@ -551,9 +551,10 @@ After a transfer, Strata reports what it could not do as asked:
 
 One short renamed line is shown as a notice. More are listed in an information dialog, up to eight
 lines and a count of the rest. Anything left out or left behind makes it a "Completed with errors"
-warning. When the transfer failed or was cancelled, its failure or cancel dialog lists the whole
-report under the outcome instead, in the same sections. Keep Both numbers, which the user asked
-for, metadata a destination cannot store and replaced FAT characters are not reported.
+warning. When the transfer failed or was cancelled, or a restore or merge undo completed with
+errors, the dialog of that outcome lists the whole report under it instead, in the same sections.
+Keep Both numbers, which the user asked for, metadata a destination cannot store and replaced FAT
+characters are not reported.
 
 ### Limits
 

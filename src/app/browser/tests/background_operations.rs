@@ -381,6 +381,7 @@ fn reported(events: &[BrowserEvent]) -> Vec<(usize, &crate::services::TransferRe
             BrowserEvent::ItemsReported { report }
             | BrowserEvent::OperationFailed { report, .. }
             | BrowserEvent::OperationCancelled { report, .. }
+            | BrowserEvent::OperationCompletedWithErrors { report, .. }
                 if !report.is_empty() =>
             {
                 Some((index, report))
@@ -393,9 +394,10 @@ fn reported(events: &[BrowserEvent]) -> Vec<(usize, &crate::services::TransferRe
 #[test]
 fn a_transfer_reports_its_items_once_after_it_ends() {
     type Terminal = fn(OperationRequestId) -> OperationEvent;
-    // Whether the event stops the transfer, given whether it runs in the background.
-    type Stops = fn(bool) -> bool;
-    let terminals: [(Terminal, Stops); 5] = [
+    // Whether the outcome the event ends in carries the report, given whether
+    // the operation runs in the background.
+    type Carries = fn(bool) -> bool;
+    let terminals: [(Terminal, Carries); 7] = [
         (
             |request_id| OperationEvent::Pasted {
                 request_id,
@@ -427,6 +429,25 @@ fn a_transfer_reports_its_items_once_after_it_ends() {
             |_| true,
         ),
         (
+            |request_id| OperationEvent::CompletedWithErrors {
+                request_id,
+                deleted_locations: Vec::new(),
+                retryable_locations: Vec::new(),
+                has_non_retryable_failures: true,
+                message: "Failed".into(),
+            },
+            |_| true,
+        ),
+        (
+            |request_id| OperationEvent::RestoreCompletedWithErrors {
+                request_id,
+                restored_locations: Vec::new(),
+                restored: Vec::new(),
+                message: "Failed".into(),
+            },
+            |_| true,
+        ),
+        (
             |request_id| OperationEvent::Restored {
                 request_id,
                 locations: Vec::new(),
@@ -436,8 +457,8 @@ fn a_transfer_reports_its_items_once_after_it_ends() {
         ),
     ];
     for background in [false, true] {
-        for (terminal, stops) in terminals {
-            let stopped = stops(background);
+        for (terminal, carries) in terminals {
+            let carried = carries(background);
             let browser = Browser::new(Rc::new(FakeFileSource));
             let operations = Rc::new(HeldOperations::default());
             browser.set_operation_provider(operations.clone());
@@ -478,9 +499,10 @@ fn a_transfer_reports_its_items_once_after_it_ends() {
                     BrowserEvent::TransferCompleted
                         | BrowserEvent::OperationFailed { .. }
                         | BrowserEvent::OperationCancelled { .. }
+                        | BrowserEvent::OperationCompletedWithErrors { .. }
                 )
             });
-            if stopped {
+            if carried {
                 assert_eq!(ended, Some(reports[0].0), "{row}");
             } else {
                 assert!(ended < Some(reports[0].0), "{row}");

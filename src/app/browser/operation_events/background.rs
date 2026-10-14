@@ -243,6 +243,7 @@ impl Browser {
                             retryable_locations,
                             has_non_retryable_failures,
                             message,
+                            report: std::mem::take(&mut report),
                         });
                     }
                     OperationEvent::Compressed {

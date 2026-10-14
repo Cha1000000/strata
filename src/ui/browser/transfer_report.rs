@@ -192,9 +192,9 @@ fn left_sections(report: &TransferReport) -> Vec<(String, Vec<String>)> {
     left
 }
 
-/// The detail of a failed or cancelled transfer's dialog: its `outcome`, then
-/// everything the transfer reported.
-pub(super) fn stopped_detail(outcome: String, report: &TransferReport) -> String {
+/// The detail of the dialog of an operation that failed, was cancelled or
+/// completed with errors: its `outcome`, then everything it reported.
+pub(super) fn outcome_detail(outcome: String, report: &TransferReport) -> String {
     let mut reported = renamed_sections(&followed(&report.renamed));
     reported.extend(left_sections(report));
     if reported.is_empty() {

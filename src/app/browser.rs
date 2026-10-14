@@ -254,7 +254,8 @@ pub enum BrowserEvent {
     TransferFinished {
         moved_locations: Vec<Location>,
     },
-    /// A stopped transfer's report goes with its failure or cancel instead.
+    /// The report of an operation that stopped or completed with errors goes
+    /// with that outcome instead.
     ItemsReported {
         report: TransferReport,
     },
@@ -314,6 +315,7 @@ pub enum BrowserEvent {
         /// doesn't support Trash. Always empty for a restore failure.
         retryable_locations: Vec<Location>,
         has_non_retryable_failures: bool,
+        report: TransferReport,
     },
     OperationCancelled {
         completed: usize,

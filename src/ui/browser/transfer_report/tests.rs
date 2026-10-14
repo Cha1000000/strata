@@ -166,7 +166,7 @@ fn items_left_out_or_left_behind_make_the_report_a_warning_or_follow_a_stop() {
         };
         let outcome = "Could not copy keys: Permission denied";
         assert_eq!(
-            stopped_detail(outcome.to_owned(), &report),
+            outcome_detail(outcome.to_owned(), &report),
             format!("{outcome}\n\n{detail}"),
             "{row}"
         );
@@ -210,7 +210,7 @@ fn a_stop_lists_renamed_items_by_cause_under_its_outcome() {
     let mut report = renamed(LISTED_ITEMS + 2);
     report.renamed[0].cause = RenameCause::Taken;
 
-    let detail = stopped_detail(outcome.to_owned(), &report);
+    let detail = outcome_detail(outcome.to_owned(), &report);
 
     assert!(detail.starts_with(&format!("{outcome}\n\n")), "{detail}");
     for cause in [RenameCause::Alias, RenameCause::Taken] {
@@ -360,10 +360,61 @@ fn pump_until(done: impl Fn() -> bool) {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Started {
+    Move,
+    Copy,
+    Restore,
+    MergeUndo,
+}
+
+fn start(view: &BrowserView, operations: &HeldOperations, started: Started) -> OperationRequestId {
+    let browser = view.browser();
+    match started {
+        Started::Move | Started::Copy => browser.transfer(
+            Location::local("/destination"),
+            vec![PasteItem {
+                source: Location::local("/source/run"),
+                conflict: TransferConflict::FailIfExists,
+            }],
+            started == Started::Move,
+            false,
+        ),
+        Started::Restore => browser.restore(vec![crate::services::RestoreTrashItem {
+            entry: crate::test_support::operations::entry(Location::local("/trash/files/run")),
+            destination: "/source/run".into(),
+        }]),
+        Started::MergeUndo => {
+            let copy = start(view, operations, Started::Copy);
+            operations.emit(
+                copy,
+                OperationEvent::Merged {
+                    request_id: copy,
+                    source: Location::local("/source/run"),
+                    created: vec![Location::local("/destination/run/app.conf")],
+                    overwritten: Vec::new(),
+                },
+            );
+            operations.emit(
+                copy,
+                OperationEvent::Pasted {
+                    request_id: copy,
+                    locations: Vec::new(),
+                },
+            );
+            let (generation, created, overwritten) = browser
+                .pending_undo_merge()
+                .expect("the merged copy's undo");
+            assert!(browser.undo_merge(generation, created, overwritten));
+        }
+    }
+    browser.last_started_operation().expect("an operation")
+}
+
 #[test]
-fn a_stopped_transfer_shows_one_dialog_with_its_outcome_and_report() {
+fn an_outcome_shows_one_dialog_with_the_report_of_its_operation() {
     crate::test_support::gtk_test(
-        "ui::browser::transfer_report::tests::a_stopped_transfer_shows_one_dialog_with_its_outcome_and_report",
+        "ui::browser::transfer_report::tests::an_outcome_shows_one_dialog_with_the_report_of_its_operation",
         || {
             super::super::progress::set_file_progress_delay_for_test(Duration::ZERO);
             let items = TransferReport {
@@ -375,14 +426,20 @@ fn a_stopped_transfer_shows_one_dialog_with_its_outcome_and_report() {
                     location: Location::local("/source/run/app.sock"),
                     cause: KeptCause::Skipped(SpecialKind::Socket),
                 }],
+                kept_in_trash: vec![KeptItem {
+                    location: Location::local("/trash/files/run/app.conf"),
+                    cause: KeptCause::Changed,
+                }],
                 ..renamed(1)
             };
             let lines = [
                 renamed_line(&items.renamed[0]),
                 skipped_line(&items.skipped[0]),
                 kept_line(&items.kept[0], false),
+                kept_line(&items.kept_in_trash[0], true),
             ];
             let failure = "Could not copy keys: Permission denied";
+            let errors = "Could not restore keys: Permission denied";
             let cancelled = crate::services::CancelledOperation {
                 completed: vec![Location::local("/source/run")],
                 not_attempted: vec![Location::local("/source/keys")],
@@ -390,7 +447,7 @@ fn a_stopped_transfer_shows_one_dialog_with_its_outcome_and_report() {
             };
             let summary = super::super::progress::cancelled_operation_summary(1, 0, 1);
             type Terminal = Box<dyn Fn(OperationRequestId) -> OperationEvent>;
-            let terminals: [(Terminal, &str, Option<&str>); 3] = [
+            let transfer_endings: [(Terminal, &str, Option<&str>); 3] = [
                 (
                     Box::new(|request_id| OperationEvent::TransferFailed {
                         request_id,
@@ -417,88 +474,121 @@ fn a_stopped_transfer_shows_one_dialog_with_its_outcome_and_report() {
                     None,
                 ),
             ];
-            // A move runs in the foreground and a copy in the background.
-            for moving in [true, false] {
-                for (terminal, title, outcome) in &terminals {
-                    for report in [items.clone(), TransferReport::default()] {
-                        let row =
-                            format!("moving: {moving}, {title}, items: {}", !report.is_empty());
-                        let view = BrowserView::new(
-                            Rc::new(crate::adapters::LocalFileSource),
-                            PeekBehavior::default(),
+            let restored_with_errors: Terminal =
+                Box::new(|request_id| OperationEvent::RestoreCompletedWithErrors {
+                    request_id,
+                    restored_locations: Vec::new(),
+                    restored: Vec::new(),
+                    message: errors.into(),
+                });
+            let completed_with_errors: Terminal =
+                Box::new(|request_id| OperationEvent::CompletedWithErrors {
+                    request_id,
+                    deleted_locations: Vec::new(),
+                    retryable_locations: Vec::new(),
+                    has_non_retryable_failures: true,
+                    message: errors.into(),
+                });
+            // A move, a restore and a merge undo run in the foreground and a
+            // copy in the background.
+            let mut rows = Vec::new();
+            for started in [Started::Move, Started::Copy] {
+                for (terminal, title, outcome) in &transfer_endings {
+                    rows.push((started, terminal, *title, *outcome));
+                }
+            }
+            rows.extend([
+                (
+                    Started::Restore,
+                    &restored_with_errors,
+                    "Completed with errors",
+                    Some(errors),
+                ),
+                (
+                    Started::MergeUndo,
+                    &completed_with_errors,
+                    "Completed with errors",
+                    Some(errors),
+                ),
+                (
+                    Started::Copy,
+                    &completed_with_errors,
+                    "Completed with errors",
+                    Some(errors),
+                ),
+            ]);
+            for (started, terminal, title, outcome) in rows {
+                for report in [items.clone(), TransferReport::default()] {
+                    let row = format!(
+                        "{started:?}, {title}, {outcome:?}, items: {}",
+                        !report.is_empty()
+                    );
+                    let view = BrowserView::new(
+                        Rc::new(crate::adapters::LocalFileSource),
+                        PeekBehavior::default(),
+                    );
+                    let operations = Rc::new(HeldOperations::default());
+                    view.browser().set_operation_provider(operations.clone());
+                    let window = gtk::Window::builder().child(&view.overlay()).build();
+                    window.present();
+                    let id = start(&view, &operations, started);
+                    let docked = view
+                        .state
+                        .background_file_progress
+                        .borrow()
+                        .get(&id)
+                        .map(|background| background.progress.clone());
+                    assert_eq!(docked.is_some(), started == Started::Copy, "{row}");
+                    let progress = docked.unwrap_or_else(|| view.state.file_progress());
+                    pump_until(|| progress.file_progress_view.borrow().is_some());
+                    if !report.is_empty() {
+                        operations.emit(
+                            id,
+                            OperationEvent::ItemsReported {
+                                request_id: id,
+                                report: report.clone(),
+                            },
                         );
-                        let operations = Rc::new(HeldOperations::default());
-                        view.browser().set_operation_provider(operations.clone());
-                        let window = gtk::Window::builder().child(&view.overlay()).build();
-                        window.present();
-                        view.browser().transfer(
-                            Location::local("/destination"),
-                            vec![PasteItem {
-                                source: Location::local("/source/run"),
-                                conflict: TransferConflict::FailIfExists,
-                            }],
-                            moving,
-                            false,
-                        );
-                        let id = view.browser().last_started_operation().expect("transfer");
-                        let docked = view
-                            .state
-                            .background_file_progress
-                            .borrow()
-                            .get(&id)
-                            .map(|background| background.progress.clone());
-                        assert_eq!(docked.is_some(), !moving, "{row}");
-                        let progress = docked.unwrap_or_else(|| view.state.file_progress());
-                        pump_until(|| progress.file_progress_view.borrow().is_some());
-                        if !report.is_empty() {
-                            operations.emit(
-                                id,
-                                OperationEvent::ItemsReported {
-                                    request_id: id,
-                                    report: report.clone(),
-                                },
+                    }
+
+                    operations.emit(id, terminal(id));
+
+                    pump_until(|| {
+                        progress.file_progress_view.borrow().is_none()
+                            && !modal_layers(&window)
+                                .iter()
+                                .any(crate::ui::modal::is_closing_layer)
+                    });
+                    let expected = outcome.is_some() || !report.is_empty();
+                    let dialogs = dialogs(&window);
+                    assert_eq!(dialogs.len(), usize::from(expected), "{row}: {dialogs:?}");
+                    if let [texts] = dialogs.as_slice() {
+                        let title = crate::i18n::tr(title);
+                        assert!(texts.contains(&title), "{row}: {texts:?}");
+                        let detail = match outcome {
+                            Some(outcome) => texts
+                                .iter()
+                                .find(|text| text.starts_with(outcome))
+                                .expect("the outcome"),
+                            None => texts
+                                .iter()
+                                .find(|text| text.contains(lines[0].as_str()))
+                                .expect("the report"),
+                        };
+                        if report.is_empty() {
+                            assert_eq!(Some(detail.as_str()), outcome, "{row}");
+                        }
+                        for line in &lines {
+                            assert_eq!(
+                                detail.contains(line.as_str()),
+                                !report.is_empty(),
+                                "{row}: {detail}"
                             );
                         }
-
-                        operations.emit(id, terminal(id));
-
-                        pump_until(|| {
-                            progress.file_progress_view.borrow().is_none()
-                                && !modal_layers(&window)
-                                    .iter()
-                                    .any(crate::ui::modal::is_closing_layer)
-                        });
-                        let expected = outcome.is_some() || !report.is_empty();
-                        let dialogs = dialogs(&window);
-                        assert_eq!(dialogs.len(), usize::from(expected), "{row}: {dialogs:?}");
-                        if let [texts] = dialogs.as_slice() {
-                            let title = crate::i18n::tr(title);
-                            assert!(texts.contains(&title), "{row}: {texts:?}");
-                            let detail = match outcome {
-                                Some(outcome) => texts
-                                    .iter()
-                                    .find(|text| text.starts_with(outcome))
-                                    .expect("the outcome"),
-                                None => texts
-                                    .iter()
-                                    .find(|text| text.contains(lines[0].as_str()))
-                                    .expect("the report"),
-                            };
-                            if report.is_empty() {
-                                assert_eq!(Some(detail.as_str()), *outcome, "{row}");
-                            }
-                            for line in &lines {
-                                assert_eq!(
-                                    detail.contains(line.as_str()),
-                                    !report.is_empty(),
-                                    "{row}: {detail}"
-                                );
-                            }
-                        }
-                        view.browser().clear_observer();
-                        view.dispose_file_progress();
-                        window.destroy();
                     }
+                    view.browser().clear_observer();
+                    view.dispose_file_progress();
+                    window.destroy();
                 }
             }
         },

@@ -900,7 +900,7 @@ impl ViewState {
                 self.finished_send_to_completion.take();
                 self.pending_archive_destination.take();
                 let retry = self.pending_extract_retry.take();
-                let message = super::transfer_report::stopped_detail(message.clone(), report);
+                let message = super::transfer_report::outcome_detail(message.clone(), report);
                 let password_failure = *password_failure;
                 let weak = Rc::downgrade(self);
                 self.dismiss_file_operation_progress_then(move || {
@@ -931,6 +931,7 @@ impl ViewState {
                 message,
                 retryable_locations,
                 has_non_retryable_failures,
+                report,
             } => {
                 self.suppress_scroll_after_drop.set(false);
                 self.drop_active_depths.set(None);
@@ -941,7 +942,7 @@ impl ViewState {
                     self.pending_delete_entries.take(),
                     retryable_locations,
                 );
-                let message = message.clone();
+                let message = super::transfer_report::outcome_detail(message.clone(), report);
                 let has_non_retryable_failures = *has_non_retryable_failures;
                 let weak = Rc::downgrade(self);
                 self.dismiss_file_operation_progress_then(move || {
@@ -981,7 +982,7 @@ impl ViewState {
                 self.pending_send_to_completion.take();
                 self.finished_send_to_completion.take();
                 let affected_locations = affected_locations.clone();
-                let message = super::transfer_report::stopped_detail(
+                let message = super::transfer_report::outcome_detail(
                     super::progress::cancelled_operation_summary(
                         *completed,
                         *failed,

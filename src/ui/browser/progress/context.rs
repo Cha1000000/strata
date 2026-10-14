@@ -290,7 +290,10 @@ impl ViewState {
                 message,
                 retryable_locations,
                 has_non_retryable_failures,
+                report,
             } => {
+                let message =
+                    &super::super::transfer_report::outcome_detail(message.clone(), report);
                 let entries = super::super::trash::retryable_delete_entries(
                     background.delete_entries.clone(),
                     retryable_locations,
@@ -346,7 +349,7 @@ impl ViewState {
                 show_error_dialog(
                     &self.overlay,
                     &crate::i18n::tr("Unable to complete operation"),
-                    &super::super::transfer_report::stopped_detail(message.clone(), report),
+                    &super::super::transfer_report::outcome_detail(message.clone(), report),
                 );
                 true
             }
@@ -364,7 +367,7 @@ impl ViewState {
                 show_error_dialog(
                     &self.overlay,
                     &crate::i18n::tr("Operation cancelled"),
-                    &super::super::transfer_report::stopped_detail(
+                    &super::super::transfer_report::outcome_detail(
                         super::cancelled_operation_summary(*completed, *failed, *not_attempted),
                         report,
                     ),

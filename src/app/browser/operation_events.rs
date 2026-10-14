@@ -545,6 +545,7 @@ impl Browser {
                     message,
                     retryable_locations,
                     has_non_retryable_failures,
+                    report: std::mem::take(report),
                 });
             }
             OperationEvent::Deleted { locations, .. } => {
@@ -574,6 +575,7 @@ impl Browser {
                     message,
                     retryable_locations: Vec::new(),
                     has_non_retryable_failures: true,
+                    report: std::mem::take(report),
                 });
             }
             OperationEvent::Cancelled { result, .. } => self.publish_cancelled_operation(
