@@ -1098,10 +1098,12 @@ fn a_rewrite_that_keeps_the_size_and_times_is_kept_at_the_source() -> Result<(),
         let changed = folder.join("b.txt");
         fs::write(&changed, b"b1")?;
         let path = changed.clone();
+        let probe = root.path().join("probe");
         // After the copy, as the deletion opens the folder: only the change
         // time tells.
         let racer: super::fs_quirks::Racer = Box::new(move || {
             let before = fs::metadata(&path).expect("stat the source");
+            wait_for_a_later_change_time(&probe, &before);
             fs::write(&path, b"B2").expect("rewrite the source");
             let modified = rustix::fs::Timespec {
                 tv_sec: before.mtime(),
@@ -1130,6 +1132,19 @@ fn a_rewrite_that_keeps_the_size_and_times_is_kept_at_the_source() -> Result<(),
         assert_eq!(report.kept, [kept(changed, KeptCause::Changed)], "{row}");
     }
     Ok(())
+}
+
+/// A rewrite within one change-time tick of `than` (10 ms on exFAT) would keep
+/// its change time.
+fn wait_for_a_later_change_time(probe: &Path, than: &fs::Metadata) {
+    loop {
+        fs::write(probe, b"probe").expect("write the probe");
+        let stamped = fs::metadata(probe).expect("stat the probe");
+        if (stamped.ctime(), stamped.ctime_nsec()) > (than.ctime(), than.ctime_nsec()) {
+            break;
+        }
+    }
+    fs::remove_file(probe).expect("remove the probe");
 }
 
 #[test]
