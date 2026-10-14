@@ -1672,10 +1672,37 @@ impl Copy {
 
 /// An open source file and its snapshot from that descriptor.
 struct Opened {
-    fd: OwnedFd,
+    fd: SourceFd,
     stat: EntryStat,
-    /// Released once `fd` is closed.
-    _held: Option<OneOpen>,
+}
+
+/// A source file's descriptor, and on an SMB source the hold on a linked
+/// file, which is released only once the descriptor is closed.
+struct SourceFd {
+    fd: Option<OwnedFd>,
+    held: Option<OneOpen>,
+}
+
+impl SourceFd {
+    fn new(fd: OwnedFd) -> Self {
+        Self {
+            fd: Some(fd),
+            held: None,
+        }
+    }
+}
+
+impl AsFd for SourceFd {
+    fn as_fd(&self) -> BorrowedFd<'_> {
+        self.fd.as_ref().expect("open until dropped").as_fd()
+    }
+}
+
+impl Drop for SourceFd {
+    fn drop(&mut self) {
+        // Closed before `held` is released, as the fields drop after this.
+        drop(self.fd.take());
+    }
 }
 
 /// `name` could not be opened as what it was listed as.
@@ -1691,9 +1718,8 @@ fn changed(name: &OsStr, error: Errno) -> Failure {
 fn open_file(fs: &dyn FsOps, at: Entry<'_>) -> Result<Opened, Failure> {
     match fs.open_source(at, true) {
         Ok(Some((fd, stat))) => Ok(Opened {
-            fd,
+            fd: SourceFd::new(fd),
             stat,
-            _held: None,
         }),
         Ok(None) => Err(Failure::Changed),
         Err(error) => Err(changed(at.name, error)),
@@ -1797,14 +1823,12 @@ impl<'a> FileCopy<'a> {
             return open_file(fs, at);
         }
         let held = OneOpen::wait(seen, &self.copy.cancelled)?;
-        let source = open_file(fs, at)?;
+        let mut source = open_file(fs, at)?;
+        source.fd.held = Some(held);
         if source.stat.identity != seen.identity {
             return Err(Failure::Changed);
         }
-        Ok(Opened {
-            _held: Some(held),
-            ..source
-        })
+        Ok(source)
     }
 
     /// Returns the name the copy took and its identity there, and records
@@ -2114,9 +2138,8 @@ impl<'a> FileCopy<'a> {
         let fs = self.copy.fs;
         let source = match fs.open_source(from, false)? {
             Some((fd, stat)) if stat.identity == expected => Opened {
-                fd,
+                fd: SourceFd::new(fd),
                 stat,
-                _held: None,
             },
             _ => return Err(Failure::Changed),
         };
