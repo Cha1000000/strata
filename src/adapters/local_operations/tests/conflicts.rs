@@ -536,15 +536,16 @@ fn keep_both_takes_the_next_number_past_names_already_taken() -> Result<(), Box<
     }
     // Where a stage cannot be placed, it is copied out to a name another
     // program takes first.
-    let rows: [(
-        &str,
+    type Row = (
+        &'static str,
         Kind,
         Way,
         Preset,
-        &[&str],
-        Option<(Op, &str, usize)>,
-        &str,
-    ); 7] = [
+        &'static [&'static str],
+        Option<(Op, &'static str, usize)>,
+        &'static str,
+    );
+    let rows: [Row; 7] = [
         (
             "my.photos",
             Kind::Folder,

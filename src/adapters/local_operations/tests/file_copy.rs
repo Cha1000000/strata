@@ -548,13 +548,14 @@ fn sparse_files_keep_their_holes_where_both_ends_can() -> Result<(), Box<dyn Err
     };
     // The source, the destination (`None` on the same mount), what happens
     // to the source as the copy runs, and whether holes are kept.
-    let rows: [(
-        &str,
+    type Row = (
+        &'static str,
         Preset,
         Option<Preset>,
-        Option<(Op, &str, fn(&Path) -> Racer)>,
+        Option<(Op, &'static str, fn(&Path) -> Racer)>,
         bool,
-    ); 12] = [
+    );
+    let rows: [Row; 12] = [
         ("one mount", ext4, None, None, true),
         ("two mounts", ext4, Some(ext4), None, true),
         (

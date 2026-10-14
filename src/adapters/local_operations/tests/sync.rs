@@ -398,17 +398,19 @@ impl Barriers {
     }
 }
 
+type PasteMoves = (
+    Rc<RefCell<Option<LoadHandle>>>,
+    Rc<RefCell<Vec<OperationEvent>>>,
+    Rc<RefCell<Vec<Location>>>,
+);
+
 fn paste_moves(
     id: u64,
     destination: &Path,
     sources: &[PathBuf],
     barriers: &Barriers,
     cancel_after: Option<usize>,
-) -> (
-    Rc<RefCell<Option<LoadHandle>>>,
-    Rc<RefCell<Vec<OperationEvent>>>,
-    Rc<RefCell<Vec<Location>>>,
-) {
+) -> PasteMoves {
     let events = Rc::new(RefCell::new(Vec::new()));
     let early = Rc::new(RefCell::new(Vec::new()));
     let handle = Rc::new(RefCell::new(None));
@@ -1324,8 +1326,13 @@ fn a_barrier_needs_a_readable_folder_only_where_it_flushes_one() -> Result<(), B
             },
         );
 
-        let (_operation, events, _) =
-            paste_moves(id, &destination, &[source.clone()], &Barriers::new(), None);
+        let (_operation, events, _) = paste_moves(
+            id,
+            &destination,
+            std::slice::from_ref(&source),
+            &Barriers::new(),
+            None,
+        );
         pump_until_transfer(&events);
 
         if moved {
@@ -1473,7 +1480,8 @@ fn a_writeback_lost_during_a_move_keeps_every_source_it_may_hold() -> Result<(),
             paths.push(sources.join(name));
         }
         let _sources = FsQuirks::install(&sources, Quirks::default());
-        let loser: Arc<std::sync::Mutex<Option<Box<dyn Fn() + Send + Sync>>>> = Arc::default();
+        type Lose = Box<dyn Fn() + Send + Sync>;
+        let loser: Arc<std::sync::Mutex<Option<Lose>>> = Arc::default();
         let lose = loser.clone();
         let scope = FsQuirks::install(
             &destination,

@@ -740,12 +740,13 @@ fn a_stage_with_read_only_folders_is_removed_when_it_cannot_be_published()
 #[test]
 fn a_copied_folder_keeps_its_hard_links_where_the_destination_can() -> Result<(), Box<dyn Error>> {
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock()?;
-    let in_place: fn(&mut MountCapabilities) = |capabilities| {
+    type Learned = fn(&mut MountCapabilities);
+    let in_place: Learned = |capabilities| {
         capabilities.no_replace = Some(false);
         capabilities.hard_links = Some(true);
         capabilities.rename_over_empty_directory = Some(false);
     };
-    let rows: [(&str, Preset, Option<fn(&mut MountCapabilities)>, bool); 5] = [
+    let rows: [(&str, Preset, Option<Learned>, bool); 5] = [
         ("ext4", Quirks::ext4, None, true),
         ("nfs3", Quirks::nfs3, None, true),
         (

@@ -666,7 +666,7 @@ fn undoing_a_move_gives_back_names_numbered_as_aliases() -> Result<(), Box<dyn E
             &origin,
             Quirks {
                 before: taken
-                    .then(|| (Op::Rename, "makefile (1)", 0, racer))
+                    .then_some((Op::Rename, "makefile (1)", 0, racer))
                     .into_iter()
                     .collect(),
                 ..Quirks::default()

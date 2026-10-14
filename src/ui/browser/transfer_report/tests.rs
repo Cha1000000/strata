@@ -134,13 +134,13 @@ fn items_left_out_or_left_behind_make_the_report_a_warning() {
     };
     let denied = rustix::io::Errno::ACCESS.raw_os_error();
     let reason = crate::services::io_error_detail(&std::io::Error::from_raw_os_error(denied));
-    let left_behind = vec![
+    let left_behind = [
         kept(KeptCause::Changed),
         kept(KeptCause::Undeletable(denied)),
         kept(KeptCause::Skipped(SpecialKind::Socket)),
         kept(KeptCause::CopyGone),
     ];
-    let left_in_trash = vec![
+    let left_in_trash = [
         in_trash(KeptCause::Changed),
         in_trash(KeptCause::Undeletable(denied)),
     ];

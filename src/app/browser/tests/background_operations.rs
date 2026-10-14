@@ -388,7 +388,8 @@ fn reported(events: &[BrowserEvent]) -> Vec<(usize, crate::services::TransferRep
 
 #[test]
 fn a_transfer_reports_its_items_once_after_it_ends() {
-    let terminals: [(fn(OperationRequestId) -> OperationEvent, bool); 3] = [
+    type Terminal = fn(OperationRequestId) -> OperationEvent;
+    let terminals: [(Terminal, bool); 3] = [
         (
             |request_id| OperationEvent::Pasted {
                 request_id,

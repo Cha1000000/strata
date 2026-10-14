@@ -478,7 +478,8 @@ fn merge_never_overwrites_an_entry_created_during_the_merge() -> Result<(), Box<
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
         .lock()
         .map_err(|error| error.to_string())?;
-    let rows: [(&str, &str, Preset, &[(&str, &str, RenameCause)]); 2] = [
+    type Renamed = &'static [(&'static str, &'static str, RenameCause)];
+    let rows: [(&str, &str, Preset, Renamed); 2] = [
         (
             "notes.txt",
             "notes (1).txt",

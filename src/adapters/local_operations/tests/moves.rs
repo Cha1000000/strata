@@ -1039,18 +1039,14 @@ fn move_across_volumes(
         .map(|(moved, report, events, _)| (moved, report, events))
 }
 
-fn move_across_volumes_logged(
-    folder: &Path,
-    quirks: Quirks,
-) -> Result<
-    (
-        PathBuf,
-        TransferReport,
-        Vec<OperationEvent>,
-        Vec<super::fs_quirks::Call>,
-    ),
-    Box<dyn Error>,
-> {
+type LoggedMove = (
+    PathBuf,
+    TransferReport,
+    Vec<OperationEvent>,
+    Vec<super::fs_quirks::Call>,
+);
+
+fn move_across_volumes_logged(folder: &Path, quirks: Quirks) -> Result<LoggedMove, Box<dyn Error>> {
     let source_dir = folder.parent().ok_or("a folder in a source volume")?;
     let destination = source_dir.with_file_name("destination");
     fs::create_dir_all(&destination)?;
@@ -1148,10 +1144,7 @@ fn a_file_rewritten_as_it_is_read_is_copied_again_whole() -> Result<(), Box<dyn 
         fs::create_dir_all(&folder)?;
         let db = folder.join("db");
         fs::write(&db, b"first")?;
-        let (before, expected): (
-            Vec<(Op, &'static str, usize, super::fs_quirks::Racer)>,
-            &[u8],
-        ) = if row == "same size" {
+        let (before, expected): (Vec<_>, &[u8]) = if row == "same size" {
             (vec![(Op::Read, "db", 1, rewrite(&db, b"other"))], b"other")
         } else {
             (
@@ -1348,7 +1341,8 @@ fn moves_compare_inode_numbers_only_where_the_source_keeps_them() -> Result<(), 
             ..Quirks::default()
         }
     };
-    let cases: [(&str, Box<dyn Fn() -> Quirks>, bool); 4] = [
+    type MakeQuirks = Box<dyn Fn() -> Quirks>;
+    let cases: [(&str, MakeQuirks, bool); 4] = [
         ("sshfs", Box::new(Quirks::sshfs), false),
         (
             "cifs noserverino",
