@@ -352,43 +352,75 @@ fn a_failed_restore_copy_of_a_file_leaves_nothing_at_its_name() -> Result<(), Bo
 }
 
 #[test]
-fn a_cancelled_restore_copy_that_cannot_remove_what_it_made_fails() -> Result<(), Box<dyn Error>> {
+fn a_cancelled_restore_copy_of_a_folder_is_a_cancel_only_once_the_folder_is_gone()
+-> Result<(), Box<dyn Error>> {
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock()?;
-    let fixture = tempfile::tempdir()?;
-    let source = fixture.path().join("source");
-    fs::create_dir(&source)?;
-    let contents = vec![0x5a; 4 * 1024 * 1024];
-    fs::write(source.join("data"), &contents)?;
-    let destination = fixture.path().join("destination");
-    let cancellable = gio::Cancellable::new();
-    let racer = |cancel: gio::Cancellable| -> Racer { Box::new(move || cancel.cancel()) };
-    // The cut-off folder cannot be opened to be emptied, after it was opened
-    // once as it was made and once by the copy.
-    let _scope = FsQuirks::install(
-        fixture.path(),
-        Quirks {
-            before: vec![
-                (Op::CopyRange, "*", 0, racer(cancellable.clone())),
-                (Op::Write, "*", 0, racer(cancellable.clone())),
-            ],
-            fail: vec![(Op::OpenDir, "destination", 2, Errno::IO)],
-            reflink: Support::Rejected(Errno::OPNOTSUPP),
-            ..Quirks::without_placement()
-        },
-    );
+    // Cleanup opens the cut-off folder (its third open, after making and
+    // filling it), checks it, empties it and checks its name before removing
+    // it. Rows fail the open or a check, or renumber the folder as libfuse
+    // without `use_ino` does, where only its type is compared.
+    let sshfs = Some(("fuse.sshfs", "rw"));
+    for (mount_type, fail, renumber, removed) in [
+        (None, Some((Op::OpenDir, 2)), false, false),
+        (None, Some((Op::StatFd, 2)), false, false),
+        (None, None, true, false),
+        (None, Some((Op::Stat, 2)), false, false),
+        (sshfs, None, true, true),
+    ] {
+        let row = format!("{mount_type:?}, {fail:?}, renumbered: {renumber}");
+        let fixture = tempfile::tempdir()?;
+        let source = fixture.path().join("source");
+        fs::create_dir(&source)?;
+        let contents = vec![0x5a; 4 * 1024 * 1024];
+        fs::write(source.join("data"), &contents)?;
+        let destination = fixture.path().join("destination");
+        let cancellable = gio::Cancellable::new();
+        let racer = |cancel: gio::Cancellable| -> Racer { Box::new(move || cancel.cancel()) };
+        let path = destination.clone();
+        let renumbering: Racer = Box::new(move || super::fs_quirks::renumbered(&path));
+        let _scope = FsQuirks::install(
+            fixture.path(),
+            Quirks {
+                before: vec![
+                    (Op::CopyRange, "*", 0, racer(cancellable.clone())),
+                    (Op::Write, "*", 0, racer(cancellable.clone())),
+                ],
+                after: if renumber {
+                    vec![(Op::OpenDir, "destination", 2, renumbering)]
+                } else {
+                    Vec::new()
+                },
+                fail: fail
+                    .map(|(op, skip)| (op, "destination", skip, Errno::IO))
+                    .into_iter()
+                    .collect(),
+                mount_type,
+                reflink: Support::Rejected(Errno::OPNOTSUPP),
+                ..Quirks::without_placement()
+            },
+        );
 
-    let restored = glib::MainContext::default().block_on(move_restore_path(
-        source.clone(),
-        destination.clone(),
-        fixture.path().to_path_buf(),
-        Arc::default(),
-        cancellable,
-    ));
+        let restored = glib::MainContext::default().block_on(move_restore_path(
+            source.clone(),
+            destination.clone(),
+            fixture.path().to_path_buf(),
+            Arc::default(),
+            cancellable,
+        ));
 
-    let error = restored.expect_err("the cut-off copy stayed");
-    assert!(!error.matches(gio::IOErrorEnum::Cancelled), "{error}");
-    assert!(fs::symlink_metadata(&destination).is_ok());
-    assert_eq!(fs::read(source.join("data"))?, contents);
+        let error = restored.expect_err("a cut-off copy");
+        assert_eq!(
+            error.matches(gio::IOErrorEnum::Cancelled),
+            removed,
+            "{row}: {error}"
+        );
+        assert_eq!(
+            fs::symlink_metadata(&destination).is_err(),
+            removed,
+            "{row}"
+        );
+        assert_eq!(fs::read(source.join("data"))?, contents, "{row}");
+    }
     Ok(())
 }
 

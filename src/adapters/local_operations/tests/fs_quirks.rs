@@ -1113,7 +1113,7 @@ impl FsOps for Scoped {
         assert_off_main_thread();
         match scope_for(fd) {
             Some(scope) => scope
-                .run(Op::StatFd, &[], |_| System.stat_fd(fd))
+                .run(Op::StatFd, &[&fd_name(fd)], |_| System.stat_fd(fd))
                 .map(|stat| scope.reported(path_of(fd), stat)),
             None => System.stat_fd(fd),
         }

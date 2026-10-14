@@ -842,11 +842,11 @@ impl Created {
             Err(Errno::NOENT) => return Ok(()),
             Err(error) => return Err(io_error(os_error_detail(error))),
         };
-        if !fs
+        let opened = fs
             .stat_fd(dir.as_fd())
-            .is_ok_and(|stat| same_entry(&stat, root.identity, family))
-        {
-            return Ok(());
+            .map_err(|error| io_error(os_error_detail(error)))?;
+        if !same_entry(&opened, root.identity, family) {
+            return Err(placement_error(PlaceError::Changed));
         }
         let mut made = std::mem::take(&mut *lock(&self.0));
         made.sort_by(|(left, _), (right, _)| {
@@ -879,12 +879,12 @@ impl Created {
             }
         }
         drop((folder, dir));
-        match fs.stat(root_entry, true) {
-            Ok(current) if current.identity == root.identity => fs
-                .unlink(root_entry, AtFlags::REMOVEDIR)
-                .map_err(|error| io_error(os_error_detail(error))),
-            _ => Ok(()),
-        }
+        remove_own(
+            fs,
+            root_entry,
+            |current| same_entry(current, root.identity, family),
+            AtFlags::REMOVEDIR,
+        )
     }
 }
 
@@ -1085,6 +1085,24 @@ fn same_entry(current: &EntryStat, identity: LocalFileIdentity, family: Family) 
         current.identity == identity
     } else {
         current.kind == identity.kind
+    }
+}
+
+/// Removes what a copy made at `entry`; anything else there is an error.
+fn remove_own(
+    fs: &dyn FsOps,
+    entry: Entry<'_>,
+    made: impl FnOnce(&EntryStat) -> bool,
+    flags: AtFlags,
+) -> Result<(), glib::Error> {
+    match fs.stat(entry, true) {
+        Ok(current) if made(&current) => match fs.unlink(entry, flags) {
+            Ok(()) | Err(Errno::NOENT) => Ok(()),
+            Err(error) => Err(io_error(os_error_detail(error))),
+        },
+        Ok(_) => Err(placement_error(PlaceError::Changed)),
+        Err(Errno::NOENT) => Ok(()),
+        Err(error) => Err(io_error(os_error_detail(error))),
     }
 }
 
@@ -2117,18 +2135,12 @@ impl<'a> FileCopy<'a> {
     }
 
     fn remove_made(&self, name: &OsStr, identity: LocalFileIdentity) -> Result<(), glib::Error> {
-        let fs = self.copy.fs;
-        let entry = self.at(name);
-        match fs.stat(entry, true) {
-            Ok(current) if current.identity == identity => match fs.unlink(entry, AtFlags::empty())
-            {
-                Ok(()) | Err(Errno::NOENT) => Ok(()),
-                Err(error) => Err(io_error(os_error_detail(error))),
-            },
-            Ok(_) => Err(placement_error(PlaceError::Changed)),
-            Err(Errno::NOENT) => Ok(()),
-            Err(error) => Err(io_error(os_error_detail(error))),
-        }
+        remove_own(
+            self.copy.fs,
+            self.at(name),
+            |current| current.identity == identity,
+            AtFlags::empty(),
+        )
     }
 
     fn discard(&self, stage: &Stage, failure: Failure) -> Failure {
