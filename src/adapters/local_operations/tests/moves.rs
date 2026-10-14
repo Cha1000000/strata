@@ -1842,9 +1842,10 @@ fn files_read_within_a_coarse_time_tick_are_compared_before_their_move_deletes_t
     // When the file is rewritten at the same size: before the deletion
     // opens the moved folder, or the moved file itself to compare it, both
     // keeping its times; right after the comparison, at the time of the
-    // engine's clock then, in FAT's two-second steps; or before the
-    // deletion, after growing as the copy read it, which the copy then
-    // read again.
+    // engine's clock then, in FAT's two-second steps; before the deletion,
+    // after growing as the copy read it, which the copy then read again;
+    // or by renaming a file with the same size and times over it as the
+    // deletion opens it to compare it.
     #[derive(Clone, Copy, PartialEq)]
     enum Rewrite {
         Never,
@@ -1852,14 +1853,22 @@ fn files_read_within_a_coarse_time_tick_are_compared_before_their_move_deletes_t
         Comparing,
         Compared,
         Grown,
+        RenamedOver,
     }
     // The source volume, how long after its modification time the copy
     // reads the file (on sshfs, as with a server clock behind ours), when
     // it is rewritten, and whether the deletion reads it again. Only the
     // file itself is moved where it is rewritten as it is compared.
-    let rows: [(&str, Preset, Duration, Rewrite, bool); 11] = [
+    let rows: [(&str, Preset, Duration, Rewrite, bool); 12] = [
         ("vfat", vfat, recent, Rewrite::Deleting, true),
         ("exfat-fuse", exfat_fuse, recent, Rewrite::Deleting, true),
+        (
+            "exfat-fuse, renamed over",
+            exfat_fuse,
+            recent,
+            Rewrite::RenamedOver,
+            true,
+        ),
         ("sshfs", sshfs, recent, Rewrite::Deleting, true),
         ("sshfs, behind", sshfs, behind, Rewrite::Deleting, true),
         ("hfsplus", hfsplus, recent, Rewrite::Deleting, true),
@@ -1895,19 +1904,22 @@ fn files_read_within_a_coarse_time_tick_are_compared_before_their_move_deletes_t
                 set_times(&path, step).expect("set the times");
             })
         };
-        let (item, racers) = match rewrite {
-            Rewrite::Never => (&folder, Vec::new()),
+        let (item, before, after) = match rewrite {
+            Rewrite::Never => (&folder, Vec::new(), Vec::new()),
             Rewrite::Deleting => (
                 &folder,
                 vec![(Op::OpenDir, "folder", 1, rewriter(b"ORIGINAL", false))],
+                Vec::new(),
             ),
             Rewrite::Comparing => (
                 &file,
                 vec![(Op::OpenSource, "a.txt", 1, rewriter(b"ORIGINAL", false))],
+                Vec::new(),
             ),
             Rewrite::Compared => (
                 &folder,
                 vec![(Op::Stat, "a.txt", 0, rewriter(b"ORIGINAL", true))],
+                Vec::new(),
             ),
             Rewrite::Grown => (
                 &folder,
@@ -1920,10 +1932,25 @@ fn files_read_within_a_coarse_time_tick_are_compared_before_their_move_deletes_t
                         rewriter(b"ORIGINAL, GROWN", false),
                     ),
                 ],
+                Vec::new(),
             ),
+            Rewrite::RenamedOver => {
+                let (path, saved) = (file.clone(), folder.join(".a.txt.save"));
+                let rename_over: super::fs_quirks::Racer = Box::new(move || {
+                    fs::write(&saved, b"ORIGINAL").expect("save the new version aside");
+                    set_times(&saved, seconds).expect("set the times");
+                    fs::rename(&saved, &path).expect("rename it over the source");
+                });
+                (
+                    &folder,
+                    Vec::new(),
+                    vec![(Op::OpenSource, "a.txt", 1, rename_over)],
+                )
+            }
         };
         let quirks = Quirks {
-            before: racers,
+            before,
+            after,
             ..preset()
         };
 
@@ -1954,10 +1981,12 @@ fn files_read_within_a_coarse_time_tick_are_compared_before_their_move_deletes_t
             .filter(|(_, call)| call.op == Op::OpenSource && call.names == ["a.txt"])
             .map(|(index, _)| index)
             .collect();
+        // A file renamed over reads as deleted through the descriptor.
         let read = opened.get(1).is_some_and(|&reopened| {
-            calls[reopened..]
-                .iter()
-                .any(|call| call.op == Op::Read && call.names == ["a.txt"])
+            calls[reopened..].iter().any(|call| {
+                call.op == Op::Read
+                    && (call.names == ["a.txt"] || call.names == ["a.txt (deleted)"])
+            })
         });
         assert_eq!(read, read_again, "{row}");
     }

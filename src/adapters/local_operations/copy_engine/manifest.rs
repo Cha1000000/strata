@@ -606,14 +606,15 @@ impl At {
         let deletion = &self.deletion;
         let fs = deletion.fs;
         // Compared before the stat below, which sees any later rewrite.
-        if let Some(contents) = &snapshot.contents {
-            match self.same_contents(contents, snapshot.size, stopped) {
+        let compared = match &snapshot.contents {
+            None => None,
+            Some(contents) => match self.same_contents(contents, snapshot.size, stopped) {
                 None => return,
-                Some(Ok(true)) => {}
-                Some(Ok(false)) => return deletion.keep(self.path.clone(), KeptCause::Changed),
+                Some(Ok(Some(file))) => Some(file),
+                Some(Ok(None)) => return deletion.keep(self.path.clone(), KeptCause::Changed),
                 Some(Err(error)) => return deletion.failed(self.path.clone(), error),
-            }
-        }
+            },
+        };
         let key = (snapshot.identity.device, snapshot.identity.inode);
         // Checking, removing and counting a name of a file with several
         // names must not interleave with another name's check.
@@ -627,8 +628,18 @@ impl At {
                     .filter(|&&count| count <= snapshot.nlink)
                     .count() as u64
             });
-        match fs.stat(self.entry_at(), true) {
-            Ok(current) if snapshot.holds(&current, deletion.stable_inodes, since) => {
+        let current = fs.stat(self.entry_at(), true);
+        // Only the file compared may go, not one renamed over its name since;
+        // its open descriptor keeps its inode number. Closed before the
+        // unlink, as FUSE and NFS rename a file unlinked while open aside.
+        let compared_here = compared.is_none_or(|file| {
+            let opened = fs.stat_fd(file.as_fd());
+            matches!((&current, opened), (Ok(current), Ok(opened)) if opened.identity == current.identity)
+        });
+        match current {
+            Ok(current)
+                if compared_here && snapshot.holds(&current, deletion.stable_inodes, since) =>
+            {
                 match fs.unlink(self.entry_at(), AtFlags::empty()) {
                     Ok(()) => {
                         if let Some(unlinks) = &mut unlinks {
@@ -643,7 +654,7 @@ impl At {
         }
     }
 
-    /// Whether the file still holds what the copy holds, read once any
+    /// The file, still open, if it holds what the copy holds, read once any
     /// rewrite would move its modification time; `None` if the deletion
     /// stopped meanwhile.
     fn same_contents(
@@ -651,14 +662,14 @@ impl At {
         contents: &Contents,
         size: u64,
         stopped: &dyn Fn() -> bool,
-    ) -> Option<Result<bool, Errno>> {
+    ) -> Option<Result<Option<OwnedFd>, Errno>> {
         if !wait_until(contents.settled, stopped) {
             return None;
         }
         let fs = self.deletion.fs;
         let file = match fs.open_source(self.entry_at(), false) {
             Ok(Some((file, _))) => file,
-            Ok(None) => return Some(Ok(false)),
+            Ok(None) => return Some(Ok(None)),
             Err(error) => return Some(Err(error)),
         };
         let mut buffer =
@@ -679,7 +690,9 @@ impl At {
                 Err(error) => return Some(Err(error)),
             }
         }
-        Some(Ok(digest.finish().as_ref() == contents.digest.as_ref()))
+        Some(Ok(
+            (digest.finish().as_ref() == contents.digest.as_ref()).then_some(file)
+        ))
     }
 
     fn rmdir(&self, opened: Arc<OwnedFd>) {
