@@ -1627,6 +1627,10 @@ fn open_file(fs: &dyn FsOps, at: Entry<'_>, cancelled: &AtomicBool) -> Result<Op
 /// How long after `closetimeo` the SMB client may take to close the handle.
 const DEFERRED_CLOSE_MARGIN: Duration = Duration::from_millis(500);
 
+/// The longest an open waits for a deferred close, as `closetimeo` may be
+/// set to days.
+const DEFERRED_CLOSE_LIMIT: Duration = Duration::from_secs(10);
+
 /// After this machine writes a file, the SMB client keeps its handle open
 /// for `closetimeo` and refuses an open of another name of the file with
 /// `EINVAL` meanwhile, so the open is tried again until then.
@@ -1638,7 +1642,9 @@ fn open_after_deferred_close(
     let Some(deferred) = Mount::new(fs, at.dir).deferred_close else {
         return Err(open_failure(at.name, Errno::INVAL));
     };
-    let mut left = deferred.saturating_add(DEFERRED_CLOSE_MARGIN);
+    let mut left = deferred
+        .saturating_add(DEFERRED_CLOSE_MARGIN)
+        .min(DEFERRED_CLOSE_LIMIT);
     let mut pause = Duration::from_millis(10);
     while !left.is_zero() {
         let waited = pause.min(left);

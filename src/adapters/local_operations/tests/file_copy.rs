@@ -1164,7 +1164,8 @@ fn source_opens_are_retried_only_on_smb_and_only_for_its_close_timeout()
 -> Result<(), Box<dyn Error>> {
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock()?;
     let second = Duration::from_secs(1);
-    let at_once = Duration::ZERO..Duration::from_nanos(1);
+    let exactly = |waited: Duration| waited..waited + Duration::from_nanos(1);
+    let at_once = exactly(Duration::ZERO);
     // The mount, the error opens of `b` fail with, how long `EINVAL` lasts,
     // and how long a copy that fails waited.
     for (row, mount, errno, refused_for, failed_after) in [
@@ -1176,11 +1177,18 @@ fn source_opens_are_retried_only_on_smb_and_only_for_its_close_timeout()
             None,
         ),
         (
-            "past the close timeout",
+            "past the default close timeout",
             ("cifs", "rw"),
             Errno::INVAL,
             60 * second,
-            Some(second..2 * second),
+            Some(exactly(Duration::from_millis(1500))),
+        ),
+        (
+            "closetimeo=60",
+            ("cifs", "rw,closetimeo=60"),
+            Errno::INVAL,
+            120 * second,
+            Some(exactly(10 * second)),
         ),
         (
             "ext4",

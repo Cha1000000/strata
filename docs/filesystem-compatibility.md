@@ -591,9 +591,9 @@ for, metadata a destination cannot store and replaced FAT characters are not rep
   count the share reports. After this machine writes a file on a share, opening another name of it
   fails the same way, for any program, until the client's deferred close expires (`closetimeo` in
   the mount's options, one second by default). Strata retries an open of an SMB source that fails
-  with `EINVAL`, backing off, for that time plus half a second, and cancelling stops the wait at
-  once. Opens still refused after that, as while the writer keeps the file open, fail with "Could
-  not copy". Other errors and other filesystems are not retried.
+  with `EINVAL`, backing off, for that time plus half a second but at most ten seconds, and
+  cancelling stops the wait at once. Opens still refused after that, as while the writer keeps the
+  file open, fail with "Could not copy". Other errors and other filesystems are not retried.
 - **SMB read-only folders.** Without POSIX extensions, the client decides a folder's read-only
   attribute from cached attributes, so write access given back right after it was taken does
   nothing until the folder is revalidated. Strata revalidates before giving it back; other programs
