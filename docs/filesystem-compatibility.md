@@ -590,7 +590,7 @@ and replaced FAT characters are not reported.
   kernel client, so Strata opens one name of a file at a time when it reads from SMB, whatever link
   count the share reports. After this machine writes a file on a share, opening another name of it
   fails the same way, for any program, until the client's deferred close expires (`closetimeo`, one
-  second in the lab); a copy started in that time fails with "changed while it was being copied".
+  second in the lab); a copy started in that time fails with "Could not copy".
 - **SMB read-only folders.** Without POSIX extensions, the client decides a folder's read-only
   attribute from cached attributes, so write access given back right after it was taken does
   nothing until the folder is revalidated. Strata revalidates before giving it back; other programs

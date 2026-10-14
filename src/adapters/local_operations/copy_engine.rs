@@ -1589,12 +1589,19 @@ impl Drop for SourceFd {
     }
 }
 
-fn changed(name: &OsStr, error: Errno) -> Failure {
-    Failure::Error(io_error(rust_i18n::t!(
-        "%{name} changed while it was being copied: %{error}",
-        name = name.to_string_lossy(),
-        error = os_error_detail(error)
-    )))
+/// A listed name that no longer holds the entry, or holds another kind, is a
+/// change; other errors, such as an unreadable entry, are reported as they are.
+fn open_failure(name: &OsStr, error: Errno) -> Failure {
+    match error {
+        Errno::NOENT | Errno::NOTDIR | Errno::LOOP | Errno::STALE | Errno::NXIO | Errno::NODEV => {
+            Failure::Error(io_error(rust_i18n::t!(
+                "%{name} changed while it was being copied: %{error}",
+                name = name.to_string_lossy(),
+                error = os_error_detail(error)
+            )))
+        }
+        error => Failure::Os(error).named(name),
+    }
 }
 
 fn open_file(fs: &dyn FsOps, at: Entry<'_>) -> Result<Opened, Failure> {
@@ -1604,7 +1611,7 @@ fn open_file(fs: &dyn FsOps, at: Entry<'_>) -> Result<Opened, Failure> {
             stat,
         }),
         Ok(None) => Err(Failure::Changed),
-        Err(error) => Err(changed(at.name, error)),
+        Err(error) => Err(open_failure(at.name, error)),
     }
 }
 

@@ -24,14 +24,14 @@ use rustix::{
 };
 
 use super::{
-    Barrier, Copy, Created, Failure, Mount, Source, best_effort, changed,
+    Barrier, Copy, Created, Failure, Mount, Source, best_effort,
     data::Data,
     direct_folder, from_stage, is_fatal, is_unsupported,
     links::{self, Links, Role},
     lock,
     manifest::{self, Pending},
     metadata::Snapshot,
-    open_file, open_one_name,
+    open_failure, open_file, open_one_name,
     restrictive::{self, Restrictive},
     same_entry, stable_inodes, stage,
 };
@@ -365,7 +365,7 @@ impl Folder {
         let (source_parent, source_name, expected) = &self.source;
         let source = fs
             .open_dir(Entry::new(&**source_parent, source_name))
-            .map_err(|error| changed(source_name, error))?;
+            .map_err(|error| open_failure(source_name, error))?;
         let source_stat = fs.stat_fd(source.as_fd())?;
         if expected.is_some_and(|expected| expected != source_stat.identity) {
             return Err(Failure::Changed);
@@ -884,7 +884,7 @@ impl File {
         let (opened, stat) = if tree.opens_one_name_per_file() {
             let stat = fs
                 .stat(at, false)
-                .map_err(|error| changed(&self.name, error))?;
+                .map_err(|error| open_failure(&self.name, error))?;
             (None, stat)
         } else {
             let opened = open_file(fs, at)?;
@@ -1073,12 +1073,12 @@ impl Merged {
         let (source_parent, source_name) = &self.source;
         let source = fs
             .open_dir(Entry::new(&**source_parent, source_name))
-            .map_err(|error| changed(source_name, error))?;
+            .map_err(|error| open_failure(source_name, error))?;
         tree.source_in(fs, source.as_fd());
         let (target_parent, target_name, expected) = &self.target;
         let target = fs
             .open_dir(Entry::new(&**target_parent, target_name))
-            .map_err(|error| changed(target_name, error))?;
+            .map_err(|error| open_failure(target_name, error))?;
         let target_stat = fs.stat_fd(target.as_fd())?;
         let mount = Mount::new(fs, target.as_fd());
         if expected.is_some_and(|expected| !same_entry(&target_stat, expected, mount.family)) {

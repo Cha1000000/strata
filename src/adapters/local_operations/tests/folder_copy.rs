@@ -977,3 +977,111 @@ fn a_refused_link_is_copied_from_the_first_copy_and_ends_linking() -> Result<(),
     assert_eq!(read.len(), 1, "the source is read once: {read:?}");
     Ok(())
 }
+
+#[test]
+fn a_copy_calls_an_entry_changed_only_when_its_name_no_longer_holds_it()
+-> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock()?;
+    let smb = || Quirks {
+        mount_type: Some(("cifs", "rw")),
+        ..Quirks::default()
+    };
+    let plain = Quirks::default as Preset;
+    for (row, selected, merge, (preset, op, name, error), changed) in [
+        (
+            "selected file",
+            "folder/keys",
+            false,
+            (plain, Op::OpenSource, "keys", Errno::ACCESS),
+            false,
+        ),
+        (
+            "file",
+            "folder",
+            false,
+            (plain, Op::OpenSource, "keys", Errno::ACCESS),
+            false,
+        ),
+        (
+            "folder",
+            "folder",
+            false,
+            (plain, Op::OpenDir, "secrets", Errno::ACCESS),
+            false,
+        ),
+        (
+            "file on SMB",
+            "folder",
+            false,
+            (smb, Op::Stat, "keys", Errno::ACCESS),
+            false,
+        ),
+        (
+            "merged folder",
+            "folder",
+            true,
+            (plain, Op::OpenDir, "sub", Errno::ACCESS),
+            false,
+        ),
+        (
+            "file gone",
+            "folder",
+            false,
+            (plain, Op::OpenSource, "keys", Errno::NOENT),
+            true,
+        ),
+        (
+            "folder now a link",
+            "folder",
+            false,
+            (plain, Op::OpenDir, "secrets", Errno::LOOP),
+            true,
+        ),
+    ] {
+        let root = tempfile::tempdir()?;
+        let (sources, destination) = (root.path().join("sources"), root.path().join("destination"));
+        let folder = sources.join("folder");
+        for made in [
+            folder.join("secrets"),
+            folder.join("sub"),
+            destination.join("folder/sub"),
+        ] {
+            fs::create_dir_all(made)?;
+        }
+        for file in ["keys", "secrets/a", "sub/b"] {
+            fs::write(folder.join(file), file)?;
+        }
+        let _sources = FsQuirks::install(
+            &sources,
+            Quirks {
+                fail: vec![(op, name, 0, error)],
+                ..preset()
+            },
+        );
+        let _destination = FsQuirks::install(&destination, Quirks::default());
+        let target = if merge {
+            Destination::Merge(destination.join("folder"))
+        } else {
+            Destination::New(destination.join("copy"), Taken::Fail)
+        };
+
+        let (copied, _) = reporting(&sources.join(selected), target, Options::default());
+
+        let error = crate::services::io_error_detail(&io::Error::from(error));
+        let expected = if changed {
+            rust_i18n::t!(
+                "%{name} changed while it was being copied: %{error}",
+                name = name,
+                error = error
+            )
+        } else {
+            rust_i18n::t!(
+                "Could not copy %{name}: %{error}",
+                name = name,
+                error = error
+            )
+        };
+        assert_eq!(copied.expect_err(row).message(), expected, "{row}");
+    }
+    Ok(())
+}
