@@ -4521,24 +4521,30 @@ impl Browser {
             }
             open
         };
-        for (depth, watched) in open_locations {
-            if locations.len() > MAX_INCREMENTAL_OPERATION_UPDATES
-                && (watched.is_recent_root() || watched.is_camera_photo_root())
-            {
-                if !rescanning.contains(&depth) {
-                    self.refresh_column(depth);
-                }
-                continue;
+        let mut by_folder = HashMap::<_, Vec<_>>::new();
+        for location in locations {
+            if let Some(parent) = deletion_parent_location(location) {
+                by_folder.entry(parent).or_default().push(location.clone());
             }
-            let removed = locations
-                .iter()
-                .filter(|location| {
-                    deletion_parent_location(location).is_some_and(|parent| parent == watched)
-                        || watched.is_recent_root()
-                        || watched.contains_camera_photo_location(location)
-                })
-                .cloned()
-                .collect::<Vec<_>>();
+        }
+        for (depth, watched) in open_locations {
+            let removed = if watched.is_recent_root() || watched.is_camera_photo_root() {
+                if locations.len() > MAX_INCREMENTAL_OPERATION_UPDATES {
+                    if !rescanning.contains(&depth) {
+                        self.refresh_column(depth);
+                    }
+                    continue;
+                }
+                locations
+                    .iter()
+                    .filter(|location| {
+                        watched.is_recent_root() || watched.contains_camera_photo_location(location)
+                    })
+                    .cloned()
+                    .collect()
+            } else {
+                by_folder.get(&watched).cloned().unwrap_or_default()
+            };
             if removed.is_empty() {
                 continue;
             }
