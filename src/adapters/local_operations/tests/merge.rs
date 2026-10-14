@@ -2037,7 +2037,8 @@ fn a_merge_undo_deletes_only_what_the_merge_left_unchanged() -> Result<(), Box<d
 }
 
 #[test]
-fn undoing_a_replace_deletes_only_what_it_left_unchanged() -> Result<(), Box<dyn Error>> {
+fn undoing_a_replace_deletes_what_it_placed_only_if_all_of_it_is_unchanged()
+-> Result<(), Box<dyn Error>> {
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
         .lock()
         .map_err(|error| error.to_string())?;
@@ -2047,6 +2048,7 @@ fn undoing_a_replace_deletes_only_what_it_left_unchanged() -> Result<(), Box<dyn
         (true, "untouched"),
         (true, "edited"),
         (true, "added to"),
+        (true, "edited during the undo"),
         (true, "undeletable"),
     ];
     for (directory, change) in rows {
@@ -2087,15 +2089,25 @@ fn undoing_a_replace_deletes_only_what_it_left_unchanged() -> Result<(), Box<dyn
         };
         let trash = trash_in(root.path());
         let location = Location::local(&target);
-        let _scope = (change == "undeletable").then(|| {
-            FsQuirks::install(
-                root.path(),
-                Quirks {
-                    fail: vec![(Op::Unlink, "a.txt", 0, Errno::ACCESS)],
-                    ..Quirks::default()
-                },
-            )
-        });
+        let edited = target.join("sub/b.txt");
+        let _scope = match change {
+            "undeletable" => Some(Quirks {
+                fail: vec![(Op::Unlink, "a.txt", 0, Errno::ACCESS)],
+                ..Quirks::default()
+            }),
+            // Once the comparison found it unchanged, before its deletion.
+            "edited during the undo" => Some(Quirks {
+                before: vec![(
+                    Op::Stat,
+                    "b.txt",
+                    1,
+                    Box::new(move || drop(fs::write(&edited, b"edited b"))),
+                )],
+                ..Quirks::default()
+            }),
+            _ => None,
+        }
+        .map(|quirks| FsQuirks::install(root.path(), quirks));
 
         let events = run_undo(
             (
@@ -2145,14 +2157,19 @@ fn undoing_a_replace_deletes_only_what_it_left_unchanged() -> Result<(), Box<dyn
         assert!(trash.join("info/target.trashinfo").exists(), "{row}");
         match (directory, change) {
             (false, _) => assert_eq!(fs::read(&target)?, b"edited"),
-            (true, "edited") => {
-                assert_eq!(names(&target)?, ["sub"]);
-                assert_eq!(names(&target.join("sub"))?, ["b.txt"]);
+            (true, "edited during the undo") => {
                 assert_eq!(fs::read(target.join("sub/b.txt"))?, b"edited b");
             }
-            _ => {
-                assert_eq!(names(&target)?, ["sub"]);
-                assert_eq!(names(&target.join("sub"))?, ["c.txt"]);
+            (true, _) => {
+                assert_eq!(names(&target)?, ["a.txt", "sub"], "{row}");
+                assert_eq!(fs::read(target.join("a.txt"))?, b"new a", "{row}");
+                let sub = target.join("sub");
+                if change == "edited" {
+                    assert_eq!(names(&sub)?, ["b.txt"]);
+                    assert_eq!(fs::read(sub.join("b.txt"))?, b"edited b");
+                } else {
+                    assert_eq!(names(&sub)?, ["b.txt", "c.txt"]);
+                }
             }
         }
     }

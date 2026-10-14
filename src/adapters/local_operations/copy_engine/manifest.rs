@@ -519,12 +519,36 @@ pub(super) fn remove(
     unlinks: Arc<Unlinks>,
     cancelled: Arc<AtomicBool>,
 ) -> Removed {
+    walk(fs, parent, root, unlinks, cancelled, false)
+}
+
+/// Keeps what [`remove`] would keep, and folders holding entries added
+/// since, without deleting anything.
+pub(super) fn compare(
+    fs: &'static dyn FsOps,
+    parent: Arc<OwnedFd>,
+    root: &Folder,
+    unlinks: Arc<Unlinks>,
+    cancelled: Arc<AtomicBool>,
+) -> Removed {
+    walk(fs, parent, root, unlinks, cancelled, true)
+}
+
+fn walk(
+    fs: &'static dyn FsOps,
+    parent: Arc<OwnedFd>,
+    root: &Folder,
+    unlinks: Arc<Unlinks>,
+    cancelled: Arc<AtomicBool>,
+    compare_only: bool,
+) -> Removed {
     let deletion = Arc::new(Deletion {
         fs,
         stable_inodes: Mount::keeps_inode_numbers(fs, parent.as_fd()),
         unlinks,
         kept: Mutex::default(),
         removed: AtomicBool::new(false),
+        compare_only,
     });
     let steps = deletion.steps(root, Path::new(""));
     let workers = match steps.as_slice() {
@@ -570,6 +594,7 @@ struct Deletion {
     unlinks: Arc<Unlinks>,
     kept: Mutex<Vec<(PathBuf, KeptCause)>>,
     removed: AtomicBool,
+    compare_only: bool,
 }
 
 impl Deletion {
@@ -589,6 +614,19 @@ impl Deletion {
             .map_or(true, |entries| {
                 entries.iter().any(|(name, _)| !kept.contains(name))
             })
+    }
+
+    /// Whether the folder lists a name its record lacks.
+    fn added_to(&self, opened: BorrowedFd<'_>, folder: &Folder) -> Result<bool, Errno> {
+        let recorded: HashSet<OsString> = lock(&folder.children)
+            .iter()
+            .map(|(name, _)| name.clone())
+            .collect();
+        Ok(self
+            .fs
+            .list(opened)?
+            .iter()
+            .any(|(name, _)| !recorded.contains(name)))
     }
 
     fn failed(&self, path: PathBuf, error: Errno) {
@@ -701,9 +739,13 @@ impl At {
         let fs = deletion.fs;
         let opened = fs
             .open_dir(self.entry_at())
-            .and_then(|fd| fs.stat_fd(fd.as_fd()).map(|stat| (fd, stat)));
+            .and_then(|fd| fs.stat_fd(fd.as_fd()).map(|stat| (fd, stat)))
+            .and_then(|(fd, stat)| {
+                let added = deletion.compare_only && deletion.added_to(fd.as_fd(), folder)?;
+                Ok((fd, stat, added))
+            });
         let fd = match opened {
-            Ok((fd, current)) if deletion.same(&current, folder.identity) => Arc::new(fd),
+            Ok((fd, current, false)) if deletion.same(&current, folder.identity) => Arc::new(fd),
             Ok(_) | Err(Errno::NOTDIR | Errno::LOOP) => {
                 deletion.keep(self.path, KeptCause::Changed);
                 queue.complete(completion);
@@ -784,12 +826,14 @@ impl At {
         });
         // Left uncompared only while the clock has not reached its time.
         let still_ahead = ahead.is_none_or(|modified| now() < modified);
+        let unchanged = compared_here
+            && still_ahead
+            && current
+                .as_ref()
+                .is_ok_and(|current| snapshot.holds(current, deletion.stable_inodes, since));
         match current {
-            Ok(current)
-                if compared_here
-                    && still_ahead
-                    && snapshot.holds(&current, deletion.stable_inodes, since) =>
-            {
+            Ok(_) if unchanged && deletion.compare_only => {}
+            Ok(current) if unchanged => {
                 match fs.unlink(self.entry_at(), AtFlags::empty()) {
                     Ok(()) => {
                         deletion.removed.store(true, Ordering::Release);
@@ -832,6 +876,9 @@ impl At {
 
     fn rmdir(&self, opened: Arc<OwnedFd>) {
         let deletion = &self.deletion;
+        if deletion.compare_only {
+            return;
+        }
         let fs = deletion.fs;
         // An open folder keeps its inode number even where numbers change
         // between the copy and the deletion, so the name must report it.

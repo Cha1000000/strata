@@ -192,7 +192,7 @@ pub(super) fn placed_at(
     }
 }
 
-/// Deletes what an operation placed at `path`, as far as it is unchanged.
+/// Deletes what an operation placed at `path` if all of it is unchanged.
 pub(super) async fn remove_placed(
     path: PathBuf,
     placed: PlacedSnapshot,
@@ -225,6 +225,17 @@ pub(super) async fn remove_placed(
             }
             Err(error) => return failed(io_error(error)),
         };
+        // Deleting only part of it would not free the path for the original.
+        let compared = manifest::compare(
+            fs(),
+            parent.clone(),
+            &placed.root(),
+            unlinks.clone(),
+            cancelled.clone(),
+        );
+        if compared.result.is_err() || !compared.kept.is_empty() {
+            return compared;
+        }
         manifest::remove(fs(), parent, &placed.root(), unlinks, cancelled)
     })
     .await;

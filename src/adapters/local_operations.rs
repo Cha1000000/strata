@@ -5185,8 +5185,8 @@ enum Reverted {
     Kept,
 }
 
-/// Reverts one overwritten merge path: deletes what the operation put there,
-/// as far as it is unchanged, so the staged original can move back out of
+/// Reverts one overwritten merge path: deletes what the operation put there
+/// if all of it is unchanged, so the staged original can move back out of
 /// Trash. Sets `deleting` once it deleted anything.
 async fn undo_merged_overwrite(
     (location, placed): (&Location, Option<&PlacedSnapshot>),
@@ -5286,9 +5286,9 @@ async fn run_merge_undo(
     let mut completed = 0usize;
     let remaining = |index: usize| pending[index..].to_vec();
     // Undo applies to copies only, so an incoming item at an overwritten path
-    // is a duplicate of the surviving source: delete it permanently, as far
-    // as it is unchanged, to free the path, then move the staged original
-    // back out of Trash.
+    // is a duplicate of the surviving source: delete it permanently, if it
+    // is unchanged, to free the path, then move the staged original back
+    // out of Trash.
     for (index, location) in overwritten.iter().enumerate() {
         if cancellable.is_cancelled() {
             emit(cancelled_event(
