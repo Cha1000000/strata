@@ -3839,23 +3839,29 @@ async fn merge_owing(
         .chain(&plan.overwritten)
         .filter_map(|location| location.native_path().map(Path::to_path_buf))
         .collect();
+    // Undo trashes what a merge created, so it needs a record of it only
+    // where originals could not go to the Trash, or none were offered it.
+    let records_created = match &target_path {
+        Some(root) if !move_source && !plan.created.is_empty() => {
+            aside.is_some() || (trashed.is_empty() && !can_trash(root.clone()).await)
+        }
+        _ => false,
+    };
     // Undo applies to copies, and deletes what they placed only unchanged.
     let placing = target_path
         .as_ref()
-        .filter(|_| !move_source && !(trashed.is_empty() && plan.created.is_empty()))
+        .filter(|_| !move_source && (!trashed.is_empty() || records_created))
         .map(|root| {
             let path = |location: &Location| location.native_path().map(Path::to_path_buf);
-            let wanted: HashSet<_> = trashed
-                .iter()
-                .chain(&plan.created)
-                .filter_map(path)
-                .collect();
-            let unwanted = plan
-                .overwritten
-                .iter()
-                .filter_map(path)
-                .filter(|path| !wanted.contains(path))
-                .collect();
+            let created = plan.created.iter().filter(|_| records_created);
+            let wanted: HashSet<_> = trashed.iter().chain(created).filter_map(path).collect();
+            let unwanted = records_created.then(|| {
+                plan.overwritten
+                    .iter()
+                    .filter_map(path)
+                    .filter(|path| !wanted.contains(path))
+                    .collect()
+            });
             copy_engine::Placing::new(root.clone(), wanted, unwanted)
         });
     (hooks.on_merged)(MergePlan {
@@ -3914,6 +3920,12 @@ async fn merge_owing(
         });
     }
     Ok(owed)
+}
+
+async fn can_trash(path: PathBuf) -> bool {
+    run_blocking(move || Ok(fs().can_trash(&path)))
+        .await
+        .unwrap_or(false)
 }
 
 #[cfg(test)]

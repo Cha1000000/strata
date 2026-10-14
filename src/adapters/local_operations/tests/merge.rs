@@ -154,8 +154,8 @@ fn merging_folders_unites_contents_and_overwrites_shared_names() -> Result<(), B
     );
     assert_eq!(
         placed_paths(&plans[1].placed),
-        [target.join("incoming.txt"), target.join("shared.txt")],
-        "what the copy put at created and overwritten paths is recorded for undo"
+        [target.join("shared.txt")],
+        "undo trashes what was created, so only what the copy put over an original is recorded"
     );
     Ok(())
 }
@@ -218,11 +218,8 @@ fn merging_recurses_into_subdirectories_shared_by_both_sides() -> Result<(), Box
     );
     assert_eq!(
         placed_paths(&plans[1].placed),
-        [
-            target.join("nested/incoming.txt"),
-            target.join("nested/shared.txt")
-        ],
-        "what the copy put at created and overwritten paths is recorded for undo"
+        [target.join("nested/shared.txt")],
+        "undo trashes what was created, so only what the copy put over an original is recorded"
     );
     Ok(())
 }
@@ -282,6 +279,7 @@ fn a_merge_from_a_location_without_paths_records_the_folders_it_creates_once_fil
     let root = tempfile::tempdir()?;
     let target = root.path().join("scalable");
     write_files(&target, &[("stays.txt", "keep me")])?;
+    let _scope = FsQuirks::install(root.path(), without_trash(Quirks::default()));
     let (plans, on_merged) = recorded_plans();
 
     let result = glib::MainContext::default().block_on(merge_local(
@@ -298,7 +296,6 @@ fn a_merge_from_a_location_without_paths_records_the_folders_it_creates_once_fil
     assert_eq!(placed_paths(&parts.2), [actions.clone(), apps.clone()]);
     let edited = fs::read_dir(&apps)?.next().ok_or("an app icon")??.path();
     fs::write(&edited, b"edited after the merge")?;
-    let _scope = FsQuirks::install(root.path(), without_trash(Quirks::default()));
 
     let events = run_undo(parts, staged_lookup(HashMap::new()));
 
@@ -319,6 +316,7 @@ fn a_new_subdirectory_is_reported_as_a_single_created_entry() -> Result<(), Box<
     fs::create_dir_all(source.join("sub/deep"))?;
     fs::create_dir_all(&target)?;
     fs::write(source.join("sub/deep/incoming.txt"), b"new")?;
+    let _scope = FsQuirks::install(root.path(), without_trash(Quirks::default()));
     let (plans, on_merged) = recorded_plans();
 
     let result = glib::MainContext::default().block_on(merge_local(
@@ -339,7 +337,11 @@ fn a_new_subdirectory_is_reported_as_a_single_created_entry() -> Result<(), Box<
         "undo removes the topmost created directory, not each nested child"
     );
     assert!(plans[0].overwritten.is_empty());
-    assert_eq!(placed_paths(&plans[1].placed), [target.join("sub")]);
+    assert_eq!(
+        placed_paths(&plans[1].placed),
+        [target.join("sub")],
+        "without Trash, it is recorded whole"
+    );
     Ok(())
 }
 
@@ -2674,6 +2676,75 @@ fn an_undo_keeps_what_was_too_big_to_record() -> Result<(), Box<dyn Error>> {
         assert_eq!(fs::read(&a)?, b"old a");
         assert_eq!(fs::read(&b)?, b"incoming b");
         assert_eq!(kept_in_trash(&events), changed_after_the_merge(&b));
+    }
+    Ok(())
+}
+
+#[test]
+fn a_merge_records_what_it_creates_only_where_undo_cannot_trash_it() -> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    // A created folder of four entries sorts ahead of z.txt, with room to
+    // record three.
+    let _limit = PlacedEntriesGuard::set(3);
+    for overwrites in [true, false] {
+        let root = tempfile::tempdir()?;
+        let source = root.path().join("source");
+        let target = root.path().join("target");
+        write_files(
+            &source,
+            &[
+                ("big/1.txt", "1"),
+                ("big/2.txt", "2"),
+                ("big/3.txt", "3"),
+                ("z.txt", "incoming z"),
+            ],
+        )?;
+        write_files(&target, &[("stays.txt", "keep me")])?;
+        let z = target.join("z.txt");
+        if overwrites {
+            fs::write(&z, b"old z")?;
+        }
+        // The Trash took the original, or is offered where there is none.
+        let _scope = (!overwrites).then(|| {
+            FsQuirks::install(
+                root.path(),
+                Quirks {
+                    trash: Trash::Refused,
+                    ..Quirks::default()
+                },
+            )
+        });
+        let (stage, _) = rename_stage(root.path().join("staging"));
+        let (plans, on_merged) = recorded_plans();
+
+        glib::MainContext::default().block_on(merge_local_with(
+            gio::File::for_path(&source),
+            gio::File::for_path(&target),
+            false,
+            gio::Cancellable::new(),
+            None,
+            MergeHooks {
+                fat_family: false,
+                copy_into_target: real_copy(),
+                stage_overwrite: stage,
+                on_merged: &on_merged,
+            },
+        ))?;
+
+        let parts = undo_parts(plans.take());
+        if !overwrites {
+            assert!(parts.2.is_empty(), "{:?}", placed_paths(&parts.2));
+            continue;
+        }
+        assert_eq!(placed_paths(&parts.2), [z.clone()]);
+        let staged = HashMap::from([(
+            z.clone(),
+            staged_trash_fixture(root.path(), "z.txt", &z, b"old z")?,
+        )]);
+        let events = run_undo((Vec::new(), parts.1, parts.2), staged_lookup(staged));
+        assert_eq!(fs::read(&z)?, b"old z", "{events:?}");
     }
     Ok(())
 }

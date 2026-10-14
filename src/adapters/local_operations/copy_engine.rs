@@ -111,18 +111,19 @@ pub(super) enum Destination {
 pub(super) struct Placing {
     root: PathBuf,
     wanted: HashSet<PathBuf>,
-    unwanted: HashSet<PathBuf>,
+    unwanted: Option<HashSet<PathBuf>>,
     placed: Mutex<Vec<(PathBuf, Placed)>>,
     left: AtomicUsize,
 }
 
 impl Placing {
     /// `root` is the merged folder. Beneath it, `wanted` are the paths undo
-    /// reverts, and `unwanted` the overwritten paths it leaves.
+    /// reverts. Where the merge records all it creates, `unwanted` are the
+    /// overwritten paths undo leaves.
     pub(super) fn new(
         root: PathBuf,
         wanted: HashSet<PathBuf>,
-        unwanted: HashSet<PathBuf>,
+        unwanted: Option<HashSet<PathBuf>>,
     ) -> Arc<Self> {
         Arc::new(Self {
             root,
@@ -148,7 +149,11 @@ impl Placing {
         cancelled: &AtomicBool,
     ) {
         let path = self.root.join(path);
-        if !self.unwanted.contains(&path) {
+        let wanted = match &self.unwanted {
+            Some(unwanted) => !unwanted.contains(&path),
+            None => self.wants(&path),
+        };
+        if wanted {
             self.record(fs, (dir, name), path, cancelled);
         }
     }
