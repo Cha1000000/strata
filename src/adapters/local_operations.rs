@@ -5435,7 +5435,18 @@ async fn run_merge_undo(
                         }
                         _ => Ok(false),
                     }
-                    .map(|removed| kept = !removed)
+                    .and_then(|removed| {
+                        // What changed once part of it was deleted holds its folder.
+                        if !removed && deleting {
+                            return Err(io_error(crate::services::io_error_detail(
+                                &io::Error::from_raw_os_error(
+                                    rustix::io::Errno::NOTEMPTY.raw_os_error(),
+                                ),
+                            )));
+                        }
+                        kept = !removed;
+                        Ok(())
+                    })
                 }
                 result => result.map(|identity| trashed_identity = identity),
             },

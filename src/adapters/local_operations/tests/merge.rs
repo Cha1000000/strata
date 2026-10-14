@@ -2753,6 +2753,54 @@ fn a_merge_undo_without_trash_deletes_only_what_the_merge_created_unchanged()
     Ok(())
 }
 
+#[test]
+fn a_created_folder_changed_while_undo_deletes_it_fails_as_not_empty() -> Result<(), Box<dyn Error>>
+{
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let root = tempfile::tempdir()?;
+    let folder = root.path().join("sub");
+    write_files(&folder, &[("a.txt", "a"), ("b.txt", "b")])?;
+    let placed = placed_now(&[&folder]);
+    let added = folder.join("c.txt");
+    let racer_added = added.clone();
+    let racer: Racer = Box::new(move || {
+        fs::write(&racer_added, b"added during the undo").expect("added entry");
+    });
+    let _scope = FsQuirks::install(
+        root.path(),
+        without_trash(Quirks {
+            after: vec![(Op::Unlink, "a.txt", 0, racer)],
+            ..Quirks::default()
+        }),
+    );
+
+    let events = run_undo(
+        (vec![Location::local(&folder)], Vec::new(), placed),
+        staged_lookup(HashMap::new()),
+    );
+
+    assert_eq!(names(&folder)?, ["c.txt"]);
+    let Some(OperationEvent::CompletedWithErrors {
+        deleted_locations,
+        message,
+        ..
+    }) = events.last()
+    else {
+        panic!("{events:?}");
+    };
+    assert!(deleted_locations.is_empty());
+    let not_empty = crate::services::io_error_detail(&io::Error::from_raw_os_error(
+        Errno::NOTEMPTY.raw_os_error(),
+    ));
+    assert!(
+        message.contains(&super::super::item_error("sub", &not_empty)),
+        "{message}"
+    );
+    Ok(())
+}
+
 fn without_trash(quirks: Quirks) -> Quirks {
     Quirks {
         trash: Trash::Unsupported,
