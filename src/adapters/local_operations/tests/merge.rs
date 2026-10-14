@@ -2705,7 +2705,7 @@ fn a_created_tree_too_big_to_record_leaves_its_entries_to_the_rest() -> Result<(
     merged?;
     let [big, z] = ["big", "z.txt"].map(|name| target.join(name));
     let parts = undo_parts(plans);
-    assert_eq!(placed_paths(&parts.2), [z.clone()]);
+    assert_eq!(placed_paths(&parts.2), std::slice::from_ref(&z));
 
     let events = run_undo(parts, staged_lookup(HashMap::new()));
 
@@ -2816,7 +2816,7 @@ fn a_merge_records_what_it_creates_only_where_undo_cannot_trash_it() -> Result<(
             assert!(parts.2.is_empty(), "{:?}", placed_paths(&parts.2));
             continue;
         }
-        assert_eq!(placed_paths(&parts.2), [z.clone()]);
+        assert_eq!(placed_paths(&parts.2), std::slice::from_ref(&z));
         let staged = HashMap::from([(
             z.clone(),
             staged_trash_fixture(root.path(), "z.txt", &z, b"old z")?,

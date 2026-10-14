@@ -1320,30 +1320,12 @@ fn a_merge_undo_leaves_what_it_kept_out_of_undo_history() {
     let kept = Location::local("/fixture/archive/kept.txt");
     let cut = Location::local("/fixture/archive/cut.txt");
     let earlier = UndoEntry::Trash(vec![Location::local("/fixture/earlier.txt")]);
-    let kept_only = |request_id| OperationEvent::CompletedWithErrors {
-        request_id,
-        deleted_locations: Vec::new(),
-        retryable_locations: Vec::new(),
-        has_non_retryable_failures: true,
-        message: "kept.txt: It was kept".to_owned(),
-    };
-    let cut_off = |request_id| OperationEvent::Cancelled {
-        request_id,
-        result: crate::services::CancelledOperation {
-            failed: vec![Location::local("/fixture/archive/kept.txt")],
-            not_attempted: vec![Location::local("/fixture/archive/cut.txt")],
-            ..Default::default()
-        },
-    };
-    let rows: [(
-        Vec<Location>,
-        &dyn Fn(OperationRequestId) -> OperationEvent,
-        _,
-    ); 2] = [
-        (vec![kept.clone()], &kept_only, earlier.clone()),
+    // Whether a cancel cuts off an item after the kept one.
+    let rows = [
+        (false, vec![kept.clone()], earlier.clone()),
         (
+            true,
             vec![kept.clone(), cut.clone()],
-            &cut_off,
             UndoEntry::Merge {
                 created: vec![cut.clone()],
                 overwritten: Vec::new(),
@@ -1352,7 +1334,7 @@ fn a_merge_undo_leaves_what_it_kept_out_of_undo_history() {
             },
         ),
     ];
-    for (created, outcome, expected) in rows {
+    for (cancelled, created, expected) in rows {
         PENDING_UNDO.with(|pending| *pending.borrow_mut() = UndoState::default());
         let browser = Browser::new(Rc::new(FakeFileSource));
         browser.set_operation_provider(Rc::new(ImmediateOperationProvider));
@@ -1376,7 +1358,24 @@ fn a_merge_undo_leaves_what_it_kept_out_of_undo_history() {
             request_id,
             location: kept.clone(),
         });
-        emit(outcome(request_id));
+        emit(if cancelled {
+            OperationEvent::Cancelled {
+                request_id,
+                result: crate::services::CancelledOperation {
+                    failed: vec![kept.clone()],
+                    not_attempted: vec![cut.clone()],
+                    ..Default::default()
+                },
+            }
+        } else {
+            OperationEvent::CompletedWithErrors {
+                request_id,
+                deleted_locations: Vec::new(),
+                retryable_locations: Vec::new(),
+                has_non_retryable_failures: true,
+                message: "kept.txt: It was kept".to_owned(),
+            }
+        });
 
         assert_eq!(pending_undo_entry(), Some(expected));
         assert!(
