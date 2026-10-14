@@ -20,10 +20,14 @@ over an empty placeholder that Strata has just created. Where hard links are
 unusable too, as on sshfs and vboxsf, the restore takes the
 [reserved-name step](filesystem-compatibility.md#the-reserved-name-step-and-its-risk),
 which has one narrow window. Only where no step can place the item, for example
-where a probe cannot settle what the mount supports, is it copied with exclusive
-creation and the trash copy deleted afterwards. If something already exists at
-the destination, or the outcome cannot be confirmed, the payload and its trash
-metadata remain intact.
+where a probe cannot settle what the mount supports, is it copied through the
+[copy engine](filesystem-compatibility.md#restoring-from-trash): each entry is
+created exclusively at its final name with the metadata the destination keeps,
+and the copy is flushed to disk before the trash copy is deleted entry by entry.
+Entries that changed meanwhile, or that the destination cannot store, stay in
+the Trash with the item's trash metadata and are reported. If something already
+exists at the destination, or the outcome cannot be confirmed, the payload and
+its trash metadata remain intact.
 
 Deleting or trashing a folder in Strata removes its sidebar pin and pins inside
 it from GTK's shared bookmarks file and every open sidebar. Only confirmed
@@ -73,6 +77,11 @@ The tests create their own temporary payloads and metadata. They cover:
   errors, occupied directories, and dangling destination symlinks;
 - preservation of the payload and metadata on failure, and metadata cleanup on
   success;
+- restore copies where nothing can be placed: read-only items keep their
+  metadata, a failed copy removes only what it created, the trash copy is
+  deleted only once the copy is flushed, and changed or uncopyable entries stay
+  in the Trash with their metadata
+  (`adapters::local_operations::tests::restore_safety`);
 - mixed valid/invalid selections, full destination presentation, cancellation,
   and missing modal hosts;
 - bounded concurrent lookups, result ordering, and dropping active lookups when
@@ -115,8 +124,12 @@ or `.trashinfo` contents, and never run a blanket cleanup scan of other mounts.
    during confirmation; neither may move files or delete metadata.
 3. Change the original destination between confirmation and execution, and
    create a destination collision. Restore must fail without overwriting data.
-4. Test an unsupported atomic-rename filesystem. Expect the explicit safety
-   error and preserved payload/metadata, not an unflagged-rename fallback.
+4. Test a filesystem without atomic no-replace renames, such as NFS or sshfs.
+   Restore must succeed without replacing an item created at the destination
+   meanwhile. Where nothing can be placed, the item is copied: modes, times and
+   extended attributes must survive where the destination stores them, and an
+   entry changed in the Trash during the restore must stay there with its
+   metadata and be reported.
 5. Check long paths and large selections: destinations must remain readable and
    scrollable, with a cancellable loading indicator during lookup.
 6. Exercise Undo and DnD modifiers, cursor feedback, and folder/background/sidebar

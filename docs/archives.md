@@ -197,8 +197,9 @@ the sources are not compressed again for each collision.
 Replace moves the existing archive to Trash where the location supports it,
 and Undo restores it. Elsewhere, the original is swapped out atomically on
 filesystems known to support that, or moved to a hidden sibling, and it is
-deleted only after the new archive is in place and flushed to removable
-drives. Such a replacement has no Undo, because the original no longer exists.
+deleted only after the new archive is in place and
+[flushed to the drive](filesystem-compatibility.md#durability). Such a
+replacement has no Undo, because the original no longer exists.
 If none of these is safe at the location, or the existing archive is replaced
 by another item while the new one is encoded, nothing is replaced; the refusal
 comes before encoding when possible.

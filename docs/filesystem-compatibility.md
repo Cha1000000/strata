@@ -22,6 +22,12 @@ the GVfs backend, and Strata uses GIO for them.
 - **Never remove a name on a guess.** A name is unlinked only after Strata has proven which inode
   it holds. When the outcome of a step cannot be proven, both names are kept and the operation
   reports that the result could not be confirmed.
+- **Never delete what a copy does not hold.** A move that has to copy deletes a source entry only
+  once the copy is flushed to the destination's device, and only while the entry is still what
+  the copy read. Anything else stays where it was and is reported; see
+  [Moves across filesystems](#moves-across-filesystems).
+- **Show only complete copies.** A copy appears under its final name once it is complete, except
+  on mounts where nothing can be placed; see [Publishing a copy](#publishing-a-copy).
 - **Never block the interface.** No filesystem call runs on the GTK main thread, including probes,
   mount lookups and waits. A hung NFS or FUSE server stalls the operation, not the window.
 - **Move metadata, not data.** Renames never copy file contents. Moves within one filesystem
@@ -70,9 +76,6 @@ Residual limits:
 - Undo and restore find an item Strata moved to Trash (by Delete, Replace or Merge) by original
   path, device and inode number, without birth time. If another item trashed from the same path got
   that inode number, they can bring back that item instead; they never overwrite anything.
-- A file stage's identity is read by name once GIO's copy into it finishes, so a process that
-  replaced that randomly named stage at any point during the copy would have its file treated as
-  the copy.
 - On SMB2/3, gvfsd-fuse and FUSE daemons that ignore rename flags, the no-replace check is made
   by the client kernel, so it protects against local processes but not against another client
   creating the same name at the same moment.
@@ -154,11 +157,11 @@ What it risks, and why that is low:
   it is not learned for the mount; if it was specific to the item, an empty folder that arrives in
   that instant could be replaced.
 
-Copying into a name created exclusively would protect an arrival completely, but it costs more
-than it protects. Deleting the source afterwards loses writes made to it during the copy. A copy
-drops the owner, extended attributes, birth time and hard links, and needs room for a second copy.
-An interrupted folder move is left split across two folders. Archive publication, and Replace and
-Merge without Trash, would still be refused on these mounts.
+Copying into a name created exclusively would protect an arrival completely, but it costs more than
+it protects. It rewrites every byte, and a file written during the copy stays behind at the source.
+A copy drops the owner, the birth time and, on these mounts, hard links, and needs room for a
+second copy. An interrupted folder move is left split across two folders. Archive publication, and
+Replace and Merge without Trash, would still be refused on these mounts.
 
 ## What a mount supports
 
@@ -202,7 +205,8 @@ Before copying anything, Replace chooses how to remove the original, in this ord
 
 Copies are written into a hidden `.strata-replacement-<id>` stage before they are placed. A file
 stage is created by the copy itself, exclusively, at a fresh name, so nothing is ever copied over
-a stage.
+a stage. Where the original or a moved source will be deleted, the stage is flushed to disk first;
+see [Durability](#durability).
 
 When Replace is part of a move within one filesystem, the source itself is placed after the
 original is out of the way, so nothing is copied unless no step can place it. Without Trash, a
@@ -211,8 +215,392 @@ only delete the remaining copy. A replacing move keeps its Undo, which moves the
 
 Merge moves the files it overwrites to Trash. Without Trash, it sets them aside, never by
 exchange: the originals go into one hidden `.strata-merge-<id>` folder inside the merge target, are
-put back if the merge fails, and are removed after it succeeds. It refuses to set a file aside
-where Replace would.
+put back if the merge fails, and are removed once it succeeds and is flushed to disk. An original
+whose name the merge left free, because the incoming item was a special file the destination
+cannot store or a source that a merging move kept, is put back instead. It refuses to set a file
+aside where Replace would. How the incoming items are placed is described under
+[Merges](#merges).
+
+## Copying
+
+Every copy between two native paths goes through one engine, `copy_engine` in
+`src/adapters/local_operations/copy_engine.rs`: pastes, Duplicate and Keep Both, moves across
+filesystems, Replace's staging copy, merges, and restores from Trash where nothing can be placed.
+It runs on worker threads, opens every entry through a descriptor beneath a pinned folder
+(`openat2` with `RESOLVE_BENEATH` and no symlinks), and makes every call through the `FsOps` seam.
+It never replaces an entry. Copies to or from GVfs locations stay on GIO, except that a native
+item moved to one is deleted by Strata, as described under
+[Moves across filesystems](#moves-across-filesystems).
+
+### Publishing a copy
+
+- **A file on a local POSIX filesystem** (ext2/3/4, XFS, btrfs, f2fs, tmpfs, bcachefs, ZFS,
+  overlayfs) is written into an unnamed `O_TMPFILE` in the destination folder and linked to its
+  name with an exclusive `linkat` once its data and metadata are complete; `AT_EMPTY_PATH` is
+  tried first, then `/proc/self/fd`, which Linux before 6.10 needs. A crash leaves nothing
+  behind. If the link is refused for any reason other than a taken name or a full disk, the bytes
+  already written are copied on the same device into a hidden stage, without reading the source
+  again. SMB is left out although its client accepts `O_TMPFILE`: it fakes one with a visible
+  `.__smbfile_tmp*` file and reports write errors only after the name is published. FUSE daemons
+  that implement it are unprobed.
+- **Elsewhere, and for folders,** the copy is built in a hidden `.strata-copy-*` stage in the
+  destination folder and published with the [placement routine](#placing-an-item-without-replacing).
+  A file stage is created exclusively, and its identity is read from its own descriptor. Replace
+  builds its copy under `.strata-replacement-*` and places it itself; see
+  [Replace and merge](#replace-and-merge).
+- **Where nothing can be placed,** because the mount's learned capabilities rule out every step for
+  a folder or publishing a stage returns "unsupported", entries are created exclusively at their
+  final names. A copy that fails there removes only the entries it created, each identified by its
+  inode, and the item's folder only once it is empty. A stage built before this was known is copied
+  again from the stage, on the same device.
+- **Keep Both and Duplicate** choose their number when the copy is published, so a name taken in
+  the meantime moves the copy on to the next number. Moves within one filesystem try each numbered
+  name with the placement routine. GVfs destinations are probed off the main thread, and the copy
+  retries on "exists". After an unconfirmed publish, both names are kept and no other number is
+  tried.
+
+A crash or an unplugged device can leave a `.strata-copy-*` stage behind. It holds only a partial
+copy whose source still exists, and is safe to delete; nothing removes it automatically.
+
+### Data
+
+| Step | When | Gives way to the next step |
+| --- | --- | --- |
+| `FICLONE`, one call | the file is not empty and the destination has not refused clones; on SMB only on kernels with the client's December 2023 fixes | on the errnos that mean it did nothing; `EOPNOTSUPP` and `ENOTTY` are remembered for the mount |
+| `copy_file_range`, in chunks | the file reports a size, and both ends are on one device, or in one network family (NFS, SMB or FUSE) on a kernel with that family's fixes: NFS from 5.9, FUSE from 5.8, SMB from 6.7, 6.6.7 or 6.1.73 | on the errnos that mean "unsupported", from the current offset; `ENOSYS` is remembered for the process |
+| `pread` and `pwrite` | always | — |
+
+- Chunks start at 1 MiB, double while a call takes under 100 ms, up to 64 MiB, and halve when one
+  takes over 250 ms. On NFS they stop at 2 MiB, because a larger request becomes an asynchronous
+  server-side COPY that costs about 3 s whatever its size. A call that takes over a second at
+  2 MiB or less switches the rest of that copy to reads and writes. A file that reports a size of
+  0, as virtual files on FUSE do, is read whole.
+- `EIO`, `ENOSPC`, `EDQUOT`, `EFBIG` and lost connections fail the file. A clone that fails with
+  `EIO` is not retried, since a fallback could read pages the cache has reverted.
+- Progress and cancellation are checked between calls, and a file is copied to its end even if it
+  grew after it was opened. A clone is a single call: on a hugely fragmented file it cannot be
+  cancelled until it returns.
+
+**Sparse files** keep their holes, as with `cp --sparse=auto`, when the file is at least 1 MiB with
+fewer allocated blocks than its size, the source is ext2/3/4, XFS, btrfs, tmpfs or f2fs, and the
+destination is not vfat, exFAT or ntfs3. Those fill a skipped hole with zeros in one call that
+reports no progress and cannot be cancelled. ZFS and network sources are copied in full, because
+some ZFS releases report holes over data not yet synced, also through NFS. The copy walks
+`SEEK_DATA` and `SEEK_HOLE` up to the size seen at open, sets the copy's length, then copies
+anything the file gained since. Skipped holes count as copied bytes, so progress reaches its
+total. A clone keeps holes by itself. FUSE destinations get the walk too, since the daemon behind
+them is unknown, and one may still write the zeros.
+
+### Metadata
+
+A file is created at 0600 and gets, after its data: its owner and group, set only for the ids that
+differ; its extended attributes, ACLs last; its exact mode; and its times. The owner comes first
+because `chown` clears file capabilities and the setuid and setgid bits. Extended attributes come
+before the mode, so `user.*` attributes survive on read-only files and folders. A folder is made at
+0700 and gets the same once its last child is done, so its times survive too.
+
+- **Best effort.** Only `EIO`, `ESTALE` and lost connections fail the copy. Any other refusal is
+  skipped without a report, so copies to removable media do not warn about permissions every time.
+  A namespace the destination refuses with `EOPNOTSUPP` is remembered for the mount, and a name
+  refused for lack of permission, such as `security.*` for a normal user, for the rest of the
+  copy. Names that libattr's `xattr.conf` skips (`security.evm`, `trusted.SGI_*`, `xfsroot.*`,
+  `afs.*`, `user.Beagle.*`) are never copied, nor are ntfs3's `$LXUID`, `$LXGID`, `$LXMOD` and
+  `$LXDEV`, which would set owner and mode behind `fchown` and `fchmod`.
+- **Special bits.** Setuid and setgid are dropped when the owner could not be kept, as `cp` does.
+- **Setgid folders.** Inside a destination folder that hands its group to new items, everything
+  copied keeps the inherited group, and copied folders keep the setgid bit.
+- **Folders without owner access.** A folder whose mode would lock its owner out, such as 0555, is
+  filled with owner access and recorded by its path beneath the copy, without holding a
+  descriptor. It gets its exact mode in a last pass, deepest first, before the copy is published,
+  so trees with thousands of read-only folders (`~/go/pkg/mod`) need no descriptor per folder. A
+  stage that cannot be published gets owner access back, so it can be removed.
+- **Times after close.** On NFSv4, closing a file written under a write delegation sets its times
+  to the close time, so they are set again after close, through a read-only reopen, a write
+  reopen, or by name. On SMB and FUSE, a forced stat after close catches times a writeback cache
+  moved by 2 s or more, and sets them again.
+- **Symbolic links** keep their times, except on FUSE, where sshfs would apply them to the link's
+  target. Their owner is not set. A destination that refuses symbolic links fails the copy of a
+  folder holding one.
+
+Mount options decide the mode on vfat, exFAT, exfat-fuse, ntfs-3g and SMB without POSIX
+extensions: `chmod` succeeds there without changing it, so a 0700 folder takes the mount's mode.
+What the lab's mounts keep, with udisks' default options:
+
+| Destination | Mode | Times | Extended attributes |
+| --- | --- | --- | --- |
+| ext4, tmpfs | exact | to the nanosecond | yes |
+| ntfs3 | exact | 100 ns | yes |
+| NFSv4.2 | exact | to the nanosecond, set again after close | `user.*` where the server supports them |
+| NFSv3 | exact | to the nanosecond | no |
+| SMB with POSIX extensions | exact | 100 ns | `user.*` |
+| SMB without them | 0755; a read-only file shows 0555 | 100 ns | `user.*` |
+| ntfs-3g | 0777 | 100 ns | `user.*` |
+| sshfs | exact | whole seconds | no |
+| vfat | files 0644, folders 0755; a read-only file stays read-only | modification 2 s, access only the date | no |
+| exFAT (kernel) | 0755 | modification 10 ms, access 2 s | no |
+| exfat-fuse | 0777 | whole seconds | no |
+
+A normal user keeps only their own owner, and a group they belong to.
+
+### Folders, names and case aliases
+
+A folder's tree is copied by up to eight workers, one where either disk is rotational, on the queue
+that deletions use. The queue runs depth first, so few folders are open at once. Entries are
+created exclusively, so a taken name inside a folder the copy made means one of three things:
+
+- **A case alias.** On case-insensitive destinations (vfat, exFAT, exfat-fuse, ntfs3 with `nocase`,
+  SMB, and casefolded ext4, f2fs and tmpfs folders), two source names can be one destination name.
+  The later name in byte order gets the next Keep Both number, so `Makefile` and `makefile` become
+  `Makefile` and `makefile (1)`, and the completion report lists it. Strata never predicts aliases;
+  only the destination's "exists" counts, which also covers 8.3 short names and Unicode
+  normalization. A source sibling that already has the numbered name keeps it, and the alias moves
+  on to `makefile (2)`.
+- **The copy's own entry after a lost reply.** NFS `CREATE`, `MKDIR`, `SYMLINK` and `LINK` are not
+  idempotent. An entry listed under exactly the requested name, still as fresh as the copy would
+  have made it (an empty folder, an empty file with one link, or a symlink with the same target),
+  and not made by another worker of the copy, is adopted.
+- **Someone else's entry,** possible on SMB without POSIX extensions, where the 0700 stage is not
+  private on the server. It is left alone, and the copy's entry is numbered.
+
+So that numbering follows byte order, names that may collide are claimed by the folder's job, one
+after another, before their contents are written. ext2/3/4, XFS, btrfs, tmpfs and f2fs folders
+without the casefold flag never collide, so there each file is simply created by its own job.
+Elsewhere, only names that fold to the same key (compatibility forms decomposed, case folded,
+trailing dots and spaces dropped) are claimed; a name that looks like a FAT short name
+(`PROGRA~1`) or is not valid UTF-8 makes the whole folder claim. A claim is a `mknodat`, which opens
+no descriptor, because vfat mounted with `flush` waits 100 ms at every close of a written file.
+Where `mknodat` is refused, and always on SMB, it is an exclusive read-only create: on SMB, names
+made by `mknodat` and looked up by name while other files were being written stalled the folder's
+publication for Samba's 35 s lease-break timeout.
+
+On FAT-family destinations, characters FAT cannot store are replaced first, without a report, and
+names inside a copied folder that become equal are then numbered as aliases. A paste's top-level
+items are numbered by the FAT planner before copying, also without a report.
+
+### Hard links
+
+Names of one file within one copied item stay one file where the destination keeps hard links, as
+with `cp -a` and cross-filesystem `mv`. Only the first name is copied. Once every file of the item
+is written, each other name is linked to that copy exclusively, before folders get their final
+modes. Whether the destination keeps links comes from the mount's learned capabilities, or from a
+probe on Strata's own `.strata-probe-*` names in the destination, never inside the copy. Links
+that report their own inode number, as on sshfs, count as missing. Where a link is refused, that
+name and every later one are copied from the first copy, on the same device.
+
+Names outside the copied item are copied separately, and so, in a merge, are names that land in
+different merged folders. SMB shares without POSIX extensions report one link for each file a
+folder listing shows, and sshfs for every file, so their hard links are copied as separate files.
+
+### Special files
+
+Named pipes inside a copied folder are recreated with their owner, mode and times; their extended
+attributes are not copied, since reading them would open the pipe. Where the destination refuses
+pipes (vfat, exFAT and sshfs with `EPERM`, exfat-fuse with `EIO`, SMB without POSIX extensions
+with `EOPNOTSUPP`), they are left out and reported, as sockets and device files always are. A
+selected pipe is recreated where the destination allows it. A selected pipe it refuses, a selected
+socket or device file, and a pipe that Replace would stage fail with "it is not a regular file,
+directory, or symbolic link".
+
+### Merges
+
+Merge first moves the originals it replaces out of the way, as described in
+[Replace and merge](#replace-and-merge). The incoming items are then built in a hidden
+`.strata-copy-*` stage inside each merged folder, made when the first of them arrives, with the
+naming rules above. Once the folder's items are complete, they are placed one by one in byte order
+with the placement routine:
+
+- A name another program took in the meantime gives the incoming item the next number, reported as
+  taken. This includes a file that meets a folder.
+- Where nothing can be placed, a file is copied out of the stage at its name, and new folders are
+  copied in place in the live folder from the start.
+- After an unconfirmed placement, the stage is kept, since it may hold the item, and the merge
+  fails.
+
+Placed folders then get their exact modes, and the empty stage is removed. Nothing is written into
+a live folder except by an exclusive rename, or an exclusive create where nothing can be placed, so
+a stopped merge leaves no partial file under a real name. Items already placed stay, and only they
+are reported. Undoing a merge removes items under the names they were saved as. Each merged folder
+is opened without following symlinks and pinned, so a folder swapped for a link is not followed,
+while mount points inside the target are.
+
+### Moves across filesystems
+
+A move within one filesystem is a rename. Across filesystems, or where nothing can place the item,
+Strata copies the item and records for each source entry what the copy read: its identity, link
+count, size, and modification and change times. It records names only and holds no descriptors.
+After the destination is flushed (see [Durability](#durability)), each source entry is deleted only
+if it is still what the copy read:
+
+- **Torn files.** A file that changes while it is read is copied once more. If it changes again,
+  its copy is removed and the source is kept. A selected file then fails with "changed while it was
+  being copied", and nothing is published.
+- **The check.** A forced stat (`AT_STATX_FORCE_SYNC`, which revalidates NFS and SMB) must show the
+  same type, size and modification time and, where inode numbers are stable, the same inode, change
+  time and link count. Removing one name of a hard-linked file changes the other names' change time
+  and link count, so Strata counts the names it removed itself, across every item of a paste, a
+  restore or an undo, and accepts only those changes.
+- **Relaxed identity.** FUSE daemons without `use_ino`, vfat and exFAT, and cifs mounted with
+  `noserverino` give an entry a new inode number once the kernel evicts it. There, the type and the
+  birth time, where both stats report one, stand in for the inode, and the change time is compared
+  only for files with one link.
+- **Racily clean files.** Where timestamps are coarse, a same-size rewrite can leave a file's times
+  as they were. Such files are compared by content; see [Racily clean files](#racily-clean-files).
+- **Folders** are opened and checked like entries, and removed once empty. A folder that gained
+  entries, or another folder put at its name, stays.
+- **The copy itself.** If the copy is no longer where the move published it, nothing of that item
+  is deleted.
+
+What stays is reported by cause: changed during the move, could not be deleted (with the error, as
+in a read-only folder), a special file the destination cannot store, or an item whose copy was
+moved away. An entry already gone is not reported, since a move leaves exactly that. A moved item
+with anything left behind is left out of Undo. Undoing a move gives back names that were numbered
+as aliases, where the original name is free.
+
+A native item moved to a GVfs destination is recorded before GIO copies it, then deleted the same
+way. Nothing can be flushed there and nothing is compared by content, and a file that changes
+during GIO's copy stays at the source while its torn copy stays at the destination. Items on GVfs
+locations are copied and deleted by GIO. One moved to a native destination whose flush needs each
+file synced, such as SMB, has its files synced before the flush.
+
+### Racily clean files
+
+As in Git's "racily clean" check: where a filesystem's timestamps are coarse, a file rewritten with
+the same size within one tick keeps its modification time, and FAT keeps no change time at all, so
+no stat can show the rewrite. On those mounts, a file whose modification time falls within one
+tick of when the copy read it is copied with reads and writes while a SHA-256 digest of the bytes
+is taken. Before the move deletes it, Strata waits until a rewrite would have moved its time, reads
+the source again, up to one byte past the size it copied, and keeps it as changed if it differs.
+It is deleted only if its name still holds the file it compared.
+
+| Source | Window after the modification time |
+| --- | --- |
+| vfat, msdos, exFAT; exfat-fuse; `fuseblk` mounts whose format udev cannot tell | 2 s (exFAT stores 10 ms, but gets FAT's window) |
+| HFS, HFS+ | 1 s |
+| sshfs | 3 s: the 1 s tick, plus 2 s for a server clock behind ours |
+| any other file whose modification time has no fraction of a second, as on FAT-backed shares, ext2/3 with small inodes, rclone and gvfsd-fuse | 2 s |
+
+- Each window gets 100 ms more for the coarse clock the kernel stamps times with. Files modified
+  longer ago are not read again, and other mounts keep the stat check alone.
+- The wait is at most the window, so moving a file just saved on a FAT stick takes up to about 2 s
+  longer.
+- A file dated ahead of the clock, on a mount this machine stamps (FAT, `fuseblk`, HFS), cannot
+  have been rewritten unnoticed until the clock reaches its time. While the clock is before it, it
+  is deleted without being read again; after, it is compared like the others.
+- If the clock was set back to before the copy read a file, the file is kept as changed.
+
+### Durability
+
+Before Strata deletes anything that only a copy holds, it flushes the copy to the destination's
+device. That covers the source of a move that copied, an original that Replace exchanged or set
+aside, a merge's set-aside originals, an archive's replaced original, and the Trash copy after a
+restore copy. The flush goes through a folder opened before the copy wrote, because since Linux 5.8
+`syncfs` reports only the writeback errors that follow its descriptor's open; a folder others may
+only write into is replaced by the nearest readable folder above it on the same mount. Plain
+copies never sync, but every close is checked, which catches the write errors NFS, SMB and FUSE
+report there.
+
+| Destination | Flush | Why |
+| --- | --- | --- |
+| ext2/3/4, XFS, btrfs, f2fs, tmpfs, bcachefs, ZFS, overlayfs, ntfs3, NFS | `syncfs` | `sync_fs` flushes the device; NFS commits to the server |
+| vfat, msdos, exFAT | `syncfs`, then `fsync` of the folder | `sync_fs` writes back without flushing the device's cache, which `fsync`, of folders too, does |
+| ntfs-3g, exfat-fuse | `syncfs`, then `fsync` of the folder | without `FUSE_SYNCFS`, `syncfs` writes the daemon's device pages back but flushes nothing; both daemons sync and flush their whole device for a folder's `fsync` |
+| other FUSE daemons, and `fuseblk` mounts udev cannot tell | `fdatasync` of each written file before it is closed, then `fsync` of the folder | a file's `fsync` reaches the daemon; the folder's covers names published after the files were synced |
+| SMB | `fdatasync` of each written file | only a file's `fsync` reaches the server, as an SMB FLUSH |
+| any other | `fdatasync` of each written file, then `syncfs` | |
+
+- ntfs-3g and exfat-fuse are recognised by the format udev records for the mount's device
+  (`ID_FS_TYPE` in `/run/udev/data/b<major>:<minor>`), read off the main thread and cached with
+  the mount's capabilities.
+- A removable device gets a folder `fsync` besides. Before Linux 5.8, every file is synced too,
+  since `syncfs` reports no writeback errors there.
+- If the flush fails, nothing behind it is deleted, both copies stay, and the error says the device
+  could not finish writing.
+
+**Batches.** A paste collects what it owes per destination filesystem and flushes once per batch:
+at 256 items, at 1 GiB copied, 5 s after the batch's first item (checked as items finish), and at
+the end of the paste, including on cancel or failure. Sources are deleted in batches, and each item
+is recorded as moved, for Undo, once its source is deleted. Cancelling stops copying, then
+completes the deletions of the batch, whose copies are on disk. A crash before a batch closes
+leaves both copies. The progress dock shows "Writing to device…" during a final flush, except on
+SMB, whose files were synced as they were written. A merge also flushes the filesystems mounted
+beneath its target that it wrote to. Replace syncs only where its original or its source will be
+deleted: for moves, without Trash, and when a move to Trash fails after the copy was staged.
+Undoing moves is batched the same way; a restore copy flushes once per item.
+
+**Parallel moves.** A paste of more than eight native files into a native folder, none of them in
+conflict, copies or moves up to eight files at a time, one where either disk is rotational. Each
+move tries a rename first; one that has to copy joins the batches.
+
+### Restoring from Trash
+
+Restore places an item with the placement routine. Only where no step can place it on its
+filesystem does it copy the item, in place at its final names, pinned to the Trash item it checked,
+with the best-effort metadata above. The copy is flushed, then the Trash copy is deleted entry by
+entry, as a move deletes its source. Anything changed or uncopyable stays in the Trash with its
+`.trashinfo`, and is reported as left in the Trash. A failed restore copy removes only the entries
+it created. A restore across filesystems is refused.
+
+### The completion report
+
+After a transfer, Strata reports what it could not do as asked:
+
+- names the destination took for another (case aliases), and names taken during a merge or an undo,
+  each with the name the item was saved as;
+- special files left out of a copy;
+- source entries a move left behind, and entries a restore left in the Trash, with the reason.
+
+One short renamed line is shown as a notice. More are listed in an information dialog, up to eight
+lines and a count of the rest. Anything left out or left behind makes it a warning, titled
+"Completed with errors", or "Some items were left out or left behind" when the transfer failed or
+was cancelled. Keep Both numbers, which the user asked for, metadata a destination cannot store
+and replaced FAT characters are not reported.
+
+### Limits
+
+- **Coarse times.** vfat keeps no change time and a 2 s modification time, exFAT 10 ms, sshfs whole
+  seconds. Moves compare racily clean files by content; without that, a same-size rewrite within
+  one tick would pass. Where the kernel stamps times from a clock that advances once per tick (up
+  to 10 ms), a same-size rewrite within that tick of the previous write, after the copy read the
+  file, can still pass on any filesystem.
+- **exFAT folders.** The kernel's exFAT driver changes a folder's birth time whenever an entry is
+  renamed into it, so a move then keeps that whole folder instead of only the changed entry.
+- **Relaxed identity.** Where a source has no stable inode numbers and reports no birth time
+  (sshfs, exfat-fuse, ntfs-3g), a different file with the same type, size and times put at a source
+  name passes for the original, unless it is racily clean and compared. A copy recognises its own
+  entries by inode number, and on FUSE its claimed files by type and size. Where the kernel can
+  renumber an evicted entry (FUSE, vfat, exFAT, cifs with `noserverino`), a renumbered entry stops
+  the copy as changed; nothing is deleted, and its hidden stage can be left behind.
+- **Modes that cannot be stored.** On vfat, exFAT, exfat-fuse, ntfs-3g and SMB without POSIX
+  extensions, the mount options decide modes, and nothing reports what was lost. On SMB with POSIX
+  extensions, a file opened right after `chmod 0444` reports 0755, so any copier copies 0755.
+- **Alias order.** Aliases are numbered in byte order where names are claimed. They are numbered
+  in the order their copies finish where the destination takes two names for one that Strata's
+  fold keeps apart, and on XFS's deprecated `ascii-ci` format, which no casefold flag shows. In a
+  merge, a name another program takes at the same moment is decided by timing.
+- **sshfs.** The 3 s window covers a server clock up to 2 s behind; a server further behind can hide
+  a rewrite. sshfs answers stats from its attribute cache (`cache_timeout`, 20 s by default), so a
+  change made on the server can stay invisible to both stat checks for longer than the window; the
+  content comparison reads from the server.
+- **Times after close.** The check on SMB and FUSE tolerates 2 s, so a daemon that moves times by
+  less is not corrected. On NFSv4, setting times again costs one more open per file.
+- **GVfs destinations.** A native item moved to one is not flushed and not compared by content, and
+  a torn copy stays there while its source is kept. Sources on GVfs locations are deleted by GIO,
+  without a check of each entry.
+- **SMB sources.** Opening two names of one hard-linked file at once fails with `EINVAL` on the
+  kernel client, so Strata opens one name of a file at a time when it reads from SMB, whatever link
+  count the share reports. After this machine writes a file on a share, opening another name of it
+  fails the same way, for any program, until the client's deferred close expires (`closetimeo`, one
+  second in the lab); a copy started in that time fails with "changed while it was being copied".
+- **SMB read-only folders.** Without POSIX extensions, the client decides a folder's read-only
+  attribute from cached attributes, so write access given back right after it was taken does
+  nothing until the folder is revalidated. Strata revalidates before giving it back; other programs
+  may not. Folder access times come back as the modification time.
+- **ntfs-3g and exfat-fuse** are recognised only from the host's udev records. Without them, as in
+  containers, they keep per-file syncs and the 2 s comparison window. Their batched flush relies on
+  the daemon's `FUSE_FSYNCDIR` syncing the whole device, as both daemons do; the kernel reports
+  success for a daemon that does not implement it.
+- **vfat with `flush`** waits 100 ms at every close of a written file, which bounds copies of many
+  small files: 2,000 files take about 26 s with eight workers.
 
 ## Rename
 
@@ -254,7 +642,8 @@ before reporting success or recording Undo.
 
 | Name | Purpose | After a crash |
 | --- | --- | --- |
-| `.strata-replacement-*` | staging copy before publication; after an exchange, the swapped-out original until it is deleted | **may be the user's original** |
+| `.strata-replacement-*` | Replace's staging copy; after an exchange, the swapped-out original until it is deleted | **may be the user's original** |
+| `.strata-copy-*` | a copy being built: a new item, or a merge's incoming items inside the merged folder | partial copy; safe to delete |
 | `.strata-compression-*` | archive being written; after an exchange, the replaced archive | **may be the user's original** |
 | `.strata-replaced-*` | original set aside by Replace | **may be the only copy of the user's item** |
 | `.strata-merge-*` | originals set aside by Merge | **may hold the only copies** |
@@ -313,8 +702,19 @@ Quirks emulate rejected rename flags (NFS, ntfs-3g), missing hard links (vfat, v
 collisions reported as `EPERM`, gvfsd-fuse refusing to rename over an empty folder, case-insensitive
 lookups, invalid names, unsupported or lying Trash, reused inode numbers, hard links with their own
 inode numbers, missing birth times, lost replies (on sshfs, a lost rename reply leaves the target
-name reporting its old inode number) and racing processes. The seam also asserts that
-no call runs on the main context's thread. Run them with:
+name reporting its old inode number) and racing processes, before or after a call.
+
+For copies they also emulate a mount's family and superblock options as mountinfo reports them,
+the device format udev records, refused `O_TMPFILE` and its links, refused clones, a
+`copy_file_range` that ends early, short reads and writes, times reset at close (NFSv4.2
+delegations, FUSE writeback caches), refused `chown`, foreign groups, extended attributes refused
+by prefix, injected or listed with ACLs first, refused `mknodat` of files and pipes, NFS silly
+renames, files that report no size, reported modes, change times that equal the modification time
+(FAT), single link counts (sshfs), entries renumbered after eviction, SMB's refusal to open two
+names of one file at once and its stale read-only folders, and writeback errors that `syncfs`
+reports. Tests can also pretend to run on another kernel release, freeze the clock the racily
+clean check reads, and set a paste's batch limits and clock. The seam also asserts that no call runs
+on the main context's thread. Run them with:
 
 ```bash
 ./scripts/test-headless.py local_operations::
@@ -352,9 +752,14 @@ mount on which the kernel cifs client turned server inode numbers off during the
 failures after that point can be artefacts of that mount state.
 
 Unit tests layer quirks on a fully featured filesystem, so on a limited mount some of them fail by
-design: a test expecting a plain rename sees the ladder link instead on NFS, and fixtures with
-symlinks, FIFOs or Unix permissions cannot exist on vfat. Read failures against a run of the same
-filter on `origin/main`.
+design: a test expecting a plain rename sees the ladder link instead on NFS, fixtures with
+symlinks, FIFOs or Unix permissions cannot exist on vfat, a racer keyed to a step the mount never
+takes (an `O_TMPFILE` link, a hole, a `syncfs`, an exchange) never runs, and a time with a fraction
+of a second is rounded away on vfat, exfat-fuse and sshfs. On NFS a file renamed over while open
+reads as `.nfsXXXX`, and on casefolded folders `/proc` shows files the test process created as
+`name (deleted)`, so quirk patterns by name miss them. The container has no udev database, so
+exfat-fuse and ntfs-3g are not recognised there and keep their per-file syncs. Read failures
+against a run of the same filter on `origin/main`.
 
 Requirements and safety:
 
@@ -385,3 +790,43 @@ Requirements and safety:
   than sshfs are not covered.
 
 Never point tests at real user shares or removable drives.
+
+### Lab measurements
+
+Flushes counted on the backing loop device for one call after writing 16 KiB, over three rounds.
+NFS and sshfs serve tmpfs in the lab, so they have no device to count.
+
+| Mount | Close | `syncfs` | `fsync` of the folder | `fdatasync` of the file |
+| --- | --- | --- | --- | --- |
+| ext4 | 0 | 2–4 | 2 | 2 |
+| vfat with `flush`, exFAT | 0 | 0 | 1 | 1 |
+| ntfs3 | 0 | 1 | 1 | 1 |
+| exfat-fuse, ntfs-3g | 0 | 0 | 1 | 1 |
+| SMB, on the server's device | 0 | 0 | 0 | 2 |
+
+On vfat, exFAT and both FUSE daemons `syncfs` writes the data back without flushing, and a folder's
+`fsync` alone writes no file data on vfat and exFAT. Both FUSE daemons sync and flush their whole
+device for a folder's `fsync`: after ten unsynced files it costs one flush, and ntfs-3g skips the
+flush of a clean device, so ten `fdatasync` calls also cost one. Moving 300 files to exfat-fuse in
+two batches took 302 flushes with a sync per file and 2 with one folder `fsync` per batch; on
+ntfs-3g about 290 and 2.
+
+Moving 1,000 files of 4 KiB with one flush per item cost 1,000 flushes and 16.6 s on vfat, against
+13.2 s with the default batches, and 3.7–3.9 s on ntfs3 and exfat-fuse, against 0.13–0.15 s.
+Batch limits from 64 items up differ by at most 0.1 s per 1,000 files, and large files show no
+difference. The loop devices sit in memory, so the flush latency of real USB media is not measured.
+
+Copying a folder of 2,000 files of 1 KiB with eight workers, in seconds:
+
+| Mount | No name claimed | Every name claimed | GIO, one file at a time | `cp -r` |
+| --- | --- | --- | --- | --- |
+| tmpfs, ext4 | 0.01 | 0.01–0.02 | 0.02–0.03 | 0.01–0.02 |
+| vfat with `flush` | 26.0 | 26.2 | 208 | 208 |
+| exFAT | 0.16 | 0.15 | 0.16 | 0.15 |
+| NFSv3 | 0.09 | 0.12 | 0.12 | 0.09 |
+| NFSv4.2 | 0.12 | 0.13–0.19 | 0.16 | 0.12 |
+| SMB, case-insensitive | 0.57–0.63 | 0.61–0.67 | 0.69–0.80 | 0.68 |
+| sshfs | 10.4–13.2 | 1.9–3.7 | 97–106 | 113–129 |
+
+vfat waits 100 ms at each close of a written file, which bounds every copier there. The lab's SFTP
+round trip takes about 46 ms, so the sshfs row compares copiers only.

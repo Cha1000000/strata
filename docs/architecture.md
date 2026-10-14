@@ -247,6 +247,13 @@ supports. Its syscalls go through the `FsOps` seam in `fs_ops.rs`, and what each
 cached in `adapters/volume/mount_capabilities.rs`. See
 [Filesystem compatibility](filesystem-compatibility.md).
 
+Copies between native paths, including moves across filesystems, merges, Replace stages and
+restore copies, go through `adapters/local_operations/copy_engine.rs`. It copies through
+descriptors on worker threads, on the queue `work_queue.rs` shares with deletions, and records
+what a move read so that only unchanged sources are deleted. `owed.rs` batches the deletions a
+paste owes behind one durability barrier per destination filesystem, and the completion report
+reaches the UI as `OperationEvent::ItemsReported`.
+
 Filesystem work for Trash lives in `adapters/trash.rs`. Measurement shares one entry/time budget
 across root and descendant batches; depth truncation and unreadable descendants remain branch-local.
 Deleting Trash streams its own batches, independently of any incomplete measurement. Native path
