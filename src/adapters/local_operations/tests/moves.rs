@@ -1847,6 +1847,13 @@ fn files_read_within_a_coarse_time_tick_are_compared_before_their_move_deletes_t
         ctime_is_mtime: true,
         ..Quirks::default()
     };
+    // An SMB share of a FAT disk, whose times only their lack of a fraction
+    // of a second tells coarse.
+    let fat_share = || Quirks {
+        mount_type: Some(("cifs", "rw")),
+        ctime_is_mtime: true,
+        ..Quirks::default()
+    };
     // Reads of four bytes, so the copy and the comparison read in chunks.
     let chunked = || Quirks {
         short_io: Some(4),
@@ -1891,7 +1898,7 @@ fn files_read_within_a_coarse_time_tick_are_compared_before_their_move_deletes_t
     // times written in a time zone ahead of ours read), when it is
     // rewritten, and whether the deletion reads it again. Only the file
     // itself is moved where it is rewritten as it is compared.
-    let rows: [(&str, Preset, i64, Rewrite, bool); 23] = [
+    let rows: [(&str, Preset, i64, Rewrite, bool); 24] = [
         ("vfat", vfat, recent, Rewrite::Deleting, true),
         (
             "vfat, past the tick",
@@ -1925,6 +1932,7 @@ fn files_read_within_a_coarse_time_tick_are_compared_before_their_move_deletes_t
         ("sshfs", sshfs, recent, Rewrite::Deleting, true),
         ("sshfs, behind", sshfs, behind, Rewrite::Deleting, true),
         ("hfsplus", hfsplus, recent, Rewrite::Deleting, true),
+        ("FAT share", fat_share, recent, Rewrite::Deleting, true),
         ("vfat, file", vfat, recent, Rewrite::Comparing, true),
         ("vfat, compared", vfat, recent, Rewrite::Compared, true),
         ("vfat, grown", vfat, recent, Rewrite::Grown, true),
@@ -1972,7 +1980,14 @@ fn files_read_within_a_coarse_time_tick_are_compared_before_their_move_deletes_t
         fs::write(&file, b"original")?;
         let epoch = SystemTime::UNIX_EPOCH;
         let seconds = SystemTime::now().duration_since(epoch)?.as_secs() / 2 * 2;
-        set_times(&file, seconds)?;
+        if matches!(preset().mount_type, Some(("ext4", _))) {
+            // ext4 keeps a fraction of a second, which FAT, sshfs and HFS+
+            // times lack.
+            let modified = epoch + Duration::new(seconds, 250_000_000);
+            fs::File::open(&file)?.set_modified(modified)?;
+        } else {
+            set_times(&file, seconds)?;
+        }
         let read_at = i64::try_from(seconds)? * 1000 + read_after;
         let _clock = ClockGuard::set(epoch + Duration::from_millis(u64::try_from(read_at)?));
         let rewriter = |contents: &'static [u8], clocked: bool| -> super::fs_quirks::Racer {

@@ -1520,18 +1520,17 @@ impl Copy {
     ) -> Result<Option<(Snapshot, manifest::Read)>, Failure> {
         let mut stat = source.stat;
         let source_fd = source.fd.as_fd();
-        // A folder may hold another mount, so each file has its own.
-        let coarse_times = self
+        // A folder may hold another mount, so each file asks its own.
+        let mount_times = self
             .recording
-            .then(|| Mount::new(self.fs, source_fd).coarse_times)
-            .flatten();
+            .then(|| Mount::new(self.fs, source_fd).coarse_times);
         for attempt in 0..2 {
             if attempt > 0 {
                 self.fs.set_len(target, 0)?;
             }
             let counted = attempt == 0;
             let unsettled =
-                coarse_times.and_then(|coarse| manifest::unsettled(&stat, coarse, manifest::now()));
+                mount_times.and_then(|coarse| manifest::unsettled(&stat, coarse, manifest::now()));
             let digest = match unsettled {
                 Some(_) => Some(self.copy_digested(data, (source_fd, &stat), target, counted)?),
                 None => {

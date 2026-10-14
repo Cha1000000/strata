@@ -112,10 +112,19 @@ pub(super) struct Unsettled {
 /// modification time.
 pub(super) fn unsettled(
     stat: &EntryStat,
-    coarse: CoarseTimes,
+    coarse: Option<CoarseTimes>,
     started: SystemTime,
 ) -> Option<Unsettled> {
     let (seconds, nanoseconds) = stat.mtime;
+    // A time with no fraction of a second may come from a filesystem as
+    // coarse as FAT's that the mount does not show, such as one a server
+    // shares.
+    let coarse = coarse.or_else(|| {
+        (nanoseconds == 0).then_some(CoarseTimes {
+            window: Duration::from_secs(2),
+            stamped_here: false,
+        })
+    })?;
     let modified =
         UNIX_EPOCH.checked_add(Duration::new(u64::try_from(seconds).ok()?, nanoseconds))?;
     // Our clock stamps a time ahead of it only once it reaches that time; a
