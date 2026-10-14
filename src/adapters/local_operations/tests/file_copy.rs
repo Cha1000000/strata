@@ -3,12 +3,12 @@
 use std::{
     io::Write,
     os::unix::fs::{FileExt, MetadataExt, PermissionsExt},
-    sync::Mutex,
+    sync::{Mutex, OnceLock},
 };
 
 use rustix::io::Errno;
 
-use super::fs_quirks::{Call, Op, Racer, Support, TmpfileLink};
+use super::fs_quirks::{Call, NameOpens, Op, Racer, Support, TmpfileLink};
 use super::*;
 use crate::adapters::volume::{XattrNamespace, mount_capabilities};
 
@@ -18,7 +18,7 @@ struct Mounts {
     _root: tempfile::TempDir,
     sources: PathBuf,
     destination: PathBuf,
-    _source_scope: FsQuirks,
+    source_scope: FsQuirks,
     destination_scope: FsQuirks,
 }
 
@@ -32,7 +32,7 @@ fn mounts(
     fs::create_dir(&sources)?;
     fs::create_dir(&target)?;
     Ok(Mounts {
-        _source_scope: FsQuirks::install(&sources, source),
+        source_scope: FsQuirks::install(&sources, source),
         destination_scope: FsQuirks::install(&target, destination(&target)),
         _root: root,
         sources,
@@ -936,5 +936,77 @@ fn xattrs_are_kept_when_an_acl_takes_the_owners_write_access() -> Result<(), Box
     assert_eq!(&value[..length], b"metadata");
     let length = getxattr(&target, "system.posix_acl_access", &mut value[..])?;
     assert_eq!(&value[..length], acl);
+    Ok(())
+}
+
+#[test]
+fn selected_names_of_a_linked_file_on_an_smb_share_are_opened_one_at_a_time()
+-> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock()?;
+    // The first linked name opened stays open until the other was looked
+    // at, as its copy does in parallel just before opening it; small reads
+    // keep the first open while that copy would open the other.
+    type Reader = Box<dyn Fn() -> Vec<Call> + Send + Sync>;
+    let reader: Arc<OnceLock<Reader>> = Arc::default();
+    let read = reader.clone();
+    let both_looked_at = move || {
+        read.get().is_some_and(|calls| {
+            let calls = calls();
+            ["linked-a", "linked-b"].iter().all(|name| {
+                calls
+                    .iter()
+                    .any(|call| call.op == Op::Stat && call.names == [*name])
+            })
+        })
+    };
+    let hold: Racer = Box::new(move || {
+        let start = Instant::now();
+        while !both_looked_at() && start.elapsed() < Duration::from_secs(5) {
+            thread::sleep(Duration::from_millis(5));
+        }
+    });
+    let smb = Quirks {
+        mount_type: Some(("cifs", "rw")),
+        name_opens: NameOpens::OneAtATime,
+        short_io: Some(4096),
+        after: vec![(Op::OpenSource, "linked-*", 0, hold)],
+        ..Quirks::default()
+    };
+    let mounts = mounts(smb, |_| Quirks::default())?;
+    let _ = reader.set(Box::new(mounts.source_scope.reader()));
+    fs::write(mounts.sources.join("linked-a"), patterned(1 << 20))?;
+    fs::hard_link(
+        mounts.sources.join("linked-a"),
+        mounts.sources.join("linked-b"),
+    )?;
+    // Enough files for the bulk path, the linked names first, so they are
+    // copied in parallel.
+    let mut names = vec!["linked-a".to_owned(), "linked-b".to_owned()];
+    for index in 0..8 {
+        let name = format!("file-{index}");
+        fs::write(mounts.sources.join(&name), &name)?;
+        names.push(name);
+    }
+
+    run_paste(PasteRequest {
+        id: OperationRequestId(98),
+        destination: Location::local(&mounts.destination),
+        items: names
+            .iter()
+            .map(|name| PasteItem {
+                source: Location::local(mounts.sources.join(name)),
+                conflict: TransferConflict::FailIfExists,
+            })
+            .collect(),
+        move_sources: false,
+    });
+
+    for name in &names {
+        assert_eq!(
+            fs::read(mounts.destination.join(name))?,
+            fs::read(mounts.sources.join(name))?,
+            "{name}"
+        );
+    }
     Ok(())
 }

@@ -124,6 +124,20 @@ pub(crate) enum TmpfileLink {
     Unavailable,
 }
 
+/// Opening a name of a file fails with `EINVAL` where another name of it
+/// is in the way, as the SMB client's one lease per file makes a second
+/// open fail, or a Samba server defer it forever.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum NameOpens {
+    #[default]
+    Any,
+    /// Once another name was opened at all, which pins that a copy never
+    /// opens a later name.
+    FirstOnly,
+    /// While another name is open.
+    OneAtATime,
+}
+
 pub(crate) type Racer = Box<dyn FnMut() + Send>;
 pub(crate) type Preset = fn() -> Quirks;
 
@@ -208,10 +222,8 @@ pub(crate) struct Quirks {
     /// Entries matching the name report this mode, as another user's file
     /// readable through its group or others does to the user copying it.
     pub reported_mode: Option<(&'static str, u32)>,
-    /// Opening a name of a file another name of which was opened fails
-    /// with `EINVAL`, as the SMB client's one lease per file makes a second
-    /// open while the first is held.
-    pub one_open_per_file: bool,
+    /// Which names of a file with several open.
+    pub name_opens: NameOpens,
     /// Giving a folder write access back right after taking it does
     /// nothing until a stat that revalidates comes between, as the SMB
     /// client without POSIX extensions decides from attributes it cached.
@@ -345,8 +357,9 @@ struct State {
     /// Writebacks lost so far, and how many each open folder has reported.
     writebacks_lost: u64,
     reported_losses: HashMap<RawFd, u64>,
-    /// The name each file was first opened by, by device and inode.
-    opened_names: HashMap<(u64, u64), PathBuf>,
+    /// Each name a file was opened by, by device and inode, with the
+    /// descriptor that opened it.
+    opened_names: Vec<((u64, u64), PathBuf, RawFd)>,
     /// Folders made read-only that no revalidating stat has seen since.
     read_only_unseen: HashSet<PathBuf>,
 }
@@ -380,7 +393,7 @@ impl FsQuirks {
                 renumbered: HashSet::new(),
                 writebacks_lost: 0,
                 reported_losses: HashMap::new(),
-                opened_names: HashMap::new(),
+                opened_names: Vec::new(),
                 read_only_unseen: HashSet::new(),
             }),
         });
@@ -454,6 +467,14 @@ fn take_racer(
     }
     racers[index].2 -= 1;
     None
+}
+
+/// Whether descriptor `fd` still has the file `key` open by `name`.
+fn still_open(fd: RawFd, name: &Path, key: (u64, u64)) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let link = format!("/proc/self/fd/{fd}");
+    std::fs::read_link(&link).is_ok_and(|opened| opened == name)
+        && std::fs::metadata(&link).is_ok_and(|file| (file.dev(), file.ino()) == key)
 }
 
 /// A bare `*` also matches calls that name nothing.
@@ -1213,18 +1234,25 @@ impl FsOps for Scoped {
         let path = path_of(at.dir).map(|dir| dir.join(at.name));
         let opened = scope.run(Op::OpenSource, &[at.name], |scope| {
             let opened = scope.resolved(at, |at| System.open_source(at, listed))?;
-            if let (Some((_, stat)), Some(path)) = (&opened, &path)
-                && scope.quirk(|quirks| quirks.one_open_per_file)
+            let name_opens = scope.quirk(|quirks| quirks.name_opens);
+            if let (Some((fd, stat)), Some(path)) = (&opened, &path)
+                && name_opens != NameOpens::Any
             {
                 let key = (stat.identity.device, stat.identity.inode);
                 let mut state = scope.state();
-                let first = state
+                if name_opens == NameOpens::OneAtATime {
+                    state
+                        .opened_names
+                        .retain(|&(key, ref name, fd)| still_open(fd, name, key));
+                }
+                if state
                     .opened_names
-                    .entry(key)
-                    .or_insert_with(|| path.clone());
-                if first != path {
+                    .iter()
+                    .any(|(other, name, _)| *other == key && name != path)
+                {
                     return Err(Errno::INVAL);
                 }
+                state.opened_names.push((key, path.clone(), fd.as_raw_fd()));
             }
             Ok(opened)
         })?;

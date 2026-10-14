@@ -15,13 +15,13 @@ mod tree;
 
 use std::{
     borrow::Borrow,
-    collections::HashSet,
+    collections::{BTreeSet, HashSet},
     ffi::{OsStr, OsString},
     os::fd::{AsFd, BorrowedFd, OwnedFd},
     path::{Path, PathBuf},
     rc::Rc,
     sync::{
-        Arc, Mutex, MutexGuard, OnceLock,
+        Arc, Condvar, Mutex, MutexGuard, OnceLock,
         atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering},
     },
     thread,
@@ -616,10 +616,15 @@ fn copy_new(
     let recorded_in = source.recorded_in.as_deref();
     match stat.kind {
         FileType::RegularFile if in_place => FileCopy::new(copy, parent.as_fd())
-            .in_place(source.entry(), stat.identity, name, recorded_in)
+            .in_place(source.entry(), &stat, name, recorded_in)
             .map(|_| name.to_os_string()),
         FileType::RegularFile => FileCopy::new(copy, parent.as_fd())
-            .copy_from(source.entry(), FileTarget::Final(name, taken), recorded_in)
+            .copy_from(
+                source.entry(),
+                &stat,
+                FileTarget::Final(name, taken),
+                recorded_in,
+            )
             .map(|(name, _)| name),
         FileType::Symlink => {
             copy.check_cancelled()?;
@@ -682,6 +687,7 @@ fn copy_stage(
         FileType::RegularFile => {
             let (name, identity) = FileCopy::new(copy, parent.as_fd()).copy_from(
                 source.entry(),
+                &stat,
                 FileTarget::Hidden,
                 recorded_in,
             )?;
@@ -1675,6 +1681,8 @@ impl Copy {
 struct Opened {
     fd: OwnedFd,
     stat: EntryStat,
+    /// Released once `fd` is closed.
+    _held: Option<OneOpen>,
 }
 
 /// `name` could not be opened as what it was listed as.
@@ -1689,9 +1697,47 @@ fn changed(name: &OsStr, error: Errno) -> Failure {
 /// The regular file just listed at `at`, opened without following it.
 fn open_file(fs: &dyn FsOps, at: Entry<'_>) -> Result<Opened, Failure> {
     match fs.open_source(at, true) {
-        Ok(Some((fd, stat))) => Ok(Opened { fd, stat }),
+        Ok(Some((fd, stat))) => Ok(Opened {
+            fd,
+            stat,
+            _held: None,
+        }),
         Ok(None) => Err(Failure::Changed),
         Err(error) => Err(changed(at.name, error)),
+    }
+}
+
+/// Linked files on SMB sources that a copy has a name of open, by device
+/// and inode: the SMB client takes one lease per file and refuses an open
+/// of another name meanwhile, or a Samba server defers it forever.
+static OPEN_LINKED: Mutex<BTreeSet<(u64, u64)>> = Mutex::new(BTreeSet::new());
+static OPEN_LINKED_CLOSED: Condvar = Condvar::new();
+
+/// A linked file on an SMB source that this copy has a name of open.
+struct OneOpen((u64, u64));
+
+impl OneOpen {
+    /// Waits until no other copy has a name of the file `seen` describes
+    /// open, unless the copy is cancelled meanwhile.
+    fn wait(seen: &EntryStat, cancelled: &AtomicBool) -> Result<Self, Failure> {
+        let key = (seen.identity.device, seen.identity.inode);
+        let mut open = lock(&OPEN_LINKED);
+        while !open.insert(key) {
+            if cancelled.load(Ordering::Acquire) {
+                return Err(Failure::Cancelled);
+            }
+            open = OPEN_LINKED_CLOSED
+                .wait_timeout(open, Duration::from_millis(50))
+                .map_or_else(|error| error.into_inner().0, |(open, _)| open);
+        }
+        Ok(Self(key))
+    }
+}
+
+impl Drop for OneOpen {
+    fn drop(&mut self) {
+        lock(&OPEN_LINKED).remove(&self.0);
+        OPEN_LINKED_CLOSED.notify_all();
     }
 }
 
@@ -1749,17 +1795,37 @@ impl<'a> FileCopy<'a> {
         }
     }
 
+    /// The file at `at`, just seen as `seen`, opened. On an SMB source a
+    /// name of a linked file opens only while no other copy has a name of
+    /// it open.
+    fn open(&self, at: Entry<'_>, seen: &EntryStat) -> Result<Opened, Failure> {
+        let fs = self.copy.fs;
+        if seen.nlink < 2 || Mount::new(fs, at.dir).family != Family::Smb {
+            return open_file(fs, at);
+        }
+        let held = OneOpen::wait(seen, &self.copy.cancelled)?;
+        let source = open_file(fs, at)?;
+        if source.stat.identity != seen.identity {
+            return Err(Failure::Changed);
+        }
+        Ok(Opened {
+            _held: Some(held),
+            ..source
+        })
+    }
+
     /// Returns the name the copy took and its identity there, and records
-    /// the source as read in `recorded_in`.
+    /// the source, seen as `seen`, as read in `recorded_in`.
     fn copy_from(
         &mut self,
         at: Entry<'_>,
+        seen: &EntryStat,
         target: FileTarget<'_>,
         recorded_in: Option<&manifest::Folder>,
     ) -> Result<(OsString, LocalFileIdentity), Failure> {
         let fs = self.copy.fs;
         self.copy.check_cancelled()?;
-        let source = open_file(fs, at)?;
+        let source = self.open(at, seen)?;
         let parent = fs.stat_fd(self.dir)?;
         let mut tmpfile = None;
         if stage::tmpfile_allowed(self.target.family)
@@ -1791,19 +1857,20 @@ impl<'a> FileCopy<'a> {
     }
 
     /// Creates `name` exclusively and fills it from the file at `at`, which
-    /// must still be `expected`, where the mount cannot place a stage; returns
-    /// its identity, and records the source as read in `recorded_in`.
+    /// must still be the one seen as `seen`, where the mount cannot place a
+    /// stage; returns its identity, and records the source as read in
+    /// `recorded_in`.
     fn in_place(
         &mut self,
         at: Entry<'_>,
-        expected: LocalFileIdentity,
+        seen: &EntryStat,
         name: &OsStr,
         recorded_in: Option<&manifest::Folder>,
     ) -> Result<LocalFileIdentity, Failure> {
         let fs = self.copy.fs;
         self.copy.check_cancelled()?;
-        let source = open_file(fs, at)?;
-        if source.stat.identity != expected {
+        let source = self.open(at, seen)?;
+        if source.stat.identity != seen.identity {
             return Err(Failure::Changed);
         }
         let parent = fs.stat_fd(self.dir)?;
@@ -2053,7 +2120,11 @@ impl<'a> FileCopy<'a> {
     ) -> Result<LocalFileIdentity, Failure> {
         let fs = self.copy.fs;
         let source = match fs.open_source(from, false)? {
-            Some((fd, stat)) if stat.identity == expected => Opened { fd, stat },
+            Some((fd, stat)) if stat.identity == expected => Opened {
+                fd,
+                stat,
+                _held: None,
+            },
             _ => return Err(Failure::Changed),
         };
         let read;

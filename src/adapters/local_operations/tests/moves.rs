@@ -4,7 +4,7 @@ use std::os::unix::fs::{FileTypeExt, MetadataExt};
 
 use rustix::io::Errno;
 
-use super::fs_quirks::{Op, Support};
+use super::fs_quirks::{NameOpens, Op, Support};
 use super::*;
 use crate::services::{KeptCause, KeptItem, SpecialKind, TransferReport};
 
@@ -1707,7 +1707,7 @@ fn linked_names_on_an_smb_source_are_never_open_at_once() -> Result<(), Box<dyn 
     fs::hard_link(folder.join("a"), folder.join("sub/c"))?;
     let smb = Quirks {
         mount_type: Some(("cifs", "rw")),
-        one_open_per_file: true,
+        name_opens: NameOpens::FirstOnly,
         ..Quirks::default()
     };
 
