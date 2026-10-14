@@ -21,7 +21,7 @@ use std::{
     path::{Path, PathBuf},
     rc::Rc,
     sync::{
-        Arc, Condvar, Mutex, MutexGuard, OnceLock,
+        Arc, Condvar, Mutex, MutexGuard,
         atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering},
     },
     thread,
@@ -1299,9 +1299,6 @@ struct Copy {
     nodes_refused: AtomicBool,
     /// With [`Options::manifest`].
     recording: bool,
-    /// How coarse the source's times are, from its first file read while
-    /// recording.
-    source_times: OnceLock<Option<Duration>>,
     durable: bool,
     left: Mutex<Left>,
 }
@@ -1326,7 +1323,6 @@ impl Copy {
             refused_xattrs: Mutex::default(),
             nodes_refused: AtomicBool::new(false),
             recording: options.manifest,
-            source_times: OnceLock::new(),
             durable: options.durable,
             left: Mutex::default(),
         })
@@ -1524,13 +1520,10 @@ impl Copy {
     ) -> Result<Option<(Snapshot, manifest::Read)>, Failure> {
         let mut stat = source.stat;
         let source_fd = source.fd.as_fd();
+        // A folder may hold another mount, so each file has its own.
         let coarse_times = self
             .recording
-            .then(|| {
-                *self
-                    .source_times
-                    .get_or_init(|| Mount::new(self.fs, source_fd).coarse_times)
-            })
+            .then(|| Mount::new(self.fs, source_fd).coarse_times)
             .flatten();
         for attempt in 0..2 {
             if attempt > 0 {

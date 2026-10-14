@@ -2017,3 +2017,76 @@ fn files_read_within_a_coarse_time_tick_are_compared_before_their_move_deletes_t
     }
     Ok(())
 }
+
+#[test]
+fn files_on_a_coarse_mount_inside_a_moved_folder_are_compared() -> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let root = tempfile::tempdir()?;
+    let source_dir = root.path().join("source");
+    let folder = source_dir.join("folder");
+    let inner = folder.join("inner");
+    fs::create_dir_all(&inner)?;
+    fs::write(folder.join("outer.txt"), b"outer")?;
+    let file = inner.join("a.txt");
+    fs::write(&file, b"original")?;
+    let epoch = SystemTime::UNIX_EPOCH;
+    let seconds = SystemTime::now().duration_since(epoch)?.as_secs() / 2 * 2;
+    set_times(&file, seconds)?;
+    let _clock = ClockGuard::set(epoch + Duration::from_secs(seconds) + Duration::from_millis(500));
+    let path = file.clone();
+    let rewrite: super::fs_quirks::Racer = Box::new(move || {
+        fs::write(&path, b"ORIGINAL").expect("rewrite the source");
+        set_times(&path, seconds).expect("keep its times");
+    });
+    let outer = FsQuirks::install(
+        &source_dir,
+        Quirks {
+            before: vec![(Op::OpenDir, "folder", 1, rewrite)],
+            ..Quirks::ext4()
+        },
+    );
+    // The outer file is read first, as a single worker does anyway.
+    let calls = outer.reader();
+    let outer_read: super::fs_quirks::Racer = Box::new(move || {
+        let start = Instant::now();
+        while !calls()
+            .iter()
+            .any(|call| call.op == Op::Read && call.names == ["outer.txt"])
+        {
+            assert!(
+                start.elapsed() < Duration::from_secs(5),
+                "outer.txt was never read"
+            );
+            thread::sleep(Duration::from_millis(5));
+        }
+    });
+    let _inner = FsQuirks::install(
+        &inner,
+        Quirks {
+            mount_type: Some(("fuseblk", "rw")),
+            device_format: Some("exfat"),
+            ctime_is_mtime: true,
+            no_birth_time: true,
+            before: vec![(Op::OpenSource, "a.txt", 0, outer_read)],
+            ..Quirks::default()
+        },
+    );
+    let destination = root.path().join("destination");
+    fs::create_dir_all(&destination)?;
+    let _destination = FsQuirks::install(&destination, Quirks::default());
+
+    let (_operation, events) =
+        paste_move(97, &destination, &folder, TransferConflict::FailIfExists);
+    pump_until_transfer(&events);
+
+    let report = reported(&events);
+    assert_eq!(
+        fs::read(destination.join("folder/inner/a.txt"))?,
+        b"original"
+    );
+    assert_eq!(fs::read(&file)?, b"ORIGINAL");
+    assert_eq!(report.kept, [kept(file, KeptCause::Changed)]);
+    Ok(())
+}
