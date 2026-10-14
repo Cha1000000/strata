@@ -2114,14 +2114,18 @@ fn undoing_a_replace_deletes_what_it_placed_only_if_all_of_it_is_unchanged()
         }
         .map(|quirks| FsQuirks::install(root.path(), quirks));
 
-        let events = run_undo(
-            (
-                Vec::new(),
-                vec![location.clone()],
-                HashMap::from([(location.clone(), placed)]),
-            ),
-            staged_lookup(HashMap::from([(target.clone(), original)])),
-        );
+        let undo = || {
+            run_undo(
+                (
+                    Vec::new(),
+                    vec![location.clone()],
+                    HashMap::from([(location.clone(), placed.clone())]),
+                ),
+                staged_lookup(HashMap::from([(target.clone(), original.clone())])),
+            )
+        };
+
+        let events = undo();
 
         if change == "undeletable" {
             let Some(OperationEvent::CompletedWithErrors { message, .. }) = events.last() else {
@@ -2139,6 +2143,8 @@ fn undoing_a_replace_deletes_what_it_placed_only_if_all_of_it_is_unchanged()
             assert_eq!(names(&target)?, ["a.txt"]);
             assert!(kept_in_trash(&events).is_empty());
             assert!(trash.join("info/target.trashinfo").exists());
+            assert_eq!(restored(&undo()), Some(vec![location]));
+            assert_eq!(names(&target)?, ["old.txt"]);
             continue;
         }
         if change == "untouched" {
@@ -2199,11 +2205,15 @@ fn a_merge_undo_compares_what_it_placed_as_a_move_compares_its_sources()
         ctime_is_mtime: true,
         ..Quirks::vfat()
     };
+    let unreadable = move || Quirks {
+        fail: vec![(Op::OpenSource, "merged.txt", 0, Errno::ACCESS)],
+        ..coarse()
+    };
     // Inode numbers that change once the kernel evicts an entry, and a
     // rewrite within one tick of coarse times, which leaves the size and
     // times as they were.
     type MakeQuirks = Box<dyn Fn() -> Quirks>;
-    let rows: [(&str, MakeQuirks, &str, bool); 4] = [
+    let rows: [(&str, MakeQuirks, &str, bool); 6] = [
         (
             "cifs noserverino",
             Box::new(cifs("rw,noserverino")),
@@ -2213,6 +2223,8 @@ fn a_merge_undo_compares_what_it_placed_as_a_move_compares_its_sources()
         ("cifs", Box::new(cifs("rw,serverino")), "evicted", false),
         ("vfat", Box::new(coarse), "untouched", true),
         ("vfat", Box::new(coarse), "rewritten", false),
+        ("vfat", Box::new(coarse), "rewritten in a folder", false),
+        ("vfat", Box::new(unreadable), "unread", false),
     ];
     for (mount, quirks, change, undone) in rows {
         let row = format!("{mount}, {change}");
@@ -2220,24 +2232,35 @@ fn a_merge_undo_compares_what_it_placed_as_a_move_compares_its_sources()
         let _clock =
             ClockGuard::set(epoch + Duration::from_secs(seconds) + Duration::from_millis(500));
         let root = tempfile::tempdir()?;
-        let merged = root.path().join("merged.txt");
+        let name = if change == "rewritten in a folder" {
+            "folder"
+        } else {
+            "merged.txt"
+        };
+        let placed_at = root.path().join(name);
+        let merged = if name == "folder" {
+            fs::create_dir(&placed_at)?;
+            placed_at.join("merged.txt")
+        } else {
+            placed_at.clone()
+        };
         fs::write(&merged, b"merged")?;
         set_times(&merged, seconds, 0)?;
         let _scope = FsQuirks::install(root.path(), quirks());
-        let placed = placed_now(&[&merged]);
+        let placed = placed_now(&[&placed_at]);
         match change {
             "evicted" => super::fs_quirks::renumbered(&merged),
-            "rewritten" => {
+            "rewritten" | "rewritten in a folder" => {
                 fs::write(&merged, b"MERGED")?;
                 set_times(&merged, seconds, 0)?;
             }
             _ => {}
         }
-        let original = staged_trash_fixture(root.path(), "merged.txt", &merged, b"original")?;
+        let original = staged_trash_fixture(root.path(), name, &placed_at, b"original")?;
 
         let events = run_undo(
-            (Vec::new(), vec![Location::local(&merged)], placed),
-            staged_lookup(HashMap::from([(merged.clone(), original)])),
+            (Vec::new(), vec![Location::local(&placed_at)], placed),
+            staged_lookup(HashMap::from([(placed_at.clone(), original)])),
         );
 
         assert!(restored(&events).is_some(), "{row}: {events:?}");
@@ -2248,13 +2271,14 @@ fn a_merge_undo_compares_what_it_placed_as_a_move_compares_its_sources()
             assert_ne!(fs::read(&merged)?, b"original", "{row}");
             assert_eq!(
                 kept_in_trash(&events),
-                changed_after_the_merge(&merged),
+                changed_after_the_merge(&placed_at),
                 "{row}"
             );
             assert!(
                 trash_in(root.path())
-                    .join("info/merged.txt.trashinfo")
-                    .exists()
+                    .join(format!("info/{name}.trashinfo"))
+                    .exists(),
+                "{row}"
             );
         }
     }
@@ -2269,48 +2293,72 @@ fn a_merge_undo_cancelled_while_it_compares_an_item_leaves_it_whole() -> Result<
         .map_err(|error| error.to_string())?;
     let epoch = SystemTime::UNIX_EPOCH;
     let seconds = SystemTime::now().duration_since(epoch)?.as_secs() / 2 * 2;
-    let _clock = ClockGuard::set(epoch + Duration::from_secs(seconds) + Duration::from_millis(500));
-    let root = tempfile::tempdir()?;
-    let merged = root.path().join("merged.txt");
-    fs::write(&merged, b"merged")?;
-    set_times(&merged, seconds, 0)?;
-    let cancellable = gio::Cancellable::new();
-    let cancel = cancellable.clone();
-    let cancel: Racer = Box::new(move || cancel.cancel());
-    // The first open is the record's own, the second the comparison's.
-    let _scope = FsQuirks::install(
-        root.path(),
-        Quirks {
-            ctime_is_mtime: true,
-            before: vec![(Op::OpenSource, "merged.txt", 1, cancel)],
-            ..Quirks::vfat()
-        },
-    );
-    let placed = placed_now(&[&merged]);
-    let original = staged_trash_fixture(root.path(), "merged.txt", &merged, b"original")?;
-    let events = Rc::new(RefCell::new(Vec::new()));
-    let emitted = events.clone();
+    // Whether an item it kept as edited came first.
+    for after_a_kept_item in [false, true] {
+        let _clock =
+            ClockGuard::set(epoch + Duration::from_secs(seconds) + Duration::from_millis(500));
+        let root = tempfile::tempdir()?;
+        let merged = root.path().join("merged.txt");
+        let edited = root.path().join("edited.txt");
+        for path in [&merged, &edited] {
+            fs::write(path, b"merged")?;
+            set_times(path, seconds, 0)?;
+        }
+        let cancellable = gio::Cancellable::new();
+        let cancel = cancellable.clone();
+        let cancel: Racer = Box::new(move || cancel.cancel());
+        // The first open is the record's own, the second the comparison's.
+        let _scope = FsQuirks::install(
+            root.path(),
+            Quirks {
+                ctime_is_mtime: true,
+                before: vec![(Op::OpenSource, "merged.txt", 1, cancel)],
+                ..Quirks::vfat()
+            },
+        );
+        let placed = placed_now(&[&merged, &edited]);
+        fs::write(&edited, b"edited after the merge")?;
+        let mut overwritten = vec![Location::local(&merged)];
+        let mut staged = HashMap::from([(
+            merged.clone(),
+            staged_trash_fixture(root.path(), "merged.txt", &merged, b"original")?,
+        )]);
+        if after_a_kept_item {
+            overwritten.insert(0, Location::local(&edited));
+            staged.insert(
+                edited.clone(),
+                staged_trash_fixture(root.path(), "edited.txt", &edited, b"original")?,
+            );
+        }
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let emitted = events.clone();
 
-    glib::MainContext::default().block_on(run_merge_undo(
-        OperationRequestId(1616),
-        (Vec::new(), vec![Location::local(&merged)], placed),
-        Rc::new(move |event| emitted.borrow_mut().push(event)),
-        cancellable,
-        staged_lookup(HashMap::from([(merged.clone(), original)])),
-    ));
+        glib::MainContext::default().block_on(run_merge_undo(
+            OperationRequestId(1616),
+            (Vec::new(), overwritten, placed),
+            Rc::new(move |event| emitted.borrow_mut().push(event)),
+            cancellable,
+            staged_lookup(staged),
+        ));
 
-    let events = events.borrow();
-    let Some(OperationEvent::Cancelled { result, .. }) = events.last() else {
-        panic!("expected a cancel, got {events:?}");
-    };
-    assert!(result.completed.is_empty());
-    assert!(result.failed.is_empty());
-    assert_eq!(result.not_attempted, [Location::local(&merged)]);
-    assert_eq!(fs::read(&merged)?, b"merged");
-    assert_eq!(
-        fs::read(trash_in(root.path()).join("files/merged.txt"))?,
-        b"original"
-    );
+        let events = events.borrow();
+        let Some(OperationEvent::Cancelled { result, .. }) = events.last() else {
+            panic!("expected a cancel, got {events:?}");
+        };
+        let kept: &[Location] = if after_a_kept_item {
+            &[Location::local(&edited)]
+        } else {
+            &[]
+        };
+        assert_eq!(result.completed, kept);
+        assert!(result.failed.is_empty());
+        assert_eq!(result.not_attempted, [Location::local(&merged)]);
+        assert_eq!(fs::read(&merged)?, b"merged");
+        assert_eq!(
+            fs::read(trash_in(root.path()).join("files/merged.txt"))?,
+            b"original"
+        );
+    }
     Ok(())
 }
 
