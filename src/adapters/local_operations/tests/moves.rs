@@ -1847,10 +1847,12 @@ fn files_read_within_a_coarse_time_tick_are_compared_before_their_move_deletes_t
         ctime_is_mtime: true,
         ..Quirks::default()
     };
-    let recent = Duration::from_millis(500);
-    let past_the_tick = Duration::from_millis(2050);
-    let behind = Duration::from_millis(2500);
-    let long_ago = Duration::from_secs(3600);
+    // In milliseconds after the file's modification time.
+    let recent = 500;
+    let past_the_tick = 2050;
+    let behind = 2500;
+    let long_ago = 3_600_000;
+    let ahead = -3_600_000;
     // When the file is rewritten at the same size: before the deletion
     // opens the moved folder, or the moved file itself to compare it, both
     // keeping its times; right after the comparison, at the time of the
@@ -1858,7 +1860,8 @@ fn files_read_within_a_coarse_time_tick_are_compared_before_their_move_deletes_t
     // two-second steps; before the deletion, after growing as the copy
     // read it, which the copy then read again; or by renaming a file with
     // the same size and times over it as the deletion opens it to compare
-    // it. Or never, with the clock set back before the deletion.
+    // it; or before the deletion, once the clock reached a time it was
+    // read ahead of. Or never, with the clock set back before the deletion.
     #[derive(Clone, Copy, PartialEq)]
     enum Rewrite {
         Never,
@@ -1867,14 +1870,16 @@ fn files_read_within_a_coarse_time_tick_are_compared_before_their_move_deletes_t
         Compared,
         Grown,
         RenamedOver,
+        Reached,
         ClockSetBack,
     }
     // The source volume, how long after its modification time the copy
     // reads the file (on sshfs, as with a server clock behind ours; past
-    // the tick, as the coarse clock may still stamp it), when it is
-    // rewritten, and whether the deletion reads it again. Only the
-    // file itself is moved where it is rewritten as it is compared.
-    let rows: [(&str, Preset, Duration, Rewrite, bool); 16] = [
+    // the tick, as the coarse clock may still stamp it; before it, as FAT
+    // times written in a time zone ahead of ours read), when it is
+    // rewritten, and whether the deletion reads it again. Only the file
+    // itself is moved where it is rewritten as it is compared.
+    let rows: [(&str, Preset, i64, Rewrite, bool); 19] = [
         ("vfat", vfat, recent, Rewrite::Deleting, true),
         (
             "vfat, past the tick",
@@ -1920,6 +1925,9 @@ fn files_read_within_a_coarse_time_tick_are_compared_before_their_move_deletes_t
             false,
         ),
         ("vfat, long before", vfat, long_ago, Rewrite::Never, false),
+        ("vfat, ahead", vfat, ahead, Rewrite::Never, false),
+        ("vfat, ahead, reached", vfat, ahead, Rewrite::Reached, true),
+        ("sshfs, ahead", sshfs, ahead, Rewrite::Never, true),
         ("ext4", Quirks::ext4, recent, Rewrite::Never, false),
     ];
     for (row, preset, read_after, rewrite, read_again) in rows {
@@ -1931,7 +1939,8 @@ fn files_read_within_a_coarse_time_tick_are_compared_before_their_move_deletes_t
         let epoch = SystemTime::UNIX_EPOCH;
         let seconds = SystemTime::now().duration_since(epoch)?.as_secs() / 2 * 2;
         set_times(&file, seconds)?;
-        let _clock = ClockGuard::set(epoch + Duration::from_secs(seconds) + read_after);
+        let read_at = i64::try_from(seconds)? * 1000 + read_after;
+        let _clock = ClockGuard::set(epoch + Duration::from_millis(u64::try_from(read_at)?));
         let rewriter = |contents: &'static [u8], clocked: bool| -> super::fs_quirks::Racer {
             let path = file.clone();
             Box::new(move || {
@@ -1988,6 +1997,19 @@ fn files_read_within_a_coarse_time_tick_are_compared_before_their_move_deletes_t
                     &folder,
                     Vec::new(),
                     vec![(Op::OpenSource, "a.txt", 1, rename_over)],
+                )
+            }
+            Rewrite::Reached => {
+                let mut rewrite = rewriter(b"ORIGINAL", false);
+                let reached: super::fs_quirks::Racer = Box::new(move || {
+                    let after = epoch + Duration::from_secs(seconds) + Duration::from_millis(500);
+                    super::super::copy_engine::set_clock_for_test(Some(after));
+                    rewrite();
+                });
+                (
+                    &folder,
+                    vec![(Op::OpenDir, "folder", 1, reached)],
+                    Vec::new(),
                 )
             }
             Rewrite::ClockSetBack => {

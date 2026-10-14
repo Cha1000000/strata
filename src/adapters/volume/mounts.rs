@@ -47,22 +47,37 @@ impl MountType {
         }
     }
 
-    /// How long after a file's modification time a rewrite may leave that
-    /// time as it is, where the mount keeps coarse times: one timestamp
-    /// tick, and on sshfs also two seconds for the server's clock, which
-    /// sets the time, running behind ours. A server further behind can
-    /// still hide a rewrite. A `fuseblk` mount whose device udev cannot
-    /// tell may be exFAT. `None` where a rewrite always moves the time.
-    pub(crate) fn coarse_times(&self, fuse_format: Option<FuseFormat>) -> Option<Duration> {
+    /// How coarse the mount's times are, where a rewrite may leave a file's
+    /// modification time as it is. A `fuseblk` mount whose device udev
+    /// cannot tell may be exFAT.
+    pub(crate) fn coarse_times(&self, fuse_format: Option<FuseFormat>) -> Option<CoarseTimes> {
+        let here = |seconds| CoarseTimes {
+            window: Duration::from_secs(seconds),
+            stamped_here: true,
+        };
         match (family(&self.fs_type), self.fs_type.as_str(), fuse_format) {
-            (Family::Fat, ..) | (_, "fuseblk", Some(FuseFormat::Exfat) | None) => {
-                Some(Duration::from_secs(2))
-            }
-            (_, "hfs" | "hfsplus", _) => Some(Duration::from_secs(1)),
-            (_, "fuse.sshfs", _) => Some(Duration::from_secs(3)),
+            (Family::Fat, ..) | (_, "fuseblk", Some(FuseFormat::Exfat) | None) => Some(here(2)),
+            (_, "hfs" | "hfsplus", _) => Some(here(1)),
+            // A one-second tick, and two seconds for the server's clock
+            // running behind ours. A server further behind can still hide
+            // a rewrite.
+            (_, "fuse.sshfs", _) => Some(CoarseTimes {
+                window: Duration::from_secs(3),
+                stamped_here: false,
+            }),
             _ => None,
         }
     }
+}
+
+/// A mount whose times a rewrite may leave as they are.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct CoarseTimes {
+    /// How long after a file's modification time a rewrite may leave it.
+    pub window: Duration,
+    /// Whether this machine's clock stamps them, as on a local disk,
+    /// rather than a server's.
+    pub stamped_here: bool,
 }
 
 /// The format udev found on the device a `fuseblk` mount serves, for the

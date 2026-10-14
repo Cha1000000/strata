@@ -30,6 +30,7 @@ use crate::{
         io_error, local_device_is_rotational,
         work_queue::{self, Group, Job, WorkQueue},
     },
+    adapters::volume::CoarseTimes,
     services::KeptCause,
 };
 
@@ -101,25 +102,34 @@ const COARSE_CLOCK: Duration = Duration::from_millis(100);
 pub(super) struct Unsettled {
     read: SystemTime,
     settled: SystemTime,
+    /// A modification time ahead of our clock, which stamps it: until that
+    /// clock reaches it, no rewrite can have left it as it is.
+    ahead: Option<SystemTime>,
 }
 
-/// For the file `stat` describes, read from `started`, where the mount keeps
-/// times as coarse as `window`; `None` once any rewrite would move its
+/// For the file `stat` describes, read from `started`, on a mount whose
+/// times are as `coarse`; `None` once any rewrite would move its
 /// modification time.
 pub(super) fn unsettled(
     stat: &EntryStat,
-    window: Duration,
+    coarse: CoarseTimes,
     started: SystemTime,
 ) -> Option<Unsettled> {
     let (seconds, nanoseconds) = stat.mtime;
     let modified =
         UNIX_EPOCH.checked_add(Duration::new(u64::try_from(seconds).ok()?, nanoseconds))?;
-    // A time ahead of our clock, from a server's, settles no later than one
-    // read as it was set.
-    let settled = modified.min(started).checked_add(window + COARSE_CLOCK)?;
+    // Our clock stamps a time ahead of it only once it reaches that time; a
+    // server's, which may run ahead of ours, may stamp it now.
+    let stamped = if coarse.stamped_here {
+        modified
+    } else {
+        modified.min(started)
+    };
+    let settled = stamped.checked_add(coarse.window + COARSE_CLOCK)?;
     (started < settled).then_some(Unsettled {
         read: started,
         settled,
+        ahead: (coarse.stamped_here && started < modified).then_some(modified),
     })
 }
 
@@ -632,15 +642,22 @@ impl At {
     fn entry(&self, snapshot: &SourceSnapshot, stopped: &dyn Fn() -> bool) {
         let deletion = &self.deletion;
         let fs = deletion.fs;
+        let ahead = snapshot
+            .contents
+            .as_ref()
+            .and_then(|contents| contents.unsettled.ahead)
+            .filter(|&modified| now() < modified);
         // Compared before the stat below, which sees any later rewrite.
         let compared = match &snapshot.contents {
-            None => None,
-            Some(contents) => match self.same_contents(contents, snapshot.size, stopped) {
-                None => return,
-                Some(Ok(Some(file))) => Some(file),
-                Some(Ok(None)) => return deletion.keep(self.path.clone(), KeptCause::Changed),
-                Some(Err(error)) => return deletion.failed(self.path.clone(), error),
-            },
+            Some(contents) if ahead.is_none() => {
+                match self.same_contents(contents, snapshot.size, stopped) {
+                    None => return,
+                    Some(Ok(Some(file))) => Some(file),
+                    Some(Ok(None)) => return deletion.keep(self.path.clone(), KeptCause::Changed),
+                    Some(Err(error)) => return deletion.failed(self.path.clone(), error),
+                }
+            }
+            _ => None,
         };
         let key = (snapshot.identity.device, snapshot.identity.inode);
         // Checking, removing and counting a name of a file with several
@@ -663,9 +680,13 @@ impl At {
             let opened = fs.stat_fd(file.as_fd());
             matches!((&current, opened), (Ok(current), Ok(opened)) if opened.identity == current.identity)
         });
+        // Left uncompared only while the clock has not reached its time.
+        let still_ahead = ahead.is_none_or(|modified| now() < modified);
         match current {
             Ok(current)
-                if compared_here && snapshot.holds(&current, deletion.stable_inodes, since) =>
+                if compared_here
+                    && still_ahead
+                    && snapshot.holds(&current, deletion.stable_inodes, since) =>
             {
                 match fs.unlink(self.entry_at(), AtFlags::empty()) {
                     Ok(()) => {

@@ -5,9 +5,9 @@
 //! so a stale entry costs speed or a refusal. The exception is the
 //! reserved-name rung, which an entry alone enables, with its small window.
 
-use std::{collections::BTreeMap, ffi::OsStr, sync::Mutex, time::Duration};
+use std::{collections::BTreeMap, ffi::OsStr, sync::Mutex};
 
-use super::{Family, FuseFormat};
+use super::{CoarseTimes, Family, FuseFormat};
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub(crate) enum MountKey {
@@ -39,7 +39,7 @@ pub(crate) struct MountCapabilities {
     /// From udev, for a `fuseblk` mount; learned with `family`.
     pub fuse_format: Option<FuseFormat>,
     /// See [`super::MountType::coarse_times`]; learned with `family`.
-    pub coarse_times: Option<Duration>,
+    pub coarse_times: Option<CoarseTimes>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

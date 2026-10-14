@@ -46,8 +46,8 @@ use super::{
 };
 use crate::{
     adapters::volume::{
-        Family, FuseFormat, MountCapabilities, MountKey, MountType, family, learn_mount_capability,
-        mount_capabilities,
+        CoarseTimes, Family, FuseFormat, MountCapabilities, MountKey, MountType, family,
+        learn_mount_capability, mount_capabilities,
     },
     model::Location,
     services::{KeptCause, RenameCause, RenamedItem, SkippedItem, SpecialKind, TransferReport},
@@ -1172,7 +1172,7 @@ struct Mount {
     key: MountKey,
     family: Family,
     fuse_format: Option<FuseFormat>,
-    coarse_times: Option<Duration>,
+    coarse_times: Option<CoarseTimes>,
 }
 
 impl Mount {
@@ -1531,7 +1531,7 @@ impl Copy {
             }
             let counted = attempt == 0;
             let unsettled =
-                coarse_times.and_then(|window| manifest::unsettled(&stat, window, manifest::now()));
+                coarse_times.and_then(|coarse| manifest::unsettled(&stat, coarse, manifest::now()));
             let digest = match unsettled {
                 Some(_) => Some(self.copy_digested(data, (source_fd, &stat), target, counted)?),
                 None => {
