@@ -327,3 +327,26 @@ fn a_cancel_that_cuts_off_an_item_counts_it_as_not_attempted() -> Result<(), Box
     }
     Ok(())
 }
+
+#[test]
+fn only_a_cut_off_between_local_locations_counts_as_not_attempted() {
+    let local = gio::File::for_path("/tmp/strata-cut-off");
+    let remote = gio::File::for_uri("sftp://host/strata-cut-off");
+    for (source, target, untouched) in [
+        (&local, &local, true),
+        (&local, &remote, false),
+        (&remote, &local, false),
+    ] {
+        assert_eq!(
+            super::super::undone_when_cancelled(source, target),
+            untouched,
+            "{} to {}",
+            source.uri(),
+            target.uri()
+        );
+    }
+    assert!(!super::super::deletion_undone_when_cancelled(
+        &Location::uri("sftp://host/strata-cut-off"),
+        false
+    ));
+}
