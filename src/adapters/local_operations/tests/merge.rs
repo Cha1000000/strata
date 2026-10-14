@@ -1678,6 +1678,55 @@ fn a_merge_undo_cut_off_counts_an_item_as_not_attempted_only_when_it_left_it_who
 }
 
 #[test]
+fn a_kept_item_counts_as_failed_when_a_later_item_is_cut_off() -> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let root = tempfile::tempdir()?;
+    let [kept, cut] = ["kept.txt", "cut.txt"].map(|name| root.path().join(name));
+    for item in [&kept, &cut] {
+        fs::write(item, b"merged")?;
+    }
+    let placed = placed_now(&[&cut]);
+    let cancellable = gio::Cancellable::new();
+    let cancel = cancellable.clone();
+    let cancel: Racer = Box::new(move || cancel.cancel());
+    let _scope = FsQuirks::install(
+        root.path(),
+        without_trash(Quirks {
+            after: vec![(Op::Stat, "cut.txt", 1, cancel)],
+            ..Quirks::default()
+        }),
+    );
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let emitted = events.clone();
+
+    glib::MainContext::default().block_on(run_merge_undo(
+        OperationRequestId(1617),
+        (
+            vec![Location::local(&kept), Location::local(&cut)],
+            Vec::new(),
+            placed,
+        ),
+        Rc::new(move |event| emitted.borrow_mut().push(event)),
+        cancellable,
+        staged_lookup(HashMap::new()),
+    ));
+
+    let events = events.borrow();
+    let Some(OperationEvent::Cancelled { result, .. }) = events.last() else {
+        panic!("expected a cancel, got {events:?}");
+    };
+    assert!(result.completed.is_empty(), "{result:?}");
+    assert_eq!(result.failed, [Location::local(&kept)]);
+    assert_eq!(result.not_attempted, [Location::local(&cut)]);
+    assert_eq!(kept_items(&events), [Location::local(&kept)]);
+    assert_eq!(fs::read(&kept)?, b"merged");
+    assert_eq!(fs::read(&cut)?, b"merged");
+    Ok(())
+}
+
+#[test]
 fn a_merge_undo_never_counts_an_item_it_could_not_check_as_undone() -> Result<(), Box<dyn Error>> {
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
         .lock()
@@ -1967,6 +2016,16 @@ fn kept_in_trash(events: &[OperationEvent]) -> Vec<KeptItem> {
             _ => None,
         })
         .flatten()
+        .collect()
+}
+
+fn kept_items(events: &[OperationEvent]) -> Vec<Location> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            OperationEvent::ItemKept { location, .. } => Some(location.clone()),
+            _ => None,
+        })
         .collect()
 }
 
@@ -2715,6 +2774,13 @@ fn a_merge_undo_without_trash_deletes_only_what_the_merge_created_unchanged()
                 "{row}: {item:?}"
             );
         }
+        let mut kept_items = kept_items(&events);
+        kept_items.sort_by_key(Location::display_name);
+        assert_eq!(
+            kept_items,
+            kept.iter().map(Location::local).collect::<Vec<_>>(),
+            "{row}: nothing is left to undo of what was kept"
+        );
         if kept.contains(&folder.as_path()) {
             let mut expected = vec!["a.txt", "b.txt"];
             if change == "added to" {
@@ -2782,6 +2848,10 @@ fn a_created_folder_changed_while_undo_deletes_it_fails_as_not_empty() -> Result
     );
 
     assert_eq!(names(&folder)?, ["c.txt"]);
+    assert!(
+        kept_items(&events).is_empty(),
+        "what is left is still to undo"
+    );
     let Some(OperationEvent::CompletedWithErrors {
         deleted_locations,
         message,

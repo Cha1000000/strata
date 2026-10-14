@@ -5453,6 +5453,10 @@ async fn run_merge_undo(
         };
         let deleted_locations = match result {
             Ok(()) if kept => {
+                emit(OperationEvent::ItemKept {
+                    request_id,
+                    location: location.clone(),
+                });
                 errors.push(item_error(
                     &location.display_name(),
                     crate::i18n::tr("It was kept, as it may have changed since it was copied"),

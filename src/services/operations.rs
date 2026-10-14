@@ -418,6 +418,12 @@ pub enum OperationEvent {
         location: Location,
         identity: TrashedOriginal,
     },
+    /// A merge undo left the item at `location`, as it may have changed
+    /// since, so nothing of it is left to undo. It still counts as failed.
+    ItemKept {
+        request_id: OperationRequestId,
+        location: Location,
+    },
     FlushingToDevice {
         request_id: OperationRequestId,
     },

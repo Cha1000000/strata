@@ -1288,6 +1288,80 @@ fn a_partial_merge_undo_keeps_the_paths_still_to_revert() {
 }
 
 #[test]
+fn a_merge_undo_leaves_what_it_kept_out_of_undo_history() {
+    let kept = Location::local("/fixture/archive/kept.txt");
+    let cut = Location::local("/fixture/archive/cut.txt");
+    let earlier = UndoEntry::Trash(vec![Location::local("/fixture/earlier.txt")]);
+    let kept_only = |request_id| OperationEvent::CompletedWithErrors {
+        request_id,
+        deleted_locations: Vec::new(),
+        retryable_locations: Vec::new(),
+        has_non_retryable_failures: true,
+        message: "kept.txt: It was kept".to_owned(),
+    };
+    let cut_off = |request_id| OperationEvent::Cancelled {
+        request_id,
+        result: crate::services::CancelledOperation {
+            failed: vec![Location::local("/fixture/archive/kept.txt")],
+            not_attempted: vec![Location::local("/fixture/archive/cut.txt")],
+            ..Default::default()
+        },
+    };
+    let rows: [(
+        Vec<Location>,
+        &dyn Fn(OperationRequestId) -> OperationEvent,
+        _,
+    ); 2] = [
+        (vec![kept.clone()], &kept_only, earlier.clone()),
+        (
+            vec![kept.clone(), cut.clone()],
+            &cut_off,
+            UndoEntry::Merge {
+                created: vec![cut.clone()],
+                overwritten: Vec::new(),
+                originals: HashMap::new(),
+                placed: HashMap::new(),
+            },
+        ),
+    ];
+    for (created, outcome, expected) in rows {
+        PENDING_UNDO.with(|pending| *pending.borrow_mut() = UndoState::default());
+        let browser = Browser::new(Rc::new(FakeFileSource));
+        browser.set_operation_provider(Rc::new(ImmediateOperationProvider));
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let observed = events.clone();
+        browser.observe(move |event| observed.borrow_mut().push(event.clone()));
+        push_pending_undo(earlier.clone());
+        push_pending_undo(UndoEntry::Merge {
+            created,
+            overwritten: Vec::new(),
+            originals: HashMap::new(),
+            placed: HashMap::new(),
+        });
+        let (generation, claimed) = claim_pending_undo(None).expect("undo claim");
+        let request_id = browser.begin_operation();
+        browser.restoration_operation.set(true);
+        browser.undo_claim.replace(Some((generation, claimed)));
+        let emit = browser.operation_callback(request_id, false, HashSet::new());
+
+        emit(OperationEvent::ItemKept {
+            request_id,
+            location: kept.clone(),
+        });
+        emit(outcome(request_id));
+
+        assert_eq!(pending_undo_entry(), Some(expected));
+        assert!(
+            !events.borrow().iter().any(|event| matches!(
+                event,
+                BrowserEvent::ItemRemoved { location, .. } if *location == kept
+            )),
+            "a kept item stays in view"
+        );
+    }
+}
+
+#[test]
 fn a_created_folder_can_be_undone_by_trashing_it() {
     let browser = Browser::new(Rc::new(FakeFileSource));
     browser.set_operation_provider(Rc::new(ImmediateOperationProvider));

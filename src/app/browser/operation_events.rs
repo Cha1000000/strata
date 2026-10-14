@@ -341,6 +341,10 @@ impl Browser {
                 return true;
             }
             OperationEvent::ItemTrashed { .. } => return true,
+            OperationEvent::ItemKept { location, .. } => {
+                self.mark_merged_undo_item_completed(location);
+                return true;
+            }
             OperationEvent::ArchiveStarted { total, .. } => {
                 BrowserEvent::ArchiveStarted { total: *total }
             }
@@ -393,7 +397,7 @@ impl Browser {
     }
 
     /// DeleteProgress carries the processed path, which is how a merge undo
-    /// reports trashed `created` items.
+    /// reports trashed `created` items, and ItemKept the ones it left.
     fn mark_merged_undo_item_completed(&self, location: &Location) {
         let claim = self.undo_claim.borrow();
         if let Some((generation, UndoEntry::Merge { .. })) = claim.as_ref() {
@@ -646,6 +650,7 @@ impl Browser {
             | OperationEvent::ItemsReported { .. }
             | OperationEvent::ItemMoved { .. }
             | OperationEvent::ItemTrashed { .. }
+            | OperationEvent::ItemKept { .. }
             | OperationEvent::ArchiveStarted { .. }
             | OperationEvent::ArchiveProgress { .. }
             | OperationEvent::FlushingToDevice { .. } => {}
@@ -761,6 +766,7 @@ fn operation_event_id(event: &OperationEvent) -> OperationRequestId {
         | OperationEvent::Pasted { request_id, .. }
         | OperationEvent::ItemMoved { request_id, .. }
         | OperationEvent::ItemTrashed { request_id, .. }
+        | OperationEvent::ItemKept { request_id, .. }
         | OperationEvent::FlushingToDevice { request_id }
         | OperationEvent::ItemsReported { request_id, .. }
         | OperationEvent::Merged { request_id, .. }

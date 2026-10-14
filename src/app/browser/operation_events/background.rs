@@ -176,7 +176,9 @@ impl Browser {
             OperationEvent::FlushingToDevice { .. } => {
                 emit(BrowserEvent::FlushingToDevice);
             }
-            OperationEvent::ItemMoved { .. } | OperationEvent::ItemTrashed { .. } => {}
+            OperationEvent::ItemMoved { .. }
+            | OperationEvent::ItemTrashed { .. }
+            | OperationEvent::ItemKept { .. } => {}
             OperationEvent::ArchiveStarted { total, .. } => {
                 emit(BrowserEvent::ArchiveStarted { total });
             }
