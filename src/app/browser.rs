@@ -4720,23 +4720,8 @@ impl Browser {
 }
 
 fn location_or_ancestor_is_affected(location: &Location, roots: &HashSet<Location>) -> bool {
-    let mut current = Some(location.clone());
-    while let Some(loc) = current {
-        if roots.contains(&loc) {
-            return true;
-        }
-        current = loc.parent();
-    }
-    for root in roots {
-        let mut curr = root.parent();
-        while let Some(p) = curr {
-            if &p == location {
-                return true;
-            }
-            curr = p.parent();
-        }
-    }
-    false
+    std::iter::successors(Some(location.clone()), Location::parent)
+        .any(|folder| roots.contains(&folder))
 }
 
 fn deletion_parent_location(location: &Location) -> Option<Location> {

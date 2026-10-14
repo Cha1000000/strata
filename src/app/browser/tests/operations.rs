@@ -310,15 +310,16 @@ fn large_restore_progress_defers_model_removal() {
 }
 
 #[test]
-fn cancellation_refreshes_an_affected_remote_root_and_its_open_descendants() {
+fn cancellation_refreshes_only_an_affected_remote_folder_and_its_open_descendants() {
     let enumerate_calls = Rc::new(Cell::new(0));
     let browser = Browser::new(Rc::new(CountingFileSource {
         enumerate_calls: enumerate_calls.clone(),
     }));
-    let root = Location::uri("smb://host/share");
-    browser.navigate(root.clone());
-    browser.descend(0, Location::uri("smb://host/share/child"));
-    assert_eq!(enumerate_calls.get(), 2);
+    let affected = Location::uri("smb://host/share/child");
+    browser.navigate(Location::uri("smb://host/share"));
+    browser.descend(0, affected.clone());
+    browser.descend(1, Location::uri("smb://host/share/child/grandchild"));
+    assert_eq!(enumerate_calls.get(), 3);
 
     let events = Rc::new(RefCell::new(Vec::new()));
     let observed = events.clone();
@@ -351,12 +352,12 @@ fn cancellation_refreshes_an_affected_remote_root_and_its_open_descendants() {
             completed: vec![Location::uri("smb://host/share/completed")],
             failed: vec![Location::uri("smb://host/share/interrupted")],
             not_attempted: vec![Location::uri("smb://host/share/not-attempted")],
-            affected_locations: HashSet::from([root]),
+            affected_locations: HashSet::from([affected]),
         },
     });
 
     assert_eq!(browser.current_operation.get(), None);
-    assert_eq!(enumerate_calls.get(), 2);
+    assert_eq!(enumerate_calls.get(), 3);
     let affected_locations = events
         .borrow()
         .iter()
@@ -368,7 +369,7 @@ fn cancellation_refreshes_an_affected_remote_root_and_its_open_descendants() {
         })
         .expect("cancellation event");
     browser.refresh_after_cancellation(&affected_locations);
-    assert_eq!(enumerate_calls.get(), 4);
+    assert_eq!(enumerate_calls.get(), 5);
     assert!(
         events
             .borrow()
