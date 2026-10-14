@@ -1847,6 +1847,12 @@ fn files_read_within_a_coarse_time_tick_are_compared_before_their_move_deletes_t
         ctime_is_mtime: true,
         ..Quirks::default()
     };
+    // Reads of four bytes, so the copy and the comparison read in chunks.
+    let chunked = || Quirks {
+        short_io: Some(4),
+        ctime_is_mtime: true,
+        ..Quirks::vfat()
+    };
     // In milliseconds after the file's modification time.
     let recent = 500;
     let past_the_tick = 2050;
@@ -1862,7 +1868,9 @@ fn files_read_within_a_coarse_time_tick_are_compared_before_their_move_deletes_t
     // the same size and times over it as the deletion opens it to compare
     // it; or, once the clock reached a time it was read ahead of, before
     // the deletion, right after the comparison, or as the deletion looks at
-    // it. Or never, with the clock set back before the deletion.
+    // it; or, its first chunk only, right after the comparison read it,
+    // at the coarse clock's time then. Or never, with the clock set back
+    // before the deletion.
     #[derive(Clone, Copy, PartialEq)]
     enum Rewrite {
         Never,
@@ -1874,6 +1882,7 @@ fn files_read_within_a_coarse_time_tick_are_compared_before_their_move_deletes_t
         Reached,
         ReachedCompared,
         ReachedAtStat,
+        ChunkCompared,
         ClockSetBack,
     }
     // The source volume, how long after its modification time the copy
@@ -1882,7 +1891,7 @@ fn files_read_within_a_coarse_time_tick_are_compared_before_their_move_deletes_t
     // times written in a time zone ahead of ours read), when it is
     // rewritten, and whether the deletion reads it again. Only the file
     // itself is moved where it is rewritten as it is compared.
-    let rows: [(&str, Preset, i64, Rewrite, bool); 21] = [
+    let rows: [(&str, Preset, i64, Rewrite, bool); 23] = [
         ("vfat", vfat, recent, Rewrite::Deleting, true),
         (
             "vfat, past the tick",
@@ -1920,6 +1929,14 @@ fn files_read_within_a_coarse_time_tick_are_compared_before_their_move_deletes_t
         ("vfat, compared", vfat, recent, Rewrite::Compared, true),
         ("vfat, grown", vfat, recent, Rewrite::Grown, true),
         ("vfat, unchanged", vfat, recent, Rewrite::Never, true),
+        ("vfat, in chunks", chunked, recent, Rewrite::Never, true),
+        (
+            "vfat, chunk compared",
+            chunked,
+            recent,
+            Rewrite::ChunkCompared,
+            true,
+        ),
         (
             "vfat, clock set back",
             vfat,
@@ -2047,6 +2064,26 @@ fn files_read_within_a_coarse_time_tick_are_compared_before_their_move_deletes_t
                 vec![(Op::Stat, "a.txt", 0, reached(rewriter(b"ORIGINAL", false)))],
                 Vec::new(),
             ),
+            Rewrite::ChunkCompared => {
+                let path = file.clone();
+                let rewrite_chunk: super::fs_quirks::Racer = Box::new(move || {
+                    let source = fs::OpenOptions::new().write(true).open(&path);
+                    std::os::unix::fs::FileExt::write_at(&source.expect("open"), b"ORIG", 0)
+                        .expect("rewrite the first chunk");
+                    let now = (super::super::copy_engine::clock_for_test()
+                        - Duration::from_millis(10))
+                    .duration_since(epoch)
+                    .expect("a time after 1970");
+                    set_times(&path, now.as_secs() / 2 * 2).expect("set the times");
+                });
+                // The copy reads two chunks and the end, then the comparison
+                // its first chunk.
+                (
+                    &folder,
+                    Vec::new(),
+                    vec![(Op::Read, "a.txt", 3, rewrite_chunk)],
+                )
+            }
             Rewrite::ClockSetBack => {
                 let set_back: super::fs_quirks::Racer = Box::new(move || {
                     let hour_before = epoch + Duration::from_secs(seconds - 3600);
@@ -2086,6 +2123,10 @@ fn files_read_within_a_coarse_time_tick_are_compared_before_their_move_deletes_t
             }
             Rewrite::ClockSetBack => {
                 assert_eq!(fs::read(&file)?, original, "{row}");
+                assert_eq!(report.kept, [kept(file, KeptCause::Changed)], "{row}");
+            }
+            Rewrite::ChunkCompared => {
+                assert_eq!(fs::read(&file)?, b"ORIGinal", "{row}");
                 assert_eq!(report.kept, [kept(file, KeptCause::Changed)], "{row}");
             }
             _ => {
