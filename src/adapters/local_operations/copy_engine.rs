@@ -837,8 +837,10 @@ impl Created {
 
     fn remove(&self, fs: &dyn FsOps, root: &Root, family: Family) -> Result<(), glib::Error> {
         let root_entry = Entry::new(&*root.parent, &root.name);
-        let Ok(dir) = fs.open_dir(root_entry) else {
-            return Ok(());
+        let dir = match fs.open_dir(root_entry) {
+            Ok(dir) => dir,
+            Err(Errno::NOENT) => return Ok(()),
+            Err(error) => return Err(io_error(os_error_detail(error))),
         };
         if !fs
             .stat_fd(dir.as_fd())
@@ -2037,7 +2039,7 @@ impl<'a> FileCopy<'a> {
                         Ok(created) => created,
                         Err(failure) => return Err(self.discard(&stage, failure)),
                     };
-                    if let Err(error) = self.remove_stage(&stage) {
+                    if let Err(error) = self.remove_made(&stage.name, stage.created.identity) {
                         return Err(Failure::Error(stage_left(&error)));
                     }
                     break created;
@@ -2105,19 +2107,24 @@ impl<'a> FileCopy<'a> {
             self.copy
                 .settle_times(target, created.identity, snapshot, self.target.family)
         })(fd);
-        if filled.is_err() {
-            placement::remove_if_unchanged(fs, target, created.identity, AtFlags::empty());
+        match filled {
+            Ok(()) => Ok(created.identity),
+            Err(failure) => {
+                let removed = self.remove_made(name, created.identity);
+                Err(self.copy.after_cleanup(failure, removed))
+            }
         }
-        filled.map(|()| created.identity)
     }
 
-    fn remove_stage(&self, stage: &Stage) -> Result<(), glib::Error> {
+    fn remove_made(&self, name: &OsStr, identity: LocalFileIdentity) -> Result<(), glib::Error> {
         let fs = self.copy.fs;
-        let entry = self.at(&stage.name);
+        let entry = self.at(name);
         match fs.stat(entry, true) {
-            Ok(current) if current.identity == stage.created.identity => fs
-                .unlink(entry, AtFlags::empty())
-                .map_err(|error| io_error(os_error_detail(error))),
+            Ok(current) if current.identity == identity => match fs.unlink(entry, AtFlags::empty())
+            {
+                Ok(()) | Err(Errno::NOENT) => Ok(()),
+                Err(error) => Err(io_error(os_error_detail(error))),
+            },
             Ok(_) => Err(placement_error(PlaceError::Changed)),
             Err(Errno::NOENT) => Ok(()),
             Err(error) => Err(io_error(os_error_detail(error))),
@@ -2125,7 +2132,7 @@ impl<'a> FileCopy<'a> {
     }
 
     fn discard(&self, stage: &Stage, failure: Failure) -> Failure {
-        let removed = self.remove_stage(stage);
+        let removed = self.remove_made(&stage.name, stage.created.identity);
         self.copy.after_cleanup(failure, removed)
     }
 }

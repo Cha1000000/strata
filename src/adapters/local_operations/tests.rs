@@ -405,6 +405,18 @@ impl CancelFromMain {
         })
     }
 
+    /// Holds its worker until the cancel was made.
+    fn waiter(&self) -> fs_quirks::Racer {
+        let this = self.clone();
+        Box::new(move || {
+            let (state, changed) = &*this.0;
+            let mut state = state.lock().expect("cancel state");
+            while *state != Some(true) {
+                state = changed.wait(state).expect("cancel state");
+            }
+        })
+    }
+
     fn serve(&self, cancel: impl FnOnce()) {
         let (state, changed) = &*self.0;
         let mut state = state.lock().expect("cancel state");

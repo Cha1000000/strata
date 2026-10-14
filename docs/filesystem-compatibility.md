@@ -540,7 +540,11 @@ filesystem does it copy the item, in place at its final names, pinned to the Tra
 with the best-effort metadata above. The copy is flushed, then the Trash copy is deleted entry by
 entry, as a move deletes its source. Anything changed or uncopyable stays in the Trash with its
 `.trashinfo`, and is reported as left in the Trash. A failed restore copy removes only the entries
-it created. A restore across filesystems is refused.
+it created. A cancel during the copy removes them too and counts the item as not attempted, left in
+the Trash with its `.trashinfo`; if they cannot be removed, the item counts as failed. A cancelled
+restore or merge undo ends as cancelled, even when its last item finished. A merge undo deletes its
+copy before it restores the original, so an item cut off after that counts as failed. A restore
+across filesystems is refused.
 
 ### The completion report
 

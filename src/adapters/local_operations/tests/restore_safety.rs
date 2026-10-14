@@ -352,6 +352,59 @@ fn a_failed_restore_copy_of_a_file_leaves_nothing_at_its_name() -> Result<(), Bo
 }
 
 #[test]
+fn a_cancelled_restore_copy_that_cannot_remove_what_it_made_fails() -> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock()?;
+    // The cut-off file cannot be unlinked; the cut-off folder cannot be
+    // opened to be emptied, after it was opened once as it was made and once
+    // by the copy.
+    for (folder, cleanup) in [(false, (Op::Unlink, 0)), (true, (Op::OpenDir, 2))] {
+        let fixture = tempfile::tempdir()?;
+        let source = fixture.path().join("source");
+        let data = if folder {
+            fs::create_dir(&source)?;
+            source.join("data")
+        } else {
+            source.clone()
+        };
+        let contents = vec![0x5a; 4 * 1024 * 1024];
+        fs::write(&data, &contents)?;
+        let destination = fixture.path().join("destination");
+        let cancellable = gio::Cancellable::new();
+        let racer = |cancel: gio::Cancellable| -> Racer { Box::new(move || cancel.cancel()) };
+        let (op, skip) = cleanup;
+        let _scope = FsQuirks::install(
+            fixture.path(),
+            Quirks {
+                before: vec![
+                    (Op::CopyRange, "*", 0, racer(cancellable.clone())),
+                    (Op::Write, "*", 0, racer(cancellable.clone())),
+                ],
+                fail: vec![(op, "destination", skip, Errno::IO)],
+                reflink: Support::Rejected(Errno::OPNOTSUPP),
+                ..Quirks::without_placement()
+            },
+        );
+
+        let restored = glib::MainContext::default().block_on(move_restore_path(
+            source.clone(),
+            destination.clone(),
+            fixture.path().to_path_buf(),
+            Arc::default(),
+            cancellable,
+        ));
+
+        let error = restored.expect_err("the cut-off copy stayed");
+        assert!(
+            !error.matches(gio::IOErrorEnum::Cancelled),
+            "{folder}: {error}"
+        );
+        assert!(fs::symlink_metadata(&destination).is_ok(), "{folder}");
+        assert_eq!(fs::read(&data)?, contents);
+    }
+    Ok(())
+}
+
+#[test]
 fn a_restore_cancelled_once_its_copy_is_complete_finishes() -> Result<(), Box<dyn Error>> {
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock()?;
     let fixture = tempfile::tempdir()?;
@@ -946,6 +999,139 @@ fn a_restore_cut_off_before_it_places_the_item_counts_it_as_not_attempted()
     assert_eq!(result.not_attempted, [Location::local(&source)]);
     assert_eq!(fs::read(&source)?, b"original");
     assert!(fs::symlink_metadata(&destination).is_err());
+    Ok(())
+}
+
+#[test]
+fn a_restore_cancelled_while_it_copies_an_item_ends_as_a_cancel() -> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock()?;
+    // Items in restore order: "cut" is being copied when the cancel lands,
+    // after the first item ended, "taken" fails as its name is in use, and a
+    // stuck cut-off copy cannot be removed.
+    for (names, stuck) in [
+        (&["first", "cut"][..], false),
+        (&["first", "cut", "last"], false),
+        (&["taken", "cut"], false),
+        (&["first", "cut"], true),
+    ] {
+        let fixture = tempfile::tempdir()?;
+        let trash = fixture
+            .path()
+            .join(format!(".Trash-{}", rustix::process::getuid().as_raw()));
+        fs::create_dir_all(trash.join("files"))?;
+        fs::create_dir_all(trash.join("info"))?;
+        let documents = fixture.path().join("Documents");
+        fs::create_dir(&documents)?;
+        if names.contains(&"taken") {
+            fs::write(documents.join("taken"), b"occupant")?;
+        }
+        let contents = |name: &str| match name {
+            "cut" => vec![0x5a; 4 * 1024 * 1024],
+            _ => name.as_bytes().to_vec(),
+        };
+        for name in names {
+            fs::write(trash.join("files").join(name), contents(name))?;
+            fs::write(
+                trash.join(format!("info/{name}.trashinfo")),
+                format!("[Trash Info]\nPath=Documents/{name}\n"),
+            )?;
+        }
+        let cancel = CancelFromMain::default();
+        let _scope = FsQuirks::install(
+            fixture.path(),
+            Quirks {
+                before: vec![
+                    (Op::CopyRange, "cut", 0, cancel.racer()),
+                    (Op::Write, "cut", 0, cancel.racer()),
+                    (Op::Stat, "last", 0, cancel.waiter()),
+                ],
+                fail: if stuck {
+                    vec![(Op::Unlink, "cut", 0, Errno::IO)]
+                } else {
+                    Vec::new()
+                },
+                reflink: Support::Rejected(Errno::OPNOTSUPP),
+                ..Quirks::without_placement()
+            },
+        );
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let emitted = events.clone();
+        let mut operation = Some(
+            LocalOperationProvider.restore(
+                RestoreRequest {
+                    id: OperationRequestId(1615),
+                    source: RestoreSource::TrashEntries(
+                        names
+                            .iter()
+                            .map(|name| RestoreTrashItem {
+                                entry: file_entry(&trash.join("files").join(name)),
+                                destination: documents.join(name),
+                            })
+                            .collect(),
+                    ),
+                },
+                Rc::new(move |event| emitted.borrow_mut().push(event)),
+            ),
+        );
+
+        let context = glib::MainContext::default();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !events.borrow().iter().any(|event| {
+            matches!(
+                event,
+                OperationEvent::Cancelled { .. }
+                    | OperationEvent::Restored { .. }
+                    | OperationEvent::RestoreCompletedWithErrors { .. }
+            )
+        }) {
+            assert!(
+                Instant::now() < deadline,
+                "{names:?}, {stuck}: {:?}",
+                events.borrow()
+            );
+            if events
+                .borrow()
+                .iter()
+                .any(|event| matches!(event, OperationEvent::RestoreProgress { completed: 1, .. }))
+            {
+                cancel.serve(|| drop(operation.take()));
+            }
+            context.iteration(false);
+            thread::sleep(Duration::from_millis(1));
+        }
+
+        assert!(cancel.served(), "{names:?}, {stuck}");
+        let events = events.borrow();
+        let Some(OperationEvent::Cancelled { result, .. }) = events.last() else {
+            panic!(
+                "{names:?}, {stuck}: expected a cancel, got {:?}",
+                events.last()
+            );
+        };
+        let in_trash = |name: &str| Location::local(trash.join("files").join(name));
+        let mut failed = Vec::new();
+        let mut not_attempted = names[1..].iter().map(|name| in_trash(name)).collect();
+        if names[0] == "taken" {
+            assert!(result.completed.is_empty());
+            failed.push(in_trash("taken"));
+            assert_eq!(fs::read(documents.join("taken"))?, b"occupant");
+        } else {
+            assert_eq!(result.completed, [Location::local(documents.join("first"))]);
+            assert_eq!(fs::read(documents.join("first"))?, b"first");
+            assert!(!trash.join("info/first.trashinfo").exists());
+        }
+        if stuck {
+            failed.append(&mut not_attempted);
+        }
+        assert_eq!(result.failed, failed, "{names:?}, {stuck}");
+        assert_eq!(result.not_attempted, not_attempted, "{names:?}, {stuck}");
+        for name in &names[1..] {
+            assert_eq!(fs::read(trash.join("files").join(name))?, contents(name));
+            assert!(trash.join(format!("info/{name}.trashinfo")).exists());
+            let left = fs::symlink_metadata(documents.join(name)).is_ok();
+            assert_eq!(left, stuck && *name == "cut", "{names:?}, {stuck}: {name}");
+        }
+    }
     Ok(())
 }
 

@@ -497,6 +497,10 @@ fn an_outcome_shows_one_dialog_with_the_report_of_its_operation() {
                     rows.push((started, terminal, *title, *outcome));
                 }
             }
+            let (cancelled, title, outcome) = &transfer_endings[1];
+            for started in [Started::Restore, Started::MergeUndo] {
+                rows.push((started, cancelled, *title, *outcome));
+            }
             rows.extend([
                 (
                     Started::Restore,

@@ -2544,7 +2544,10 @@ async fn move_restore_path(
     )
     .await
     .map_err(|error| {
-        if error.matches(gio::IOErrorEnum::Exists) {
+        // A cancelled copy removed what it made, or failed.
+        if was_cancelled(&error) {
+            error
+        } else if error.matches(gio::IOErrorEnum::Exists) {
             restore_destination_exists(&display_name)
         } else {
             io_error(could_not_restore(
@@ -5100,7 +5103,8 @@ fn trashed_merge_original(
 }
 
 /// Reverts one overwritten merge path: removes the incoming copy so the
-/// staged original can move back out of Trash.
+/// staged original can move back out of Trash. Sets `deleting` once it
+/// starts to remove the incoming copy.
 async fn undo_merged_overwrite(
     location: &Location,
     staged: &RestoreEntry,
@@ -5108,6 +5112,7 @@ async fn undo_merged_overwrite(
     affected_locations: &mut HashSet<Location>,
     unlinks: &Arc<copy_engine::Unlinks>,
     cancellable: &gio::Cancellable,
+    deleting: &mut bool,
 ) -> Result<TransferReport, glib::Error> {
     let file = gio_file_for_location(location);
     let existing_type = await_cancellable(&file, cancellable, |file, cancellable, result| {
@@ -5123,6 +5128,7 @@ async fn undo_merged_overwrite(
     .map(|info| info.file_type())
     .ok();
     if let Some(file_type) = existing_type {
+        *deleting = true;
         permanently_delete_maybe_local(
             file,
             file_type == gio::FileType::Directory,
@@ -5180,6 +5186,7 @@ async fn run_merge_undo(
             ));
             return;
         }
+        let mut deleting = false;
         let result = match staged_original(location.clone(), cancellable.clone()).await {
             Ok(staged) => {
                 undo_merged_overwrite(
@@ -5189,6 +5196,7 @@ async fn run_merge_undo(
                     &mut affected_locations,
                     &unlinks,
                     &cancellable,
+                    &mut deleting,
                 )
                 .await
             }
@@ -5203,13 +5211,16 @@ async fn run_merge_undo(
                 restored.push(location.clone());
                 Some(location.clone())
             }
+            // Once its incoming copy is deleted, a cut-off item is no longer whole.
             Err(error) if was_cancelled(&error) => {
-                failed_locations.push(location.clone());
+                if deleting {
+                    failed_locations.push(location.clone());
+                }
                 emit(cancelled_event(
                     request_id,
                     completed_locations,
                     failed_locations,
-                    remaining(index + 1),
+                    remaining(index + usize::from(deleting)),
                     affected_locations,
                 ));
                 return;
@@ -5319,7 +5330,15 @@ async fn run_merge_undo(
             deleted_locations,
         });
     }
-    if errors.is_empty() {
+    if cancellable.is_cancelled() {
+        emit(cancelled_event(
+            request_id,
+            completed_locations,
+            failed_locations,
+            Vec::new(),
+            affected_locations,
+        ));
+    } else if errors.is_empty() {
         emit(OperationEvent::Restored {
             request_id,
             locations: Vec::new(),
@@ -6662,8 +6681,6 @@ impl OperationProvider for LocalOperationProvider {
                     affected_locations.extend(affected);
                     completed += 1;
                     let restored_location = match result {
-                        // A cancel stops a restore only before it places the
-                        // item; a stopped restore copy fails as an error.
                         Err(error) if was_cancelled(&error) => {
                             cut_off.push(entry.source.clone());
                             None
@@ -6696,8 +6713,7 @@ impl OperationProvider for LocalOperationProvider {
                         restored_location,
                     });
                 }
-                if !cut_off.is_empty() || operation_cancellable.is_cancelled() && completed < total
-                {
+                if !cut_off.is_empty() || operation_cancellable.is_cancelled() {
                     cut_off.extend(
                         entries[completed..]
                             .iter()

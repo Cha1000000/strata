@@ -1596,6 +1596,93 @@ fn a_merge_undo_never_counts_an_item_it_could_not_check_as_undone() -> Result<()
     Ok(())
 }
 
+#[test]
+fn a_merge_undo_cancelled_while_it_restores_an_original_ends_as_a_cancel()
+-> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    // Whether the merge's copy is still at the last path, which the undo
+    // deletes before it restores the original, and whether the cut-off copy
+    // of the original cannot be removed.
+    for (incoming, stuck) in [(true, false), (false, false), (false, true)] {
+        let root = tempfile::tempdir()?;
+        let [first, second] = ["first.bin", "second.bin"].map(|name| root.path().join(name));
+        let original = vec![0x5a; 4 * 1024 * 1024];
+        fs::write(&first, b"incoming")?;
+        if incoming {
+            fs::write(&second, b"incoming")?;
+        }
+        let staged = HashMap::from([
+            (
+                first.clone(),
+                staged_trash_fixture(root.path(), "first.bin", &first, b"first original")?,
+            ),
+            (
+                second.clone(),
+                staged_trash_fixture(root.path(), "second.bin", &second, &original)?,
+            ),
+        ]);
+        let trash = root
+            .path()
+            .join(format!(".Trash-{}", rustix::process::getuid().as_raw()));
+        let cancellable = gio::Cancellable::new();
+        let racer = |cancel: gio::Cancellable| -> super::fs_quirks::Racer {
+            Box::new(move || cancel.cancel())
+        };
+        let _scope = FsQuirks::install(
+            root.path(),
+            Quirks {
+                before: vec![
+                    (Op::CopyRange, "second.bin", 0, racer(cancellable.clone())),
+                    (Op::Write, "second.bin", 0, racer(cancellable.clone())),
+                ],
+                fail: if stuck {
+                    vec![(Op::Unlink, "second.bin", 0, Errno::IO)]
+                } else {
+                    Vec::new()
+                },
+                reflink: super::fs_quirks::Support::Rejected(Errno::OPNOTSUPP),
+                ..Quirks::without_placement()
+            },
+        );
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let emitted = events.clone();
+
+        glib::MainContext::default().block_on(run_merge_undo(
+            OperationRequestId(1615),
+            Vec::new(),
+            vec![Location::local(&first), Location::local(&second)],
+            Rc::new(move |event| emitted.borrow_mut().push(event)),
+            cancellable,
+            staged_lookup(staged),
+        ));
+
+        let events = events.borrow();
+        let Some(OperationEvent::Cancelled { result, .. }) = events.last() else {
+            panic!(
+                "{incoming}, {stuck}: expected a cancel, got {:?}",
+                events.last()
+            );
+        };
+        let cut_off = vec![Location::local(&second)];
+        let (failed, not_attempted) = if incoming || stuck {
+            (cut_off, Vec::new())
+        } else {
+            (Vec::new(), cut_off)
+        };
+        assert_eq!(result.completed, [Location::local(&first)]);
+        assert_eq!(result.failed, failed, "{incoming}, {stuck}");
+        assert_eq!(result.not_attempted, not_attempted, "{incoming}, {stuck}");
+        assert_eq!(fs::read(&first)?, b"first original");
+        let left = fs::symlink_metadata(&second).is_ok();
+        assert_eq!(left, stuck, "{incoming}, {stuck}");
+        assert_eq!(fs::read(trash.join("files/second.bin"))?, original);
+        assert!(trash.join("info/second.bin.trashinfo").exists());
+    }
+    Ok(())
+}
+
 fn without_trash(quirks: Quirks) -> Quirks {
     Quirks {
         trash: Trash::Unsupported,
