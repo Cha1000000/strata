@@ -1773,11 +1773,11 @@ fn a_file_put_in_a_moved_files_place_within_its_time_tick_is_kept() -> Result<()
     Ok(())
 }
 
-/// Sets the modification and access times of `path` to `seconds`.
-fn set_times(path: &Path, seconds: u64) -> io::Result<()> {
+/// Sets the modification and access times of `path`.
+fn set_times(path: &Path, seconds: u64, nanoseconds: u32) -> io::Result<()> {
     let times = rustix::fs::Timespec {
         tv_sec: i64::try_from(seconds).map_err(io::Error::other)?,
-        tv_nsec: 0,
+        tv_nsec: nanoseconds.into(),
     };
     rustix::fs::utimensat(
         rustix::fs::CWD,
@@ -1980,14 +1980,14 @@ fn files_read_within_a_coarse_time_tick_are_compared_before_their_move_deletes_t
         fs::write(&file, b"original")?;
         let epoch = SystemTime::UNIX_EPOCH;
         let seconds = SystemTime::now().duration_since(epoch)?.as_secs() / 2 * 2;
-        if matches!(preset().mount_type, Some(("ext4", _))) {
-            // ext4 keeps a fraction of a second, which FAT, sshfs and HFS+
-            // times lack.
-            let modified = epoch + Duration::new(seconds, 250_000_000);
-            fs::File::open(&file)?.set_modified(modified)?;
-        } else {
-            set_times(&file, seconds)?;
-        }
+        // ext4 keeps nanoseconds and exFAT hundredths of a second; FAT,
+        // sshfs and HFS+ keep whole seconds.
+        let fraction = match preset().mount_type {
+            Some(("ext4", _)) => 250_000_000,
+            Some(("fuseblk", _)) => 500_000_000,
+            _ => 0,
+        };
+        set_times(&file, seconds, fraction)?;
         let read_at = i64::try_from(seconds)? * 1000 + read_after;
         let _clock = ClockGuard::set(epoch + Duration::from_millis(u64::try_from(read_at)?));
         let rewriter = |contents: &'static [u8], clocked: bool| -> super::fs_quirks::Racer {
@@ -1997,12 +1997,12 @@ fn files_read_within_a_coarse_time_tick_are_compared_before_their_move_deletes_t
                 let now = (super::super::copy_engine::clock_for_test() - Duration::from_millis(10))
                     .duration_since(epoch)
                     .expect("a time after 1970");
-                let step = if clocked {
-                    now.as_secs() / 2 * 2
+                let (step, fraction) = if clocked {
+                    (now.as_secs() / 2 * 2, 0)
                 } else {
-                    seconds
+                    (seconds, fraction)
                 };
-                set_times(&path, step).expect("set the times");
+                set_times(&path, step, fraction).expect("set the times");
             })
         };
         // Moves the clock just past the file's time, then runs `then`.
@@ -2047,7 +2047,7 @@ fn files_read_within_a_coarse_time_tick_are_compared_before_their_move_deletes_t
                 let (path, saved) = (file.clone(), folder.join(".a.txt.save"));
                 let rename_over: super::fs_quirks::Racer = Box::new(move || {
                     fs::write(&saved, b"ORIGINAL").expect("save the new version aside");
-                    set_times(&saved, seconds).expect("set the times");
+                    set_times(&saved, seconds, fraction).expect("set the times");
                     fs::rename(&saved, &path).expect("rename it over the source");
                 });
                 (
@@ -2089,7 +2089,7 @@ fn files_read_within_a_coarse_time_tick_are_compared_before_their_move_deletes_t
                         - Duration::from_millis(10))
                     .duration_since(epoch)
                     .expect("a time after 1970");
-                    set_times(&path, now.as_secs() / 2 * 2).expect("set the times");
+                    set_times(&path, now.as_secs() / 2 * 2, 0).expect("set the times");
                 });
                 // The copy reads two chunks and the end, then the comparison
                 // its first chunk.
@@ -2182,12 +2182,15 @@ fn files_on_a_coarse_mount_inside_a_moved_folder_are_compared() -> Result<(), Bo
     fs::write(&file, b"original")?;
     let epoch = SystemTime::UNIX_EPOCH;
     let seconds = SystemTime::now().duration_since(epoch)?.as_secs() / 2 * 2;
-    set_times(&file, seconds)?;
-    let _clock = ClockGuard::set(epoch + Duration::from_secs(seconds) + Duration::from_millis(500));
+    // exFAT keeps hundredths of a second.
+    let fraction = 500_000_000;
+    set_times(&file, seconds, fraction)?;
+    let _clock =
+        ClockGuard::set(epoch + Duration::new(seconds, fraction) + Duration::from_millis(500));
     let path = file.clone();
     let rewrite: super::fs_quirks::Racer = Box::new(move || {
         fs::write(&path, b"ORIGINAL").expect("rewrite the source");
-        set_times(&path, seconds).expect("keep its times");
+        set_times(&path, seconds, fraction).expect("keep its times");
     });
     let outer = FsQuirks::install(
         &source_dir,
@@ -2253,7 +2256,7 @@ fn a_source_growing_as_it_is_compared_is_kept_without_reading_what_it_grew_by()
     fs::write(&file, b"original")?;
     let epoch = SystemTime::UNIX_EPOCH;
     let seconds = SystemTime::now().duration_since(epoch)?.as_secs() / 2 * 2;
-    set_times(&file, seconds)?;
+    set_times(&file, seconds, 0)?;
     let _clock = ClockGuard::set(epoch + Duration::from_secs(seconds) + Duration::from_millis(500));
     let grown = 64 << 20;
     let path = file.clone();
