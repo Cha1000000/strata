@@ -1,10 +1,15 @@
 // SPDX-License-Identifier: MIT
 
+use std::os::unix::fs::MetadataExt;
+
 use rustix::io::Errno;
 
-use super::fs_quirks::{Op, Trash};
+use super::fs_quirks::{Op, Racer, Trash};
 use super::*;
-use crate::adapters::volume::learn_mount_capability;
+use crate::{
+    adapters::volume::learn_mount_capability,
+    services::{KeptCause, KeptItem, PlacedSnapshot, ReplacedOriginal},
+};
 
 fn real_copy() -> CopyStep {
     super::super::merge_copy(None, false)
@@ -138,7 +143,7 @@ fn merging_folders_unites_contents_and_overwrites_shared_names() -> Result<(), B
     );
     assert_eq!(fs::read(staging.join("staged-0"))?, b"old");
     let plans = plans.borrow();
-    assert_eq!(plans.len(), 1);
+    assert_eq!(plans.len(), 2);
     assert_eq!(
         plans[0].created,
         vec![Location::local(target.join("incoming.txt"))]
@@ -146,6 +151,11 @@ fn merging_folders_unites_contents_and_overwrites_shared_names() -> Result<(), B
     assert_eq!(
         plans[0].overwritten,
         vec![Location::local(target.join("shared.txt"))]
+    );
+    assert_eq!(
+        plans[1].placed.keys().collect::<Vec<_>>(),
+        [&Location::local(target.join("shared.txt"))],
+        "what the copy put at an overwritten path is recorded for undo"
     );
     Ok(())
 }
@@ -189,7 +199,7 @@ fn merging_recurses_into_subdirectories_shared_by_both_sides() -> Result<(), Box
     );
     assert_eq!(fs::read(target.join("nested/stays.txt"))?, b"keep me");
     let plans = plans.borrow();
-    assert_eq!(plans.len(), 1);
+    assert_eq!(plans.len(), 2);
     assert_eq!(
         plans[0].created,
         vec![Location::local(target.join("nested/incoming.txt"))]
@@ -197,6 +207,55 @@ fn merging_recurses_into_subdirectories_shared_by_both_sides() -> Result<(), Box
     assert_eq!(
         plans[0].overwritten,
         vec![Location::local(target.join("nested/shared.txt"))]
+    );
+    assert_eq!(
+        plans[1].placed.keys().collect::<Vec<_>>(),
+        [&Location::local(target.join("nested/shared.txt"))],
+        "what the copy put at an overwritten path is recorded for undo"
+    );
+    Ok(())
+}
+
+#[test]
+fn a_merge_from_a_location_without_paths_records_what_it_copied_over_an_original()
+-> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    gio::resources_register_include!("strata.gresource")?;
+    let source = gio::File::for_uri("resource:///io/github/lgse/Strata/brand");
+    assert!(!source.is_native());
+    let root = tempfile::tempdir()?;
+    let target = root.path().join("brand");
+    let overwritten = target.join("strata-logo-white.svg");
+    write_files(
+        &target,
+        &[("strata-logo-white.svg", "old"), ("stays.txt", "keep me")],
+    )?;
+    let (stage, _) = rename_stage(root.path().join("staging"));
+    let (plans, on_merged) = recorded_plans();
+
+    let result = glib::MainContext::default().block_on(merge_local_with(
+        source,
+        gio::File::for_path(&target),
+        false,
+        gio::Cancellable::new(),
+        None,
+        MergeHooks {
+            fat_family: false,
+            copy_into_target: real_copy(),
+            stage_overwrite: stage,
+            on_merged: &on_merged,
+        },
+    ));
+
+    assert!(result.is_ok(), "{result:?}");
+    assert_ne!(fs::read(&overwritten)?, b"old");
+    let (_, staged, placed) = undo_parts(plans.take());
+    assert_eq!(staged, [Location::local(&overwritten)]);
+    assert_eq!(
+        placed.keys().collect::<Vec<_>>(),
+        [&Location::local(&overwritten)]
     );
     Ok(())
 }
@@ -1122,10 +1181,10 @@ fn merge_undo_uses_recorded_identity_when_trash_dates_collide() -> Result<(), Bo
         });
         let events = Rc::new(RefCell::new(Vec::new()));
         let emitted = events.clone();
+        let placed = placed_now(&[&target]);
         glib::MainContext::default().block_on(run_merge_undo(
             OperationRequestId(91),
-            Vec::new(),
-            vec![location],
+            (Vec::new(), vec![location], placed),
             Rc::new(move |event| emitted.borrow_mut().push(event)),
             gio::Cancellable::new(),
             lookup,
@@ -1192,10 +1251,14 @@ fn check_merge_undo_restores_staged_originals_and_removes_created() -> Result<()
 
     let events = Rc::new(RefCell::new(Vec::new()));
     let emitted = events.clone();
+    let placed = placed_now(&[&shared]);
     glib::MainContext::default().block_on(run_merge_undo(
         OperationRequestId(90),
-        vec![Location::local(&incoming)],
-        vec![Location::local(&shared)],
+        (
+            vec![Location::local(&incoming)],
+            vec![Location::local(&shared)],
+            placed,
+        ),
         Rc::new(move |event| emitted.borrow_mut().push(event)),
         gio::Cancellable::new(),
         lookup,
@@ -1289,8 +1352,11 @@ fn undoing_a_merge_with_numbered_aliases_removes_only_its_items() -> Result<(), 
     let emitted = undone.clone();
     glib::MainContext::default().block_on(run_merge_undo(
         OperationRequestId(95),
-        vec![Location::local(folder.join("Makefile")), saved_as],
-        Vec::new(),
+        (
+            vec![Location::local(folder.join("Makefile")), saved_as],
+            Vec::new(),
+            HashMap::new(),
+        ),
         Rc::new(move |event| emitted.borrow_mut().push(event)),
         gio::Cancellable::new(),
         staged_lookup(HashMap::new()),
@@ -1322,10 +1388,10 @@ fn merge_undo_keeps_the_incoming_copy_when_no_staged_original_exists() -> Result
 
     let events = Rc::new(RefCell::new(Vec::new()));
     let emitted = events.clone();
+    let placed = placed_now(&[&shared]);
     glib::MainContext::default().block_on(run_merge_undo(
         OperationRequestId(91),
-        Vec::new(),
-        vec![Location::local(&shared)],
+        (Vec::new(), vec![Location::local(&shared)], placed),
         Rc::new(move |event| emitted.borrow_mut().push(event)),
         gio::Cancellable::new(),
         staged_lookup(HashMap::new()),
@@ -1357,8 +1423,7 @@ fn merge_undo_tolerates_created_paths_that_no_longer_exist() -> Result<(), Box<d
     let emitted = events.clone();
     glib::MainContext::default().block_on(run_merge_undo(
         OperationRequestId(92),
-        vec![Location::local(&gone)],
-        Vec::new(),
+        (vec![Location::local(&gone)], Vec::new(), HashMap::new()),
         Rc::new(move |event| emitted.borrow_mut().push(event)),
         gio::Cancellable::new(),
         staged_lookup(HashMap::new()),
@@ -1390,8 +1455,11 @@ fn a_cancelled_merge_undo_reports_everything_not_attempted() -> Result<(), Box<d
     let emitted = events.clone();
     glib::MainContext::default().block_on(run_merge_undo(
         OperationRequestId(93),
-        vec![Location::local(&incoming)],
-        vec![Location::local(&shared)],
+        (
+            vec![Location::local(&incoming)],
+            vec![Location::local(&shared)],
+            HashMap::new(),
+        ),
         Rc::new(move |event| emitted.borrow_mut().push(event)),
         cancellable,
         staged_lookup(HashMap::new()),
@@ -1513,8 +1581,11 @@ fn a_merge_undo_cut_off_counts_an_item_as_not_attempted_only_when_it_left_it_who
 
         glib::MainContext::default().block_on(run_merge_undo(
             OperationRequestId(1615),
-            created.iter().map(Location::local).collect(),
-            Vec::new(),
+            (
+                created.iter().map(Location::local).collect(),
+                Vec::new(),
+                HashMap::new(),
+            ),
             Rc::new(move |event| emitted.borrow_mut().push(event)),
             cancellable,
             staged_lookup(HashMap::new()),
@@ -1573,12 +1644,15 @@ fn a_merge_undo_never_counts_an_item_it_could_not_check_as_undone() -> Result<()
 
     glib::MainContext::default().block_on(run_merge_undo(
         OperationRequestId(1615),
-        vec![
-            Location::local(&first),
-            unreadable.clone(),
-            Location::local(&second),
-        ],
-        Vec::new(),
+        (
+            vec![
+                Location::local(&first),
+                unreadable.clone(),
+                Location::local(&second),
+            ],
+            Vec::new(),
+            HashMap::new(),
+        ),
         emit,
         cancellable,
         staged_lookup(HashMap::new()),
@@ -1649,10 +1723,14 @@ fn a_merge_undo_cancelled_while_it_restores_an_original_ends_as_a_cancel()
         let events = Rc::new(RefCell::new(Vec::new()));
         let emitted = events.clone();
 
+        let placed = placed_now(&[&first, &second]);
         glib::MainContext::default().block_on(run_merge_undo(
             OperationRequestId(1615),
-            Vec::new(),
-            vec![Location::local(&first), Location::local(&second)],
+            (
+                Vec::new(),
+                vec![Location::local(&first), Location::local(&second)],
+                placed,
+            ),
             Rc::new(move |event| emitted.borrow_mut().push(event)),
             cancellable,
             staged_lookup(staged),
@@ -1737,10 +1815,14 @@ fn a_merge_undo_restores_an_original_only_over_a_path_it_checked() -> Result<(),
             emitted.borrow_mut().push(event);
         });
 
+        let placed = placed_now(&[&first]);
         glib::MainContext::default().block_on(run_merge_undo(
             OperationRequestId(1615),
-            Vec::new(),
-            vec![Location::local(&first), target.clone()],
+            (
+                Vec::new(),
+                vec![Location::local(&first), target.clone()],
+                placed,
+            ),
             emit,
             cancellable,
             lookup,
@@ -1780,6 +1862,433 @@ fn a_merge_undo_restores_an_original_only_over_a_path_it_checked() -> Result<(),
             (case, last) => panic!("{case}: {last:?}"),
         }
     }
+    Ok(())
+}
+
+type UndoParts = (
+    Vec<Location>,
+    Vec<Location>,
+    HashMap<Location, PlacedSnapshot>,
+);
+
+/// What undo is given of a merge, from what it reported.
+fn undo_parts(plans: Vec<MergePlan>) -> UndoParts {
+    let mut parts = UndoParts::default();
+    for plan in plans {
+        parts.0.extend(plan.created);
+        parts.1.extend(plan.overwritten);
+        parts.2.extend(plan.placed);
+    }
+    parts
+}
+
+fn run_undo(parts: UndoParts, lookup: StagedOriginalLookup) -> Vec<OperationEvent> {
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let emitted = events.clone();
+    glib::MainContext::default().block_on(run_merge_undo(
+        OperationRequestId(1616),
+        parts,
+        Rc::new(move |event| emitted.borrow_mut().push(event)),
+        gio::Cancellable::new(),
+        lookup,
+    ));
+    events.take()
+}
+
+fn kept_in_trash(events: &[OperationEvent]) -> Vec<KeptItem> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            OperationEvent::ItemsReported { report, .. } => Some(report.kept_in_trash.clone()),
+            _ => None,
+        })
+        .flatten()
+        .collect()
+}
+
+fn restored(events: &[OperationEvent]) -> Option<Vec<Location>> {
+    match events.last() {
+        Some(OperationEvent::Restored { restored, .. }) => Some(restored.clone()),
+        _ => None,
+    }
+}
+
+fn changed_after_the_merge(location: &Path) -> Vec<KeptItem> {
+    vec![KeptItem {
+        location: Location::local(location),
+        cause: KeptCause::ReplacementChanged,
+    }]
+}
+
+fn trash_in(root: &Path) -> PathBuf {
+    root.join(format!(".Trash-{}", rustix::process::getuid().as_raw()))
+}
+
+fn staged_trash_folder(
+    root: &Path,
+    name: &str,
+    original: &Path,
+    files: &[(&str, &str)],
+) -> Result<RestoreEntry, Box<dyn Error>> {
+    let entry = staged_trash_fixture(root, name, original, b"")?;
+    let staged = entry.physical_path.clone().ok_or("staged path")?;
+    fs::remove_file(&staged)?;
+    write_files(&staged, files)?;
+    Ok(entry)
+}
+
+#[test]
+fn a_merge_undo_deletes_only_what_the_merge_left_unchanged() -> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    // What happened to the merged a.txt after the merge.
+    for change in ["untouched", "edited", "touched", "replaced"] {
+        let root = tempfile::tempdir()?;
+        let source = root.path().join("source");
+        let target = root.path().join("target");
+        write_files(
+            &source,
+            &[("docs/a.txt", "incoming a"), ("docs/b.txt", "incoming b")],
+        )?;
+        write_files(
+            &target,
+            &[
+                ("docs/a.txt", "old a"),
+                ("docs/b.txt", "old b"),
+                ("docs/stays.txt", "keep me"),
+            ],
+        )?;
+        let (stage, _) = rename_stage(root.path().join("staging"));
+        let (plans, on_merged) = recorded_plans();
+        glib::MainContext::default().block_on(merge_local_with(
+            gio::File::for_path(&source),
+            gio::File::for_path(&target),
+            false,
+            gio::Cancellable::new(),
+            None,
+            MergeHooks {
+                fat_family: false,
+                copy_into_target: real_copy(),
+                stage_overwrite: stage,
+                on_merged: &on_merged,
+            },
+        ))?;
+        let [a, b] = ["docs/a.txt", "docs/b.txt"].map(|path| target.join(path));
+        match change {
+            "edited" => fs::write(&a, b"edited after the merge")?,
+            "touched" => set_times(&a, 1_000_000_000, 0)?,
+            "replaced" => {
+                let merged = fs::metadata(&a)?;
+                let other = a.with_file_name("a.new");
+                fs::write(&other, fs::read(&a)?)?;
+                set_times(
+                    &other,
+                    u64::try_from(merged.mtime())?,
+                    u32::try_from(merged.mtime_nsec())?,
+                )?;
+                fs::rename(&other, &a)?;
+            }
+            _ => {}
+        }
+        let staged = HashMap::from([
+            (
+                a.clone(),
+                staged_trash_fixture(root.path(), "a.txt", &a, b"old a")?,
+            ),
+            (
+                b.clone(),
+                staged_trash_fixture(root.path(), "b.txt", &b, b"old b")?,
+            ),
+        ]);
+        let trash = trash_in(root.path());
+
+        let events = run_undo(undo_parts(plans.take()), staged_lookup(staged));
+
+        assert_eq!(fs::read(&b)?, b"old b", "{change}");
+        assert_eq!(fs::read(target.join("docs/stays.txt"))?, b"keep me");
+        if change == "untouched" {
+            assert_eq!(fs::read(&a)?, b"old a");
+            let mut undone = restored(&events).ok_or("not restored")?;
+            undone.sort_by_key(Location::display_name);
+            assert_eq!(undone, [Location::local(&a), Location::local(&b)]);
+            assert!(kept_in_trash(&events).is_empty());
+            continue;
+        }
+        let expected: &[u8] = match change {
+            "edited" => b"edited after the merge",
+            _ => b"incoming a",
+        };
+        assert_eq!(fs::read(&a)?, expected, "{change}");
+        assert_eq!(
+            restored(&events),
+            Some(vec![Location::local(&b)]),
+            "{change}"
+        );
+        assert_eq!(
+            kept_in_trash(&events),
+            changed_after_the_merge(&a),
+            "{change}"
+        );
+        assert_eq!(fs::read(trash.join("files/a.txt"))?, b"old a", "{change}");
+        assert!(trash.join("info/a.txt.trashinfo").exists(), "{change}");
+    }
+    Ok(())
+}
+
+#[test]
+fn undoing_a_replace_deletes_only_what_it_left_unchanged() -> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let rows = [
+        (false, "untouched"),
+        (false, "edited"),
+        (true, "untouched"),
+        (true, "edited"),
+        (true, "added to"),
+        (true, "undeletable"),
+    ];
+    for (directory, change) in rows {
+        let row = format!("{change} {}", if directory { "folder" } else { "file" });
+        let root = tempfile::tempdir()?;
+        let source = root.path().join("source");
+        let target = root.path().join("target");
+        if directory {
+            write_files(&source, &[("a.txt", "new a"), ("sub/b.txt", "new b")])?;
+            write_files(&target, &[("old.txt", "old")])?;
+        } else {
+            fs::write(&source, b"new")?;
+            fs::write(&target, b"old")?;
+        }
+        let replaced = RefCell::new(None);
+        glib::MainContext::default().block_on(replace_local_with(
+            gio::File::for_path(&source),
+            gio::File::for_path(&target),
+            false,
+            gio::Cancellable::new(),
+            None,
+            super::super::Copying::default(),
+            &|original, placed| *replaced.borrow_mut() = Some((original, placed)),
+        ))?;
+        let Some((ReplacedOriginal::Trashed(_), Some(placed))) = replaced.take() else {
+            return Err(format!("{row}: the original was not replaced through Trash").into());
+        };
+        match (directory, change) {
+            (false, "edited") => fs::write(&target, b"edited")?,
+            (true, "edited") => fs::write(target.join("sub/b.txt"), b"edited b")?,
+            (true, "added to") => fs::write(target.join("sub/c.txt"), b"added")?,
+            _ => {}
+        }
+        let original = if directory {
+            staged_trash_folder(root.path(), "target", &target, &[("old.txt", "old")])?
+        } else {
+            staged_trash_fixture(root.path(), "target", &target, b"old")?
+        };
+        let trash = trash_in(root.path());
+        let location = Location::local(&target);
+        let _scope = (change == "undeletable").then(|| {
+            FsQuirks::install(
+                root.path(),
+                Quirks {
+                    fail: vec![(Op::Unlink, "a.txt", 0, Errno::ACCESS)],
+                    ..Quirks::default()
+                },
+            )
+        });
+
+        let events = run_undo(
+            (
+                Vec::new(),
+                vec![location.clone()],
+                HashMap::from([(location.clone(), placed)]),
+            ),
+            staged_lookup(HashMap::from([(target.clone(), original)])),
+        );
+
+        if change == "undeletable" {
+            let Some(OperationEvent::CompletedWithErrors { message, .. }) = events.last() else {
+                panic!("{row}: {events:?}");
+            };
+            let denied = crate::services::io_error_detail(&io::Error::from_raw_os_error(
+                Errno::ACCESS.raw_os_error(),
+            ));
+            let error = rust_i18n::t!(
+                "Could not delete %{name}: %{error}",
+                name = "a.txt",
+                error = denied
+            );
+            assert!(message.contains(&*error), "{message}");
+            assert_eq!(names(&target)?, ["a.txt"]);
+            assert!(kept_in_trash(&events).is_empty());
+            assert!(trash.join("info/target.trashinfo").exists());
+            continue;
+        }
+        if change == "untouched" {
+            assert_eq!(restored(&events), Some(vec![location]), "{row}");
+            let restored = if directory {
+                assert_eq!(names(&target)?, ["old.txt"], "{row}");
+                fs::read(target.join("old.txt"))?
+            } else {
+                fs::read(&target)?
+            };
+            assert_eq!(restored, b"old", "{row}");
+            assert!(!trash.join("info/target.trashinfo").exists(), "{row}");
+            continue;
+        }
+        assert_eq!(restored(&events), Some(Vec::new()), "{row}");
+        assert_eq!(
+            kept_in_trash(&events),
+            changed_after_the_merge(&target),
+            "{row}"
+        );
+        assert!(trash.join("info/target.trashinfo").exists(), "{row}");
+        match (directory, change) {
+            (false, _) => assert_eq!(fs::read(&target)?, b"edited"),
+            (true, "edited") => {
+                assert_eq!(names(&target)?, ["sub"]);
+                assert_eq!(names(&target.join("sub"))?, ["b.txt"]);
+                assert_eq!(fs::read(target.join("sub/b.txt"))?, b"edited b");
+            }
+            _ => {
+                assert_eq!(names(&target)?, ["sub"]);
+                assert_eq!(names(&target.join("sub"))?, ["c.txt"]);
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn a_merge_undo_compares_what_it_placed_as_a_move_compares_its_sources()
+-> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let epoch = SystemTime::UNIX_EPOCH;
+    let seconds = SystemTime::now().duration_since(epoch)?.as_secs() / 2 * 2;
+    let cifs = |options| {
+        move || Quirks {
+            mount_type: Some(("cifs", options)),
+            ..Quirks::default()
+        }
+    };
+    let coarse = || Quirks {
+        ctime_is_mtime: true,
+        ..Quirks::vfat()
+    };
+    // Inode numbers that change once the kernel evicts an entry, and a
+    // rewrite within one tick of coarse times, which leaves the size and
+    // times as they were.
+    type MakeQuirks = Box<dyn Fn() -> Quirks>;
+    let rows: [(&str, MakeQuirks, &str, bool); 4] = [
+        (
+            "cifs noserverino",
+            Box::new(cifs("rw,noserverino")),
+            "evicted",
+            true,
+        ),
+        ("cifs", Box::new(cifs("rw,serverino")), "evicted", false),
+        ("vfat", Box::new(coarse), "untouched", true),
+        ("vfat", Box::new(coarse), "rewritten", false),
+    ];
+    for (mount, quirks, change, undone) in rows {
+        let row = format!("{mount}, {change}");
+        // Waiting for a tick to pass moves it on.
+        let _clock =
+            ClockGuard::set(epoch + Duration::from_secs(seconds) + Duration::from_millis(500));
+        let root = tempfile::tempdir()?;
+        let merged = root.path().join("merged.txt");
+        fs::write(&merged, b"merged")?;
+        set_times(&merged, seconds, 0)?;
+        let _scope = FsQuirks::install(root.path(), quirks());
+        let placed = placed_now(&[&merged]);
+        match change {
+            "evicted" => super::fs_quirks::renumbered(&merged),
+            "rewritten" => {
+                fs::write(&merged, b"MERGED")?;
+                set_times(&merged, seconds, 0)?;
+            }
+            _ => {}
+        }
+        let original = staged_trash_fixture(root.path(), "merged.txt", &merged, b"original")?;
+
+        let events = run_undo(
+            (Vec::new(), vec![Location::local(&merged)], placed),
+            staged_lookup(HashMap::from([(merged.clone(), original)])),
+        );
+
+        assert!(restored(&events).is_some(), "{row}: {events:?}");
+        if undone {
+            assert_eq!(fs::read(&merged)?, b"original", "{row}");
+            assert!(kept_in_trash(&events).is_empty(), "{row}");
+        } else {
+            assert_ne!(fs::read(&merged)?, b"original", "{row}");
+            assert_eq!(
+                kept_in_trash(&events),
+                changed_after_the_merge(&merged),
+                "{row}"
+            );
+            assert!(
+                trash_in(root.path())
+                    .join("info/merged.txt.trashinfo")
+                    .exists()
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn a_merge_undo_cancelled_while_it_compares_an_item_leaves_it_whole() -> Result<(), Box<dyn Error>>
+{
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let epoch = SystemTime::UNIX_EPOCH;
+    let seconds = SystemTime::now().duration_since(epoch)?.as_secs() / 2 * 2;
+    let _clock = ClockGuard::set(epoch + Duration::from_secs(seconds) + Duration::from_millis(500));
+    let root = tempfile::tempdir()?;
+    let merged = root.path().join("merged.txt");
+    fs::write(&merged, b"merged")?;
+    set_times(&merged, seconds, 0)?;
+    let cancellable = gio::Cancellable::new();
+    let cancel = cancellable.clone();
+    let cancel: Racer = Box::new(move || cancel.cancel());
+    // The first open is the record's own, the second the comparison's.
+    let _scope = FsQuirks::install(
+        root.path(),
+        Quirks {
+            ctime_is_mtime: true,
+            before: vec![(Op::OpenSource, "merged.txt", 1, cancel)],
+            ..Quirks::vfat()
+        },
+    );
+    let placed = placed_now(&[&merged]);
+    let original = staged_trash_fixture(root.path(), "merged.txt", &merged, b"original")?;
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let emitted = events.clone();
+
+    glib::MainContext::default().block_on(run_merge_undo(
+        OperationRequestId(1616),
+        (Vec::new(), vec![Location::local(&merged)], placed),
+        Rc::new(move |event| emitted.borrow_mut().push(event)),
+        cancellable,
+        staged_lookup(HashMap::from([(merged.clone(), original)])),
+    ));
+
+    let events = events.borrow();
+    let Some(OperationEvent::Cancelled { result, .. }) = events.last() else {
+        panic!("expected a cancel, got {events:?}");
+    };
+    assert!(result.completed.is_empty());
+    assert!(result.failed.is_empty());
+    assert_eq!(result.not_attempted, [Location::local(&merged)]);
+    assert_eq!(fs::read(&merged)?, b"merged");
+    assert_eq!(
+        fs::read(trash_in(root.path()).join("files/merged.txt"))?,
+        b"original"
+    );
     Ok(())
 }
 

@@ -4,10 +4,13 @@
 mod tests;
 
 use std::{
+    any::Any,
     collections::{HashMap, HashSet},
     ffi::OsString,
+    fmt,
     path::PathBuf,
     rc::Rc,
+    sync::Arc,
 };
 
 use crate::model::{FileEntry, Location};
@@ -135,6 +138,36 @@ pub enum ReplacedOriginal {
     Deleted,
 }
 
+/// What an operation put at a path, as it put it there, so that undo
+/// deletes it only while it is unchanged. Only the provider that recorded
+/// it can read it.
+#[derive(Clone)]
+pub struct PlacedSnapshot(Arc<dyn Any + Send + Sync>);
+
+impl PlacedSnapshot {
+    pub fn new(snapshot: impl Any + Send + Sync) -> Self {
+        Self(Arc::new(snapshot))
+    }
+
+    pub fn get<T: Any>(&self) -> Option<&T> {
+        self.0.downcast_ref()
+    }
+}
+
+impl PartialEq for PlacedSnapshot {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for PlacedSnapshot {}
+
+impl fmt::Debug for PlacedSnapshot {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("PlacedSnapshot")
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct UndoMergeRequest {
     pub id: OperationRequestId,
@@ -144,6 +177,9 @@ pub struct UndoMergeRequest {
     /// undo deletes the incoming copy and restores the original.
     pub overwritten: Vec<Location>,
     pub originals: HashMap<Location, TrashedOriginal>,
+    /// What the operation put at overwritten paths; an item without one, or
+    /// changed since, stays, and so does its original in Trash.
+    pub placed: HashMap<Location, PlacedSnapshot>,
 }
 
 #[derive(Clone, Debug)]
@@ -297,6 +333,8 @@ pub struct SkippedItem {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum KeptCause {
     Changed,
+    /// What replaced it changed afterwards, so undo kept that instead.
+    ReplacementChanged,
     /// Deleting it failed with this OS error number.
     Undeletable(i32),
     Skipped(SpecialKind),
@@ -387,13 +425,15 @@ pub enum OperationEvent {
     },
     /// A folder merge finished (or staged its backups): `created` are paths
     /// the merge wrote fresh, `overwritten` are paths whose originals now
-    /// sit in Trash. Reported per merged source so undo can rebuild the
-    /// pre-merge state even after a partial transfer.
+    /// sit in Trash, and `placed` what it put at them. Reported per merged
+    /// source so undo can rebuild the pre-merge state even after a partial
+    /// transfer.
     Merged {
         request_id: OperationRequestId,
         source: Location,
         created: Vec<Location>,
         overwritten: Vec<Location>,
+        placed: HashMap<Location, PlacedSnapshot>,
     },
     TransferFailed {
         request_id: OperationRequestId,
@@ -466,6 +506,8 @@ pub enum OperationEvent {
         /// The finished archive, recorded so undo can trash it.
         archive: Location,
         original: Option<ReplacedOriginal>,
+        /// The archive as it replaced an original moved to Trash.
+        placed: Option<PlacedSnapshot>,
     },
     Extracted {
         request_id: OperationRequestId,

@@ -137,7 +137,7 @@ use crate::{
     model::{EntryKind, FileEntry, Location, MetadataValue},
     services::{
         DeleteRequest, LoadHandle, MoveRecord, OperationEvent, OperationProvider,
-        OperationRequestId, PasteItem, PasteRequest, RestoreRequest, RestoreSource,
+        OperationRequestId, PasteItem, PasteRequest, PlacedSnapshot, RestoreRequest, RestoreSource,
         RestoreTrashItem, TransferConflict, TrashedOriginal, UndoMoveItem, UndoMoveRequest,
         UndoRenameRequest,
     },
@@ -191,6 +191,23 @@ pub(super) fn names(dir: &Path) -> io::Result<Vec<String>> {
         .collect::<Result<Vec<_>, _>>()?;
     names.sort();
     Ok(names)
+}
+
+fn set_times(path: &Path, seconds: u64, nanoseconds: u32) -> io::Result<()> {
+    let times = rustix::fs::Timespec {
+        tv_sec: i64::try_from(seconds).map_err(io::Error::other)?,
+        tv_nsec: nanoseconds.into(),
+    };
+    rustix::fs::utimensat(
+        rustix::fs::CWD,
+        path,
+        &rustix::fs::Timestamps {
+            last_access: times,
+            last_modification: times,
+        },
+        rustix::fs::AtFlags::empty(),
+    )?;
+    Ok(())
 }
 
 fn has_colon(name: &OsStr) -> bool {
@@ -259,8 +276,20 @@ fn merge_reporting(
     target: &Path,
     workers: Option<usize>,
 ) -> (Result<(), glib::Error>, crate::services::TransferReport) {
-    let destination = super::copy_engine::Destination::Merge(target.to_path_buf());
+    let destination = super::copy_engine::Destination::Merge(target.to_path_buf(), None);
     reporting(source, destination, workers_only(workers))
+}
+
+/// Records what is at each path as an operation that just put it there would.
+fn placed_now(paths: &[&Path]) -> HashMap<Location, PlacedSnapshot> {
+    paths
+        .iter()
+        .filter_map(|path| {
+            let placed = glib::MainContext::default()
+                .block_on(super::copy_engine::placed(path.to_path_buf()))?;
+            Some((Location::local(path), placed))
+        })
+        .collect()
 }
 
 fn workers_only(workers: Option<usize>) -> super::copy_engine::Options {

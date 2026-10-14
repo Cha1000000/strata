@@ -2,7 +2,8 @@
 
 //! What a move copied of each source entry, as it was once the copy had
 //! read it, so that afterwards only the entries the copy holds unchanged
-//! are deleted. It keeps names, never descriptors.
+//! are deleted. It keeps names, never descriptors. What an operation placed
+//! is recorded the same way, for undo to delete only while unchanged.
 
 use std::{
     collections::{HashMap, HashSet},
@@ -20,7 +21,10 @@ use std::{
 
 use gtk::glib;
 use ring::digest;
-use rustix::{fs::AtFlags, io::Errno};
+use rustix::{
+    fs::{AtFlags, FileType},
+    io::Errno,
+};
 
 use super::{Failure, Mount, lock};
 use crate::{
@@ -144,6 +148,7 @@ pub(super) fn unsettled(
     })
 }
 
+#[derive(Clone)]
 pub(super) struct Contents {
     digest: digest::Digest,
     unsettled: Unsettled,
@@ -162,6 +167,7 @@ pub(super) struct Read {
 
 const MIB: usize = 1 << 20;
 
+#[derive(Clone)]
 struct SourceSnapshot {
     identity: LocalFileIdentity,
     nlink: u64,
@@ -216,6 +222,24 @@ enum Node {
     Entry(SourceSnapshot),
     Folder(Arc<Folder>),
     Kept(KeptCause),
+}
+
+impl Node {
+    fn copied(&self) -> Self {
+        match self {
+            Self::Entry(snapshot) => Self::Entry(snapshot.clone()),
+            Self::Folder(folder) => Self::Folder(Arc::new(Folder {
+                identity: folder.identity,
+                children: Mutex::new(
+                    lock(&folder.children)
+                        .iter()
+                        .map(|(name, node)| (name.clone(), node.copied()))
+                        .collect(),
+                ),
+            })),
+            Self::Kept(cause) => Self::Kept(cause.clone()),
+        }
+    }
 }
 
 impl Folder {
@@ -332,12 +356,35 @@ pub(super) fn snapshot(
     cancelled: &AtomicBool,
 ) -> Result<Manifest, Failure> {
     let root = Folder::root();
-    record(fs, parent.as_fd(), name, &root, cancelled)?;
+    record(fs, parent.as_fd(), name, &root, cancelled, false)?;
     Ok(Manifest {
         parent: OffMain::new(parent),
         root,
         copy: None,
     })
+}
+
+/// What an operation put at a name, as it was once there.
+pub(in crate::adapters::local_operations) struct Placed {
+    name: OsString,
+    node: Node,
+}
+
+impl Placed {
+    /// A fresh record to delete by, as deleting takes what it deletes.
+    pub(super) fn root(&self) -> Arc<Folder> {
+        let root = Folder::root();
+        root.add(&self.name, self.node.copied());
+        root
+    }
+}
+
+/// Run right after placing, so that it records what was placed.
+pub(super) fn placed(fs: &dyn FsOps, dir: BorrowedFd<'_>, name: &OsStr) -> Result<Placed, Failure> {
+    let root = Folder::root();
+    record(fs, dir, name, &root, &AtomicBool::new(false), true)?;
+    let (name, node) = root.take().pop().ok_or(Failure::Changed)?;
+    Ok(Placed { name, node })
 }
 
 pub(super) fn of(parent: Arc<OwnedFd>, root: Arc<Folder>) -> Manifest {
@@ -348,18 +395,25 @@ pub(super) fn of(parent: Arc<OwnedFd>, root: Arc<Folder>) -> Manifest {
     }
 }
 
+/// With `contents`, a file within a tick of its mount's coarse times is
+/// digested, for a deletion to compare.
 fn record(
     fs: &dyn FsOps,
     dir: BorrowedFd<'_>,
     name: &OsStr,
     folder: &Folder,
     cancelled: &AtomicBool,
+    contents: bool,
 ) -> Result<(), Failure> {
     if cancelled.load(Ordering::Acquire) {
         return Err(Failure::Cancelled);
     }
     let at = Entry { dir, name };
     let stat = fs.stat(at, false)?;
+    if contents && stat.kind == FileType::RegularFile {
+        folder.add(name, digested(fs, at, &stat));
+        return Ok(());
+    }
     if !stat.is_directory() {
         folder.entry(name, &stat);
         return Ok(());
@@ -370,10 +424,64 @@ fn record(
     }
     let recorded = folder.folder(name, stat.identity);
     for (child, _) in fs.list(opened.as_fd())? {
-        record(fs, opened.as_fd(), &child, &recorded, cancelled)
+        record(fs, opened.as_fd(), &child, &recorded, cancelled, contents)
             .map_err(|failure| failure.named(&child))?;
     }
     Ok(())
+}
+
+fn digested(fs: &dyn FsOps, at: Entry<'_>, stat: &EntryStat) -> Node {
+    let coarse = Mount::new(fs, at.dir).coarse_times;
+    let Some(unsettled) = unsettled(stat, coarse, now()) else {
+        return Node::Entry(SourceSnapshot::of(stat, None));
+    };
+    let read = || -> Result<Option<digest::Digest>, Errno> {
+        let Some((file, _)) = fs.open_source(at, false)? else {
+            return Ok(None);
+        };
+        let digest = digest_of(fs, file.as_fd(), stat.size, &|| false).transpose()?;
+        let after = fs.stat_fd(file.as_fd())?;
+        Ok(digest.filter(|_| after.identity == stat.identity && !changed(stat, &after)))
+    };
+    match read() {
+        Ok(Some(digest)) => Node::Entry(SourceSnapshot::of(
+            stat,
+            Some(Contents::new(digest, unsettled)),
+        )),
+        // Nothing tells what was placed, so a deletion keeps it.
+        _ => Node::Kept(KeptCause::Changed),
+    }
+}
+
+/// The digest of the file's first `size` bytes and the next, if any, which
+/// tells a file that grew; `None` if stopped.
+fn digest_of(
+    fs: &dyn FsOps,
+    file: BorrowedFd<'_>,
+    size: u64,
+    stopped: &dyn Fn() -> bool,
+) -> Option<Result<digest::Digest, Errno>> {
+    let mut buffer = vec![0; usize::try_from(size).map_or(MIB, |size| size.clamp(64 << 10, MIB))];
+    let mut digest = digest::Context::new(&digest::SHA256);
+    let end = size.saturating_add(1);
+    let mut offset = 0;
+    while offset < end {
+        if stopped() {
+            return None;
+        }
+        let wanted =
+            usize::try_from(end - offset).map_or(buffer.len(), |left| left.min(buffer.len()));
+        match fs.read_at(file, &mut buffer[..wanted], offset) {
+            Ok(0) => break,
+            Ok(read) => {
+                digest.update(&buffer[..read]);
+                offset += read as u64;
+            }
+            Err(Errno::INTR) => {}
+            Err(error) => return Some(Err(error)),
+        }
+    }
+    Some(Ok(digest.finish()))
 }
 
 pub(super) fn delete(
@@ -392,14 +500,33 @@ pub(super) fn delete(
             .collect();
         return (kept, Ok(()));
     }
-    let parent = parent.into_inner();
+    let removed = remove(fs, parent.into_inner(), &root, unlinks, cancelled);
+    (removed.kept, removed.result)
+}
+
+pub(in crate::adapters::local_operations) struct Removed {
+    pub kept: Vec<(PathBuf, KeptCause)>,
+    /// Whether any entry was deleted.
+    pub removed: bool,
+    pub result: Result<(), glib::Error>,
+}
+
+/// Deletes the recorded entries that are still as recorded.
+pub(super) fn remove(
+    fs: &'static dyn FsOps,
+    parent: Arc<OwnedFd>,
+    root: &Folder,
+    unlinks: Arc<Unlinks>,
+    cancelled: Arc<AtomicBool>,
+) -> Removed {
     let deletion = Arc::new(Deletion {
         fs,
         stable_inodes: Mount::keeps_inode_numbers(fs, parent.as_fd()),
         unlinks,
         kept: Mutex::default(),
+        removed: AtomicBool::new(false),
     });
-    let steps = deletion.steps(&root, Path::new(""));
+    let steps = deletion.steps(root, Path::new(""));
     let workers = match steps.as_slice() {
         // A moved file has no folder to share out.
         [(_, _, Step::Entry(_))] => 1,
@@ -428,8 +555,11 @@ pub(super) fn delete(
     work_queue::run_workers(&queue, workers, Some(10), |work| {
         thread::Builder::new().spawn(work)
     });
-    let result = queue.result();
-    (std::mem::take(&mut *lock(&deletion.kept)), result)
+    Removed {
+        kept: std::mem::take(&mut *lock(&deletion.kept)),
+        removed: deletion.removed.load(Ordering::Acquire),
+        result: queue.result(),
+    }
 }
 
 struct Deletion {
@@ -439,6 +569,7 @@ struct Deletion {
     stable_inodes: bool,
     unlinks: Arc<Unlinks>,
     kept: Mutex<Vec<(PathBuf, KeptCause)>>,
+    removed: AtomicBool,
 }
 
 impl Deletion {
@@ -661,6 +792,7 @@ impl At {
             {
                 match fs.unlink(self.entry_at(), AtFlags::empty()) {
                     Ok(()) => {
+                        deletion.removed.store(true, Ordering::Release);
                         if let Some(unlinks) = &mut unlinks {
                             unlinks.entry(key).or_default().push(current.nlink);
                         }
@@ -692,32 +824,10 @@ impl At {
             Ok(None) => return Some(Ok(None)),
             Err(error) => return Some(Err(error)),
         };
-        let mut buffer =
-            vec![0; usize::try_from(size).map_or(MIB, |size| size.clamp(64 << 10, MIB))];
-        let mut digest = digest::Context::new(&digest::SHA256);
-        // A byte past what the copy holds tells a file that grew, however
-        // long it keeps growing.
-        let end = size.saturating_add(1);
-        let mut offset = 0;
-        while offset < end {
-            if stopped() {
-                return None;
-            }
-            let wanted =
-                usize::try_from(end - offset).map_or(buffer.len(), |left| left.min(buffer.len()));
-            match fs.read_at(file.as_fd(), &mut buffer[..wanted], offset) {
-                Ok(0) => break,
-                Ok(read) => {
-                    digest.update(&buffer[..read]);
-                    offset += read as u64;
-                }
-                Err(Errno::INTR) => {}
-                Err(error) => return Some(Err(error)),
-            }
-        }
-        Some(Ok(
-            (digest.finish().as_ref() == contents.digest.as_ref()).then_some(file)
-        ))
+        Some(
+            digest_of(fs, file.as_fd(), size, stopped)?
+                .map(|digest| (digest.as_ref() == contents.digest.as_ref()).then_some(file)),
+        )
     }
 
     fn rmdir(&self, opened: Arc<OwnedFd>) {
@@ -735,7 +845,8 @@ impl At {
             Err(error) => return deletion.failed(self.path.clone(), error),
         }
         match fs.unlink(self.entry_at(), AtFlags::REMOVEDIR) {
-            Ok(()) | Err(Errno::NOENT) => {}
+            Ok(()) => deletion.removed.store(true, Ordering::Release),
+            Err(Errno::NOENT) => {}
             // Entries added meanwhile stay, and so does their folder.
             Err(Errno::NOTEMPTY | Errno::EXIST) => {
                 if deletion.holds_others(self.entry_at(), &self.path) {

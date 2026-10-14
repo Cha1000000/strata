@@ -1758,23 +1758,6 @@ fn a_file_put_in_a_moved_files_place_within_its_time_tick_is_kept() -> Result<()
     Ok(())
 }
 
-fn set_times(path: &Path, seconds: u64, nanoseconds: u32) -> io::Result<()> {
-    let times = rustix::fs::Timespec {
-        tv_sec: i64::try_from(seconds).map_err(io::Error::other)?,
-        tv_nsec: nanoseconds.into(),
-    };
-    rustix::fs::utimensat(
-        rustix::fs::CWD,
-        path,
-        &rustix::fs::Timestamps {
-            last_access: times,
-            last_modification: times,
-        },
-        rustix::fs::AtFlags::empty(),
-    )?;
-    Ok(())
-}
-
 #[test]
 fn files_read_within_a_coarse_time_tick_are_compared_before_their_move_deletes_them()
 -> Result<(), Box<dyn Error>> {

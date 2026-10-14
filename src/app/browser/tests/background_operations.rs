@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 
 use super::*;
+use crate::services::PlacedSnapshot;
 use crate::test_support::operations::{HeldOperations, entry, operation_event};
 
 fn copy(browser: &Rc<Browser>, name: &str) -> OperationRequestId {
@@ -512,6 +513,51 @@ fn a_transfer_reports_its_items_once_after_it_ends() {
 }
 
 #[test]
+fn a_background_merge_records_what_it_placed_for_undo() {
+    PENDING_UNDO.with(|pending| *pending.borrow_mut() = UndoState::default());
+    let browser = Browser::new(Rc::new(FakeFileSource));
+    let operations = Rc::new(HeldOperations::default());
+    browser.set_operation_provider(operations.clone());
+    let id = copy(&browser, "folder");
+    let overwritten = Location::local("/fixture/destination/folder/notes.txt");
+    let placed = HashMap::from([(overwritten.clone(), PlacedSnapshot::new(()))]);
+    assert!(browser.background_file_operation(id));
+
+    for (overwritten, placed) in [
+        (vec![overwritten.clone()], HashMap::new()),
+        (Vec::new(), placed.clone()),
+    ] {
+        operations.emit(
+            id,
+            OperationEvent::Merged {
+                request_id: id,
+                source: Location::local("/fixture/folder"),
+                created: Vec::new(),
+                overwritten,
+                placed,
+            },
+        );
+    }
+    operations.emit(
+        id,
+        OperationEvent::Pasted {
+            request_id: id,
+            locations: Vec::new(),
+        },
+    );
+
+    assert_eq!(
+        pending_undo_entry(),
+        Some(UndoEntry::Merge {
+            created: Vec::new(),
+            overwritten: vec![overwritten],
+            originals: HashMap::new(),
+            placed,
+        })
+    );
+}
+
+#[test]
 fn a_background_merge_undo_removes_merged_items_under_the_names_they_were_saved_as() {
     PENDING_UNDO.with(|pending| *pending.borrow_mut() = UndoState::default());
     let browser = Browser::new(Rc::new(FakeFileSource));
@@ -527,6 +573,7 @@ fn a_background_merge_undo_removes_merged_items_under_the_names_they_were_saved_
             source: Location::local("/fixture/folder"),
             created: vec![Location::local("/fixture/destination/folder/makefile")],
             overwritten: Vec::new(),
+            placed: HashMap::new(),
         },
     );
     operations.emit(
@@ -550,6 +597,7 @@ fn a_background_merge_undo_removes_merged_items_under_the_names_they_were_saved_
             created: vec![Location::local("/fixture/destination/folder/makefile (1)")],
             overwritten: Vec::new(),
             originals: HashMap::new(),
+            placed: HashMap::new(),
         })
     );
 }

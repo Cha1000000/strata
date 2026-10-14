@@ -258,6 +258,7 @@ fn superseded_operations_still_report_each_location_they_changed() {
         source: item.clone(),
         created: Vec::new(),
         overwritten: vec![overwritten.clone()],
+        placed: HashMap::new(),
     };
     type Script<'a> = Box<dyn Fn(OperationRequestId) -> Vec<OperationEvent> + 'a>;
     // A restore sets no kind: its events describe themselves.

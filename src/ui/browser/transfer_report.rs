@@ -90,6 +90,11 @@ fn kept_line(item: &KeptItem, in_trash: bool) -> String {
             folder = folder()
         )
         .into_owned(),
+        KeptCause::ReplacementChanged => rust_i18n::t!(
+            "“%{name}” changed after it replaced the original and was kept",
+            name = name
+        )
+        .into_owned(),
         KeptCause::CopyGone => rust_i18n::t!(
             "“%{name}” was left in “%{folder}”, as its copy was no longer where the move put it",
             name = name,

@@ -601,6 +601,7 @@ type UndoMergeRecord = (
     Vec<Location>,
     Vec<Location>,
     HashMap<Location, TrashedOriginal>,
+    HashMap<Location, crate::services::PlacedSnapshot>,
 );
 
 thread_local! {
@@ -782,6 +783,7 @@ impl OperationProvider for ImmediateOperationProvider {
                 request.created.clone(),
                 request.overwritten.clone(),
                 request.originals.clone(),
+                request.placed.clone(),
             ));
         });
         emit(OperationEvent::Restored {
@@ -830,6 +832,7 @@ impl OperationProvider for ImmediateOperationProvider {
             archive_name: request.archive_name,
             archive,
             original: None,
+            placed: None,
         });
         LoadHandle::new(|| {})
     }

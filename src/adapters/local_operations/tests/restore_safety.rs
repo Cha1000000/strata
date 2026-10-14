@@ -629,8 +629,11 @@ fn restore_leaves_in_the_trash_what_it_cannot_copy_or_finds_changed() -> Result<
             });
             glib::MainContext::default().block_on(run_merge_undo(
                 OperationRequestId(504),
-                Vec::new(),
-                vec![Location::local(&destination)],
+                (
+                    Vec::new(),
+                    vec![Location::local(&destination)],
+                    HashMap::new(),
+                ),
                 emit,
                 gio::Cancellable::new(),
                 lookup,

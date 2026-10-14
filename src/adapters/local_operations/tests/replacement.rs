@@ -38,7 +38,7 @@ fn replace_reporting(
         gio::Cancellable::new(),
         None,
         Copying::default(),
-        &|original| replaced.borrow_mut().push(original),
+        &|original, _| replaced.borrow_mut().push(original),
     ));
     (result, replaced.into_inner())
 }
@@ -152,7 +152,7 @@ fn a_replacement_reports_what_it_left_out_only_once_it_is_published() -> Result<
                 progress: Some(progress),
                 fat_family: false,
             },
-            &|_| {},
+            &|_, _| {},
         ));
 
         assert_eq!(result.is_ok(), published, "{result:?}");
@@ -456,7 +456,7 @@ fn replacement_move_does_not_delete_a_substituted_source() -> Result<(), Box<dyn
             progress: Some(progress),
             fat_family: false,
         },
-        &|_| {},
+        &|_, _| {},
     ))?;
 
     assert_eq!(fs::read(target)?, b"replacement");

@@ -16,10 +16,10 @@ use crate::{
         DirectoryChange, DirectoryRequest, ExtractRequest, FileSource, LoadHandle,
         LocationIdentity, LocationValidationError, MetadataOutcome, MetadataRequest, MoveRecord,
         OperationEvent, OperationProvider, OperationRequestId, PasswordFailure, PasteItem,
-        PasteRequest, RenameRecord, RenameRequest, RenamedItem, RequestId, RestoreRequest,
-        RestoreSource, RestoreTrashItem, TransferConflict, TransferReport, TrashedOriginal,
-        UndoCopyRequest, UndoMergeRequest, UndoMoveItem, UndoMoveRequest, UndoRenameRequest,
-        validate_basename, validate_uri_credentials,
+        PasteRequest, PlacedSnapshot, RenameRecord, RenameRequest, RenamedItem, RequestId,
+        RestoreRequest, RestoreSource, RestoreTrashItem, TransferConflict, TransferReport,
+        TrashedOriginal, UndoCopyRequest, UndoMergeRequest, UndoMoveItem, UndoMoveRequest,
+        UndoRenameRequest, validate_basename, validate_uri_credentials,
     },
 };
 
@@ -371,11 +371,13 @@ pub enum UndoEntry {
     Move(Vec<MoveRecord>),
     Copy(Vec<Location>),
     /// `created` paths get trashed; `overwritten` paths lose the incoming
-    /// copy and get their staged original restored from Trash.
+    /// copy, as far as it is still as `placed` records, and get their
+    /// staged original restored from Trash.
     Merge {
         created: Vec<Location>,
         overwritten: Vec<Location>,
         originals: HashMap<Location, TrashedOriginal>,
+        placed: HashMap<Location, PlacedSnapshot>,
     },
     Rename(RenameRecord),
     Group {
@@ -407,6 +409,7 @@ impl UndoEntry {
                 created: Vec::new(),
                 overwritten: Vec::new(),
                 originals: HashMap::new(),
+                placed: HashMap::new(),
             },
             Self::Rename(record) => Self::Rename(record.clone()),
             Self::Group { folder, .. } => Self::Group {
@@ -457,11 +460,13 @@ fn complete_undo_item(
                 created,
                 overwritten,
                 originals,
+                placed,
             },
             UndoEntry::Merge {
                 created: done_created,
                 overwritten: done_overwritten,
                 originals: done_originals,
+                placed: done_placed,
             },
         ) => {
             if let Some(index) = created.iter().position(|candidate| candidate == location) {
@@ -476,6 +481,9 @@ fn complete_undo_item(
             if let Some(original) = originals.remove(location) {
                 done_originals.insert(location.clone(), original);
             }
+            if let Some(snapshot) = placed.remove(location) {
+                done_placed.insert(location.clone(), snapshot);
+            }
         }
         _ => {}
     }
@@ -489,6 +497,7 @@ struct MergeUndoState {
     sources: HashSet<Location>,
     created: Vec<Location>,
     overwritten: Vec<Location>,
+    placed: HashMap<Location, PlacedSnapshot>,
 }
 
 impl MergeUndoState {
@@ -826,11 +835,13 @@ fn retain_replay_merge_items(
                 created: kept_created,
                 overwritten: kept_overwritten,
                 originals,
+                placed,
             } = &mut pending.entry
         {
             kept_created.retain(|location| created.contains(location));
             kept_overwritten.retain(|location| overwritten.contains(location));
             originals.retain(|location, _| overwritten.contains(location));
+            placed.retain(|location, _| overwritten.contains(location));
         }
     });
 }
@@ -3247,7 +3258,12 @@ impl Browser {
         let Some((generation, entry)) = claim_pending_undo(Some(generation)) else {
             return false;
         };
-        let UndoEntry::Merge { mut originals, .. } = entry else {
+        let UndoEntry::Merge {
+            mut originals,
+            mut placed,
+            ..
+        } = entry
+        else {
             finish_undo(generation, false);
             return false;
         };
@@ -3257,6 +3273,7 @@ impl Browser {
         };
         retain_replay_merge_items(false, generation, &created, &overwritten);
         originals.retain(|location, _| overwritten.contains(location));
+        placed.retain(|location, _| overwritten.contains(location));
         let total = created.len() + overwritten.len();
         let refresh_locations = created
             .iter()
@@ -3271,6 +3288,7 @@ impl Browser {
                 created: created.clone(),
                 overwritten: overwritten.clone(),
                 originals: originals.clone(),
+                placed: placed.clone(),
             },
         )));
         self.emit(BrowserEvent::RestorationStarted { total });
@@ -3280,6 +3298,7 @@ impl Browser {
                 created,
                 overwritten,
                 originals,
+                placed,
             },
             self.operation_callback(request_id, false, refresh_locations),
         );

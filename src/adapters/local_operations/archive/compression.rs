@@ -23,7 +23,9 @@ use super::{
     ArchiveError, COPY_BUF, archive_failed, check_archive_cancelled, copy_with_big_buf,
     decoders::FILE_ATTRIBUTE_UNIX_EXTENSION, destination::process_umask,
 };
-use crate::services::{ReplacedOriginal, TransferConflict, TrashedOriginal, error_detail};
+use crate::services::{
+    PlacedSnapshot, ReplacedOriginal, TransferConflict, TrashedOriginal, error_detail,
+};
 use gtk::{gio, glib};
 use rustix::fs::AtFlags;
 use std::{
@@ -66,7 +68,7 @@ pub(super) async fn write_staged_archive<F>(
     conflict: TransferConflict,
     cancelled: Arc<AtomicBool>,
     write_archive: F,
-) -> Result<(String, Option<ReplacedOriginal>), ArchiveError>
+) -> Result<(String, Option<ReplacedOriginal>, Option<PlacedSnapshot>), ArchiveError>
 where
     F: FnOnce(std::fs::File) -> Result<(), ArchiveError> + Send + 'static,
 {
@@ -93,9 +95,9 @@ where
     let published = gio::spawn_blocking(move || job.write(conflict, &cancelled, write_archive))
         .await
         .map_err(|_| archive_failed(crate::i18n::tr("Compression stopped unexpectedly")))??;
-    let original = match published.displaced {
-        Displaced::None => None,
-        Displaced::Trashed(original) => Some(ReplacedOriginal::Trashed(original)),
+    let (original, placed) = match published.displaced {
+        Displaced::None => (None, None),
+        Displaced::Trashed(original, placed) => (Some(ReplacedOriginal::Trashed(original)), placed),
         Displaced::Aside(aside) => {
             let mut owed = Owed::default();
             owed.barrier = barrier;
@@ -103,10 +105,10 @@ where
             owed.settle(None, &gio::Cancellable::new())
                 .await
                 .map_err(|error| archive_failed(error.message()))?;
-            Some(ReplacedOriginal::Deleted)
+            (Some(ReplacedOriginal::Deleted), None)
         }
     };
-    Ok((published.name, original))
+    Ok((published.name, original, placed))
 }
 
 enum Strategy {
@@ -125,7 +127,8 @@ enum Replacement {
 
 enum Displaced {
     None,
-    Trashed(TrashedOriginal),
+    /// With what replaced it, for undo to delete.
+    Trashed(TrashedOriginal, Option<PlacedSnapshot>),
     Aside(DisplacedOriginal),
 }
 
@@ -343,7 +346,11 @@ impl Publication {
         }
         stage
             .place(OsStr::new(&self.name))
-            .map(|()| self.published(Displaced::Trashed(identity.into())))
+            .map(|()| {
+                let placed =
+                    copy_engine::placed_at(fs(), stage.parent.as_fd(), OsStr::new(&self.name));
+                self.published(Displaced::Trashed(identity.into(), placed))
+            })
             .map_err(|error| {
                 archive_failed(rust_i18n::t!(
                     "Could not publish the archive; the original is in Trash: %{error}",

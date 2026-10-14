@@ -76,13 +76,15 @@ fn compression_staging_stays_private_while_encoding() -> Result<(), Box<dyn Erro
     assert_eq!(compression_stage_mode(&destination)?, 0o600);
 
     release.store(true, Ordering::Release);
+    let (name, replaced, placed) = context.block_on(task)??;
     assert_eq!(
-        context.block_on(task)?,
-        Ok((
+        (name, replaced),
+        (
             "existing.zip".to_owned(),
             Some(ReplacedOriginal::Trashed(original))
-        ))
+        )
     );
+    assert!(placed.is_some(), "the archive is recorded for undo");
     assert_eq!(fs::read(&archive)?, b"replacement");
     assert_eq!(fs::metadata(&archive)?.permissions().mode() & 0o777, 0o640);
     assert!(stages(&destination, COMPRESSION_STAGE)?.is_empty());
@@ -131,7 +133,7 @@ fn compression_new_archive_staging_stays_private_until_publish() -> Result<(), B
     release.store(true, Ordering::Release);
     assert_eq!(
         context.block_on(task)?,
-        Ok(("created.zip".to_owned(), None))
+        Ok(("created.zip".to_owned(), None, None))
     );
     assert_eq!(fs::read(&archive)?, b"created");
     assert_eq!(
@@ -195,20 +197,21 @@ fn keep_both_retries_publication_collisions_without_encoding_again() -> Result<(
         let worker_encoded = encoded.clone();
         let late_archive = archive.clone();
         let late_first = first.clone();
-        let (published, original) = glib::MainContext::default().block_on(write_staged_archive(
-            &destination,
-            &archive,
-            TransferConflict::KeepBoth,
-            never_cancelled(),
-            move |mut file| {
-                worker_encoded.fetch_add(1, Ordering::Relaxed);
-                file.write_all(b"new archive")
-                    .map_err(|error| error.to_string())?;
-                fs::write(late_archive, b"late original").map_err(|error| error.to_string())?;
-                fs::write(late_first, b"late numbered").map_err(|error| error.to_string())?;
-                Ok(())
-            },
-        ))?;
+        let (published, original, _) =
+            glib::MainContext::default().block_on(write_staged_archive(
+                &destination,
+                &archive,
+                TransferConflict::KeepBoth,
+                never_cancelled(),
+                move |mut file| {
+                    worker_encoded.fetch_add(1, Ordering::Relaxed);
+                    file.write_all(b"new archive")
+                        .map_err(|error| error.to_string())?;
+                    fs::write(late_archive, b"late original").map_err(|error| error.to_string())?;
+                    fs::write(late_first, b"late numbered").map_err(|error| error.to_string())?;
+                    Ok(())
+                },
+            ))?;
         assert_eq!(published, format!("archive.part (4).{extension}"));
         assert!(original.is_none());
         assert_eq!(encoded.load(Ordering::Relaxed), 1);
@@ -243,7 +246,10 @@ fn publish_replacement(destination: &Path, conflict: TransferConflict) -> (Compr
             Ok(())
         },
     ));
-    (result, encoded.load(Ordering::Relaxed))
+    (
+        result.map(|(name, original, _)| (name, original)),
+        encoded.load(Ordering::Relaxed),
+    )
 }
 
 #[test]

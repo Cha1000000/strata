@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 
-use std::rc::Rc;
+use std::{collections::HashMap, rc::Rc};
 
 use gtk::prelude::*;
 
@@ -144,6 +144,7 @@ fn items_left_out_or_left_behind_make_the_report_a_warning_or_follow_a_stop() {
     let left_in_trash = [
         in_trash(KeptCause::Changed),
         in_trash(KeptCause::Undeletable(denied)),
+        in_trash(KeptCause::ReplacementChanged),
     ];
     for (renamed_count, skipped_count, kept_count, in_trash_count) in [
         (0, 2, 0, 0),
@@ -151,7 +152,7 @@ fn items_left_out_or_left_behind_make_the_report_a_warning_or_follow_a_stop() {
         (3, 2, 0, 0),
         (0, 0, 4, 0),
         (1, 2, 4, 0),
-        (0, 0, 0, 2),
+        (0, 0, 0, 3),
     ] {
         let row = format!("{renamed_count}, {skipped_count}, {kept_count}, {in_trash_count}");
         let report = TransferReport {
@@ -196,6 +197,11 @@ fn items_left_out_or_left_behind_make_the_report_a_warning_or_follow_a_stop() {
             name = "data"
         );
         assert_eq!(detail.contains(&*changed), in_trash_count > 0, "{row}");
+        let replacement = rust_i18n::t!(
+            "“%{name}” changed after it replaced the original and was kept",
+            name = "data"
+        );
+        assert_eq!(detail.contains(&*replacement), in_trash_count > 0, "{row}");
         assert_eq!(
             detail.contains(&reason),
             kept_count + in_trash_count > 0,
@@ -393,6 +399,7 @@ fn start(view: &BrowserView, operations: &HeldOperations, started: Started) -> O
                     source: Location::local("/source/run"),
                     created: vec![Location::local("/destination/run/app.conf")],
                     overwritten: Vec::new(),
+                    placed: HashMap::new(),
                 },
             );
             operations.emit(

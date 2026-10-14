@@ -9,7 +9,8 @@ use std::{
 use crate::{
     model::Location,
     services::{
-        OperationEvent, OperationRequestId, ReplacedOriginal, TransferReport, TrashedOriginal,
+        OperationEvent, OperationRequestId, PlacedSnapshot, ReplacedOriginal, TransferReport,
+        TrashedOriginal,
     },
 };
 
@@ -129,10 +130,13 @@ impl OperationCompletion {
                 // progress; it must undo through the overwritten restore
                 // path instead, or the restored original would be trashed.
                 all_created.retain(|location| !merged.overwritten.contains(location));
+                let mut placed = merged.placed;
+                placed.retain(|location, _| merged.overwritten.contains(location));
                 publish(UndoEntry::Merge {
                     created: all_created,
                     overwritten: merged.overwritten,
                     originals: HashMap::new(),
+                    placed,
                 });
             }
             None => {}
@@ -311,12 +315,14 @@ impl Browser {
                 source,
                 created,
                 overwritten,
+                placed,
                 ..
             } => {
                 let mut merged = self.merged_undo.borrow_mut();
                 merged.sources.insert(source.clone());
                 merged.created.extend(created.iter().cloned());
                 merged.overwritten.extend(overwritten.iter().cloned());
+                merged.placed.extend(placed.clone());
                 return true;
             }
             OperationEvent::ItemsReported { report, .. } => {
@@ -594,16 +600,13 @@ impl Browser {
                 archive_name,
                 archive,
                 original,
+                placed,
                 ..
             } => {
                 if !completion.undoing {
                     match original {
                         Some(ReplacedOriginal::Trashed(original)) => {
-                            push_pending_undo(UndoEntry::Merge {
-                                created: Vec::new(),
-                                overwritten: vec![archive.clone()],
-                                originals: HashMap::from([(archive, original)]),
-                            })
+                            push_pending_undo(replaced_archive_undo(archive, original, placed))
                         }
                         Some(ReplacedOriginal::Deleted) => {}
                         None => push_pending_undo(UndoEntry::Copy(vec![archive])),
@@ -732,6 +735,21 @@ impl Browser {
             affected_locations,
             report,
         });
+    }
+}
+
+fn replaced_archive_undo(
+    archive: Location,
+    original: TrashedOriginal,
+    placed: Option<PlacedSnapshot>,
+) -> UndoEntry {
+    UndoEntry::Merge {
+        created: Vec::new(),
+        overwritten: vec![archive.clone()],
+        placed: placed
+            .map(|placed| HashMap::from([(archive.clone(), placed)]))
+            .unwrap_or_default(),
+        originals: HashMap::from([(archive, original)]),
     }
 }
 

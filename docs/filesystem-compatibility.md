@@ -542,10 +542,19 @@ entry, as a move deletes its source. Anything changed or uncopyable stays in the
 `.trashinfo`, and is reported as left in the Trash. A failed restore copy removes only the entries
 it created. A cancel during the copy removes them too and counts the item as not attempted, left in
 the Trash with its `.trashinfo`; if they cannot be removed, the item counts as failed. A cancelled
-restore or merge undo ends as cancelled, even when its last item finished. A merge undo deletes its
-copy before it restores the original, so an item cut off after that counts as failed. It restores
-an original only once it found its path empty or deleted its copy there: a path it cannot check
-fails with that error and the original stays in the Trash. A restore across filesystems is refused.
+restore or merge undo ends as cancelled, even when its last item finished. A restore across
+filesystems is refused.
+
+Undoing a merge, or a copy or an archive that replaced its original through the Trash, deletes what
+the operation put at the original's path, then restores the original. As it places an item there,
+the operation records it as a [move](#moves-across-filesystems) records its sources, with the
+contents of files within a tick of coarse times, and the undo deletes each entry only if it is
+still as recorded, by the same rules. Entries edited, replaced or added since stay, with the
+folders that hold them, and the original stays in the Trash with its `.trashinfo`, reported as left
+there because what replaced it changed. Without a record, an original is restored only to an empty
+path. A merge undo deletes its copy before it restores the original, so an item cut off
+after it deleted anything counts as failed; one cut off while it compares counts as not attempted.
+A path it cannot check fails with that error and the original stays in the Trash.
 
 ### The completion report
 
@@ -554,7 +563,8 @@ After a transfer, Strata reports what it could not do as asked:
 - names the destination took for another (case aliases), and names taken during a merge or an undo,
   each with the name the item was saved as;
 - special files left out of a copy;
-- source entries a move left behind, and entries a restore left in the Trash, with the reason.
+- source entries a move left behind, entries a restore left in the Trash, and originals an undo
+  left there because what replaced them changed, with the reason.
 
 One short renamed line is shown as a notice. More are listed in an information dialog, up to eight
 lines and a count of the rest. Anything left out or left behind makes it a "Completed with errors"

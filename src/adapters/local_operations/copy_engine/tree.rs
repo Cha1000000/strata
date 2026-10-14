@@ -24,7 +24,7 @@ use rustix::{
 };
 
 use super::{
-    Barrier, Copy, Created, Failure, Mount, Source, best_effort,
+    Barrier, Copy, Created, Failure, Mount, Placing, Source, best_effort,
     data::Data,
     direct_folder, from_stage, is_fatal, is_unsupported,
     links::{self, Links, Role},
@@ -1058,6 +1058,7 @@ pub(super) struct Merged {
     pub(super) target: (Arc<OwnedFd>, OsString, Option<LocalFileIdentity>),
     pub(super) path: PathBuf,
     pub(super) recorded_in: Option<Arc<manifest::Folder>>,
+    pub(super) placing: Option<Arc<Placing>>,
 }
 
 impl Merged {
@@ -1105,6 +1106,7 @@ impl Merged {
             path: self.path.clone(),
             name: source_name.clone(),
             recorded,
+            placing: self.placing.clone(),
         };
         tree.probe_links_in(&mount, live.dir.clone());
         let mut new = Vec::new();
@@ -1128,6 +1130,7 @@ impl Merged {
                             ),
                             path: self.path.join(target_name),
                             recorded_in: live.recorded.clone(),
+                            placing: live.placing.clone(),
                         },
                     ));
                 }
@@ -1150,6 +1153,7 @@ struct Live {
     naming: Naming,
     name: OsString,
     recorded: Option<Arc<manifest::Folder>>,
+    placing: Option<Arc<Placing>>,
 }
 
 impl Live {
@@ -1210,6 +1214,7 @@ impl Live {
             mount: self.mount,
             scope,
             name: self.name.clone(),
+            placing: self.placing.clone(),
         };
         let group = Group::new(children.len(), TreeJob::Place(tree.clone(), place));
         made.make_all(tree, queue, &self.source, children, &group)
@@ -1260,6 +1265,7 @@ pub(super) struct Place {
     mount: Mount,
     scope: usize,
     name: OsString,
+    placing: Option<Arc<Placing>>,
 }
 
 impl Place {
@@ -1295,6 +1301,8 @@ impl Place {
                         for folder in &mut restrictive {
                             super::rebase(&mut folder.path, &requested, &path);
                         }
+                    } else if let Some(placing) = &self.placing {
+                        placing.placed(fs, self.live.as_fd(), name, &path);
                     }
                     placed.push(path);
                 }

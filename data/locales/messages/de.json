@@ -927,6 +927,7 @@
   "“%{name}” (socket)": "„%{name}“ (Socket)",
   "“%{name}” already exists": "„%{name}“ ist bereits vorhanden",
   "“%{name}” can’t be replaced safely at this location. Delete or rename it first, then try again.": "„%{name}“ kann an diesem Ort nicht sicher ersetzt werden. Löschen oder benennen Sie es zuerst um und versuchen Sie es dann erneut.",
+  "“%{name}” changed after it replaced the original and was kept": "„%{name}“ hat sich nach dem Ersetzen des Originals geändert und wurde behalten",
   "“%{name}” changed during the move and was left in “%{folder}”": "„%{name}“ hat sich während des Verschiebens geändert und ist in „%{folder}“ geblieben",
   "“%{name}” changed during the restore and was left in the Trash": "„%{name}“ hat sich während der Wiederherstellung geändert und ist im Papierkorb geblieben",
   "“%{name}” is already pinned": "„%{name}“ ist bereits angeheftet",

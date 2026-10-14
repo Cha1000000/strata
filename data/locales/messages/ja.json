@@ -927,6 +927,7 @@
   "“%{name}” (socket)": "「%{name}」（ソケット）",
   "“%{name}” already exists": "「%{name}」はすでに存在します",
   "“%{name}” can’t be replaced safely at this location. Delete or rename it first, then try again.": "「%{name}」はこの場所では安全に置き換えられません。先に削除するか名前を変更してから、もう一度お試しください。",
+  "“%{name}” changed after it replaced the original and was kept": "「%{name}」は元の項目を置き換えた後に変更されたため、そのまま残されました",
   "“%{name}” changed during the move and was left in “%{folder}”": "「%{name}」は移動中に変更されたため、「%{folder}」に残されました",
   "“%{name}” changed during the restore and was left in the Trash": "「%{name}」は復元中に変更されたため、ゴミ箱に残されました",
   "“%{name}” is already pinned": "「%{name}」はすでにピン留めされています",

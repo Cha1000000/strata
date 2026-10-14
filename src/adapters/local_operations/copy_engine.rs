@@ -50,13 +50,17 @@ use crate::{
         learn_mount_capability, mount_capabilities,
     },
     model::Location,
-    services::{KeptCause, RenameCause, RenamedItem, SkippedItem, SpecialKind, TransferReport},
+    services::{
+        KeptCause, PlacedSnapshot, RenameCause, RenamedItem, SkippedItem, SpecialKind,
+        TransferReport,
+    },
 };
 pub(super) use barrier::Barrier;
 use data::Data;
 #[cfg(test)]
 pub(super) use data::set_kernel_for_test;
 pub(super) use manifest::{Manifest, Published, Unlinks};
+use manifest::{Placed, Removed};
 #[cfg(test)]
 pub(super) use manifest::{now as clock_for_test, set_clock_for_test};
 use metadata::Snapshot;
@@ -100,7 +104,131 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 
 pub(super) enum Destination {
     New(PathBuf, Taken),
-    Merge(PathBuf),
+    Merge(PathBuf, Option<Arc<Placing>>),
+}
+
+/// The paths a merge records what it places at, as it places it.
+pub(super) struct Placing {
+    root: PathBuf,
+    wanted: HashSet<PathBuf>,
+    placed: Mutex<Vec<(PathBuf, Placed)>>,
+}
+
+impl Placing {
+    /// `root` is the merged folder, and `wanted` are paths beneath it.
+    pub(super) fn new(root: PathBuf, wanted: HashSet<PathBuf>) -> Arc<Self> {
+        Arc::new(Self {
+            root,
+            wanted,
+            placed: Mutex::default(),
+        })
+    }
+
+    pub(super) fn wants(&self, path: &Path) -> bool {
+        self.wanted.contains(path)
+    }
+
+    /// `path` is where the merge placed `name` of `dir`, beneath its folder.
+    fn placed(&self, fs: &dyn FsOps, dir: BorrowedFd<'_>, name: &OsStr, path: &Path) {
+        let path = self.root.join(path);
+        if self.wants(&path) {
+            self.record(fs, dir, name, path);
+        }
+    }
+
+    fn record(&self, fs: &dyn FsOps, dir: BorrowedFd<'_>, name: &OsStr, path: PathBuf) {
+        match manifest::placed(fs, dir, name) {
+            Ok(placed) => lock(&self.placed).push((path, placed)),
+            Err(failure) => {
+                let error = failure.into_error(name);
+                tracing::warn!(?path, %error, "could not record a placed item");
+            }
+        }
+    }
+
+    pub(super) fn take(&self) -> Vec<(PathBuf, PlacedSnapshot)> {
+        std::mem::take(&mut *lock(&self.placed))
+            .into_iter()
+            .map(|(path, placed)| (path, PlacedSnapshot::new(placed)))
+            .collect()
+    }
+}
+
+/// Records what a merge copied to `path` some other way.
+pub(super) async fn record_placed(placing: Arc<Placing>, path: PathBuf) {
+    let recorded = run_blocking(move || {
+        let (parent, name) = split(&path)?;
+        placing.record(fs(), parent.as_fd(), &name, path.clone());
+        Ok(())
+    })
+    .await;
+    if let Err(error) = recorded {
+        tracing::warn!(%error, "could not record a placed item");
+    }
+}
+
+/// What is at `path`, recorded as an operation just put it there.
+pub(super) async fn placed(path: PathBuf) -> Option<PlacedSnapshot> {
+    let recorded = run_blocking(move || {
+        let (parent, name) = split(&path)?;
+        Ok(placed_at(fs(), parent.as_fd(), &name))
+    })
+    .await;
+    recorded.ok().flatten()
+}
+
+pub(super) fn placed_at(
+    fs: &dyn FsOps,
+    dir: BorrowedFd<'_>,
+    name: &OsStr,
+) -> Option<PlacedSnapshot> {
+    match manifest::placed(fs, dir, name) {
+        Ok(placed) => Some(PlacedSnapshot::new(placed)),
+        Err(failure) => {
+            let error = failure.into_error(name);
+            tracing::warn!(?name, %error, "could not record a placed item");
+            None
+        }
+    }
+}
+
+/// Deletes what an operation placed at `path`, as far as it is unchanged.
+pub(super) async fn remove_placed(
+    path: PathBuf,
+    placed: PlacedSnapshot,
+    unlinks: Arc<Unlinks>,
+    cancellable: &gio::Cancellable,
+) -> Removed {
+    let failed = |error| Removed {
+        kept: Vec::new(),
+        removed: false,
+        result: Err(error),
+    };
+    let removed = run_cancellable(cancellable, move |cancelled| {
+        let Some(placed) = placed.get::<Placed>() else {
+            return failed(io_error("Unknown placed item record"));
+        };
+        let Some(folder) = path.parent() else {
+            return failed(io_error(crate::i18n::tr("Invalid local filesystem target")));
+        };
+        let parent = match open_local_parent_directory(folder) {
+            Ok(parent) => Arc::new(parent),
+            Err(_)
+                if std::fs::symlink_metadata(folder)
+                    .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound) =>
+            {
+                return Removed {
+                    kept: Vec::new(),
+                    removed: false,
+                    result: Ok(()),
+                };
+            }
+            Err(error) => return failed(io_error(error)),
+        };
+        manifest::remove(fs(), parent, &placed.root(), unlinks, cancelled)
+    })
+    .await;
+    removed.unwrap_or_else(|_| failed(io_error("Delete worker stopped unexpectedly")))
 }
 
 pub(super) struct Copied {
@@ -128,9 +256,9 @@ pub(super) async fn copy_local(
     progress: Option<Rc<TransferProgressTracker>>,
     cancellable: &gio::Cancellable,
 ) -> Result<Copied, glib::Error> {
-    let (Destination::New(target, _) | Destination::Merge(target)) = &destination;
+    let (Destination::New(target, _) | Destination::Merge(target, _)) = &destination;
     let target = target.clone();
-    let merging = matches!(destination, Destination::Merge(_));
+    let merging = matches!(destination, Destination::Merge(..));
     let followed = following(
         Item::Path(source),
         options,
@@ -147,9 +275,10 @@ pub(super) async fn copy_local(
                 };
                 Ok((name, Vec::new(), published))
             }
-            Destination::Merge(folder) => {
+            Destination::Merge(folder, placing) => {
                 let name = folder.file_name().unwrap_or_default().to_os_string();
-                merge(copy, source, &folder, options.workers).map(|nested| (name, nested, None))
+                merge(copy, source, &folder, options.workers, placing)
+                    .map(|nested| (name, nested, None))
             }
         },
     )
@@ -953,6 +1082,7 @@ fn merge(
     source: &Source,
     folder: &Path,
     workers: Option<usize>,
+    placing: Option<Arc<Placing>>,
 ) -> Result<Vec<Barrier>, Failure> {
     let (parent, name) = split(folder).map_err(Failure::Error)?;
     let workers = workers.unwrap_or_else(|| worker_count(source, &parent));
@@ -961,6 +1091,7 @@ fn merge(
         target: (parent, name, None),
         path: PathBuf::new(),
         recorded_in: source.recorded_in.clone(),
+        placing,
     };
     let (
         walked,

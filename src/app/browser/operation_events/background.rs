@@ -13,6 +13,7 @@ use crate::services::{
 use super::super::push_background_undo;
 use super::{
     Browser, BrowserEvent, MergeUndoState, OperationCompletion, OperationContext, UndoEntry,
+    replaced_archive_undo,
 };
 
 pub(crate) struct BackgroundOperation {
@@ -159,12 +160,14 @@ impl Browser {
                 source,
                 created,
                 overwritten,
+                placed,
                 ..
             } => {
                 let mut merged = job.merged.borrow_mut();
                 merged.sources.insert(source);
                 merged.created.extend(created);
                 merged.overwritten.extend(overwritten);
+                merged.placed.extend(placed);
             }
             OperationEvent::ItemsReported { report, .. } => {
                 job.merged.borrow_mut().rename(&report.renamed);
@@ -250,16 +253,13 @@ impl Browser {
                         archive_name,
                         archive,
                         original,
+                        placed,
                         ..
                     } => {
                         match original {
-                            Some(ReplacedOriginal::Trashed(original)) => {
-                                push_background_undo(UndoEntry::Merge {
-                                    created: Vec::new(),
-                                    overwritten: vec![archive.clone()],
-                                    originals: HashMap::from([(archive, original)]),
-                                })
-                            }
+                            Some(ReplacedOriginal::Trashed(original)) => push_background_undo(
+                                replaced_archive_undo(archive, original, placed),
+                            ),
                             Some(ReplacedOriginal::Deleted) => {}
                             None => push_background_undo(UndoEntry::Copy(vec![archive])),
                         }

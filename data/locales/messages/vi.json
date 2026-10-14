@@ -927,6 +927,7 @@
   "“%{name}” (socket)": "“%{name}” (socket)",
   "“%{name}” already exists": "“%{name}” đã tồn tại",
   "“%{name}” can’t be replaced safely at this location. Delete or rename it first, then try again.": "Không thể thay thế “%{name}” một cách an toàn tại vị trí này. Hãy xóa hoặc đổi tên mục đó trước rồi thử lại.",
+  "“%{name}” changed after it replaced the original and was kept": "“%{name}” đã thay đổi sau khi thay thế bản gốc nên được giữ lại",
   "“%{name}” changed during the move and was left in “%{folder}”": "“%{name}” đã thay đổi trong khi di chuyển nên được giữ lại trong “%{folder}”",
   "“%{name}” changed during the restore and was left in the Trash": "“%{name}” đã thay đổi trong khi khôi phục nên được giữ lại trong Thùng rác",
   "“%{name}” is already pinned": "“%{name}” đã được ghim",

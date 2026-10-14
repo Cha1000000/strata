@@ -1060,7 +1060,7 @@ fn a_copy_calls_an_entry_changed_only_when_its_name_no_longer_holds_it()
         );
         let _destination = FsQuirks::install(&destination, Quirks::default());
         let target = if merge {
-            Destination::Merge(destination.join("folder"))
+            Destination::Merge(destination.join("folder"), None)
         } else {
             Destination::New(destination.join("copy"), Taken::Fail)
         };
