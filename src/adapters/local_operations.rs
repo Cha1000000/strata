@@ -5342,6 +5342,7 @@ async fn run_merge_undo(
     let unlinks = Arc::default();
     let mut completed_locations = Vec::new();
     let mut restored = Vec::new();
+    let mut removed = Vec::new();
     let mut failed_locations = Vec::new();
     let mut errors = Vec::new();
     let mut completed = 0usize;
@@ -5396,6 +5397,10 @@ async fn run_merge_undo(
                         }],
                         ..TransferReport::default()
                     },
+                });
+                emit(OperationEvent::ItemKept {
+                    request_id,
+                    location: location.clone(),
                 });
                 completed_locations.push(location.clone());
                 None
@@ -5511,6 +5516,7 @@ async fn run_merge_undo(
                     });
                 }
                 completed_locations.push(location.clone());
+                removed.push(location.clone());
                 vec![location.clone()]
             }
             Err(error) if was_cancelled(&error) => {
@@ -5556,13 +5562,13 @@ async fn run_merge_undo(
     } else if errors.is_empty() {
         emit(OperationEvent::Restored {
             request_id,
-            locations: Vec::new(),
+            locations: removed,
             restored,
         });
     } else {
         emit(OperationEvent::CompletedWithErrors {
             request_id,
-            deleted_locations: completed_locations,
+            deleted_locations: removed,
             retryable_locations: Vec::new(),
             has_non_retryable_failures: true,
             message: deletion_error_summary(&errors, true),

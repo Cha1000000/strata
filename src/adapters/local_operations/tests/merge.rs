@@ -3455,3 +3455,225 @@ fn merge_originals_are_deleted_only_once_the_merge_is_flushed() -> Result<(), Bo
     }
     Ok(())
 }
+
+/// Lists local folders, watching them only when `watched`, as where no
+/// folder monitor is available.
+struct Listing {
+    watched: bool,
+}
+
+impl crate::services::FileSource for Listing {
+    fn validate_location(
+        &self,
+        location: &Location,
+    ) -> Result<(), crate::services::LocationValidationError> {
+        crate::adapters::LocalFileSource.validate_location(location)
+    }
+
+    fn validate_location_async(
+        &self,
+        location: Location,
+        emit: Rc<dyn Fn(Result<(), crate::services::LocationValidationError>)>,
+    ) -> crate::services::LoadHandle {
+        crate::adapters::LocalFileSource.validate_location_async(location, emit)
+    }
+
+    fn enumerate(
+        &self,
+        request: crate::services::DirectoryRequest,
+        emit: Rc<dyn Fn(crate::services::DirectoryEvent)>,
+    ) -> crate::services::LoadHandle {
+        crate::adapters::LocalFileSource.enumerate(request, emit)
+    }
+
+    fn watch(
+        &self,
+        location: Location,
+        include_hidden: bool,
+        notify: Rc<dyn Fn(crate::services::DirectoryChange)>,
+    ) -> Option<crate::services::LoadHandle> {
+        self.watched
+            .then(|| crate::adapters::LocalFileSource.watch(location, include_hidden, notify))
+            .flatten()
+    }
+}
+
+#[test]
+fn a_merge_undo_drops_from_view_only_what_it_removed() {
+    crate::test_support::gtk_test(
+        "adapters::local_operations::tests::merge::a_merge_undo_drops_from_view_only_what_it_removed",
+        || {
+            check_a_merge_undo_drops_from_view_only_what_it_removed().expect("merge undo view");
+        },
+    );
+}
+
+fn check_a_merge_undo_drops_from_view_only_what_it_removed() -> Result<(), Box<dyn Error>> {
+    use crate::app::{Browser, BrowserEvent};
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let context = glib::MainContext::default();
+    let pump_until = |what: &str, done: &dyn Fn() -> bool| {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !done() {
+            if Instant::now() > deadline {
+                return Err(format!("timed out waiting until {what}"));
+            }
+            context.iteration(false);
+            thread::sleep(Duration::from_millis(1));
+        }
+        Ok(())
+    };
+    let sandbox = glib::user_data_dir()
+        .parent()
+        .ok_or("the test's data folder")?
+        .to_path_buf();
+    let mut failures = Vec::new();
+    let rows = [false, true].into_iter().flat_map(|failing| {
+        [(false, false), (true, false), (false, true), (true, true)]
+            .map(|(background, watched)| (failing, background, watched))
+    });
+    // Without a monitor, the folder learns only from the undo's outcome.
+    for (failing, background, watched) in rows {
+        let row = format!(
+            "undo fails an item: {failing}, merged in the background: {background}, watched: {watched}"
+        );
+        let root = tempfile::tempdir_in(glib::home_dir())?;
+        let source = root.path().join("source");
+        let folder = root.path().join("destination/folder");
+        write_files(
+            &source,
+            &[
+                ("folder/a.txt", "incoming a"),
+                ("folder/b.txt", "incoming b"),
+                ("folder/c.txt", "incoming c"),
+                ("folder/new.txt", "new"),
+            ],
+        )?;
+        write_files(
+            &folder,
+            &[
+                ("a.txt", "original a"),
+                ("b.txt", "original b"),
+                ("c.txt", "original c"),
+            ],
+        )?;
+        // The Trash shares the scope, so it is on the folder's mount.
+        let _scope = FsQuirks::install(
+            &sandbox,
+            Quirks {
+                fail: if failing {
+                    vec![(Op::Unlink, "c.txt", 0, Errno::ACCESS)]
+                } else {
+                    Vec::new()
+                },
+                ..Quirks::default()
+            },
+        );
+        let browser = Browser::new(Rc::new(Listing { watched }));
+        browser.set_operation_provider(Rc::new(LocalOperationProvider));
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let observed = events.clone();
+        browser.observe(move |event| {
+            observed
+                .borrow_mut()
+                .push(crate::test_support::operations::operation_event(event).clone());
+        });
+        let names = || {
+            let mut names = browser
+                .with_column_entries(0, |entries| {
+                    entries
+                        .iter()
+                        .map(|entry| entry.display_name.clone())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            names.sort();
+            names
+        };
+
+        browser.transfer(
+            Location::local(root.path().join("destination")),
+            vec![PasteItem {
+                source: Location::local(source.join("folder")),
+                conflict: TransferConflict::Merge,
+            }],
+            false,
+            false,
+        );
+        if background {
+            let id = browser.last_started_operation().ok_or("the merge")?;
+            assert!(browser.background_file_operation(id), "{row}");
+        }
+        pump_until(&format!("{row}: the merge ends"), &|| {
+            events
+                .borrow()
+                .iter()
+                .any(|event| matches!(event, BrowserEvent::TransferCompleted))
+        })?;
+        fs::write(folder.join("b.txt"), "edited after the merge")?;
+        browser.navigate(Location::local(&folder));
+        pump_until(&format!("{row}: the folder lists the merge"), &|| {
+            names() == ["a.txt", "b.txt", "c.txt", "new.txt"]
+        })?;
+        let (generation, created, overwritten) =
+            browser.pending_undo_merge().ok_or("the merge's undo")?;
+        events.borrow_mut().clear();
+
+        assert!(
+            browser.undo_merge(generation, created, overwritten),
+            "{row}"
+        );
+        pump_until(&format!("{row}: the undo ends"), &|| {
+            events
+                .borrow()
+                .iter()
+                .any(|event| matches!(event, BrowserEvent::RestorationFinished { .. }))
+        })?;
+
+        assert_eq!(
+            events
+                .borrow()
+                .iter()
+                .any(|event| matches!(event, BrowserEvent::OperationCompletedWithErrors { .. })),
+            failing,
+            "{row}"
+        );
+        assert_eq!(fs::read(folder.join("a.txt"))?, b"original a", "{row}");
+        assert_eq!(
+            fs::read(folder.join("b.txt"))?,
+            b"edited after the merge",
+            "{row}"
+        );
+        assert_eq!(
+            fs::read(folder.join("c.txt"))?,
+            if failing {
+                &b"incoming c"[..]
+            } else {
+                b"original c"
+            },
+            "{row}"
+        );
+        assert!(!folder.join("new.txt").exists(), "{row}");
+        let expected = ["a.txt", "b.txt", "c.txt"];
+        // A monitor may still be reporting what the undo changed.
+        let listed = if watched {
+            pump_until(&row, &|| names() == expected).is_ok()
+        } else {
+            names() == expected
+        };
+        if !listed {
+            failures.push(format!("{row}: the folder lists {:?}", names()));
+        }
+        assert_eq!(
+            browser
+                .pending_undo_merge()
+                .map(|(_, created, overwritten)| (created, overwritten)),
+            failing.then(|| (Vec::new(), vec![Location::local(folder.join("c.txt"))])),
+            "{row}: only what failed is left to undo"
+        );
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+    Ok(())
+}

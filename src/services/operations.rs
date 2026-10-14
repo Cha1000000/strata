@@ -419,7 +419,8 @@ pub enum OperationEvent {
         identity: TrashedOriginal,
     },
     /// A merge undo left the item at `location`, as it may have changed
-    /// since, so nothing of it is left to undo. It still counts as failed.
+    /// since, so nothing of it is left to undo. A created item so kept still
+    /// counts as failed.
     ItemKept {
         request_id: OperationRequestId,
         location: Location,
@@ -487,7 +488,7 @@ pub enum OperationEvent {
     },
     Restored {
         request_id: OperationRequestId,
-        /// Trash entries that left the trash view.
+        /// What left its folder: Trash entries, or what a merge undo removed.
         locations: Vec<Location>,
         /// Where the restored items landed, recorded for undo.
         restored: Vec<Location>,
