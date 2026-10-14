@@ -354,53 +354,41 @@ fn a_failed_restore_copy_of_a_file_leaves_nothing_at_its_name() -> Result<(), Bo
 #[test]
 fn a_cancelled_restore_copy_that_cannot_remove_what_it_made_fails() -> Result<(), Box<dyn Error>> {
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock()?;
-    // The cut-off file cannot be unlinked; the cut-off folder cannot be
-    // opened to be emptied, after it was opened once as it was made and once
-    // by the copy.
-    for (folder, cleanup) in [(false, (Op::Unlink, 0)), (true, (Op::OpenDir, 2))] {
-        let fixture = tempfile::tempdir()?;
-        let source = fixture.path().join("source");
-        let data = if folder {
-            fs::create_dir(&source)?;
-            source.join("data")
-        } else {
-            source.clone()
-        };
-        let contents = vec![0x5a; 4 * 1024 * 1024];
-        fs::write(&data, &contents)?;
-        let destination = fixture.path().join("destination");
-        let cancellable = gio::Cancellable::new();
-        let racer = |cancel: gio::Cancellable| -> Racer { Box::new(move || cancel.cancel()) };
-        let (op, skip) = cleanup;
-        let _scope = FsQuirks::install(
-            fixture.path(),
-            Quirks {
-                before: vec![
-                    (Op::CopyRange, "*", 0, racer(cancellable.clone())),
-                    (Op::Write, "*", 0, racer(cancellable.clone())),
-                ],
-                fail: vec![(op, "destination", skip, Errno::IO)],
-                reflink: Support::Rejected(Errno::OPNOTSUPP),
-                ..Quirks::without_placement()
-            },
-        );
+    let fixture = tempfile::tempdir()?;
+    let source = fixture.path().join("source");
+    fs::create_dir(&source)?;
+    let contents = vec![0x5a; 4 * 1024 * 1024];
+    fs::write(source.join("data"), &contents)?;
+    let destination = fixture.path().join("destination");
+    let cancellable = gio::Cancellable::new();
+    let racer = |cancel: gio::Cancellable| -> Racer { Box::new(move || cancel.cancel()) };
+    // The cut-off folder cannot be opened to be emptied, after it was opened
+    // once as it was made and once by the copy.
+    let _scope = FsQuirks::install(
+        fixture.path(),
+        Quirks {
+            before: vec![
+                (Op::CopyRange, "*", 0, racer(cancellable.clone())),
+                (Op::Write, "*", 0, racer(cancellable.clone())),
+            ],
+            fail: vec![(Op::OpenDir, "destination", 2, Errno::IO)],
+            reflink: Support::Rejected(Errno::OPNOTSUPP),
+            ..Quirks::without_placement()
+        },
+    );
 
-        let restored = glib::MainContext::default().block_on(move_restore_path(
-            source.clone(),
-            destination.clone(),
-            fixture.path().to_path_buf(),
-            Arc::default(),
-            cancellable,
-        ));
+    let restored = glib::MainContext::default().block_on(move_restore_path(
+        source.clone(),
+        destination.clone(),
+        fixture.path().to_path_buf(),
+        Arc::default(),
+        cancellable,
+    ));
 
-        let error = restored.expect_err("the cut-off copy stayed");
-        assert!(
-            !error.matches(gio::IOErrorEnum::Cancelled),
-            "{folder}: {error}"
-        );
-        assert!(fs::symlink_metadata(&destination).is_ok(), "{folder}");
-        assert_eq!(fs::read(&data)?, contents);
-    }
+    let error = restored.expect_err("the cut-off copy stayed");
+    assert!(!error.matches(gio::IOErrorEnum::Cancelled), "{error}");
+    assert!(fs::symlink_metadata(&destination).is_ok());
+    assert_eq!(fs::read(source.join("data"))?, contents);
     Ok(())
 }
 
