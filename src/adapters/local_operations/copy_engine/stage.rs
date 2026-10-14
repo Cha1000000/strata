@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: MIT
 
-//! Hidden stages for copies, and publishing one without replacing anything.
-
 use std::{
     collections::HashMap,
     ffi::{OsStr, OsString},
@@ -71,7 +69,6 @@ pub(super) fn colliding(names: &[&OsStr]) -> Vec<bool> {
     keys.iter().map(|key| counts[key.as_str()] > 1).collect()
 }
 
-/// What any two names a filesystem may take for one share.
 pub(super) fn collision_key(name: &OsStr) -> OsString {
     fold(name).map_or_else(|| name.to_os_string(), OsString::from)
 }
@@ -93,7 +90,6 @@ fn fold(name: &OsStr) -> Option<String> {
     )
 }
 
-/// A new hidden file in `dir`, with the stat of its own descriptor.
 pub(in crate::adapters::local_operations) fn create_file(
     fs: &dyn FsOps,
     dir: BorrowedFd<'_>,
@@ -111,7 +107,6 @@ pub(in crate::adapters::local_operations) fn create_file(
     })
 }
 
-/// The empty file a create whose reply was lost left at `entry`, opened.
 fn lost_file(fs: &dyn FsOps, entry: Entry<'_>) -> Option<OwnedFd> {
     let fresh = |stat: &EntryStat| stat.kind == FileType::RegularFile && stat.size == 0;
     let identity = placement::left_by_lost_reply(fs, entry, |stat| fresh(stat) && stat.nlink == 1)?;
@@ -121,8 +116,6 @@ fn lost_file(fs: &dyn FsOps, entry: Entry<'_>) -> Option<OwnedFd> {
         .then_some(fd)
 }
 
-/// Puts the stage `stage`, recorded as `recorded`, at `name` in the same
-/// folder without replacing an entry.
 pub(in crate::adapters::local_operations) fn publish(
     fs: &dyn FsOps,
     dir: BorrowedFd<'_>,

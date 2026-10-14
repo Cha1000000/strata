@@ -24,7 +24,6 @@ use crate::adapters::{
 
 #[derive(Clone, Debug)]
 pub(in crate::adapters::local_operations) struct Restrictive {
-    /// Beneath the root; empty for the root itself.
     pub(super) path: PathBuf,
     pub(super) identity: LocalFileIdentity,
     pub(super) mode: u32,
@@ -36,8 +35,6 @@ impl Restrictive {
     }
 }
 
-/// The folder at `path` beneath `root`, unless something other than
-/// `identity` is there now.
 pub(super) fn reopen(
     fs: &dyn FsOps,
     root: BorrowedFd<'_>,
@@ -65,7 +62,6 @@ pub(super) fn reopen(
     }
 }
 
-/// `path` as a name `open_dir` resolves beneath a folder; empty is the folder.
 pub(super) fn beneath(path: &Path) -> &OsStr {
     if path.as_os_str().is_empty() {
         OsStr::new(".")

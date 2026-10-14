@@ -45,7 +45,6 @@ pub(in crate::adapters::local_operations) struct Unlinks(Mutex<HashMap<(u64, u64
 #[cfg(test)]
 static TEST_NOW: Mutex<Option<SystemTime>> = Mutex::new(None);
 
-/// Pretends it is `now`, or follows the real clock with `None`.
 #[cfg(test)]
 pub(in crate::adapters::local_operations) fn set_clock_for_test(now: Option<SystemTime>) {
     *lock(&TEST_NOW) = now;
@@ -59,7 +58,6 @@ pub(in crate::adapters::local_operations) fn now() -> SystemTime {
     SystemTime::now()
 }
 
-/// How waiting for a source's times to settle ended.
 enum Waited {
     Settled,
     Stopped,
@@ -69,7 +67,6 @@ enum Waited {
     SetBack,
 }
 
-/// Waits until `unsettled` settles, checking `stopped` meanwhile.
 fn wait_until(unsettled: Unsettled, stopped: &dyn Fn() -> bool) -> Waited {
     loop {
         let now = now();
@@ -96,8 +93,6 @@ fn wait_until(unsettled: Unsettled, stopped: &dyn Fn() -> bool) -> Waited {
 /// ours: a kernel tick, at most 10 ms, with room to spare.
 const COARSE_CLOCK: Duration = Duration::from_millis(100);
 
-/// When a copy read a source file whose modification time a rewrite may
-/// leave as it is, and when any rewrite would move it.
 #[derive(Clone, Copy)]
 pub(super) struct Unsettled {
     read: SystemTime,
@@ -107,9 +102,6 @@ pub(super) struct Unsettled {
     ahead: Option<SystemTime>,
 }
 
-/// For the file `stat` describes, read from `started`, on a mount whose
-/// times are as `coarse`; `None` once any rewrite would move its
-/// modification time.
 pub(super) fn unsettled(
     stat: &EntryStat,
     coarse: Option<CoarseTimes>,
@@ -142,9 +134,6 @@ pub(super) fn unsettled(
     })
 }
 
-/// What a copy holds of a source file whose times may not show a rewrite:
-/// a digest of the bytes it copied, which the source must still match once
-/// any rewrite would move its modification time.
 pub(super) struct Contents {
     digest: digest::Digest,
     unsettled: Unsettled,
@@ -156,7 +145,6 @@ impl Contents {
     }
 }
 
-/// A source file as a copy read it.
 pub(super) struct Read {
     pub stat: EntryStat,
     pub contents: Option<Contents>,
@@ -164,7 +152,6 @@ pub(super) struct Read {
 
 const MIB: usize = 1 << 20;
 
-/// A source entry as the copy read it.
 struct SourceSnapshot {
     identity: LocalFileIdentity,
     nlink: u64,
@@ -186,9 +173,7 @@ impl SourceSnapshot {
         }
     }
 
-    /// Whether `current` is still this entry, where deletions have removed
-    /// `unlinked` of its other names since it was taken. Removing a name
-    /// changes the ctime and link count of the others.
+    /// Removing a name changes the ctime and link count of the others.
     fn holds(&self, current: &EntryStat, stable_inodes: bool, unlinked: u64) -> bool {
         let same = current.identity.may_be(&self.identity)
             && current.size == self.size
@@ -207,12 +192,10 @@ impl SourceSnapshot {
     }
 }
 
-/// Whether a source changed between two stats of its descriptor.
 pub(super) fn changed(before: &EntryStat, after: &EntryStat) -> bool {
     before.size != after.size || before.mtime != after.mtime || before.ctime != after.ctime
 }
 
-/// A source folder, and what the copy took from it.
 pub(super) struct Folder {
     /// `None` for the folder holding the moved item, which stays.
     identity: Option<LocalFileIdentity>,
@@ -226,7 +209,6 @@ enum Node {
 }
 
 impl Folder {
-    /// The folder holding the moved item.
     pub(super) fn root() -> Arc<Self> {
         Arc::new(Self {
             identity: None,
@@ -234,8 +216,6 @@ impl Folder {
         })
     }
 
-    /// The child folder `name`, recorded with its `identity`, to record its
-    /// own children in.
     pub(super) fn folder(&self, name: &OsStr, identity: LocalFileIdentity) -> Arc<Self> {
         let folder = Arc::new(Self {
             identity: Some(identity),
@@ -245,12 +225,10 @@ impl Folder {
         folder
     }
 
-    /// The child `name` was copied as `stat` describes it.
     pub(super) fn entry(&self, name: &OsStr, stat: &EntryStat) {
         self.add(name, Node::Entry(SourceSnapshot::of(stat, None)));
     }
 
-    /// The child file `name` was copied as `read` describes it.
     pub(super) fn file(&self, name: &OsStr, read: Read) {
         self.add(
             name,
@@ -258,7 +236,6 @@ impl Folder {
         );
     }
 
-    /// The child `name` stays at the source.
     pub(super) fn keep(&self, name: &OsStr, cause: KeptCause) {
         self.add(name, Node::Kept(cause));
     }
@@ -272,8 +249,6 @@ impl Folder {
     }
 }
 
-/// A later name of a file with several names, recorded once the links pass
-/// has made it.
 pub(super) struct Pending {
     folder: Arc<Folder>,
     name: OsString,
@@ -298,11 +273,9 @@ impl Pending {
     }
 }
 
-/// The native item a move copied, by name in its pinned parent.
 pub(in crate::adapters::local_operations) struct Manifest {
     pub(super) parent: OffMain<Arc<OwnedFd>>,
     pub(super) root: Arc<Folder>,
-    /// Where the copy went, where the move can see it.
     copy: Option<Published>,
 }
 
@@ -312,7 +285,6 @@ impl Manifest {
     }
 }
 
-/// A move's copy, by name in its pinned parent, as published.
 pub(in crate::adapters::local_operations) struct Published {
     parent: OffMain<Arc<OwnedFd>>,
     name: OsString,
@@ -320,7 +292,6 @@ pub(in crate::adapters::local_operations) struct Published {
 }
 
 impl Published {
-    /// The item `name` in `parent` as it is now.
     pub(super) fn at(fs: &dyn FsOps, parent: Arc<OwnedFd>, name: OsString) -> Result<Self, Errno> {
         let identity = fs.stat(Entry::new(&*parent, &name), false)?.identity;
         Ok(Self {
@@ -330,7 +301,6 @@ impl Published {
         })
     }
 
-    /// Whether the copy is still where it was published.
     fn stays(&self, fs: &dyn FsOps) -> bool {
         let parent = &**self.parent;
         let stable = Mount::keeps_inode_numbers(fs, parent.as_fd());
@@ -345,8 +315,6 @@ impl Published {
     }
 }
 
-/// Records the item `name` in `parent` as it is now, for a copy that this
-/// engine does not make.
 pub(super) fn snapshot(
     fs: &dyn FsOps,
     parent: Arc<OwnedFd>,
@@ -362,7 +330,6 @@ pub(super) fn snapshot(
     })
 }
 
-/// A manifest of what a copy that records took of the item in `parent`.
 pub(super) fn of(parent: Arc<OwnedFd>, root: Arc<Folder>) -> Manifest {
     Manifest {
         parent: OffMain::new(parent),
@@ -399,11 +366,6 @@ fn record(
     Ok(())
 }
 
-/// Deletes each entry `manifest` recorded that the source still holds as
-/// recorded, then each folder left empty, and returns what it found must
-/// stay, by path beneath the item's parent, even when it stopped. Entries
-/// added to the source meanwhile are not recorded, so they and their
-/// folders stay.
 pub(super) fn delete(
     fs: &'static dyn FsOps,
     manifest: Manifest,
@@ -460,7 +422,6 @@ pub(super) fn delete(
     (std::mem::take(&mut *lock(&deletion.kept)), result)
 }
 
-/// What every job of one deletion shares.
 struct Deletion {
     fs: &'static dyn FsOps,
     /// FUSE daemons without `use_ino` and cifs without server inode
@@ -475,8 +436,6 @@ impl Deletion {
         lock(&self.kept).push((path, cause));
     }
 
-    /// Whether the folder at `at`, at `path`, which could not be removed,
-    /// holds an entry that is not, nor holds, one already kept.
     fn holds_others(&self, at: Entry<'_>, path: &Path) -> bool {
         let kept: HashSet<OsString> = lock(&self.kept)
             .iter()
@@ -491,7 +450,6 @@ impl Deletion {
             })
     }
 
-    /// Making `path` go failed with `error`.
     fn failed(&self, path: PathBuf, error: Errno) {
         match error {
             // The copy holds it, and its source is gone, as a move leaves it.
@@ -502,8 +460,6 @@ impl Deletion {
         }
     }
 
-    /// What removes each entry `folder`, at `path`, recorded; entries
-    /// recorded as staying are kept at once.
     fn steps(&self, folder: &Folder, path: &Path) -> Vec<(OsString, PathBuf, Step)> {
         let mut steps = Vec::new();
         for (name, node) in folder.take() {
@@ -521,7 +477,6 @@ impl Deletion {
         steps
     }
 
-    /// Whether the folder `current` is the one recorded as `identity`.
     fn same(&self, current: &EntryStat, identity: Option<LocalFileIdentity>) -> bool {
         identity.is_some_and(|identity| {
             if self.stable_inodes {
@@ -533,12 +488,10 @@ impl Deletion {
     }
 }
 
-/// A recorded entry, by name in its opened parent.
 struct At {
     deletion: Arc<Deletion>,
     parent: Arc<OwnedFd>,
     name: OsString,
-    /// Beneath the item's parent.
     path: PathBuf,
 }
 
@@ -551,7 +504,6 @@ struct Removal {
 enum Step {
     Folder(Arc<Folder>),
     Entry(SourceSnapshot),
-    /// Removes the folder opened as this, once its recorded entries are done.
     Rmdir(Arc<OwnedFd>),
 }
 
@@ -711,9 +663,8 @@ impl At {
         }
     }
 
-    /// The file, still open, if it holds what the copy holds, read once any
-    /// rewrite would move its modification time; `None` if the deletion
-    /// stopped meanwhile.
+    /// The file, still open, if it holds what the copy holds; `None` if the
+    /// deletion stopped while waiting.
     fn same_contents(
         &self,
         contents: &Contents,

@@ -24,10 +24,8 @@ use crate::adapters::{
 
 #[derive(Clone, Copy, Default)]
 struct Plan {
-    /// `fdatasync` on each written file before it is closed.
     each_file: bool,
     sync_fs: bool,
-    /// `fsync` on the barrier's folder, after any `syncfs`.
     sync_dir: bool,
 }
 
@@ -79,14 +77,12 @@ impl Plan {
     }
 }
 
-/// Whether a durable copy onto `mount` syncs each file before closing it.
 pub(super) fn each_file(mount: &Mount) -> bool {
     Plan::of(mount).each_file
 }
 
 static OPENED: AtomicU64 = AtomicU64::new(0);
 
-/// A destination folder opened before a copy writes beneath it.
 pub(in crate::adapters::local_operations) struct Barrier {
     dir: OffMain<OwnedFd>,
     pub path: PathBuf,
@@ -137,7 +133,6 @@ impl Barrier {
         Err(could_not_open(Errno::ACCESS))
     }
 
-    /// A barrier at the folder `dir`, at `path`, which a copy opened.
     pub(super) fn at(fs: &dyn FsOps, dir: BorrowedFd<'_>, path: PathBuf) -> Result<Self, Errno> {
         let dir = fs.open_dir(Entry {
             dir,
@@ -157,14 +152,10 @@ impl Barrier {
         }
     }
 
-    /// Whether files written beneath it are synced one by one, since
-    /// reaching it does not reach them.
     pub(in crate::adapters::local_operations) fn syncs_each_file(&self) -> bool {
         self.plan.each_file
     }
 
-    /// Whether reaching it flushes anything itself, unlike on SMB, where
-    /// each file was synced as it was written.
     pub(in crate::adapters::local_operations) fn flushes(&self) -> bool {
         self.plan.sync_fs || self.plan.sync_dir
     }
@@ -174,8 +165,6 @@ impl Barrier {
         self.opened < other.opened
     }
 
-    /// Flushes the filesystem to its device; a `removable` one gets a
-    /// folder `fsync` besides.
     pub(super) fn reach(&self, fs: &dyn FsOps, removable: bool) -> Result<(), Errno> {
         if self.plan.sync_fs {
             fs.sync_fs(self.dir.as_fd())?;

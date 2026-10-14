@@ -2,10 +2,7 @@
 
 //! Copies a folder's tree on the shared work queue. Entries are made
 //! exclusively, so in a folder this copy made a taken name is a case alias,
-//! someone else's entry, or the copy's own entry whose reply was lost. Each
-//! folder gets its metadata once its last child is done. A merge builds a
-//! live folder's new children in a hidden stage inside it, and places them
-//! once they are complete.
+//! someone else's entry, or the copy's own entry whose reply was lost.
 
 use std::{
     collections::{HashMap, HashSet},
@@ -59,30 +56,22 @@ const CASEFOLD: u32 = 0x4000_0000;
 type Queue = WorkQueue<TreeJob>;
 type Completion = Option<Arc<Group<TreeJob>>>;
 
-/// What every job of one walk shares.
 pub(super) struct Tree {
     copy: Arc<Copy>,
     workers: usize,
-    /// By scope.
     restrictive: Mutex<Vec<(usize, Restrictive)>>,
     links: Links,
-    /// The next scope a merge stage takes.
     scopes: AtomicUsize,
     created: Option<Arc<Created>>,
-    /// Merge stages not yet placed and removed.
     stages: Mutex<Vec<StagedSibling>>,
-    /// Where the children a merge placed went, beneath the walk's root.
     placed: Mutex<Vec<PathBuf>>,
     nested: Mutex<Nested>,
-    /// The family of the walk's source.
     source_family: OnceLock<Family>,
 }
 
-/// The filesystems a durable merge reaches beneath its root's.
 #[derive(Default)]
 struct Nested {
     root: Option<MountKey>,
-    /// One for each, at the first folder merged there, beneath the root.
     barriers: Vec<Barrier>,
 }
 
@@ -98,7 +87,6 @@ impl Tree {
         }
     }
 
-    /// Takes the restrictive folders recorded in `scope`.
     fn take_restrictive(&self, scope: usize) -> Vec<Restrictive> {
         let mut recorded = lock(&self.restrictive);
         let (taken, kept) = std::mem::take(&mut *recorded)
@@ -108,8 +96,6 @@ impl Tree {
         taken.into_iter().map(|(_, folder)| folder).collect()
     }
 
-    /// Opens a barrier on the filesystem of the live folder `dir` at `path`,
-    /// before a durable merge writes there, unless it is the root's or has one.
     fn reach(
         &self,
         fs: &dyn FsOps,
@@ -132,19 +118,15 @@ impl Tree {
         Ok(())
     }
 
-    /// Learns the source's family from the walk's first source folder.
     fn source_in(&self, fs: &dyn FsOps, folder: BorrowedFd<'_>) {
         self.source_family
             .get_or_init(|| Mount::new(fs, folder).family);
     }
 
-    /// Whether a file's names must not be open at once, as the SMB client
-    /// takes one lease per file and refuses or stalls a second open.
     fn opens_one_name_per_file(&self) -> bool {
         self.source_family.get() == Some(&Family::Smb)
     }
 
-    /// The stage with `identity` is placed and removed, or must be kept.
     fn settle_stage(&self, identity: LocalFileIdentity) {
         lock(&self.stages).retain(|staged| staged.identity != identity);
     }
@@ -187,23 +169,15 @@ impl Job for TreeJob {
     }
 }
 
-/// What a walk leaves for the passes after it.
 pub(super) struct Walked {
-    /// Folders left open to their owner until their exact modes are set.
     pub(super) restrictive: Vec<Restrictive>,
     pub(super) links: Links,
-    /// Merge stages a stopped merge did not place.
     pub(super) stages: Vec<StagedSibling>,
-    /// Where the children a merge placed went.
     pub(super) placed: Vec<PathBuf>,
-    /// Barriers on the filesystems a durable merge reached beneath its
-    /// root's, at paths beneath the walk's root.
     pub(super) nested: Vec<Barrier>,
 }
 
-/// Runs the walk that `root` starts on `workers` threads, recording what it
-/// makes in `created`. Every descriptor the walk opened is closed when it
-/// returns.
+/// Every descriptor the walk opened is closed when it returns.
 pub(super) fn walk(
     copy: &Arc<Copy>,
     workers: usize,
@@ -242,17 +216,12 @@ pub(super) fn walk(
     (result, walked)
 }
 
-/// How the files of a made folder get their names.
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub(super) enum Naming {
-    /// Decided from the made folder itself.
     Decide,
-    /// Each file job creates its file.
     Create,
     /// The filesystem may take two names for one, so names that may collide
-    /// are claimed in byte order before their files are written. A file job
-    /// adopts a file its own lost reply left, as NFS creates are not
-    /// idempotent.
+    /// are claimed in byte order before their files are written.
     Claim,
 }
 
@@ -300,12 +269,10 @@ impl Names {
         })
     }
 
-    /// Whether a taken name may be adopted as the copy's own.
     fn adopts(&self) -> bool {
         self.made.is_some()
     }
 
-    /// One of the folder's jobs made `identity` at `name`.
     pub(super) fn made(&self, name: &OsStr, identity: LocalFileIdentity) {
         if let Some(made) = &self.made {
             lock(made)
@@ -315,9 +282,6 @@ impl Names {
         }
     }
 
-    /// Whether `identity`, found at `name`, may be an entry no other job of
-    /// the folder made. Where inode numbers are not kept, only while no
-    /// entry under a name that may collide with it was made.
     fn unclaimed(&self, name: &OsStr, identity: LocalFileIdentity) -> bool {
         let Some(made) = &self.made else {
             return false;
@@ -327,8 +291,6 @@ impl Names {
             .is_none_or(|made| self.stable_inodes && !made.contains(&identity))
     }
 
-    /// Makes with `make` the first numbered name free for `name`, and
-    /// returns that name.
     fn number<T>(
         &self,
         name: &OsStr,
@@ -355,9 +317,6 @@ impl Names {
     }
 }
 
-/// Makes the entry at `path`, beneath the walk's root, with `make`; where
-/// its name is taken, makes it under the next free numbered name and reports
-/// it saved there for `cause`. Returns the path the entry took.
 pub(super) fn make_numbered<T>(
     copy: &Copy,
     names: &Names,
@@ -378,24 +337,16 @@ pub(super) fn make_numbered<T>(
     }
 }
 
-/// A source folder and the folder this copy made for it, both opened when
-/// the job runs.
 pub(super) struct Folder {
-    /// The source's parent and name, and its identity where known.
     pub(super) source: (Arc<OwnedFd>, OsString, Option<LocalFileIdentity>),
-    /// The made folder's parent and name, and its identity.
     pub(super) target: (Arc<OwnedFd>, OsString, LocalFileIdentity),
-    /// The made folder's parent, whose setgid bit it follows.
     pub(super) parent: EntryStat,
-    /// Beneath the walk's root.
     pub(super) path: PathBuf,
     pub(super) naming: Naming,
     pub(super) mount: Mount,
-    /// Names are linked only to names of the same scope, whose restrictive
-    /// folders get their modes together: the whole made tree, or one merge
-    /// stage.
+    /// Names link only within one scope, whose restrictive folders get their
+    /// modes together: the made tree, or one merge stage.
     pub(super) scope: usize,
-    /// Where the source folder is recorded, by a move.
     pub(super) recorded_in: Option<Arc<manifest::Folder>>,
     pub(super) completion: Completion,
 }
@@ -462,9 +413,6 @@ impl Folder {
     }
 }
 
-/// A source folder's children in byte order with their types, and the
-/// names they ask for in the target. Names that FAT-like targets take for
-/// one are numbered as aliases when they are made.
 fn target_children(
     fs: &dyn FsOps,
     source: BorrowedFd<'_>,
@@ -483,32 +431,25 @@ fn target_children(
         .collect())
 }
 
-/// A target folder this copy made, while its children are made.
 struct Made {
     dir: Arc<OwnedFd>,
-    /// The folder the children land in, whose setgid bit they follow.
     stat: EntryStat,
     path: PathBuf,
     naming: Naming,
     names: Arc<Names>,
     mount: Mount,
     scope: usize,
-    /// Where the children's source folder is recorded, by a move.
     recorded: Option<Arc<manifest::Folder>>,
 }
 
-/// A source folder's child and the name it gets in the made folder.
 struct Child<'a> {
     name: &'a OsStr,
     kind: FileType,
     target_name: &'a OsStr,
-    /// The name may collide with a sibling's, so a file's name is claimed.
     claim: bool,
 }
 
 impl Made {
-    /// Makes each of `children` as a member of `group`, claiming in byte
-    /// order the names of files that may collide.
     fn make_all(
         &self,
         tree: &Arc<Tree>,
@@ -540,8 +481,6 @@ impl Made {
         Ok(())
     }
 
-    /// Makes the target of `child`: a folder, a link, or a file's claimed
-    /// name, and queues what fills it.
     fn make(
         &self,
         tree: &Arc<Tree>,
@@ -657,7 +596,6 @@ impl Made {
         Ok(())
     }
 
-    /// The source child `name` was copied as `stat` describes it.
     fn record(&self, name: &OsStr, stat: &EntryStat) {
         if let Some(folder) = &self.recorded {
             folder.entry(name, stat);
@@ -665,7 +603,6 @@ impl Made {
     }
 }
 
-/// How a special file other than a named pipe is reported.
 fn special_kind(kind: FileType) -> SpecialKind {
     if kind == FileType::Socket {
         SpecialKind::Socket
@@ -674,12 +611,10 @@ fn special_kind(kind: FileType) -> SpecialKind {
     }
 }
 
-/// The last component of a path beneath the walk's root.
 fn file_name(path: &Path) -> OsString {
     path.file_name().unwrap_or_default().to_os_string()
 }
 
-/// The folder's entries in byte order with their types.
 fn children(fs: &dyn FsOps, folder: BorrowedFd<'_>) -> Result<Vec<(OsString, FileType)>, Failure> {
     let mut children = fs.list(folder)?;
     children.sort_by(|(left, _), (right, _)| left.cmp(right));
@@ -694,8 +629,8 @@ fn children(fs: &dyn FsOps, folder: BorrowedFd<'_>) -> Result<Vec<(OsString, Fil
     Ok(children)
 }
 
-/// Whether making `entry` failed because its name is taken: sshfs reports a
-/// collision as `EPERM`, and SMB a folder in a file's way as `EISDIR`.
+/// sshfs reports a taken name as `EPERM`, and SMB a folder in a file's way
+/// as `EISDIR`.
 pub(super) fn taken(fs: &dyn FsOps, entry: Entry<'_>, error: Errno) -> bool {
     match error {
         Errno::EXIST | Errno::ISDIR => true,
@@ -704,11 +639,8 @@ pub(super) fn taken(fs: &dyn FsOps, entry: Entry<'_>, error: Errno) -> bool {
     }
 }
 
-/// The taken `entry` in a folder this copy made, with its `names`, when it
-/// is this copy's own whose reply was lost, as NFS creations are not
-/// idempotent: still as fresh as making it leaves it, not made under another
-/// name, and listed under exactly that name, which no other job of the copy
-/// tries.
+/// NFS creations are not idempotent, so a taken name may be this copy's own
+/// entry whose reply was lost.
 pub(super) fn adopt(
     fs: &dyn FsOps,
     entry: Entry<'_>,
@@ -796,7 +728,6 @@ fn claim_file(
     }
 }
 
-/// As fresh as creating a file leaves it.
 fn fresh_file(stat: &EntryStat) -> bool {
     stat.kind == FileType::RegularFile && stat.size == 0 && stat.nlink == 1
 }
@@ -808,9 +739,6 @@ pub(super) fn read_link(fs: &dyn FsOps, at: Entry<'_>) -> Result<OsString, Failu
     })
 }
 
-/// Recreates the symlink at `source` as `target`, in a folder this copy made
-/// with `names` or not, with its times, counts it with its target's length
-/// as its bytes, and returns the source's stat.
 pub(super) fn copy_link(
     copy: &Copy,
     source: Entry<'_>,
@@ -847,12 +775,8 @@ pub(super) fn copy_link(
     Ok(stat)
 }
 
-/// Recreates the named pipe at `source` as `target`, in a folder this copy
-/// made with `names` or not, with its owner, mode and times, and counts it
-/// as a file.
-/// Returns the source's stat, and what was made: `None` where the
-/// destination refuses named pipes. Reading the source's xattrs would open
-/// it, which lets a writer waiting on it go on.
+/// The source's xattrs are not copied: reading them would open it, which
+/// lets a writer waiting on it go on.
 pub(super) fn copy_fifo(
     copy: &Copy,
     source: Entry<'_>,
@@ -884,8 +808,6 @@ pub(super) fn copy_fifo(
     Ok((stat, Some(identity)))
 }
 
-/// Gives the pipe made as `identity` at `target` the owner, mode and times
-/// of the source pipe `stat` describes.
 fn finish_pipe(
     copy: &Copy,
     stat: &EntryStat,
@@ -920,21 +842,16 @@ fn refuses_pipes(error: Errno) -> bool {
     matches!(error, Errno::PERM | Errno::IO | Errno::NOSYS | Errno::INVAL) || is_unsupported(error)
 }
 
-/// A regular file copied into a folder through its own descriptor.
 pub(super) struct File {
     source: Arc<OwnedFd>,
     name: OsString,
     target: Arc<OwnedFd>,
-    /// The folder the file is made in, whose setgid bit it follows.
     parent: EntryStat,
-    /// What the folder job claimed; `None` makes the file exclusively.
     claimed: Option<LocalFileIdentity>,
     names: Arc<Names>,
     mount: Mount,
-    /// Beneath the walk's root: where it was claimed, or the name it asks for.
     path: PathBuf,
     scope: usize,
-    /// Where its source folder is recorded, by a move.
     recorded_in: Option<Arc<manifest::Folder>>,
     completion: Completion,
 }
@@ -1064,7 +981,7 @@ impl File {
             placement::remove_if_unchanged(fs, target, created.identity, AtFlags::empty());
         }
         let Some(read) = written? else {
-            // It kept changing while it was read, so it stays at the source.
+            // It kept changing while it was read.
             if let Some(folder) = &self.recorded_in {
                 folder.keep(&self.name, KeptCause::Changed);
             }
@@ -1083,7 +1000,6 @@ impl File {
     }
 }
 
-/// Opens a file this copy made earlier, for writing.
 fn open_made(fs: &dyn FsOps, target: Entry<'_>) -> Result<OwnedFd, Failure> {
     fs.open_write(target).map_err(|error| match error {
         // A pipe without a reader took the file's place.
@@ -1092,9 +1008,7 @@ fn open_made(fs: &dyn FsOps, target: Entry<'_>) -> Result<OwnedFd, Failure> {
     })
 }
 
-/// A made folder's own metadata, once its last child is done.
 pub(super) struct Finish {
-    /// The source folder's name, for errors.
     name: OsString,
     target: Arc<OwnedFd>,
     created: EntryStat,
@@ -1139,14 +1053,10 @@ impl Finish {
     }
 }
 
-/// A source folder merged into the live folder of the same name, whose own
-/// metadata is left alone.
 pub(super) struct Merged {
     pub(super) source: (Arc<OwnedFd>, OsString),
-    /// The live folder's parent and name, and its identity once seen.
     pub(super) target: (Arc<OwnedFd>, OsString, Option<LocalFileIdentity>),
     pub(super) path: PathBuf,
-    /// Where the source folder is recorded, by a move.
     pub(super) recorded_in: Option<Arc<manifest::Folder>>,
 }
 
@@ -1157,8 +1067,6 @@ impl Merged {
         }
     }
 
-    /// Merges each child folder into the live folder of the same name, and
-    /// adds every other child beside them.
     fn merge(&self, tree: &Arc<Tree>, queue: &Queue) -> Result<(), Failure> {
         let copy = &tree.copy;
         let fs = copy.fs;
@@ -1232,27 +1140,19 @@ impl Merged {
     }
 }
 
-/// A live folder a merge adds children to, and its source folder.
 struct Live {
     source: Arc<OwnedFd>,
     dir: Arc<OwnedFd>,
     stat: EntryStat,
     mount: Mount,
-    /// Beneath the walk's root.
     path: PathBuf,
-    /// What every child asks for, against which a taken name is numbered.
     names: Arc<Names>,
-    /// How the files of its stage get their names.
     naming: Naming,
-    /// The source folder's name, for errors.
     name: OsString,
-    /// Where the source folder is recorded, by a move.
     recorded: Option<Arc<manifest::Folder>>,
 }
 
 impl Live {
-    /// Builds the `new` children in a stage, except folders where the mount
-    /// cannot place one, which are made at their names.
     fn add(
         &self,
         tree: &Arc<Tree>,
@@ -1315,8 +1215,6 @@ impl Live {
         made.make_all(tree, queue, &self.source, children, &group)
     }
 
-    /// Copies the source folder `name` to `target_name`, making each entry
-    /// at its final name and removing them again if the copy fails.
     fn copy_in_place(&self, tree: &Tree, name: &OsStr, target_name: &OsStr) -> Result<(), Failure> {
         let copy = &tree.copy;
         let source = Source {
@@ -1353,19 +1251,14 @@ impl Live {
     }
 }
 
-/// Puts a merge stage's children into its live folder once all of them are
-/// complete, in byte order and never over an entry, then removes the stage.
 pub(super) struct Place {
     live: Arc<OwnedFd>,
     stage: Arc<OwnedFd>,
-    /// The stage's name in the live folder, and its identity.
     staged: (OsString, LocalFileIdentity),
-    /// The live folder, beneath the walk's root.
     path: PathBuf,
     names: Arc<Names>,
     mount: Mount,
     scope: usize,
-    /// The source folder's name, for errors.
     name: OsString,
 }
 
@@ -1435,8 +1328,6 @@ impl Place {
         self.remove_stage(tree)
     }
 
-    /// Places the staged child `name`, under the next free number where its
-    /// name was taken meanwhile, and returns where it went.
     fn place_child(
         &self,
         copy: &Arc<Copy>,
@@ -1466,8 +1357,6 @@ impl Place {
         .map(|(path, ())| path)
     }
 
-    /// Copies the staged child `name`, which the mount cannot place, to
-    /// `candidate`, then removes it from the stage.
     fn copy_out(
         &self,
         copy: &Arc<Copy>,

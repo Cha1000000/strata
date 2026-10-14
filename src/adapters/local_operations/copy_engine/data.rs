@@ -27,7 +27,6 @@ use crate::adapters::{
 
 const MIB: usize = 1 << 20;
 
-/// Learned from `ENOSYS`, for the rest of the process.
 static COPY_RANGE_MISSING: AtomicBool = AtomicBool::new(false);
 
 #[cfg(test)]
@@ -51,11 +50,9 @@ fn network(family: Family) -> Option<Network> {
     }
 }
 
-/// The kernel release tests pretend to run on, if any.
 #[cfg(test)]
 static TEST_KERNEL: std::sync::Mutex<Option<(u32, u32, u32)>> = std::sync::Mutex::new(None);
 
-/// Pretends to run on `release`, or on the real kernel with `None`.
 #[cfg(test)]
 pub(in crate::adapters::local_operations) fn set_kernel_for_test(release: Option<(u32, u32, u32)>) {
     *lock(&TEST_KERNEL) = release;
@@ -98,12 +95,9 @@ fn has_copy_fixes(network: Network) -> bool {
     }
 }
 
-/// Which steps of the ladder may run for one source and target.
 pub(super) struct Route {
     clone: bool,
-    /// The largest `copy_file_range` request, where it may run at all.
     copy_range: Option<usize>,
-    /// Whether the holes the source reports are left out of the copy.
     holes: bool,
 }
 
@@ -145,8 +139,7 @@ impl Route {
     }
 }
 
-/// Whether a file of at least 1 MiB has fewer blocks than its size, as
-/// `cp --sparse=auto` decides.
+/// As `cp --sparse=auto` decides.
 fn sparse(stat: &EntryStat) -> bool {
     stat.size >= 1 << 20 && stat.blocks.saturating_mul(512) < stat.size
 }
@@ -169,7 +162,6 @@ fn holes_unknown(error: Errno) -> bool {
     matches!(error, Errno::INVAL | Errno::OPNOTSUPP | ENOTSUPP)
 }
 
-/// The two open files of one copy, and its cancel flag.
 #[derive(Clone, Copy)]
 struct Ends<'a> {
     fs: &'a dyn FsOps,
@@ -187,11 +179,9 @@ impl Ends<'_> {
     }
 }
 
-/// Where a span of the copy stops.
 #[derive(Clone, Copy)]
 enum Until {
     At(u64),
-    /// The end of the file, expected at this offset.
     End(u64),
 }
 
@@ -205,16 +195,11 @@ impl Until {
 
 enum Ranged {
     Done,
-    /// Reads and writes continue from this offset.
     From(u64),
 }
 
-/// How far leaving out holes took the copy.
 enum Walked {
-    /// Up to the size seen at open, with the copy given that size, or the
-    /// smaller one the source has now.
     Done,
-    /// The source cannot tell its holes from here on.
     Dense(u64),
 }
 
@@ -275,8 +260,6 @@ impl Data {
         self.copy_span(ends, route, offset, Until::End(size), &mut progress)
     }
 
-    /// Copies every byte with reads and writes, and returns a digest of
-    /// what it copied.
     pub(super) fn copy_digested(
         &mut self,
         fs: &dyn FsOps,
@@ -296,8 +279,6 @@ impl Data {
         Ok(digest.finish())
     }
 
-    /// Copies the data the source reports before `size` and skips its
-    /// holes, counting them as copied.
     fn copy_data_ranges(
         &mut self,
         ends: Ends<'_>,
@@ -339,8 +320,6 @@ impl Data {
         Ok(Walked::Done)
     }
 
-    /// Copies from `offset` with `copy_file_range` where it may run, then
-    /// with reads and writes.
     fn copy_span(
         &mut self,
         ends: Ends<'_>,
@@ -421,7 +400,6 @@ impl Data {
         }
     }
 
-    /// Also digests what it copies into `digest`.
     fn read_write(
         &mut self,
         ends: Ends<'_>,

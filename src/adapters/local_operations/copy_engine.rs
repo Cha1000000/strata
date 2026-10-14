@@ -62,7 +62,6 @@ pub(super) use manifest::{now as clock_for_test, set_clock_for_test};
 use metadata::Snapshot;
 pub(super) use restrictive::Restrictive;
 
-/// Counters that workers advance and the main thread's follower reads.
 #[derive(Default)]
 pub(super) struct SharedProgress {
     bytes: AtomicU64,
@@ -78,7 +77,6 @@ impl SharedProgress {
         }
     }
 
-    /// The file a worker started since the last call.
     pub(super) fn take_current(&self) -> Option<String> {
         lock(&self.current).take()
     }
@@ -101,40 +99,28 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 pub(super) enum Destination {
-    /// A new item at this path, or under [`Taken::Number`] at the first free
-    /// numbered name beside it.
     New(PathBuf, Taken),
-    /// Into the existing folder at this path, without replacing its entries.
     Merge(PathBuf),
 }
 
 pub(super) struct Copied {
-    /// The name the new item took, or the merged folder's.
     pub name: OsString,
-    /// What the copy added to the progress it was given.
     pub reported: Reported,
-    /// What the copy took from the source, with [`Options::manifest`].
     pub manifest: Option<Manifest>,
-    /// Barriers on the other filesystems a durable merge wrote to, mounted
-    /// in the merged folder.
+    /// Barriers of the mounts nested in a durably merged folder.
     pub nested: Vec<Barrier>,
 }
 
 #[derive(Clone, Copy, Default)]
 pub(super) struct Options {
     pub fat_family: bool,
-    /// Worked out from the source and destination devices when `None`.
     pub workers: Option<usize>,
-    /// Records each source entry as the copy read it, for a move to delete
-    /// only what the copy holds. A file that changes while it is read is
-    /// read again, and left at the source if it changes again.
     pub manifest: bool,
-    /// Something only the copy will hold is deleted once its [`Barrier`]
-    /// is reached, so files that barrier cannot reach are synced as written.
+    /// What only the copy will hold is deleted once its [`Barrier`] is reached,
+    /// so files that barrier cannot reach are synced as written.
     pub durable: bool,
 }
 
-/// Copies the native item at `source`.
 pub(super) async fn copy_local(
     source: PathBuf,
     destination: Destination,
@@ -196,10 +182,6 @@ pub(super) async fn copy_local(
     }
 }
 
-/// Copies the native item at `source` into a hidden sibling of `target`,
-/// which Replace publishes, and returns it with what it took from the
-/// source with [`Options::manifest`], and what to report once it is
-/// published.
 pub(super) async fn copy_to_stage(
     source: PathBuf,
     target: PathBuf,
@@ -226,11 +208,8 @@ pub(super) async fn copy_to_stage(
     Ok((staged, followed.manifest, left_report(&root, followed.left)))
 }
 
-/// Copies the item `source` names in its pinned parent, which must still be
-/// `expected`, to the free name of `target` in its pinned parent, making each
-/// entry at its final name: for a mount that can place neither the item nor
-/// a stage. A failed copy removes only what it made. Returns what it took
-/// from the source, which it always records, and what to report about it.
+/// For a mount that can place neither the item nor a stage. A failed copy
+/// removes only what it made.
 pub(super) async fn copy_in_place(
     (source, name, expected): (Arc<OwnedFd>, OsString, LocalFileIdentity),
     (parent, target): (Arc<OwnedFd>, PathBuf),
@@ -262,7 +241,6 @@ pub(super) async fn copy_in_place(
     Ok((manifest, left_report(&target, followed.left)))
 }
 
-/// What the native item at `source` holds now, for a move that GIO copies.
 pub(super) async fn snapshot(
     source: PathBuf,
     cancellable: &gio::Cancellable,
@@ -276,9 +254,6 @@ pub(super) async fn snapshot(
     recorded.map_err(|_| io_error("Copy worker stopped unexpectedly"))?
 }
 
-/// Deletes each source entry `manifest` recorded that the source still holds
-/// as the copy read it, and returns what it found must stay, by path
-/// beneath the item's parent, with why, even when it stopped.
 pub(super) async fn delete_unchanged_sources(
     manifest: Manifest,
     unlinks: Arc<Unlinks>,
@@ -296,8 +271,6 @@ pub(super) async fn delete_unchanged_sources(
     })
 }
 
-/// Syncs each file in the trees at `paths`, which GIO wrote, for a barrier
-/// that does not reach them.
 pub(super) async fn sync_files(
     paths: Vec<PathBuf>,
     cancellable: &gio::Cancellable,
@@ -341,7 +314,6 @@ fn sync_tree(fs: &dyn FsOps, at: Entry<'_>, cancelled: &AtomicBool) -> Result<()
     Ok(())
 }
 
-/// Where a move published its copy, as `name` in `parent` is now.
 pub(super) async fn published(
     parent: Arc<OwnedFd>,
     name: OsString,
@@ -353,14 +325,11 @@ pub(super) async fn published(
     .await
 }
 
-/// A barrier at the folder `path`, which must be opened before a copy
-/// writes beneath it.
+/// Must be opened before a copy writes beneath `path`.
 pub(super) async fn barrier(path: PathBuf) -> Result<Barrier, glib::Error> {
     run_blocking(move || Barrier::open(fs(), &path)).await
 }
 
-/// Puts what was written beneath `barrier` since it was opened on its
-/// device, or tells why not.
 pub(super) async fn reach(barrier: Barrier, removable: bool) -> Result<(), String> {
     match gio::spawn_blocking(move || barrier.reach(fs(), removable)).await {
         Ok(Ok(())) => Ok(()),
@@ -369,9 +338,6 @@ pub(super) async fn reach(barrier: Barrier, removable: bool) -> Result<(), Strin
     }
 }
 
-/// What a copy run by [`following`] made or why it stopped, what it added to
-/// progress, what it left as the user would not expect, and what it took
-/// from the source.
 struct Followed<T> {
     value: Result<T, glib::Error>,
     reported: Reported,
@@ -379,16 +345,12 @@ struct Followed<T> {
     manifest: Option<Manifest>,
 }
 
-/// Entries a copy saved under other names than they asked for, and special
-/// files it left out, by path beneath the item.
 #[derive(Default)]
 struct Left {
     renamed: Vec<(PathBuf, PathBuf, RenameCause)>,
     skipped: Vec<(PathBuf, SpecialKind)>,
 }
 
-/// `path` moved with the entry at `from` to `to`, where it is that entry or
-/// beneath it.
 fn rebase(path: &mut PathBuf, from: &Path, to: &Path) {
     if let Ok(rest) = path.strip_prefix(from) {
         *path = if rest.as_os_str().is_empty() {
@@ -399,14 +361,12 @@ fn rebase(path: &mut PathBuf, from: &Path, to: &Path) {
     }
 }
 
-/// Tells `progress` what the copy left inside the item at `root`.
 fn report(progress: Option<&TransferProgressTracker>, root: &Path, left: Left) {
     if let Some(progress) = progress {
         progress.report(left_report(root, left));
     }
 }
 
-/// What the copy left inside the item at `root`.
 fn left_report(root: &Path, left: Left) -> TransferReport {
     let location = |path: PathBuf| Location::local(root.join(path));
     TransferReport {
@@ -431,14 +391,11 @@ fn left_report(root: &Path, left: Left) -> TransferReport {
     }
 }
 
-/// What a copy reads: the item at a path, or one by name in a folder
-/// pinned earlier.
 enum Item {
     Path(PathBuf),
     Pinned(Arc<OwnedFd>, OsString),
 }
 
-/// Runs `work` on a worker thread while `progress` follows it.
 async fn following<T: Send + 'static>(
     item: Item,
     options: Options,
@@ -497,7 +454,6 @@ async fn following<T: Send + 'static>(
     })
 }
 
-/// Copies `staged` to `name` beside it, where the mount cannot place the stage.
 pub(super) async fn copy_from_stage(
     staged: &StagedSibling,
     name: OsString,
@@ -530,8 +486,6 @@ pub(super) async fn copy_from_stage(
     copied.map_err(|_| io_error("Copy worker stopped unexpectedly"))?
 }
 
-/// Gives the owner back the folders a stage locked them out of, so the stage
-/// can be removed.
 pub(super) fn unlock_stage(staged: &StagedSibling) {
     if staged.restrictive.is_empty() {
         return;
@@ -549,11 +503,9 @@ pub(super) fn unlock_stage(staged: &StagedSibling) {
     }
 }
 
-/// An item to copy, by name in its pinned parent.
 struct Source {
     parent: Arc<OwnedFd>,
     name: OsString,
-    /// Where the copy records what it took from the item.
     recorded_in: Option<Arc<manifest::Folder>>,
 }
 
@@ -571,8 +523,6 @@ fn split(path: &Path) -> Result<(Arc<OwnedFd>, OsString), glib::Error> {
     Ok((Arc::new(parent), name.to_os_string()))
 }
 
-/// Runs `attempt` with each of `names` until one is not taken, trying the
-/// next only under [`Taken::Number`], and returns the name that took.
 fn first_free<T>(
     names: impl IntoIterator<Item = OsString>,
     taken: Taken,
@@ -587,18 +537,12 @@ fn first_free<T>(
     Err(Failure::Place(PlaceError::Exists))
 }
 
-/// How a new item takes its name.
 #[derive(Clone, Copy)]
 enum NewItem {
-    /// Published from a stage, or under [`Taken::Number`] at the first free
-    /// numbered name.
     Published(Taken),
-    /// Made entry by entry at its final name, from a source that must still
-    /// be this.
     InPlace(LocalFileIdentity),
 }
 
-/// Copies `source` to `name` in `parent`, and returns the name it took.
 fn copy_new(
     copy: &Arc<Copy>,
     source: &Source,
@@ -735,7 +679,6 @@ fn worker_count(source: &Source, target: &OwnedFd) -> usize {
     bounded_local_worker_count(available, rotational)
 }
 
-/// Copies the folder `source` into a fresh hidden stage in `parent`.
 fn stage_folder(
     copy: &Arc<Copy>,
     source: &Source,
@@ -760,8 +703,6 @@ fn stage_folder(
     }
 }
 
-/// Puts a folder stage at `name`, or copies it there where the mount cannot
-/// place it, and returns the name it took.
 fn publish_folder(
     copy: &Arc<Copy>,
     staged: StagedSibling,
@@ -816,7 +757,6 @@ fn publish_folder(
     Err(copy.discarding(staged, Failure::Place(PlaceError::Exists)))
 }
 
-/// The item is complete, but the stage it was copied from is left.
 fn stage_left(error: &glib::Error) -> glib::Error {
     io_error(rust_i18n::t!(
         "The item was copied, but its staging copy could not be removed: %{error}",
@@ -824,16 +764,12 @@ fn stage_left(error: &glib::Error) -> glib::Error {
     ))
 }
 
-/// A folder this copy made, which only it writes into.
 struct Root {
     parent: Arc<OwnedFd>,
     name: OsString,
     identity: LocalFileIdentity,
 }
 
-/// Copies the folder `source` into the empty folder `root`, links the later
-/// names of linked files, then gives the folders that would lock their owner
-/// out their exact modes. `created` records each entry made beneath `root`.
 fn fill(
     copy: &Arc<Copy>,
     source: &Source,
@@ -891,8 +827,6 @@ fn fill(
     Ok(restrictive)
 }
 
-/// Entries a copy made beneath a root at its final name, by path beneath
-/// it, so a failed copy removes only what it made.
 #[derive(Default)]
 struct Created(Mutex<Vec<(PathBuf, LocalFileIdentity)>>);
 
@@ -901,8 +835,6 @@ impl Created {
         lock(&self.0).push((path, identity));
     }
 
-    /// Removes each entry still as it was made, deepest first, then `root`
-    /// unless something else is left in it.
     fn remove(&self, fs: &dyn FsOps, root: &Root, family: Family) -> Result<(), glib::Error> {
         let root_entry = Entry::new(&*root.parent, &root.name);
         let Ok(dir) = fs.open_dir(root_entry) else {
@@ -954,8 +886,6 @@ impl Created {
     }
 }
 
-/// Copies the folder `source` to `name`, making each entry at its final
-/// name, and removes what it made if the copy fails.
 fn direct_folder(
     copy: &Arc<Copy>,
     source: &Source,
@@ -993,7 +923,6 @@ fn direct_folder(
         })
 }
 
-/// The item a stage holds, copied to `name` beside it.
 fn from_stage(
     copy: &Arc<Copy>,
     source: &Source,
@@ -1017,10 +946,6 @@ fn from_stage(
     }
 }
 
-/// Merges the folder `source` into the live `folder`, and returns barriers
-/// on the other filesystems a durable merge wrote to there. Only complete
-/// children appear there, and a stopped merge removes the stages it did not
-/// place.
 fn merge(
     copy: &Arc<Copy>,
     source: &Source,
@@ -1060,7 +985,6 @@ fn merge(
     Err(copy.after_cleanup(Failure::Error(error), cleanup))
 }
 
-/// Why a copy stopped.
 enum Failure {
     Cancelled,
     Os(Errno),
@@ -1086,7 +1010,6 @@ impl From<PlaceError> for Failure {
 }
 
 impl Failure {
-    /// The failure as an error about `name`, a child of the item.
     fn named(self, name: &OsStr) -> Self {
         Self::Error(self.into_error(name))
     }
@@ -1122,7 +1045,6 @@ impl Failure {
     }
 }
 
-/// The device or the connection is failing, so no step may skip the error.
 fn is_fatal(error: Errno) -> bool {
     matches!(
         error,
@@ -1139,7 +1061,6 @@ fn is_fatal(error: Errno) -> bool {
     )
 }
 
-/// Only device, handle and connection failures stop a metadata step.
 fn best_effort(result: Result<(), Errno>) -> Result<(), Errno> {
     match result {
         Err(error) if is_fatal(error) => Err(error),
@@ -1157,7 +1078,6 @@ fn stable_inodes(family: Family) -> bool {
     family != Family::Fuse
 }
 
-/// Whether `current` is still the entry recorded as `identity`.
 fn same_entry(current: &EntryStat, identity: LocalFileIdentity, family: Family) -> bool {
     if stable_inodes(family) {
         current.identity == identity
@@ -1166,7 +1086,6 @@ fn same_entry(current: &EntryStat, identity: LocalFileIdentity, family: Family) 
     }
 }
 
-/// A mount with what was learned about it, keyed as placement keys it.
 #[derive(Clone, Copy)]
 struct Mount {
     key: MountKey,
@@ -1190,8 +1109,6 @@ impl Mount {
         }
     }
 
-    /// Whether the mount holding `dir` keeps inode numbers, as its
-    /// mountinfo entry tells.
     fn keeps_inode_numbers(fs: &dyn FsOps, dir: BorrowedFd<'_>) -> bool {
         let key = fs.mount_key(dir);
         mount_capabilities(key)
@@ -1209,10 +1126,7 @@ impl Mount {
     }
 }
 
-/// Reads what mountinfo says of the mount holding `dir` once per mount: its
-/// family, whether it keeps inode numbers, and how coarse its times are;
-/// and for a `fuseblk` mount, what udev says its device holds, which tells
-/// its daemon.
+/// For `fuseblk`, udev's record of the device tells which daemon serves it.
 fn learn_mount_type(fs: &dyn FsOps, dir: BorrowedFd<'_>, key: MountKey) -> MountCapabilities {
     let mount_type = fs.mount_type(dir);
     let family = mount_type
@@ -1281,10 +1195,8 @@ fn link_tmpfile(fs: &dyn FsOps, fd: BorrowedFd<'_>, to: Entry<'_>) -> Result<(),
     }
 }
 
-/// What every worker of one copy shares.
 struct Copy {
     fs: &'static dyn FsOps,
-    /// The name errors about the item itself give.
     item: OsString,
     cancelled: Arc<AtomicBool>,
     progress: Arc<SharedProgress>,
@@ -1293,11 +1205,8 @@ struct Copy {
     counted: bool,
     fat_family: bool,
     data: Mutex<Vec<Data>>,
-    /// Names refused one by one, such as `security.*` as non-root.
     refused_xattrs: Mutex<HashSet<OsString>>,
-    /// The target refused `mknodat`, so claims create and close instead.
     nodes_refused: AtomicBool,
-    /// With [`Options::manifest`].
     recording: bool,
     durable: bool,
     left: Mutex<Left>,
@@ -1328,8 +1237,6 @@ impl Copy {
         })
     }
 
-    /// The same copy repeating bytes it already counted, from a stage that
-    /// is removed afterwards.
     fn uncounted(&self) -> Arc<Self> {
         Self::new(
             self.fs,
@@ -1344,8 +1251,6 @@ impl Copy {
         )
     }
 
-    /// A copy of a folder made at its own root beneath the item, sharing
-    /// this one's progress and cancel flag.
     fn nested(&self) -> Arc<Self> {
         let options = Options {
             fat_family: self.fat_family,
@@ -1363,7 +1268,6 @@ impl Copy {
         )
     }
 
-    /// Takes what `nested`, a copy of the folder at `path`, left.
     fn adopt(&self, nested: &Self, path: &Path) {
         let Left { renamed, skipped } = std::mem::take(&mut *lock(&nested.left));
         let mut left = lock(&self.left);
@@ -1379,7 +1283,6 @@ impl Copy {
         lock(&self.left).renamed.push((requested, saved_as, cause));
     }
 
-    /// What was left beneath the entry at `from` went with it to `to`.
     fn relocate(&self, from: &Path, to: &Path) {
         let move_beneath = |path: &mut PathBuf| {
             if path != from {
@@ -1396,7 +1299,6 @@ impl Copy {
         }
     }
 
-    /// Forgets what was left anywhere but at or beneath `paths`.
     fn keep_left_beneath(&self, paths: &[PathBuf]) {
         let kept = |path: &Path| paths.iter().any(|placed| path.starts_with(placed));
         let mut left = lock(&self.left);
@@ -1404,8 +1306,6 @@ impl Copy {
         left.skipped.retain(|(path, _)| kept(path));
     }
 
-    /// Leaves out the special file at `path`, named `name` in its source
-    /// folder; a move keeps it there, recorded in `recorded_in`.
     fn skip(
         &self,
         path: PathBuf,
@@ -1422,8 +1322,6 @@ impl Copy {
         Ok(())
     }
 
-    /// Counts a completed file, with the `bytes` it made without copying
-    /// data, unless this copy repeats one already counted.
     fn add_file(&self, bytes: u64) {
         if self.counted {
             self.progress.add_bytes(bytes);
@@ -1431,8 +1329,6 @@ impl Copy {
         }
     }
 
-    /// Syncs a file this copy wrote before it is closed, where the
-    /// destination's barrier will not reach it.
     fn sync_written(&self, fd: BorrowedFd<'_>, mount: &Mount) -> Result<(), Failure> {
         if self.durable && barrier::each_file(mount) {
             self.fs.sync_data(fd)?;
@@ -1447,7 +1343,6 @@ impl Copy {
         Ok(())
     }
 
-    /// Runs `work` with a worker's reusable data buffer.
     fn with_data<T>(&self, work: impl FnOnce(&mut Data) -> T) -> T {
         let mut data = lock(&self.data).pop().unwrap_or_default();
         let result = work(&mut data);
@@ -1455,7 +1350,6 @@ impl Copy {
         result
     }
 
-    /// Copies all of `source`, counting the bytes as progress when `counted`.
     fn copy_data(
         &self,
         data: &mut Data,
@@ -1482,8 +1376,6 @@ impl Copy {
         )
     }
 
-    /// Copies all of `source` with reads and writes, counting the bytes as
-    /// progress when `counted`, and returns a digest of what it copied.
     fn copy_digested(
         &self,
         data: &mut Data,
@@ -1505,11 +1397,9 @@ impl Copy {
         )
     }
 
-    /// Copies all of `source` into `target` and reads its metadata, and
-    /// returns that with the source as read. When recording, a source that
-    /// changed meanwhile is read once more; `None` if it changed again. A
-    /// source on a mount with coarse times, read within one of its ticks,
-    /// is copied with a digest that a move compares it with later.
+    /// When recording, a source that changed while it was read is read once
+    /// more (`None` if it changed again), and one read within a tick of its
+    /// mount's coarse times is digested for the move to compare.
     fn copy_file(
         &self,
         data: &mut Data,
@@ -1635,8 +1525,6 @@ impl Copy {
         }
     }
 
-    /// Removes a folder stage this copy made, giving its locked folders back
-    /// to the owner first.
     fn discard(&self, staged: StagedSibling) -> Result<(), glib::Error> {
         unlock_stage(&staged);
         let roots = vec![PinnedEntry {
@@ -1669,14 +1557,11 @@ impl Copy {
     }
 }
 
-/// An open source file and its snapshot from that descriptor.
 struct Opened {
     fd: SourceFd,
     stat: EntryStat,
 }
 
-/// A source file's descriptor, and on an SMB source the hold on its file,
-/// which is released only once the descriptor is closed.
 struct SourceFd {
     fd: Option<OwnedFd>,
     held: Option<OneOpen>,
@@ -1704,7 +1589,6 @@ impl Drop for SourceFd {
     }
 }
 
-/// `name` could not be opened as what it was listed as.
 fn changed(name: &OsStr, error: Errno) -> Failure {
     Failure::Error(io_error(rust_i18n::t!(
         "%{name} changed while it was being copied: %{error}",
@@ -1713,7 +1597,6 @@ fn changed(name: &OsStr, error: Errno) -> Failure {
     )))
 }
 
-/// The regular file just listed at `at`, opened without following it.
 fn open_file(fs: &dyn FsOps, at: Entry<'_>) -> Result<Opened, Failure> {
     match fs.open_source(at, true) {
         Ok(Some((fd, stat))) => Ok(Opened {
@@ -1725,8 +1608,6 @@ fn open_file(fs: &dyn FsOps, at: Entry<'_>) -> Result<Opened, Failure> {
     }
 }
 
-/// The file at `at` on an SMB source, just seen as `seen`, opened once no
-/// other copy has a name of it open.
 fn open_one_name(
     fs: &dyn FsOps,
     at: Entry<'_>,
@@ -1749,12 +1630,9 @@ fn open_one_name(
 static OPEN_ON_SMB: Mutex<BTreeSet<(u64, u64)>> = Mutex::new(BTreeSet::new());
 static OPEN_ON_SMB_CLOSED: Condvar = Condvar::new();
 
-/// A file on an SMB source that this copy has a name of open.
 struct OneOpen((u64, u64));
 
 impl OneOpen {
-    /// Waits until no other copy has a name of the file `seen` describes
-    /// open, unless the copy is cancelled meanwhile.
     fn wait(seen: &EntryStat, cancelled: &AtomicBool) -> Result<Self, Failure> {
         let key = (seen.identity.device, seen.identity.inode);
         let mut open = lock(&OPEN_ON_SMB);
@@ -1777,11 +1655,9 @@ impl Drop for OneOpen {
     }
 }
 
-/// Where a top-level file ends up.
 #[derive(Clone, Copy)]
 enum FileTarget<'a> {
     Final(&'a OsStr, Taken),
-    /// Under a hidden `.strata-replacement-*` name, left unpublished.
     Hidden,
 }
 
@@ -1794,19 +1670,16 @@ impl FileTarget<'_> {
     }
 }
 
-/// A stage this copy created, which only it may remove.
 struct Stage {
     name: OsString,
     created: EntryStat,
 }
 
-/// One top-level file copied into `dir`.
 struct FileCopy<'a> {
     copy: &'a Copy,
     dir: BorrowedFd<'a>,
     target: Mount,
     data: Data,
-    /// The source as the copy read it.
     read: Option<manifest::Read>,
 }
 
@@ -1831,8 +1704,6 @@ impl<'a> FileCopy<'a> {
         }
     }
 
-    /// The file at `at`, just seen as `seen`, opened, on an SMB source one
-    /// name of a file at a time.
     fn open(&self, at: Entry<'_>, seen: &EntryStat) -> Result<Opened, Failure> {
         let fs = self.copy.fs;
         if Mount::new(fs, at.dir).family != Family::Smb {
@@ -1841,8 +1712,6 @@ impl<'a> FileCopy<'a> {
         open_one_name(fs, at, seen, &self.copy.cancelled)
     }
 
-    /// Returns the name the copy took and its identity there, and records
-    /// the source, seen as `seen`, as read in `recorded_in`.
     fn copy_from(
         &mut self,
         at: Entry<'_>,
@@ -1883,10 +1752,6 @@ impl<'a> FileCopy<'a> {
         Ok(copied)
     }
 
-    /// Creates `name` exclusively and fills it from the file at `at`, which
-    /// must still be the one seen as `seen`, where the mount cannot place a
-    /// stage; returns its identity, and records the source as read in
-    /// `recorded_in`.
     fn in_place(
         &mut self,
         at: Entry<'_>,
@@ -1911,8 +1776,6 @@ impl<'a> FileCopy<'a> {
         Ok(identity)
     }
 
-    /// Copies `source` into `target`, or fails if it kept changing while it
-    /// was read.
     fn read_into(
         &mut self,
         source: &Opened,
@@ -2061,8 +1924,6 @@ impl<'a> FileCopy<'a> {
         Ok((fd, Stage { name, created }))
     }
 
-    /// Closes the stage and settles its times, then publishes it at a final
-    /// name; a failure discards it.
     fn finish_stage(
         &mut self,
         fd: OwnedFd,
@@ -2135,8 +1996,6 @@ impl<'a> FileCopy<'a> {
         Ok(published)
     }
 
-    /// Creates `name` exclusively and fills it from the file at `from`, which
-    /// must still be `expected`: a stage the mount cannot place.
     fn create_from(
         &mut self,
         from: Entry<'_>,
@@ -2169,9 +2028,6 @@ impl<'a> FileCopy<'a> {
         })
     }
 
-    /// Creates `name` exclusively, has `write` fill it and return the
-    /// metadata to give it, then closes it and settles its times. A file
-    /// that fails is removed.
     fn create<S: Borrow<Snapshot>>(
         &mut self,
         name: &OsStr,
@@ -2202,7 +2058,6 @@ impl<'a> FileCopy<'a> {
         filled.map(|()| created.identity)
     }
 
-    /// Removes a stage this copy created, unless something else took its name.
     fn remove_stage(&self, stage: &Stage) -> Result<(), glib::Error> {
         let fs = self.copy.fs;
         let entry = self.at(&stage.name);

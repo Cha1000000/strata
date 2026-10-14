@@ -70,7 +70,6 @@ pub(super) struct Snapshot {
 }
 
 impl Snapshot {
-    /// What `stat` says, without xattrs.
     pub(super) fn of(stat: &EntryStat) -> Self {
         Self {
             mode: stat.mode,
@@ -107,8 +106,7 @@ impl Snapshot {
         })
     }
 
-    /// `created` is the new entry as made in `parent`; inside a setgid
-    /// folder it keeps the folder's group.
+    /// Inside a setgid folder, `created` keeps the folder's group.
     pub(super) fn apply(
         &self,
         fs: &dyn FsOps,
@@ -166,7 +164,6 @@ impl Snapshot {
         Ok(restrictive.then_some(mode))
     }
 
-    /// Sets the owner and the xattrs, and returns the mode to set.
     fn owner_and_xattrs(
         &self,
         fs: &dyn FsOps,

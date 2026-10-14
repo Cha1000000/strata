@@ -37,38 +37,28 @@ use crate::{
 /// A source file by device and inode, within one scope.
 pub(super) type Key = (usize, u64, u64);
 
-/// How a name of a source file with several names is made.
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub(super) enum Role {
     /// Copied on its own, as the destination keeps no links.
     Copied,
     /// Copied, and the later names are linked to the copy.
     First,
-    /// Made by the links pass.
     Later,
 }
 
-/// A name of a source file with several names.
 pub(super) struct Name {
     pub(super) key: Key,
-    /// Beneath the walk's root.
     pub(super) path: PathBuf,
-    /// The source name, for errors.
     pub(super) source: OsString,
-    /// What the folder job claimed at `path`.
     pub(super) claimed: Option<LocalFileIdentity>,
-    /// The names of its folder.
     pub(super) names: Arc<Names>,
     pub(super) size: u64,
-    /// Recorded once made, by a move.
     pub(super) recorded: Option<Pending>,
 }
 
 #[derive(Default)]
 struct First {
-    /// Where the copy is, once it is written.
     written: Option<(PathBuf, LocalFileIdentity)>,
-    /// It kept changing while it was read, so a move leaves every name.
     torn: bool,
 }
 
@@ -86,11 +76,8 @@ pub(super) struct Links {
     probes: Mutex<HashMap<MountKey, Probe>>,
 }
 
-/// Whether a mount keeps links, where it has not learned that.
 enum Probe {
-    /// To be probed in this folder, outside the copy.
     In(Arc<OwnedFd>),
-    /// Probed by this copy, without learning anything.
     Found(bool),
 }
 
@@ -98,14 +85,13 @@ enum Probe {
 struct State {
     firsts: HashMap<Key, First>,
     later: Vec<Name>,
-    /// The folders later names land in, by scope.
     folders: HashSet<(usize, PathBuf)>,
     retimed: Vec<Retimed>,
 }
 
 impl Links {
-    /// Probes `mount`, if it must be, in `dir`: a folder of the destination
-    /// that the copy does not make, so nothing a probe leaves ends up in it.
+    /// `dir` is a destination folder the copy does not make, so nothing a probe
+    /// leaves ends up in the copy.
     pub(super) fn probe_in(&self, mount: MountKey, dir: Arc<OwnedFd>) {
         lock(&self.probes).entry(mount).or_insert(Probe::In(dir));
     }
@@ -125,7 +111,6 @@ impl Links {
         kept
     }
 
-    /// Decides how `name` is made, and records it.
     pub(super) fn role(&self, fs: &dyn FsOps, mount: &Mount, name: Name) -> Role {
         if !self.kept(fs, mount) {
             return Role::Copied;
@@ -146,22 +131,18 @@ impl Links {
         }
     }
 
-    /// The first name of `key` is written at `path`.
     pub(super) fn written(&self, key: Key, path: PathBuf, identity: LocalFileIdentity) {
         if let Some(first) = lock(&self.state).firsts.get_mut(&key) {
             first.written = Some((path, identity));
         }
     }
 
-    /// The first name of `key` kept changing while it was read.
     pub(super) fn torn(&self, key: Key) {
         if let Some(first) = lock(&self.state).firsts.get_mut(&key) {
             first.torn = true;
         }
     }
 
-    /// Keeps the times of the made folder at `path` in `scope` for after
-    /// the links pass, when a later name lands in it.
     pub(super) fn retime(
         &self,
         scope: usize,
@@ -191,10 +172,7 @@ impl Links {
         lock(&self.state).later.is_empty()
     }
 
-    /// Makes every later name of `scope` beneath `root`, the folder at
-    /// `base` beneath the walk's root, in path order, then gives the folders
-    /// they land in their times back. Runs while every folder is still open
-    /// to its owner.
+    /// Runs while every folder is still open to its owner.
     pub(super) fn make(
         &self,
         scope: usize,
@@ -261,14 +239,12 @@ impl Links {
     }
 }
 
-/// `path`, beneath the walk's root, as a path beneath `base`.
 fn beneath<'a>(base: &Path, path: &'a Path) -> Result<&'a Path, Failure> {
     path.strip_prefix(base).map_err(|_| Failure::Changed)
 }
 
-/// Links `name` to the copy at `first`, or copies that copy on the same
-/// device where the destination refuses; one refusal ends `linking`.
-/// Returns where `name` was made and what it holds.
+/// Where the destination refuses a link, copies the first copy on the same
+/// device instead, and stops linking.
 fn make(
     copy: &Copy,
     (root, base): (BorrowedFd<'_>, &Path),
@@ -332,8 +308,6 @@ fn make(
     )
 }
 
-/// Removes what the folder job claimed for `name`, whose first name kept
-/// changing while it was read, so no name of it is copied.
 fn leave(copy: &Copy, (root, base): (BorrowedFd<'_>, &Path), name: &Name) -> Result<(), Failure> {
     let (Some(claimed), Some(file_name)) = (name.claimed, name.path.file_name()) else {
         return Ok(());
@@ -351,7 +325,6 @@ fn leave(copy: &Copy, (root, base): (BorrowedFd<'_>, &Path), name: &Name) -> Res
     }
 }
 
-/// The folder holding `path` beneath `root`.
 fn parent(fs: &dyn FsOps, root: BorrowedFd<'_>, path: &Path) -> Result<OwnedFd, Errno> {
     let parent = path.parent().unwrap_or(Path::new(""));
     fs.open_dir(Entry {
