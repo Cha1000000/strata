@@ -5180,8 +5180,8 @@ fn trashed_merge_original(
 
 enum Reverted {
     Restored(TransferReport),
-    /// What the operation put in place of the original changed since, so
-    /// it stays, and so does the original in Trash.
+    /// What the operation put in place of the original may have changed
+    /// since, so it stays, and so does the original in Trash.
     Kept,
 }
 

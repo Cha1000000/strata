@@ -91,7 +91,7 @@ fn kept_line(item: &KeptItem, in_trash: bool) -> String {
         )
         .into_owned(),
         KeptCause::ReplacementChanged => rust_i18n::t!(
-            "“%{name}” changed after it replaced the original and was kept",
+            "“%{name}” was left in the Trash, as what replaced it may have changed since",
             name = name
         )
         .into_owned(),

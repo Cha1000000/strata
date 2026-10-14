@@ -551,15 +551,20 @@ the operation records it as a [move](#moves-across-filesystems) records its sour
 contents of files within a tick of coarse times. It reads such a file back only until the tick
 passes, as any later rewrite changes its times. An item has no record if a cancel stops its
 recording, or if it would take the operation's records past 100,000 entries (some 20 MB kept in
-the undo history).
-The undo first compares all of it by the same rules, and deletes it only if every entry is still as
-recorded and no folder holds an entry added since. Otherwise all of it stays, and the original
-stays in the Trash with its `.trashinfo`, reported as left there because what replaced it changed.
-An entry that changes between the comparison and its deletion still stays, though entries deleted
-before it are gone. Without a record, an original is restored only to an empty path. A merge undo
-deletes its copy before it restores the original, so an item cut off after it deleted anything
-counts as failed; one cut off while it compares counts as not attempted. A path it cannot check
-fails with that error and the original stays in the Trash.
+the undo history). The undo first compares all of it by the same rules, and deletes it only if
+every entry is still as recorded and no folder holds an entry added since. Otherwise all of it
+stays, and the original stays in the Trash with its `.trashinfo`, reported as left there because
+what replaced it may have changed. An entry that changes between the comparison and its deletion
+still stays, though entries deleted before it are gone. Without a record, an original is restored
+only to an empty path. A merge undo deletes its copy before it restores the original, so an item
+cut off after it deleted anything counts as failed; one cut off while it compares counts as not
+attempted. A path it cannot check fails with that error and the original stays in the Trash.
+
+As in a move, anything that changes an entry's change time counts as a change, even with its
+contents untouched, and an undo may come long after the operation. Renaming the item away and
+back, deleting it to the Trash and undoing that, changing its permissions or adding a hard link to
+it, as some backup tools do, all keep it. So does replacing it twice and undoing both, as undoing
+the second puts the first back by a rename.
 
 ### The completion report
 
@@ -569,7 +574,7 @@ After a transfer, Strata reports what it could not do as asked:
   each with the name the item was saved as;
 - special files left out of a copy;
 - source entries a move left behind, entries a restore left in the Trash, and originals an undo
-  left there because what replaced them changed, with the reason.
+  left there because what replaced them may have changed, with the reason.
 
 One short renamed line is shown as a notice. More are listed in an information dialog, up to eight
 lines and a count of the rest. Anything left out or left behind makes it a "Completed with errors"

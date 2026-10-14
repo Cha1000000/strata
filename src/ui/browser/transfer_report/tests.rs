@@ -198,7 +198,7 @@ fn items_left_out_or_left_behind_make_the_report_a_warning_or_follow_a_stop() {
         );
         assert_eq!(detail.contains(&*changed), in_trash_count > 0, "{row}");
         let replacement = rust_i18n::t!(
-            "“%{name}” changed after it replaced the original and was kept",
+            "“%{name}” was left in the Trash, as what replaced it may have changed since",
             name = "data"
         );
         assert_eq!(detail.contains(&*replacement), in_trash_count > 0, "{row}");

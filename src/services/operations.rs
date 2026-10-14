@@ -333,7 +333,7 @@ pub struct SkippedItem {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum KeptCause {
     Changed,
-    /// What replaced it changed afterwards, so undo kept that instead.
+    /// What replaced it may have changed afterwards, so undo kept that instead.
     ReplacementChanged,
     /// Deleting it failed with this OS error number.
     Undeletable(i32),
