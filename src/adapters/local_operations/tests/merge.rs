@@ -1492,9 +1492,10 @@ fn merge_undo_tolerates_created_paths_that_no_longer_exist() -> Result<(), Box<d
         staged_lookup(HashMap::new()),
     ));
 
+    // Reported as removed, so a view that still lists it drops it.
     assert!(matches!(
         events.borrow().last(),
-        Some(OperationEvent::Restored { .. })
+        Some(OperationEvent::Restored { locations, .. }) if locations == &[Location::local(&gone)]
     ));
     Ok(())
 }
