@@ -3,13 +3,14 @@
 use std::{
     io::Write,
     os::unix::fs::{FileExt, MetadataExt, PermissionsExt},
-    sync::{Mutex, OnceLock},
+    sync::{Mutex, OnceLock, atomic::Ordering},
 };
 
 use rustix::io::Errno;
 
 use super::fs_quirks::{Call, NameOpens, Op, Racer, Support, TmpfileLink};
 use super::*;
+use crate::adapters::local_operations::{bounded_local_worker_count, local_device_is_rotational};
 use crate::adapters::volume::{XattrNamespace, mount_capabilities};
 
 /// A source folder and a destination folder, each with its own quirks, so
@@ -959,9 +960,15 @@ fn selected_names_of_a_linked_file_on_an_smb_share_are_opened_one_at_a_time()
             })
         })
     };
+    let timed_out = Arc::new(AtomicBool::new(false));
+    let timer = timed_out.clone();
     let hold: Racer = Box::new(move || {
         let start = Instant::now();
-        while !both_looked_at() && start.elapsed() < Duration::from_secs(5) {
+        while !both_looked_at() {
+            if start.elapsed() > Duration::from_secs(5) {
+                timer.store(true, Ordering::Relaxed);
+                return;
+            }
             thread::sleep(Duration::from_millis(5));
         }
     });
@@ -973,6 +980,15 @@ fn selected_names_of_a_linked_file_on_an_smb_share_are_opened_one_at_a_time()
         ..Quirks::default()
     };
     let mounts = mounts(smb, |_| Quirks::default())?;
+    let folder = fs::File::open(&mounts.sources)?;
+    let rotational = thread::spawn(move || local_device_is_rotational(&folder))
+        .join()
+        .map_err(|_| "reading whether the disk is rotational")?;
+    let available = thread::available_parallelism().map_or(1, usize::from);
+    if bounded_local_worker_count(available, rotational == Some(true)) < 2 {
+        eprintln!("skipped: the bulk path copies one file at a time on this machine");
+        return Ok(());
+    }
     let _ = reader.set(Box::new(mounts.source_scope.reader()));
     fs::write(mounts.sources.join("linked-a"), patterned(1 << 20))?;
     fs::hard_link(
@@ -1001,6 +1017,10 @@ fn selected_names_of_a_linked_file_on_an_smb_share_are_opened_one_at_a_time()
         move_sources: false,
     });
 
+    assert!(
+        !timed_out.load(Ordering::Relaxed),
+        "the other linked name was never looked at while the first was open"
+    );
     for name in &names {
         assert_eq!(
             fs::read(mounts.destination.join(name))?,
@@ -1008,5 +1028,44 @@ fn selected_names_of_a_linked_file_on_an_smb_share_are_opened_one_at_a_time()
             "{name}"
         );
     }
+    Ok(())
+}
+
+#[test]
+fn a_linked_name_on_an_smb_share_swapped_before_its_open_is_not_copied()
+-> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock()?;
+    // The hold is on the file seen at the name, so it keeps no other copy
+    // off a file put there meanwhile, which may have a name open elsewhere.
+    let swapped: Arc<OnceLock<PathBuf>> = Arc::default();
+    let at = swapped.clone();
+    let swap: Racer = Box::new(move || {
+        let name = at.get().expect("the linked name");
+        let other = name.with_file_name("other");
+        fs::write(&other, b"another file").expect("write another file");
+        fs::rename(&other, name).expect("put it at the linked name");
+    });
+    let smb = Quirks {
+        mount_type: Some(("cifs", "rw")),
+        name_opens: NameOpens::OneAtATime,
+        before: vec![(Op::OpenSource, "linked-b", 0, swap)],
+        ..Quirks::default()
+    };
+    let mounts = mounts(smb, |_| Quirks::default())?;
+    let linked = mounts.sources.join("linked-b");
+    fs::write(mounts.sources.join("linked-a"), b"linked")?;
+    fs::hard_link(mounts.sources.join("linked-a"), &linked)?;
+    let _ = swapped.set(linked.clone());
+
+    let error = copy(&linked, &mounts.target()).expect_err("a swapped name is not copied");
+
+    assert_eq!(
+        error.message(),
+        rust_i18n::t!(
+            "%{name} changed while it was being copied",
+            name = "linked-b"
+        )
+    );
+    assert!(!mounts.target().exists());
     Ok(())
 }
