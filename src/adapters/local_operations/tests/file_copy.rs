@@ -1070,9 +1070,10 @@ fn a_linked_name_on_an_smb_share_swapped_before_its_open_is_not_copied()
 
 const CLOCK_START: Duration = Duration::from_secs(1_800_000_000);
 
-/// `b` names a file this machine just wrote as `a`, which the mount refuses
-/// to open by that other name for `refused_for` on the test clock.
-fn just_written_and_linked(
+/// Opens of `b` fail with `EINVAL` for `refused_for` on the test clock, as
+/// an SMB client's do for another name of a file this machine just wrote.
+/// `b` is no such name, which a real SMB mount would refuse in real time.
+fn refused_for_a_while(
     (fs_type, options): (&'static str, &'static str),
     refused_for: Duration,
     more: Quirks,
@@ -1088,8 +1089,7 @@ fn just_written_and_linked(
     )?;
     let folder = mounts.sources.join("folder");
     fs::create_dir(&folder)?;
-    fs::write(mounts.sources.join("a"), b"just written")?;
-    fs::hard_link(mounts.sources.join("a"), folder.join("b"))?;
+    fs::write(folder.join("b"), b"just written")?;
     Ok((clock, mounts, folder))
 }
 
@@ -1145,7 +1145,7 @@ fn another_name_of_a_file_just_written_on_smb_is_copied_once_the_client_closes_i
         }),
     ];
     for (row, copier) in rows {
-        let (_clock, mounts, folder) = just_written_and_linked(
+        let (_clock, mounts, folder) = refused_for_a_while(
             ("cifs", "rw"),
             Duration::from_millis(1200),
             Quirks::default(),
@@ -1211,7 +1211,7 @@ fn source_opens_are_retried_only_on_smb_and_only_for_its_close_timeout()
                 ..Quirks::default()
             },
         };
-        let (_clock, mounts, folder) = just_written_and_linked(mount, refused_for, more)?;
+        let (_clock, mounts, folder) = refused_for_a_while(mount, refused_for, more)?;
 
         let copied = copy(&folder.join("b"), &mounts.target());
 
@@ -1244,7 +1244,7 @@ fn a_copy_cancelled_while_waiting_for_an_smb_close_stops_at_once() -> Result<(),
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock()?;
     let cancellable = gio::Cancellable::new();
     let cancel = cancellable.clone();
-    let (_clock, mounts, folder) = just_written_and_linked(
+    let (_clock, mounts, folder) = refused_for_a_while(
         ("cifs", "rw"),
         Duration::from_secs(60),
         Quirks {
