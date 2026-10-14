@@ -80,10 +80,10 @@ pub use preview::{
     PreviewRequest, PreviewRequestId, SandboxedMedia, SecretString, archive_preview_tree,
 };
 pub(crate) use preview::{
-    INCORRECT_ARCHIVE_PASSWORD, archive_preview_format, content_family, has_plain_text_extension,
-    is_extensionless_dotfile, is_image_path, is_media_path, is_model,
-    is_non_executable_extensionless_dotfile, normalize_preview_text, split_archive_name,
-    supports_remote_video,
+    INCORRECT_ARCHIVE_PASSWORD, archive_preview_format, bytes_support_named_family, content_family,
+    has_plain_text_extension, is_extensionless_dotfile, is_image_path, is_media_path, is_model,
+    is_non_executable_extensionless_dotfile, looks_like_text, normalize_preview_text,
+    read_head_sample, reconcile_with_sample, split_archive_name, supports_remote_video,
 };
 pub(crate) use transfer_action::{
     CrossVolumeDropStrategy, DropActionInput, DropCommit, DropOverride, TransferKind,

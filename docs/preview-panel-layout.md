@@ -113,7 +113,14 @@ Constants live in `src/ui/preview/layout.rs` and `src/ui/preview.rs`.
   defers loading; widening the window restores it with the same selection and
   manual width. The sidebar
   collapses to a rail while a preview is present and space is short, with 24 px
-  of hysteresis so it does not flicker at the threshold. A divider position
+  of hysteresis so it does not flicker at the threshold. One rule decides the
+  rail: the preview's rule while a preview, placeholder, or reserved Columns
+  slot is present, and the window rule (the full sidebar beside one column)
+  otherwise. The header toggle, the preview tick, and the chooser all ask it, so
+  showing the sidebar opens straight into the rail instead of expanding and
+  snapping back. A change in fit compacts an expanded sidebar once; the header
+  toggle's steps or the saved compact preference override it either way (see
+  [Sidebar compact](preferences.md)). A divider position
   that a narrow window pinned is never recorded as the user's sidebar width:
   the preview is sized against the width the user chose, and the sidebar
   returns to it as soon as the content has room again.

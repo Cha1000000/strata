@@ -13,7 +13,7 @@ use crate::{
 };
 
 use super::{
-    RecentAvailability, SIDEBAR_WIDTH, SidebarState, SidebarView, TrashContents,
+    RailPolicy, RecentAvailability, SIDEBAR_WIDTH, SidebarState, SidebarView, TrashContents,
     event_changes_trash_contents, install_sidebar_file_drop, load_pinned_places,
     resolve_place_order, select_sidebar_row,
 };
@@ -186,8 +186,10 @@ impl SidebarState {
             rebuild_queued: Cell::new(false),
             scroll_restore_queued: Cell::new(false),
             rail: Cell::new(false),
+            policy: RailPolicy::default(),
             saved_width: Cell::new(None),
             update_label,
+            rail_changed: RefCell::new(None),
             keycaps: RefCell::new(Vec::new()),
             keycaps_shown: Cell::new(false),
             visible_pins: RefCell::new(Vec::new()),

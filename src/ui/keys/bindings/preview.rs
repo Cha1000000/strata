@@ -30,6 +30,7 @@ catalog! {
         TENXER_FIND_IN_PREVIEW: Binding = Binding::plain(Key::slash);
     }
     unlisted {
+        PDF_ZOOM_RESET: Binding = Binding::ctrl(Key::_0);
         MEDIA_VOLUME_STEP_UP_EQUAL: Binding = Binding::plain(Key::equal);
         FIND_IN_PREVIEW: Binding = Binding::ctrl(Key::f);
         PREVIOUS_MATCH: Binding = Binding::shift(Key::Return);

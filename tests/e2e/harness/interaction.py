@@ -309,12 +309,28 @@ class Pointer:
         self.connection.button(1, False)
         time.sleep(POINTER_GAP)
 
-    def scroll(self, at: tuple[int, int], *, clicks: int = 3, down: bool = True):
+    def scroll(
+        self,
+        at: tuple[int, int],
+        *,
+        clicks: int = 3,
+        down: bool = True,
+        modifiers: Sequence[str] = (),
+    ):
         """Turn the wheel over a point. Buttons 4 and 5 are wheel up and down."""
 
+        held = [MODIFIER_KEYSYMS[modifier.lower()] for modifier in modifiers]
         self.move_to(*at)
-        for _ in range(clicks):
-            self._tap(5 if down else 4, hold=EVENT_GAP)
+        for modifier in held:
+            self.connection.key(modifier, True)
+            time.sleep(EVENT_GAP)
+        try:
+            for _ in range(clicks):
+                self._tap(5 if down else 4, hold=EVENT_GAP)
+        finally:
+            for modifier in reversed(held):
+                self.connection.key(modifier, False)
+                time.sleep(EVENT_GAP)
 
     def park(self, bounds: Bounds) -> None:
         """Move the pointer away so hover styling does not vary between runs."""

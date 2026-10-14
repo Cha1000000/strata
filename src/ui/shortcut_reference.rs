@@ -173,13 +173,6 @@ pub(crate) fn legend_markup(hints: &[(Keys, &str)]) -> String {
         .join("   ")
 }
 
-pub(crate) fn sidebar_toggle_tooltip(tenxer: bool) -> String {
-    with_keys(
-        "Toggle sidebar (%{keys})",
-        One(if tenxer { TENXER_SIDEBAR } else { SIDEBAR }),
-    )
-}
-
 const IN_ANY_PREVIEW: &str = "%{keys} in any preview";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

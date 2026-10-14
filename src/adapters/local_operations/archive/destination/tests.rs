@@ -414,13 +414,13 @@ fn publication_without_rename_flags_never_replaces_entries() -> Result<(), Box<d
         ("directory", "docs/readme.txt", "docs", |_| Ok(()), "docs"),
         (
             "directory collision",
-            "docs/readme.txt",
-            "docs",
+            "docs-1.2/readme.txt",
+            "docs-1.2",
             |root| {
-                fs::create_dir(root.join("docs"))?;
-                fs::write(root.join("docs/keep.txt"), b"keep")
+                fs::create_dir(root.join("docs-1.2"))?;
+                fs::write(root.join("docs-1.2/keep.txt"), b"keep")
             },
-            "docs (2)",
+            "docs-1.2 (2)",
         ),
     ];
     for (label, member, root_name, create_existing, expected) in cases {

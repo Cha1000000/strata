@@ -152,7 +152,9 @@ mod column_imp {
     use super::*;
 
     #[derive(Default)]
-    pub struct ContentColumn;
+    pub struct ContentColumn {
+        pub(super) start_aligned: std::cell::Cell<bool>,
+    }
 
     #[glib::object_subclass]
     impl ObjectSubclass for ContentColumn {
@@ -200,13 +202,12 @@ mod column_imp {
             for child in laid_out_children(widget) {
                 let child_width = column_width(&child, width);
                 let height = child.measure(gtk::Orientation::Vertical, child_width).1;
-                allocate_at(
-                    &child,
-                    child_width,
-                    height,
-                    (width - child_width).max(0) / 2,
-                    y,
-                );
+                let x = if self.start_aligned.get() {
+                    0
+                } else {
+                    (width - child_width).max(0) / 2
+                };
+                allocate_at(&child, child_width, height, x, y);
                 y += height;
             }
         }
@@ -220,6 +221,14 @@ glib::wrapper! {
 impl ContentColumn {
     pub(in crate::ui) fn new() -> Self {
         glib::Object::new()
+    }
+
+    /// Unwrapped rows can be wider than the viewport; centring each one in
+    /// the widest row's width would scatter them, so they share a left edge.
+    pub(in crate::ui) fn set_start_aligned(&self, start_aligned: bool) {
+        if self.imp().start_aligned.replace(start_aligned) != start_aligned {
+            self.layout_changed();
+        }
     }
 }
 

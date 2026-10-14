@@ -275,6 +275,7 @@ fn virtual_preview(
                 document_tags_for_bind.as_ref(),
             )
         };
+        align_document_row(&row, state_for_bind.wrapped.get());
         if !source && let Some(view) = bound.view.upgrade() {
             if let PreviewUnit::Document(unit) = unit {
                 bind_inline_math(&view, unit, index, &state_for_bind.media_cache);
@@ -490,10 +491,15 @@ impl VirtualPreviewState {
             match self.units.get(*index) {
                 Some(PreviewUnit::Document(_)) => {
                     view.set_wrap_mode(document_wrap_mode(wrapped));
-                    let width = view.width();
-                    if width > 0 {
-                        size_document_text_view(&view, width);
+                    if wrapped {
+                        view.set_width_request(-1);
                     }
+                    // GTK reports the previous mode's height until the view has
+                    // been allocated and revalidated in the new one.
+                    view.add_tick_callback(|view, _| {
+                        schedule_document_view_size(view, view.width());
+                        glib::ControlFlow::Break
+                    });
                 }
                 Some(PreviewUnit::Source(unit)) => {
                     apply_source_view_wrap(&view, &normalize_preview_text(&unit.display), wrapped);
@@ -501,9 +507,19 @@ impl VirtualPreviewState {
                 None => {}
             }
             if let Some(row) = bound.root.upgrade() {
+                align_document_row(&row, wrapped);
                 row.queue_resize();
             }
         }
+    }
+}
+
+fn align_document_row(row: &gtk::Box, wrapped: bool) {
+    if let Some(column) = row
+        .layout_manager()
+        .and_downcast::<super::preview::media_layout::ContentColumn>()
+    {
+        column.set_start_aligned(!wrapped);
     }
 }
 
@@ -754,11 +770,38 @@ pub(super) fn schedule_document_view_size(
 
 fn size_document_text_view(view: &super::document_view::DocumentTextView, width: i32) {
     view.set_height_request(-1);
+    // Unwrapped lines must widen the list, or the scroller has nothing to scroll.
+    let width = if view.wrap_mode() == gtk::WrapMode::None {
+        let unwrapped = unwrapped_document_width(view);
+        view.set_width_request(unwrapped);
+        width.max(unwrapped)
+    } else {
+        view.set_width_request(-1);
+        width
+    };
     let (minimum, natural, _, _) = view.measure(
         gtk::Orientation::Vertical,
         if width > 0 { width } else { -1 },
     );
     view.set_height_request(minimum.max(natural));
+}
+
+fn unwrapped_document_width(view: &super::document_view::DocumentTextView) -> i32 {
+    let buffer = view.buffer();
+    let mut line = buffer.start_iter();
+    let mut widest = 0;
+    loop {
+        let mut end = line;
+        if !end.ends_line() {
+            end.forward_to_line_end();
+        }
+        let location = view.iter_location(&end);
+        widest = widest.max(location.x() + location.width());
+        if !line.forward_line() {
+            break;
+        }
+    }
+    widest + view.right_margin()
 }
 
 fn source_line_numbers_view(unit: &SourceUnit) -> gtk::TextView {

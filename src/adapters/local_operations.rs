@@ -1669,16 +1669,24 @@ impl CreatedCopyRoot {
     }
 }
 
-/// The synchronous call reports a folder it made even if the copy is
-/// cancelled meanwhile, where `make_directory_async` reports only the cancel
-/// and the folder would be left behind.
+/// The folder is made without the copy's cancellable: GIO and GVfs can report
+/// a cancel after making it, which would leave it behind.
 async fn make_copy_folder(
     target: &gio::File,
     cancellable: &gio::Cancellable,
     created_root: &Option<Rc<CreatedCopyRoot>>,
 ) -> Result<(), glib::Error> {
-    let (folder, cancellable) = (target.clone(), cancellable.clone());
-    run_blocking(move || folder.make_directory(Some(&cancellable))).await?;
+    cancellable.set_error_if_cancelled()?;
+    let folder = target.clone();
+    run_blocking(move || folder.make_directory(gio::Cancellable::NONE))
+        .await
+        .map_err(|error| {
+            if cancellable.is_cancelled() {
+                cancelled_local_operation()
+            } else {
+                error
+            }
+        })?;
     if let Some(created_root) = created_root {
         created_root.was_created.set(true);
         created_root

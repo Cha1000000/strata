@@ -51,6 +51,13 @@ fn comic_and_epub_selections_are_quick_preview_targets() {
 }
 
 #[test]
+fn ambiguous_names_are_quick_preview_targets_for_the_loader_to_resolve() {
+    for name in ["app.ts", "module.mts", "notes.zig"] {
+        assert!(preview_target(Some(entry(name))).is_some(), "{name}");
+    }
+}
+
+#[test]
 fn model_progress_and_theme_reloads_follow_the_current_request_in_each_drawer() {
     crate::test_support::gtk_test(
         "ui::preview::tests::model_progress_and_theme_reloads_follow_the_current_request_in_each_drawer",

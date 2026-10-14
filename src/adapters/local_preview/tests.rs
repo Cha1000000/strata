@@ -805,6 +805,153 @@ fn text_subclassed_names_resolve_their_preview_from_the_type_hierarchy() {
     }
 }
 
+#[derive(Debug, PartialEq)]
+enum Resolved {
+    Text(String),
+    Image,
+    Pdf,
+    Unsupported,
+}
+
+#[test]
+fn preview_families_follow_file_bytes_not_names() {
+    use crate::{
+        model::{EntryKind, FileEntry, Location, MetadataValue},
+        services::PreviewRequestId,
+    };
+
+    let _main_context = crate::test_support::ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .expect("main context lock");
+    let directory = tempfile::tempdir().expect("preview fixture directory");
+    let provider = LocalPreviewProvider::new(Rc::new(|| MediaPreviewBackend::Software));
+    let context = glib::MainContext::default();
+    let _owner = context.acquire().expect("main context owner");
+
+    let png = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR\0\0\0\x01\0\0\0\x01";
+    let utf16 = b"\xff\xfeh\x00i\x00\n\x00";
+    for (name, bytes, expected) in [
+        (
+            "notes.png",
+            &b"just some notes\n"[..],
+            Resolved::Text("just some notes\n".into()),
+        ),
+        (
+            "clip.mp4",
+            &b"not a movie\n"[..],
+            Resolved::Text("not a movie\n".into()),
+        ),
+        (
+            "app.ts",
+            &b"const x = 1;\n"[..],
+            Resolved::Text("const x = 1;\n".into()),
+        ),
+        (
+            "backup.zip",
+            &b"not an archive\n"[..],
+            Resolved::Text("not an archive\n".into()),
+        ),
+        (
+            "report.docx",
+            &b"not a document\n"[..],
+            Resolved::Text("not a document\n".into()),
+        ),
+        (
+            "App.tsx",
+            &b"<div />\n"[..],
+            Resolved::Text("<div />\n".into()),
+        ),
+        ("README.md", &png[..], Resolved::Image),
+        ("photo.txt", &png[..], Resolved::Image),
+        (
+            "paper.txt",
+            &b"%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\nendobj\n"[..],
+            Resolved::Pdf,
+        ),
+        (
+            "icon.svg",
+            &b"<svg xmlns=\"http://www.w3.org/2000/svg\"/>"[..],
+            Resolved::Image,
+        ),
+        (
+            "data.json",
+            &[0u8, 159, 146, 150, 0, 255, 0, 1][..],
+            Resolved::Unsupported,
+        ),
+        ("wide.txt", &utf16[..], Resolved::Text("hi\n".into())),
+    ] {
+        let path = directory.path().join(name);
+        fs::write(&path, bytes).expect("preview fixture");
+        let request = PreviewRequest {
+            id: PreviewRequestId(1),
+            entry: FileEntry {
+                location: Location::local(&path),
+                thumbnail_path: None,
+                native_name: name.into(),
+                display_name: name.into(),
+                kind: EntryKind::File,
+                size: MetadataValue::Unknown,
+                modified_unix_seconds: MetadataValue::Unknown,
+                mode: MetadataValue::Unknown,
+                image_dimensions: MetadataValue::Unknown,
+                child_count: MetadataValue::Unknown,
+                duration_seconds: MetadataValue::Unknown,
+                recent_unix_seconds: MetadataValue::Unknown,
+                is_hidden: false,
+                recent_uri: None,
+            },
+            text_byte_limit: 1024,
+            render_document: true,
+            pdf_page: 0,
+            media_size: MediaPreviewSize::new(640, 800),
+            model_palette: crate::services::ModelPalette::default(),
+            archive_password: None,
+        };
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let events_for_emit = events.clone();
+        let _handle = provider.load_with_renderer(
+            request,
+            Rc::new(move |event| events_for_emit.borrow_mut().push(event)),
+            move |_, operation, _, _, _| {
+                assert!(
+                    matches!(
+                        operation,
+                        crate::sandbox::ParseOperation::PreviewImage
+                            | crate::sandbox::ParseOperation::PreviewPdf(_)
+                    ),
+                    "{name} reached the sandbox as {operation:?}"
+                );
+                Ok(crate::sandbox::ParseOutput {
+                    data: Vec::new(),
+                    page: 0,
+                    pages: 0,
+                    text_layer: None,
+                })
+            },
+        );
+        context.block_on(async {
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while events.borrow().is_empty() && std::time::Instant::now() < deadline {
+                glib::timeout_future(Duration::from_millis(1)).await;
+            }
+        });
+
+        let events = events.borrow();
+        assert_eq!(events.len(), 1, "{name}");
+        let PreviewEvent::Ready(preview) = &events[0] else {
+            panic!("{name} preview failed: {:?}", events[0]);
+        };
+        let resolved = match &preview.content {
+            PreviewContent::Text { content, .. } => Resolved::Text(content.clone()),
+            PreviewContent::Rasterized { .. } => Resolved::Image,
+            PreviewContent::Pdf { .. } => Resolved::Pdf,
+            PreviewContent::Unsupported => Resolved::Unsupported,
+            other => panic!("{name} resolved to {other:?}"),
+        };
+        assert_eq!(resolved, expected, "{name}");
+    }
+}
+
 #[test]
 fn archives_list_member_trees_as_preview_content() {
     crate::test_support::gtk_test(
@@ -1058,7 +1205,8 @@ fn corrupt_archives_report_a_failed_preview() {
         || {
             let directory = tempfile::tempdir().expect("preview fixture directory");
             let path = directory.path().join("fake.zip");
-            fs::write(&path, b"not a zip archive").expect("write corrupt fixture");
+            fs::write(&path, b"PK\x03\x04\0\0\0\0not a zip archive")
+                .expect("write corrupt fixture");
             let events = preview_archive(&path, "fake.zip");
             assert_eq!(events.len(), 1);
             let PreviewEvent::Failed { message, .. } = &events[0] else {
@@ -1233,7 +1381,7 @@ fn unsupported_archive_preview_reports_unsupported_format() {
 
             let directory = tempfile::tempdir().expect("preview fixture directory");
             let path = directory.path().join("sample.zip");
-            fs::write(&path, b"placeholder").expect("write placeholder");
+            fs::write(&path, b"PK\x03\x04\0\0\0\0placeholder").expect("write placeholder");
             let request = PreviewRequest {
                 id: PreviewRequestId(1),
                 entry: FileEntry {

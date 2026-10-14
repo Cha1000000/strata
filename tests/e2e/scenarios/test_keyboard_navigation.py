@@ -192,10 +192,16 @@ def test_tenxer_sidebar_and_header_round_trips(strata):
 
         strata.keyboard.press("Tab")
         strata.wait(lambda: toggle.has_state("focused"), "Tab to return to the sidebar toggle")
+        # The toggle steps full -> rail -> hidden; the rail keeps the Home row.
+        strata.keyboard.press("space")
+        strata.wait(
+            lambda: strata.window.find(role="button", name="Home") is not None,
+            "Space on the header toggle to compact the sidebar",
+        )
         strata.keyboard.press("space")
         strata.wait(
             lambda: strata.window.find(role="button", name="Home") is None,
-            "Space on the header toggle to hide the sidebar",
+            "Space again on the header toggle to hide the sidebar",
         )
         strata.keyboard.press("ctrl+shift+b")
         assert strata.window.find(role="button", name="Home") is None

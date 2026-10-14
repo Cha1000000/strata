@@ -14,8 +14,8 @@ use crate::ui::{
         bindings::{
             DOWN, FIRST_ITEM, LAST_ITEM, LEFT, MEDIA_SEEK_BACK_PAGE, MEDIA_SEEK_FORWARD_PAGE,
             MEDIA_SEEK_START, MEDIA_VOLUME_STEP_DOWN, MEDIA_VOLUME_STEP_UP,
-            MEDIA_VOLUME_STEP_UP_EQUAL, PAGE_DOWN, PAGE_UP, RIGHT, SPACE, TENXER_LAST_ITEM,
-            TENXER_MEDIA_MUTE, TENXER_MEDIA_NEXT, TENXER_MEDIA_PREVIOUS, UP,
+            MEDIA_VOLUME_STEP_UP_EQUAL, PAGE_DOWN, PAGE_UP, PDF_ZOOM_RESET, RIGHT, SPACE,
+            TENXER_LAST_ITEM, TENXER_MEDIA_MUTE, TENXER_MEDIA_NEXT, TENXER_MEDIA_PREVIOUS, UP,
         },
     },
 };
@@ -156,6 +156,19 @@ pub(super) fn step_preview_volume(delta: f64) {
 }
 
 impl PreviewDrawer {
+    pub(in crate::ui) fn reset_pdf_zoom(&self, press: &KeyPress) -> bool {
+        press.is(PDF_ZOOM_RESET)
+            && self
+                .state
+                .pane
+                .root()
+                .and_then(|root| root.focus())
+                .is_some_and(|focused| {
+                    self.owns_focus(Some(&focused))
+                        && focused.activate_action("pdf.reset-zoom", None).is_ok()
+                })
+    }
+
     /// The browser whose Miller columns yield their keyboard-destination bar
     /// while the drawer owns the keys.
     pub(in crate::ui) fn bind_keyboard_view(&self, view: &BrowserView) {

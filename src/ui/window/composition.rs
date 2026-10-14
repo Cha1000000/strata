@@ -41,7 +41,7 @@ impl WindowContent {
         let preview = layout::preview(&browser, preferences);
         let header = layout::Header::new(window, &browser, &preview, preferences);
         let sidebar = super::build_sidebar(browser.clone(), preferences.clone(), false);
-        let root = layout::browser_layout(&browser, &preview, &sidebar, &header);
+        let root = layout::browser_layout(&browser, &preview, &sidebar, &header, preferences);
         let footer = layout::FooterBinding::new(window, &root, &browser, preferences);
         input::install_mouse_history(&root, &browser);
         crate::ui::scrolling::install_autoscroll_stop(&root);
@@ -107,7 +107,7 @@ impl WindowContent {
         let top_bar = crate::ui::top_bar_navigation::TopBarNavigation::new(
             &self.header.content,
             &self.sidebar.widget,
-            &self.header.sidebar_toggle,
+            self.header.sidebar_toggle.upcast_ref(),
         );
         let controllers = keyboard::install_on(
             window,
@@ -156,7 +156,7 @@ impl WindowContent {
 
     #[cfg(test)]
     pub(super) fn sidebar_toggle(&self) -> &gtk::ToggleButton {
-        &self.header.sidebar_toggle
+        self.header.sidebar_toggle.upcast_ref()
     }
 
     #[cfg(test)]

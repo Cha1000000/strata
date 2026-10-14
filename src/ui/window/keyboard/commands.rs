@@ -156,7 +156,7 @@ impl Dispatcher {
             .press
             .is(if tenxer { TENXER_SIDEBAR } else { SIDEBAR })
         {
-            toggle.set_active(!toggle.is_active());
+            toggle.emit_clicked();
             return Some(Propagation::Stop);
         }
         None

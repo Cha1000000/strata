@@ -93,6 +93,10 @@ fn media_families_split_audio_and_video_and_skip_gifs() {
     ] {
         assert_eq!(entry_family(&entry(name)), None, "{name}");
     }
+
+    let mut not_really_media = entry("clip.mp4");
+    not_really_media.duration_seconds = MetadataValue::Unavailable;
+    assert_eq!(entry_family(&not_really_media), None);
 }
 
 #[test]

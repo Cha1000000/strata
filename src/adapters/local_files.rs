@@ -26,8 +26,9 @@ use crate::{
     services::{
         DirectoryChange, DirectoryEvent, DirectoryRequest, FileSource, LoadHandle,
         LocationIdentity, LocationValidationError, MetadataOutcome, MetadataRequest,
-        MetadataUpdate, RequestId, backend_unavailable_message, is_hidden_name, is_image_path,
-        is_media_path, native_hidden_names, native_kind, sanitize_failure_message,
+        MetadataUpdate, RequestId, backend_unavailable_message, bytes_support_named_family,
+        is_hidden_name, is_image_path, is_media_path, native_hidden_names, native_kind,
+        sanitize_failure_message,
     },
 };
 
@@ -1859,8 +1860,9 @@ fn fill_icon_details_with_probe(
     if cancellable.is_cancelled() || Instant::now() >= deadline {
         return false;
     }
-    let needs_metadata =
-        info.file_type() == gio::FileType::Regular && (is_image_path(path) || is_media_path(path));
+    let needs_metadata = info.file_type() == gio::FileType::Regular
+        && (is_image_path(path) || is_media_path(path))
+        && bytes_support_named_family(path);
     if needs_metadata {
         #[cfg(test)]
         if let Ok(mut counts) = media_metadata_probe_counts().lock() {

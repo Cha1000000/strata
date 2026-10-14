@@ -7,7 +7,8 @@ use crate::ui::{
     browser::{BrowserView, COLUMN_WIDTH, WeakBrowserView},
     browser_modes::BrowserMode,
     window::{
-        MIN_SIDEBAR_WIDTH, SidebarState, SidebarView, preferred_sidebar_width, sidebar_rail_width,
+        MIN_SIDEBAR_WIDTH, SidebarFit, SidebarState, SidebarView, preferred_sidebar_width,
+        sidebar_fits_without_preview, sidebar_rail_width,
     },
 };
 
@@ -31,7 +32,6 @@ pub(super) struct SplitSizing {
     suspended: Cell<bool>,
     resume_media: Cell<bool>,
     reload_on_resume: Cell<bool>,
-    sidebar_railed: Cell<bool>,
     sidebar_saved_width: Cell<i32>,
 }
 
@@ -77,6 +77,15 @@ struct BrowserBinding {
     content: glib::WeakRef<gtk::Paned>,
     browser: WeakBrowserView,
     sidebar: Option<Weak<SidebarState>>,
+}
+
+/// The preview's judgement of the sidebar beside its own needs.
+struct SidebarAssessment {
+    /// `None` until the window has a width; a zero width is unknown, not short.
+    fit: Option<SidebarFit>,
+    saved_width: i32,
+    /// A narrow window, not the user, pinned the divider where it is.
+    squeezed: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -191,7 +200,6 @@ impl PreviewDrawer {
                 state.refresh_panel_action();
                 if !state.is_enabled() && !state.reserves_column_space() {
                     state.hide_panel();
-                    state.release_sidebar_rail();
                 }
             }
         });
@@ -241,6 +249,9 @@ impl PreviewDrawer {
             state.publish_column_width_limit(split);
             if state.is_enabled() || state.reserves_column_space() {
                 state.sync_split(split);
+            }
+            if !state.preview_present() {
+                state.sync_sidebar_without_preview();
             }
             glib::ControlFlow::Continue
         });
@@ -434,44 +445,123 @@ impl PreviewState {
         self.revealer.set_reveal_child(true);
     }
 
-    pub(super) fn release_sidebar_rail(&self) {
-        if !self.sizing.sidebar_railed.replace(false) {
+    /// A preview, a reserved placeholder, or Columns' reserved slot takes part
+    /// in the sidebar fit rule; otherwise the window-only rule applies.
+    pub(super) fn preview_present(&self) -> bool {
+        self.current.borrow().is_some()
+            || self.reserves_empty_preview()
+            || self.reserves_column_space()
+    }
+
+    pub(super) fn sync_sidebar_without_preview(&self) {
+        let binding = self.sizing.binding.borrow();
+        let Some(binding) = binding.as_ref() else {
             return;
+        };
+        let (Some(content), Some(sidebar)) = (
+            binding.content.upgrade(),
+            binding.sidebar.as_ref().and_then(Weak::upgrade),
+        ) else {
+            return;
+        };
+        let Some(fits) = sidebar_fits_without_preview(&content) else {
+            return;
+        };
+        if let Some(rail) = sidebar.observe_fit(SidebarFit {
+            fits,
+            preview: false,
+        }) {
+            sidebar.apply_rail(rail);
         }
-        if let Some(binding) = self.sizing.binding.borrow().as_ref()
-            && let Some(content) = binding.content.upgrade()
-        {
-            let available = content
-                .root()
-                .map_or_else(|| content.width(), |r| r.width());
-            let needs_full = preferred_sidebar_width() + COLUMN_WIDTH + 1;
-            let keep_railed = available > 0 && available < needs_full;
-            let sidebar = binding.sidebar.as_ref().and_then(Weak::upgrade);
-            if let Some(sidebar) = sidebar.as_ref() {
-                sidebar.set_rail(keep_railed);
-            }
-            if content
-                .start_child()
-                .is_some_and(|sidebar| sidebar.get_visible())
-            {
-                if keep_railed {
-                    content.set_position(sidebar_rail_width());
+    }
+
+    pub(super) fn sidebar_fit(&self, content: &gtk::Paned) -> Option<SidebarFit> {
+        if !self.preview_present() {
+            return sidebar_fits_without_preview(content).map(|fits| SidebarFit {
+                fits,
+                preview: false,
+            });
+        }
+        let split = self.split.borrow().clone()?;
+        let binding = self.sizing.binding.borrow();
+        let sidebar = binding
+            .as_ref()
+            .and_then(|binding| binding.sidebar.as_ref())
+            .and_then(Weak::upgrade);
+        let geometry = self.geometry(&split);
+        self.assess_sidebar(&split, content, sidebar.as_ref(), geometry)
+            .fit
+    }
+
+    fn assess_sidebar(
+        &self,
+        split: &gtk::Paned,
+        content: &gtk::Paned,
+        sidebar: Option<&Rc<SidebarState>>,
+        geometry: Geometry,
+    ) -> SidebarAssessment {
+        let visible = content
+            .start_child()
+            .is_some_and(|sidebar| sidebar.get_visible());
+        let is_railed = sidebar.is_some_and(|sidebar| sidebar.rail.get());
+        let saved_width = sidebar
+            .and_then(|sidebar| sidebar.saved_width.get())
+            .unwrap_or_else(|| {
+                let saved = self.sizing.sidebar_saved_width.get();
+                if saved > 0 {
+                    saved
                 } else {
-                    let restore = sidebar
-                        .as_ref()
-                        .and_then(|s| s.saved_width.get())
-                        .unwrap_or_else(|| {
-                            let saved = self.sizing.sidebar_saved_width.get();
-                            if saved > 0 {
-                                saved
-                            } else {
-                                preferred_sidebar_width()
-                            }
-                        })
-                        .max(MIN_SIDEBAR_WIDTH);
-                    content.set_position(restore);
+                    preferred_sidebar_width()
                 }
+            })
+            .max(MIN_SIDEBAR_WIDTH);
+        let full = if sidebar.is_none() {
+            0
+        } else if is_railed || !visible {
+            saved_width.max(preferred_sidebar_width())
+        } else {
+            // A manually narrowed sidebar must not prevent railing.
+            content.position().max(preferred_sidebar_width())
+        };
+        let content_sep = separator_width(content);
+        let occupied = match self.sizing.browser() {
+            Some(browser) if geometry.columns => browser.preview_standard_navigation_width(),
+            _ => COLUMN_WIDTH,
+        };
+        // A previously clamped manual width must not defeat the preview minimum.
+        let preview_needed = self
+            .sizing
+            .manual_width
+            .get()
+            .unwrap_or(MIN_SPLIT_PREVIEW_WIDTH)
+            .max(MIN_SPLIT_PREVIEW_WIDTH);
+        let needs = full + content_sep + occupied + geometry.separator + preview_needed;
+        // Measure outside the split so railing cannot change its own threshold.
+        // The content paned is not consulted: the slot re-budgets a sidebar a
+        // frame after it shows, and a one-frame shortage would latch the rail.
+        let available = split
+            .parent()
+            .map(|parent| parent.width())
+            .filter(|width| *width > 0)
+            .or_else(|| (geometry.available > 0).then_some(geometry.available));
+        // Hysteresis prevents toggling at the threshold.
+        let wants_rail = available.map(|available| {
+            if is_railed {
+                available < needs + RAIL_RELEASE_MARGIN
+            } else {
+                available < needs
             }
+        });
+        let squeezed = visible
+            && !is_railed
+            && content.position() + content_sep + COLUMN_WIDTH >= content.width();
+        SidebarAssessment {
+            fit: wants_rail.map(|wants_rail| SidebarFit {
+                fits: !wants_rail,
+                preview: true,
+            }),
+            saved_width,
+            squeezed,
         }
     }
 
@@ -558,120 +648,55 @@ impl PreviewState {
     pub(super) fn sync_split(self: &Rc<Self>, split: &gtk::Paned) {
         let mut geometry = self.geometry(split);
         let reserved = self.reserves_column_space();
-        let preview_present =
-            self.current.borrow().is_some() || self.reserves_empty_preview() || reserved;
-        if preview_present
+        if self.preview_present()
             && let Some(binding) = self.sizing.binding.borrow().as_ref()
             && let Some(content) = binding.content.upgrade()
+            && let Some(sidebar) = binding.sidebar.as_ref().and_then(Weak::upgrade)
         {
-            let sidebar = binding.sidebar.as_ref().and_then(Weak::upgrade);
             let visible = content
                 .start_child()
                 .is_some_and(|sidebar| sidebar.get_visible());
-            let is_railed = sidebar.as_ref().is_some_and(|s| s.rail.get());
-            let saved_width = sidebar
-                .as_ref()
-                .and_then(|s| s.saved_width.get())
-                .unwrap_or_else(|| {
-                    let saved = self.sizing.sidebar_saved_width.get();
-                    if saved > 0 {
-                        saved
-                    } else {
-                        preferred_sidebar_width()
-                    }
-                })
-                .max(MIN_SIDEBAR_WIDTH);
-            let full = if sidebar.is_none() {
-                0
-            } else if is_railed || !visible {
-                saved_width.max(preferred_sidebar_width())
-            } else {
-                // A manually narrowed sidebar must not prevent railing.
-                content.position().max(preferred_sidebar_width())
-            };
-            let content_sep = separator_width(&content);
-            let resizing_columns = binding
-                .browser
-                .upgrade()
-                .is_some_and(|browser| browser.is_resizing_columns());
-            let occupied = if let Some(browser) = binding.browser.upgrade() {
-                if geometry.columns {
-                    browser.preview_standard_navigation_width()
-                } else {
-                    COLUMN_WIDTH
-                }
-            } else {
-                COLUMN_WIDTH
-            };
-            // A previously clamped manual width must not defeat the preview minimum.
-            let preview_needed = self
-                .sizing
-                .manual_width
-                .get()
-                .unwrap_or(MIN_SPLIT_PREVIEW_WIDTH)
-                .max(MIN_SPLIT_PREVIEW_WIDTH);
-            let needs = full + content_sep + occupied + geometry.separator + preview_needed;
-            let content_has_room = content.width() <= 0 || content.width() >= full + COLUMN_WIDTH;
-            // Measure outside the split so railing cannot change its own threshold.
-            let available = split
-                .parent()
-                .map(|parent| parent.width())
-                .filter(|width| *width > 0)
-                .unwrap_or(geometry.available);
-            // Hysteresis prevents toggling at the threshold.
-            let wants_rail = if is_railed {
-                available < needs + RAIL_RELEASE_MARGIN
-            } else {
-                available < needs
-            };
-            let change_applies = !resizing_columns
-                && !self.sizing.resizing.get()
-                && if wants_rail {
-                    !is_railed && sidebar.is_some()
-                } else {
-                    is_railed && content_has_room
-                };
+            let is_railed = sidebar.rail.get();
+            let resizing = self.sizing.resizing.get()
+                || binding
+                    .browser
+                    .upgrade()
+                    .is_some_and(|browser| browser.is_resizing_columns());
+            let assessment = self.assess_sidebar(split, &content, Some(&sidebar), geometry);
+            let saved_width = assessment.saved_width;
             let squeezed_room = !is_railed
                 && visible
-                && !wants_rail
-                && !resizing_columns
-                && !self.sizing.resizing.get()
+                && assessment.fit.is_some_and(|fit| fit.fits)
+                && !resizing
                 && content.position() < saved_width
-                && content.width() >= saved_width + content_sep + COLUMN_WIDTH;
+                && content.width() >= saved_width + separator_width(&content) + COLUMN_WIDTH;
             if squeezed_room {
                 content.set_position(saved_width);
                 geometry = self.geometry(split);
             }
-            if change_applies {
-                if wants_rail {
+            if !resizing
+                && let Some(fit) = assessment.fit
+                && let Some(rail) = sidebar.observe_fit(fit)
+            {
+                if rail {
                     if visible {
-                        let squeezed =
-                            content.position() + content_sep + COLUMN_WIDTH >= content.width();
-                        let width = if squeezed {
+                        let width = if assessment.squeezed {
                             saved_width
                         } else {
                             content.position().max(MIN_SIDEBAR_WIDTH)
                         };
                         self.sizing.sidebar_saved_width.set(width);
-                        if let Some(sidebar) = sidebar.as_ref() {
-                            sidebar.saved_width.set(Some(width));
-                        }
+                        sidebar.saved_width.set(Some(width));
                     }
-                    if let Some(sidebar) = sidebar.as_ref() {
-                        sidebar.set_rail(true);
-                    }
+                    sidebar.set_rail(true);
                     if visible {
                         content.set_position(sidebar_rail_width());
                     }
-                    self.sizing.sidebar_railed.set(true);
                 } else {
-                    if let Some(sidebar) = sidebar.as_ref() {
-                        sidebar.set_rail(false);
-                    }
+                    sidebar.set_rail(false);
                     if visible {
                         content.set_position(saved_width);
                     }
-                    self.sizing.sidebar_railed.set(false);
                 }
                 geometry = self.geometry(split);
             }
@@ -712,7 +737,6 @@ impl PreviewState {
                     self.hide_panel();
                 }
                 if !reserves_empty_preview {
-                    self.release_sidebar_rail();
                     self.sizing.suspended.set(false);
                 }
                 return;

@@ -2,9 +2,10 @@
 
 use super::{
     ArchiveDirectory, ArchiveFileEntry, ArchiveNode, MediaPreviewSize, PreviewContent,
-    archive_preview_format, archive_preview_tree, content_family, has_plain_text_extension,
-    is_extensionless_dotfile, is_image_path, is_media_path,
-    is_non_executable_extensionless_dotfile, normalize_preview_text,
+    archive_preview_format, archive_preview_tree, bytes_support_named_family, content_family,
+    has_plain_text_extension, is_extensionless_dotfile, is_image_path, is_media_path,
+    is_non_executable_extensionless_dotfile, looks_like_text, normalize_preview_text,
+    reconcile_with_sample,
 };
 
 #[test]
@@ -667,4 +668,157 @@ fn secret_string_exposes_its_value_explicitly() {
     let secret = super::SecretString::new("s3cret".to_owned());
     assert_eq!(secret.expose(), "s3cret");
     assert_eq!(format!("{secret:?}"), "[REDACTED]");
+}
+
+fn mpeg_ts_packets() -> Vec<u8> {
+    let mut packet = [0u8; 188];
+    packet[0] = 0x47;
+    packet.repeat(6)
+}
+
+#[test]
+fn text_detection_follows_bytes_not_names() {
+    let packets = mpeg_ts_packets();
+    for (label, bytes, text) in [
+        (
+            "utf-8 source",
+            &b"const x: number = 42;\nexport default x;\n"[..],
+            true,
+        ),
+        ("latin-1", &b"caf\xe9 au lait\n"[..], true),
+        ("utf-16 with bom", &b"\xff\xfeh\x00i\x00"[..], true),
+        ("terminal escapes", &b"\x1b[32mok\x1b[0m done\n"[..], true),
+        (
+            "a few control bytes",
+            &b"line\x01\x02\x03 one\nline two\n"[..],
+            true,
+        ),
+        ("utf-8 cut mid-sequence", &"héllo".as_bytes()[..2], true),
+        ("empty", &b""[..], true),
+        ("png", &b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR"[..], false),
+        ("mpeg transport stream", packets.as_slice(), false),
+        (
+            "non-utf-8 control soup",
+            &[0x01u8, 0xFF, 0x02, 0xFE].repeat(16)[..],
+            false,
+        ),
+    ] {
+        assert_eq!(looks_like_text(bytes), text, "{label}");
+    }
+}
+
+fn named_family(name: &str) -> (String, PreviewContent) {
+    let content_type =
+        gtk::gio::content_type_guess(Some(std::path::Path::new(name)), None::<&[u8]>)
+            .0
+            .to_string();
+    let mut content = content_family(&content_type);
+    if matches!(content, PreviewContent::Unsupported)
+        && gtk::gio::content_type_is_a(&content_type, "text/plain")
+    {
+        content = PreviewContent::Text {
+            content: String::new(),
+            truncated: false,
+        };
+    }
+    (content_type, content)
+}
+
+fn family(content: &PreviewContent) -> &'static str {
+    match content {
+        PreviewContent::Text { .. } => "text",
+        PreviewContent::Image => "image",
+        PreviewContent::Media => "media",
+        PreviewContent::Pdf { .. } => "pdf",
+        PreviewContent::Unsupported => "unsupported",
+        _ => "other",
+    }
+}
+
+#[test]
+fn preview_family_follows_bytes_when_names_disagree() {
+    let packets = mpeg_ts_packets();
+    let png = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR\0\0\0\x01\0\0\0\x01";
+    let svg = format!(
+        "<?xml version=\"1.0\"?>\n{}<svg xmlns=\"http://www.w3.org/2000/svg\"/>",
+        " ".repeat(300)
+    );
+    for (name, bytes, expected) in [
+        ("notes.png", &b"just some notes\n"[..], "text"),
+        ("clip.mp4", &b"not a movie\n"[..], "text"),
+        ("backup.zip", &b"not an archive\n"[..], "text"),
+        ("app.ts", &b"const x: number = 42;\n"[..], "text"),
+        ("App.tsx", &b"export const C = () => <div />;\n"[..], "text"),
+        ("module.mts", &b"export {};\n"[..], "text"),
+        ("photo.txt", &png[..], "image"),
+        (
+            "paper.txt",
+            &b"%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\nendobj\n"[..],
+            "pdf",
+        ),
+        ("icon.svg", svg.as_bytes(), "image"),
+        (
+            "data.json",
+            &[0u8, 159, 146, 150, 0, 255, 0, 1][..],
+            "unsupported",
+        ),
+    ] {
+        let (mut content_type, mut content) = named_family(name);
+        reconcile_with_sample(&mut content_type, &mut content, bytes);
+        assert_eq!(family(&content), expected, "{name}");
+        if expected == "text" {
+            assert!(
+                !matches!(
+                    content_family(&content_type),
+                    PreviewContent::Image | PreviewContent::Media | PreviewContent::Pdf { .. }
+                ),
+                "{name} kept visual type {content_type}"
+            );
+        }
+    }
+
+    let (mut content_type, mut content) = named_family("clip.ts");
+    reconcile_with_sample(&mut content_type, &mut content, &packets);
+    assert_ne!(
+        family(&content),
+        "text",
+        "transport stream named like source"
+    );
+}
+
+#[test]
+fn text_families_keep_the_named_type_for_highlighting() {
+    for name in ["notes.md", "page.html", "config.yaml", "query.sql"] {
+        let (named_type, mut content) = named_family(name);
+        let mut content_type = named_type.clone();
+        reconcile_with_sample(&mut content_type, &mut content, b"plain text body\n");
+        assert_eq!(content_type, named_type, "{name}");
+        assert_eq!(family(&content), "text", "{name}");
+    }
+}
+
+#[test]
+fn metadata_probes_skip_text_that_merely_shares_a_media_name() {
+    let directory = tempfile::tempdir().expect("fixture directory");
+    let png = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR\0\0\0\x01\0\0\0\x01";
+    for (name, bytes, supported) in [
+        ("clip.mp4", &b"export const x = 1;\n"[..], false),
+        ("clip.ts", &b"export const x = 1;\n"[..], false),
+        ("photo.png", &b"not pixels\n"[..], false),
+        ("photo.png", &png[..], true),
+        (
+            "icon.svg",
+            &b"<svg xmlns=\"http://www.w3.org/2000/svg\"/>"[..],
+            true,
+        ),
+        ("missing.mp4", &b""[..], true),
+    ] {
+        let path = directory.path().join(name);
+        if name == "missing.mp4" {
+            let _ = std::fs::remove_file(&path);
+        } else {
+            std::fs::write(&path, bytes).expect("fixture");
+        }
+        assert_eq!(bytes_support_named_family(&path), supported, "{name}");
+    }
 }

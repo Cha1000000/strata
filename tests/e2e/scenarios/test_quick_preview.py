@@ -646,6 +646,58 @@ def test_pdf_preview_selects_and_copies_text(strata, fixture_tree):
     assert "Hello PDF text" in table_clipboard_text(strata)
 
 
+@pytest.mark.preferences(single_click_previews=False, text_size=21)
+@pytest.mark.parametrize(("gesture", "tenxer"), [
+    pytest.param("wheel", False, marks=pytest.mark.preferences(tenxer_mode=False), id="wheel"),
+    pytest.param("reset", False, marks=pytest.mark.preferences(tenxer_mode=False), id="reset"),
+    pytest.param("reset", True, marks=pytest.mark.preferences(tenxer_mode=True), id="reset-tenxer"),
+])
+def test_pdf_zoom_keeps_interface_text_size(strata, fixture_tree, gesture, tenxer):
+    fixture_tree.path("page.pdf").write_bytes(
+        (Path(__file__).resolve().parents[2] / "fixtures" / "documents" / "text.pdf").read_bytes()
+    )
+    strata.select_entry_with_keyboard("page.pdf")
+    strata.keyboard.press("i" if tenxer else "space")
+    page = strata.wait(
+        lambda: strata.preview()
+        and strata.preview().find(role="image", name="PDF page text"),
+        "PDF page",
+    )
+    strata.settle(page)
+    saved = strata.environment.read_preferences()["text_size"]
+    fitted = page.screen_bounds().width
+
+    if gesture == "reset":
+        strata.pointer.click(page)
+    strata.pointer.scroll(page.screen_bounds().center, clicks=2, down=False, modifiers=["ctrl"])
+    strata.wait(
+        lambda: page.screen_bounds().width > fitted,
+        "Ctrl+wheel over the PDF to enlarge its pages",
+    )
+    if gesture == "reset":
+        strata.keyboard.press("ctrl+0")
+        strata.wait(
+            lambda: page.screen_bounds().width == fitted,
+            "Ctrl+0 on the focused PDF to restore the fitted page width",
+        )
+    strata.settle(page)
+    assert strata.environment.read_preferences()["text_size"] == saved
+
+    strata.pointer.click(page)
+    listing = strata.entry("page.pdf")
+    strata.pointer.scroll(listing.screen_bounds().center, clicks=2, down=False, modifiers=["ctrl"])
+    strata.wait(
+        lambda: strata.environment.read_preferences()["text_size"] == "23",
+        "wheel outside the PDF to resize interface text despite PDF keyboard focus",
+    )
+    strata.pointer.click(strata.entry("page.pdf"))
+    strata.keyboard.press("ctrl+0")
+    strata.wait(
+        lambda: strata.environment.read_preferences()["text_size"] == "13",
+        "reset outside the PDF to restore interface text size",
+    )
+
+
 def table_clipboard_text(strata, *, before_read=None):
     from gi.repository import Gdk, GLib
 

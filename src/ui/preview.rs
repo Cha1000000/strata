@@ -98,22 +98,23 @@ pub(crate) fn entry_supports_quick_preview(entry: &FileEntry) -> bool {
         return entry.location.native_path().is_some();
     }
 
+    let native_path = entry.location.native_path();
     let (content_type, uncertain) =
         gio::content_type_guess(Some(Path::new(&entry.native_name)), None::<&[u8]>);
     let content = crate::services::content_family(&content_type);
     if crate::services::table::is_workbook(&content_type, &entry.native_name)
         || crate::services::docx::is_document(&content_type, &entry.native_name)
     {
-        return entry.location.native_path().is_some();
+        return native_path.is_some();
     }
-    if entry.location.native_path().is_none()
+    if native_path.is_none()
         && (matches!(content, PreviewContent::Pdf { .. })
             || (matches!(content, PreviewContent::Media)
                 && !crate::services::supports_remote_video(&entry.native_name)))
     {
         return false;
     }
-    if entry.location.native_path().is_some()
+    if native_path.is_some()
         && crate::services::archive_preview_format(&entry.native_name).is_some()
     {
         return true;
@@ -2307,22 +2308,44 @@ impl PreviewState {
             {
                 return glib::Propagation::Proceed;
             }
-            let Some(scroll) = weak_scroll.upgrade() else {
-                return glib::Propagation::Stop;
-            };
-            let previous = zoom_for_scroll.get();
-            let next = pdf_zoom_after_scroll(previous, dy);
-            if (next - previous).abs() < f64::EPSILON {
-                return glib::Propagation::Stop;
+            if let Some(scroll) = weak_scroll.upgrade() {
+                let next = pdf_zoom_after_scroll(zoom_for_scroll.get(), dy);
+                let previous = apply_pdf_zoom(
+                    &scroll,
+                    &zoom_for_scroll,
+                    &page_width_for_scroll,
+                    &visible_pages_for_scroll.borrow(),
+                    next,
+                );
+                if let Some(previous) = previous {
+                    preserve_pdf_view_center(&scroll, next / previous);
+                }
             }
-            zoom_for_scroll.set(next);
-            let width = pdf_page_width(&scroll, next);
-            page_width_for_scroll.set(width);
-            resize_pdf_pages(&visible_pages_for_scroll.borrow(), width);
-            preserve_pdf_view_center(&scroll, next / previous);
             glib::Propagation::Stop
         });
         scroll.add_controller(zoom_scroll);
+
+        let reset = gio::SimpleAction::new("reset-zoom", None);
+        let weak_scroll = scroll.downgrade();
+        let zoom_for_reset = zoom.clone();
+        let page_width_for_reset = page_width.clone();
+        let visible_pages_for_reset = visible_pages.clone();
+        reset.connect_activate(move |_, _| {
+            let Some(scroll) = weak_scroll.upgrade() else {
+                return;
+            };
+            // No view-center correction: the list view re-anchors the visible page itself.
+            apply_pdf_zoom(
+                &scroll,
+                &zoom_for_reset,
+                &page_width_for_reset,
+                &visible_pages_for_reset.borrow(),
+                PDF_MIN_ZOOM,
+            );
+        });
+        let actions = gio::SimpleActionGroup::new();
+        actions.add_action(&reset);
+        scroll.insert_action_group("pdf", Some(&actions));
 
         scroll.set_focusable(true);
         scroll.set_cursor_from_name(Some("grab"));
@@ -3302,7 +3325,8 @@ fn media_family(content_type: &str) -> Option<MediaFamily> {
     }
 }
 
-/// Cached per extension: stepping scans whole folders on the main thread.
+/// Cached per extension: stepping scans whole folders on the main thread. An entry whose
+/// metadata probe found no media drops out of the sequence whatever its name says.
 fn entry_family(entry: &FileEntry) -> Option<MediaFamily> {
     thread_local! {
         static FAMILIES: RefCell<HashMap<String, Option<MediaFamily>>> =
@@ -3313,6 +3337,9 @@ fn entry_family(entry: &FileEntry) -> Option<MediaFamily> {
         .and_then(|extension| extension.to_str())
         .filter(|_| !entry.is_directory())
         .map(str::to_ascii_lowercase)?;
+    if entry.duration_seconds == MetadataValue::Unavailable {
+        return None;
+    }
     FAMILIES.with_borrow_mut(|known| {
         *known.entry(extension).or_insert_with_key(|extension| {
             media_family(
@@ -3785,6 +3812,23 @@ fn pdf_page_width(scroll: &gtk::ScrolledWindow, zoom: f64) -> i32 {
         .saturating_sub(PDF_PAGE_GAP * 2)
         .max(1);
     (f64::from(fit_width) * zoom).round() as i32
+}
+
+fn apply_pdf_zoom(
+    scroll: &gtk::ScrolledWindow,
+    zoom: &Cell<f64>,
+    page_width: &Cell<i32>,
+    pages: &HashMap<i32, (gtk::Overlay, gtk::Picture, gtk::DrawingArea)>,
+    next: f64,
+) -> Option<f64> {
+    let previous = zoom.replace(next);
+    if (next - previous).abs() < f64::EPSILON {
+        return None;
+    }
+    let width = pdf_page_width(scroll, next);
+    page_width.set(width);
+    resize_pdf_pages(pages, width);
+    Some(previous)
 }
 
 fn resize_pdf_pages(

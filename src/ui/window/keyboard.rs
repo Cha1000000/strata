@@ -106,7 +106,6 @@ pub(super) fn install_on(
     // reach descendant scrolled windows, killing touchpad scrolling.
     let wheel = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::VERTICAL);
     wheel.set_propagation_phase(gtk::PropagationPhase::Capture);
-    let window_for_wheel = window.downgrade();
     let zoom = Rc::new(TextZoomScroll::default());
     let wheel_root = root.as_ref().downgrade();
     wheel.connect_scroll(move |controller, _, dy| {
@@ -116,20 +115,20 @@ pub(super) fn install_on(
         {
             return Propagation::Proceed;
         }
-        let Some(window) = window_for_wheel.upgrade() else {
-            return Propagation::Proceed;
-        };
+        let modifiers = controller.current_event_state();
+        // Scroll events carry no position, so ask the seat where the pointer is.
         let target = controller
             .current_event()
-            .and_then(|event| event.position())
-            .and_then(|(x, y)| window.pick(x, y, gtk::PickFlags::DEFAULT));
-        zoom.handle(
-            &preferences,
-            controller.current_event_state(),
-            controller.unit(),
-            target,
-            dy,
-        )
+            .filter(|_| modifiers.contains(Modifiers::CONTROL_MASK))
+            .and_then(|event| {
+                let surface = event.surface()?;
+                let device = event.seat()?.pointer()?;
+                let (x, y, _) = surface.device_position(&device)?;
+                let native = gtk::Native::for_surface(&surface)?;
+                let (dx, dy) = native.surface_transform();
+                native.pick(x - dx, y - dy, gtk::PickFlags::DEFAULT)
+            });
+        zoom.handle(&preferences, modifiers, controller.unit(), target, dy)
     });
     window.add_controller(wheel.clone());
     let controllers = vec![keys.upcast(), wheel.upcast()];
@@ -683,7 +682,9 @@ impl Dispatcher {
             // Text-size shortcuts run before the chord consumer. Drop the mark
             // first, then resize, matching Ctrl+, opening Settings.
             self.shortcuts.cancel_chord();
-            preferences.set_text_size(size);
+            if !self.preview.reset_pdf_zoom(press) {
+                preferences.set_text_size(size);
+            }
             return Propagation::Stop;
         }
         if let Some(result) = self.input_owner(browser, press) {

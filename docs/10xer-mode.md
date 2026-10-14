@@ -646,8 +646,8 @@ panes. **Tab** moves from the file list to the window header. **Shift+Tab**
 stays with the files. From the footer or other chrome outside the header and
 sidebar, the next **Tab** or arrow key returns to the file list.
 
-**Ctrl+N** shows or hides the sidebar, like the header toggle, and passes
-through while the preview owns the keys. **Ctrl+B** pages up instead of
+**Ctrl+N** steps the sidebar from full to its icon rail to hidden and back,
+like the header toggle, and passes through while the preview owns the keys. **Ctrl+B** pages up instead of
 toggling it. **Ctrl+Shift+B** focuses the sidebar when it is visible; a hidden
 sidebar stays hidden. Pressing **Ctrl+Shift+B** again returns to the files.
 

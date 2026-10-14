@@ -7,12 +7,12 @@ impl PreviewDrawer {
         self.state.is_enabled()
     }
 
-    pub(in crate::ui) fn is_suspended(&self) -> bool {
-        self.state.sizing.is_suspended()
-    }
-
-    pub(in crate::ui) fn reserves_empty_preview(&self) -> bool {
-        self.state.reserves_empty_preview() || self.state.reserves_column_space()
+    /// Whether the full sidebar fits, by the rule the preview applies each frame.
+    pub(in crate::ui) fn sidebar_fit(
+        &self,
+        content: &gtk::Paned,
+    ) -> Option<crate::ui::window::SidebarFit> {
+        self.state.sidebar_fit(content)
     }
 
     pub(in crate::ui) fn action(&self) -> gio::SimpleAction {
@@ -99,7 +99,7 @@ impl PreviewState {
         } else {
             self.hide_panel();
             if !reserves_empty_preview && !self.reserves_column_space() {
-                self.release_sidebar_rail();
+                self.sync_sidebar_without_preview();
             }
         }
     }
