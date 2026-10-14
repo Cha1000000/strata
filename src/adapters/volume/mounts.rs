@@ -51,10 +51,11 @@ impl MountType {
     /// time as it is, where the mount keeps coarse times: one timestamp
     /// tick, and on sshfs also two seconds for the server's clock, which
     /// sets the time, running behind ours. A server further behind can
-    /// still hide a rewrite. `None` where a rewrite always moves the time.
+    /// still hide a rewrite. A `fuseblk` mount whose device udev cannot
+    /// tell may be exFAT. `None` where a rewrite always moves the time.
     pub(crate) fn coarse_times(&self, fuse_format: Option<FuseFormat>) -> Option<Duration> {
         match (family(&self.fs_type), self.fs_type.as_str(), fuse_format) {
-            (Family::Fat, ..) | (_, "fuseblk", Some(FuseFormat::Exfat)) => {
+            (Family::Fat, ..) | (_, "fuseblk", Some(FuseFormat::Exfat) | None) => {
                 Some(Duration::from_secs(2))
             }
             (_, "hfs" | "hfsplus", _) => Some(Duration::from_secs(1)),

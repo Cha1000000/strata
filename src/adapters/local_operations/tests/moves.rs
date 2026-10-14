@@ -1820,12 +1820,23 @@ fn files_read_within_a_coarse_time_tick_are_compared_before_their_move_deletes_t
         ctime_is_mtime: true,
         ..Quirks::vfat()
     };
-    let exfat_fuse = || Quirks {
-        mount_type: Some(("fuseblk", "rw")),
-        device_format: Some("exfat"),
-        ctime_is_mtime: true,
-        no_birth_time: true,
-        ..Quirks::default()
+    fn exfat_fuse() -> Quirks {
+        Quirks {
+            mount_type: Some(("fuseblk", "rw")),
+            device_format: Some("exfat"),
+            ctime_is_mtime: true,
+            no_birth_time: true,
+            ..Quirks::default()
+        }
+    }
+    // exfat-fuse on a device udev has no record of, or cannot read.
+    let fuseblk = || Quirks {
+        device_format: None,
+        ..exfat_fuse()
+    };
+    let udev_failed = || Quirks {
+        fail: vec![(Op::DeviceFormat, "*", 0, Errno::ACCESS)],
+        ..exfat_fuse()
     };
     let sshfs = || Quirks {
         ctime_is_mtime: true,
@@ -1859,9 +1870,23 @@ fn files_read_within_a_coarse_time_tick_are_compared_before_their_move_deletes_t
     // reads the file (on sshfs, as with a server clock behind ours), when
     // it is rewritten, and whether the deletion reads it again. Only the
     // file itself is moved where it is rewritten as it is compared.
-    let rows: [(&str, Preset, Duration, Rewrite, bool); 12] = [
+    let rows: [(&str, Preset, Duration, Rewrite, bool); 14] = [
         ("vfat", vfat, recent, Rewrite::Deleting, true),
         ("exfat-fuse", exfat_fuse, recent, Rewrite::Deleting, true),
+        (
+            "fuseblk, no record",
+            fuseblk,
+            recent,
+            Rewrite::Deleting,
+            true,
+        ),
+        (
+            "fuseblk, udev failed",
+            udev_failed,
+            recent,
+            Rewrite::Deleting,
+            true,
+        ),
         (
             "exfat-fuse, renamed over",
             exfat_fuse,
