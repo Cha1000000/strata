@@ -582,7 +582,7 @@ impl Made {
                 let (path, claimed) = if child.claim {
                     let (path, identity) =
                         make_numbered(copy, names, &path, false, alias, |name| {
-                            claim_file(copy, Entry::new(dir, name), names)
+                            claim_file(copy, Entry::new(dir, name), names, self.mount.family)
                         })?;
                     tree.made(&path, identity);
                     (path, Some(identity))
@@ -757,9 +757,16 @@ fn claim_folder(
 
 /// Claims a file's name without opening it for writing: vfat mounted with
 /// `flush` waits at every such close, and the file job opens it once more.
-fn claim_file(copy: &Copy, entry: Entry<'_>, names: &Names) -> Result<LocalFileIdentity, Failure> {
+/// On SMB, names made as nodes and looked up while other files were written
+/// left the folder's rename waiting 35 s for Samba, so they are created.
+fn claim_file(
+    copy: &Copy,
+    entry: Entry<'_>,
+    names: &Names,
+    family: Family,
+) -> Result<LocalFileIdentity, Failure> {
     let fs = copy.fs;
-    if !copy.nodes_refused.load(Ordering::Relaxed) {
+    if family != Family::Smb && !copy.nodes_refused.load(Ordering::Relaxed) {
         match fs.create_node(entry, FileType::RegularFile, Mode::from_raw_mode(0o600)) {
             Ok(()) => {
                 let identity = fs.stat(entry, false)?.identity;

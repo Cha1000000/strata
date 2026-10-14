@@ -335,29 +335,40 @@ fn only_names_that_may_collide_are_claimed() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn files_are_claimed_where_nodes_are_refused() -> Result<(), Box<dyn Error>> {
+fn files_are_claimed_by_creating_them_where_nodes_are_refused_or_on_smb()
+-> Result<(), Box<dyn Error>> {
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock()?;
-    let mounts = mounts(Quirks {
+    // A refused node is learned once per copy. On SMB, names made as nodes
+    // and looked up while other files were written left the folder's
+    // rename waiting 35 s for Samba.
+    let refused = || Quirks {
         mount_type: Some(("fuse.example", "rw")),
         node_create: Support::Rejected(Errno::NOSYS),
         ..Quirks::default()
-    })?;
-    let source = mounts.sources.join("source");
-    fs::create_dir(&source)?;
-    let files = ["a.txt", "A.txt", "a.TXT"];
-    for file in files {
-        fs::write(source.join(file), file)?;
-    }
-    let target = mounts.destination.join("target");
+    };
+    let smb = || Quirks {
+        mount_type: Some(("cifs", "rw")),
+        ..Quirks::default()
+    };
+    for (row, quirks, nodes) in [("refused", refused as Preset, 1), ("SMB", smb, 0)] {
+        let mounts = mounts(quirks())?;
+        let source = mounts.sources.join("source");
+        fs::create_dir(&source)?;
+        let files = ["a.txt", "A.txt", "a.TXT"];
+        for file in files {
+            fs::write(source.join(file), file)?;
+        }
+        let target = mounts.destination.join("target");
 
-    copy(&source, &target)?;
+        copy(&source, &target)?;
 
-    for file in files {
-        assert_eq!(fs::read_to_string(target.join(file))?, file);
+        for file in files {
+            assert_eq!(fs::read_to_string(target.join(file))?, file, "{row}");
+        }
+        let scope = &mounts.destination_scope;
+        assert_eq!(scope.count(Op::CreateNode), nodes, "{row}");
+        assert_eq!(scope.count(Op::CreateReadonly), 3, "{row}");
     }
-    let scope = &mounts.destination_scope;
-    assert_eq!(scope.count(Op::CreateNode), 1, "learned once per copy");
-    assert_eq!(scope.count(Op::CreateReadonly), 3);
     Ok(())
 }
 
