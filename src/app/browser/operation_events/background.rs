@@ -201,7 +201,6 @@ impl Browser {
                     reveal_locations: job.created.borrow().clone(),
                 };
                 completion.record_trash_undo(&event, push_background_undo);
-                let stopped = super::stopped(&event);
                 if job.copying {
                     completion.record_transfer_undo(
                         (&[], &HashMap::new(), &TransferReport::default()),
@@ -214,6 +213,7 @@ impl Browser {
                     });
                 }
                 self.refresh_unmonitored_operation_locations(context);
+                let mut report = job.report.take();
                 match event {
                     OperationEvent::Pasted { .. } => {
                         if self.last_started_operation() == Some(context.request_id)
@@ -284,6 +284,7 @@ impl Browser {
                             failed: result.failed.len(),
                             not_attempted: result.not_attempted.len(),
                             affected_locations,
+                            report: std::mem::take(&mut report),
                         });
                     }
                     OperationEvent::Failed {
@@ -295,6 +296,7 @@ impl Browser {
                         emit(BrowserEvent::OperationFailed {
                             message,
                             password_failure,
+                            report: std::mem::take(&mut report),
                         });
                     }
                     OperationEvent::TransferFailed { message, .. } => {
@@ -302,17 +304,18 @@ impl Browser {
                         emit(BrowserEvent::OperationFailed {
                             message,
                             password_failure: None,
+                            report: std::mem::take(&mut report),
                         });
                     }
                     _ => emit(BrowserEvent::OperationFailed {
                         message: "The background operation returned an unexpected result."
                             .to_owned(),
                         password_failure: None,
+                        report: std::mem::take(&mut report),
                     }),
                 }
-                let report = job.report.take();
                 if !report.is_empty() {
-                    emit(BrowserEvent::ItemsReported { report, stopped });
+                    emit(BrowserEvent::ItemsReported { report });
                 }
                 let load = job.load.take();
                 drop(load);

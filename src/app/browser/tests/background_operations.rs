@@ -373,13 +373,17 @@ fn renamed(name: &str) -> crate::services::TransferReport {
     }
 }
 
-fn reported(events: &[BrowserEvent]) -> Vec<(usize, crate::services::TransferReport, bool)> {
+fn reported(events: &[BrowserEvent]) -> Vec<(usize, &crate::services::TransferReport)> {
     events
         .iter()
         .enumerate()
         .filter_map(|(index, event)| match operation_event(event) {
-            BrowserEvent::ItemsReported { report, stopped } => {
-                Some((index, report.clone(), *stopped))
+            BrowserEvent::ItemsReported { report }
+            | BrowserEvent::OperationFailed { report, .. }
+            | BrowserEvent::OperationCancelled { report, .. }
+                if !report.is_empty() =>
+            {
+                Some((index, report))
             }
             _ => None,
         })
@@ -442,9 +446,9 @@ fn a_transfer_reports_its_items_once_after_it_ends() {
             assert_eq!(
                 reports
                     .iter()
-                    .map(|(_, report, stopped)| (report, *stopped))
+                    .map(|(_, report)| *report)
                     .collect::<Vec<_>>(),
-                [(&expected, stopped)],
+                [&expected],
                 "background: {background}"
             );
             let ended = events.iter().position(|event| {
@@ -455,7 +459,11 @@ fn a_transfer_reports_its_items_once_after_it_ends() {
                         | BrowserEvent::OperationCancelled { .. }
                 )
             });
-            assert!(ended < Some(reports[0].0), "background: {background}");
+            if stopped {
+                assert_eq!(ended, Some(reports[0].0), "background: {background}");
+            } else {
+                assert!(ended < Some(reports[0].0), "background: {background}");
+            }
         }
     }
 }

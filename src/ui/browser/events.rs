@@ -768,12 +768,12 @@ impl ViewState {
                 self.dismiss_file_operation_progress();
                 self.prune_stale_search_results();
             }
-            BrowserEvent::ItemsReported { report, stopped } => {
-                let (report, stopped) = (report.clone(), *stopped);
+            BrowserEvent::ItemsReported { report } => {
+                let report = report.clone();
                 let weak = Rc::downgrade(self);
                 self.dismiss_file_operation_progress_then(move || {
                     if let Some(state) = weak.upgrade() {
-                        state.show_transfer_report(&report, stopped);
+                        state.show_transfer_report(&report);
                     }
                 });
             }
@@ -891,6 +891,7 @@ impl ViewState {
             BrowserEvent::OperationFailed {
                 message,
                 password_failure,
+                report,
             } => {
                 self.suppress_scroll_after_drop.set(false);
                 self.drop_active_depths.set(None);
@@ -899,7 +900,7 @@ impl ViewState {
                 self.finished_send_to_completion.take();
                 self.pending_archive_destination.take();
                 let retry = self.pending_extract_retry.take();
-                let message = message.clone();
+                let message = super::transfer_report::stopped_detail(message.clone(), report);
                 let password_failure = *password_failure;
                 let weak = Rc::downgrade(self);
                 self.dismiss_file_operation_progress_then(move || {
@@ -972,6 +973,7 @@ impl ViewState {
                 failed,
                 not_attempted,
                 affected_locations,
+                report,
             } => {
                 self.suppress_scroll_after_drop.set(false);
                 self.drop_active_depths.set(None);
@@ -979,10 +981,13 @@ impl ViewState {
                 self.pending_send_to_completion.take();
                 self.finished_send_to_completion.take();
                 let affected_locations = affected_locations.clone();
-                let message = super::progress::cancelled_operation_summary(
-                    *completed,
-                    *failed,
-                    *not_attempted,
+                let message = super::transfer_report::stopped_detail(
+                    super::progress::cancelled_operation_summary(
+                        *completed,
+                        *failed,
+                        *not_attempted,
+                    ),
+                    report,
                 );
                 let weak = Rc::downgrade(self);
                 self.dismiss_file_operation_progress_then(move || {

@@ -16,15 +16,6 @@ use crate::{
 mod background;
 pub(super) use background::BackgroundOperation;
 
-fn stopped(event: &OperationEvent) -> bool {
-    matches!(
-        event,
-        OperationEvent::TransferFailed { .. }
-            | OperationEvent::Failed { .. }
-            | OperationEvent::Cancelled { .. }
-    )
-}
-
 use super::{
     Browser, BrowserEvent, MergeUndoState, UndoEntry, completed_replay_items, finish_replay,
     mark_replay_item_completed, move_records, moved_target, push_pending_redo, push_pending_undo,
@@ -443,11 +434,10 @@ impl Browser {
         }
         let load = self.operation_load.take();
         drop(load);
-        let stopped = stopped(&event);
-        self.publish_operation_outcome(context, completion, event);
-        let report = self.transfer_report.take();
+        let mut report = self.transfer_report.take();
+        self.publish_operation_outcome(context, completion, event, &mut report);
         if !report.is_empty() {
-            self.emit(BrowserEvent::ItemsReported { report, stopped });
+            self.emit(BrowserEvent::ItemsReported { report });
         }
         if !refresh_depths.is_empty() {
             self.emit(BrowserEvent::OperationRefreshRequired {
@@ -517,6 +507,7 @@ impl Browser {
         context: &OperationContext,
         completion: OperationCompletion,
         event: OperationEvent,
+        report: &mut TransferReport,
     ) {
         match event {
             OperationEvent::Failed { message, .. } if context.rename => {
@@ -532,12 +523,14 @@ impl Browser {
             } => self.emit(BrowserEvent::OperationFailed {
                 message,
                 password_failure,
+                report: std::mem::take(report),
             }),
             OperationEvent::TransferFailed { message, .. } => {
                 self.refresh_columns_at_many(&context.refresh_locations);
                 self.emit(BrowserEvent::OperationFailed {
                     message,
                     password_failure: None,
+                    report: std::mem::take(report),
                 });
             }
             OperationEvent::CompletedWithErrors {
@@ -583,9 +576,12 @@ impl Browser {
                     has_non_retryable_failures: true,
                 });
             }
-            OperationEvent::Cancelled { result, .. } => {
-                self.publish_cancelled_operation(context, completion, result)
-            }
+            OperationEvent::Cancelled { result, .. } => self.publish_cancelled_operation(
+                context,
+                completion,
+                result,
+                std::mem::take(report),
+            ),
             OperationEvent::Renamed { .. } => {
                 self.emit(BrowserEvent::RenameCompleted {
                     request_id: context.request_id,
@@ -705,6 +701,7 @@ impl Browser {
         context: &OperationContext,
         completion: OperationCompletion,
         result: crate::services::CancelledOperation,
+        report: TransferReport,
     ) {
         if context.rename {
             self.emit(BrowserEvent::RenameAbandoned {
@@ -731,6 +728,7 @@ impl Browser {
             failed: result.failed.len(),
             not_attempted: result.not_attempted.len(),
             affected_locations,
+            report,
         });
     }
 }

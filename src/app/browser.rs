@@ -254,9 +254,9 @@ pub enum BrowserEvent {
     TransferFinished {
         moved_locations: Vec<Location>,
     },
+    /// A stopped transfer's report goes with its failure or cancel instead.
     ItemsReported {
         report: TransferReport,
-        stopped: bool,
     },
     /// Only for remembered folders; the default sort is left unchanged.
     FolderSortChosen {
@@ -305,6 +305,7 @@ pub enum BrowserEvent {
     OperationFailed {
         message: String,
         password_failure: Option<PasswordFailure>,
+        report: TransferReport,
     },
     OperationCompletedWithErrors {
         message: String,
@@ -319,6 +320,7 @@ pub enum BrowserEvent {
         failed: usize,
         not_attempted: usize,
         affected_locations: HashSet<Location>,
+        report: TransferReport,
     },
     OperationRefreshRequired {
         depths: Vec<usize>,
@@ -2496,6 +2498,7 @@ impl Browser {
             self.emit(BrowserEvent::OperationFailed {
                 message: crate::i18n::tr(message),
                 password_failure: None,
+                report: TransferReport::default(),
             });
             return;
         }
@@ -2503,6 +2506,7 @@ impl Browser {
             self.emit(BrowserEvent::OperationFailed {
                 message: crate::i18n::tr("File operations are unavailable"),
                 password_failure: None,
+                report: TransferReport::default(),
             });
             return;
         };
@@ -2542,6 +2546,7 @@ impl Browser {
             self.emit(BrowserEvent::OperationFailed {
                 message: crate::i18n::tr(message),
                 password_failure: None,
+                report: TransferReport::default(),
             });
             return;
         }
@@ -2549,6 +2554,7 @@ impl Browser {
             self.emit(BrowserEvent::OperationFailed {
                 message: crate::i18n::tr("File operations are unavailable"),
                 password_failure: None,
+                report: TransferReport::default(),
             });
             return;
         };
@@ -2603,6 +2609,7 @@ impl Browser {
             self.emit(BrowserEvent::OperationFailed {
                 message: crate::i18n::tr("File operations are unavailable"),
                 password_failure: None,
+                report: TransferReport::default(),
             });
             return;
         };
@@ -2656,6 +2663,7 @@ impl Browser {
             self.emit(BrowserEvent::OperationFailed {
                 message: crate::i18n::tr("File operations are unavailable"),
                 password_failure: None,
+                report: TransferReport::default(),
             });
             return;
         };
@@ -2697,6 +2705,7 @@ impl Browser {
             self.emit(BrowserEvent::OperationFailed {
                 message: crate::i18n::tr("File operations are unavailable"),
                 password_failure: None,
+                report: TransferReport::default(),
             });
             return;
         };
@@ -3327,6 +3336,7 @@ impl Browser {
             self.emit(BrowserEvent::OperationFailed {
                 message: crate::i18n::tr("File operations are unavailable"),
                 password_failure: None,
+                report: TransferReport::default(),
             });
             return;
         };
@@ -3364,6 +3374,7 @@ impl Browser {
             self.emit(BrowserEvent::OperationFailed {
                 message: crate::i18n::tr("File operations are unavailable"),
                 password_failure: None,
+                report: TransferReport::default(),
             });
             return;
         };

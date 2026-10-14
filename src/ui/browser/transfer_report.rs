@@ -29,7 +29,6 @@ enum Presentation {
         detail: String,
     },
     Warning {
-        title: String,
         detail: String,
     },
 }
@@ -170,35 +169,47 @@ fn sections(sections: Vec<(String, Vec<String>)>) -> String {
         .join("\n\n")
 }
 
-fn presentation(report: &TransferReport, stopped: bool) -> Option<Presentation> {
+fn left_sections(report: &TransferReport) -> Vec<(String, Vec<String>)> {
+    let mut left = Vec::new();
+    if !report.skipped.is_empty() {
+        let skipped = report.skipped.iter().map(skipped_line).collect::<Vec<_>>();
+        let heading =
+            crate::i18n::tr("These special files can\u{2019}t be copied and were left out");
+        left.push((heading, skipped));
+    }
+    for (kept, heading, in_trash) in [
+        (&report.kept, "items_kept", false),
+        (&report.kept_in_trash, "items_kept_in_trash", true),
+    ] {
+        if !kept.is_empty() {
+            let lines = kept
+                .iter()
+                .map(|item| kept_line(item, in_trash))
+                .collect::<Vec<_>>();
+            left.push((crate::i18n::count(heading, lines.len()), lines));
+        }
+    }
+    left
+}
+
+/// The detail of a failed or cancelled transfer's dialog: its `outcome`, then
+/// everything the transfer reported.
+pub(super) fn stopped_detail(outcome: String, report: &TransferReport) -> String {
+    let mut reported = renamed_sections(&followed(&report.renamed));
+    reported.extend(left_sections(report));
+    if reported.is_empty() {
+        return outcome;
+    }
+    format!("{outcome}\n\n{}", sections(reported))
+}
+
+fn presentation(report: &TransferReport) -> Option<Presentation> {
     let followed = followed(&report.renamed);
     let mut renamed = renamed_sections(&followed);
-    if !report.skipped.is_empty() || !report.kept.is_empty() || !report.kept_in_trash.is_empty() {
-        if !report.skipped.is_empty() {
-            let skipped = report.skipped.iter().map(skipped_line).collect::<Vec<_>>();
-            let heading =
-                crate::i18n::tr("These special files can\u{2019}t be copied and were left out");
-            renamed.push((heading, skipped));
-        }
-        for (kept, heading, in_trash) in [
-            (&report.kept, "items_kept", false),
-            (&report.kept_in_trash, "items_kept_in_trash", true),
-        ] {
-            if !kept.is_empty() {
-                let lines = kept
-                    .iter()
-                    .map(|item| kept_line(item, in_trash))
-                    .collect::<Vec<_>>();
-                renamed.push((crate::i18n::count(heading, lines.len()), lines));
-            }
-        }
-        let title = if stopped {
-            crate::i18n::tr("Some items were left out or left behind")
-        } else {
-            crate::i18n::tr("Completed with errors")
-        };
+    let left = left_sections(report);
+    if !left.is_empty() {
+        renamed.extend(left);
         return Some(Presentation::Warning {
-            title,
             detail: sections(renamed),
         });
     }
@@ -227,8 +238,8 @@ fn presentation(report: &TransferReport, stopped: bool) -> Option<Presentation> 
 }
 
 impl ViewState {
-    pub(super) fn show_transfer_report(&self, report: &TransferReport, stopped: bool) {
-        match presentation(report, stopped) {
+    pub(super) fn show_transfer_report(&self, report: &TransferReport) {
+        match presentation(report) {
             Some(Presentation::Notice { heading, text }) => {
                 crate::ui::notice::add_notice(&self.overlay, Some(&heading), &text, NOTICE_DURATION)
             }
@@ -242,8 +253,8 @@ impl ViewState {
                 &summary,
                 &detail,
             ),
-            Some(Presentation::Warning { title, detail }) => {
-                crate::ui::modal::show_warning_dialog(&self.overlay, &title, &detail);
+            Some(Presentation::Warning { detail }) => {
+                crate::ui::modal::show_partial_failure_dialog(&self.overlay, &detail);
             }
             None => {}
         }

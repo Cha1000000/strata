@@ -1820,6 +1820,7 @@ fn cancelling_an_operation_keeps_the_live_local_listing_visible() {
                     failed: 0,
                     not_attempted: 1,
                     affected_locations: std::collections::HashSet::from([root]),
+                    report: Default::default(),
                 });
 
             assert_eq!(view.browser().column_request_id(0), Some(request));

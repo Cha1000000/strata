@@ -6,7 +6,8 @@ use gtk::prelude::*;
 
 use super::*;
 use crate::app::BrowserEvent;
-use crate::services::OperationRequestId;
+use crate::services::{OperationEvent, OperationRequestId, PasteItem, TransferConflict};
+use crate::test_support::operations::HeldOperations;
 use crate::ui::browser::{BrowserView, PeekBehavior};
 
 fn renamed(count: usize) -> TransferReport {
@@ -24,7 +25,7 @@ fn renamed(count: usize) -> TransferReport {
 
 #[test]
 fn one_short_renamed_line_gets_a_notice_and_anything_more_a_dialog() {
-    assert_eq!(presentation(&TransferReport::default(), false), None);
+    assert_eq!(presentation(&TransferReport::default()), None);
     let long = "a name long enough that the notice would cut its line short";
     let long = TransferReport {
         renamed: vec![RenamedItem {
@@ -41,7 +42,7 @@ fn one_short_renamed_line_gets_a_notice_and_anything_more_a_dialog() {
         (renamed(9), false, LISTED_ITEMS),
     ] {
         let count = report.renamed.len();
-        match presentation(&report, false) {
+        match presentation(&report) {
             Some(Presentation::Notice { text, .. }) => {
                 assert!(notice, "{count}");
                 assert_eq!(text, renamed_line(&report.renamed[0]));
@@ -68,7 +69,7 @@ fn renamed_items_are_grouped_by_why_they_were_renamed() {
     let mut report = renamed(2);
     report.renamed[1].cause = RenameCause::Taken;
 
-    let Some(Presentation::Information { detail, .. }) = presentation(&report, false) else {
+    let Some(Presentation::Information { detail, .. }) = presentation(&report) else {
         panic!("two causes need a dialog");
     };
 
@@ -79,7 +80,7 @@ fn renamed_items_are_grouped_by_why_they_were_renamed() {
         renamed: report.renamed[1..].to_vec(),
         ..TransferReport::default()
     };
-    let Some(Presentation::Notice { heading: shown, .. }) = presentation(&only_taken, false) else {
+    let Some(Presentation::Notice { heading: shown, .. }) = presentation(&only_taken) else {
         panic!("one renamed item gets a notice");
     };
     assert_eq!(shown, heading(RenameCause::Taken));
@@ -105,7 +106,7 @@ fn an_item_saved_under_two_names_in_turn_is_reported_once() {
         let Some(Presentation::Notice {
             heading: shown,
             text,
-        }) = presentation(&report, false)
+        }) = presentation(&report)
         else {
             panic!("one renamed item gets a notice");
         };
@@ -119,7 +120,7 @@ fn an_item_saved_under_two_names_in_turn_is_reported_once() {
 }
 
 #[test]
-fn items_left_out_or_left_behind_make_the_report_a_warning() {
+fn items_left_out_or_left_behind_make_the_report_a_warning_or_follow_a_stop() {
     let skipped = |kind| SkippedItem {
         location: Location::local("/copy/run/socket"),
         kind,
@@ -144,17 +145,15 @@ fn items_left_out_or_left_behind_make_the_report_a_warning() {
         in_trash(KeptCause::Changed),
         in_trash(KeptCause::Undeletable(denied)),
     ];
-    for (renamed_count, skipped_count, kept_count, in_trash_count, stopped) in [
-        (0, 2, 0, 0, false),
-        (1, 2, 0, 0, false),
-        (3, 2, 0, 0, false),
-        (0, 0, 4, 0, false),
-        (1, 2, 4, 0, false),
-        (1, 2, 4, 0, true),
-        (0, 0, 0, 2, false),
+    for (renamed_count, skipped_count, kept_count, in_trash_count) in [
+        (0, 2, 0, 0),
+        (1, 2, 0, 0),
+        (3, 2, 0, 0),
+        (0, 0, 4, 0),
+        (1, 2, 4, 0),
+        (0, 0, 0, 2),
     ] {
-        let row =
-            format!("{renamed_count}, {skipped_count}, {kept_count}, {in_trash_count}, {stopped}");
+        let row = format!("{renamed_count}, {skipped_count}, {kept_count}, {in_trash_count}");
         let report = TransferReport {
             skipped: [skipped(SpecialKind::Socket), skipped(SpecialKind::Pipe)][..skipped_count]
                 .to_vec(),
@@ -162,15 +161,15 @@ fn items_left_out_or_left_behind_make_the_report_a_warning() {
             kept_in_trash: left_in_trash[..in_trash_count].to_vec(),
             ..renamed(renamed_count)
         };
-        let Some(Presentation::Warning { title, detail }) = presentation(&report, stopped) else {
+        let Some(Presentation::Warning { detail }) = presentation(&report) else {
             panic!("{row}");
         };
-        let expected = if stopped {
-            crate::i18n::tr("Some items were left out or left behind")
-        } else {
-            crate::i18n::tr("Completed with errors")
-        };
-        assert_eq!(title, expected, "{row}");
+        let outcome = "Could not copy keys: Permission denied";
+        assert_eq!(
+            stopped_detail(outcome.to_owned(), &report),
+            format!("{outcome}\n\n{detail}"),
+            "{row}"
+        );
         assert_eq!(
             detail.matches('•').count(),
             renamed_count + skipped_count + kept_count + in_trash_count,
@@ -203,6 +202,23 @@ fn items_left_out_or_left_behind_make_the_report_a_warning() {
             "{row}"
         );
     }
+}
+
+#[test]
+fn a_stop_lists_renamed_items_by_cause_under_its_outcome() {
+    let outcome = "Could not copy keys: Permission denied";
+    let mut report = renamed(LISTED_ITEMS + 2);
+    report.renamed[0].cause = RenameCause::Taken;
+
+    let detail = stopped_detail(outcome.to_owned(), &report);
+
+    assert!(detail.starts_with(&format!("{outcome}\n\n")), "{detail}");
+    for cause in [RenameCause::Alias, RenameCause::Taken] {
+        assert_eq!(detail.matches(&heading(cause)).count(), 1, "{cause:?}");
+    }
+    assert!(detail.contains(&renamed_line(&report.renamed[0])));
+    assert_eq!(detail.matches('•').count(), 1 + LISTED_ITEMS);
+    assert!(detail.ends_with(&crate::i18n::count("more_items", 1)));
 }
 
 fn shows(overlay: &gtk::Overlay, class: &str) -> bool {
@@ -262,10 +278,7 @@ fn a_report_after_a_transfer_shows_its_notice_or_dialog() {
                 // The notice a Send to that finished quickly shows.
                 let sent = "Copied to USB";
                 crate::ui::notice::show_notice(&overlay, None, sent, NOTICE_DURATION);
-                let event = BrowserEvent::ItemsReported {
-                    report,
-                    stopped: false,
-                };
+                let event = BrowserEvent::ItemsReported { report };
                 let event = if background {
                     BrowserEvent::BackgroundOperation {
                         request_id: OperationRequestId(1),
@@ -286,6 +299,194 @@ fn a_report_after_a_transfer_shows_its_notice_or_dialog() {
                 assert_eq!(shows(&overlay, "app-modal-layer"), dialog, "{row}");
                 assert!(shows_text(&overlay, sent), "{row}");
                 window.destroy();
+            }
+        },
+    );
+}
+
+fn dialogs(window: &gtk::Window) -> Vec<Vec<String>> {
+    let mut found = Vec::new();
+    let mut stack = vec![window.clone().upcast::<gtk::Widget>()];
+    while let Some(widget) = stack.pop() {
+        if widget.has_css_class("app-modal-layer") {
+            if !crate::ui::modal::is_closing_layer(&widget) {
+                found.push(texts(&widget));
+            }
+            continue;
+        }
+        let mut child = widget.first_child();
+        while let Some(next) = child {
+            child = next.next_sibling();
+            stack.push(next);
+        }
+    }
+    found
+}
+
+fn texts(root: &gtk::Widget) -> Vec<String> {
+    let mut found = Vec::new();
+    let mut stack = vec![root.clone()];
+    while let Some(widget) = stack.pop() {
+        if let Some(label) = widget.downcast_ref::<gtk::Label>() {
+            found.push(label.label().to_string());
+        }
+        let mut child = widget.first_child();
+        while let Some(next) = child {
+            child = next.next_sibling();
+            stack.push(next);
+        }
+    }
+    found
+}
+
+fn pump_until(done: impl Fn() -> bool) {
+    let context = gtk::glib::MainContext::default();
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        while context.pending() {
+            context.iteration(false);
+        }
+        if done() {
+            return;
+        }
+        assert!(std::time::Instant::now() < deadline, "no dialog appeared");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+#[test]
+fn a_stopped_transfer_shows_one_dialog_with_its_outcome_and_report() {
+    crate::test_support::gtk_test(
+        "ui::browser::transfer_report::tests::a_stopped_transfer_shows_one_dialog_with_its_outcome_and_report",
+        || {
+            let items = TransferReport {
+                skipped: vec![SkippedItem {
+                    location: Location::local("/destination/run/preview.sock"),
+                    kind: SpecialKind::Socket,
+                }],
+                kept: vec![KeptItem {
+                    location: Location::local("/source/run/app.sock"),
+                    cause: KeptCause::Skipped(SpecialKind::Socket),
+                }],
+                ..renamed(1)
+            };
+            let lines = [
+                renamed_line(&items.renamed[0]),
+                skipped_line(&items.skipped[0]),
+                kept_line(&items.kept[0], false),
+            ];
+            let failure = "Could not copy keys: Permission denied";
+            let cancelled = crate::services::CancelledOperation {
+                completed: vec![Location::local("/source/run")],
+                not_attempted: vec![Location::local("/source/keys")],
+                ..Default::default()
+            };
+            let summary = super::super::progress::cancelled_operation_summary(1, 0, 1);
+            type Terminal = Box<dyn Fn(OperationRequestId) -> OperationEvent>;
+            let terminals: [(Terminal, &str, Option<&str>); 3] = [
+                (
+                    Box::new(|request_id| OperationEvent::TransferFailed {
+                        request_id,
+                        completed_locations: Vec::new(),
+                        message: failure.into(),
+                    }),
+                    "Unable to complete operation",
+                    Some(failure),
+                ),
+                (
+                    Box::new(move |request_id| OperationEvent::Cancelled {
+                        request_id,
+                        result: cancelled.clone(),
+                    }),
+                    "Operation cancelled",
+                    Some(&summary),
+                ),
+                (
+                    Box::new(|request_id| OperationEvent::Pasted {
+                        request_id,
+                        locations: Vec::new(),
+                    }),
+                    "Completed with errors",
+                    None,
+                ),
+            ];
+            // A move runs in the foreground and a copy in the background.
+            for moving in [true, false] {
+                for (terminal, title, outcome) in &terminals {
+                    for report in [items.clone(), TransferReport::default()] {
+                        let row =
+                            format!("moving: {moving}, {title}, items: {}", !report.is_empty());
+                        let view = BrowserView::new(
+                            Rc::new(crate::adapters::LocalFileSource),
+                            PeekBehavior::default(),
+                        );
+                        let operations = Rc::new(HeldOperations::default());
+                        view.browser().set_operation_provider(operations.clone());
+                        let window = gtk::Window::builder().child(&view.overlay()).build();
+                        window.present();
+                        view.browser().transfer(
+                            Location::local("/destination"),
+                            vec![PasteItem {
+                                source: Location::local("/source/run"),
+                                conflict: TransferConflict::FailIfExists,
+                            }],
+                            moving,
+                            false,
+                        );
+                        let id = view.browser().last_started_operation().expect("transfer");
+                        assert_eq!(
+                            view.state
+                                .background_file_progress
+                                .borrow()
+                                .contains_key(&id),
+                            !moving,
+                            "{row}"
+                        );
+                        if !report.is_empty() {
+                            operations.emit(
+                                id,
+                                OperationEvent::ItemsReported {
+                                    request_id: id,
+                                    report: report.clone(),
+                                },
+                            );
+                        }
+
+                        operations.emit(id, terminal(id));
+
+                        let expected = outcome.is_some() || !report.is_empty();
+                        pump_until(|| dialogs(&window).len() >= usize::from(expected));
+                        let dialogs = dialogs(&window);
+                        assert_eq!(dialogs.len(), usize::from(expected), "{row}: {dialogs:?}");
+                        if let [texts] = dialogs.as_slice() {
+                            let title = crate::i18n::tr(title);
+                            assert!(texts.contains(&title), "{row}: {texts:?}");
+                            let detail = match outcome {
+                                Some(outcome) => texts
+                                    .iter()
+                                    .find(|text| text.starts_with(outcome))
+                                    .expect("the outcome"),
+                                None => texts
+                                    .iter()
+                                    .find(|text| text.contains(lines[0].as_str()))
+                                    .expect("the report"),
+                            };
+                            if report.is_empty() {
+                                assert_eq!(Some(detail.as_str()), *outcome, "{row}");
+                            }
+                            for line in &lines {
+                                assert_eq!(
+                                    detail.contains(line.as_str()),
+                                    !report.is_empty(),
+                                    "{row}: {detail}"
+                                );
+                            }
+                        }
+                        view.browser().clear_observer();
+                        view.dispose_file_progress();
+                        window.destroy();
+                    }
+                }
             }
         },
     );

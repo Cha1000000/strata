@@ -228,8 +228,8 @@ impl ViewState {
         event: &BrowserEvent,
     ) {
         // It follows the event that finished the operation.
-        if let BrowserEvent::ItemsReported { report, stopped } = event {
-            self.show_transfer_report(report, *stopped);
+        if let BrowserEvent::ItemsReported { report } = event {
+            self.show_transfer_report(report);
             return;
         }
         let background = self
@@ -337,14 +337,16 @@ impl ViewState {
                 }
                 true
             }
-            BrowserEvent::OperationFailed { message, .. } => {
+            BrowserEvent::OperationFailed {
+                message, report, ..
+            } => {
                 if self.delete_dissolve_request.get() == Some(request_id) {
                     self.settle_pending_delete_dissolve();
                 }
                 show_error_dialog(
                     &self.overlay,
                     &crate::i18n::tr("Unable to complete operation"),
-                    message,
+                    &super::super::transfer_report::stopped_detail(message.clone(), report),
                 );
                 true
             }
@@ -353,6 +355,7 @@ impl ViewState {
                 failed,
                 not_attempted,
                 affected_locations,
+                report,
             } => {
                 if self.delete_dissolve_request.get() == Some(request_id) {
                     self.settle_pending_delete_dissolve();
@@ -361,7 +364,10 @@ impl ViewState {
                 show_error_dialog(
                     &self.overlay,
                     &crate::i18n::tr("Operation cancelled"),
-                    &super::cancelled_operation_summary(*completed, *failed, *not_attempted),
+                    &super::super::transfer_report::stopped_detail(
+                        super::cancelled_operation_summary(*completed, *failed, *not_attempted),
+                        report,
+                    ),
                 );
                 true
             }

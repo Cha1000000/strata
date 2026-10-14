@@ -99,6 +99,7 @@ fn only_a_password_failure_kind_opens_the_extract_password_dialog() {
                     .handle(&crate::app::BrowserEvent::OperationFailed {
                         message: message.to_owned(),
                         password_failure,
+                        report: Default::default(),
                     });
                 let context = glib::MainContext::default();
                 while context.pending() {
