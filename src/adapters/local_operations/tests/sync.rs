@@ -836,51 +836,68 @@ fn cancelling_a_move_closes_its_pending_batch() -> Result<(), Box<dyn Error>> {
         .lock()
         .map_err(|error| error.to_string())?;
     let _limits = LimitsGuard::set(NO_LIMITS);
-    let root = tempfile::tempdir()?;
-    let sources = root.path().join("sources");
-    let destination = root.path().join("destination");
-    fs::create_dir(&sources)?;
-    fs::create_dir(&destination)?;
-    let names = ["a", "b", "c"];
-    let mut paths = Vec::new();
-    for name in names {
-        fs::write(sources.join(name), name)?;
-        paths.push(sources.join(name));
+    // Ten items take the parallel path.
+    for (id, count, cancel_after) in [(330, 3, 2), (331, 3, 3), (332, 10, 10)] {
+        let row = format!("{cancel_after} of {count}");
+        let root = tempfile::tempdir()?;
+        let sources = root.path().join("sources");
+        let destination = root.path().join("destination");
+        fs::create_dir(&sources)?;
+        fs::create_dir(&destination)?;
+        let names: Vec<String> = (0..count).map(|index| format!("f{index}")).collect();
+        let names: Vec<&str> = names.iter().map(String::as_str).collect();
+        let paths: Vec<PathBuf> = names.iter().map(|name| sources.join(name)).collect();
+        for (name, path) in names.iter().zip(&paths) {
+            fs::write(path, name)?;
+        }
+        let barriers = Barriers::new();
+        let _sources = FsQuirks::install(&sources, Quirks::default());
+        let _destination = FsQuirks::install(
+            &destination,
+            Quirks {
+                before: barriers.racers(&sources, &names, &destination, None),
+                ..Quirks::ext4()
+            },
+        );
+
+        let (_operation, events, early) =
+            paste_moves(id, &destination, &paths, &barriers, Some(cancel_after));
+        pump_until_transfer(&events);
+
+        let (moved, left) = paths.split_at(cancel_after);
+        let locations = |paths: &[PathBuf]| paths.iter().map(Location::local).collect::<Vec<_>>();
+        assert!(
+            matches!(terminal_transfer(&events.borrow()),
+                Some(OperationEvent::Cancelled { result, .. })
+                if result.completed == locations(moved)
+                    && result.failed.is_empty()
+                    && result.not_attempted == locations(left)),
+            "{row}: {:?}",
+            events.borrow()
+        );
+        assert_eq!(
+            barriers.seen(),
+            [Seen {
+                deleted: Vec::new(),
+                copied: strings(&names[..cancel_after]),
+                flushing: true,
+                counted: cancel_after,
+            }],
+            "{row}"
+        );
+        for (name, path) in names.iter().zip(&paths).take(cancel_after) {
+            assert!(!path.exists(), "{row}: {name}");
+            assert_eq!(fs::read_to_string(destination.join(name))?, *name, "{row}");
+        }
+        for (name, path) in names.iter().zip(&paths).skip(cancel_after) {
+            assert!(
+                path.exists() && !destination.join(name).exists(),
+                "{row}: {name}"
+            );
+        }
+        assert_eq!(moved_count(&events.borrow()), cancel_after, "{row}");
+        assert!(early.borrow().is_empty(), "{row}");
     }
-    let barriers = Barriers::new();
-    let _sources = FsQuirks::install(&sources, Quirks::default());
-    let _destination = FsQuirks::install(
-        &destination,
-        Quirks {
-            before: barriers.racers(&sources, &names, &destination, None),
-            ..Quirks::ext4()
-        },
-    );
-
-    let (_operation, events, early) = paste_moves(330, &destination, &paths, &barriers, Some(2));
-    pump_until_transfer(&events);
-
-    assert!(
-        matches!(terminal_transfer(&events.borrow()),
-            Some(OperationEvent::Cancelled { result, .. })
-            if result.completed == [Location::local(&paths[0]), Location::local(&paths[1])]
-                && result.not_attempted == [Location::local(&paths[2])]),
-        "{:?}",
-        events.borrow()
-    );
-    assert_eq!(
-        barriers.seen(),
-        [Seen {
-            deleted: Vec::new(),
-            copied: strings(&["a", "b"]),
-            flushing: true,
-            counted: 2,
-        }]
-    );
-    assert!(!paths[0].exists() && !paths[1].exists());
-    assert!(paths[2].exists() && !destination.join("c").exists());
-    assert_eq!(moved_count(&events.borrow()), 2);
-    assert!(early.borrow().is_empty());
     Ok(())
 }
 
