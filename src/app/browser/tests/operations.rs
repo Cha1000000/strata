@@ -174,7 +174,7 @@ fn restoration_monitor_changes_publish_once_after_the_terminal_event() {
         request_id,
         completed: 1,
         total: 2,
-        restored_location: Some(first.location.clone()),
+        restored_location: Some(Location::local("/restored/first")),
     });
 
     assert_eq!(
@@ -384,6 +384,119 @@ fn cancellation_refreshes_an_affected_remote_root_and_its_open_descendants() {
             ..
         }
     )));
+}
+
+#[test]
+fn a_restore_reloads_the_open_folders_without_a_monitor_it_changed() {
+    struct Watched(CountingFileSource);
+
+    impl FileSource for Watched {
+        fn validate_location(&self, location: &Location) -> Result<(), LocationValidationError> {
+            self.0.validate_location(location)
+        }
+
+        fn enumerate(
+            &self,
+            request: DirectoryRequest,
+            emit: Rc<dyn Fn(DirectoryEvent)>,
+        ) -> LoadHandle {
+            self.0.enumerate(request, emit)
+        }
+
+        fn watch(
+            &self,
+            _location: Location,
+            _include_hidden: bool,
+            _notify: Rc<dyn Fn(DirectoryChange)>,
+        ) -> Option<LoadHandle> {
+            Some(LoadHandle::new(|| {}))
+        }
+    }
+
+    type Ending = fn(OperationRequestId, Vec<Location>) -> OperationEvent;
+    let folder = Location::uri("smb://host/share/folder");
+    let into_folder = Location::uri("smb://host/share/folder/restored.txt");
+    let restored: Ending = |request_id, restored| OperationEvent::Restored {
+        request_id,
+        locations: vec![Location::uri("trash:///restored")],
+        restored,
+    };
+    let restored_with_errors: Ending =
+        |request_id, restored| OperationEvent::RestoreCompletedWithErrors {
+            request_id,
+            restored_locations: vec![Location::uri("trash:///restored")],
+            restored,
+            message: "one item failed".to_owned(),
+        };
+    let undone_with_errors: Ending = |request_id, _| OperationEvent::CompletedWithErrors {
+        request_id,
+        deleted_locations: Vec::new(),
+        retryable_locations: Vec::new(),
+        has_non_retryable_failures: true,
+        message: "one item failed".to_owned(),
+    };
+    let rows = [
+        (
+            "restored into it",
+            restored,
+            vec![into_folder.clone()],
+            None,
+            false,
+            1,
+        ),
+        (
+            "restored into it with errors",
+            restored_with_errors,
+            vec![into_folder],
+            None,
+            false,
+            1,
+        ),
+        (
+            "restored it",
+            restored,
+            vec![folder.clone()],
+            None,
+            false,
+            2,
+        ),
+        (
+            "a merge undo in it restored nothing",
+            undone_with_errors,
+            Vec::new(),
+            Some(folder.clone()),
+            false,
+            1,
+        ),
+        (
+            "restored a watched folder",
+            restored,
+            vec![folder.clone()],
+            None,
+            true,
+            0,
+        ),
+    ];
+    for (row, ending, restored, undone_in, watched, reloaded) in rows {
+        let enumerate_calls = Rc::new(Cell::new(0));
+        let source = CountingFileSource {
+            enumerate_calls: enumerate_calls.clone(),
+        };
+        let browser = if watched {
+            Browser::new(Rc::new(Watched(source)))
+        } else {
+            Browser::new(Rc::new(source))
+        };
+        browser.navigate(Location::uri("smb://host/share"));
+        browser.descend(0, folder.clone());
+        let request_id = browser.begin_operation();
+        browser.restoration_operation.set(true);
+        let emit = browser.operation_callback(request_id, false, undone_in.into_iter().collect());
+
+        emit(ending(request_id, restored));
+
+        assert_eq!(enumerate_calls.get(), 2 + reloaded, "{row}");
+    }
 }
 
 #[test]

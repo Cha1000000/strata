@@ -3548,6 +3548,7 @@ fn check_a_merge_undo_drops_from_view_only_what_it_removed() -> Result<(), Box<d
                 ("folder/a.txt", "incoming a"),
                 ("folder/b.txt", "incoming b"),
                 ("folder/c.txt", "incoming c"),
+                ("folder/d.txt", "incoming d"),
                 ("folder/new.txt", "new"),
             ],
         )?;
@@ -3557,6 +3558,7 @@ fn check_a_merge_undo_drops_from_view_only_what_it_removed() -> Result<(), Box<d
                 ("a.txt", "original a"),
                 ("b.txt", "original b"),
                 ("c.txt", "original c"),
+                ("d.txt", "original d"),
             ],
         )?;
         // The Trash shares the scope, so it is on the folder's mount.
@@ -3613,6 +3615,7 @@ fn check_a_merge_undo_drops_from_view_only_what_it_removed() -> Result<(), Box<d
                 .any(|event| matches!(event, BrowserEvent::TransferCompleted))
         })?;
         fs::write(folder.join("b.txt"), "edited after the merge")?;
+        fs::remove_file(folder.join("d.txt"))?;
         browser.navigate(Location::local(&folder));
         pump_until(&format!("{row}: the folder lists the merge"), &|| {
             names() == ["a.txt", "b.txt", "c.txt", "new.txt"]
@@ -3655,15 +3658,12 @@ fn check_a_merge_undo_drops_from_view_only_what_it_removed() -> Result<(), Box<d
             },
             "{row}"
         );
+        assert_eq!(fs::read(folder.join("d.txt"))?, b"original d", "{row}");
         assert!(!folder.join("new.txt").exists(), "{row}");
-        let expected = ["a.txt", "b.txt", "c.txt"];
-        // A monitor may still be reporting what the undo changed.
-        let listed = if watched {
-            pump_until(&row, &|| names() == expected).is_ok()
-        } else {
-            names() == expected
-        };
-        if !listed {
+        let expected = ["a.txt", "b.txt", "c.txt", "d.txt"];
+        // A monitor may still be reporting what the undo changed, and a
+        // folder without one reloads.
+        if pump_until(&row, &|| names() == expected).is_err() {
             failures.push(format!("{row}: the folder lists {:?}", names()));
         }
         assert_eq!(

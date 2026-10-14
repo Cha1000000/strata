@@ -551,6 +551,7 @@ impl Browser {
                 ..
             } => {
                 self.remove_completed_locations(&completion, &deleted_locations);
+                self.refresh_unmonitored_restore_locations(context, &completion);
                 self.emit(BrowserEvent::OperationCompletedWithErrors {
                     message,
                     retryable_locations,
@@ -570,6 +571,7 @@ impl Browser {
                     push_pending_undo(UndoEntry::Copy(restored));
                 }
                 self.remove_completed_locations(&completion, &locations);
+                self.refresh_unmonitored_restore_locations(context, &completion);
             }
             OperationEvent::RestoreCompletedWithErrors {
                 restored_locations,
@@ -581,6 +583,7 @@ impl Browser {
                     push_pending_undo(UndoEntry::Copy(restored));
                 }
                 self.remove_completed_locations(&completion, &restored_locations);
+                self.refresh_unmonitored_restore_locations(context, &completion);
                 self.emit(BrowserEvent::OperationCompletedWithErrors {
                     message,
                     retryable_locations: Vec::new(),
@@ -664,6 +667,40 @@ impl Browser {
     ) {
         if !completion.file_operation_refreshed {
             self.remove_deleted_locations(locations);
+        }
+    }
+
+    /// Without a monitor, a folder shows what a restore put back, or could
+    /// not, only once it reloads.
+    fn refresh_unmonitored_restore_locations(
+        self: &Rc<Self>,
+        context: &OperationContext,
+        completion: &OperationCompletion,
+    ) {
+        if !completion.restoring {
+            return;
+        }
+        let depths: Vec<_> = {
+            let restored = context.location_changes.restored.borrow();
+            let parents: HashSet<_> = restored
+                .iter()
+                .filter_map(Location::parent)
+                .chain(context.refresh_locations.iter().cloned())
+                .collect();
+            let state = self.state.borrow();
+            (0..)
+                .map_while(|depth| Some((depth, state.location_at(depth)?)))
+                .filter(|(depth, location)| {
+                    !self.column_has_monitor(*depth)
+                        && (parents.contains(location)
+                            || std::iter::successors(Some(location.clone()), Location::parent)
+                                .any(|folder| restored.contains(&folder)))
+                })
+                .map(|(depth, _)| depth)
+                .collect()
+        };
+        for depth in depths {
+            self.refresh_column(depth);
         }
     }
 
