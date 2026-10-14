@@ -393,13 +393,15 @@ fn reported(events: &[BrowserEvent]) -> Vec<(usize, &crate::services::TransferRe
 #[test]
 fn a_transfer_reports_its_items_once_after_it_ends() {
     type Terminal = fn(OperationRequestId) -> OperationEvent;
-    let terminals: [(Terminal, bool); 3] = [
+    // Whether the event stops the transfer, given whether it runs in the background.
+    type Stops = fn(bool) -> bool;
+    let terminals: [(Terminal, Stops); 5] = [
         (
             |request_id| OperationEvent::Pasted {
                 request_id,
                 locations: Vec::new(),
             },
-            false,
+            |_| false,
         ),
         (
             |request_id| OperationEvent::TransferFailed {
@@ -407,18 +409,35 @@ fn a_transfer_reports_its_items_once_after_it_ends() {
                 completed_locations: Vec::new(),
                 message: "Failed".into(),
             },
-            true,
+            |_| true,
+        ),
+        (
+            |request_id| OperationEvent::Failed {
+                request_id,
+                message: "Failed".into(),
+                password_failure: None,
+            },
+            |_| true,
         ),
         (
             |request_id| OperationEvent::Cancelled {
                 request_id,
                 result: crate::services::CancelledOperation::default(),
             },
-            true,
+            |_| true,
+        ),
+        (
+            |request_id| OperationEvent::Restored {
+                request_id,
+                locations: Vec::new(),
+                restored: Vec::new(),
+            },
+            |background| background,
         ),
     ];
     for background in [false, true] {
-        for (terminal, stopped) in terminals {
+        for (terminal, stops) in terminals {
+            let stopped = stops(background);
             let browser = Browser::new(Rc::new(FakeFileSource));
             let operations = Rc::new(HeldOperations::default());
             browser.set_operation_provider(operations.clone());
@@ -437,7 +456,9 @@ fn a_transfer_reports_its_items_once_after_it_ends() {
             operations.emit(id, report("README"));
             assert!(reported(&events.borrow()).is_empty(), "reported early");
 
-            operations.emit(id, terminal(id));
+            let ending = terminal(id);
+            let row = format!("{ending:?}, background: {background}");
+            operations.emit(id, ending);
 
             let events = events.borrow();
             let mut expected = renamed("Makefile");
@@ -449,7 +470,7 @@ fn a_transfer_reports_its_items_once_after_it_ends() {
                     .map(|(_, report)| *report)
                     .collect::<Vec<_>>(),
                 [&expected],
-                "background: {background}"
+                "{row}"
             );
             let ended = events.iter().position(|event| {
                 matches!(
@@ -460,9 +481,9 @@ fn a_transfer_reports_its_items_once_after_it_ends() {
                 )
             });
             if stopped {
-                assert_eq!(ended, Some(reports[0].0), "background: {background}");
+                assert_eq!(ended, Some(reports[0].0), "{row}");
             } else {
-                assert!(ended < Some(reports[0].0), "background: {background}");
+                assert!(ended < Some(reports[0].0), "{row}");
             }
         }
     }
