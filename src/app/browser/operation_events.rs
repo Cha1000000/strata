@@ -49,7 +49,6 @@ struct OperationCompletion {
     archiving: bool,
     destination: Option<Location>,
     reveal: bool,
-    file_operation_refreshed: bool,
     undoing: bool,
     reveal_locations: Vec<Location>,
 }
@@ -64,7 +63,6 @@ impl OperationCompletion {
             archiving: browser.archive_operation.replace(false),
             destination: browser.transfer_destination.replace(None),
             reveal: browser.transfer_reveal.replace(true),
-            file_operation_refreshed: false,
             undoing: false,
             reveal_locations: Vec::new(),
         }
@@ -412,14 +410,13 @@ impl Browser {
             self.rename_operation.set(None);
         }
         let mut completion = OperationCompletion::take(self);
-        completion.file_operation_refreshed = self.flush_operation_changes(&completion);
+        self.flush_operation_changes(&completion);
         let mut refresh_depths = self
             .operation_rescan_depths
             .take()
             .into_iter()
             .collect::<Vec<_>>();
         refresh_depths.sort_unstable();
-        completion.file_operation_refreshed |= !refresh_depths.is_empty();
         // Flush observers run before the undo claim is consumed, as on the provider path.
         let undoing = self.undo_claim.take();
         if let Some((generation, entry)) = &undoing {
@@ -456,12 +453,12 @@ impl Browser {
         }
     }
 
-    fn flush_operation_changes(self: &Rc<Self>, completion: &OperationCompletion) -> bool {
+    fn flush_operation_changes(self: &Rc<Self>, completion: &OperationCompletion) {
         if !completion.deleting && !completion.restoring && completion.moving.is_none() {
-            return false;
+            return;
         }
         let changes = self.deferred_file_operation_changes.take();
-        self.flush_deferred_file_operation_changes(changes, false)
+        self.flush_deferred_file_operation_changes(changes, false);
     }
 
     fn finish_transfer(
@@ -550,7 +547,7 @@ impl Browser {
                 message,
                 ..
             } => {
-                self.remove_completed_locations(&completion, &deleted_locations);
+                self.remove_deleted_locations(&deleted_locations);
                 self.refresh_unmonitored_restore_locations(context, &completion);
                 self.emit(BrowserEvent::OperationCompletedWithErrors {
                     message,
@@ -560,7 +557,7 @@ impl Browser {
                 });
             }
             OperationEvent::Deleted { locations, .. } => {
-                self.remove_completed_locations(&completion, &locations);
+                self.remove_deleted_locations(&locations);
             }
             OperationEvent::Restored {
                 locations,
@@ -570,7 +567,7 @@ impl Browser {
                 if completion.restoring && !completion.undoing && !restored.is_empty() {
                     push_pending_undo(UndoEntry::Copy(restored));
                 }
-                self.remove_completed_locations(&completion, &locations);
+                self.remove_deleted_locations(&locations);
                 self.refresh_unmonitored_restore_locations(context, &completion);
             }
             OperationEvent::RestoreCompletedWithErrors {
@@ -582,7 +579,7 @@ impl Browser {
                 if completion.restoring && !completion.undoing && !restored.is_empty() {
                     push_pending_undo(UndoEntry::Copy(restored));
                 }
-                self.remove_completed_locations(&completion, &restored_locations);
+                self.remove_deleted_locations(&restored_locations);
                 self.refresh_unmonitored_restore_locations(context, &completion);
                 self.emit(BrowserEvent::OperationCompletedWithErrors {
                     message,
@@ -657,16 +654,6 @@ impl Browser {
             | OperationEvent::ArchiveStarted { .. }
             | OperationEvent::ArchiveProgress { .. }
             | OperationEvent::FlushingToDevice { .. } => {}
-        }
-    }
-
-    fn remove_completed_locations(
-        self: &Rc<Self>,
-        completion: &OperationCompletion,
-        locations: &[Location],
-    ) {
-        if !completion.file_operation_refreshed {
-            self.remove_deleted_locations(locations);
         }
     }
 
@@ -755,13 +742,8 @@ impl Browser {
                 request_id: context.request_id,
             });
         }
-        let affected_locations = if completion.file_operation_refreshed {
-            HashSet::new()
-        } else {
-            let mut locations = context.refresh_locations.clone();
-            locations.extend(result.affected_locations);
-            locations
-        };
+        let mut affected_locations = context.refresh_locations.clone();
+        affected_locations.extend(result.affected_locations);
         if completion.restoring && !completion.undoing && !result.completed.is_empty() {
             push_pending_undo(UndoEntry::Copy(result.completed.clone()));
         }

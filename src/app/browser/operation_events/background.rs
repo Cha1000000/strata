@@ -201,7 +201,6 @@ impl Browser {
                     archiving: !job.copying && !job.deleting,
                     destination: job.destination.clone(),
                     reveal: job.reveal,
-                    file_operation_refreshed: false,
                     undoing: false,
                     reveal_locations: job.created.borrow().clone(),
                 };

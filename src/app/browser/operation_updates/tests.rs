@@ -325,6 +325,103 @@ fn rescan_applies_incremental_changes_before_requesting_reconciliation() {
 }
 
 #[test]
+fn a_rescan_elsewhere_still_drops_what_an_operation_removed_from_an_unwatched_folder() {
+    struct Unwatched(Location);
+
+    impl FileSource for Unwatched {
+        fn validate_location(&self, _: &Location) -> Result<(), LocationValidationError> {
+            Ok(())
+        }
+
+        fn enumerate(
+            &self,
+            request: DirectoryRequest,
+            emit: Rc<dyn Fn(DirectoryEvent)>,
+        ) -> LoadHandle {
+            emit(DirectoryEvent::Batch {
+                request_id: request.id,
+                entries: vec![
+                    named(&request.location, "gone.txt", false),
+                    named(&request.location, "watched", true),
+                ],
+            });
+            emit(DirectoryEvent::Finished {
+                request_id: request.id,
+                truncated: false,
+                can_trash: None,
+                can_delete: None,
+            });
+            LoadHandle::new(|| {})
+        }
+
+        fn watch(&self, location: Location, _: bool, _: WatchCallback) -> Option<LoadHandle> {
+            (location != self.0).then(|| LoadHandle::new(|| {}))
+        }
+    }
+
+    type Ending = fn(OperationRequestId, Location) -> OperationEvent;
+    let deleted: Ending = |request_id, gone| OperationEvent::Deleted {
+        request_id,
+        locations: vec![gone],
+    };
+    let deleted_with_errors: Ending = |request_id, gone| OperationEvent::CompletedWithErrors {
+        request_id,
+        deleted_locations: vec![gone],
+        retryable_locations: Vec::new(),
+        has_non_retryable_failures: true,
+        message: "one item failed".to_owned(),
+    };
+    let restored: Ending = |request_id, gone| OperationEvent::Restored {
+        request_id,
+        locations: vec![gone],
+        restored: Vec::new(),
+    };
+    let restored_with_errors: Ending =
+        |request_id, gone| OperationEvent::RestoreCompletedWithErrors {
+            request_id,
+            restored_locations: vec![gone],
+            restored: Vec::new(),
+            message: "one item failed".to_owned(),
+        };
+    let rows = [
+        ("deleted", false, deleted),
+        ("deleted with errors", false, deleted_with_errors),
+        ("restored", true, restored),
+        ("restored with errors", true, restored_with_errors),
+    ];
+    for (row, restoring, ending) in rows {
+        let folder = if restoring {
+            Location::uri("trash:///")
+        } else {
+            Location::local("/fixture")
+        };
+        let watched = child(&folder, "watched");
+        let browser = Browser::new(Rc::new(Unwatched(folder.clone())));
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let observed = events.clone();
+        browser.observe(move |event| observed.borrow_mut().push(event.clone()));
+        browser.navigate(folder.clone());
+        browser.descend(0, watched.clone());
+        let request_id = browser.begin_operation();
+        browser.deletion_operation.set(!restoring);
+        browser.restoration_operation.set(restoring);
+        let emit = browser.operation_callback(request_id, false, HashSet::new());
+        browser.handle_directory_change(1, &watched, DirectoryChange::Rescan);
+
+        emit(ending(request_id, child(&folder, "gone.txt")));
+
+        assert_eq!(column_names(&browser, 0), ["watched"], "{row}");
+        assert!(
+            events.borrow().iter().any(|event| matches!(
+                event,
+                BrowserEvent::OperationRefreshRequired { depths } if depths == &[1]
+            )),
+            "{row}"
+        );
+    }
+}
+
+#[test]
 fn queued_parent_move_rebases_descendants_before_their_stale_batches() {
     let (browser, source) = tree(false);
     let complete = queue_until_terminal(&browser, false);
