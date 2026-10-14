@@ -528,25 +528,3 @@ fn incremental_batch_publishes_final_selection_without_holding_state_borrows() {
         "deferred monitor changes must not pull focus out of a filter"
     );
 }
-
-#[test]
-fn preferred_refresh_includes_columns_without_monitor_batches_but_empty_work_is_silent() {
-    let (browser, source) = tree(false);
-    let requests: Vec<_> = (0..3)
-        .map(|depth| browser.column_request_id(depth))
-        .collect();
-    assert!(!browser.flush_deferred_file_operation_changes(HashMap::new(), true));
-    assert_eq!(source.loads.borrow().len(), 3);
-    let changes = HashMap::from([(
-        0,
-        vec![(
-            source.root.clone(),
-            DirectoryChange::Remove(child(&source.root, "sibling.txt")),
-        )],
-    )]);
-    assert!(browser.flush_deferred_file_operation_changes(changes, true));
-    for (depth, request) in requests.into_iter().enumerate() {
-        assert_ne!(browser.column_request_id(depth), request);
-    }
-    assert_eq!(source.loads.borrow().len(), 6);
-}

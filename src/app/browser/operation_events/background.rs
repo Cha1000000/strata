@@ -76,7 +76,7 @@ impl Browser {
         self.operation_description.borrow_mut().clear();
         self.operation_destination_description.borrow_mut().clear();
         let changes = self.deferred_file_operation_changes.take();
-        self.flush_deferred_file_operation_changes(changes, false);
+        self.flush_deferred_file_operation_changes(changes);
         true
     }
 

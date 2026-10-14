@@ -458,7 +458,7 @@ impl Browser {
             return;
         }
         let changes = self.deferred_file_operation_changes.take();
-        self.flush_deferred_file_operation_changes(changes, false);
+        self.flush_deferred_file_operation_changes(changes);
     }
 
     fn finish_transfer(
