@@ -1543,6 +1543,59 @@ fn a_merge_undo_cut_off_counts_an_item_as_not_attempted_only_when_it_left_it_who
     Ok(())
 }
 
+#[test]
+fn a_merge_undo_never_counts_an_item_it_could_not_check_as_undone() -> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let root = tempfile::tempdir()?;
+    let [first, second] = ["first.txt", "second.txt"].map(|name| root.path().join(name));
+    for item in [&first, &second] {
+        fs::write(item, b"merged")?;
+    }
+    let unreadable = Location::uri("strata-test-no-backend:///odd.txt");
+    let _scope = FsQuirks::install(root.path(), without_trash(Quirks::default()));
+    let cancellable = gio::Cancellable::new();
+    let cancel = cancellable.clone();
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let emitted = events.clone();
+    let emit = Rc::new(move |event: OperationEvent| {
+        if matches!(event, OperationEvent::DeleteProgress { completed: 2, .. }) {
+            let cancel = cancel.clone();
+            // Runs ahead of the reply to the next item's check, which is then in flight.
+            glib::idle_add_local_full(glib::Priority::HIGH, move || {
+                cancel.cancel();
+                glib::ControlFlow::Break
+            });
+        }
+        emitted.borrow_mut().push(event);
+    });
+
+    glib::MainContext::default().block_on(run_merge_undo(
+        OperationRequestId(1615),
+        vec![
+            Location::local(&first),
+            unreadable.clone(),
+            Location::local(&second),
+        ],
+        Vec::new(),
+        emit,
+        cancellable,
+        staged_lookup(HashMap::new()),
+    ));
+
+    let events = events.borrow();
+    let Some(OperationEvent::Cancelled { result, .. }) = events.last() else {
+        panic!("expected a cancel, got {events:?}");
+    };
+    assert_eq!(result.completed, [Location::local(&first)]);
+    assert_eq!(result.failed, [unreadable]);
+    assert_eq!(result.not_attempted, [Location::local(&second)]);
+    assert!(!first.exists());
+    assert_eq!(fs::read(&second)?, b"merged");
+    Ok(())
+}
+
 fn without_trash(quirks: Quirks) -> Quirks {
     Quirks {
         trash: Trash::Unsupported,

@@ -5243,7 +5243,7 @@ async fn run_merge_undo(
             return;
         }
         let file = gio_file_for_location(location);
-        let existing_type = await_cancellable(&file, &cancellable, |file, cancellable, result| {
+        let queried = await_cancellable(&file, &cancellable, |file, cancellable, result| {
             file.query_info_async(
                 "standard::type",
                 gio::FileQueryInfoFlags::NOFOLLOW_SYMLINKS,
@@ -5252,19 +5252,19 @@ async fn run_merge_undo(
                 move |output| result.resolve(output),
             );
         })
-        .await
-        .map(|info| info.file_type())
-        .ok();
+        .await;
+        let found = queried.is_ok();
         let mut trashed_identity = None;
         let mut permanently_deleted = false;
-        let result = match existing_type {
-            None => Ok(()),
-            Some(file_type) => match trash::trash_entry(&file, &cancellable).await {
+        let result = match queried {
+            Err(error) if error.matches(gio::IOErrorEnum::NotFound) => Ok(()),
+            Err(error) => Err(error),
+            Ok(info) => match trash::trash_entry(&file, &cancellable).await {
                 Err(error) if error.matches(gio::IOErrorEnum::NotSupported) => {
                     permanently_deleted = true;
                     permanently_delete_maybe_local(
                         file,
-                        file_type == gio::FileType::Directory,
+                        info.file_type() == gio::FileType::Directory,
                         cancellable.clone(),
                     )
                     .await
@@ -5274,7 +5274,7 @@ async fn run_merge_undo(
         };
         let deleted_locations = match result {
             Ok(()) => {
-                if existing_type.is_some() {
+                if found {
                     super::bookmarks::deletion_completed(std::slice::from_ref(location));
                 }
                 if let Some(identity) = trashed_identity {
@@ -5288,7 +5288,8 @@ async fn run_merge_undo(
                 vec![location.clone()]
             }
             Err(error) if was_cancelled(&error) => {
-                let untouched = deletion_undone_when_cancelled(location, permanently_deleted);
+                let untouched =
+                    !found || deletion_undone_when_cancelled(location, permanently_deleted);
                 if !untouched {
                     failed_locations.push(location.clone());
                 }
