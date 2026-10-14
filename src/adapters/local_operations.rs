@@ -1605,10 +1605,11 @@ fn undone_when_cancelled(source: &gio::File, target: &gio::File) -> bool {
 }
 
 /// Whether deleting `location` leaves it whole when a cancel cuts it off:
-/// moving a local item to Trash or deleting a local file stops before it
-/// starts, while deleting a folder stops between its entries.
-fn deletion_undone_when_cancelled(location: &Location, permanent_folder: bool) -> bool {
-    location.native_path().is_some() && !permanent_folder
+/// GLib checks the cancel only before it moves a local item to Trash, while
+/// a permanent delete can remove a file, or part of a folder, before it
+/// sees the cancel.
+fn deletion_undone_when_cancelled(location: &Location, permanent: bool) -> bool {
+    location.native_path().is_some() && !permanent
 }
 
 /// Whether a delete failure is retryable as a permanent delete: it was a
@@ -5255,14 +5256,18 @@ async fn run_merge_undo(
         .map(|info| info.file_type())
         .ok();
         let mut trashed_identity = None;
-        let mut permanent_folder = false;
+        let mut permanently_deleted = false;
         let result = match existing_type {
             None => Ok(()),
-            Some(_) => match trash::trash_entry(&file, &cancellable).await {
+            Some(file_type) => match trash::trash_entry(&file, &cancellable).await {
                 Err(error) if error.matches(gio::IOErrorEnum::NotSupported) => {
-                    permanent_folder = existing_type == Some(gio::FileType::Directory);
-                    permanently_delete_maybe_local(file, permanent_folder, cancellable.clone())
-                        .await
+                    permanently_deleted = true;
+                    permanently_delete_maybe_local(
+                        file,
+                        file_type == gio::FileType::Directory,
+                        cancellable.clone(),
+                    )
+                    .await
                 }
                 result => result.map(|identity| trashed_identity = identity),
             },
@@ -5283,7 +5288,7 @@ async fn run_merge_undo(
                 vec![location.clone()]
             }
             Err(error) if was_cancelled(&error) => {
-                let untouched = deletion_undone_when_cancelled(location, permanent_folder);
+                let untouched = deletion_undone_when_cancelled(location, permanently_deleted);
                 if !untouched {
                     failed_locations.push(location.clone());
                 }
@@ -5565,10 +5570,7 @@ async fn run_deletion(
             match result.unwrap_or_else(|_| Err(io_error("Delete worker failed"))) {
                 Err(error) if was_cancelled(&error) => {
                     chunk_cancelled = true;
-                    if deletion_undone_when_cancelled(
-                        &target.location,
-                        permanent && target.is_directory,
-                    ) {
+                    if deletion_undone_when_cancelled(&target.location, permanent) {
                         cut_off.push(target.location.clone());
                     } else {
                         failed_locations.push(target.location.clone());

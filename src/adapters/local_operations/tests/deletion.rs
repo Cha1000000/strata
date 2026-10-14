@@ -473,52 +473,92 @@ fn cancelling_between_deletions_reports_completed_and_unattempted_items()
 }
 
 #[test]
-fn an_item_that_failed_before_a_cancel_stays_failed_and_the_one_it_cut_off_is_not_attempted()
--> Result<(), Box<dyn Error>> {
+fn a_cancelled_delete_counts_only_what_it_left_whole_as_not_attempted() -> Result<(), Box<dyn Error>>
+{
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
         .lock()
         .map_err(|error| error.to_string())?;
-    let root = tempfile::tempdir()?;
-    let [denied, cut, rest] =
-        ["denied.txt", "cut.txt", "rest.txt"].map(|name| root.path().join(name));
-    for item in [&denied, &cut, &rest] {
-        fs::write(item, b"kept")?;
-    }
-    let cancellable = gio::Cancellable::new();
-    let cancel = cancellable.clone();
-    let _scope = FsQuirks::install(
-        root.path(),
-        Quirks {
-            fail: vec![(Op::Stat, "denied.txt", 0, rustix::io::Errno::ACCESS)],
-            before: vec![(Op::Trash, "cut.txt", 0, Box::new(move || cancel.cancel()))],
-            ..Quirks::default()
-        },
-    );
-    let events = Rc::new(RefCell::new(Vec::new()));
-    let emitted = events.clone();
+    for (row, permanent, cut_is_folder) in [
+        ("to Trash", false, false),
+        ("a file permanently", true, false),
+        ("a folder permanently", true, true),
+    ] {
+        let root = tempfile::tempdir()?;
+        let [denied, cut, rest] =
+            ["denied.txt", "cut", "rest.txt"].map(|name| root.path().join(name));
+        let (cut_entry, cut_inside) = if cut_is_folder {
+            fs::create_dir(&cut)?;
+            (directory_entry(&cut), cut.join("inside.txt"))
+        } else {
+            (file_entry(&cut), cut.clone())
+        };
+        for item in [&denied, &cut_inside, &rest] {
+            fs::write(item, b"kept")?;
+        }
+        let cancellable = gio::Cancellable::new();
+        let cancel = cancellable.clone();
+        let cancel: super::fs_quirks::Racer = Box::new(move || cancel.cancel());
+        let cancel_at = if !permanent {
+            Quirks {
+                before: vec![(Op::Trash, "cut", 0, cancel)],
+                ..Quirks::default()
+            }
+        } else {
+            let checked = if cut_is_folder { "inside.txt" } else { "cut" };
+            Quirks {
+                after: vec![(Op::Stat, checked, 0, cancel)],
+                ..Quirks::default()
+            }
+        };
+        let _scope = FsQuirks::install(
+            root.path(),
+            Quirks {
+                fail: vec![(Op::Stat, "denied.txt", 0, rustix::io::Errno::ACCESS)],
+                ..cancel_at
+            },
+        );
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let emitted = events.clone();
 
-    glib::MainContext::default().block_on(super::super::run_deletion(
-        OperationRequestId(1615),
-        [&denied, &cut, &rest]
-            .map(|item| super::super::DeletionTarget::from_entry(&file_entry(item)))
-            .into(),
-        false,
-        Rc::new(move |event| emitted.borrow_mut().push(event)),
-        cancellable,
-    ));
+        glib::MainContext::default().block_on(super::super::run_deletion(
+            OperationRequestId(1615),
+            [file_entry(&denied), cut_entry, file_entry(&rest)]
+                .iter()
+                .map(super::super::DeletionTarget::from_entry)
+                .collect(),
+            permanent,
+            Rc::new(move |event| emitted.borrow_mut().push(event)),
+            cancellable,
+        ));
 
-    let events = events.borrow();
-    let Some(OperationEvent::Cancelled { result, .. }) = events.last() else {
-        panic!("expected a cancel, got {events:?}");
-    };
-    assert!(result.completed.is_empty());
-    assert_eq!(result.failed, [Location::local(&denied)]);
-    assert_eq!(
-        result.not_attempted,
-        [Location::local(&cut), Location::local(&rest)]
-    );
-    for item in [&denied, &cut, &rest] {
-        assert_eq!(fs::read(item)?, b"kept");
+        let events = events.borrow();
+        let Some(OperationEvent::Cancelled { result, .. }) = events.last() else {
+            panic!("{row}: expected a cancel, got {events:?}");
+        };
+        assert!(result.completed.is_empty(), "{row}");
+        if permanent {
+            assert!(
+                !cut_inside.exists(),
+                "{row}: the cancel landed before the delete"
+            );
+            assert_eq!(
+                result.failed,
+                [Location::local(&denied), Location::local(&cut)],
+                "{row}"
+            );
+            assert_eq!(result.not_attempted, [Location::local(&rest)], "{row}");
+        } else {
+            assert_eq!(fs::read(&cut_inside)?, b"kept", "{row}");
+            assert_eq!(result.failed, [Location::local(&denied)], "{row}");
+            assert_eq!(
+                result.not_attempted,
+                [Location::local(&cut), Location::local(&rest)],
+                "{row}"
+            );
+        }
+        for item in [&denied, &rest] {
+            assert_eq!(fs::read(item)?, b"kept", "{row}");
+        }
     }
     Ok(())
 }

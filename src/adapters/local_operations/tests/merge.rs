@@ -1481,49 +1481,64 @@ fn a_merge_a_cancel_cuts_off_counts_as_failed_as_it_keeps_what_it_placed()
 }
 
 #[test]
-fn a_merge_undo_cut_off_before_it_trashes_an_item_counts_it_as_not_attempted()
+fn a_merge_undo_cut_off_counts_an_item_as_not_attempted_only_when_it_left_it_whole()
 -> Result<(), Box<dyn Error>> {
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
         .lock()
         .map_err(|error| error.to_string())?;
-    let root = tempfile::tempdir()?;
-    let created = ["first.txt", "second.txt"].map(|name| root.path().join(name));
-    for item in &created {
-        fs::write(item, b"merged")?;
-    }
-    let cancellable = gio::Cancellable::new();
-    let cancel = cancellable.clone();
-    let _scope = FsQuirks::install(
-        root.path(),
-        Quirks {
-            before: vec![(Op::Trash, "first.txt", 0, Box::new(move || cancel.cancel()))],
-            ..Quirks::default()
-        },
-    );
-    let events = Rc::new(RefCell::new(Vec::new()));
-    let emitted = events.clone();
+    for has_trash in [true, false] {
+        let root = tempfile::tempdir()?;
+        let created = ["first.txt", "second.txt"].map(|name| root.path().join(name));
+        for item in &created {
+            fs::write(item, b"merged")?;
+        }
+        let cancellable = gio::Cancellable::new();
+        let cancel = cancellable.clone();
+        let cancel: super::fs_quirks::Racer = Box::new(move || cancel.cancel());
+        let quirks = if has_trash {
+            Quirks {
+                before: vec![(Op::Trash, "first.txt", 0, cancel)],
+                ..Quirks::default()
+            }
+        } else {
+            // The first check is Trash's, the second the permanent delete's.
+            without_trash(Quirks {
+                after: vec![(Op::Stat, "first.txt", 1, cancel)],
+                ..Quirks::default()
+            })
+        };
+        let _scope = FsQuirks::install(root.path(), quirks);
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let emitted = events.clone();
 
-    glib::MainContext::default().block_on(run_merge_undo(
-        OperationRequestId(1615),
-        created.iter().map(Location::local).collect(),
-        Vec::new(),
-        Rc::new(move |event| emitted.borrow_mut().push(event)),
-        cancellable,
-        staged_lookup(HashMap::new()),
-    ));
+        glib::MainContext::default().block_on(run_merge_undo(
+            OperationRequestId(1615),
+            created.iter().map(Location::local).collect(),
+            Vec::new(),
+            Rc::new(move |event| emitted.borrow_mut().push(event)),
+            cancellable,
+            staged_lookup(HashMap::new()),
+        ));
 
-    let events = events.borrow();
-    let Some(OperationEvent::Cancelled { result, .. }) = events.last() else {
-        panic!("expected a cancel, got {events:?}");
-    };
-    assert!(result.completed.is_empty());
-    assert!(result.failed.is_empty());
-    assert_eq!(
-        result.not_attempted,
-        created.iter().map(Location::local).collect::<Vec<_>>()
-    );
-    for item in &created {
-        assert_eq!(fs::read(item)?, b"merged");
+        let events = events.borrow();
+        let Some(OperationEvent::Cancelled { result, .. }) = events.last() else {
+            panic!("Trash {has_trash}: expected a cancel, got {events:?}");
+        };
+        let [first, second] = &created;
+        assert!(result.completed.is_empty(), "Trash {has_trash}");
+        if has_trash {
+            assert!(result.failed.is_empty());
+            assert_eq!(
+                result.not_attempted,
+                [Location::local(first), Location::local(second)]
+            );
+            assert_eq!(fs::read(first)?, b"merged");
+        } else {
+            assert!(!first.exists(), "the cancel landed before the delete");
+            assert_eq!(result.failed, [Location::local(first)]);
+            assert_eq!(result.not_attempted, [Location::local(second)]);
+        }
+        assert_eq!(fs::read(second)?, b"merged", "Trash {has_trash}");
     }
     Ok(())
 }
