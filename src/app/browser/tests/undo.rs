@@ -898,7 +898,10 @@ fn a_merged_copy_records_created_and_overwritten_paths_for_undo() {
         .replace(Some(Location::local("/fixture/archive")));
     let emit = browser.operation_callback(request_id, false, HashSet::new());
 
-    let placed = HashMap::from([(overwritten.clone(), PlacedSnapshot::new(()))]);
+    let placed = HashMap::from([
+        (created.clone(), PlacedSnapshot::new(())),
+        (overwritten.clone(), PlacedSnapshot::new(())),
+    ]);
     emit(OperationEvent::Merged {
         request_id,
         source: source.clone(),
@@ -981,6 +984,18 @@ fn a_merge_undo_removes_merged_items_under_the_names_they_were_saved_as() {
             ..Default::default()
         },
     });
+    // What the copy placed is recorded under the names it was saved as.
+    let placed = HashMap::from([
+        (saved_as.clone(), PlacedSnapshot::new(())),
+        (numbered.clone(), PlacedSnapshot::new(())),
+    ]);
+    emit(OperationEvent::Merged {
+        request_id,
+        source: source.clone(),
+        created: Vec::new(),
+        overwritten: Vec::new(),
+        placed: placed.clone(),
+    });
     emit(OperationEvent::Pasted {
         request_id,
         locations: vec![source],
@@ -992,7 +1007,7 @@ fn a_merge_undo_removes_merged_items_under_the_names_they_were_saved_as() {
             created: vec![saved_as, numbered],
             overwritten: Vec::new(),
             originals: HashMap::new(),
-            placed: HashMap::new(),
+            placed,
         })
     );
 }

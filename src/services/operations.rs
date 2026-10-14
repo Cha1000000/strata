@@ -171,14 +171,16 @@ impl fmt::Debug for PlacedSnapshot {
 #[derive(Clone, Debug)]
 pub struct UndoMergeRequest {
     pub id: OperationRequestId,
-    /// Paths the merge wrote fresh; undo moves them to Trash.
+    /// Paths the merge wrote fresh; undo moves them to Trash, or without
+    /// Trash deletes them as far as `placed` records them unchanged.
     pub created: Vec<Location>,
     /// Paths whose originals were staged in Trash before being overwritten;
     /// undo deletes the incoming copy and restores the original.
     pub overwritten: Vec<Location>,
     pub originals: HashMap<Location, TrashedOriginal>,
-    /// What the operation put at overwritten paths; an item without one, or
-    /// changed since, stays, and so does its original in Trash.
+    /// What the operation put at created and overwritten paths; an item
+    /// without one, or changed since, stays, and so does its original in
+    /// Trash.
     pub placed: HashMap<Location, PlacedSnapshot>,
 }
 

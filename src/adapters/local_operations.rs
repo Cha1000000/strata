@@ -1895,6 +1895,11 @@ fn copy_recursively_with_progress(
                     break;
                 }
             }
+            if let CopyRecord::Placing(Some(placing)) = record
+                && let Some(path) = target.path().filter(|path| placing.wants(path))
+            {
+                copy_engine::record_placed(placing, path, &cancellable).await;
+            }
             Ok(())
         } else {
             let source_size = info
@@ -3622,7 +3627,7 @@ async fn replace_local(
 /// What a merge will write: `created` are the topmost destination paths with
 /// no existing counterpart, `overwritten` are leaf collisions whose originals
 /// were staged in Trash so undo can restore them, and `placed` what a copy
-/// put at them.
+/// put at either, under the names it was saved as.
 #[derive(Default)]
 struct MergePlan {
     created: Vec<Location>,
@@ -3837,13 +3842,21 @@ async fn merge_owing(
     // Undo applies to copies, and deletes what they placed only unchanged.
     let placing = target_path
         .as_ref()
-        .filter(|_| !move_source && !trashed.is_empty())
+        .filter(|_| !move_source && !(trashed.is_empty() && plan.created.is_empty()))
         .map(|root| {
-            let wanted = trashed
+            let path = |location: &Location| location.native_path().map(Path::to_path_buf);
+            let wanted: HashSet<_> = trashed
                 .iter()
-                .filter_map(|location| location.native_path().map(Path::to_path_buf))
+                .chain(&plan.created)
+                .filter_map(path)
                 .collect();
-            copy_engine::Placing::new(root.clone(), wanted)
+            let unwanted = plan
+                .overwritten
+                .iter()
+                .filter_map(path)
+                .filter(|path| !wanted.contains(path))
+                .collect();
+            copy_engine::Placing::new(root.clone(), wanted, unwanted)
         });
     (hooks.on_merged)(MergePlan {
         created: plan.created,
@@ -5185,6 +5198,38 @@ enum Reverted {
     Kept,
 }
 
+/// Deletes what an operation placed at `path` if all of it is unchanged, and
+/// tells whether nothing of it is left. Sets `deleting` once it deleted
+/// anything.
+async fn remove_unchanged(
+    path: &Path,
+    placed: &PlacedSnapshot,
+    unlinks: &Arc<copy_engine::Unlinks>,
+    cancellable: &gio::Cancellable,
+    deleting: &mut bool,
+) -> Result<bool, glib::Error> {
+    let removed = copy_engine::remove_placed(
+        path.to_path_buf(),
+        placed.clone(),
+        unlinks.clone(),
+        cancellable,
+    )
+    .await;
+    *deleting = removed.removed;
+    removed.result?;
+    if let Some((path, error)) = removed.kept.iter().find_map(|(path, cause)| match cause {
+        KeptCause::Undeletable(error) => Some((path, *error)),
+        _ => None,
+    }) {
+        return Err(io_error(rust_i18n::t!(
+            "Could not delete %{name}: %{error}",
+            name = path.file_name().unwrap_or_default().to_string_lossy(),
+            error = crate::services::io_error_detail(&io::Error::from_raw_os_error(error))
+        )));
+    }
+    Ok(removed.kept.is_empty())
+}
+
 /// Reverts one overwritten merge path: deletes what the operation put there
 /// if all of it is unchanged, so the staged original can move back out of
 /// Trash. Sets `deleting` once it deleted anything.
@@ -5199,26 +5244,7 @@ async fn undo_merged_overwrite(
 ) -> Result<Reverted, glib::Error> {
     let freed = match (placed, location.native_path()) {
         (Some(placed), Some(path)) => {
-            let removed = copy_engine::remove_placed(
-                path.to_path_buf(),
-                placed.clone(),
-                unlinks.clone(),
-                cancellable,
-            )
-            .await;
-            *deleting = removed.removed;
-            removed.result?;
-            if let Some((path, error)) = removed.kept.iter().find_map(|(path, cause)| match cause {
-                KeptCause::Undeletable(error) => Some((path, *error)),
-                _ => None,
-            }) {
-                return Err(io_error(rust_i18n::t!(
-                    "Could not delete %{name}: %{error}",
-                    name = path.file_name().unwrap_or_default().to_string_lossy(),
-                    error = crate::services::io_error_detail(&io::Error::from_raw_os_error(error))
-                )));
-            }
-            removed.kept.is_empty()
+            remove_unchanged(path, placed, unlinks, cancellable, deleting).await?
         }
         // Nothing tells what is there, so only an empty path takes the
         // original back.
@@ -5394,24 +5420,35 @@ async fn run_merge_undo(
         .await;
         let found = queried.is_ok();
         let mut trashed_identity = None;
-        let mut permanently_deleted = false;
+        // Without Trash, only what the merge left unchanged is deleted.
+        let mut deleting = false;
+        let mut kept = false;
         let result = match queried {
             Err(error) if error.matches(gio::IOErrorEnum::NotFound) => Ok(()),
             Err(error) => Err(error),
-            Ok(info) => match trash::trash_entry(&file, &cancellable).await {
+            Ok(_) => match trash::trash_entry(&file, &cancellable).await {
                 Err(error) if error.matches(gio::IOErrorEnum::NotSupported) => {
-                    permanently_deleted = true;
-                    permanently_delete_maybe_local(
-                        file,
-                        info.file_type() == gio::FileType::Directory,
-                        cancellable.clone(),
-                    )
-                    .await
+                    match (placed.get(location), location.native_path()) {
+                        (Some(placed), Some(path)) => {
+                            remove_unchanged(path, placed, &unlinks, &cancellable, &mut deleting)
+                                .await
+                        }
+                        _ => Ok(false),
+                    }
+                    .map(|removed| kept = !removed)
                 }
                 result => result.map(|identity| trashed_identity = identity),
             },
         };
         let deleted_locations = match result {
+            Ok(()) if kept => {
+                errors.push(item_error(
+                    &location.display_name(),
+                    crate::i18n::tr("It was kept, as it may have changed since it was copied"),
+                ));
+                failed_locations.push(location.clone());
+                Vec::new()
+            }
             Ok(()) => {
                 if found {
                     super::bookmarks::deletion_completed(std::slice::from_ref(location));
@@ -5427,8 +5464,8 @@ async fn run_merge_undo(
                 vec![location.clone()]
             }
             Err(error) if was_cancelled(&error) => {
-                let untouched =
-                    !found || deletion_undone_when_cancelled(location, permanently_deleted);
+                // Without Trash, an item stays whole until anything of it is deleted.
+                let untouched = !found || deletion_undone_when_cancelled(location, deleting);
                 if !untouched {
                     failed_locations.push(location.clone());
                 }

@@ -442,6 +442,7 @@
   "Invalid password": "密码错误",
   "Invert selection": "反向选择",
   "Invoking": "当前文件夹",
+  "It was kept, as it may have changed since it was copied": "复制后可能已发生变化，因此已保留",
   "Items in Trash cannot be opened": "无法打开回收站中的项目",
   "Items shown in sidebar": "侧边栏中显示的项目",
   "Jobs": "任务",

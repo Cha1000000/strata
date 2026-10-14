@@ -370,7 +370,8 @@ pub enum UndoEntry {
     Trash(Vec<Location>),
     Move(Vec<MoveRecord>),
     Copy(Vec<Location>),
-    /// `created` paths get trashed; `overwritten` paths lose the incoming
+    /// `created` paths get trashed, or without Trash deleted as far as they
+    /// are still as `placed` records; `overwritten` paths lose the incoming
     /// copy, as far as it is still as `placed` records, and get their
     /// staged original restored from Trash.
     Merge {
@@ -841,9 +842,18 @@ fn retain_replay_merge_items(
             kept_created.retain(|location| created.contains(location));
             kept_overwritten.retain(|location| overwritten.contains(location));
             originals.retain(|location, _| overwritten.contains(location));
-            placed.retain(|location, _| overwritten.contains(location));
+            retain_merge_records(placed, created, overwritten);
         }
     });
+}
+
+fn retain_merge_records(
+    placed: &mut HashMap<Location, PlacedSnapshot>,
+    created: &[Location],
+    overwritten: &[Location],
+) {
+    let undone: HashSet<&Location> = created.iter().chain(overwritten).collect();
+    placed.retain(|location, _| undone.contains(location));
 }
 
 fn undo_move_parents(items: &[UndoMoveItem]) -> HashSet<Location> {
@@ -3273,7 +3283,7 @@ impl Browser {
         };
         retain_replay_merge_items(false, generation, &created, &overwritten);
         originals.retain(|location, _| overwritten.contains(location));
-        placed.retain(|location, _| overwritten.contains(location));
+        retain_merge_records(&mut placed, &created, &overwritten);
         let total = created.len() + overwritten.len();
         let refresh_locations = created
             .iter()

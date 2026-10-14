@@ -153,11 +153,19 @@ fn merging_folders_unites_contents_and_overwrites_shared_names() -> Result<(), B
         vec![Location::local(target.join("shared.txt"))]
     );
     assert_eq!(
-        plans[1].placed.keys().collect::<Vec<_>>(),
-        [&Location::local(target.join("shared.txt"))],
-        "what the copy put at an overwritten path is recorded for undo"
+        placed_paths(&plans[1].placed),
+        [target.join("incoming.txt"), target.join("shared.txt")],
+        "what the copy put at created and overwritten paths is recorded for undo"
     );
     Ok(())
+}
+
+fn placed_paths(placed: &HashMap<Location, PlacedSnapshot>) -> Vec<PathBuf> {
+    let mut paths = (placed.keys())
+        .filter_map(|location| location.native_path().map(Path::to_path_buf))
+        .collect::<Vec<_>>();
+    paths.sort();
+    paths
 }
 
 #[test]
@@ -209,9 +217,12 @@ fn merging_recurses_into_subdirectories_shared_by_both_sides() -> Result<(), Box
         vec![Location::local(target.join("nested/shared.txt"))]
     );
     assert_eq!(
-        plans[1].placed.keys().collect::<Vec<_>>(),
-        [&Location::local(target.join("nested/shared.txt"))],
-        "what the copy put at an overwritten path is recorded for undo"
+        placed_paths(&plans[1].placed),
+        [
+            target.join("nested/incoming.txt"),
+            target.join("nested/shared.txt")
+        ],
+        "what the copy put at created and overwritten paths is recorded for undo"
     );
     Ok(())
 }
@@ -261,6 +272,43 @@ fn a_merge_from_a_location_without_paths_records_what_it_copied_over_an_original
 }
 
 #[test]
+fn a_merge_from_a_location_without_paths_records_the_folders_it_creates_once_filled()
+-> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    gio::resources_register_include!("strata.gresource")?;
+    let source = gio::File::for_uri("resource:///io/github/lgse/Strata/icons/scalable");
+    let root = tempfile::tempdir()?;
+    let target = root.path().join("scalable");
+    write_files(&target, &[("stays.txt", "keep me")])?;
+    let (plans, on_merged) = recorded_plans();
+
+    let result = glib::MainContext::default().block_on(merge_local(
+        source,
+        gio::File::for_path(&target),
+        false,
+        gio::Cancellable::new(),
+        &on_merged,
+    ));
+
+    assert!(result.is_ok(), "{result:?}");
+    let [actions, apps] = ["actions", "apps"].map(|name| target.join(name));
+    let parts = undo_parts(plans.take());
+    assert_eq!(placed_paths(&parts.2), [actions.clone(), apps.clone()]);
+    let edited = fs::read_dir(&apps)?.next().ok_or("an app icon")??.path();
+    fs::write(&edited, b"edited after the merge")?;
+    let _scope = FsQuirks::install(root.path(), without_trash(Quirks::default()));
+
+    let events = run_undo(parts, staged_lookup(HashMap::new()));
+
+    assert!(!actions.exists(), "{events:?}");
+    assert_eq!(fs::read(&edited)?, b"edited after the merge");
+    assert_eq!(names(&target)?, ["apps", "stays.txt"]);
+    Ok(())
+}
+
+#[test]
 fn a_new_subdirectory_is_reported_as_a_single_created_entry() -> Result<(), Box<dyn Error>> {
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
         .lock()
@@ -284,13 +332,14 @@ fn a_new_subdirectory_is_reported_as_a_single_created_entry() -> Result<(), Box<
     assert!(result.is_ok(), "{result:?}");
     assert_eq!(fs::read(target.join("sub/deep/incoming.txt"))?, b"new");
     let plans = plans.borrow();
-    assert_eq!(plans.len(), 1);
+    assert_eq!(plans.len(), 2);
     assert_eq!(
         plans[0].created,
         vec![Location::local(target.join("sub"))],
         "undo removes the topmost created directory, not each nested child"
     );
     assert!(plans[0].overwritten.is_empty());
+    assert_eq!(placed_paths(&plans[1].placed), [target.join("sub")]);
     Ok(())
 }
 
@@ -1348,6 +1397,18 @@ fn undoing_a_merge_with_numbered_aliases_removes_only_its_items() -> Result<(), 
             cause: RenameCause::Alias,
         }]
     );
+    let placed = events
+        .iter()
+        .filter_map(|event| match event {
+            OperationEvent::Merged { placed, .. } => Some(placed.clone()),
+            _ => None,
+        })
+        .flatten()
+        .collect::<HashMap<_, _>>();
+    assert!(
+        placed.contains_key(&saved_as),
+        "an alias is recorded as saved"
+    );
     let undone = Rc::new(RefCell::new(Vec::new()));
     let emitted = undone.clone();
     glib::MainContext::default().block_on(run_merge_undo(
@@ -1355,7 +1416,7 @@ fn undoing_a_merge_with_numbered_aliases_removes_only_its_items() -> Result<(), 
         (
             vec![Location::local(folder.join("Makefile")), saved_as],
             Vec::new(),
-            HashMap::new(),
+            placed,
         ),
         Rc::new(move |event| emitted.borrow_mut().push(event)),
         gio::Cancellable::new(),
@@ -1554,26 +1615,27 @@ fn a_merge_undo_cut_off_counts_an_item_as_not_attempted_only_when_it_left_it_who
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
         .lock()
         .map_err(|error| error.to_string())?;
-    for has_trash in [true, false] {
+    // Without Trash, the first check is Trash's, the second the comparison's
+    // and the third the delete's.
+    for (row, check) in [("Trash", None), ("compare", Some(1)), ("delete", Some(2))] {
         let root = tempfile::tempdir()?;
         let created = ["first.txt", "second.txt"].map(|name| root.path().join(name));
         for item in &created {
             fs::write(item, b"merged")?;
         }
+        let placed = placed_now(&[&created[0], &created[1]]);
         let cancellable = gio::Cancellable::new();
         let cancel = cancellable.clone();
         let cancel: super::fs_quirks::Racer = Box::new(move || cancel.cancel());
-        let quirks = if has_trash {
-            Quirks {
+        let quirks = match check {
+            None => Quirks {
                 before: vec![(Op::Trash, "first.txt", 0, cancel)],
                 ..Quirks::default()
-            }
-        } else {
-            // The first check is Trash's, the second the permanent delete's.
-            without_trash(Quirks {
-                after: vec![(Op::Stat, "first.txt", 1, cancel)],
+            },
+            Some(check) => without_trash(Quirks {
+                after: vec![(Op::Stat, "first.txt", check, cancel)],
                 ..Quirks::default()
-            })
+            }),
         };
         let _scope = FsQuirks::install(root.path(), quirks);
         let events = Rc::new(RefCell::new(Vec::new()));
@@ -1584,7 +1646,7 @@ fn a_merge_undo_cut_off_counts_an_item_as_not_attempted_only_when_it_left_it_who
             (
                 created.iter().map(Location::local).collect(),
                 Vec::new(),
-                HashMap::new(),
+                placed,
             ),
             Rc::new(move |event| emitted.borrow_mut().push(event)),
             cancellable,
@@ -1593,23 +1655,24 @@ fn a_merge_undo_cut_off_counts_an_item_as_not_attempted_only_when_it_left_it_who
 
         let events = events.borrow();
         let Some(OperationEvent::Cancelled { result, .. }) = events.last() else {
-            panic!("Trash {has_trash}: expected a cancel, got {events:?}");
+            panic!("{row}: expected a cancel, got {events:?}");
         };
         let [first, second] = &created;
-        assert!(result.completed.is_empty(), "Trash {has_trash}");
-        if has_trash {
-            assert!(result.failed.is_empty());
-            assert_eq!(
-                result.not_attempted,
-                [Location::local(first), Location::local(second)]
-            );
-            assert_eq!(fs::read(first)?, b"merged");
-        } else {
+        assert!(result.completed.is_empty(), "{row}");
+        if row == "delete" {
             assert!(!first.exists(), "the cancel landed before the delete");
             assert_eq!(result.failed, [Location::local(first)]);
             assert_eq!(result.not_attempted, [Location::local(second)]);
+        } else {
+            assert!(result.failed.is_empty(), "{row}");
+            assert_eq!(
+                result.not_attempted,
+                [Location::local(first), Location::local(second)],
+                "{row}"
+            );
+            assert_eq!(fs::read(first)?, b"merged", "{row}");
         }
-        assert_eq!(fs::read(second)?, b"merged", "Trash {has_trash}");
+        assert_eq!(fs::read(second)?, b"merged", "{row}");
     }
     Ok(())
 }
@@ -1625,6 +1688,7 @@ fn a_merge_undo_never_counts_an_item_it_could_not_check_as_undone() -> Result<()
         fs::write(item, b"merged")?;
     }
     let unreadable = Location::uri("strata-test-no-backend:///odd.txt");
+    let placed = placed_now(&[&first, &second]);
     let _scope = FsQuirks::install(root.path(), without_trash(Quirks::default()));
     let cancellable = gio::Cancellable::new();
     let cancel = cancellable.clone();
@@ -1651,7 +1715,7 @@ fn a_merge_undo_never_counts_an_item_it_could_not_check_as_undone() -> Result<()
                 Location::local(&second),
             ],
             Vec::new(),
-            HashMap::new(),
+            placed,
         ),
         emit,
         cancellable,
@@ -2555,6 +2619,140 @@ fn an_undo_keeps_what_was_too_big_to_record() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+#[test]
+fn a_merge_undo_without_trash_deletes_only_what_the_merge_created_unchanged()
+-> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    // What happened to the created new.txt and sub after the merge, whether
+    // undo has Trash, and whether the mount places folders or copies them in
+    // place.
+    let rows = [
+        ("untouched", Trash::Unsupported, true),
+        ("untouched", Trash::Unsupported, false),
+        ("edited", Trash::Unsupported, true),
+        ("added to", Trash::Unsupported, true),
+        ("unrecorded", Trash::Unsupported, true),
+        ("edited", Trash::Supported, true),
+    ];
+    for (change, trash, places_folders) in rows {
+        let row = format!("{change}, {trash:?}, places folders: {places_folders}");
+        let root = tempfile::tempdir()?;
+        let source = root.path().join("source");
+        let target = root.path().join("target");
+        write_files(
+            &source,
+            &[
+                ("docs/new.txt", "incoming"),
+                ("docs/sub/a.txt", "incoming a"),
+                ("docs/sub/b.txt", "incoming b"),
+            ],
+        )?;
+        write_files(&target, &[("docs/stays.txt", "keep me")])?;
+        let placement = if places_folders {
+            Quirks::default()
+        } else {
+            Quirks {
+                mount_type: Some(("ext4", "rw")),
+                ..Quirks::without_folder_placement()
+            }
+        };
+        let scope = FsQuirks::install(root.path(), Quirks { trash, ..placement });
+        if !places_folders {
+            learn_mount_capability(scope.key(), |capabilities| {
+                capabilities.no_replace = Some(false);
+                capabilities.hard_links = Some(true);
+                capabilities.rename_over_empty_directory = Some(false);
+            });
+        }
+        let (merged, plans) = merge_through_trash(&source, &target, false, real_copy());
+        merged?;
+        let [file, folder] = ["docs/new.txt", "docs/sub"].map(|path| target.join(path));
+        let mut parts = undo_parts(plans);
+        match change {
+            "edited" => {
+                fs::write(&file, b"edited after the merge")?;
+                fs::write(folder.join("a.txt"), b"edited after the merge")?;
+            }
+            "added to" => fs::write(folder.join("c.txt"), b"added after the merge")?,
+            "unrecorded" => parts.2.clear(),
+            _ => {}
+        }
+
+        let events = run_undo(parts, staged_lookup(HashMap::new()));
+
+        assert_eq!(
+            fs::read(target.join("docs/stays.txt"))?,
+            b"keep me",
+            "{row}"
+        );
+        let mut trashed = trashed_items(&events)
+            .into_iter()
+            .map(|(location, _)| location)
+            .collect::<Vec<_>>();
+        trashed.sort_by_key(Location::display_name);
+        let kept: &[&Path] = match (change, trash) {
+            (_, Trash::Supported) => {
+                assert_eq!(
+                    trashed,
+                    [Location::local(&file), Location::local(&folder)],
+                    "{row}: Trash takes them whatever they hold"
+                );
+                &[]
+            }
+            ("untouched", _) => &[],
+            ("added to", _) => &[&folder],
+            _ => &[&file, &folder],
+        };
+        if !matches!(trash, Trash::Supported) {
+            assert!(trashed.is_empty(), "{row}");
+        }
+        for item in [&file, &folder] {
+            assert_eq!(
+                item.exists(),
+                kept.contains(&item.as_path()),
+                "{row}: {item:?}"
+            );
+        }
+        if kept.contains(&folder.as_path()) {
+            let mut expected = vec!["a.txt", "b.txt"];
+            if change == "added to" {
+                expected.push("c.txt");
+            }
+            assert_eq!(names(&folder)?, expected, "{row}: kept whole");
+            assert_eq!(fs::read(folder.join("b.txt"))?, b"incoming b", "{row}");
+        }
+        if kept.is_empty() {
+            assert!(
+                matches!(events.last(), Some(OperationEvent::Restored { .. })),
+                "{row}: {events:?}"
+            );
+            continue;
+        }
+        let Some(OperationEvent::CompletedWithErrors {
+            deleted_locations,
+            message,
+            ..
+        }) = events.last()
+        else {
+            panic!("{row}: {events:?}");
+        };
+        let deleted: Vec<_> = [&file, &folder]
+            .into_iter()
+            .filter(|item| !kept.contains(&item.as_path()))
+            .map(Location::local)
+            .collect();
+        assert_eq!(*deleted_locations, deleted, "{row}");
+        let reason = crate::i18n::tr("It was kept, as it may have changed since it was copied");
+        for item in kept {
+            let line = super::super::item_error(&Location::local(item).display_name(), &reason);
+            assert!(message.contains(&line), "{row}: {message}");
+        }
+    }
+    Ok(())
+}
+
 fn without_trash(quirks: Quirks) -> Quirks {
     Quirks {
         trash: Trash::Unsupported,
@@ -2648,14 +2846,24 @@ fn merge_without_trash_sets_originals_aside_and_removes_them_after_success()
         assert_eq!(fs::read(target.join("nested/stays.txt"))?, b"keep me");
         assert_eq!(names(&target)?, ["incoming.txt", "nested", "shared.txt"]);
         assert_eq!(source.exists(), !move_source);
-        assert_eq!(plans.len(), 1);
         assert_eq!(
             plans[0].created,
             vec![Location::local(target.join("incoming.txt"))]
         );
+        let (_, overwritten, placed) = undo_parts(plans);
         assert!(
-            plans[0].overwritten.is_empty(),
+            overwritten.is_empty(),
             "originals deleted without Trash cannot be restored by undo"
+        );
+        let recorded = if move_source {
+            Vec::new()
+        } else {
+            vec![Location::local(target.join("incoming.txt"))]
+        };
+        assert_eq!(
+            placed.into_keys().collect::<Vec<_>>(),
+            recorded,
+            "{trash:?}: only what undo deletes is recorded"
         );
     }
     Ok(())

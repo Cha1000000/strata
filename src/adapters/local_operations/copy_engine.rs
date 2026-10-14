@@ -111,26 +111,35 @@ pub(super) enum Destination {
 pub(super) struct Placing {
     root: PathBuf,
     wanted: HashSet<PathBuf>,
+    unwanted: HashSet<PathBuf>,
     placed: Mutex<Vec<(PathBuf, Placed)>>,
     left: AtomicUsize,
 }
 
 impl Placing {
-    /// `root` is the merged folder, and `wanted` are paths beneath it.
-    pub(super) fn new(root: PathBuf, wanted: HashSet<PathBuf>) -> Arc<Self> {
+    /// `root` is the merged folder. Beneath it, `wanted` are the paths undo
+    /// reverts, and `unwanted` the overwritten paths it leaves.
+    pub(super) fn new(
+        root: PathBuf,
+        wanted: HashSet<PathBuf>,
+        unwanted: HashSet<PathBuf>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             root,
             wanted,
+            unwanted,
             placed: Mutex::default(),
             left: manifest::placed_entries(),
         })
     }
 
+    /// A GIO copy, which walks into what it creates, records only these.
     pub(super) fn wants(&self, path: &Path) -> bool {
         self.wanted.contains(path)
     }
 
-    /// `path` is where the merge placed `name` of `dir`, beneath its folder.
+    /// `path` is where the merge placed `name` of `dir`, beneath its folder,
+    /// which may be a name it numbered instead of a wanted one.
     fn placed(
         &self,
         fs: &dyn FsOps,
@@ -139,7 +148,7 @@ impl Placing {
         cancelled: &AtomicBool,
     ) {
         let path = self.root.join(path);
-        if self.wants(&path) {
+        if !self.unwanted.contains(&path) {
             self.record(fs, (dir, name), path, cancelled);
         }
     }

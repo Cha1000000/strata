@@ -519,20 +519,28 @@ fn a_background_merge_records_what_it_placed_for_undo() {
     let operations = Rc::new(HeldOperations::default());
     browser.set_operation_provider(operations.clone());
     let id = copy(&browser, "folder");
+    let created = Location::local("/fixture/destination/folder/new.txt");
     let overwritten = Location::local("/fixture/destination/folder/notes.txt");
-    let placed = HashMap::from([(overwritten.clone(), PlacedSnapshot::new(()))]);
+    let placed = HashMap::from([
+        (created.clone(), PlacedSnapshot::new(())),
+        (overwritten.clone(), PlacedSnapshot::new(())),
+    ]);
     assert!(browser.background_file_operation(id));
 
-    for (overwritten, placed) in [
-        (vec![overwritten.clone()], HashMap::new()),
-        (Vec::new(), placed.clone()),
+    for (created, overwritten, placed) in [
+        (
+            vec![created.clone()],
+            vec![overwritten.clone()],
+            HashMap::new(),
+        ),
+        (Vec::new(), Vec::new(), placed.clone()),
     ] {
         operations.emit(
             id,
             OperationEvent::Merged {
                 request_id: id,
                 source: Location::local("/fixture/folder"),
-                created: Vec::new(),
+                created,
                 overwritten,
                 placed,
             },
@@ -549,7 +557,7 @@ fn a_background_merge_records_what_it_placed_for_undo() {
     assert_eq!(
         pending_undo_entry(),
         Some(UndoEntry::Merge {
-            created: Vec::new(),
+            created: vec![created],
             overwritten: vec![overwritten],
             originals: HashMap::new(),
             placed,

@@ -442,6 +442,7 @@
   "Invalid password": "パスワードが正しくありません",
   "Invert selection": "選択を反転",
   "Invoking": "呼び出し元",
+  "It was kept, as it may have changed since it was copied": "コピー後に変更された可能性があるため、残されました",
   "Items in Trash cannot be opened": "ゴミ箱内の項目は開けません",
   "Items shown in sidebar": "サイドバーに表示する項目",
   "Jobs": "ジョブ",

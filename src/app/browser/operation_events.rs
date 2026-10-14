@@ -20,7 +20,7 @@ pub(super) use background::BackgroundOperation;
 use super::{
     Browser, BrowserEvent, MergeUndoState, UndoEntry, completed_replay_items, finish_replay,
     mark_replay_item_completed, move_records, moved_target, push_pending_redo, push_pending_undo,
-    push_regenerated_undo,
+    push_regenerated_undo, retain_merge_records,
 };
 
 struct OperationContext {
@@ -131,7 +131,7 @@ impl OperationCompletion {
                 // path instead, or the restored original would be trashed.
                 all_created.retain(|location| !merged.overwritten.contains(location));
                 let mut placed = merged.placed;
-                placed.retain(|location, _| merged.overwritten.contains(location));
+                retain_merge_records(&mut placed, &all_created, &merged.overwritten);
                 publish(UndoEntry::Merge {
                     created: all_created,
                     overwritten: merged.overwritten,

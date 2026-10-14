@@ -1251,6 +1251,11 @@ impl Live {
             },
         )?;
         copy.adopt(&nested, &path);
+        if let Some(placing) = &self.placing
+            && let Some(name) = path.file_name()
+        {
+            placing.placed(copy.fs, (self.dir.as_fd(), name), &path, &copy.cancelled);
+        }
         lock(&tree.placed).push(path);
         Ok(())
     }
@@ -1291,7 +1296,6 @@ impl Place {
         children.sort_by(|(left, _), (right, _)| left.cmp(right));
         let mut restrictive = tree.take_restrictive(self.scope);
         let mut placed = Vec::new();
-        let mut in_place = Vec::new();
         let mut result = Ok(());
         for (name, kind) in &children {
             match self.place_child(copy, name, *kind == FileType::Directory) {
@@ -1302,8 +1306,6 @@ impl Place {
                         for folder in &mut restrictive {
                             super::rebase(&mut folder.path, &requested, &path);
                         }
-                    } else if self.placing.is_some() {
-                        in_place.push((name, path.clone()));
                     }
                     placed.push(path);
                 }
@@ -1319,8 +1321,10 @@ impl Place {
         }
         // Placing a name of a file changes the change time of its others.
         if let Some(placing) = &self.placing {
-            for (name, path) in in_place {
-                placing.placed(fs, (self.live.as_fd(), name), &path, &copy.cancelled);
+            for path in &placed {
+                if let Some(name) = path.file_name() {
+                    placing.placed(fs, (self.live.as_fd(), name), path, &copy.cancelled);
+                }
             }
         }
         let mut placed_folders = restrictive

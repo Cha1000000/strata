@@ -560,6 +560,14 @@ only to an empty path. A merge undo deletes its copy before it restores the orig
 cut off after it deleted anything counts as failed; one cut off while it compares counts as not
 attempted. A path it cannot check fails with that error and the original stays in the Trash.
 
+A merge undo moves what the merge created to the Trash. Where there is no Trash, it deletes it by
+the same rules instead: a copy merge also records what it creates, under the name it was saved as
+and within the same 100,000 entries, and the undo deletes an item only if all of it is unchanged.
+An item that changed, or has no record (one on a GVfs location, or one pasted beside the merged
+folder), stays whole and fails with "It was kept, as it may have changed since it was copied". An
+item cut off after it deleted anything counts as failed, and one cut off while it compares as not
+attempted.
+
 As in a move, anything that changes an entry's change time counts as a change, even with its
 contents untouched, and an undo may come long after the operation. Renaming the item away and
 back, deleting it to the Trash and undoing that, changing its permissions or adding a hard link to
