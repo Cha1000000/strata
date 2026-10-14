@@ -1,4 +1,4 @@
-use super::fs_quirks::Trash;
+use super::fs_quirks::{Op, Trash};
 use super::*;
 use crate::adapters::local_operations::{
     LocalDeleteJob, LocalDeleteQueue, PinnedEntry, parallel_delete_local_blocking_with_workers,
@@ -469,6 +469,57 @@ fn cancelling_between_deletions_reports_completed_and_unattempted_items()
     assert!(second.exists());
 
     fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn an_item_that_failed_before_a_cancel_stays_failed_and_the_one_it_cut_off_is_not_attempted()
+-> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let root = tempfile::tempdir()?;
+    let [denied, cut, rest] =
+        ["denied.txt", "cut.txt", "rest.txt"].map(|name| root.path().join(name));
+    for item in [&denied, &cut, &rest] {
+        fs::write(item, b"kept")?;
+    }
+    let cancellable = gio::Cancellable::new();
+    let cancel = cancellable.clone();
+    let _scope = FsQuirks::install(
+        root.path(),
+        Quirks {
+            fail: vec![(Op::Stat, "denied.txt", 0, rustix::io::Errno::ACCESS)],
+            before: vec![(Op::Trash, "cut.txt", 0, Box::new(move || cancel.cancel()))],
+            ..Quirks::default()
+        },
+    );
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let emitted = events.clone();
+
+    glib::MainContext::default().block_on(super::super::run_deletion(
+        OperationRequestId(1615),
+        [&denied, &cut, &rest]
+            .map(|item| super::super::DeletionTarget::from_entry(&file_entry(item)))
+            .into(),
+        false,
+        Rc::new(move |event| emitted.borrow_mut().push(event)),
+        cancellable,
+    ));
+
+    let events = events.borrow();
+    let Some(OperationEvent::Cancelled { result, .. }) = events.last() else {
+        panic!("expected a cancel, got {events:?}");
+    };
+    assert!(result.completed.is_empty());
+    assert_eq!(result.failed, [Location::local(&denied)]);
+    assert_eq!(
+        result.not_attempted,
+        [Location::local(&cut), Location::local(&rest)]
+    );
+    for item in [&denied, &cut, &rest] {
+        assert_eq!(fs::read(item)?, b"kept");
+    }
     Ok(())
 }
 

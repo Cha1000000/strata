@@ -520,12 +520,14 @@ report there.
 at 256 items, at 1 GiB copied, 5 s after the batch's first item (checked as items finish), and at
 the end of the paste, including on cancel or failure. Sources are deleted in batches, and each item
 is recorded as moved, for Undo, once its source is deleted. Cancelling stops copying, then
-completes the deletions of the batch, whose copies are on disk. A crash before a batch closes
-leaves both copies. The progress dock shows "Writing to device…" during a final flush, except on
-SMB, whose files were synced as they were written. A merge also flushes the filesystems mounted
-beneath its target that it wrote to. Replace syncs only where its original or its source will be
-deleted: for moves, without Trash, and when a move to Trash fails after the copy was staged.
-Undoing moves is batched the same way; a restore copy flushes once per item.
+completes the deletions of the batch, whose copies are on disk. Between local folders, an item the
+cancel cuts off is removed from the destination and counted as not attempted; a merge keeps what it
+placed and counts as failed. A crash before a batch closes leaves both copies. The progress dock
+shows "Writing to device…" during a final flush, except on SMB, whose files were synced as they were
+written. A merge also flushes the filesystems mounted beneath its target that it wrote to. Replace
+syncs only where its original or its source will be deleted: for moves, without Trash, and when a
+move to Trash fails after the copy was staged. Undoing moves is batched the same way; a restore copy
+flushes once per item.
 
 **Parallel moves.** A paste of more than eight native files into a native folder, none of them in
 conflict, copies or moves up to eight files at a time, one where either disk is rotational. Each

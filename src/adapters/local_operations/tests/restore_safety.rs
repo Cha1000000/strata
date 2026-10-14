@@ -885,6 +885,71 @@ fn cancelling_restore_before_io_reports_every_item_as_unattempted() -> Result<()
 }
 
 #[test]
+fn a_restore_cut_off_before_it_places_the_item_counts_it_as_not_attempted()
+-> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock()?;
+    let fixture = tempfile::tempdir()?;
+    let trash = fixture
+        .path()
+        .join(format!(".Trash-{}", rustix::process::getuid().as_raw()));
+    fs::create_dir_all(trash.join("files"))?;
+    fs::create_dir_all(trash.join("info"))?;
+    fs::create_dir(fixture.path().join("Documents"))?;
+    let source = trash.join("files/report");
+    fs::write(&source, b"original")?;
+    fs::write(
+        trash.join("info/report.trashinfo"),
+        "[Trash Info]\nPath=Documents/report\n",
+    )?;
+    let destination = fixture.path().join("Documents/report");
+    let cancel = CancelFromMain::default();
+    let _scope = FsQuirks::install(
+        fixture.path(),
+        Quirks {
+            before: vec![(Op::Stat, "report", 0, cancel.racer())],
+            ..Quirks::default()
+        },
+    );
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let emitted = events.clone();
+    let mut operation = Some(LocalOperationProvider.restore(
+        RestoreRequest {
+            id: OperationRequestId(1615),
+            source: RestoreSource::TrashEntries(vec![RestoreTrashItem {
+                entry: file_entry(&source),
+                destination: destination.clone(),
+            }]),
+        },
+        Rc::new(move |event| emitted.borrow_mut().push(event)),
+    ));
+
+    let context = glib::MainContext::default();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !events
+        .borrow()
+        .iter()
+        .any(|event| matches!(event, OperationEvent::Cancelled { .. }))
+    {
+        assert!(Instant::now() < deadline, "{:?}", events.borrow());
+        cancel.serve(|| drop(operation.take()));
+        context.iteration(false);
+        thread::sleep(Duration::from_millis(1));
+    }
+
+    assert!(cancel.served());
+    let events = events.borrow();
+    let Some(OperationEvent::Cancelled { result, .. }) = events.last() else {
+        panic!("expected a cancel, got {events:?}");
+    };
+    assert!(result.completed.is_empty());
+    assert!(result.failed.is_empty());
+    assert_eq!(result.not_attempted, [Location::local(&source)]);
+    assert_eq!(fs::read(&source)?, b"original");
+    assert!(fs::symlink_metadata(&destination).is_err());
+    Ok(())
+}
+
+#[test]
 fn restore_rejects_a_volume_orig_path_on_another_device() -> Result<(), Box<dyn Error>> {
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
         .lock()

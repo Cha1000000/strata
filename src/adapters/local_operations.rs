@@ -1596,6 +1596,21 @@ fn was_cancelled(error: &glib::Error) -> bool {
     error.matches(gio::IOErrorEnum::Cancelled)
 }
 
+/// Whether an item a cancel cuts off while it is copied or moved from
+/// `source` to `target` is left as it was: between local folders a cancelled
+/// copy removes what it wrote, or fails when it cannot. A merge keeps what it
+/// placed, and GIO's copies to or from other locations are not checked.
+fn undone_when_cancelled(source: &gio::File, target: &gio::File) -> bool {
+    source.is_native() && target.is_native()
+}
+
+/// Whether deleting `location` leaves it whole when a cancel cuts it off:
+/// moving a local item to Trash or deleting a local file stops before it
+/// starts, while deleting a folder stops between its entries.
+fn deletion_undone_when_cancelled(location: &Location, permanent_folder: bool) -> bool {
+    location.native_path().is_some() && !permanent_folder
+}
+
 /// Whether a delete failure is retryable as a permanent delete: it was a
 /// trash attempt (never a permanent one, which has no further fallback),
 /// and the destination doesn't support Trash at all rather than some other,
@@ -5240,16 +5255,14 @@ async fn run_merge_undo(
         .map(|info| info.file_type())
         .ok();
         let mut trashed_identity = None;
+        let mut permanent_folder = false;
         let result = match existing_type {
             None => Ok(()),
             Some(_) => match trash::trash_entry(&file, &cancellable).await {
                 Err(error) if error.matches(gio::IOErrorEnum::NotSupported) => {
-                    permanently_delete_maybe_local(
-                        file,
-                        existing_type == Some(gio::FileType::Directory),
-                        cancellable.clone(),
-                    )
-                    .await
+                    permanent_folder = existing_type == Some(gio::FileType::Directory);
+                    permanently_delete_maybe_local(file, permanent_folder, cancellable.clone())
+                        .await
                 }
                 result => result.map(|identity| trashed_identity = identity),
             },
@@ -5270,12 +5283,15 @@ async fn run_merge_undo(
                 vec![location.clone()]
             }
             Err(error) if was_cancelled(&error) => {
-                failed_locations.push(location.clone());
+                let untouched = deletion_undone_when_cancelled(location, permanent_folder);
+                if !untouched {
+                    failed_locations.push(location.clone());
+                }
                 emit(cancelled_event(
                     request_id,
                     completed_locations,
                     failed_locations,
-                    remaining(overwritten.len() + index + 1),
+                    remaining(overwritten.len() + index + usize::from(!untouched)),
                     affected_locations,
                 ));
                 return;
@@ -5486,6 +5502,7 @@ async fn run_deletion(
     let local_tree_worker_count = (batch_size > 1).then_some(1);
     let mut completed_count = 0;
     let mut pending_progress_locations = Vec::new();
+    let mut cut_off = Vec::new();
 
     for chunk in targets.chunks(batch_size) {
         if cancellable.is_cancelled() {
@@ -5548,7 +5565,14 @@ async fn run_deletion(
             match result.unwrap_or_else(|_| Err(io_error("Delete worker failed"))) {
                 Err(error) if was_cancelled(&error) => {
                     chunk_cancelled = true;
-                    failed_locations.push(target.location.clone());
+                    if deletion_undone_when_cancelled(
+                        &target.location,
+                        permanent && target.is_directory,
+                    ) {
+                        cut_off.push(target.location.clone());
+                    } else {
+                        failed_locations.push(target.location.clone());
+                    }
                 }
                 Err(error) => {
                     if is_trash_unsupported_failure(permanent, &error) {
@@ -5590,14 +5614,16 @@ async fn run_deletion(
             }
         }
         if chunk_cancelled {
+            cut_off.extend(
+                targets[completed_count..]
+                    .iter()
+                    .map(|target| target.location.clone()),
+            );
             emit(cancelled_event(
                 request_id,
                 deleted_locations,
                 failed_locations,
-                targets[completed_count..]
-                    .iter()
-                    .map(|target| target.location.clone())
-                    .collect(),
+                cut_off,
                 affected_locations,
             ));
             return;
@@ -5833,18 +5859,17 @@ impl OperationProvider for LocalOperationProvider {
                     || outcome.next < plans.len()
                     || settling.failure().is_some()
                 {
+                    let (cut_off, failures): (Vec<_>, Vec<_>) = outcome
+                        .failed
+                        .iter()
+                        .partition(|(_, error)| was_cancelled(error));
                     let mut failed = settling.failed();
                     failed.extend(
-                        outcome
-                            .failed
+                        failures
                             .iter()
                             .map(|(index, _)| request.items[*index].source.clone()),
                     );
-                    let failure_error = outcome
-                        .failed
-                        .iter()
-                        .find(|(_, error)| !was_cancelled(error))
-                        .map(|(_, error)| error);
+                    let failure_error = failures.first().map(|(_, error)| error);
                     let (failure, skip_flush) = failure_error.map_or((None, false), |error| {
                         copy_failure_on_fat32(error, max_file_size.is_some())
                     });
@@ -5855,8 +5880,10 @@ impl OperationProvider for LocalOperationProvider {
                         TransferStop {
                             completed: settling.completed(),
                             failed,
-                            not_attempted: request.items[outcome.next..]
+                            not_attempted: cut_off
                                 .iter()
+                                .map(|(index, _)| &request.items[*index])
+                                .chain(&request.items[outcome.next..])
                                 .map(|item| item.source.clone())
                                 .collect(),
                             affected_locations,
@@ -5973,6 +6000,8 @@ impl OperationProvider for LocalOperationProvider {
                     written_paths.push(path);
                 }
                 let replaced_permanently = Rc::new(Cell::new(false));
+                let undone = item.conflict != TransferConflict::Merge
+                    && undone_when_cancelled(&source, &target);
                 let result = if is_duplicate {
                     copy_new_recursively_on_filesystem(
                         source,
@@ -6074,8 +6103,11 @@ impl OperationProvider for LocalOperationProvider {
                         settling.finish().await;
                         let (failure, skip_flush) =
                             copy_failure_on_fat32(&error, max_file_size.is_some());
+                        let untouched = undone && was_cancelled(&error);
                         let mut failed = settling.failed();
-                        failed.push(item.source.clone());
+                        if !untouched {
+                            failed.push(item.source.clone());
+                        }
                         stop_transfer(
                             &written_paths,
                             &emit,
@@ -6083,7 +6115,7 @@ impl OperationProvider for LocalOperationProvider {
                             TransferStop {
                                 completed: settling.completed(),
                                 failed,
-                                not_attempted: request.items[index + 1..]
+                                not_attempted: request.items[index + usize::from(!untouched)..]
                                     .iter()
                                     .map(|item| item.source.clone())
                                     .collect(),
@@ -6259,6 +6291,7 @@ impl OperationProvider for LocalOperationProvider {
                     restored_paths.push(path);
                 }
                 let target = gio_file_for_location(&item.record.original);
+                let undone = undone_when_cancelled(&source, &target);
                 let copying = Copying {
                     progress: Some(progress.clone()),
                     fat_family: target_is_fat_family(&target, &mounts),
@@ -6299,8 +6332,11 @@ impl OperationProvider for LocalOperationProvider {
                         settling.finish().await;
                         let failure = (!was_cancelled(&error))
                             .then(|| crate::services::gio_error_message(&error));
+                        let untouched = undone && was_cancelled(&error);
                         let mut failed = settling.failed();
-                        failed.push(item.record.current.clone());
+                        if !untouched {
+                            failed.push(item.record.current.clone());
+                        }
                         stop_transfer(
                             &restored_paths,
                             &emit,
@@ -6308,7 +6344,7 @@ impl OperationProvider for LocalOperationProvider {
                             TransferStop {
                                 completed: settling.completed(),
                                 failed,
-                                not_attempted: request.items[index + 1..]
+                                not_attempted: request.items[index + usize::from(!untouched)..]
                                     .iter()
                                     .map(|item| item.record.current.clone())
                                     .collect(),
@@ -6572,7 +6608,7 @@ impl OperationProvider for LocalOperationProvider {
             let unlinks = Arc::new(copy_engine::Unlinks::default());
             let worker_count = restore_worker_count(&entries).await;
             let mut completed = 0;
-            let mut cancelled = false;
+            let mut cut_off = Vec::new();
             for chunk in entries.chunks(worker_count) {
                 if operation_cancellable.is_cancelled() {
                     emit(cancelled_event(
@@ -6623,15 +6659,17 @@ impl OperationProvider for LocalOperationProvider {
                     affected_locations.extend(affected);
                     completed += 1;
                     let restored_location = match result {
+                        // A cancel stops a restore only before it places the
+                        // item; a stopped restore copy fails as an error.
+                        Err(error) if was_cancelled(&error) => {
+                            cut_off.push(entry.source.clone());
+                            None
+                        }
                         Err(error) => {
-                            if was_cancelled(&error) {
-                                cancelled = true;
-                            } else {
-                                errors.push(item_error(
-                                    &entry.display_name,
-                                    crate::services::gio_error_detail(&error),
-                                ));
-                            }
+                            errors.push(item_error(
+                                &entry.display_name,
+                                crate::services::gio_error_detail(&error),
+                            ));
                             failed_locations.push(entry.source.clone());
                             None
                         }
@@ -6655,15 +6693,18 @@ impl OperationProvider for LocalOperationProvider {
                         restored_location,
                     });
                 }
-                if cancelled || operation_cancellable.is_cancelled() && completed < total {
+                if !cut_off.is_empty() || operation_cancellable.is_cancelled() && completed < total
+                {
+                    cut_off.extend(
+                        entries[completed..]
+                            .iter()
+                            .map(|entry| entry.source.clone()),
+                    );
                     emit(cancelled_event(
                         request.id,
                         restored,
                         failed_locations,
-                        entries[completed..]
-                            .iter()
-                            .map(|entry| entry.source.clone())
-                            .collect(),
+                        cut_off,
                         affected_locations,
                     ));
                     return;

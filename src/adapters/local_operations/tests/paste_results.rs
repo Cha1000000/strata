@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 
+use super::fs_quirks::{Op, Support};
 use super::*;
 
 #[test]
@@ -223,6 +224,106 @@ fn an_item_replaced_without_trash_is_left_out_of_the_paste_undo() -> Result<(), 
         };
         assert_eq!(item_moves(&events), expected_moves);
         assert_eq!(fs::read(destination.join("replace.txt"))?, b"incoming");
+    }
+    Ok(())
+}
+
+#[test]
+fn a_cancel_that_cuts_off_an_item_counts_it_as_not_attempted() -> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let bulk = super::super::MAX_LOCAL_IO_WORKERS + 1;
+    // A move runs in the foreground and a copy in the background; enough
+    // files take the bulk path, which copies several at once.
+    for (moving, files) in [(true, 2), (false, 2), (true, bulk), (false, bulk)] {
+        let row = format!("moving: {moving}, files: {files}");
+        let root = tempfile::tempdir()?;
+        let sources = root.path().join("sources");
+        let destination = root.path().join("destination");
+        fs::create_dir(&sources)?;
+        fs::create_dir(&destination)?;
+        let items = (0..files)
+            .map(|index| sources.join(format!("file-{index}.bin")))
+            .collect::<Vec<_>>();
+        for item in &items {
+            fs::write(item, vec![0x5a; 4 * 1024 * 1024])?;
+        }
+        let cancel = CancelFromMain::default();
+        let _sources = FsQuirks::install(&sources, Quirks::default());
+        let _destination = FsQuirks::install(
+            &destination,
+            Quirks {
+                before: vec![
+                    (Op::CopyRange, "*", 0, cancel.racer()),
+                    (Op::Write, "*", 0, cancel.racer()),
+                ],
+                reflink: Support::Rejected(rustix::io::Errno::OPNOTSUPP),
+                ..Quirks::default()
+            },
+        );
+        let browser = crate::app::Browser::new(Rc::new(crate::adapters::LocalFileSource));
+        browser.set_operation_provider(Rc::new(LocalOperationProvider));
+        let ended = Rc::new(RefCell::new(None));
+        let observed = ended.clone();
+        browser.observe(move |event| {
+            use crate::app::BrowserEvent;
+            match crate::test_support::operations::operation_event(event) {
+                BrowserEvent::OperationCancelled {
+                    completed,
+                    failed,
+                    not_attempted,
+                    ..
+                } => {
+                    observed.replace(Some(Ok((*completed, *failed, *not_attempted))));
+                }
+                event
+                @ (BrowserEvent::TransferCompleted | BrowserEvent::OperationFailed { .. }) => {
+                    observed.replace(Some(Err(format!("{event:?}"))));
+                }
+                _ => {}
+            }
+        });
+        browser.transfer(
+            Location::local(&destination),
+            items
+                .iter()
+                .map(|source| PasteItem {
+                    source: Location::local(source),
+                    conflict: TransferConflict::FailIfExists,
+                })
+                .collect(),
+            moving,
+            false,
+        );
+        let id = browser.last_started_operation().expect("the transfer");
+        assert_eq!(browser.background_file_operation(id), !moving, "{row}");
+
+        let context = glib::MainContext::default();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while ended.borrow().is_none() {
+            assert!(Instant::now() < deadline, "{row}: the transfer never ended");
+            cancel.serve(|| browser.cancel_operation(id));
+            context.iteration(false);
+            thread::sleep(Duration::from_millis(1));
+        }
+
+        assert!(cancel.served(), "{row}");
+        let Some(Ok((completed, failed, not_attempted))) = ended.take() else {
+            panic!("{row}: the transfer was not cancelled");
+        };
+        assert_eq!(failed, 0, "{row}");
+        assert!(not_attempted > 0, "{row}");
+        assert_eq!(completed + not_attempted, files, "{row}");
+        if files == 2 {
+            assert_eq!(completed, 0, "{row}");
+        }
+        assert_eq!(fs::read_dir(&destination)?.count(), completed, "{row}");
+        let intact = items
+            .iter()
+            .filter(|item| fs::metadata(item).is_ok_and(|item| item.len() == 4 * 1024 * 1024))
+            .count();
+        assert_eq!(intact, if moving { not_attempted } else { files }, "{row}");
     }
     Ok(())
 }

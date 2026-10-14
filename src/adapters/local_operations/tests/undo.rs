@@ -563,6 +563,89 @@ fn undoing_a_cross_volume_move_deletes_the_moved_items_once_they_are_flushed()
 }
 
 #[test]
+fn a_cancel_that_cuts_off_a_move_back_counts_it_as_not_attempted() -> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let root = tempfile::tempdir()?;
+    let originals = root.path().join("originals");
+    let moved = root.path().join("moved");
+    fs::create_dir(&originals)?;
+    fs::create_dir(&moved)?;
+    let names = ["big.bin", "next.bin"];
+    for name in names {
+        fs::write(moved.join(name), vec![0x5a; 4 * 1024 * 1024])?;
+    }
+    let cancel = CancelFromMain::default();
+    let _moved = FsQuirks::install(&moved, Quirks::default());
+    let _originals = FsQuirks::install(
+        &originals,
+        Quirks {
+            before: vec![
+                (Op::CopyRange, "*", 0, cancel.racer()),
+                (Op::Write, "*", 0, cancel.racer()),
+            ],
+            reflink: Support::Rejected(Errno::OPNOTSUPP),
+            ..Quirks::default()
+        },
+    );
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let emitted = events.clone();
+    let mut operation = Some(
+        LocalOperationProvider.undo_move(
+            UndoMoveRequest {
+                id: OperationRequestId(1615),
+                items: names
+                    .map(|name| UndoMoveItem {
+                        record: MoveRecord {
+                            original: Location::local(originals.join(name)),
+                            current: Location::local(moved.join(name)),
+                            renamed: Vec::new(),
+                        },
+                        conflict: TransferConflict::FailIfExists,
+                    })
+                    .into(),
+                cleanup_locations: Vec::new(),
+            },
+            Rc::new(move |event| emitted.borrow_mut().push(event)),
+        ),
+    );
+
+    let context = glib::MainContext::default();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !events.borrow().iter().any(|event| {
+        matches!(
+            event,
+            OperationEvent::Cancelled { .. }
+                | OperationEvent::Pasted { .. }
+                | OperationEvent::TransferFailed { .. }
+        )
+    }) {
+        assert!(Instant::now() < deadline, "the move back never ended");
+        cancel.serve(|| drop(operation.take()));
+        context.iteration(false);
+        thread::sleep(Duration::from_millis(1));
+    }
+
+    assert!(cancel.served());
+    let events = events.borrow();
+    let Some(OperationEvent::Cancelled { result, .. }) = events.last() else {
+        panic!("expected a cancel, got {events:?}");
+    };
+    assert!(result.completed.is_empty());
+    assert!(result.failed.is_empty());
+    assert_eq!(
+        result.not_attempted,
+        names.map(|name| Location::local(moved.join(name)))
+    );
+    assert_eq!(fs::read_dir(&originals)?.count(), 0);
+    for name in names {
+        assert_eq!(fs::read(moved.join(name))?.len(), 4 * 1024 * 1024);
+    }
+    Ok(())
+}
+
+#[test]
 fn cancelled_rename_undo_reports_cancellation_without_moving_the_item() -> Result<(), Box<dyn Error>>
 {
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT

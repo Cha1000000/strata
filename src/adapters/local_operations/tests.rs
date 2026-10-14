@@ -383,6 +383,43 @@ fn wait_for_operation(
     }
 }
 
+/// Has the main thread cancel the operation the first time a racer runs, and
+/// holds that racer's worker until it did, as a user's cancel lands while the
+/// worker is inside an item. `None` until a racer runs, then whether the
+/// cancel was made.
+#[derive(Clone, Default)]
+struct CancelFromMain(Arc<(std::sync::Mutex<Option<bool>>, std::sync::Condvar)>);
+
+impl CancelFromMain {
+    fn racer(&self) -> fs_quirks::Racer {
+        let this = self.clone();
+        Box::new(move || {
+            let (state, changed) = &*this.0;
+            let mut state = state.lock().expect("cancel state");
+            if state.is_none() {
+                *state = Some(false);
+                while *state == Some(false) {
+                    state = changed.wait(state).expect("cancel state");
+                }
+            }
+        })
+    }
+
+    fn serve(&self, cancel: impl FnOnce()) {
+        let (state, changed) = &*self.0;
+        let mut state = state.lock().expect("cancel state");
+        if *state == Some(false) {
+            cancel();
+            *state = Some(true);
+            changed.notify_all();
+        }
+    }
+
+    fn served(&self) -> bool {
+        *self.0.0.lock().expect("cancel state") == Some(true)
+    }
+}
+
 fn wait_for_restore(events: &Rc<RefCell<Vec<OperationEvent>>>) {
     wait_for_operation(events, |event| {
         matches!(

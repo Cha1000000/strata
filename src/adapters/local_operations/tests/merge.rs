@@ -1411,6 +1411,123 @@ fn a_cancelled_merge_undo_reports_everything_not_attempted() -> Result<(), Box<d
     Ok(())
 }
 
+#[test]
+fn a_merge_a_cancel_cuts_off_counts_as_failed_as_it_keeps_what_it_placed()
+-> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let root = tempfile::tempdir()?;
+    let sources = root.path().join("sources");
+    let destination = root.path().join("destination");
+    fs::create_dir_all(sources.join("run"))?;
+    fs::create_dir_all(destination.join("run"))?;
+    fs::write(sources.join("run/big.bin"), vec![0x5a; 4 * 1024 * 1024])?;
+    fs::write(destination.join("run/old.txt"), b"old")?;
+    let cancel = CancelFromMain::default();
+    let _sources = FsQuirks::install(&sources, Quirks::default());
+    let _destination = FsQuirks::install(
+        &destination,
+        Quirks {
+            before: vec![
+                (Op::CopyRange, "*", 0, cancel.racer()),
+                (Op::Write, "*", 0, cancel.racer()),
+            ],
+            reflink: super::fs_quirks::Support::Rejected(Errno::OPNOTSUPP),
+            ..Quirks::default()
+        },
+    );
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let emitted = events.clone();
+    let mut operation = Some(LocalOperationProvider.paste(
+        PasteRequest {
+            id: OperationRequestId(1615),
+            destination: Location::local(&destination),
+            items: vec![PasteItem {
+                source: Location::local(sources.join("run")),
+                conflict: TransferConflict::Merge,
+            }],
+            move_sources: false,
+        },
+        Rc::new(move |event| emitted.borrow_mut().push(event)),
+    ));
+
+    let context = glib::MainContext::default();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !events.borrow().iter().any(|event| {
+        matches!(
+            event,
+            OperationEvent::Cancelled { .. }
+                | OperationEvent::Pasted { .. }
+                | OperationEvent::TransferFailed { .. }
+        )
+    }) {
+        assert!(Instant::now() < deadline, "the merge never ended");
+        cancel.serve(|| drop(operation.take()));
+        context.iteration(false);
+        thread::sleep(Duration::from_millis(1));
+    }
+
+    assert!(cancel.served());
+    let events = events.borrow();
+    let Some(OperationEvent::Cancelled { result, .. }) = events.last() else {
+        panic!("expected a cancel, got {events:?}");
+    };
+    assert!(result.completed.is_empty());
+    assert_eq!(result.failed, [Location::local(sources.join("run"))]);
+    assert!(result.not_attempted.is_empty());
+    assert_eq!(fs::read(destination.join("run/old.txt"))?, b"old");
+    Ok(())
+}
+
+#[test]
+fn a_merge_undo_cut_off_before_it_trashes_an_item_counts_it_as_not_attempted()
+-> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let root = tempfile::tempdir()?;
+    let created = ["first.txt", "second.txt"].map(|name| root.path().join(name));
+    for item in &created {
+        fs::write(item, b"merged")?;
+    }
+    let cancellable = gio::Cancellable::new();
+    let cancel = cancellable.clone();
+    let _scope = FsQuirks::install(
+        root.path(),
+        Quirks {
+            before: vec![(Op::Trash, "first.txt", 0, Box::new(move || cancel.cancel()))],
+            ..Quirks::default()
+        },
+    );
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let emitted = events.clone();
+
+    glib::MainContext::default().block_on(run_merge_undo(
+        OperationRequestId(1615),
+        created.iter().map(Location::local).collect(),
+        Vec::new(),
+        Rc::new(move |event| emitted.borrow_mut().push(event)),
+        cancellable,
+        staged_lookup(HashMap::new()),
+    ));
+
+    let events = events.borrow();
+    let Some(OperationEvent::Cancelled { result, .. }) = events.last() else {
+        panic!("expected a cancel, got {events:?}");
+    };
+    assert!(result.completed.is_empty());
+    assert!(result.failed.is_empty());
+    assert_eq!(
+        result.not_attempted,
+        created.iter().map(Location::local).collect::<Vec<_>>()
+    );
+    for item in &created {
+        assert_eq!(fs::read(item)?, b"merged");
+    }
+    Ok(())
+}
+
 fn without_trash(quirks: Quirks) -> Quirks {
     Quirks {
         trash: Trash::Unsupported,
