@@ -304,14 +304,12 @@ fn a_report_after_a_transfer_shows_its_notice_or_dialog() {
     );
 }
 
-fn dialogs(window: &gtk::Window) -> Vec<Vec<String>> {
+fn modal_layers(window: &gtk::Window) -> Vec<gtk::Widget> {
     let mut found = Vec::new();
     let mut stack = vec![window.clone().upcast::<gtk::Widget>()];
     while let Some(widget) = stack.pop() {
         if widget.has_css_class("app-modal-layer") {
-            if !crate::ui::modal::is_closing_layer(&widget) {
-                found.push(texts(&widget));
-            }
+            found.push(widget);
             continue;
         }
         let mut child = widget.first_child();
@@ -321,6 +319,14 @@ fn dialogs(window: &gtk::Window) -> Vec<Vec<String>> {
         }
     }
     found
+}
+
+fn dialogs(window: &gtk::Window) -> Vec<Vec<String>> {
+    modal_layers(window)
+        .iter()
+        .filter(|layer| !crate::ui::modal::is_closing_layer(layer))
+        .map(texts)
+        .collect()
 }
 
 fn texts(root: &gtk::Widget) -> Vec<String> {
@@ -349,7 +355,7 @@ fn pump_until(done: impl Fn() -> bool) {
         if done() {
             return;
         }
-        assert!(std::time::Instant::now() < deadline, "no dialog appeared");
+        assert!(std::time::Instant::now() < deadline, "timed out");
         std::thread::sleep(Duration::from_millis(5));
     }
 }
@@ -359,6 +365,7 @@ fn a_stopped_transfer_shows_one_dialog_with_its_outcome_and_report() {
     crate::test_support::gtk_test(
         "ui::browser::transfer_report::tests::a_stopped_transfer_shows_one_dialog_with_its_outcome_and_report",
         || {
+            super::super::progress::set_file_progress_delay_for_test(Duration::ZERO);
             let items = TransferReport {
                 skipped: vec![SkippedItem {
                     location: Location::local("/destination/run/preview.sock"),
@@ -434,14 +441,15 @@ fn a_stopped_transfer_shows_one_dialog_with_its_outcome_and_report() {
                             false,
                         );
                         let id = view.browser().last_started_operation().expect("transfer");
-                        assert_eq!(
-                            view.state
-                                .background_file_progress
-                                .borrow()
-                                .contains_key(&id),
-                            !moving,
-                            "{row}"
-                        );
+                        let docked = view
+                            .state
+                            .background_file_progress
+                            .borrow()
+                            .get(&id)
+                            .map(|background| background.progress.clone());
+                        assert_eq!(docked.is_some(), !moving, "{row}");
+                        let progress = docked.unwrap_or_else(|| view.state.file_progress());
+                        pump_until(|| progress.file_progress_view.borrow().is_some());
                         if !report.is_empty() {
                             operations.emit(
                                 id,
@@ -454,8 +462,13 @@ fn a_stopped_transfer_shows_one_dialog_with_its_outcome_and_report() {
 
                         operations.emit(id, terminal(id));
 
+                        pump_until(|| {
+                            progress.file_progress_view.borrow().is_none()
+                                && !modal_layers(&window)
+                                    .iter()
+                                    .any(crate::ui::modal::is_closing_layer)
+                        });
                         let expected = outcome.is_some() || !report.is_empty();
-                        pump_until(|| dialogs(&window).len() >= usize::from(expected));
                         let dialogs = dialogs(&window);
                         assert_eq!(dialogs.len(), usize::from(expected), "{row}: {dialogs:?}");
                         if let [texts] = dialogs.as_slice() {
