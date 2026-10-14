@@ -5,8 +5,6 @@ use std::os::unix::fs::MetadataExt;
 use super::*;
 use crate::services::{RenameCause, RenamedItem};
 
-/// Copies `source` to `target` with `workers`, and returns the names it
-/// reported saved under others, beneath `target`.
 fn copy_renaming(
     source: &Path,
     target: &Path,

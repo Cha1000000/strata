@@ -29,7 +29,6 @@ use crate::adapters::volume::{MountKey, MountType, forget_test_mount_capabilitie
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Op {
     Rename,
-    /// A rename with `RENAME_EXCHANGE`.
     Exchange,
     Link,
     Unlink,
@@ -186,9 +185,7 @@ pub(crate) struct Quirks {
     pub before: Vec<(Op, &'static str, usize, Racer)>,
     /// Runs once, after the matching call after skipping the given number of matches.
     pub after: Vec<(Op, &'static str, usize, Racer)>,
-    /// The mountinfo type and superblock options `mount_type` reports.
     pub mount_type: Option<(&'static str, &'static str)>,
-    /// What udev's database records the scope's device as holding.
     pub device_format: Option<&'static str>,
     pub tmpfile: Support,
     pub tmpfile_link: TmpfileLink,
@@ -222,7 +219,6 @@ pub(crate) struct Quirks {
     /// Entries matching the name report this mode, as another user's file
     /// readable through its group or others does to the user copying it.
     pub reported_mode: Option<(&'static str, u32)>,
-    /// Which names of a file with several open.
     pub name_opens: NameOpens,
     /// Giving a folder write access back right after taking it does
     /// nothing until a stat that revalidates comes between, as the SMB
@@ -352,7 +348,6 @@ struct State {
     links_made: u64,
     stale: HashMap<PathBuf, EntryStat>,
     written: HashSet<(u64, u64)>,
-    /// Names whose entries report another inode number, as after an eviction.
     renumbered: HashSet<PathBuf>,
     /// Writebacks lost so far, and how many each open folder has reported.
     writebacks_lost: u64,
@@ -371,7 +366,6 @@ fn scopes() -> MutexGuard<'static, Vec<Arc<Scope>>> {
     SCOPES.lock().unwrap_or_else(|error| error.into_inner())
 }
 
-/// Keeps a scope registered until dropped.
 pub(crate) struct FsQuirks {
     scope: Arc<Scope>,
 }
@@ -418,7 +412,6 @@ impl FsQuirks {
         self.scope.state().calls.clone()
     }
 
-    /// Reads the calls logged so far, from a racer in another scope.
     pub(crate) fn reader(&self) -> impl Fn() -> Vec<Call> + Send + Sync + 'static {
         let scope = self.scope.clone();
         move || scope.state().calls.clone()
@@ -453,7 +446,6 @@ impl Drop for FsQuirks {
     }
 }
 
-/// The racer for a call to `op` naming `names`, once its skips are used up.
 fn take_racer(
     racers: &mut Vec<(Op, &'static str, usize, Racer)>,
     op: Op,
@@ -469,7 +461,6 @@ fn take_racer(
     None
 }
 
-/// Whether descriptor `fd` still has the file `key` open by `name`.
 fn still_open(fd: RawFd, name: &Path, key: (u64, u64)) -> bool {
     use std::os::unix::fs::MetadataExt;
     let link = format!("/proc/self/fd/{fd}");
@@ -608,7 +599,6 @@ impl Scope {
         }
     }
 
-    /// Applies `times_reset_at_close` just before `fd` is closed.
     fn closing(&self, fd: BorrowedFd<'_>) {
         let written = System.stat_fd(fd).is_ok_and(|stat| {
             self.state()
@@ -815,7 +805,6 @@ impl Scope {
         Ok(())
     }
 
-    /// Carries the inode number a link name reports along with a rename.
     fn renamed(&self, from: Entry<'_>, to: Entry<'_>, flags: RenameFlags) {
         let (Some(from), Some(to)) = (
             path_of(from.dir).map(|dir| dir.join(from.name)),
@@ -857,8 +846,6 @@ impl Scope {
         }
     }
 
-    /// Calls `read` with `at`, or with its alias where nothing has that
-    /// exact name.
     fn resolved<T>(
         &self,
         at: Entry<'_>,
@@ -884,8 +871,6 @@ impl Scope {
     }
 }
 
-/// The inode number of the regular file at `entry`, when this process holds
-/// a descriptor for it.
 fn open_in_this_process(entry: Entry<'_>) -> Option<u64> {
     let stat = System.stat(entry, false).ok()?;
     if stat.kind != FileType::RegularFile {
@@ -913,7 +898,6 @@ fn fd_name(fd: BorrowedFd<'_>) -> OsString {
         .unwrap_or_default()
 }
 
-/// Runs an fd-only call through the scope holding `fd`, logging its name and `extra`.
 fn on_fd<T>(
     fd: BorrowedFd<'_>,
     op: Op,
@@ -969,7 +953,6 @@ fn scope_for_path(path: &Path) -> Option<Arc<Scope>> {
         .cloned()
 }
 
-/// Gives whatever is now at `path` a new birth time under `reused_inodes`.
 pub(crate) fn recreated(path: &Path) {
     let (Some(scope), Some(name)) = (scope_for_path(path), path.file_name()) else {
         return;

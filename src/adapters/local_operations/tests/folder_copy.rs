@@ -9,8 +9,6 @@ use super::fs_quirks::{Call, NameOpens, Op, Racer, Support};
 use super::*;
 use crate::adapters::volume::{MountCapabilities, learn_mount_capability};
 
-/// A source folder and a destination folder, each with its own quirks, so
-/// they act as separate mounts.
 struct Mounts {
     _root: tempfile::TempDir,
     sources: PathBuf,
@@ -50,7 +48,6 @@ fn set_mode(path: &Path, mode: u32) -> io::Result<()> {
     fs::set_permissions(path, fs::Permissions::from_mode(mode))
 }
 
-/// Gives every folder under `root` its owner's access back, so it can be removed.
 fn unlock(root: &Path) -> io::Result<()> {
     if !fs::symlink_metadata(root)?.is_dir() {
         return Ok(());
@@ -338,9 +335,7 @@ fn only_names_that_may_collide_are_claimed() -> Result<(), Box<dyn Error>> {
 fn files_are_claimed_by_creating_them_where_nodes_are_refused_or_on_smb()
 -> Result<(), Box<dyn Error>> {
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock()?;
-    // A refused node is learned once per copy. On SMB, names made as nodes
-    // and looked up while other files were written left the folder's
-    // rename waiting 35 s for Samba.
+    // A refused node is learned once per copy.
     let refused = || Quirks {
         mount_type: Some(("fuse.example", "rw")),
         node_create: Support::Rejected(Errno::NOSYS),
@@ -476,8 +471,6 @@ fn a_cancelled_copy_on_nfs_leaves_no_stage() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-/// Asserts that every entry under `live` is one of the `existing` paths or
-/// a complete copy of the entry at the same path under `source`.
 fn assert_only_complete(
     row: &str,
     live: &Path,
@@ -517,8 +510,6 @@ fn assert_only_complete(
 #[test]
 fn a_stopped_merge_leaves_nothing_partial_at_a_real_name() -> Result<(), Box<dyn Error>> {
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock()?;
-    // Children built in a merge stage, and folders made at their names where
-    // the mount cannot place one.
     let presets: [(&str, Preset); 2] = [
         ("staged", Quirks::nfs3),
         ("in place", Quirks::without_folder_placement),

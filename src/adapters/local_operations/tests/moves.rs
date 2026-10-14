@@ -717,7 +717,6 @@ fn keep_both_move_renumbers_when_its_name_is_taken_meanwhile() -> Result<(), Box
     Ok(())
 }
 
-/// What the transfer reported about items inside the ones it moved.
 fn reported(events: &RefCell<Vec<OperationEvent>>) -> TransferReport {
     let mut reported = TransferReport::default();
     for event in events.borrow().iter() {
@@ -735,8 +734,6 @@ fn kept(location: PathBuf, cause: KeptCause) -> KeptItem {
     }
 }
 
-/// A destination for the move of `folder` with `conflict`, where an item of
-/// that name exists unless the move creates it.
 fn destination_for(
     root: &Path,
     conflict: TransferConflict,
@@ -879,8 +876,6 @@ fn a_file_written_during_its_own_move_stays_at_the_source() -> Result<(), Box<dy
         let path = path.to_path_buf();
         Box::new(move || fs::write(&path, contents).expect("rewrite the source"))
     };
-    // A linked file whose names are claimed, as names that may collide are
-    // on NFS, and the moved file itself.
     let cases: [(&str, usize, Preset); 4] = [
         ("in a folder", 1, Quirks::default),
         ("in a folder", 2, Quirks::default),
@@ -973,8 +968,6 @@ fn moving_across_volumes_deletes_every_entry_it_copied() -> Result<(), Box<dyn E
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
         .lock()
         .map_err(|error| error.to_string())?;
-    // A folder with linked names, a link and a named pipe, or a selected
-    // link or pipe.
     for selected in ["folder", "link", "pipe"] {
         let root = tempfile::tempdir()?;
         let source_dir = root.path().join("source");
@@ -1038,8 +1031,6 @@ fn make_fifo(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
-/// Moves the item `folder` from a volume with `quirks` to another one, and
-/// returns where it went, what the move reported, and its events.
 fn move_across_volumes(
     folder: &Path,
     quirks: Quirks,
@@ -1048,7 +1039,6 @@ fn move_across_volumes(
         .map(|(moved, report, events, _)| (moved, report, events))
 }
 
-/// [`move_across_volumes`], also returning the source volume's calls.
 fn move_across_volumes_logged(
     folder: &Path,
     quirks: Quirks,
@@ -1088,7 +1078,6 @@ fn move_across_volumes_logged(
     ))
 }
 
-/// Writes `contents` over `path` as it runs.
 fn rewrite(path: &Path, contents: &'static [u8]) -> super::fs_quirks::Racer {
     let path = path.to_path_buf();
     Box::new(move || fs::write(&path, contents).expect("rewrite the source"))
@@ -1152,8 +1141,7 @@ fn a_file_rewritten_as_it_is_read_is_copied_again_whole() -> Result<(), Box<dyn 
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
         .lock()
         .map_err(|error| error.to_string())?;
-    // Each pass reads the data, then the end of the file: rewritten at the
-    // same size there, or grown before the data and shrunk before the end.
+    // Each pass reads the data, then the end of the file.
     for row in ["same size", "shrinks"] {
         let root = tempfile::tempdir()?;
         let folder = root.path().join("source/folder");
@@ -1208,10 +1196,8 @@ fn moves_off_mounts_without_stable_inodes_keep_only_what_changed() -> Result<(),
     fs::create_dir_all(folder.join("sub"))?;
     fs::write(folder.join("a.txt"), b"a")?;
     fs::write(folder.join("sub/b.txt"), b"b")?;
-    // Linked pairs: left alone, rewritten at the same size, and rewritten at
-    // another size with the modification time put back. Removing a name of
-    // a file changes the other's change time, so only size and modification
-    // time tell.
+    // Removing a name of a file changes the other's change time, so only size
+    // and modification time tell.
     for (first, second, contents) in [
         ("x", "sub/y", "x"),
         ("m", "sub/n", "m"),
@@ -1285,10 +1271,6 @@ fn entries_swapped_or_removed_after_their_copy_are_never_deleted() -> Result<(),
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
         .lock()
         .map_err(|error| error.to_string())?;
-    // After the copy: a folder swapped for a file, an entry someone else
-    // removed, and a folder put back at the moved folder's name once its
-    // last entry went, also where inode numbers may change between the copy
-    // and the deletion.
     let vfat = || Quirks {
         mount_type: Some(("vfat", "rw")),
         ..Quirks::default()
@@ -1389,7 +1371,6 @@ fn moves_compare_inode_numbers_only_where_the_source_keeps_them() -> Result<(), 
             folder.join("sub"),
             folder.join("sub/b.txt"),
         ];
-        // The kernel evicts every entry between the copy and the deletion.
         let racer: super::fs_quirks::Racer = Box::new(move || {
             for path in &evicted {
                 super::fs_quirks::renumbered(path);
@@ -1590,7 +1571,6 @@ fn moving_to_a_remote_target_keeps_a_source_entry_changed_during_the_copy()
     let target = gio::File::for_uri("strata-test-remote:///folder");
     assert!(!target.is_native());
     let (changed, copied_to) = (folder.join("b.txt"), stand_in.clone());
-    // GIO copies to the remote target, and the source changes meanwhile.
     let remote_copy: super::super::RemoteCopy = Rc::new(move |source, target, _, cancellable| {
         let (changed, copied_to) = (changed.clone(), copied_to.clone());
         Box::pin(async move {
@@ -1637,8 +1617,6 @@ fn a_moved_source_stays_when_its_copy_is_gone_before_the_deletion() -> Result<()
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
         .lock()
         .map_err(|error| error.to_string())?;
-    // The copy is removed or replaced once the move has published it, as
-    // the deletion it owes waits for its batch.
     for conflict in [
         TransferConflict::FailIfExists,
         TransferConflict::ReplaceExisting,
@@ -1733,8 +1711,6 @@ fn a_file_put_in_a_moved_files_place_within_its_time_tick_is_kept() -> Result<()
     fs::create_dir_all(&folder)?;
     let moved_file = folder.join("a.txt");
     fs::write(&moved_file, b"original")?;
-    // Once copied, another file of the same size takes its name, with the
-    // same modification time, as within one tick of FAT's coarse times.
     let substituted = moved_file.clone();
     let racer: super::fs_quirks::Racer = Box::new(move || {
         let before = fs::metadata(&substituted).expect("stat the original");
@@ -1773,7 +1749,6 @@ fn a_file_put_in_a_moved_files_place_within_its_time_tick_is_kept() -> Result<()
     Ok(())
 }
 
-/// Sets the modification and access times of `path`.
 fn set_times(path: &Path, seconds: u64, nanoseconds: u32) -> io::Result<()> {
     let times = rustix::fs::Timespec {
         tv_sec: i64::try_from(seconds).map_err(io::Error::other)?,
@@ -1791,7 +1766,6 @@ fn set_times(path: &Path, seconds: u64, nanoseconds: u32) -> io::Result<()> {
     Ok(())
 }
 
-/// Puts back the real clock for the copy engine.
 struct ClockGuard;
 
 impl ClockGuard {
@@ -1860,24 +1834,11 @@ fn files_read_within_a_coarse_time_tick_are_compared_before_their_move_deletes_t
         ctime_is_mtime: true,
         ..Quirks::vfat()
     };
-    // In milliseconds after the file's modification time.
     let recent = 500;
     let past_the_tick = 2050;
     let behind = 2500;
     let long_ago = 3_600_000;
     let ahead = -3_600_000;
-    // When the file is rewritten at the same size: before the deletion
-    // opens the moved folder, or the moved file itself to compare it, both
-    // keeping its times; right after the comparison, at the time of the
-    // kernel's coarse clock then, a tick behind the engine's, in FAT's
-    // two-second steps; before the deletion, after growing as the copy
-    // read it, which the copy then read again; or by renaming a file with
-    // the same size and times over it as the deletion opens it to compare
-    // it; or, once the clock reached a time it was read ahead of, before
-    // the deletion, right after the comparison, or as the deletion looks at
-    // it; or, its first chunk only, right after the comparison read it,
-    // at the coarse clock's time then. Or never, with the clock set back
-    // before the deletion.
     #[derive(Clone, Copy, PartialEq)]
     enum Rewrite {
         Never,
@@ -1892,12 +1853,9 @@ fn files_read_within_a_coarse_time_tick_are_compared_before_their_move_deletes_t
         ChunkCompared,
         ClockSetBack,
     }
-    // The source volume, how long after its modification time the copy
-    // reads the file (on sshfs, as with a server clock behind ours; past
-    // the tick, as the coarse clock may still stamp it; before it, as FAT
-    // times written in a time zone ahead of ours read), when it is
-    // rewritten, and whether the deletion reads it again. Only the file
-    // itself is moved where it is rewritten as it is compared.
+    // How many milliseconds after its modification time the copy reads the file
+    // (negative: dated ahead of the clock), and whether the deletion reads it
+    // again.
     let rows: [(&str, Preset, i64, Rewrite, bool); 24] = [
         ("vfat", vfat, recent, Rewrite::Deleting, true),
         (
@@ -1990,6 +1948,8 @@ fn files_read_within_a_coarse_time_tick_are_compared_before_their_move_deletes_t
         set_times(&file, seconds, fraction)?;
         let read_at = i64::try_from(seconds)? * 1000 + read_after;
         let _clock = ClockGuard::set(epoch + Duration::from_millis(u64::try_from(read_at)?));
+        // A rewrite keeps the file's times, or, `clocked`, takes the kernel's
+        // coarse clock, a tick behind the engine's, in FAT's two-second steps.
         let rewriter = |contents: &'static [u8], clocked: bool| -> super::fs_quirks::Racer {
             let path = file.clone();
             Box::new(move || {
@@ -2005,7 +1965,6 @@ fn files_read_within_a_coarse_time_tick_are_compared_before_their_move_deletes_t
                 set_times(&path, step, fraction).expect("set the times");
             })
         };
-        // Moves the clock just past the file's time, then runs `then`.
         let reached = |mut then: super::fs_quirks::Racer| -> super::fs_quirks::Racer {
             Box::new(move || {
                 let after = epoch + Duration::from_secs(seconds) + Duration::from_millis(500);

@@ -325,20 +325,14 @@ fn bytes_already_written_are_flushed_before_transfer_failure() -> Result<(), Box
     Ok(())
 }
 
-/// What one barrier in a destination saw of a move of files.
 #[derive(Debug, PartialEq)]
 struct Seen {
-    /// Moved sources already gone.
     deleted: Vec<String>,
-    /// Copies already made.
     copied: Vec<String>,
-    /// Whether the progress dock showed the device flush.
     flushing: bool,
-    /// The items the progress dock counted done.
     counted: usize,
 }
 
-/// Records, at each `SyncFs` in the destination, what [`Seen`] holds.
 struct Barriers {
     seen: Arc<std::sync::Mutex<Vec<Seen>>>,
     flushing: Arc<std::sync::atomic::AtomicBool>,
@@ -354,7 +348,6 @@ impl Barriers {
         }
     }
 
-    /// One racer per barrier, running `also` at the first.
     fn racers(
         &self,
         sources: &Path,
@@ -405,9 +398,6 @@ impl Barriers {
     }
 }
 
-/// Pastes a move of `sources` into `destination`, recording events, the
-/// device flush status for `barriers`, and each item reported moved while
-/// its source still exists; `cancel_after` items, the move is cancelled.
 fn paste_moves(
     id: u64,
     destination: &Path,
@@ -471,7 +461,6 @@ fn moved_count(events: &[OperationEvent]) -> usize {
         .count()
 }
 
-/// Puts back the kernel release a test pretended to run on.
 struct KernelGuard;
 
 impl KernelGuard {
@@ -487,7 +476,6 @@ impl Drop for KernelGuard {
     }
 }
 
-/// Resets the batch limits a test set.
 struct LimitsGuard;
 
 impl LimitsGuard {
@@ -522,10 +510,7 @@ fn the_barrier_before_deleting_a_moved_source_follows_the_destination_family()
     // The family, what udev records the device as holding (an error is a
     // lookup that fails on an NTFS device), the kernel, whether the device
     // is removable, whether the paste moves, whether each written file is
-    // synced before it is closed, and the barrier's calls. A plain copy
-    // deletes nothing, so it never syncs. Before Linux 5.8, syncfs reports
-    // no writeback errors. ntfs-3g and exfat-fuse flush their whole device
-    // for a folder's fsync; other FUSE daemons may not.
+    // synced before it is closed, and the barrier's calls.
     type Device = Option<Result<&'static str, Errno>>;
     const NTFS: Device = Some(Ok("ntfs"));
     const EXFAT: Device = Some(Ok("exfat"));
@@ -1046,9 +1031,6 @@ fn names_of_one_file_moved_as_separate_items_are_all_deleted() -> Result<(), Box
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
         .lock()
         .map_err(|error| error.to_string())?;
-    // Selected names of one file, or folders whose files share names (as
-    // backup snapshots do), deleted in one batch or each item in its own,
-    // after the next item's copy recorded fewer names.
     let items: [(&str, &[&str]); 2] = [
         ("selected names", &["a", "b", "c"]),
         ("folders", &["daily.0", "daily.1", "daily.2"]),
@@ -1131,7 +1113,6 @@ fn a_merging_move_flushes_each_filesystem_it_wrote_to_before_deleting() -> Resul
     fs::create_dir_all(sources.join("media/sub"))?;
     fs::create_dir_all(destination.join("media/sub"))?;
     fs::write(sources.join("media/sub/new.bin"), b"new")?;
-    // Another filesystem is mounted in the merged folder.
     let outer = FsQuirks::install(&destination, Quirks::ext4());
     let nested = FsQuirks::install(&destination.join("media/sub"), Quirks::ext4());
     let at_first_unlink = Arc::new(std::sync::Mutex::new(None));
@@ -1250,8 +1231,6 @@ fn a_replace_on_smb_syncs_its_copy_only_where_the_original_is_deleted() -> Resul
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
         .lock()
         .map_err(|error| error.to_string())?;
-    // The original goes to Trash, or Trash refuses it once the copy is
-    // staged, so it is exchanged and deleted.
     for (id, trash, synced) in [(380, Trash::Supported, false), (381, Trash::Refused, true)] {
         let row = format!("{trash:?}");
         let root = tempfile::tempdir()?;
@@ -1387,8 +1366,6 @@ fn moved_files_are_synced_on_smb_whatever_the_conflict() -> Result<(), Box<dyn E
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
         .lock()
         .map_err(|error| error.to_string())?;
-    // A selected file goes through its own stage, a Replace through a stage
-    // beside the original, and a merge through a stage in the live folder.
     let conflicts = [
         TransferConflict::FailIfExists,
         TransferConflict::ReplaceExisting,
@@ -1536,7 +1513,6 @@ fn a_writeback_lost_during_a_move_keeps_every_source_it_may_hold() -> Result<(),
     Ok(())
 }
 
-/// Puts the batches' clock back to real time.
 struct ClockGuard;
 
 impl Drop for ClockGuard {
@@ -1690,7 +1666,6 @@ fn an_original_that_cannot_be_deleted_fails_its_replacing_move() -> Result<(), B
     let source = sources.join("notes.txt");
     fs::write(&source, b"incoming")?;
     fs::write(destination.join("notes.txt"), b"old")?;
-    // Another program puts its own file at the original's hidden name.
     let (watched, foreign) = (destination.clone(), root.path().join("foreign"));
     let racer: super::fs_quirks::Racer = Box::new(move || {
         let aside = fs::read_dir(&watched)

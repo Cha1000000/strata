@@ -305,8 +305,6 @@ fn a_failed_restore_copy_removes_only_what_it_made() -> Result<(), Box<dyn Error
     fs::write(source.join("sub/nested"), b"nested")?;
     let destination = fixture.path().join("destination");
     let (copy, aside) = (destination.clone(), fixture.path().join("old-copy"));
-    // Once every entry is copied, another program adds one and replaces
-    // one of the copy's, then setting the folder's own times fails.
     let racer: Racer = Box::new(move || {
         fs::write(copy.join("foreign"), b"unrelated").expect("add a foreign entry");
         fs::rename(copy.join("contents"), &aside).expect("move a copied entry aside");

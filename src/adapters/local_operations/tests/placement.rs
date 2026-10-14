@@ -45,7 +45,6 @@ fn place_in(
     )
 }
 
-/// What a user would see at `path`, to prove an entry was left untouched.
 fn fingerprint(path: &Path) -> String {
     let Ok(metadata) = fs::symlink_metadata(path) else {
         return "absent".to_owned();

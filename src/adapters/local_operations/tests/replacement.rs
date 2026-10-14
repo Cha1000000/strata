@@ -25,7 +25,6 @@ fn inode(path: &Path) -> Result<u64, io::Error> {
     Ok(fs::symlink_metadata(path)?.ino())
 }
 
-/// Replaces `target` with `source`, returning what became of the original.
 fn replace_reporting(
     source: &Path,
     target: &Path,
@@ -402,7 +401,6 @@ fn replacing_a_symlink_preserves_link_semantics() -> Result<(), Box<dyn Error>> 
     Ok(())
 }
 
-/// Moves `path` to `kept` and puts new contents at `path`, as an editor saves.
 fn substitute(path: &Path, kept: &Path) -> Racer {
     let (path, kept) = (path.to_path_buf(), kept.to_path_buf());
     Box::new(move || {

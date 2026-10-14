@@ -13,8 +13,6 @@ use super::*;
 use crate::adapters::local_operations::{bounded_local_worker_count, local_device_is_rotational};
 use crate::adapters::volume::{XattrNamespace, mount_capabilities};
 
-/// A source folder and a destination folder, each with its own quirks, so
-/// they act as separate mounts.
 struct Mounts {
     _root: tempfile::TempDir,
     sources: PathBuf,
@@ -65,7 +63,6 @@ fn patterned(length: usize) -> Vec<u8> {
     (0..length).map(|index| (index % 251) as u8).collect()
 }
 
-/// Lists `folder` into `seen` when it runs.
 fn list_into(folder: &Path, seen: &Arc<Mutex<Option<Vec<String>>>>) -> Racer {
     let (folder, seen) = (folder.to_path_buf(), seen.clone());
     Box::new(move || {
@@ -488,8 +485,6 @@ fn copy_range_refused_across_mounts_continues_with_reads_and_writes() -> Result<
     Ok(())
 }
 
-/// Writes a 64 KiB run of data, a 16 MiB hole, another run and a 1 MiB
-/// hole, and returns the size.
 fn write_sparse(path: &Path) -> io::Result<u64> {
     let run = patterned(64 * 1024);
     let second = run.len() as u64 + 16 * 1024 * 1024;
@@ -512,7 +507,6 @@ fn append_to(path: &Path) -> Racer {
     })
 }
 
-/// Cuts the source back to its first run of data.
 fn truncate(path: &Path) -> Racer {
     let path = path.to_path_buf();
     Box::new(move || {
@@ -650,7 +644,6 @@ fn sparse_files_keep_their_holes_where_both_ends_can() -> Result<(), Box<dyn Err
     Ok(())
 }
 
-/// The bytes counted before the item completed.
 fn counted_bytes(events: &[OperationEvent]) -> Option<u64> {
     events.iter().rev().find_map(|event| match event {
         OperationEvent::TransferProgress {
@@ -665,8 +658,6 @@ fn counted_bytes(events: &[OperationEvent]) -> Option<u64> {
 #[test]
 fn a_sparse_source_that_grows_is_counted_once() -> Result<(), Box<dyn Error>> {
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock()?;
-    // Data written past a gap beyond the size seen at open, or a last run of
-    // data extended past it.
     for (case, at_end) in [("past a gap", false), ("extending the last run", true)] {
         let root = tempfile::tempdir()?;
         let sources = root.path().join("sources");

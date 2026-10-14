@@ -936,7 +936,6 @@ fn a_merge_undo_removes_merged_items_under_the_names_they_were_saved_as() {
     let source = Location::local("/fixture/folder");
     let created = Location::local("/fixture/archive/folder/makefile");
     let saved_as = Location::local("/fixture/archive/folder/makefile (1)");
-    // Another item took an overwritten name before the incoming one landed.
     let overwritten = Location::local("/fixture/archive/folder/notes.txt");
     let numbered = Location::local("/fixture/archive/folder/notes (1).txt");
     let request_id = browser.begin_operation();

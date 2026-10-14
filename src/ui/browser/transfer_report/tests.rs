@@ -144,8 +144,6 @@ fn items_left_out_or_left_behind_make_the_report_a_warning() {
         in_trash(KeptCause::Changed),
         in_trash(KeptCause::Undeletable(denied)),
     ];
-    // A transfer that failed or was cancelled afterwards is not called
-    // complete.
     for (renamed_count, skipped_count, kept_count, in_trash_count, stopped) in [
         (0, 2, 0, 0, false),
         (1, 2, 0, 0, false),

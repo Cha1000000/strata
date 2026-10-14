@@ -72,7 +72,6 @@ impl Drop for CopyActivity {
     }
 }
 
-/// [`copy_recursively`] onto a FAT-like filesystem.
 fn copy_recursively_fat_family(
     source: gio::File,
     target: gio::File,
@@ -91,7 +90,6 @@ fn copy_recursively_fat_family(
     })
 }
 
-/// An empty file stage in `root`, as a staged copy of a file makes it.
 fn file_stage(root: &Path) -> Result<super::StagedSibling, Box<dyn Error>> {
     let parent = Arc::new(open_local_parent_directory(root)?);
     let (name, (_, created)) = super::copy_engine::stage::create_file(
@@ -108,7 +106,6 @@ fn file_stage(root: &Path) -> Result<super::StagedSibling, Box<dyn Error>> {
     })
 }
 
-/// A folder or symlink stage in `root`.
 fn staged(
     root: &Path,
     content: super::StageContent,
@@ -156,7 +153,6 @@ impl RemovableFlushGuard {
     }
 }
 
-/// Makes `source` and `destination` separate mounts, so moves between them copy.
 fn separate_volumes(source: &Path, destination: &Path) -> (FsQuirks, FsQuirks) {
     (
         FsQuirks::install(source, Quirks::default()),
@@ -173,7 +169,6 @@ impl Drop for RemovableFlushGuard {
     }
 }
 
-/// The sorted entry names in `dir`.
 pub(super) fn names(dir: &Path) -> io::Result<Vec<String>> {
     let mut names = fs::read_dir(dir)?
         .map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned()))
@@ -182,12 +177,10 @@ pub(super) fn names(dir: &Path) -> io::Result<Vec<String>> {
     Ok(names)
 }
 
-/// A name vfat rejects, for emulating its invalid-name errors.
 fn has_colon(name: &OsStr) -> bool {
     name.as_encoded_bytes().contains(&b':')
 }
 
-/// A new copy onto a filesystem that is not FAT-like, as the test roots are.
 async fn copy_new_recursively_with_progress(
     source: gio::File,
     target: gio::File,
@@ -207,8 +200,6 @@ async fn copy_new_recursively(
     copy_new_recursively_with_progress(source, target, cancellable, None).await
 }
 
-/// Copies `source` to `destination` with `options`, and returns how the
-/// copy ended and what it reported.
 fn reporting(
     source: &Path,
     destination: super::copy_engine::Destination,
@@ -236,8 +227,6 @@ fn reporting(
     (copied.map(drop), reported.take())
 }
 
-/// Copies `source` to `target` with `workers`, and returns what the copy
-/// reported.
 fn copy_reporting(
     source: &Path,
     target: &Path,
@@ -249,8 +238,6 @@ fn copy_reporting(
     Ok(reported)
 }
 
-/// Merges `source` into the folder `target` with `workers`, and returns how
-/// the merge ended and what it reported.
 fn merge_reporting(
     source: &Path,
     target: &Path,

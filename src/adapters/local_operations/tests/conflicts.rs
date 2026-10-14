@@ -432,7 +432,6 @@ fn pasting_onto_itself_with_keep_both_creates_numbered_copy() -> Result<(), Box<
     Ok(())
 }
 
-/// Puts a file at `path` when the racer runs, unless something is there.
 fn taking(path: &Path) -> fs_quirks::Racer {
     let path = path.to_path_buf();
     Box::new(move || {

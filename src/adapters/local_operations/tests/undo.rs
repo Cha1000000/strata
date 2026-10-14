@@ -457,7 +457,6 @@ fn a_case_only_rename_and_its_undo_keep_the_item_or_say_where_it_was_left()
     Ok(())
 }
 
-/// Undoes the moves of each (original, current) pair.
 fn undo_items(
     id: u64,
     moved: &[(&Path, &Path)],

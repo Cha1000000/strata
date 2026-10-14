@@ -481,7 +481,6 @@ fn a_stage_name_left_by_a_lost_reply_is_adopted_and_a_taken_one_is_not()
             };
             fs::write(&copied, b"copied")?;
             let parent = root.path().to_path_buf();
-            // Another program fills the name the lost reply left.
             let racer: Racer = Box::new(move || {
                 let stage = names(&parent)
                     .expect("list")

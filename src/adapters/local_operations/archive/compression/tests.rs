@@ -228,7 +228,6 @@ const FUSE_SUPER_MAGIC: rustix::fs::FsWord = 0x6573_5546;
 
 type Compressed = Result<(String, Option<ReplacedOriginal>), ArchiveError>;
 
-/// Publishes a one-line archive, reporting whether the encoder ran.
 fn publish_replacement(destination: &Path, conflict: TransferConflict) -> (Compressed, bool) {
     let encoded = Arc::new(AtomicBool::new(false));
     let worker_encoded = encoded.clone();

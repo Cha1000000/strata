@@ -349,7 +349,6 @@ fn merge_places_a_read_only_incoming_folder() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-/// The names in `folder` that are not Strata's hidden ones.
 fn visible_names(folder: &Path) -> io::Result<Vec<String>> {
     Ok(names(folder)?
         .into_iter()
@@ -593,7 +592,6 @@ fn an_item_put_at_a_placed_name_right_after_placing_stays_there() -> Result<(), 
     Ok(())
 }
 
-/// What `report` renamed, by path beneath `target`, in path order.
 fn renamed_beneath(
     target: &Path,
     report: &crate::services::TransferReport,
@@ -1527,9 +1525,6 @@ fn without_trash_an_original_the_merge_left_nothing_in_place_of_stays() -> Resul
     let rewrite = |path: PathBuf, contents: &'static [u8]| -> Racer {
         Box::new(move || fs::write(&path, contents).expect("rewrite the source"))
     };
-    // The incoming `x` is a socket, which is left out; or a file a merging
-    // move keeps at its source, as it changed again while it was read; or
-    // the socket, where moving the original back fails.
     for row in ["left out", "kept at its source", "put back fails"] {
         let root = tempfile::tempdir()?;
         let source = root.path().join("source");
