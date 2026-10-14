@@ -1081,10 +1081,7 @@ impl ViewState {
             }
             BrowserEvent::ArchiveCompleted { select_name, .. } => {
                 self.pending_extract_retry.replace(None);
-                let extracted_elsewhere = self
-                    .extract_destination
-                    .take()
-                    .is_some_and(|destination| self.browser.active_location() != Some(destination));
+                let extract_destination = self.extract_destination.take();
                 if select_name.is_empty() {
                     self.pending_archive_destination.take();
                 }
@@ -1142,11 +1139,9 @@ impl ViewState {
                     self.dismiss_file_operation_progress_then(move || {
                         if let Some(state) = weak.upgrade()
                             && state.browser.navigation_generation() == navigation_generation
+                            && !select_name.is_empty()
                         {
-                            if !select_name.is_empty() && !extracted_elsewhere {
-                                state.pending_select.borrow_mut().push(select_name);
-                            }
-                            state.browser.reload_active();
+                            state.show_archive_result(extract_destination, select_name);
                         }
                     });
                 }
@@ -1204,6 +1199,26 @@ impl ViewState {
                 _ => unreachable!(),
             };
             self.reconcile_pending_rename_after_load(depth);
+        }
+    }
+
+    /// Only a folder without a monitor needs a reload to list the result.
+    fn show_archive_result(self: &Rc<Self>, destination: Option<Location>, name: String) {
+        let active = self.browser.active_location();
+        let Some(folder) = destination.or_else(|| active.clone()) else {
+            return;
+        };
+        let Some(depth) = self.browser.open_depth(&folder) else {
+            return;
+        };
+        if active.as_ref() == Some(&folder) {
+            self.pending_archive_destination.replace(Some(folder));
+            self.pending_select.borrow_mut().push(name);
+        }
+        if self.browser.column_has_monitor(depth) {
+            self.reveal_pending_archive_at(depth);
+        } else {
+            self.browser.retry_column(depth);
         }
     }
 

@@ -1277,6 +1277,114 @@ fn extract_to_focused_enter_extracts_destination() {
     );
 }
 
+#[test]
+fn an_extraction_reloads_its_folder_only_without_a_monitor() {
+    use crate::services::{DirectoryChange, OperationEvent};
+
+    crate::test_support::gtk_test(
+        "ui::browser::transfer::tests::an_extraction_reloads_its_folder_only_without_a_monitor",
+        || {
+            for (row, watched, active_elsewhere) in [
+                ("watched", true, false),
+                ("unwatched", false, false),
+                ("unwatched, another folder active", false, true),
+            ] {
+                let fixture = tempfile::tempdir().expect("extraction fixture");
+                let archive = fixture.path().join("bundle.tar");
+                std::fs::write(&archive, b"archive").expect("archive");
+                let other = fixture.path().join("other");
+                std::fs::create_dir(&other).expect("other folder");
+                let extracted = fixture.path().join("bundle");
+                let folder = Location::local(fixture.path());
+                let source = Folders::new(if watched {
+                    Location::local(&extracted)
+                } else {
+                    folder.clone()
+                });
+                let view = crate::ui::browser::BrowserView::new(
+                    source.clone(),
+                    crate::ui::browser::PeekBehavior::default(),
+                );
+                let operations =
+                    Rc::new(crate::test_support::operations::HeldOperations::default());
+                view.browser().set_operation_provider(operations.clone());
+                let listed = |depth| {
+                    view.browser()
+                        .with_column_entries(depth, |entries| {
+                            entries
+                                .iter()
+                                .map(|entry| entry.display_name.clone())
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default()
+                };
+                view.navigate_location(folder.clone());
+                wait_until(|| listed(0).len() == 2, "the archive's folder");
+                if active_elsewhere {
+                    view.browser().descend(0, Location::local(&other));
+                    view.browser().set_active_column(1);
+                }
+                let loads = (
+                    source.loads(&folder),
+                    source.loads(&Location::local(&other)),
+                );
+
+                view.state.extract_entry(transfer_entry(&archive));
+                let id = view
+                    .browser()
+                    .last_started_operation()
+                    .expect("extraction started");
+                std::fs::create_dir(&extracted).expect("extracted folder");
+                if watched {
+                    let notify = source
+                        .monitors
+                        .borrow()
+                        .iter()
+                        .find(|(location, _)| *location == folder)
+                        .map(|(_, notify)| notify.clone())
+                        .expect("the folder's monitor");
+                    notify(DirectoryChange::Upsert(FileEntry {
+                        kind: crate::model::EntryKind::Directory,
+                        ..transfer_entry(&extracted)
+                    }));
+                }
+                operations.emit(
+                    id,
+                    OperationEvent::Extracted {
+                        request_id: id,
+                        first_name: Some("bundle".to_owned()),
+                        created: vec![Location::local(&extracted)],
+                    },
+                );
+
+                let selected = || {
+                    view.browser()
+                        .selected_entries()
+                        .into_iter()
+                        .map(|entry| entry.location)
+                        .collect::<Vec<_>>()
+                };
+                wait_until(
+                    || {
+                        listed(0).contains(&"bundle".to_owned())
+                            && (active_elsewhere || selected() == [Location::local(&extracted)])
+                    },
+                    &format!("{row}: the extracted folder to be listed"),
+                );
+                assert_eq!(
+                    (
+                        source.loads(&folder) - loads.0,
+                        source.loads(&Location::local(&other)) - loads.1
+                    ),
+                    (usize::from(!watched), 0),
+                    "{row}: only the extraction's folder without a monitor reloads"
+                );
+                view.browser().clear_observer();
+            }
+        },
+    );
+}
+
 fn send_to_toast_labels(overlay: &gtk::Overlay) -> Vec<String> {
     let mut labels = Vec::new();
     let mut stack = Vec::new();
