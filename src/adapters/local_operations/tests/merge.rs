@@ -1943,7 +1943,7 @@ fn a_merge_undo_deletes_only_what_the_merge_left_unchanged() -> Result<(), Box<d
         .lock()
         .map_err(|error| error.to_string())?;
     // What happened to the merged a.txt after the merge.
-    for change in ["untouched", "edited", "touched", "replaced"] {
+    for change in ["untouched", "linked", "edited", "touched", "replaced"] {
         let root = tempfile::tempdir()?;
         let source = root.path().join("source");
         let target = root.path().join("target");
@@ -1951,6 +1951,10 @@ fn a_merge_undo_deletes_only_what_the_merge_left_unchanged() -> Result<(), Box<d
             &source,
             &[("docs/a.txt", "incoming a"), ("docs/b.txt", "incoming b")],
         )?;
+        if change == "linked" {
+            fs::remove_file(source.join("docs/b.txt"))?;
+            fs::hard_link(source.join("docs/a.txt"), source.join("docs/b.txt"))?;
+        }
         write_files(
             &target,
             &[
@@ -1976,6 +1980,7 @@ fn a_merge_undo_deletes_only_what_the_merge_left_unchanged() -> Result<(), Box<d
         ))?;
         let [a, b] = ["docs/a.txt", "docs/b.txt"].map(|path| target.join(path));
         match change {
+            "linked" => assert_eq!(fs::metadata(&a)?.nlink(), 2, "the merge keeps the link"),
             "edited" => fs::write(&a, b"edited after the merge")?,
             "touched" => set_times(&a, 1_000_000_000, 0)?,
             "replaced" => {
@@ -2007,8 +2012,8 @@ fn a_merge_undo_deletes_only_what_the_merge_left_unchanged() -> Result<(), Box<d
 
         assert_eq!(fs::read(&b)?, b"old b", "{change}");
         assert_eq!(fs::read(target.join("docs/stays.txt"))?, b"keep me");
-        if change == "untouched" {
-            assert_eq!(fs::read(&a)?, b"old a");
+        if matches!(change, "untouched" | "linked") {
+            assert_eq!(fs::read(&a)?, b"old a", "{change}");
             let mut undone = restored(&events).ok_or("not restored")?;
             undone.sort_by_key(Location::display_name);
             assert_eq!(undone, [Location::local(&a), Location::local(&b)]);
