@@ -2445,6 +2445,68 @@ fn an_undo_keeps_what_a_cancel_stopped_the_operation_from_recording() -> Result<
     Ok(())
 }
 
+#[test]
+fn an_undo_keeps_what_was_too_big_to_record() -> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    // A replaced folder of four entries; a merge's two overwritten files,
+    // which share the limit.
+    for (merged, limit) in [(false, 3), (true, 1)] {
+        let _limit = PlacedEntriesGuard::set(limit);
+        let root = tempfile::tempdir()?;
+        let target = root.path().join("target");
+        if !merged {
+            write_files(&target, &[("a.txt", "a"), ("sub/b.txt", "b")])?;
+            let placed = placed_now(&[&target]);
+            let original =
+                staged_trash_folder(root.path(), "target", &target, &[("old.txt", "old")])?;
+            let events = run_undo(
+                (Vec::new(), vec![Location::local(&target)], placed),
+                staged_lookup(HashMap::from([(target.clone(), original)])),
+            );
+            assert_eq!(names(&target)?, ["a.txt", "sub"]);
+            assert_eq!(kept_in_trash(&events), changed_after_the_merge(&target));
+            assert!(trash_in(root.path()).join("info/target.trashinfo").exists());
+            continue;
+        }
+        let source = root.path().join("source");
+        write_files(&source, &[("a.txt", "incoming a"), ("b.txt", "incoming b")])?;
+        write_files(&target, &[("a.txt", "old a"), ("b.txt", "old b")])?;
+        let (stage, _) = rename_stage(root.path().join("staging"));
+        let (plans, on_merged) = recorded_plans();
+        glib::MainContext::default().block_on(merge_local_with(
+            gio::File::for_path(&source),
+            gio::File::for_path(&target),
+            false,
+            gio::Cancellable::new(),
+            None,
+            MergeHooks {
+                fat_family: false,
+                copy_into_target: real_copy(),
+                stage_overwrite: stage,
+                on_merged: &on_merged,
+            },
+        ))?;
+        let [a, b] = ["a.txt", "b.txt"].map(|name| target.join(name));
+        let staged = HashMap::from([
+            (
+                a.clone(),
+                staged_trash_fixture(root.path(), "a.txt", &a, b"old a")?,
+            ),
+            (
+                b.clone(),
+                staged_trash_fixture(root.path(), "b.txt", &b, b"old b")?,
+            ),
+        ]);
+        let events = run_undo(undo_parts(plans.take()), staged_lookup(staged));
+        assert_eq!(fs::read(&a)?, b"old a");
+        assert_eq!(fs::read(&b)?, b"incoming b");
+        assert_eq!(kept_in_trash(&events), changed_after_the_merge(&b));
+    }
+    Ok(())
+}
+
 fn without_trash(quirks: Quirks) -> Quirks {
     Quirks {
         trash: Trash::Unsupported,

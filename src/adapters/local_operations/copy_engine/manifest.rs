@@ -13,7 +13,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -362,7 +362,7 @@ pub(super) fn snapshot(
     cancelled: &AtomicBool,
 ) -> Result<Manifest, Failure> {
     let root = Folder::root();
-    record(fs, parent.as_fd(), name, &root, cancelled, false)?;
+    record(fs, parent.as_fd(), name, &root, cancelled, None)?;
     Ok(Manifest {
         parent: OffMain::new(parent),
         root,
@@ -385,15 +385,37 @@ impl Placed {
     }
 }
 
-/// Run right after placing, so that it records what was placed.
+/// The most entries an operation records of what it placed, at some 200
+/// bytes each, as undo history keeps them.
+const PLACED_ENTRIES: usize = 100_000;
+
+#[cfg(test)]
+static TEST_PLACED_ENTRIES: Mutex<Option<usize>> = Mutex::new(None);
+
+#[cfg(test)]
+pub(in crate::adapters::local_operations) fn set_placed_entries_for_test(limit: Option<usize>) {
+    *lock(&TEST_PLACED_ENTRIES) = limit;
+}
+
+/// How many entries an operation's record of what it placed may hold.
+pub(super) fn placed_entries() -> AtomicUsize {
+    #[cfg(test)]
+    if let Some(limit) = *lock(&TEST_PLACED_ENTRIES) {
+        return AtomicUsize::new(limit);
+    }
+    AtomicUsize::new(PLACED_ENTRIES)
+}
+
+/// Run right after placing, so that it records what was placed. Fails once
+/// the operation's records would hold more than `left` entries.
 pub(super) fn placed(
     fs: &dyn FsOps,
-    dir: BorrowedFd<'_>,
-    name: &OsStr,
+    (dir, name): (BorrowedFd<'_>, &OsStr),
     cancelled: &AtomicBool,
+    left: &AtomicUsize,
 ) -> Result<Placed, Failure> {
     let root = Folder::root();
-    record(fs, dir, name, &root, cancelled, true)?;
+    record(fs, dir, name, &root, cancelled, Some(left))?;
     let (name, node) = root.take().pop().ok_or(Failure::Changed)?;
     Ok(Placed { name, node })
 }
@@ -406,22 +428,31 @@ pub(super) fn of(parent: Arc<OwnedFd>, root: Arc<Folder>) -> Manifest {
     }
 }
 
-/// With `contents`, a file within a tick of its mount's coarse times is
-/// digested, for a deletion to compare.
+/// With `placed`, the entries it may still record, a file within a tick of
+/// its mount's coarse times is digested, for a deletion to compare.
 fn record(
     fs: &dyn FsOps,
     dir: BorrowedFd<'_>,
     name: &OsStr,
     folder: &Folder,
     cancelled: &AtomicBool,
-    contents: bool,
+    placed: Option<&AtomicUsize>,
 ) -> Result<(), Failure> {
     if cancelled.load(Ordering::Acquire) {
         return Err(Failure::Cancelled);
     }
+    if let Some(left) = placed
+        && left
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |left| {
+                left.checked_sub(1)
+            })
+            .is_err()
+    {
+        return Err(Failure::Error(io_error("Too many entries to record")));
+    }
     let at = Entry { dir, name };
     let stat = fs.stat(at, false)?;
-    if contents && stat.kind == FileType::RegularFile {
+    if placed.is_some() && stat.kind == FileType::RegularFile {
         folder.add(name, digested(fs, at, &stat, cancelled)?);
         return Ok(());
     }
@@ -435,7 +466,7 @@ fn record(
     }
     let recorded = folder.folder(name, stat.identity);
     for (child, _) in fs.list(opened.as_fd())? {
-        record(fs, opened.as_fd(), &child, &recorded, cancelled, contents)
+        record(fs, opened.as_fd(), &child, &recorded, cancelled, placed)
             .map_err(|failure| failure.named(&child))?;
     }
     Ok(())

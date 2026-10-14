@@ -62,7 +62,7 @@ pub(super) use data::set_kernel_for_test;
 pub(super) use manifest::{Manifest, Published, Unlinks};
 use manifest::{Placed, Removed};
 #[cfg(test)]
-pub(super) use manifest::{now as clock_for_test, set_clock_for_test};
+pub(super) use manifest::{now as clock_for_test, set_clock_for_test, set_placed_entries_for_test};
 use metadata::Snapshot;
 pub(super) use restrictive::Restrictive;
 
@@ -112,6 +112,7 @@ pub(super) struct Placing {
     root: PathBuf,
     wanted: HashSet<PathBuf>,
     placed: Mutex<Vec<(PathBuf, Placed)>>,
+    left: AtomicUsize,
 }
 
 impl Placing {
@@ -121,6 +122,7 @@ impl Placing {
             root,
             wanted,
             placed: Mutex::default(),
+            left: manifest::placed_entries(),
         })
     }
 
@@ -149,7 +151,7 @@ impl Placing {
         path: PathBuf,
         cancelled: &AtomicBool,
     ) {
-        match manifest::placed(fs, dir, name, cancelled) {
+        match manifest::placed(fs, (dir, name), cancelled, &self.left) {
             Ok(placed) => lock(&self.placed).push((path, placed)),
             Err(failure) => {
                 let error = failure.into_error(name);
@@ -202,7 +204,7 @@ pub(super) fn placed_at(
     (dir, name): (BorrowedFd<'_>, &OsStr),
     cancelled: &AtomicBool,
 ) -> Option<PlacedSnapshot> {
-    match manifest::placed(fs, dir, name, cancelled) {
+    match manifest::placed(fs, (dir, name), cancelled, &manifest::placed_entries()) {
         Ok(placed) => Some(PlacedSnapshot::new(placed)),
         Err(failure) => {
             let error = failure.into_error(name);

@@ -159,6 +159,22 @@ impl Drop for ClockGuard {
     }
 }
 
+/// Limits how many entries an operation records of what it placed.
+struct PlacedEntriesGuard;
+
+impl PlacedEntriesGuard {
+    fn set(limit: usize) -> Self {
+        super::copy_engine::set_placed_entries_for_test(Some(limit));
+        Self
+    }
+}
+
+impl Drop for PlacedEntriesGuard {
+    fn drop(&mut self) {
+        super::copy_engine::set_placed_entries_for_test(None);
+    }
+}
+
 struct RemovableFlushGuard;
 
 impl RemovableFlushGuard {
