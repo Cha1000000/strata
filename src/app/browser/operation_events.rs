@@ -602,7 +602,7 @@ impl Browser {
                 self.emit(BrowserEvent::RenameCompleted {
                     request_id: context.request_id,
                 });
-                self.refresh_unmonitored_operation_locations(context);
+                self.refresh_unmonitored_operation_locations(context, None);
             }
             OperationEvent::Compressed {
                 archive_name,
@@ -611,6 +611,7 @@ impl Browser {
                 placed,
                 ..
             } => {
+                self.refresh_unmonitored_operation_locations(context, None);
                 if !completion.undoing {
                     match original {
                         Some(ReplacedOriginal::Trashed(original)) => {
@@ -644,9 +645,11 @@ impl Browser {
                 if self.validation_generation.get() == context.navigation_generation {
                     self.emit(BrowserEvent::EntryCreated { location });
                 }
-                self.refresh_unmonitored_operation_locations(context);
+                self.refresh_unmonitored_operation_locations(context, None);
             }
-            OperationEvent::Created { .. } => self.refresh_unmonitored_operation_locations(context),
+            OperationEvent::Created { .. } => {
+                self.refresh_unmonitored_operation_locations(context, None)
+            }
             OperationEvent::TransferProgress { .. }
             | OperationEvent::DeleteProgress { .. }
             | OperationEvent::RestoreProgress { .. }
@@ -695,14 +698,17 @@ impl Browser {
         }
     }
 
-    fn refresh_unmonitored_operation_locations(self: &Rc<Self>, context: &OperationContext) {
-        // Remote locations have no monitor to publish the authoritative change.
-        self.refresh_columns_at_many(
-            context
-                .refresh_locations
-                .iter()
-                .filter(|location| location.native_path().is_none()),
-        );
+    /// The view reloads a `revealed` destination itself.
+    fn refresh_unmonitored_operation_locations(
+        self: &Rc<Self>,
+        context: &OperationContext,
+        revealed: Option<&Location>,
+    ) {
+        for depth in self.depths_showing(&context.refresh_locations) {
+            if !self.column_has_monitor(depth) && self.location_at(depth).as_ref() != revealed {
+                self.refresh_column(depth);
+            }
+        }
     }
 
     fn publish_completed_transfer(
@@ -710,10 +716,12 @@ impl Browser {
         context: &OperationContext,
         completion: OperationCompletion,
     ) {
-        self.refresh_unmonitored_operation_locations(context);
-        if self.can_reveal_completed_transfer(context, &completion)
-            && let Some(destination) = completion.destination
-        {
+        let revealed = completion
+            .destination
+            .clone()
+            .filter(|_| self.can_reveal_completed_transfer(context, &completion));
+        self.refresh_unmonitored_operation_locations(context, revealed.as_ref());
+        if let Some(destination) = revealed {
             self.emit(BrowserEvent::TransferReveal {
                 destination,
                 locations: completion.reveal_locations,

@@ -1465,6 +1465,20 @@ impl Browser {
         false
     }
 
+    /// Selects `targets` once the open `directory` has reloaded.
+    pub fn reveal_reloaded_locations(
+        self: &Rc<Self>,
+        directory: &Location,
+        targets: Vec<Location>,
+    ) {
+        let _update = self.navigation_update();
+        let Some(depth) = self.open_depth(directory) else {
+            return;
+        };
+        self.activate_reveal_depth(depth);
+        self.refresh_column_revealing(depth, targets);
+    }
+
     /// The caller must retry missing targets as monitor updates arrive.
     pub fn reveal_monitored_locations(
         self: &Rc<Self>,
@@ -4438,26 +4452,27 @@ impl Browser {
         self: &Rc<Self>,
         locations: impl IntoIterator<Item = &'a Location>,
     ) {
-        let locations: Vec<_> = locations.into_iter().collect();
-        let depths = {
-            let state = self.state.borrow();
-            let mut depths = Vec::new();
-            let mut depth = 0;
-            while let Some(open_location) = state.location_at(depth) {
-                if locations.iter().any(|location| {
-                    &open_location == *location
-                        || (open_location.is_recent_root() && location.is_recent_root())
-                        || open_location.contains_camera_photo_location(location)
-                }) {
-                    depths.push(depth);
-                }
-                depth += 1;
-            }
-            depths
-        };
-        for depth in depths {
+        for depth in self.depths_showing(locations) {
             self.refresh_column(depth);
         }
+    }
+
+    fn depths_showing<'a>(&self, locations: impl IntoIterator<Item = &'a Location>) -> Vec<usize> {
+        let locations: Vec<_> = locations.into_iter().collect();
+        let state = self.state.borrow();
+        let mut depths = Vec::new();
+        let mut depth = 0;
+        while let Some(open_location) = state.location_at(depth) {
+            if locations.iter().any(|location| {
+                &open_location == *location
+                    || (open_location.is_recent_root() && location.is_recent_root())
+                    || open_location.contains_camera_photo_location(location)
+            }) {
+                depths.push(depth);
+            }
+            depth += 1;
+        }
+        depths
     }
 
     pub(crate) fn refresh_after_cancellation(self: &Rc<Self>, roots: &HashSet<Location>) {

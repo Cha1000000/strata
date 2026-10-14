@@ -219,11 +219,12 @@ impl Browser {
                 let mut report = job.report.take();
                 match event {
                     OperationEvent::Pasted { .. } => {
-                        self.refresh_unmonitored_operation_locations(context);
-                        if self.last_started_operation() == Some(context.request_id)
-                            && self.can_reveal_completed_transfer(context, &completion)
-                            && let Some(destination) = completion.destination
-                        {
+                        let revealed = completion.destination.clone().filter(|_| {
+                            self.last_started_operation() == Some(context.request_id)
+                                && self.can_reveal_completed_transfer(context, &completion)
+                        });
+                        self.refresh_unmonitored_operation_locations(context, revealed.as_ref());
+                        if let Some(destination) = revealed {
                             emit(BrowserEvent::TransferReveal {
                                 destination,
                                 locations: completion.reveal_locations,
@@ -232,7 +233,7 @@ impl Browser {
                         emit(BrowserEvent::TransferCompleted);
                     }
                     OperationEvent::Deleted { locations, .. } => {
-                        self.refresh_unmonitored_operation_locations(context);
+                        self.refresh_unmonitored_operation_locations(context, None);
                         self.remove_deleted_locations(&locations, &[]);
                         emit(BrowserEvent::DeletionFinished { succeeded: true });
                     }
@@ -243,7 +244,7 @@ impl Browser {
                         message,
                         ..
                     } => {
-                        self.refresh_unmonitored_operation_locations(context);
+                        self.refresh_unmonitored_operation_locations(context, None);
                         self.remove_deleted_locations(&deleted_locations, &[]);
                         emit(BrowserEvent::OperationCompletedWithErrors {
                             retryable_locations,
@@ -259,7 +260,7 @@ impl Browser {
                         placed,
                         ..
                     } => {
-                        self.refresh_unmonitored_operation_locations(context);
+                        self.refresh_unmonitored_operation_locations(context, None);
                         match original {
                             Some(ReplacedOriginal::Trashed(original)) => push_background_undo(
                                 replaced_archive_undo(archive, original, placed),

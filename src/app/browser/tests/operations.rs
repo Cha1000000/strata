@@ -942,59 +942,108 @@ fn failed_transfers_do_not_request_a_reveal() {
 }
 
 #[test]
-fn create_and_rename_refresh_remote_columns_but_not_local_monitors() {
-    for (location, remote) in [
-        (Location::uri("smb://host/share"), true),
-        (Location::local("/fixture"), false),
+fn completed_operations_refresh_only_columns_without_a_monitor() {
+    struct Watched(CountingFileSource);
+
+    impl FileSource for Watched {
+        fn validate_location(&self, location: &Location) -> Result<(), LocationValidationError> {
+            self.0.validate_location(location)
+        }
+
+        fn enumerate(
+            &self,
+            request: DirectoryRequest,
+            emit: Rc<dyn Fn(DirectoryEvent)>,
+        ) -> LoadHandle {
+            self.0.enumerate(request, emit)
+        }
+
+        fn watch(&self, _: Location, _: bool, _: WatchCallback) -> Option<LoadHandle> {
+            Some(LoadHandle::new(|| {}))
+        }
+    }
+
+    for (location, elsewhere, watched) in [
+        (
+            Location::uri("smb://host/share"),
+            Location::uri("smb://host/elsewhere"),
+            false,
+        ),
+        (
+            Location::local("/fixture"),
+            Location::local("/elsewhere"),
+            false,
+        ),
+        (
+            Location::local("/fixture"),
+            Location::local("/elsewhere"),
+            true,
+        ),
     ] {
-        for create in [true, false] {
+        for operation in ["create", "rename", "move away", "compress"] {
             let enumerate_calls = Rc::new(Cell::new(0));
-            let browser = Browser::new(Rc::new(CountingFileSource {
+            let source = CountingFileSource {
                 enumerate_calls: enumerate_calls.clone(),
-            }));
+            };
+            let browser = if watched {
+                Browser::new(Rc::new(Watched(source)))
+            } else {
+                Browser::new(Rc::new(source))
+            };
             browser.set_operation_provider(Rc::new(ImmediateOperationProvider));
             browser.navigate(location.clone());
             assert_eq!(enumerate_calls.get(), 1);
+            let item = FileEntry {
+                location: location
+                    .child(OsStr::new("old-name.txt"))
+                    .expect("operation target"),
+                native_name: "old-name.txt".into(),
+                thumbnail_path: None,
+                display_name: "old-name.txt".into(),
+                kind: EntryKind::File,
+                size: MetadataValue::Known(1),
+                modified_unix_seconds: MetadataValue::Unknown,
+                recent_unix_seconds: MetadataValue::Unknown,
+                is_hidden: false,
+                mode: MetadataValue::Unknown,
+                image_dimensions: MetadataValue::Unknown,
+                child_count: MetadataValue::Unknown,
+                duration_seconds: MetadataValue::Unknown,
+                recent_uri: None,
+            };
 
-            if create {
-                browser.create_directory_with_naming(
+            match operation {
+                "create" => browser.create_directory_with_naming(
                     location.clone(),
                     "New Folder".to_owned(),
                     false,
-                );
-            } else {
-                browser.rename(
-                    FileEntry {
-                        location: location
-                            .child(OsStr::new("old-name.txt"))
-                            .expect("rename target"),
-                        native_name: "old-name.txt".into(),
-                        thumbnail_path: None,
-                        display_name: "old-name.txt".into(),
-                        kind: EntryKind::File,
-                        size: MetadataValue::Known(1),
-                        modified_unix_seconds: MetadataValue::Unknown,
-                        recent_unix_seconds: MetadataValue::Unknown,
-                        is_hidden: false,
-                        mode: MetadataValue::Unknown,
-                        image_dimensions: MetadataValue::Unknown,
-                        child_count: MetadataValue::Unknown,
-                        duration_seconds: MetadataValue::Unknown,
-                        recent_uri: None,
-                    },
-                    "new-name.txt".to_owned(),
-                );
+                ),
+                "rename" => {
+                    browser.rename(item, "new-name.txt".to_owned());
+                }
+                "move away" => browser.transfer(
+                    elsewhere.clone(),
+                    vec![PasteItem {
+                        source: item.location,
+                        conflict: TransferConflict::FailIfExists,
+                    }],
+                    true,
+                    false,
+                ),
+                _ => browser.compress(
+                    vec![item],
+                    location.clone(),
+                    "archive".to_owned(),
+                    TransferConflict::FailIfExists,
+                    crate::services::ArchiveFormat::Zip,
+                    None,
+                ),
             }
 
             assert_eq!(
                 enumerate_calls.get(),
-                if remote { 2 } else { 1 },
-                "{}",
-                if remote {
-                    "a remote column has no live monitor, so it should be refreshed explicitly"
-                } else {
-                    "a local column already has a live file monitor; no extra refresh is needed"
-                }
+                if watched { 1 } else { 2 },
+                "{operation} in {location:?}, watched: {watched}"
             );
         }
     }

@@ -1831,50 +1831,74 @@ fn cancelling_an_operation_keeps_the_live_local_listing_visible() {
     );
 }
 
+type Notify = Rc<dyn Fn(crate::services::DirectoryChange)>;
+
+/// Local listings with every folder but `unwatched` reported as watched.
+struct Folders {
+    unwatched: Location,
+    loads: RefCell<Vec<Location>>,
+    monitors: RefCell<Vec<(Location, Notify)>>,
+}
+
+impl Folders {
+    fn new(unwatched: Location) -> Rc<Self> {
+        Rc::new(Self {
+            unwatched,
+            loads: RefCell::default(),
+            monitors: RefCell::default(),
+        })
+    }
+
+    fn loads(&self, location: &Location) -> usize {
+        self.loads
+            .borrow()
+            .iter()
+            .filter(|loaded| *loaded == location)
+            .count()
+    }
+}
+
+impl crate::services::FileSource for Folders {
+    fn validate_location(
+        &self,
+        location: &Location,
+    ) -> Result<(), crate::services::LocationValidationError> {
+        crate::adapters::LocalFileSource.validate_location(location)
+    }
+
+    fn validate_location_async(
+        &self,
+        location: Location,
+        emit: Rc<dyn Fn(Result<(), crate::services::LocationValidationError>)>,
+    ) -> crate::services::LoadHandle {
+        crate::adapters::LocalFileSource.validate_location_async(location, emit)
+    }
+
+    fn enumerate(
+        &self,
+        request: crate::services::DirectoryRequest,
+        emit: Rc<dyn Fn(crate::services::DirectoryEvent)>,
+    ) -> crate::services::LoadHandle {
+        self.loads.borrow_mut().push(request.location.clone());
+        crate::adapters::LocalFileSource.enumerate(request, emit)
+    }
+
+    fn watch(
+        &self,
+        location: Location,
+        _: bool,
+        notify: Notify,
+    ) -> Option<crate::services::LoadHandle> {
+        (location != self.unwatched).then(|| {
+            self.monitors.borrow_mut().push((location, notify));
+            crate::services::LoadHandle::new(|| {})
+        })
+    }
+}
+
 #[test]
 fn a_cancelled_transfer_reloads_its_unwatched_destination_while_a_watched_folder_rescans() {
-    use crate::services::{
-        CancelledOperation, DirectoryChange, DirectoryEvent, DirectoryRequest, FileSource,
-        LoadHandle, LocationValidationError, OperationEvent,
-    };
-
-    type Notify = Rc<dyn Fn(DirectoryChange)>;
-
-    struct Folders {
-        unwatched: Location,
-        loads: RefCell<Vec<Location>>,
-        monitors: RefCell<Vec<(Location, Notify)>>,
-    }
-
-    impl FileSource for Folders {
-        fn validate_location(&self, location: &Location) -> Result<(), LocationValidationError> {
-            crate::adapters::LocalFileSource.validate_location(location)
-        }
-
-        fn validate_location_async(
-            &self,
-            location: Location,
-            emit: Rc<dyn Fn(Result<(), LocationValidationError>)>,
-        ) -> LoadHandle {
-            crate::adapters::LocalFileSource.validate_location_async(location, emit)
-        }
-
-        fn enumerate(
-            &self,
-            request: DirectoryRequest,
-            emit: Rc<dyn Fn(DirectoryEvent)>,
-        ) -> LoadHandle {
-            self.loads.borrow_mut().push(request.location.clone());
-            crate::adapters::LocalFileSource.enumerate(request, emit)
-        }
-
-        fn watch(&self, location: Location, _: bool, notify: Notify) -> Option<LoadHandle> {
-            (location != self.unwatched).then(|| {
-                self.monitors.borrow_mut().push((location, notify));
-                LoadHandle::new(|| {})
-            })
-        }
-    }
+    use crate::services::{CancelledOperation, DirectoryChange, OperationEvent};
 
     crate::test_support::gtk_test(
         "ui::browser::transfer::tests::a_cancelled_transfer_reloads_its_unwatched_destination_while_a_watched_folder_rescans",
@@ -1890,11 +1914,7 @@ fn a_cancelled_transfer_reloads_its_unwatched_destination_while_a_watched_folder
                 let target = destination_path.join("item.txt");
                 let root = Location::local(fixture.path());
                 let destination = Location::local(&destination_path);
-                let source = Rc::new(Folders {
-                    unwatched: destination.clone(),
-                    loads: RefCell::default(),
-                    monitors: RefCell::default(),
-                });
+                let source = Folders::new(destination.clone());
                 let view = crate::ui::browser::BrowserView::new(
                     source.clone(),
                     crate::ui::browser::PeekBehavior::default(),
@@ -1915,14 +1935,7 @@ fn a_cancelled_transfer_reloads_its_unwatched_destination_while_a_watched_folder
                     names.sort();
                     names
                 };
-                let loads = |location: &Location| {
-                    source
-                        .loads
-                        .borrow()
-                        .iter()
-                        .filter(|loaded| *loaded == location)
-                        .count()
-                };
+                let loads = |location: &Location| source.loads(location);
                 view.navigate_location(root.clone());
                 wait_until(|| names(0).len() == 2, "the watched folder's listing");
                 view.browser().descend(0, destination.clone());
@@ -1999,6 +2012,107 @@ fn a_cancelled_transfer_reloads_its_unwatched_destination_while_a_watched_folder
                     (loads(&root), loads(&destination)),
                     (loaded.0 + 1, loaded.1 + 1),
                     "{row}: each folder reloads once"
+                );
+                view.browser().clear_observer();
+            }
+        },
+    );
+}
+
+#[test]
+fn a_completed_transfer_reloads_its_unwatched_destination_once() {
+    use crate::services::OperationEvent;
+
+    crate::test_support::gtk_test(
+        "ui::browser::transfer::tests::a_completed_transfer_reloads_its_unwatched_destination_once",
+        || {
+            // The view docks a copy in the background and keeps a move in the foreground.
+            for moving in [false, true] {
+                let row = if moving { "move" } else { "copy" };
+                let fixture = tempfile::tempdir().expect("completed transfer fixture");
+                let item = fixture.path().join("item.txt");
+                std::fs::write(&item, b"new item").expect("transferred item");
+                let destination_path = fixture.path().join("destination");
+                std::fs::create_dir(&destination_path).expect("destination folder");
+                let target = destination_path.join("item.txt");
+                std::fs::write(&target, b"old").expect("replaced item");
+                let root = Location::local(fixture.path());
+                let destination = Location::local(&destination_path);
+                let source = Folders::new(destination.clone());
+                let view = crate::ui::browser::BrowserView::new(
+                    source.clone(),
+                    crate::ui::browser::PeekBehavior::default(),
+                );
+                let operations =
+                    Rc::new(crate::test_support::operations::HeldOperations::default());
+                view.browser().set_operation_provider(operations.clone());
+                let loaded = |depth| {
+                    view.browser()
+                        .column_snapshot(depth)
+                        .is_some_and(|snapshot| !snapshot.loading && snapshot.count > 0)
+                };
+                view.navigate_location(root.clone());
+                wait_until(|| loaded(0), "the watched folder's listing");
+                view.browser().descend(0, destination.clone());
+                wait_until(|| loaded(1), "the destination's listing");
+                let loads = source.loads(&destination);
+
+                view.browser().transfer(
+                    destination.clone(),
+                    vec![PasteItem {
+                        source: Location::local(&item),
+                        conflict: TransferConflict::ReplaceExisting,
+                    }],
+                    moving,
+                    true,
+                );
+                let id = view
+                    .browser()
+                    .last_started_operation()
+                    .expect("transfer started");
+                assert_eq!(view.browser().has_foreground_operation(), moving, "{row}");
+                if moving {
+                    std::fs::rename(&item, &target).expect("moved item");
+                } else {
+                    std::fs::copy(&item, &target).expect("copied item");
+                }
+                operations.emit(
+                    id,
+                    OperationEvent::TransferProgress {
+                        request_id: id,
+                        completed_items: 1,
+                        completed_files: 1,
+                        total_files: Some(1),
+                        current_file: None,
+                        transferred_bytes: 8,
+                        total_bytes: Some(8),
+                        created_location: (!moving).then(|| Location::local(&target)),
+                    },
+                );
+                operations.emit(
+                    id,
+                    OperationEvent::Pasted {
+                        request_id: id,
+                        locations: vec![Location::local(&item)],
+                    },
+                );
+
+                wait_until(
+                    || {
+                        loaded(1)
+                            && view
+                                .browser()
+                                .selected_entries()
+                                .into_iter()
+                                .map(|entry| entry.location)
+                                .eq([Location::local(&target)])
+                    },
+                    &format!("{row}: the destination to reveal the replaced item"),
+                );
+                assert_eq!(
+                    source.loads(&destination),
+                    loads + 1,
+                    "{row}: the destination reloads once"
                 );
                 view.browser().clear_observer();
             }

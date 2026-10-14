@@ -742,18 +742,15 @@ fn rename_undo_consumes_only_the_latest_rename_entry() {
 
 #[test]
 fn rename_undo_preserves_current_metadata_after_the_forward_rename() {
-    let browser = Browser::new(Rc::new(FakeFileSource));
+    let browser = Browser::new(Rc::new(WatchingFileSource {
+        notify: Rc::default(),
+    }));
     browser.set_operation_provider(Rc::new(ImmediateOperationProvider));
     let parent = Location::local("/fixture");
     let mut original = fixture_entry("/fixture/original");
     original.kind = EntryKind::Directory;
-    {
-        let mut state = browser.state.borrow_mut();
-        state.navigate(parent.clone(), RequestId(1));
-        state
-            .apply_batch(RequestId(1), vec![original.clone()])
-            .expect("initial directory batch");
-    }
+    browser.navigate(parent.clone());
+    browser.handle_directory_change(0, &parent, DirectoryChange::Upsert(original.clone()));
 
     browser.descend(0, original.location.clone());
     browser.rename(original.clone(), "renamed".to_owned());
@@ -788,7 +785,9 @@ fn rename_undo_preserves_current_metadata_after_the_forward_rename() {
 
 #[test]
 fn rename_undo_does_not_publish_historical_metadata_when_current_entry_is_unavailable() {
-    let browser = Browser::new(Rc::new(FakeFileSource));
+    let browser = Browser::new(Rc::new(WatchingFileSource {
+        notify: Rc::default(),
+    }));
     browser.set_operation_provider(Rc::new(ImmediateOperationProvider));
     let parent = Location::local("/fixture");
     let mut original = fixture_entry("/fixture/original");

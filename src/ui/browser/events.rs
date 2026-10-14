@@ -1235,10 +1235,13 @@ impl ViewState {
         if locations.len() > MAX_BULK_REVEAL_SELECTION {
             locations.truncate(1);
         }
-        if let Some(depth) = self.browser.open_depth(&destination)
-            && self.browser.column_has_monitor(depth)
-        {
+        if let Some(depth) = self.browser.open_depth(&destination) {
             self.prepare_reveal(&destination);
+            if !self.browser.column_has_monitor(depth) {
+                self.browser
+                    .reveal_reloaded_locations(&destination, locations);
+                return;
+            }
             if self
                 .browser
                 .reveal_monitored_locations(destination.clone(), &locations)
