@@ -5115,7 +5115,7 @@ async fn undo_merged_overwrite(
     deleting: &mut bool,
 ) -> Result<TransferReport, glib::Error> {
     let file = gio_file_for_location(location);
-    let existing_type = await_cancellable(&file, cancellable, |file, cancellable, result| {
+    let queried = await_cancellable(&file, cancellable, |file, cancellable, result| {
         file.query_info_async(
             "standard::type",
             gio::FileQueryInfoFlags::NOFOLLOW_SYMLINKS,
@@ -5124,17 +5124,20 @@ async fn undo_merged_overwrite(
             move |output| result.resolve(output),
         );
     })
-    .await
-    .map(|info| info.file_type())
-    .ok();
-    if let Some(file_type) = existing_type {
-        *deleting = true;
-        permanently_delete_maybe_local(
-            file,
-            file_type == gio::FileType::Directory,
-            cancellable.clone(),
-        )
-        .await?;
+    .await;
+    match queried {
+        Err(error) if error.matches(gio::IOErrorEnum::NotFound) => {}
+        // Never restore over an item that could not be checked.
+        Err(error) => return Err(error),
+        Ok(info) => {
+            *deleting = true;
+            permanently_delete_maybe_local(
+                file,
+                info.file_type() == gio::FileType::Directory,
+                cancellable.clone(),
+            )
+            .await?;
+        }
     }
     restore_trash_entry(staged, context, affected_locations, unlinks, cancellable).await
 }

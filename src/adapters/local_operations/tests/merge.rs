@@ -1683,6 +1683,106 @@ fn a_merge_undo_cancelled_while_it_restores_an_original_ends_as_a_cancel()
     Ok(())
 }
 
+#[test]
+fn a_merge_undo_restores_an_original_only_over_a_path_it_checked() -> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let unreadable = "strata-test-no-backend:///second.txt";
+    // The second path's check fails, a cancel cuts it off, or the merge's
+    // copy is already gone from it.
+    for case in ["failed", "cancelled", "missing"] {
+        let root = tempfile::tempdir()?;
+        let [first, second] = ["first.txt", "second.txt"].map(|name| root.path().join(name));
+        fs::write(&first, b"merged")?;
+        if case == "cancelled" {
+            fs::write(&second, b"merged")?;
+        }
+        let target = match case {
+            "failed" => Location::uri(unreadable),
+            _ => Location::local(&second),
+        };
+        let entries = RefCell::new(HashMap::from([
+            (
+                Location::local(&first),
+                staged_trash_fixture(root.path(), "first.txt", &first, b"first")?,
+            ),
+            (
+                target.clone(),
+                staged_trash_fixture(root.path(), "second.txt", &second, b"second")?,
+            ),
+        ]));
+        let lookup: StagedOriginalLookup = Rc::new(move |location, _| {
+            let entry = entries.borrow_mut().remove(&location);
+            Box::pin(async move { entry.ok_or_else(|| io_error("not staged")) })
+        });
+        let trash = root
+            .path()
+            .join(format!(".Trash-{}", rustix::process::getuid().as_raw()));
+        let cancellable = gio::Cancellable::new();
+        let cancel = cancellable.clone();
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let emitted = events.clone();
+        let emit = Rc::new(move |event: OperationEvent| {
+            if case == "cancelled"
+                && matches!(event, OperationEvent::RestoreProgress { completed: 1, .. })
+            {
+                let cancel = cancel.clone();
+                // Runs ahead of the reply to the second path's check, then in flight.
+                glib::idle_add_local_full(glib::Priority::HIGH, move || {
+                    cancel.cancel();
+                    glib::ControlFlow::Break
+                });
+            }
+            emitted.borrow_mut().push(event);
+        });
+
+        glib::MainContext::default().block_on(run_merge_undo(
+            OperationRequestId(1615),
+            Vec::new(),
+            vec![Location::local(&first), target.clone()],
+            emit,
+            cancellable,
+            lookup,
+        ));
+
+        let events = events.borrow();
+        assert_eq!(fs::read(&first)?, b"first", "{case}");
+        let staged_second = fs::read(trash.join("files/second.txt"));
+        match (case, events.last()) {
+            ("failed", Some(OperationEvent::CompletedWithErrors { message, .. })) => {
+                let check = gio::File::for_uri(unreadable)
+                    .query_info(
+                        "standard::type",
+                        gio::FileQueryInfoFlags::NOFOLLOW_SYMLINKS,
+                        gio::Cancellable::NONE,
+                    )
+                    .expect_err("no backend");
+                assert!(
+                    message.contains(&crate::services::gio_error_detail(&check)),
+                    "{message}"
+                );
+                assert_eq!(staged_second?, b"second");
+                assert!(trash.join("info/second.txt.trashinfo").exists());
+                assert!(fs::symlink_metadata(&second).is_err());
+            }
+            ("cancelled", Some(OperationEvent::Cancelled { result, .. })) => {
+                assert_eq!(result.completed, [Location::local(&first)]);
+                assert!(result.failed.is_empty());
+                assert_eq!(result.not_attempted, [Location::local(&second)]);
+                assert_eq!(staged_second?, b"second");
+                assert_eq!(fs::read(&second)?, b"merged");
+            }
+            ("missing", Some(OperationEvent::Restored { .. })) => {
+                assert_eq!(fs::read(&second)?, b"second");
+                assert!(staged_second.is_err());
+            }
+            (case, last) => panic!("{case}: {last:?}"),
+        }
+    }
+    Ok(())
+}
+
 fn without_trash(quirks: Quirks) -> Quirks {
     Quirks {
         trash: Trash::Unsupported,

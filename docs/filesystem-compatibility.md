@@ -543,8 +543,9 @@ entry, as a move deletes its source. Anything changed or uncopyable stays in the
 it created. A cancel during the copy removes them too and counts the item as not attempted, left in
 the Trash with its `.trashinfo`; if they cannot be removed, the item counts as failed. A cancelled
 restore or merge undo ends as cancelled, even when its last item finished. A merge undo deletes its
-copy before it restores the original, so an item cut off after that counts as failed. A restore
-across filesystems is refused.
+copy before it restores the original, so an item cut off after that counts as failed. It restores
+an original only once it found its path empty or deleted its copy there: a path it cannot check
+fails with that error and the original stays in the Trash. A restore across filesystems is refused.
 
 ### The completion report
 
