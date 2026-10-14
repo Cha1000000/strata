@@ -589,8 +589,11 @@ and replaced FAT characters are not reported.
 - **SMB sources.** Opening two names of one hard-linked file at once fails with `EINVAL` on the
   kernel client, so Strata opens one name of a file at a time when it reads from SMB, whatever link
   count the share reports. After this machine writes a file on a share, opening another name of it
-  fails the same way, for any program, until the client's deferred close expires (`closetimeo`, one
-  second in the lab); a copy started in that time fails with "Could not copy".
+  fails the same way, for any program, until the client's deferred close expires (`closetimeo` in
+  the mount's options, one second by default). Strata retries an open of an SMB source that fails
+  with `EINVAL`, backing off, for that time plus half a second, and cancelling stops the wait at
+  once. Opens still refused after that, as while the writer keeps the file open, fail with "Could
+  not copy". Other errors and other filesystems are not retried.
 - **SMB read-only folders.** Without POSIX extensions, the client decides a folder's read-only
   attribute from cached attributes, so write access given back right after it was taken does
   nothing until the folder is revalidated. Strata revalidates before giving it back; other programs
@@ -711,10 +714,11 @@ delegations, FUSE writeback caches), refused `chown`, foreign groups, extended a
 by prefix, injected or listed with ACLs first, refused `mknodat` of files and pipes, NFS silly
 renames, files that report no size, reported modes, change times that equal the modification time
 (FAT), single link counts (sshfs), entries renumbered after eviction, SMB's refusal to open two
-names of one file at once and its stale read-only folders, and writeback errors that `syncfs`
-reports. Tests can also pretend to run on another kernel release, freeze the clock the racily
-clean check reads, and set a paste's batch limits and clock. The seam also asserts that no call runs
-on the main context's thread. Run them with:
+names of one file at once or, during its deferred close, another name of a file just written, its
+stale read-only folders, and writeback errors that `syncfs` reports. Tests can also pretend to run
+on another kernel release, freeze the clock that the racily clean check and the wait for SMB's
+deferred close read, and set a paste's batch limits and clock. The seam also asserts that no call
+runs on the main context's thread. Run them with:
 
 ```bash
 ./scripts/test-headless.py local_operations::

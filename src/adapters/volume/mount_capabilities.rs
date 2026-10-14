@@ -5,7 +5,7 @@
 //! so a stale entry costs speed or a refusal. The exception is the
 //! reserved-name rung, which an entry alone enables, with its small window.
 
-use std::{collections::BTreeMap, ffi::OsStr, sync::Mutex};
+use std::{collections::BTreeMap, ffi::OsStr, sync::Mutex, time::Duration};
 
 use super::{CoarseTimes, Family, FuseFormat};
 
@@ -37,6 +37,7 @@ pub(crate) struct MountCapabilities {
     pub stable_inodes: Option<bool>,
     pub fuse_format: Option<FuseFormat>,
     pub coarse_times: Option<CoarseTimes>,
+    pub deferred_close: Option<Duration>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

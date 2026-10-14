@@ -1775,21 +1775,6 @@ fn set_times(path: &Path, seconds: u64, nanoseconds: u32) -> io::Result<()> {
     Ok(())
 }
 
-struct ClockGuard;
-
-impl ClockGuard {
-    fn set(now: SystemTime) -> Self {
-        super::super::copy_engine::set_clock_for_test(Some(now));
-        Self
-    }
-}
-
-impl Drop for ClockGuard {
-    fn drop(&mut self) {
-        super::super::copy_engine::set_clock_for_test(None);
-    }
-}
-
 #[test]
 fn files_read_within_a_coarse_time_tick_are_compared_before_their_move_deletes_them()
 -> Result<(), Box<dyn Error>> {

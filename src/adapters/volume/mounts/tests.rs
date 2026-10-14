@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 
-use std::path::Path;
+use std::{path::Path, time::Duration};
 
 use super::{MountTable, is_remote_fs_type, unescape};
 
@@ -57,6 +57,27 @@ fn inode_numbers_are_unstable_on_fat_fuse_and_cifs_without_server_inodes() {
     for id in 74..=77 {
         assert_eq!(stable(id), Some(false), "mount {id}");
     }
+}
+
+#[test]
+fn smb_mounts_keep_closed_handles_for_their_close_timeout() {
+    let table = MountTable::parse(
+        "\
+80 22 0:70 / /mnt/a rw - cifs //server/a rw,vers=3.1.1,actimeo=1
+81 22 0:71 / /mnt/b rw - cifs //server/b rw,vers=3.1.1,actimeo=1,closetimeo=0
+82 22 0:72 / /mnt/c rw - smb3 //server/c rw,vers=3.1.1,closetimeo=5,cache=strict
+83 22 0:73 / /mnt/d rw - nfs4 server:/d rw,vers=4.2
+",
+    );
+    let deferred = |id| {
+        table
+            .mount_type_of(id)
+            .and_then(super::MountType::deferred_close)
+    };
+    assert_eq!(deferred(80), Some(Duration::from_secs(1)));
+    assert_eq!(deferred(81), Some(Duration::ZERO));
+    assert_eq!(deferred(82), Some(Duration::from_secs(5)));
+    assert_eq!(deferred(83), None);
 }
 
 #[test]

@@ -58,6 +58,16 @@ pub(in crate::adapters::local_operations) fn now() -> SystemTime {
     SystemTime::now()
 }
 
+/// Sleeps, or moves the time tests pretend it is on.
+pub(super) fn sleep(duration: Duration) {
+    #[cfg(test)]
+    if let Some(pretended) = lock(&TEST_NOW).as_mut() {
+        *pretended += duration;
+        return;
+    }
+    thread::sleep(duration);
+}
+
 enum Waited {
     Settled,
     Stopped,

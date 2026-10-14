@@ -143,6 +143,22 @@ use crate::{
     },
 };
 
+/// Sets the time the copy engine's waits pretend it is, until dropped.
+struct ClockGuard;
+
+impl ClockGuard {
+    fn set(now: SystemTime) -> Self {
+        super::copy_engine::set_clock_for_test(Some(now));
+        Self
+    }
+}
+
+impl Drop for ClockGuard {
+    fn drop(&mut self) {
+        super::copy_engine::set_clock_for_test(None);
+    }
+}
+
 struct RemovableFlushGuard;
 
 impl RemovableFlushGuard {

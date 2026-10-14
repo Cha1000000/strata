@@ -887,7 +887,7 @@ impl File {
                 .map_err(|error| open_failure(&self.name, error))?;
             (None, stat)
         } else {
-            let opened = open_file(fs, at)?;
+            let opened = open_file(fs, at, &copy.cancelled)?;
             let stat = opened.stat;
             (Some(opened), stat)
         };

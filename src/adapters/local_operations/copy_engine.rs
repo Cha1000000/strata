@@ -1092,6 +1092,7 @@ struct Mount {
     family: Family,
     fuse_format: Option<FuseFormat>,
     coarse_times: Option<CoarseTimes>,
+    deferred_close: Option<Duration>,
 }
 
 impl Mount {
@@ -1106,6 +1107,7 @@ impl Mount {
             family: capabilities.family.unwrap_or(Family::Other),
             fuse_format: capabilities.fuse_format,
             coarse_times: capabilities.coarse_times,
+            deferred_close: capabilities.deferred_close,
         }
     }
 
@@ -1138,13 +1140,17 @@ fn learn_mount_type(fs: &dyn FsOps, dir: BorrowedFd<'_>, key: MountKey) -> Mount
         .filter(|mount| mount.fs_type == "fuseblk")
         .and_then(|_| fs.device_format(dir).ok().flatten())
         .and_then(|format| FuseFormat::of(&format));
-    let coarse_times = mount_type.and_then(|mount| mount.coarse_times(fuse_format));
+    let coarse_times = mount_type
+        .as_ref()
+        .and_then(|mount| mount.coarse_times(fuse_format));
+    let deferred_close = mount_type.and_then(|mount| mount.deferred_close());
     let mut learned = MountCapabilities::default();
     learn_mount_capability(key, |capabilities| {
         capabilities.family = Some(family);
         capabilities.stable_inodes = Some(stable);
         capabilities.fuse_format = fuse_format;
         capabilities.coarse_times = coarse_times;
+        capabilities.deferred_close = deferred_close;
         learned = *capabilities;
     });
     learned
@@ -1604,15 +1610,49 @@ fn open_failure(name: &OsStr, error: Errno) -> Failure {
     }
 }
 
-fn open_file(fs: &dyn FsOps, at: Entry<'_>) -> Result<Opened, Failure> {
-    match fs.open_source(at, true) {
-        Ok(Some((fd, stat))) => Ok(Opened {
+fn open_file(fs: &dyn FsOps, at: Entry<'_>, cancelled: &AtomicBool) -> Result<Opened, Failure> {
+    let opened = match fs.open_source(at, true) {
+        Err(Errno::INVAL) => open_after_deferred_close(fs, at, cancelled),
+        opened => opened.map_err(|error| open_failure(at.name, error)),
+    };
+    match opened? {
+        Some((fd, stat)) => Ok(Opened {
             fd: SourceFd::new(fd),
             stat,
         }),
-        Ok(None) => Err(Failure::Changed),
-        Err(error) => Err(open_failure(at.name, error)),
+        None => Err(Failure::Changed),
     }
+}
+
+/// How long after `closetimeo` the SMB client may take to close the handle.
+const DEFERRED_CLOSE_MARGIN: Duration = Duration::from_millis(500);
+
+/// After this machine writes a file, the SMB client keeps its handle open
+/// for `closetimeo` and refuses an open of another name of the file with
+/// `EINVAL` meanwhile, so the open is tried again until then.
+fn open_after_deferred_close(
+    fs: &dyn FsOps,
+    at: Entry<'_>,
+    cancelled: &AtomicBool,
+) -> Result<Option<(OwnedFd, EntryStat)>, Failure> {
+    let Some(deferred) = Mount::new(fs, at.dir).deferred_close else {
+        return Err(open_failure(at.name, Errno::INVAL));
+    };
+    let mut left = deferred.saturating_add(DEFERRED_CLOSE_MARGIN);
+    let mut pause = Duration::from_millis(10);
+    while !left.is_zero() {
+        let waited = pause.min(left);
+        manifest::sleep(waited);
+        left -= waited;
+        if cancelled.load(Ordering::Acquire) {
+            return Err(Failure::Cancelled);
+        }
+        match fs.open_source(at, true) {
+            Err(Errno::INVAL) => pause = (pause * 2).min(Duration::from_millis(50)),
+            opened => return opened.map_err(|error| open_failure(at.name, error)),
+        }
+    }
+    Err(open_failure(at.name, Errno::INVAL))
 }
 
 fn open_one_name(
@@ -1622,7 +1662,7 @@ fn open_one_name(
     cancelled: &AtomicBool,
 ) -> Result<Opened, Failure> {
     let held = OneOpen::wait(seen, cancelled)?;
-    let mut source = open_file(fs, at)?;
+    let mut source = open_file(fs, at, cancelled)?;
     source.fd.held = Some(held);
     if source.stat.identity != seen.identity {
         return Err(Failure::Changed);
@@ -1714,7 +1754,7 @@ impl<'a> FileCopy<'a> {
     fn open(&self, at: Entry<'_>, seen: &EntryStat) -> Result<Opened, Failure> {
         let fs = self.copy.fs;
         if Mount::new(fs, at.dir).family != Family::Smb {
-            return open_file(fs, at);
+            return open_file(fs, at, &self.copy.cancelled);
         }
         open_one_name(fs, at, seen, &self.copy.cancelled)
     }

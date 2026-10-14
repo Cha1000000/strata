@@ -46,6 +46,21 @@ impl MountType {
         }
     }
 
+    /// How long the SMB client keeps a closed file's handle open
+    /// (`closetimeo`, one second by default).
+    pub(crate) fn deferred_close(&self) -> Option<Duration> {
+        if family(&self.fs_type) != Family::Smb {
+            return None;
+        }
+        let seconds = self
+            .super_options
+            .split(',')
+            .find_map(|option| option.strip_prefix("closetimeo="))
+            .and_then(|seconds| seconds.parse().ok())
+            .unwrap_or(1);
+        Some(Duration::from_secs(seconds))
+    }
+
     /// A `fuseblk` mount whose device udev cannot tell may be exFAT.
     pub(crate) fn coarse_times(&self, fuse_format: Option<FuseFormat>) -> Option<CoarseTimes> {
         let here = |seconds| CoarseTimes {

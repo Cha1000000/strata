@@ -1067,3 +1067,202 @@ fn a_linked_name_on_an_smb_share_swapped_before_its_open_is_not_copied()
     assert!(!mounts.target().exists());
     Ok(())
 }
+
+const CLOCK_START: Duration = Duration::from_secs(1_800_000_000);
+
+/// `b` names a file this machine just wrote as `a`, which the mount refuses
+/// to open by that other name for `refused_for` on the test clock.
+fn just_written_and_linked(
+    (fs_type, options): (&'static str, &'static str),
+    refused_for: Duration,
+    more: Quirks,
+) -> Result<(ClockGuard, Mounts, PathBuf), Box<dyn Error>> {
+    let clock = ClockGuard::set(SystemTime::UNIX_EPOCH + CLOCK_START);
+    let mounts = mounts(
+        Quirks {
+            mount_type: Some((fs_type, options)),
+            deferred_close: Some(("b", SystemTime::UNIX_EPOCH + CLOCK_START + refused_for)),
+            ..more
+        },
+        |_| Quirks::default(),
+    )?;
+    let folder = mounts.sources.join("folder");
+    fs::create_dir(&folder)?;
+    fs::write(mounts.sources.join("a"), b"just written")?;
+    fs::hard_link(mounts.sources.join("a"), folder.join("b"))?;
+    Ok((clock, mounts, folder))
+}
+
+fn waited() -> Result<Duration, Box<dyn Error>> {
+    Ok(super::super::copy_engine::clock_for_test()
+        .duration_since(SystemTime::UNIX_EPOCH + CLOCK_START)?)
+}
+
+fn opens_of_b(mounts: &Mounts) -> usize {
+    mounts
+        .source_scope
+        .calls()
+        .iter()
+        .filter(|call| call.op == Op::OpenSource && call.names == ["b"])
+        .count()
+}
+
+#[test]
+fn another_name_of_a_file_just_written_on_smb_is_copied_once_the_client_closes_it()
+-> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock()?;
+    type Copier = fn(&Mounts, &Path) -> Result<PathBuf, Box<dyn Error>>;
+    let rows: [(&str, Copier); 3] = [
+        ("selected", |mounts, folder| {
+            copy(&folder.join("b"), &mounts.target())?;
+            Ok(mounts.target())
+        }),
+        ("in a folder", |mounts, folder| {
+            let target = mounts.destination.join("folder");
+            copy(folder, &target)?;
+            Ok(target.join("b"))
+        }),
+        ("among enough files for the bulk path", |mounts, folder| {
+            let mut items = vec![folder.join("b")];
+            for index in 0..super::super::MAX_LOCAL_IO_WORKERS {
+                let file = mounts.sources.join(format!("file-{index}"));
+                fs::write(&file, b"other")?;
+                items.push(file);
+            }
+            run_paste(PasteRequest {
+                id: OperationRequestId(97),
+                destination: Location::local(&mounts.destination),
+                items: items
+                    .into_iter()
+                    .map(|source| PasteItem {
+                        source: Location::local(source),
+                        conflict: TransferConflict::FailIfExists,
+                    })
+                    .collect(),
+                move_sources: false,
+            });
+            Ok(mounts.destination.join("b"))
+        }),
+    ];
+    for (row, copier) in rows {
+        let (_clock, mounts, folder) = just_written_and_linked(
+            ("cifs", "rw"),
+            Duration::from_millis(1200),
+            Quirks::default(),
+        )?;
+
+        let copied = copier(&mounts, &folder)?;
+
+        assert_eq!(fs::read(copied)?, b"just written", "{row}");
+        assert!(opens_of_b(&mounts) > 1, "{row}");
+    }
+    Ok(())
+}
+
+#[test]
+fn source_opens_are_retried_only_on_smb_and_only_for_its_close_timeout()
+-> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock()?;
+    let second = Duration::from_secs(1);
+    let at_once = Duration::ZERO..Duration::from_nanos(1);
+    // The mount, the error opens of `b` fail with, how long `EINVAL` lasts,
+    // and how long a copy that fails waited.
+    for (row, mount, errno, refused_for, failed_after) in [
+        (
+            "closetimeo=5",
+            ("smb3", "rw,closetimeo=5"),
+            Errno::INVAL,
+            4 * second,
+            None,
+        ),
+        (
+            "past the close timeout",
+            ("cifs", "rw"),
+            Errno::INVAL,
+            60 * second,
+            Some(second..2 * second),
+        ),
+        (
+            "ext4",
+            ("ext4", "rw"),
+            Errno::INVAL,
+            second,
+            Some(at_once.clone()),
+        ),
+        (
+            "NFS",
+            ("nfs4", "rw,vers=4.2"),
+            Errno::INVAL,
+            second,
+            Some(at_once.clone()),
+        ),
+        (
+            "another error",
+            ("cifs", "rw"),
+            Errno::ACCESS,
+            Duration::ZERO,
+            Some(at_once.clone()),
+        ),
+    ] {
+        let more = match errno {
+            Errno::INVAL => Quirks::default(),
+            errno => Quirks {
+                fail: vec![(Op::OpenSource, "b", 0, errno)],
+                ..Quirks::default()
+            },
+        };
+        let (_clock, mounts, folder) = just_written_and_linked(mount, refused_for, more)?;
+
+        let copied = copy(&folder.join("b"), &mounts.target());
+
+        let Some(failed_after) = failed_after else {
+            copied?;
+            assert_eq!(fs::read(mounts.target())?, b"just written", "{row}");
+            continue;
+        };
+        let error = copied.expect_err(row);
+        assert_eq!(
+            error.message(),
+            rust_i18n::t!(
+                "Could not copy %{name}: %{error}",
+                name = "b",
+                error = crate::services::io_error_detail(&io::Error::from(errno))
+            ),
+            "{row}"
+        );
+        assert!(failed_after.contains(&waited()?), "{row}: {:?}", waited()?);
+        if failed_after == at_once {
+            assert_eq!(opens_of_b(&mounts), 1, "{row}");
+        }
+        assert!(!mounts.target().exists(), "{row}");
+    }
+    Ok(())
+}
+
+#[test]
+fn a_copy_cancelled_while_waiting_for_an_smb_close_stops_at_once() -> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock()?;
+    let cancellable = gio::Cancellable::new();
+    let cancel = cancellable.clone();
+    let (_clock, mounts, folder) = just_written_and_linked(
+        ("cifs", "rw"),
+        Duration::from_secs(60),
+        Quirks {
+            before: vec![(Op::OpenSource, "b", 1, Box::new(move || cancel.cancel()))],
+            ..Quirks::default()
+        },
+    )?;
+
+    let copied = glib::MainContext::default().block_on(copy_new_recursively(
+        gio::File::for_path(folder.join("b")),
+        gio::File::for_path(mounts.target()),
+        cancellable,
+    ));
+
+    let error = copied.expect_err("the copy was cancelled");
+    assert!(error.matches(gio::IOErrorEnum::Cancelled), "{error}");
+    assert_eq!(opens_of_b(&mounts), 2);
+    assert!(waited()? < Duration::from_millis(100), "{:?}", waited()?);
+    assert!(!mounts.target().exists());
+    Ok(())
+}

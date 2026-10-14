@@ -14,6 +14,7 @@ use std::{
         Arc, Mutex, MutexGuard,
         atomic::{AtomicU64, Ordering},
     },
+    time::SystemTime,
 };
 
 use gtk::{gio, glib};
@@ -22,7 +23,7 @@ use rustix::{
     io::Errno,
 };
 
-use super::super::copy_engine::forget_learned_copy_support;
+use super::super::copy_engine::{clock_for_test, forget_learned_copy_support};
 use super::super::fs_ops::{Entry, EntryStat, FsOps, System, assert_off_main_thread};
 use crate::adapters::volume::{MountKey, MountType, forget_test_mount_capabilities};
 
@@ -220,6 +221,10 @@ pub(crate) struct Quirks {
     /// readable through its group or others does to the user copying it.
     pub reported_mode: Option<(&'static str, u32)>,
     pub name_opens: NameOpens,
+    /// Opening a matching name fails with `EINVAL` until the test clock
+    /// reaches the time, as the SMB client refuses another name of a file
+    /// this machine wrote while it keeps the closed handle (`closetimeo`).
+    pub deferred_close: Option<(&'static str, SystemTime)>,
     /// Giving a folder write access back right after taking it does
     /// nothing until a stat that revalidates comes between, as the SMB
     /// client without POSIX extensions decides from attributes it cached.
@@ -1216,6 +1221,12 @@ impl FsOps for Scoped {
         };
         let path = path_of(at.dir).map(|dir| dir.join(at.name));
         let opened = scope.run(Op::OpenSource, &[at.name], |scope| {
+            if let Some((pattern, until)) = scope.quirk(|quirks| quirks.deferred_close)
+                && matches(pattern, &[at.name])
+                && clock_for_test() < until
+            {
+                return Err(Errno::INVAL);
+            }
             let opened = scope.resolved(at, |at| System.open_source(at, listed))?;
             let name_opens = scope.quirk(|quirks| quirks.name_opens);
             if let (Some((fd, stat)), Some(path)) = (&opened, &path)
