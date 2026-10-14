@@ -2592,6 +2592,7 @@ fn an_undo_keeps_what_a_cancel_stopped_the_operation_from_recording() -> Result<
 
         let recorded = glib::MainContext::default().block_on(super::super::copy_engine::placed(
             placed.clone(),
+            super::super::copy_engine::placed_budget(),
             &cancellable,
         ));
 
@@ -2711,6 +2712,49 @@ fn a_created_tree_too_big_to_record_leaves_its_entries_to_the_rest() -> Result<(
     assert!(!z.exists(), "{events:?}");
     assert_eq!(names(&big)?, ["1.txt", "2.txt", "3.txt"]);
     assert_eq!(kept_items(&events), [Location::local(&big)]);
+    Ok(())
+}
+
+#[test]
+fn a_paste_records_no_more_than_its_limit_across_its_merges() -> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let _limit = PlacedEntriesGuard::set(1);
+    let root = tempfile::tempdir()?;
+    let sources = root.path().join("sources");
+    let destination = root.path().join("destination");
+    write_files(
+        &sources,
+        &[("a/first.txt", "first"), ("b/second.txt", "second")],
+    )?;
+    write_files(
+        &destination,
+        &[("a/stays.txt", "keep me"), ("b/stays.txt", "keep me")],
+    )?;
+    let _scope = FsQuirks::install(root.path(), without_trash(Quirks::default()));
+
+    let events = run_paste(PasteRequest {
+        id: OperationRequestId(1618),
+        destination: Location::local(&destination),
+        items: ["a", "b"]
+            .map(|name| PasteItem {
+                source: Location::local(sources.join(name)),
+                conflict: TransferConflict::Merge,
+            })
+            .into(),
+        move_sources: false,
+    });
+
+    let placed = events
+        .iter()
+        .filter_map(|event| match event {
+            OperationEvent::Merged { placed, .. } => Some(placed.clone()),
+            _ => None,
+        })
+        .flatten()
+        .collect::<HashMap<_, _>>();
+    assert_eq!(placed_paths(&placed), [destination.join("a/first.txt")]);
     Ok(())
 }
 

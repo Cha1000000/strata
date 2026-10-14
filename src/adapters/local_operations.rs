@@ -40,7 +40,7 @@ use std::{
     rc::Rc,
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
     thread,
     time::{Duration, Instant},
@@ -2143,6 +2143,7 @@ async fn move_local_owing(
     let Copying {
         progress,
         fat_family,
+        ..
     } = copying;
     let mut owed = Owed::default();
     if let Some(target_path) = native_path(&target) {
@@ -2645,6 +2646,7 @@ async fn move_local(
     let copying = Copying {
         progress: progress.clone(),
         fat_family,
+        ..Copying::default()
     };
     move_local_with_progress(
         source,
@@ -2748,6 +2750,7 @@ fn remote_copy(copying: Copying) -> RemoteCopy {
         let Copying {
             progress,
             fat_family,
+            ..
         } = copying.clone();
         Box::pin(copy_new_recursively_on_filesystem(
             source,
@@ -3283,6 +3286,7 @@ async fn replace_through_stage(
         durable,
         ..copy_engine::Options::default()
     };
+    let placed_entries = copying.placed_entries;
     let (staged, sources, report) = copy_engine::copy_to_stage(
         source_path.to_path_buf(),
         target_path.to_path_buf(),
@@ -3303,7 +3307,12 @@ async fn replace_through_stage(
                 let placed = if moving {
                     None
                 } else {
-                    copy_engine::placed(target_path.to_path_buf(), cancellable).await
+                    copy_engine::placed(
+                        target_path.to_path_buf(),
+                        placed_entries.clone(),
+                        cancellable,
+                    )
+                    .await
                 };
                 let replaced = StagedReplacement {
                     original: ReplacedOriginal::Trashed(plan.trashed_original()),
@@ -3598,10 +3607,22 @@ async fn publish_staged_replacement(
 
 type StagedCopy = (Option<copy_engine::Manifest>, TransferReport);
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 struct Copying {
     progress: Option<Rc<TransferProgressTracker>>,
     fat_family: bool,
+    /// Shared by all the records of what one paste placed.
+    placed_entries: Arc<AtomicUsize>,
+}
+
+impl Default for Copying {
+    fn default() -> Self {
+        Self {
+            progress: None,
+            fat_family: false,
+            placed_entries: copy_engine::placed_budget(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -3766,6 +3787,7 @@ async fn merge_owing(
     move_source: bool,
     cancellable: &gio::Cancellable,
     affected_locations: Option<&mut HashSet<Location>>,
+    placed_entries: &Arc<AtomicUsize>,
     hooks: MergeHooks<'_>,
 ) -> Result<Owed, glib::Error> {
     if let Some(locations) = affected_locations {
@@ -3862,7 +3884,7 @@ async fn merge_owing(
                     .filter(|path| !wanted.contains(path))
                     .collect()
             });
-            copy_engine::Placing::new(root.clone(), wanted, unwanted)
+            copy_engine::Placing::new(root.clone(), wanted, unwanted, placed_entries.clone())
         });
     (hooks.on_merged)(MergePlan {
         created: plan.created,
@@ -3943,6 +3965,7 @@ async fn merge_local_with(
         move_source,
         &cancellable,
         affected_locations,
+        &copy_engine::placed_budget(),
         hooks,
     )
     .await?
@@ -6050,6 +6073,7 @@ impl OperationProvider for LocalOperationProvider {
             let copying = Copying {
                 progress: Some(progress.clone()),
                 fat_family,
+                ..Copying::default()
             };
             if let Some((plans, worker_count)) =
                 parallel_copy_plans(&request, &sources, &destination, regular_files, fat_family)
@@ -6234,6 +6258,7 @@ impl OperationProvider for LocalOperationProvider {
                         request.move_sources,
                         &operation_cancellable,
                         Some(&mut affected_locations),
+                        &copying.placed_entries,
                         progress_merge_hooks(Some(progress.clone()), fat_family, &|plan| {
                             emit(OperationEvent::Merged {
                                 request_id: request.id,
@@ -6513,6 +6538,7 @@ impl OperationProvider for LocalOperationProvider {
                 let copying = Copying {
                     progress: Some(progress.clone()),
                     fat_family: target_is_fat_family(&target, &mounts),
+                    ..Copying::default()
                 };
                 let result = if item.conflict == TransferConflict::ReplaceExisting {
                     replace_owing(

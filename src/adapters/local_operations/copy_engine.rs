@@ -113,24 +113,26 @@ pub(super) struct Placing {
     wanted: HashSet<PathBuf>,
     unwanted: Option<HashSet<PathBuf>>,
     placed: Mutex<Vec<(PathBuf, Placed)>>,
-    left: AtomicUsize,
+    left: Arc<AtomicUsize>,
 }
 
 impl Placing {
     /// `root` is the merged folder. Beneath it, `wanted` are the paths undo
     /// reverts. Where the merge records all it creates, `unwanted` are the
-    /// overwritten paths undo leaves.
+    /// overwritten paths undo leaves. `left` is the operation's
+    /// [`placed_budget`].
     pub(super) fn new(
         root: PathBuf,
         wanted: HashSet<PathBuf>,
         unwanted: Option<HashSet<PathBuf>>,
+        left: Arc<AtomicUsize>,
     ) -> Arc<Self> {
         Arc::new(Self {
             root,
             wanted,
             unwanted,
             placed: Mutex::default(),
-            left: manifest::placed_entries(),
+            left,
         })
     }
 
@@ -199,15 +201,21 @@ pub(super) async fn record_placed(
     }
 }
 
-/// What is at `path`, recorded as an operation just put it there; nothing
-/// if cancelled meanwhile.
+/// The entries all records of what one operation placed may hold.
+pub(super) fn placed_budget() -> Arc<AtomicUsize> {
+    Arc::new(manifest::placed_entries())
+}
+
+/// What is at `path`, recorded as an operation just put it there, within
+/// what is `left` of its [`placed_budget`]; nothing if cancelled meanwhile.
 pub(super) async fn placed(
     path: PathBuf,
+    left: Arc<AtomicUsize>,
     cancellable: &gio::Cancellable,
 ) -> Option<PlacedSnapshot> {
     let recorded = run_cancellable(cancellable, move |cancelled| {
         let (parent, name) = split(&path).ok()?;
-        placed_at(fs(), (parent.as_fd(), &name), &cancelled)
+        placed_within(fs(), (parent.as_fd(), &name), &cancelled, &left)
     })
     .await;
     recorded.ok().flatten()
@@ -215,10 +223,19 @@ pub(super) async fn placed(
 
 pub(super) fn placed_at(
     fs: &dyn FsOps,
-    (dir, name): (BorrowedFd<'_>, &OsStr),
+    at: (BorrowedFd<'_>, &OsStr),
     cancelled: &AtomicBool,
 ) -> Option<PlacedSnapshot> {
-    match manifest::placed(fs, (dir, name), cancelled, &manifest::placed_entries()) {
+    placed_within(fs, at, cancelled, &manifest::placed_entries())
+}
+
+fn placed_within(
+    fs: &dyn FsOps,
+    (dir, name): (BorrowedFd<'_>, &OsStr),
+    cancelled: &AtomicBool,
+    left: &AtomicUsize,
+) -> Option<PlacedSnapshot> {
+    match manifest::placed(fs, (dir, name), cancelled, left) {
         Ok(placed) => Some(PlacedSnapshot::new(placed)),
         Err(failure) => {
             let error = failure.into_error(name);

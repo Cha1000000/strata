@@ -1539,6 +1539,7 @@ fn a_move_cancelled_while_deleting_its_sources_reports_what_stays() -> Result<()
     let copying = super::super::Copying {
         progress: Some(progress),
         fat_family: false,
+        ..Default::default()
     };
 
     let moved = glib::MainContext::default().block_on(super::super::move_local_with_progress(
@@ -1605,6 +1606,7 @@ fn moving_to_a_remote_target_keeps_a_source_entry_changed_during_the_copy()
         super::super::Copying {
             progress: Some(progress),
             fat_family: false,
+            ..Default::default()
         },
         super::super::attempt_move(None),
         remote_copy,

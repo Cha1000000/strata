@@ -550,19 +550,20 @@ the operation put at the original's path, then restores the original. As it plac
 the operation records it as a [move](#moves-across-filesystems) records its sources, with the
 contents of files within a tick of coarse times. It reads such a file back only until the tick
 passes, as any later rewrite changes its times. An item has no record if a cancel stops its
-recording, or if it would take the operation's records past 100,000 entries (some 20 MB kept in
-the undo history). The undo first compares all of it by the same rules, and deletes it only if
-every entry is still as recorded and no folder holds an entry added since. Otherwise all of it
-stays, and the original stays in the Trash with its `.trashinfo`, reported as left there because
-what replaced it may have changed. An entry that changes between the comparison and its deletion
-still stays, though entries deleted before it are gone. Without a record, an original is restored
-only to an empty path. A merge undo deletes its copy before it restores the original, so an item
-cut off after it deleted anything counts as failed; one cut off while it compares counts as not
-attempted. A path it cannot check fails with that error and the original stays in the Trash.
+recording, or if it would take the records of its paste or archive past 100,000 entries (some 20 MB
+kept in the undo history); one that does takes none of them. The undo first compares all of it by
+the same rules, and deletes it only if every entry is still as recorded and no folder holds an entry
+added since. Otherwise all of it stays, and the original stays in the Trash with its `.trashinfo`,
+reported as left there because what replaced it may have changed. An entry that changes between the
+comparison and its deletion still stays, though entries deleted before it are gone. Without a
+record, an original is restored only to an empty path. A merge undo deletes its copy before it
+restores the original, so an item cut off after it deleted anything counts as failed; one cut off
+while it compares counts as not attempted. A path it cannot check fails with that error and the
+original stays in the Trash.
 
 A merge undo moves what the merge created to the Trash. Where there is no Trash, it deletes it by
 the same rules instead. A copy merge records what it creates, under the name it was saved as and
-within the same 100,000 entries, only where an original could not go to the Trash, or where it
+within the paste's 100,000 entries, only where an original could not go to the Trash, or where it
 overwrote nothing and the location offers no Trash. The undo deletes an item only if all of it is
 unchanged. An item that changed, or has no record (one on a GVfs location, one pasted beside the
 merged folder, or one created where the Trash worked during the merge), stays whole and fails with

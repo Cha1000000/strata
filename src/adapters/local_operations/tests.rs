@@ -303,6 +303,7 @@ fn placed_now(paths: &[&Path]) -> HashMap<Location, PlacedSnapshot> {
         .filter_map(|path| {
             let placed = glib::MainContext::default().block_on(super::copy_engine::placed(
                 path.to_path_buf(),
+                super::copy_engine::placed_budget(),
                 &gio::Cancellable::new(),
             ))?;
             Some((Location::local(path), placed))
