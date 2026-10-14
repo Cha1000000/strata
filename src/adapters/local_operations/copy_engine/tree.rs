@@ -1320,7 +1320,7 @@ impl Place {
         // Placing a name of a file changes the change time of its others.
         if let Some(placing) = &self.placing {
             for (name, path) in in_place {
-                placing.placed(fs, self.live.as_fd(), name, &path);
+                placing.placed(fs, (self.live.as_fd(), name), &path, &copy.cancelled);
             }
         }
         let mut placed_folders = restrictive

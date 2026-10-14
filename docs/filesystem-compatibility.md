@@ -548,14 +548,16 @@ filesystems is refused.
 Undoing a merge, or a copy or an archive that replaced its original through the Trash, deletes what
 the operation put at the original's path, then restores the original. As it places an item there,
 the operation records it as a [move](#moves-across-filesystems) records its sources, with the
-contents of files within a tick of coarse times. The undo first compares all of it by the same
-rules, and deletes it only if every entry is still as recorded and no folder holds an entry added
-since. Otherwise all of it stays, and the original stays in the Trash with its `.trashinfo`,
-reported as left there because what replaced it changed. An entry that changes between the
-comparison and its deletion still stays, though entries deleted before it are gone. Without a
-record, an original is restored only to an empty path. A merge undo deletes its copy before it restores the original, so an item cut off
-after it deleted anything counts as failed; one cut off while it compares counts as not attempted.
-A path it cannot check fails with that error and the original stays in the Trash.
+contents of files within a tick of coarse times. It reads such a file back only until the tick
+passes, as any later rewrite changes its times; a cancel while it records leaves the item without
+a record. The undo first compares all of it by the same rules, and deletes it only if every entry
+is still as recorded and no folder holds an entry added since. Otherwise all of it stays, and the
+original stays in the Trash with its `.trashinfo`, reported as left there because what replaced it
+changed. An entry that changes between the comparison and its deletion still stays, though entries
+deleted before it are gone. Without a record, an original is restored only to an empty path. A
+merge undo deletes its copy before it restores the original, so an item cut off after it deleted
+anything counts as failed; one cut off while it compares counts as not attempted. A path it cannot
+check fails with that error and the original stays in the Trash.
 
 ### The completion report
 

@@ -1926,7 +1926,7 @@ fn copy_recursively_with_progress(
                 && let CopyRecord::Placing(Some(placing)) = record
                 && let Some(path) = target.path().filter(|path| placing.wants(path))
             {
-                copy_engine::record_placed(placing, path).await;
+                copy_engine::record_placed(placing, path, &cancellable).await;
             }
             if result.is_ok()
                 && let Some(file_progress) = file_progress
@@ -3298,7 +3298,7 @@ async fn replace_through_stage(
                 let placed = if moving {
                     None
                 } else {
-                    copy_engine::placed(target_path.to_path_buf()).await
+                    copy_engine::placed(target_path.to_path_buf(), cancellable).await
                 };
                 let replaced = StagedReplacement {
                     original: ReplacedOriginal::Trashed(plan.trashed_original()),

@@ -250,7 +250,7 @@ impl Publication {
         }
         // Closed before publication so NFS never silly-renames the stage.
         drop(handle);
-        self.publish(stage, strategy)
+        self.publish(stage, strategy, cancelled)
     }
 
     fn existing(&self, parent: &OwnedFd) -> Result<Option<EntryStat>, ArchiveError> {
@@ -273,7 +273,12 @@ impl Publication {
         }
     }
 
-    fn publish(&self, stage: &Stage, strategy: Strategy) -> Result<Published, ArchiveError> {
+    fn publish(
+        &self,
+        stage: &Stage,
+        strategy: Strategy,
+        cancelled: &AtomicBool,
+    ) -> Result<Published, ArchiveError> {
         let (replacement, identity) = match strategy {
             Strategy::New => {
                 return stage
@@ -285,7 +290,7 @@ impl Publication {
             Strategy::Replace(replacement, identity) => (replacement, identity),
         };
         let Some(stat) = self.existing(&stage.parent)? else {
-            return self.publish(stage, Strategy::New);
+            return self.publish(stage, Strategy::New, cancelled);
         };
         if stat.identity != identity {
             return Err(archive_failed(crate::i18n::tr(
@@ -293,7 +298,7 @@ impl Publication {
             )));
         }
         match replacement {
-            Replacement::Trash => self.publish_after_trash(stage, identity),
+            Replacement::Trash => self.publish_after_trash(stage, identity, cancelled),
             Replacement::Exchange => self.publish_by_exchange(stage, identity),
             Replacement::Aside => self.publish_after_set_aside(stage, identity),
         }
@@ -324,6 +329,7 @@ impl Publication {
         &self,
         stage: &Stage,
         identity: LocalFileIdentity,
+        cancelled: &AtomicBool,
     ) -> Result<Published, ArchiveError> {
         match trash_verified(
             Entry::new(&*stage.parent, OsStr::new(&self.name)),
@@ -334,7 +340,7 @@ impl Publication {
             Ok(()) => {}
             Err(error) if error.matches(gio::IOErrorEnum::NotSupported) => {
                 let replacement = self.without_trash(&stage.parent)?;
-                return self.publish(stage, Strategy::Replace(replacement, identity));
+                return self.publish(stage, Strategy::Replace(replacement, identity), cancelled);
             }
             Err(error) => {
                 return Err(archive_failed(rust_i18n::t!(
@@ -347,8 +353,8 @@ impl Publication {
         stage
             .place(OsStr::new(&self.name))
             .map(|()| {
-                let placed =
-                    copy_engine::placed_at(fs(), stage.parent.as_fd(), OsStr::new(&self.name));
+                let name = OsStr::new(&self.name);
+                let placed = copy_engine::placed_at(fs(), (stage.parent.as_fd(), name), cancelled);
                 self.published(Displaced::Trashed(identity.into(), placed))
             })
             .map_err(|error| {

@@ -152,11 +152,17 @@ pub(super) fn unsettled(
 pub(super) struct Contents {
     digest: digest::Digest,
     unsettled: Unsettled,
+    /// How many leading bytes the digest covers, if not all of them.
+    prefix: Option<u64>,
 }
 
 impl Contents {
     pub(super) fn new(digest: digest::Digest, unsettled: Unsettled) -> Self {
-        Self { digest, unsettled }
+        Self {
+            digest,
+            unsettled,
+            prefix: None,
+        }
     }
 }
 
@@ -380,9 +386,14 @@ impl Placed {
 }
 
 /// Run right after placing, so that it records what was placed.
-pub(super) fn placed(fs: &dyn FsOps, dir: BorrowedFd<'_>, name: &OsStr) -> Result<Placed, Failure> {
+pub(super) fn placed(
+    fs: &dyn FsOps,
+    dir: BorrowedFd<'_>,
+    name: &OsStr,
+    cancelled: &AtomicBool,
+) -> Result<Placed, Failure> {
     let root = Folder::root();
-    record(fs, dir, name, &root, &AtomicBool::new(false), true)?;
+    record(fs, dir, name, &root, cancelled, true)?;
     let (name, node) = root.take().pop().ok_or(Failure::Changed)?;
     Ok(Placed { name, node })
 }
@@ -411,7 +422,7 @@ fn record(
     let at = Entry { dir, name };
     let stat = fs.stat(at, false)?;
     if contents && stat.kind == FileType::RegularFile {
-        folder.add(name, digested(fs, at, &stat));
+        folder.add(name, digested(fs, at, &stat, cancelled)?);
         return Ok(());
     }
     if !stat.is_directory() {
@@ -430,44 +441,58 @@ fn record(
     Ok(())
 }
 
-fn digested(fs: &dyn FsOps, at: Entry<'_>, stat: &EntryStat) -> Node {
+fn digested(
+    fs: &dyn FsOps,
+    at: Entry<'_>,
+    stat: &EntryStat,
+    cancelled: &AtomicBool,
+) -> Result<Node, Failure> {
     let coarse = Mount::new(fs, at.dir).coarse_times;
     let Some(unsettled) = unsettled(stat, coarse, now()) else {
-        return Node::Entry(SourceSnapshot::of(stat, None));
+        return Ok(Node::Entry(SourceSnapshot::of(stat, None)));
     };
-    let read = || -> Result<Option<digest::Digest>, Errno> {
+    // Once the tick passes, any rewrite changes the times, so the bytes not
+    // read by then need no digest.
+    let stopped = || cancelled.load(Ordering::Acquire) || now() >= unsettled.settled;
+    let read = || -> Result<Option<Option<Contents>>, Errno> {
         let Some((file, _)) = fs.open_source(at, false)? else {
             return Ok(None);
         };
-        let digest = digest_of(fs, file.as_fd(), stat.size, &|| false).transpose()?;
+        let end = stat.size.saturating_add(1);
+        let (digest, prefix) = digest_of(fs, file.as_fd(), end, &stopped)?;
         let after = fs.stat_fd(file.as_fd())?;
-        Ok(digest.filter(|_| after.identity == stat.identity && !changed(stat, &after)))
+        let contents = (prefix != Some(0)).then_some(Contents {
+            digest,
+            unsettled,
+            prefix,
+        });
+        Ok((after.identity == stat.identity && !changed(stat, &after)).then_some(contents))
     };
-    match read() {
-        Ok(Some(digest)) => Node::Entry(SourceSnapshot::of(
-            stat,
-            Some(Contents::new(digest, unsettled)),
-        )),
+    let read = read();
+    if cancelled.load(Ordering::Acquire) {
+        return Err(Failure::Cancelled);
+    }
+    Ok(match read {
+        Ok(Some(contents)) => Node::Entry(SourceSnapshot::of(stat, contents)),
         // Nothing tells what was placed, so a deletion keeps it.
         _ => Node::Kept(KeptCause::Changed),
-    }
+    })
 }
 
-/// The digest of the file's first `size` bytes and the next, if any, which
-/// tells a file that grew; `None` if stopped.
+/// The digest of the file's first `end` bytes, or of all of it if shorter,
+/// with how many bytes it read if `stopped` cut it short.
 fn digest_of(
     fs: &dyn FsOps,
     file: BorrowedFd<'_>,
-    size: u64,
+    end: u64,
     stopped: &dyn Fn() -> bool,
-) -> Option<Result<digest::Digest, Errno>> {
-    let mut buffer = vec![0; usize::try_from(size).map_or(MIB, |size| size.clamp(64 << 10, MIB))];
+) -> Result<(digest::Digest, Option<u64>), Errno> {
+    let mut buffer = vec![0; usize::try_from(end).map_or(MIB, |end| end.clamp(64 << 10, MIB))];
     let mut digest = digest::Context::new(&digest::SHA256);
-    let end = size.saturating_add(1);
     let mut offset = 0;
     while offset < end {
         if stopped() {
-            return None;
+            return Ok((digest.finish(), Some(offset)));
         }
         let wanted =
             usize::try_from(end - offset).map_or(buffer.len(), |left| left.min(buffer.len()));
@@ -478,10 +503,10 @@ fn digest_of(
                 offset += read as u64;
             }
             Err(Errno::INTR) => {}
-            Err(error) => return Some(Err(error)),
+            Err(error) => return Err(error),
         }
     }
-    Some(Ok(digest.finish()))
+    Ok((digest.finish(), None))
 }
 
 pub(super) fn delete(
@@ -833,24 +858,22 @@ impl At {
                 .is_ok_and(|current| snapshot.holds(current, deletion.stable_inodes, since));
         match current {
             Ok(_) if unchanged && deletion.compare_only => {}
-            Ok(current) if unchanged => {
-                match fs.unlink(self.entry_at(), AtFlags::empty()) {
-                    Ok(()) => {
-                        deletion.removed.store(true, Ordering::Release);
-                        if let Some(unlinks) = &mut unlinks {
-                            unlinks.entry(key).or_default().push(current.nlink);
-                        }
+            Ok(current) if unchanged => match fs.unlink(self.entry_at(), AtFlags::empty()) {
+                Ok(()) => {
+                    deletion.removed.store(true, Ordering::Release);
+                    if let Some(unlinks) = &mut unlinks {
+                        unlinks.entry(key).or_default().push(current.nlink);
                     }
-                    Err(error) => deletion.failed(self.path.clone(), error),
                 }
-            }
+                Err(error) => deletion.failed(self.path.clone(), error),
+            },
             Ok(_) => deletion.keep(self.path.clone(), KeptCause::Changed),
             Err(error) => deletion.failed(self.path.clone(), error),
         }
     }
 
     /// The file, still open, if it holds what the copy holds; `None` if the
-    /// deletion stopped while waiting.
+    /// deletion stopped meanwhile.
     fn same_contents(
         &self,
         contents: &Contents,
@@ -868,10 +891,15 @@ impl At {
             Ok(None) => return Some(Ok(None)),
             Err(error) => return Some(Err(error)),
         };
-        Some(
-            digest_of(fs, file.as_fd(), size, stopped)?
-                .map(|digest| (digest.as_ref() == contents.digest.as_ref()).then_some(file)),
-        )
+        // A byte past what the copy holds tells a file that grew.
+        let end = contents.prefix.unwrap_or(size.saturating_add(1));
+        match digest_of(fs, file.as_fd(), end, stopped) {
+            Ok((_, Some(_))) => None,
+            Ok((digest, None)) => Some(Ok(
+                (digest.as_ref() == contents.digest.as_ref()).then_some(file)
+            )),
+            Err(error) => Some(Err(error)),
+        }
     }
 
     fn rmdir(&self, opened: Arc<OwnedFd>) {

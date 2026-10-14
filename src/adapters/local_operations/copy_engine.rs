@@ -129,15 +129,27 @@ impl Placing {
     }
 
     /// `path` is where the merge placed `name` of `dir`, beneath its folder.
-    fn placed(&self, fs: &dyn FsOps, dir: BorrowedFd<'_>, name: &OsStr, path: &Path) {
+    fn placed(
+        &self,
+        fs: &dyn FsOps,
+        (dir, name): (BorrowedFd<'_>, &OsStr),
+        path: &Path,
+        cancelled: &AtomicBool,
+    ) {
         let path = self.root.join(path);
         if self.wants(&path) {
-            self.record(fs, dir, name, path);
+            self.record(fs, (dir, name), path, cancelled);
         }
     }
 
-    fn record(&self, fs: &dyn FsOps, dir: BorrowedFd<'_>, name: &OsStr, path: PathBuf) {
-        match manifest::placed(fs, dir, name) {
+    fn record(
+        &self,
+        fs: &dyn FsOps,
+        (dir, name): (BorrowedFd<'_>, &OsStr),
+        path: PathBuf,
+        cancelled: &AtomicBool,
+    ) {
+        match manifest::placed(fs, dir, name, cancelled) {
             Ok(placed) => lock(&self.placed).push((path, placed)),
             Err(failure) => {
                 let error = failure.into_error(name);
@@ -155,23 +167,31 @@ impl Placing {
 }
 
 /// Records what a merge copied to `path` some other way.
-pub(super) async fn record_placed(placing: Arc<Placing>, path: PathBuf) {
-    let recorded = run_blocking(move || {
+pub(super) async fn record_placed(
+    placing: Arc<Placing>,
+    path: PathBuf,
+    cancellable: &gio::Cancellable,
+) {
+    let recorded = run_cancellable(cancellable, move |cancelled| {
         let (parent, name) = split(&path)?;
-        placing.record(fs(), parent.as_fd(), &name, path.clone());
-        Ok(())
+        placing.record(fs(), (parent.as_fd(), &name), path.clone(), &cancelled);
+        Ok::<_, glib::Error>(())
     })
     .await;
-    if let Err(error) = recorded {
+    if let Ok(Err(error)) = recorded {
         tracing::warn!(%error, "could not record a placed item");
     }
 }
 
-/// What is at `path`, recorded as an operation just put it there.
-pub(super) async fn placed(path: PathBuf) -> Option<PlacedSnapshot> {
-    let recorded = run_blocking(move || {
-        let (parent, name) = split(&path)?;
-        Ok(placed_at(fs(), parent.as_fd(), &name))
+/// What is at `path`, recorded as an operation just put it there; nothing
+/// if cancelled meanwhile.
+pub(super) async fn placed(
+    path: PathBuf,
+    cancellable: &gio::Cancellable,
+) -> Option<PlacedSnapshot> {
+    let recorded = run_cancellable(cancellable, move |cancelled| {
+        let (parent, name) = split(&path).ok()?;
+        placed_at(fs(), (parent.as_fd(), &name), &cancelled)
     })
     .await;
     recorded.ok().flatten()
@@ -179,10 +199,10 @@ pub(super) async fn placed(path: PathBuf) -> Option<PlacedSnapshot> {
 
 pub(super) fn placed_at(
     fs: &dyn FsOps,
-    dir: BorrowedFd<'_>,
-    name: &OsStr,
+    (dir, name): (BorrowedFd<'_>, &OsStr),
+    cancelled: &AtomicBool,
 ) -> Option<PlacedSnapshot> {
-    match manifest::placed(fs, dir, name) {
+    match manifest::placed(fs, dir, name, cancelled) {
         Ok(placed) => Some(PlacedSnapshot::new(placed)),
         Err(failure) => {
             let error = failure.into_error(name);
