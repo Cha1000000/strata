@@ -561,16 +561,17 @@ restores the original, so an item cut off after it deleted anything counts as fa
 while it compares counts as not attempted. A path it cannot check fails with that error and the
 original stays in the Trash.
 
-A merge undo moves what the merge created to the Trash. Where there is no Trash, it deletes it by
-the same rules instead. A copy merge records what it creates, under the name it was saved as and
-within the paste's 100,000 entries, only where an original could not go to the Trash, or where it
-overwrote nothing and the location offers no Trash. The undo deletes an item only if all of it is
-unchanged. An item that changed, or has no record (one on a GVfs location, one pasted beside the
-merged folder, or one created where the Trash worked during the merge), stays whole and fails with
-"It was kept, as it may have changed since it was copied"; another undo does not try it again. One
-that changes after part of it was deleted fails with "The folder is not empty", and stays to undo.
-An item cut off after it deleted anything counts as failed, and one cut off while it compares as
-not attempted.
+A merge undo moves what the merge created to the Trash, and so does undoing the items copied
+beside it in the same paste. Where there is no Trash, it deletes them by the same rules instead. A
+copy merge records what it creates, under the name it was saved as and within the paste's 100,000
+entries, only where an original could not go to the Trash, or where it overwrote nothing and the
+location offers no Trash; a paste with a merge records each item it copies beside it where the
+destination offers no Trash. The undo deletes an item only if all of it is unchanged. An item that
+changed, or has no record (one on a GVfs location, or one created where the Trash worked during the
+paste), stays whole and fails with "It was kept, as it may have changed since it was copied";
+another undo does not try it again. One that changes after part of it was deleted fails with "The
+folder is not empty", and stays to undo. An item cut off after it deleted anything counts as
+failed, and one cut off while it compares as not attempted.
 
 As in a move, anything that changes an entry's change time counts as a change, even with its
 contents untouched, and an undo may come long after the operation. Renaming the item away and

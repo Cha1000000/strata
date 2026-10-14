@@ -6150,6 +6150,17 @@ impl OperationProvider for LocalOperationProvider {
                 });
                 return;
             }
+            // A paste with a merge is undone as one, which deletes what it
+            // copied beside the merge where there is no Trash, as recorded.
+            let records_copies = !request.move_sources
+                && request
+                    .items
+                    .iter()
+                    .any(|item| item.conflict == TransferConflict::Merge)
+                && match native_path(&destination) {
+                    Some(path) => !can_trash(path).await,
+                    None => false,
+                };
             let mut written_paths = Vec::new();
             for (index, item) in request.items.iter().enumerate() {
                 if operation_cancellable.is_cancelled() || settling.failure().is_some() {
@@ -6385,6 +6396,25 @@ impl OperationProvider for LocalOperationProvider {
                         && item.conflict != TransferConflict::Merge
                         && !replaced_permanently.get()
                 });
+                if records_copies
+                    && item.conflict != TransferConflict::ReplaceExisting
+                    && let Some(location) = &created_location
+                    && let Some(path) = location.native_path()
+                    && let Some(placed) = copy_engine::placed(
+                        path.to_path_buf(),
+                        copying.placed_entries.clone(),
+                        &operation_cancellable,
+                    )
+                    .await
+                {
+                    emit(OperationEvent::Merged {
+                        request_id: request.id,
+                        source: item.source.clone(),
+                        created: Vec::new(),
+                        overwritten: Vec::new(),
+                        placed: HashMap::from([(location.clone(), placed)]),
+                    });
+                }
                 let done = Done {
                     index,
                     moved_to: target_location,

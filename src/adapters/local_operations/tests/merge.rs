@@ -2969,6 +2969,86 @@ fn a_merge_undo_without_trash_deletes_only_what_the_merge_created_unchanged()
 }
 
 #[test]
+fn a_merge_undo_without_trash_deletes_what_its_paste_copied_only_if_unchanged()
+-> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    for edited in [false, true] {
+        let root = tempfile::tempdir()?;
+        let sources = root.path().join("sources");
+        let destination = root.path().join("destination");
+        write_files(
+            &sources,
+            &[
+                ("notes.txt", "notes"),
+                ("docs/new.txt", "incoming"),
+                ("keep.txt", "incoming keep"),
+                ("plain/a.txt", "a"),
+            ],
+        )?;
+        write_files(
+            &destination,
+            &[("docs/stays.txt", "keep me"), ("keep.txt", "original keep")],
+        )?;
+        let _scope = FsQuirks::install(root.path(), without_trash(Quirks::default()));
+        let item = |name: &str, conflict| PasteItem {
+            source: Location::local(sources.join(name)),
+            conflict,
+        };
+
+        let events = run_paste(PasteRequest {
+            id: OperationRequestId(1619),
+            destination: Location::local(&destination),
+            items: vec![
+                item("notes.txt", TransferConflict::FailIfExists),
+                item("docs", TransferConflict::Merge),
+                item("keep.txt", TransferConflict::KeepBoth),
+                item("plain", TransferConflict::FailIfExists),
+            ],
+            move_sources: false,
+        });
+        // As the app gathers the undo of a paste with a merge.
+        let mut parts = UndoParts::default();
+        for event in events {
+            match event {
+                OperationEvent::TransferProgress {
+                    created_location, ..
+                } => parts.0.extend(created_location),
+                OperationEvent::Merged {
+                    created, placed, ..
+                } => {
+                    parts.0.extend(created);
+                    parts.2.extend(placed);
+                }
+                _ => {}
+            }
+        }
+        let [notes, plain] = ["notes.txt", "plain"].map(|name| destination.join(name));
+        if edited {
+            fs::write(&notes, b"edited after the paste")?;
+            fs::write(plain.join("a.txt"), b"edited after the paste")?;
+        }
+
+        let undone = run_undo(parts, staged_lookup(HashMap::new()));
+
+        let mut left = vec!["docs", "keep.txt"];
+        let mut kept = Vec::new();
+        if edited {
+            left.extend(["notes.txt", "plain"]);
+            kept.extend([Location::local(&notes), Location::local(&plain)]);
+        }
+        assert_eq!(names(&destination)?, left, "edited: {edited}: {undone:?}");
+        assert_eq!(names(&destination.join("docs"))?, ["stays.txt"]);
+        assert_eq!(fs::read(destination.join("keep.txt"))?, b"original keep");
+        let mut kept_items = kept_items(&undone);
+        kept_items.sort_by_key(Location::display_name);
+        assert_eq!(kept_items, kept, "edited: {edited}");
+    }
+    Ok(())
+}
+
+#[test]
 fn a_created_folder_changed_while_undo_deletes_it_fails_as_not_empty() -> Result<(), Box<dyn Error>>
 {
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT

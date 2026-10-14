@@ -1036,6 +1036,15 @@ fn a_paste_mixing_plain_copies_and_a_merge_records_one_merge_undo() {
         total_bytes: None,
         created_location: Some(copied.clone()),
     });
+    // Where there is no Trash, the paste records its plain copies too.
+    let placed = HashMap::from([(copied.clone(), PlacedSnapshot::new(()))]);
+    emit(OperationEvent::Merged {
+        request_id,
+        source: Location::local("/fixture/report.txt"),
+        created: Vec::new(),
+        overwritten: Vec::new(),
+        placed: placed.clone(),
+    });
     emit(OperationEvent::Merged {
         request_id,
         source: Location::local("/fixture/folder"),
@@ -1057,7 +1066,7 @@ fn a_paste_mixing_plain_copies_and_a_merge_records_one_merge_undo() {
             created: vec![copied, merged_created],
             overwritten: vec![merged_overwritten],
             originals: HashMap::new(),
-            placed: HashMap::new(),
+            placed,
         })
     );
 }

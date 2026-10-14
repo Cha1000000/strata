@@ -435,7 +435,8 @@ pub enum OperationEvent {
     /// the merge wrote fresh, `overwritten` are paths whose originals now
     /// sit in Trash, and `placed` what it put at them. Reported per merged
     /// source so undo can rebuild the pre-merge state even after a partial
-    /// transfer.
+    /// transfer. Where there is no Trash, a paste with a merge also reports
+    /// here only `placed` for each item it copied beside it.
     Merged {
         request_id: OperationRequestId,
         source: Location,
