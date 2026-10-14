@@ -2152,6 +2152,7 @@ async fn move_local_owing(
     })
 }
 
+#[cfg(test)]
 async fn move_local_with_progress(
     source: gio::File,
     target: gio::File,
@@ -2571,6 +2572,7 @@ async fn move_restore(
     )))
 }
 
+#[cfg(test)]
 async fn move_local(
     source: gio::File,
     target: gio::File,
@@ -3486,6 +3488,7 @@ async fn replace_owing(
     Ok(owed)
 }
 
+#[cfg(test)]
 async fn replace_local_with(
     source: gio::File,
     target: gio::File,

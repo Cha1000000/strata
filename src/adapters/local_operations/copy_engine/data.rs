@@ -16,7 +16,7 @@ use std::{
 use ring::digest;
 use rustix::io::Errno;
 
-use super::{Failure, Mount, is_fatal, is_unsupported, lock};
+use super::{Failure, Mount, is_fatal, is_unsupported};
 use crate::adapters::{
     local_operations::{
         fs_ops::{EntryStat, FsOps},
@@ -55,12 +55,12 @@ static TEST_KERNEL: std::sync::Mutex<Option<(u32, u32, u32)>> = std::sync::Mutex
 
 #[cfg(test)]
 pub(in crate::adapters::local_operations) fn set_kernel_for_test(release: Option<(u32, u32, u32)>) {
-    *lock(&TEST_KERNEL) = release;
+    *super::lock(&TEST_KERNEL) = release;
 }
 
 pub(super) fn kernel() -> (u32, u32, u32) {
     #[cfg(test)]
-    if let Some(release) = *lock(&TEST_KERNEL) {
+    if let Some(release) = *super::lock(&TEST_KERNEL) {
         return release;
     }
     static KERNEL: OnceLock<(u32, u32, u32)> = OnceLock::new();
