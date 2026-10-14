@@ -388,6 +388,143 @@ fn cancellation_refreshes_only_an_affected_remote_folder_and_its_open_descendant
 }
 
 #[test]
+fn a_stopped_transfer_reloads_its_destination_once() {
+    struct Destination {
+        watched: bool,
+        loads: Cell<usize>,
+    }
+
+    impl FileSource for Destination {
+        fn validate_location(&self, _: &Location) -> Result<(), LocationValidationError> {
+            Ok(())
+        }
+
+        fn enumerate(
+            &self,
+            request: DirectoryRequest,
+            emit: Rc<dyn Fn(DirectoryEvent)>,
+        ) -> LoadHandle {
+            self.loads.set(self.loads.get() + 1);
+            emit(DirectoryEvent::Finished {
+                request_id: request.id,
+                truncated: false,
+                can_trash: None,
+                can_delete: None,
+            });
+            LoadHandle::new(|| {})
+        }
+
+        fn watch(&self, _: Location, _: bool, _: WatchCallback) -> Option<LoadHandle> {
+            self.watched.then(|| LoadHandle::new(|| {}))
+        }
+    }
+
+    type Ending = fn(OperationRequestId) -> OperationEvent;
+    let cancelled: Ending = |request_id| OperationEvent::Cancelled {
+        request_id,
+        result: CancelledOperation {
+            affected_locations: HashSet::from([Location::uri("sftp://host/destination")]),
+            ..CancelledOperation::default()
+        },
+    };
+    let failed: Ending = |request_id| OperationEvent::Failed {
+        request_id,
+        message: "failed".to_owned(),
+        password_failure: None,
+    };
+    let transfer_failed: Ending = |request_id| OperationEvent::TransferFailed {
+        request_id,
+        completed_locations: Vec::new(),
+        message: "failed".to_owned(),
+    };
+    let rows = [
+        ("cancelled", false, false, false, cancelled, 1),
+        ("failed", false, false, false, failed, 1),
+        ("transfer failed", false, false, false, transfer_failed, 1),
+        (
+            "transfer failed, watched",
+            false,
+            true,
+            false,
+            transfer_failed,
+            0,
+        ),
+        (
+            "transfer failed, rescanned",
+            false,
+            true,
+            true,
+            transfer_failed,
+            1,
+        ),
+        (
+            "cancelled in the background",
+            true,
+            false,
+            false,
+            cancelled,
+            1,
+        ),
+        ("failed in the background", true, false, false, failed, 1),
+        (
+            "transfer failed in the background",
+            true,
+            false,
+            false,
+            transfer_failed,
+            1,
+        ),
+    ];
+    for (row, background, watched, rescanned, ending, reloads) in rows {
+        let destination = Location::uri("sftp://host/destination");
+        let source = Rc::new(Destination {
+            watched,
+            loads: Cell::new(0),
+        });
+        let browser = Browser::new(source.clone());
+        let operations = Rc::new(crate::test_support::operations::HeldOperations::default());
+        browser.set_operation_provider(operations.clone());
+        browser.navigate(destination.clone());
+        browser.transfer(
+            destination.clone(),
+            vec![PasteItem {
+                source: Location::uri("sftp://host/source/item.txt"),
+                conflict: TransferConflict::FailIfExists,
+            }],
+            false,
+            false,
+        );
+        let id = browser.last_started_operation().expect("copy started");
+        if background {
+            assert!(browser.background_file_operation(id), "{row}");
+        }
+        if rescanned {
+            browser.handle_directory_change(0, &destination, DirectoryChange::Rescan);
+        }
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let observed = events.clone();
+        browser.observe(move |event| observed.borrow_mut().push(event.clone()));
+        let loaded = source.loads.get();
+
+        operations.emit(id, ending(id));
+        // What the view does once the progress closes.
+        for event in events.take() {
+            match crate::test_support::operations::operation_event(&event) {
+                BrowserEvent::OperationCancelled {
+                    affected_locations, ..
+                } => browser.refresh_after_cancellation(affected_locations),
+                BrowserEvent::OperationRefreshRequired { depths } => {
+                    browser.refresh_operation_columns(depths)
+                }
+                _ => {}
+            }
+        }
+
+        assert_eq!(source.loads.get() - loaded, reloads, "{row}");
+    }
+}
+
+#[test]
 fn a_restore_reloads_the_open_folders_without_a_monitor_it_changed() {
     struct Watched(CountingFileSource);
 

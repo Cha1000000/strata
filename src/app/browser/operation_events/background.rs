@@ -216,10 +216,10 @@ impl Browser {
                         moved_locations: Vec::new(),
                     });
                 }
-                self.refresh_unmonitored_operation_locations(context);
                 let mut report = job.report.take();
                 match event {
                     OperationEvent::Pasted { .. } => {
+                        self.refresh_unmonitored_operation_locations(context);
                         if self.last_started_operation() == Some(context.request_id)
                             && self.can_reveal_completed_transfer(context, &completion)
                             && let Some(destination) = completion.destination
@@ -232,6 +232,7 @@ impl Browser {
                         emit(BrowserEvent::TransferCompleted);
                     }
                     OperationEvent::Deleted { locations, .. } => {
+                        self.refresh_unmonitored_operation_locations(context);
                         self.remove_deleted_locations(&locations, &[]);
                         emit(BrowserEvent::DeletionFinished { succeeded: true });
                     }
@@ -242,6 +243,7 @@ impl Browser {
                         message,
                         ..
                     } => {
+                        self.refresh_unmonitored_operation_locations(context);
                         self.remove_deleted_locations(&deleted_locations, &[]);
                         emit(BrowserEvent::OperationCompletedWithErrors {
                             retryable_locations,
@@ -257,6 +259,7 @@ impl Browser {
                         placed,
                         ..
                     } => {
+                        self.refresh_unmonitored_operation_locations(context);
                         match original {
                             Some(ReplacedOriginal::Trashed(original)) => push_background_undo(
                                 replaced_archive_undo(archive, original, placed),
@@ -294,7 +297,7 @@ impl Browser {
                         password_failure,
                         ..
                     } => {
-                        self.refresh_columns_at_many(&context.refresh_locations);
+                        self.refresh_columns_at_or_below(&context.refresh_locations);
                         emit(BrowserEvent::OperationFailed {
                             message,
                             password_failure,
@@ -302,7 +305,7 @@ impl Browser {
                         });
                     }
                     OperationEvent::TransferFailed { message, .. } => {
-                        self.refresh_columns_at_many(&context.refresh_locations);
+                        self.refresh_columns_at_or_below(&context.refresh_locations);
                         emit(BrowserEvent::OperationFailed {
                             message,
                             password_failure: None,

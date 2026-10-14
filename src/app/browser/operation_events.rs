@@ -528,13 +528,16 @@ impl Browser {
                 message,
                 password_failure,
                 ..
-            } => self.emit(BrowserEvent::OperationFailed {
-                message,
-                password_failure,
-                report: std::mem::take(report),
-            }),
+            } => {
+                self.refresh_columns_at_or_below(&context.refresh_locations);
+                self.emit(BrowserEvent::OperationFailed {
+                    message,
+                    password_failure,
+                    report: std::mem::take(report),
+                });
+            }
             OperationEvent::TransferFailed { message, .. } => {
-                self.refresh_columns_at_many(&context.refresh_locations);
+                self.refresh_columns_at_or_below(&context.refresh_locations);
                 self.emit(BrowserEvent::OperationFailed {
                     message,
                     password_failure: None,
