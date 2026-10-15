@@ -185,6 +185,7 @@ pub(super) fn assert_off_main_thread() {
 
 /// The path the kernel resolved `fd` to.
 pub(super) fn opened_path(fd: BorrowedFd<'_>) -> std::io::Result<PathBuf> {
+    assert_off_main_thread();
     std::fs::read_link(format!("/proc/self/fd/{}", fd.as_raw_fd()))
 }
 
