@@ -260,6 +260,75 @@ fn an_undone_move_gives_names_back_as_they_were_and_a_redone_one_fixes_them()
     Ok(())
 }
 
+fn refuses_a_colon_b(name: &OsStr) -> Option<Errno> {
+    (name == "a:b").then_some(Errno::INVAL)
+}
+
+#[test]
+fn rules_a_mount_learned_fix_names_a_redo_brings_but_not_those_an_undo_gives_back()
+-> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    for (mode, expected) in [(NameMode::Keep, "c:d"), (NameMode::Fix, "c_d")] {
+        let root = tempfile::tempdir()?;
+        let disk = root.path().join("disk");
+        let source = root.path().join("source");
+        let moved = root.path().join("moved").join("project");
+        for folder in [&disk, &source, &moved] {
+            fs::create_dir_all(folder)?;
+        }
+        fs::write(source.join("a:b"), b"refused")?;
+        fs::write(moved.join("c:d"), b"held before the move")?;
+        let _disk = FsQuirks::install(
+            &disk,
+            Quirks {
+                mount_type: Some(("fuse.strictfs", "rw,user_id=0,group_id=0")),
+                invalid_name: Some(refuses_a_colon_b),
+                ..Quirks::default()
+            },
+        );
+        run_paste(PasteRequest {
+            id: OperationRequestId(1590),
+            destination: Location::local(&disk),
+            items: vec![PasteItem {
+                source: Location::local(source.join("a:b")),
+                conflict: TransferConflict::FailIfExists,
+            }],
+            move_sources: false,
+        });
+        assert_eq!(names(&disk)?, ["a_b"], "{mode:?}");
+
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let emitted = events.clone();
+        let _operation = LocalOperationProvider.undo_move(
+            UndoMoveRequest {
+                names: mode,
+                cleanup_locations: Vec::new(),
+                id: OperationRequestId(1591),
+                items: vec![UndoMoveItem {
+                    record: MoveRecord {
+                        original: Location::local(disk.join("project")),
+                        current: Location::local(&moved),
+                        renamed: Vec::new(),
+                    },
+                    conflict: TransferConflict::FailIfExists,
+                }],
+            },
+            Rc::new(move |event| emitted.borrow_mut().push(event)),
+        );
+        drive_until_transfer_settles(&events);
+
+        assert!(
+            matches!(events.borrow().last(), Some(OperationEvent::Pasted { .. })),
+            "{mode:?}: {:?}",
+            events.borrow()
+        );
+        assert_eq!(names(&disk.join("project"))?, [expected], "{mode:?}");
+    }
+    Ok(())
+}
+
 #[test]
 fn rename_undo_restores_a_native_name_byte_for_byte() -> Result<(), Box<dyn Error>> {
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT

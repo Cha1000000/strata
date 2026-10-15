@@ -390,18 +390,19 @@ same-named one.
 
 A mount may still refuse a name: a call that creates it fails with `EINVAL`, `EILSEQ`, `EBADMSG`,
 `ENAMETOOLONG`, or `ENOENT` in a folder that exists, or placing a staged copy fails with an error the
-placement routine puts down to the name. The entry is then tried again under the Windows rules, one
-level at a time: valid UTF-8, then the characters Windows refuses, trailing dots and spaces, device
-names, and 255 bytes and UTF-16 units, skipping levels that leave the name as it is. The first name
-the mount takes is used, numbered where it is taken, and reported as fixed, except as the name of a
-Keep Both copy, whose numbered name is not reported either. A mount whose type does
-not show its rules (sshfs and other FUSE daemons, 9p, virtiofs, vboxsf, a `fuseblk` device udev
-cannot name, unknown types) remembers the level that worked until it changes, so its later names
-are fixed before they are copied. Any other mount tries each refused name again on its own, so one
-odd folder never puts a whole disk under Windows rules. Undo tries entries inside an item again,
-but gives the item itself back under its own name or fails; copies through GIO do not try again.
-Where no level helps, the item fails with "The name isn’t valid at this location", or "The name is
-too long".
+placement routine puts down to the name. The entry is then tried again under the name its folder's
+rules give, then under each of the Windows rules that changes it on its own (valid UTF-8, the
+characters Windows refuses, trailing dots and spaces, device names, 255 bytes and UTF-16 units), and
+then under those rules together, fewest first, skipping names already tried. The first name the
+mount takes is used, numbered where it is taken, and reported as fixed, except as the name of a Keep
+Both copy, whose numbered name is not reported either. A mount whose type does not show its rules
+(sshfs and other FUSE daemons, 9p, virtiofs, vboxsf, a `fuseblk` device udev cannot name, unknown
+types) remembers the rules that worked until it changes, so later names brought onto it are fixed by
+them before they are copied; names undo gives back are not. Any other mount tries each refused name
+again on its own, so one odd folder never puts a whole disk under Windows rules. Undo tries entries
+inside an item again, but gives the item itself back under its own name or fails; copies through GIO
+do not try again. Where no rule helps, the item fails with "The name isn’t valid at this location",
+or "The name is too long".
 
 Undoing a move fixes only names the original mount cannot hold at all, such as malformed UTF-8, and
 then gives the entries inside the item the names they had, deepest first, also where the item came

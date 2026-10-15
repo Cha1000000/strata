@@ -10,7 +10,8 @@ use super::super::{
 use super::{MountProfile, Profiles, folder_name_limit, learn_mount_type};
 use crate::adapters::volume::{
     FAT32_MAX_FILE_SIZE, Family, MountNames, NameEncoding, NameLimit, NameProfile, NameRules,
-    Reserved, Strip, gvfs_bridge_profile, gvfs_profile, learn_mount_capability, mount_capabilities,
+    Reserved, Strictness, Strip, gvfs_bridge_profile, gvfs_profile, learn_mount_capability,
+    mount_capabilities,
 };
 
 fn profile_of(profiles: &Profiles, folder: &Path) -> Result<MountProfile, Box<dyn Error>> {
@@ -54,6 +55,7 @@ fn windows(reserved: Reserved, learns: bool) -> NameProfile {
 fn each_mount_is_profiled_from_what_its_folder_reports() -> Result<(), Box<dyn Error>> {
     let profile = |names, symlinks, max_file_size, family| MountProfile {
         names,
+        strictness: Strictness::default(),
         symlinks,
         max_file_size,
         family,

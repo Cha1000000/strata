@@ -755,8 +755,8 @@ fn first_free<T>(
 
 /// Makes what a mount refused under `name` under the names it may take
 /// for it instead, in a folder whose names follow `rules`, until one is
-/// made. A mount that learns keeps the level of rules that made it. Fails
-/// as at first where none is.
+/// made. A mount that learns keeps the rules that made it. Fails as at
+/// first where none is.
 fn retry_refused<T>(
     copy: &Copy,
     rules: &FolderRules,

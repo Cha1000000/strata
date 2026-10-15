@@ -41,7 +41,7 @@ pub(crate) struct MountCapabilities {
     /// From mountinfo, udev and `statfs`.
     pub names: Option<MountNames>,
     /// What names a mount whose rules nothing shows refused taught it.
-    pub strictness: Option<Strictness>,
+    pub strictness: Strictness,
     /// `Some(false)` where the driver has no symbolic links.
     pub symlinks: Option<bool>,
     pub max_file_size: Option<u64>,

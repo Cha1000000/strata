@@ -12,7 +12,7 @@ use super::{
     placement::{self, PlaceError},
 };
 use crate::{
-    adapters::volume::{NameLimit, NameProfile, Strictness},
+    adapters::volume::{NameLimit, NameProfile, StrictRule, Strictness},
     services::RenameCause,
 };
 
@@ -40,16 +40,33 @@ pub(super) fn parse_copy_suffix(stem: &OsStr) -> (&OsStr, Option<u64>) {
 }
 
 /// The names a mount that refused `name` may take for it, in a folder whose
-/// names follow `rules`: those that each level of the Windows rules in turn
-/// gives, where that changes the name, with why.
+/// names follow `rules`, with the Windows rules each needs beyond those and
+/// why: the name the folder's rules give, then those each rule that changes
+/// that gives alone, then those such rules give together, fewest first, each
+/// where it is a new name.
 pub(super) fn stricter_names(
     name: &OsStr,
     rules: &NameProfile,
     is_directory: bool,
 ) -> Vec<(Strictness, OsString, RenameCause)> {
+    let fixed = |strictness| fix::fix_name(name, &rules.stricter(strictness), is_directory);
+    let own = fixed(Strictness::default()).name;
+    let changing = StrictRule::ALL
+        .into_iter()
+        .filter(|rule| fixed(Strictness::of([*rule])).name != own)
+        .collect::<Vec<_>>();
+    let mut sets = (0..1_u32 << changing.len()).collect::<Vec<_>>();
+    sets.sort_by_key(|set| set.count_ones());
     let mut names = Vec::<(Strictness, OsString, RenameCause)>::new();
-    for strictness in Strictness::ALL {
-        let fixed = fix::fix_name(name, &rules.stricter(strictness), is_directory);
+    for set in sets {
+        let strictness = Strictness::of(
+            changing
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| set & 1 << index != 0)
+                .map(|(_, rule)| *rule),
+        );
+        let fixed = fixed(strictness);
         let Some(cause) = fixed.cause else {
             continue;
         };
@@ -62,7 +79,7 @@ pub(super) fn stricter_names(
 
 /// Whether a mount may refuse `name` for a reason the Windows rules know.
 pub(super) fn may_be_refused(name: &OsStr) -> bool {
-    let strictest = NameProfile::posix(None).stricter(Strictness::Length);
+    let strictest = NameProfile::posix(None).stricter(Strictness::all());
     fix::fix_name(name, &strictest, false).cause.is_some()
 }
 

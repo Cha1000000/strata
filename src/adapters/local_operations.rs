@@ -6436,7 +6436,7 @@ impl OperationProvider for LocalOperationProvider {
                     return;
                 }
             };
-            let rules = names.applied(pasted_into.profile.names);
+            let rules = names.applied(pasted_into.profile.names, pasted_into.profile.strictness);
             // Replace and Merge act on the name the prompt confirmed.
             let fixing = pasted_into
                 .fixing(&filesystems)

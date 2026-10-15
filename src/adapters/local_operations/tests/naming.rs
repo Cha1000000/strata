@@ -5,13 +5,13 @@ use rustix::{fs::Mode, io::Errno};
 use super::super::{
     fs_ops::{Entry, fs},
     mount_profile::Profiles,
-    naming::{Key, PlanEntry, Planned, fix::fix_name, plan_names},
+    naming::{Key, PlanEntry, Planned, fix::fix_name, plan_names, stricter_names},
 };
 use super::*;
 use crate::{
     adapters::volume::{
-        MountType, NameEncoding, NameLimit, NameProfile, PrivateUse, Reserved, gvfs_bridge_profile,
-        gvfs_profile,
+        MountType, NameEncoding, NameLimit, NameProfile, PrivateUse, Reserved, StrictRule,
+        Strictness, gvfs_bridge_profile, gvfs_profile,
     },
     services::RenameCause,
 };
@@ -1493,5 +1493,62 @@ fn fixing_a_fixed_name_changes_nothing() {
                 "{name:?} {profile:?}"
             );
         }
+    }
+}
+
+#[test]
+fn a_refused_name_tries_each_rule_alone_before_rules_together() {
+    use RenameCause::{Invalid, TooLong};
+    use StrictRule::{Characters, DeviceNames, Length, TrailingDots, Utf8};
+    let posix = NameProfile::posix(None);
+    // As ntfs-3g where udev cannot name its device.
+    let windows = NameProfile::windows(Reserved::Bare, NameEncoding::Utf8).learning();
+    let (long, cut) = ("a".repeat(300), "a".repeat(255));
+    let rows: [(&[u8], NameProfile, Vec<(&[StrictRule], &str, RenameCause)>); 10] = [
+        (b"plain", posix, vec![]),
+        (b"x\xffy", posix, vec![(&[Utf8], "x_y", Invalid)]),
+        (b"a:b", posix, vec![(&[Characters], "a_b", Invalid)]),
+        (b"x.", posix, vec![(&[TrailingDots], "x", Invalid)]),
+        (
+            b"con.txt",
+            posix,
+            vec![(&[DeviceNames], "con_.txt", Invalid)],
+        ),
+        (long.as_bytes(), posix, vec![(&[Length], &cut, TooLong)]),
+        (
+            b"aux.c:",
+            posix,
+            vec![
+                (&[Characters], "aux.c_", Invalid),
+                (&[DeviceNames], "aux_.c:", Invalid),
+                (&[Characters, DeviceNames], "aux_.c_", Invalid),
+            ],
+        ),
+        (
+            b"a:b.",
+            posix,
+            vec![
+                (&[Characters], "a_b.", Invalid),
+                (&[TrailingDots], "a:b", Invalid),
+                (&[Characters, TrailingDots], "a_b", Invalid),
+            ],
+        ),
+        // What the folder's own rules give comes first and needs nothing more.
+        (b"aux.c", windows, vec![(&[DeviceNames], "aux_.c", Invalid)]),
+        (
+            b"aux.c.",
+            windows,
+            vec![(&[], "aux.c", Invalid), (&[DeviceNames], "aux_.c", Invalid)],
+        ),
+    ];
+    for (name, rules, expected) in rows {
+        let name = OsString::from_vec(name.to_vec());
+        let expected = expected
+            .into_iter()
+            .map(|(strict, saved, cause)| {
+                (Strictness::of(strict.iter().copied()), saved.into(), cause)
+            })
+            .collect::<Vec<(Strictness, OsString, RenameCause)>>();
+        assert_eq!(stricter_names(&name, &rules, false), expected, "{name:?}");
     }
 }

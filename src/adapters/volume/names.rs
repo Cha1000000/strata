@@ -81,10 +81,9 @@ pub(crate) struct NameProfile {
     pub learns: bool,
 }
 
-/// How much of the Windows rules a mount that refused a name may need: each
-/// level holds those before it.
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-pub(crate) enum Strictness {
+/// One of the Windows rules a mount that refused a name may need.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum StrictRule {
     Utf8,
     Characters,
     TrailingDots,
@@ -92,7 +91,7 @@ pub(crate) enum Strictness {
     Length,
 }
 
-impl Strictness {
+impl StrictRule {
     pub(crate) const ALL: [Self; 5] = [
         Self::Utf8,
         Self::Characters,
@@ -100,6 +99,28 @@ impl Strictness {
         Self::DeviceNames,
         Self::Length,
     ];
+}
+
+/// Which of the Windows rules a mount needs beyond its own.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct Strictness(u8);
+
+impl Strictness {
+    pub(crate) fn of(rules: impl IntoIterator<Item = StrictRule>) -> Self {
+        Self(rules.into_iter().fold(0, |set, rule| set | 1 << rule as u8))
+    }
+
+    pub(crate) fn all() -> Self {
+        Self::of(StrictRule::ALL)
+    }
+
+    pub(crate) fn has(self, rule: StrictRule) -> bool {
+        self.0 & 1 << rule as u8 != 0
+    }
+
+    pub(crate) fn and(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
 }
 
 /// Where a mount's name rules come from.
@@ -206,26 +227,25 @@ impl NameProfile {
         }
     }
 
-    /// These rules and the Windows rules up to `strictness`.
+    /// These rules and the Windows rules in `strictness`.
     pub(crate) fn stricter(self, strictness: Strictness) -> Self {
-        let at = |level| strictness >= level;
         let within = |limit: Option<u16>| {
             Some(limit.map_or(WINDOWS_UNITS, |limit| limit.min(WINDOWS_UNITS)))
         };
         let mut rules = self;
-        if rules.encoding == NameEncoding::AnyBytes {
+        if strictness.has(StrictRule::Utf8) && rules.encoding == NameEncoding::AnyBytes {
             rules.encoding = NameEncoding::Utf8;
         }
-        if at(Strictness::Characters) {
+        if strictness.has(StrictRule::Characters) {
             rules.rules = NameRules::Windows;
         }
-        if at(Strictness::TrailingDots) && rules.strip == Strip::None {
+        if strictness.has(StrictRule::TrailingDots) && rules.strip == Strip::None {
             rules.strip = Strip::Trailing;
         }
-        if at(Strictness::DeviceNames) {
+        if strictness.has(StrictRule::DeviceNames) {
             rules.reserved = Reserved::Full;
         }
-        if at(Strictness::Length) {
+        if strictness.has(StrictRule::Length) {
             rules.limit.bytes = within(rules.limit.bytes);
             rules.limit.units = within(rules.limit.units);
         }
@@ -233,10 +253,11 @@ impl NameProfile {
     }
 
     /// These rules and what refusals taught a mount that learns.
-    pub(crate) fn taught(self, strictness: Option<Strictness>) -> Self {
-        match strictness {
-            Some(strictness) if self.learns => self.stricter(strictness),
-            _ => self,
+    pub(crate) fn taught(self, strictness: Strictness) -> Self {
+        if self.learns {
+            self.stricter(strictness)
+        } else {
+            self
         }
     }
 }

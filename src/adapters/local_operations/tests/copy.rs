@@ -1764,7 +1764,7 @@ fn a_refused_name_takes_the_first_stricter_rules_it_passes_and_teaches_only_a_mo
         device_format: None,
         ..Quirks::ntfs_3g()
     };
-    // As a casefolded folder refuses names its filesystem takes elsewhere.
+    // A mount whose rules are known never learns from what it refuses.
     let strict_ext4 = || Quirks {
         invalid_name: Some(has_colon),
         ..Quirks::ext4()
@@ -1926,6 +1926,11 @@ fn a_refused_name_takes_the_first_stricter_rules_it_passes_and_teaches_only_a_mo
     Ok(())
 }
 
+fn refuses_colons_and_aux(name: &OsStr) -> Option<Errno> {
+    let name = name.as_encoded_bytes();
+    (name.contains(&b':') || name.to_ascii_lowercase().starts_with(b"aux.")).then_some(Errno::INVAL)
+}
+
 fn refuses_trailing_dots(name: &OsStr) -> Option<Errno> {
     name.as_encoded_bytes()
         .ends_with(b".")
@@ -1962,6 +1967,76 @@ fn a_name_refused_for_its_trailing_dot_takes_the_name_without_it_unless_a_siblin
             fs::read(disk.join("dots").join(saved.last().ok_or("none")?))?,
             b"x."
         );
+    }
+    Ok(())
+}
+
+#[test]
+fn a_mount_that_learns_keeps_only_the_rules_its_refused_names_needed() -> Result<(), Box<dyn Error>>
+{
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    type Refusal = fn(&OsStr) -> Option<Errno>;
+    let rows: [(Refusal, &str, &str, &[&str], [&str; 3], [&str; 3]); 2] = [
+        // Neither rule alone gives a name the mount takes.
+        (
+            refuses_colons_and_aux,
+            "aux.c:",
+            "aux_.c_",
+            &["aux.c:", "aux.c_", "aux_.c:"],
+            ["b:c", "aux.txt", "x."],
+            ["aux_.txt", "b_c", "x."],
+        ),
+        (
+            refuses_trailing_dots,
+            "x.",
+            "x",
+            &["x."],
+            ["a:b", "aux.txt", "y."],
+            ["a:b", "aux.txt", "y"],
+        ),
+    ];
+    for (refuses, first, saved, refused, later, later_saved) in rows {
+        let root = tempfile::tempdir()?;
+        let source = root.path().join("source");
+        let disk = root.path().join("disk");
+        for folder in ["one", "two"] {
+            fs::create_dir_all(source.join(folder))?;
+        }
+        fs::create_dir(&disk)?;
+        fs::write(source.join("one").join(first), first)?;
+        for name in later {
+            fs::write(source.join("two").join(name), name)?;
+        }
+        let scope = FsQuirks::install(
+            &disk,
+            Quirks {
+                mount_type: Some(("fuse.strictfs", "rw,user_id=0,group_id=0")),
+                invalid_name: Some(refuses),
+                ..Quirks::default()
+            },
+        );
+        let refused_calls = || {
+            scope
+                .calls()
+                .iter()
+                .flat_map(|call| call.names.clone())
+                .filter(|name| refuses(name).is_some())
+                .map(|name| name.to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+        };
+
+        paste_into(&disk, &[source.join("one")]);
+
+        assert_eq!(fs::read(disk.join("one").join(saved))?, first.as_bytes());
+        assert_eq!(refused_calls(), refused, "{first}");
+        scope.clear_calls();
+
+        paste_into(&disk, &[source.join("two")]);
+
+        assert_eq!(names(&disk.join("two"))?, later_saved, "{first}");
+        assert_eq!(refused_calls(), [] as [&str; 0], "{first}");
     }
     Ok(())
 }
