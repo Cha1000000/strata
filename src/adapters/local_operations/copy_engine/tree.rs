@@ -41,7 +41,7 @@ use crate::{
             LocalFileIdentity, StageContent, StagedSibling, cancelled_local_operation,
             fs_ops::{Entry, EntryStat, FsOps},
             io_error,
-            naming::{Key, PlanEntry, fat_family_profile, numbered_names, plan_names},
+            naming::{Key, PlanEntry, Planned, fat_family_profile, numbered_names, plan_names},
             os_error_detail, placement,
             placement::{COPY_PREFIX, PlaceError},
             work_queue::{self, Group, Job, WorkQueue},
@@ -353,6 +353,18 @@ pub(super) fn make_numbered<T>(
     }
 }
 
+/// Reports a child the plan numbered because the folder takes its name for
+/// a sibling's, as `make_numbered` reports one the folder refused.
+fn planned_alias(copy: &Copy, folder: &Path, name: &OsStr, planned: &Planned) {
+    if planned.alias {
+        copy.renamed(
+            folder.join(name),
+            folder.join(&planned.target),
+            RenameCause::Alias,
+        );
+    }
+}
+
 pub(super) struct Folder {
     pub(super) source: (Arc<OwnedFd>, OsString, Option<LocalFileIdentity>),
     pub(super) target: (Arc<OwnedFd>, OsString, LocalFileIdentity),
@@ -396,7 +408,10 @@ impl Folder {
         let snapshot = Snapshot::read(fs, source.as_fd(), &source_stat)?;
         let naming = self.naming.decide(fs, self.mount.family, target.as_fd());
         let children = target_children(fs, source.as_fd(), copy.fat_family, naming)?;
-        let requested = children.iter().map(|(_, _, name)| name.clone()).collect();
+        let requested = children
+            .iter()
+            .map(|(_, _, planned)| planned.target.clone())
+            .collect();
         let limit = self.mount.name_limit(target.as_fd());
         let made = Made {
             naming,
@@ -435,7 +450,7 @@ fn target_children(
     source: BorrowedFd<'_>,
     fixing: bool,
     naming: Naming,
-) -> Result<Vec<(OsString, FileType, OsString)>, Failure> {
+) -> Result<Vec<(OsString, FileType, Planned)>, Failure> {
     let children = children(fs, source)?;
     let entries = children
         .iter()
@@ -445,11 +460,11 @@ fn target_children(
             fixing,
         })
         .collect::<Vec<_>>();
-    let targets = plan_names(&entries, &fat_family_profile(), naming.key());
+    let planned = plan_names(&entries, &fat_family_profile(), naming.key());
     Ok(children
         .into_iter()
-        .zip(targets)
-        .map(|((name, kind), target)| (name, kind, target))
+        .zip(planned)
+        .map(|((name, kind), planned)| (name, kind, planned))
         .collect())
 }
 
@@ -477,28 +492,29 @@ impl Made {
         tree: &Arc<Tree>,
         queue: &Queue,
         source: &Arc<OwnedFd>,
-        children: Vec<(OsString, FileType, OsString)>,
+        children: Vec<(OsString, FileType, Planned)>,
         group: &Arc<Group<TreeJob>>,
     ) -> Result<(), Failure> {
         let colliding = if self.naming == Naming::Claim {
             let names = children
                 .iter()
-                .map(|(_, _, name)| name.as_os_str())
+                .map(|(_, _, planned)| planned.target.as_os_str())
                 .collect::<Vec<_>>();
             stage::colliding(&names)
         } else {
             vec![false; children.len()]
         };
-        for ((name, kind, target_name), colliding) in children.into_iter().zip(colliding) {
+        for ((name, kind, planned), colliding) in children.into_iter().zip(colliding) {
             tree.copy.check_cancelled()?;
             let child = Child {
                 name: &name,
                 kind,
-                target_name: &target_name,
+                target_name: &planned.target,
                 claim: colliding,
             };
             self.make(tree, queue, source, &child, group)
                 .map_err(|failure| failure.named(&name))?;
+            planned_alias(&tree.copy, &self.path, &name, &planned);
         }
         Ok(())
     }
@@ -1117,7 +1133,10 @@ impl Merged {
         // A stage made in the live folder inherits its casefolding.
         let naming = Naming::Decide.decide(fs, mount.family, target.as_fd());
         let children = target_children(fs, source.as_fd(), copy.fat_family, naming)?;
-        let requested = children.iter().map(|(_, _, name)| name.clone()).collect();
+        let requested = children
+            .iter()
+            .map(|(_, _, planned)| planned.target.clone())
+            .collect();
         let limit = mount.name_limit(target.as_fd());
         let live = Live {
             names: Names::new(requested, naming, mount.family, limit),
@@ -1133,15 +1152,17 @@ impl Merged {
         };
         tree.probe_links_in(&mount, live.dir.clone());
         let mut new = Vec::new();
-        for (name, kind, target_name) in children {
+        for (name, kind, planned) in children {
             copy.check_cancelled()?;
-            let existing = match fs.stat(Entry::new(&*live.dir, &target_name), false) {
+            let target_name = &planned.target;
+            let existing = match fs.stat(Entry::new(&*live.dir, target_name), false) {
                 Ok(existing) => Some(existing),
                 Err(Errno::NOENT) => None,
                 Err(error) => return Err(Failure::Os(error).named(&name)),
             };
             match existing {
                 Some(existing) if existing.is_directory() && kind == FileType::Directory => {
+                    planned_alias(copy, &self.path, &name, &planned);
                     queue.enqueue(TreeJob::Merge(
                         tree.clone(),
                         Merged {
@@ -1159,7 +1180,7 @@ impl Merged {
                 }
                 // A name taken since the merge was planned gets a number
                 // when the child is placed.
-                _ => new.push((name, kind, target_name)),
+                _ => new.push((name, kind, planned)),
             }
         }
         live.add(tree, queue, new)
@@ -1184,7 +1205,7 @@ impl Live {
         &self,
         tree: &Arc<Tree>,
         queue: &Queue,
-        mut new: Vec<(OsString, FileType, OsString)>,
+        mut new: Vec<(OsString, FileType, Planned)>,
     ) -> Result<(), Failure> {
         let mut in_place = Vec::new();
         if placement::can_place(tree.copy.fs, self.dir.as_fd(), true) == Some(false) {
@@ -1195,9 +1216,10 @@ impl Live {
         if !new.is_empty() {
             self.stage(tree, queue, new)?;
         }
-        for (name, _, target_name) in in_place {
-            self.copy_in_place(tree, &name, &target_name)
+        for (name, _, planned) in in_place {
+            self.copy_in_place(tree, &name, &planned.target)
                 .map_err(|failure| failure.named(&name))?;
+            planned_alias(&tree.copy, &self.path, &name, &planned);
         }
         Ok(())
     }
@@ -1206,7 +1228,7 @@ impl Live {
         &self,
         tree: &Arc<Tree>,
         queue: &Queue,
-        children: Vec<(OsString, FileType, OsString)>,
+        children: Vec<(OsString, FileType, Planned)>,
     ) -> Result<(), Failure> {
         let fs = tree.copy.fs;
         tree.copy.check_cancelled()?;

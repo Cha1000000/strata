@@ -1049,6 +1049,12 @@ fn fat_family_copies_number_fixed_names_past_the_names_their_siblings_keep()
         fs::write(source.join("a:.txt"), b"colon")?;
         fs::write(source.join("A*.txt"), b"star")?;
         fs::write(source.join("a_.txt"), b"kept")?;
+        fs::write(source.join("README.txt"), b"upper")?;
+        fs::write(source.join("Readme.txt"), b"mixed")?;
+        for folder in ["Photos.2024", "photos.2024"] {
+            fs::create_dir(source.join(folder))?;
+            fs::write(source.join(folder).join("photo"), folder)?;
+        }
         let _destination = FsQuirks::install(&destination, Quirks::vfat());
 
         let result = glib::MainContext::default().block_on(copy(
@@ -1063,6 +1069,10 @@ fn fat_family_copies_number_fixed_names_past_the_names_their_siblings_keep()
             ("A_ (1).txt", "star"),
             ("a_ (2).txt", "colon"),
             ("a_ (3).txt", "question"),
+            ("README.txt", "upper"),
+            ("Readme (1).txt", "mixed"),
+            ("Photos.2024/photo", "Photos.2024"),
+            ("photos.2024 (1)/photo", "photos.2024"),
         ] {
             assert_eq!(
                 fs::read(target.join(name))?,
@@ -1070,7 +1080,7 @@ fn fat_family_copies_number_fixed_names_past_the_names_their_siblings_keep()
                 "{row}: {name}"
             );
         }
-        assert_eq!(names(&target)?.len(), 134, "{row}");
+        assert_eq!(names(&target)?.len(), 138, "{row}");
     }
     Ok(())
 }

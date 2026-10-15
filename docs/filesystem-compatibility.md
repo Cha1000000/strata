@@ -374,10 +374,12 @@ made by `mknodat` and looked up by name while other files were being written sta
 publication for Samba's 35 s lease-break timeout.
 
 On FAT-family destinations, characters FAT cannot store are replaced before copying, without a
-report. A name that needs no change keeps it, even where a replaced name would equal it: replaced
-names that equal another name in their folder, or among a paste's top-level items, are numbered in
-the byte order of the names they replace, also without a report. In a merge, a replaced name equal
-to an existing item replaces that item like any other same-named one.
+report. A name that needs no change keeps it, even where a replaced name would equal it, unless FAT
+takes it for another such name in its folder, or among a paste's top-level items, that sorts first
+in bytes (`Readme.txt` beside `README.txt`): it is then numbered as an alias before copying.
+Replaced names that equal another name are numbered too, in the byte order of the names they
+replace, without a report. In a merge, a planned name equal to an existing item replaces that item
+like any other same-named one.
 
 ### Hard links
 

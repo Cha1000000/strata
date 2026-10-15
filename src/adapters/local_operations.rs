@@ -52,7 +52,7 @@ use gtk::{gio, glib, prelude::*};
 
 use copy_engine::SharedProgress;
 use fs_ops::{Entry, EntryStat, OffMain, fs};
-use naming::{Arrivals, Key, PlanEntry, Taken, numbered_names, plan_names};
+use naming::{Key, PlanEntry, Taken, numbered_names, plan_names};
 use owed::{Deletion, Done, Owed, Settling};
 use placement::{COPY_PREFIX, Displacement, PlaceError, REPLACED_PREFIX, RenameFailure};
 use work_queue::{Group, Job, WorkQueue};
@@ -1196,9 +1196,9 @@ pub(crate) fn transfer_source_name(source: &gio::File) -> Option<OsString> {
     crate::model::transfer_file_name(source)
 }
 
-/// Where each source goes in `destination`: under its own name, or under
-/// one fixed for a FAT-family destination and planned against the other
-/// sources' names. `None` for a source without a name.
+/// Where each source goes in `destination`: under its own name, or, on a
+/// FAT-family destination, under one planned against the other sources'
+/// names. `None` for a source without a name.
 fn paste_targets(
     sources: &[gio::File],
     destination: &gio::File,
@@ -1223,7 +1223,7 @@ fn paste_targets(
         .map(|name| {
             name.as_ref()
                 .and_then(|_| planned.next())
-                .map(|name| destination.child(name))
+                .map(|planned| destination.child(planned.target))
         })
         .collect()
 }
@@ -1488,6 +1488,43 @@ async fn next_children(
         },
     )
     .await
+}
+
+/// The next of a folder's children, as their names, whether each is a
+/// folder, and the names they take in the target: batch by batch, or all at
+/// once where names are fixed, since which of two names a folder takes for
+/// one keeps it depends on both.
+async fn next_named_children(
+    enumerator: &gio::FileEnumerator,
+    cancellable: &gio::Cancellable,
+    fixing: bool,
+) -> Result<Vec<(OsString, bool, OsString)>, glib::Error> {
+    let mut children = Vec::new();
+    loop {
+        let batch = next_children(enumerator, cancellable).await?;
+        let listed = batch.is_empty();
+        children.extend(batch.iter().map(|child| {
+            let is_directory = child.file_type() == gio::FileType::Directory;
+            (child.name().into_os_string(), is_directory)
+        }));
+        if listed || !fixing {
+            break;
+        }
+    }
+    let entries = children
+        .iter()
+        .map(|(name, is_directory)| PlanEntry {
+            name,
+            is_directory: *is_directory,
+            fixing,
+        })
+        .collect::<Vec<_>>();
+    let planned = plan_names(&entries, &naming::fat_family_profile(), Key::Folded);
+    Ok(children
+        .into_iter()
+        .zip(planned)
+        .map(|((name, is_directory), planned)| (name, is_directory, planned.target))
+        .collect())
 }
 
 fn was_cancelled(error: &glib::Error) -> bool {
@@ -1768,33 +1805,23 @@ fn copy_recursively_with_progress(
                     );
                 })
                 .await?;
-            let copy_child = |name: &OsStr, target_name: &OsStr| {
-                copy_recursively_with_progress(
-                    source.child(name),
-                    target.child(target_name),
-                    into,
-                    cancellable.clone(),
-                    record.clone(),
-                    progress.clone(),
-                    fat_family,
-                )
-            };
-            let mut arrivals = Arrivals::new(fat_family, naming::fat_family_profile(), Key::Folded);
             loop {
-                let children = next_children(&enumerator, &cancellable).await?;
+                let children = next_named_children(&enumerator, &cancellable, fat_family).await?;
                 if children.is_empty() {
                     break;
                 }
-                for child in children {
-                    let name = child.name();
-                    let is_directory = child.file_type() == gio::FileType::Directory;
-                    if arrivals.keeps(name.as_os_str(), is_directory) {
-                        copy_child(name.as_os_str(), name.as_os_str()).await?;
-                    }
+                for (name, _, target_name) in children {
+                    copy_recursively_with_progress(
+                        source.child(&name),
+                        target.child(&target_name),
+                        into,
+                        cancellable.clone(),
+                        record.clone(),
+                        progress.clone(),
+                        fat_family,
+                    )
+                    .await?;
                 }
-            }
-            for arrived in arrivals.planned() {
-                copy_child(&arrived.name, &arrived.target).await?;
             }
             if let CopyRecord::Placing(Some(placing)) = record
                 && let Some(path) = target.path().filter(|path| placing.wants(path))
@@ -3603,30 +3630,16 @@ fn classify_merge<'a>(
             );
         })
         .await?;
-        let mut arrivals = Arrivals::new(fat_family, naming::fat_family_profile(), Key::Folded);
         loop {
-            let children = next_children(&enumerator, cancellable).await?;
+            let children = next_named_children(&enumerator, cancellable, fat_family).await?;
             if children.is_empty() {
-                break;
+                return Ok(());
             }
-            for child in children {
-                let name = child.name();
-                let is_directory = child.file_type() == gio::FileType::Directory;
-                if arrivals.keeps(name.as_os_str(), is_directory) {
-                    let child = (source.child(&name), is_directory, target.child(&name));
-                    classify_merge_child(child, plan, cancellable, fat_family).await?;
-                }
+            for (name, is_directory, target_name) in children {
+                let child = (source.child(name), is_directory, target.child(target_name));
+                classify_merge_child(child, plan, cancellable, fat_family).await?;
             }
         }
-        for arrived in arrivals.planned() {
-            let child = (
-                source.child(&arrived.name),
-                arrived.is_directory,
-                target.child(&arrived.target),
-            );
-            classify_merge_child(child, plan, cancellable, fat_family).await?;
-        }
-        Ok(())
     })
 }
 

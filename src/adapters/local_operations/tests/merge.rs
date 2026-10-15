@@ -76,6 +76,8 @@ fn fat_merge_overwrites_the_names_it_plans_and_keeps_the_names_that_need_no_fix(
             ("a:.txt", "colon"),
             ("b:.txt", "b colon"),
             ("b_.txt", "b kept"),
+            ("C.txt", "upper c"),
+            ("c.txt", "lower c"),
         ] {
             fs::write(source.join("nested?").join(name), contents)?;
         }
@@ -111,6 +113,8 @@ fn fat_merge_overwrites_the_names_it_plans_and_keeps_the_names_that_need_no_fix(
             ("a_ (1).txt", "question"),
             ("b_.txt", "b kept"),
             ("b_ (1).txt", "b colon"),
+            ("C.txt", "upper c"),
+            ("c (1).txt", "lower c"),
         ] {
             assert_eq!(
                 fs::read(nested.join(name))?,
@@ -118,7 +122,7 @@ fn fat_merge_overwrites_the_names_it_plans_and_keeps_the_names_that_need_no_fix(
                 "{row}: {name}"
             );
         }
-        assert_eq!(names(&nested)?.len(), 4, "{row}");
+        assert_eq!(names(&nested)?.len(), 6, "{row}");
         let mut staged_contents = (0..staged.borrow().len())
             .map(|index| fs::read_to_string(staging.join(format!("staged-{index}"))))
             .collect::<io::Result<Vec<_>>>()?;
@@ -131,8 +135,11 @@ fn fat_merge_overwrites_the_names_it_plans_and_keeps_the_names_that_need_no_fix(
         let plans = plans.borrow();
         assert_eq!(plans.len(), 2, "{row}");
         assert_eq!(
-            plans[0].created,
-            [Location::local(nested.join("a_ (1).txt"))],
+            plans[0].created.iter().collect::<HashSet<_>>(),
+            ["a_ (1).txt", "C.txt", "c (1).txt"]
+                .map(|name| Location::local(nested.join(name)))
+                .iter()
+                .collect(),
             "{row}"
         );
         assert_eq!(plans[0].overwritten, *staged.borrow(), "{row}");

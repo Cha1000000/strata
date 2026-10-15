@@ -6,7 +6,7 @@ use super::super::{
     fs_ops::{Entry, fs},
     mount_profile::Profiles,
     naming::{
-        Key, PlanEntry, fat_family_profile,
+        Key, PlanEntry, Planned, fat_family_profile,
         fix::{Cause, fix_name},
         plan_names,
     },
@@ -78,11 +78,15 @@ fn copy_suffix_parsing_and_candidate_naming() {
 
 #[test]
 fn fixed_names_are_numbered_past_the_names_their_siblings_keep() {
-    // An entry's name, whether it is a folder, whether it is fixed, and the
-    // name planned for it.
-    let file = |name: &str, planned: &str| (name.to_owned(), false, true, planned.to_owned());
-    let folder = |name: &str, planned: &str| (name.to_owned(), true, true, planned.to_owned());
-    let unfixed = |name: &str| (name.to_owned(), false, false, name.to_owned());
+    // An entry's name, whether it is a folder, whether it is fixed, the name
+    // planned for it, and whether that is numbered as another kept name's
+    // alias.
+    let file = |name: &str, planned: &str| (name.to_owned(), false, true, planned.to_owned(), false);
+    let folder = |name: &str, planned: &str| (name.to_owned(), true, true, planned.to_owned(), false);
+    let alias = |name: &str, is_directory, planned: &str| {
+        (name.to_owned(), is_directory, true, planned.to_owned(), true)
+    };
+    let unfixed = |name: &str| (name.to_owned(), false, false, name.to_owned(), false);
     let cjk = |count| "\u{4e2d}".repeat(count);
     let rows = [
         (
@@ -103,6 +107,35 @@ fn fixed_names_are_numbered_past_the_names_their_siblings_keep() {
             vec![file("A:b", "A_b (1)"), file("a_b", "a_b")],
         ),
         (Key::Exact, vec![file("A:b", "A_b"), file("a_b", "a_b")]),
+        (
+            Key::Folded,
+            vec![file("A.txt", "A.txt"), alias("a.txt", false, "a (1).txt")],
+        ),
+        (
+            Key::Folded,
+            vec![
+                alias("a.txt", false, "a (2).txt"),
+                file("a (1).txt", "a (1).txt"),
+                file("A.txt", "A.txt"),
+            ],
+        ),
+        (
+            Key::Folded,
+            vec![
+                alias("a_b", false, "a_b (2)"),
+                file("a:b", "a_b (1)"),
+                file("A_b", "A_b"),
+            ],
+        ),
+        (
+            Key::Folded,
+            vec![
+                folder("Photos.2024", "Photos.2024"),
+                alias("photos.2024", true, "photos.2024 (1)"),
+            ],
+        ),
+        (Key::Folded, vec![unfixed("a.txt"), alias("A.txt", false, "A (1).txt")]),
+        (Key::Exact, vec![file("A.txt", "A.txt"), file("a.txt", "a.txt")]),
         (Key::Folded, vec![unfixed("x:y"), file("x?y", "x_y")]),
         (
             Key::Folded,
@@ -127,7 +160,7 @@ fn fixed_names_are_numbered_past_the_names_their_siblings_keep() {
             }
             let entries = row
                 .iter()
-                .map(|(name, is_directory, fixing, _)| PlanEntry {
+                .map(|(name, is_directory, fixing, ..)| PlanEntry {
                     name: OsStr::new(name),
                     is_directory: *is_directory,
                     fixing: *fixing,
@@ -135,7 +168,10 @@ fn fixed_names_are_numbered_past_the_names_their_siblings_keep() {
                 .collect::<Vec<_>>();
             let planned = row
                 .iter()
-                .map(|(.., planned)| OsString::from(planned))
+                .map(|(.., planned, alias)| Planned {
+                    target: OsString::from(planned),
+                    alias: *alias,
+                })
                 .collect::<Vec<_>>();
             assert_eq!(
                 plan_names(&entries, &fat_family_profile(), key),
@@ -511,11 +547,39 @@ fn duplicating_multi_extension_file_uses_last_extension_for_candidate_name()
 fn pasted_names_fixed_for_fat_are_planned_after_the_names_kept() {
     use gtk::gio::FileType::{Directory, Regular};
     let destination = gio::File::for_path("/media/stick");
-    let sources = ["/one/a:b", "/two/a_b", "/one/v1.2:", "/two/v1.2:"].map(gio::File::for_path);
-    let kinds = [Some(Regular), Some(Regular), Some(Regular), Some(Directory)];
+    let sources = [
+        "/one/a:b",
+        "/two/a_b",
+        "/one/v1.2:",
+        "/two/v1.2:",
+        "/one/A:c",
+        "/two/a_c",
+        "/one/x",
+        "/two/X",
+        "/three/x",
+    ]
+    .map(gio::File::for_path);
+    let mut kinds = [Some(Regular); 9];
+    kinds[3] = Some(Directory);
     for (fat_family, expected) in [
-        (false, ["a:b", "a_b", "v1.2:", "v1.2:"]),
-        (true, ["a_b (1)", "a_b", "v1.2_", "v1.2_ (1)"]),
+        (
+            false,
+            ["a:b", "a_b", "v1.2:", "v1.2:", "A:c", "a_c", "x", "X", "x"],
+        ),
+        (
+            true,
+            [
+                "a_b (1)",
+                "a_b",
+                "v1.2_",
+                "v1.2_ (1)",
+                "A_c (1)",
+                "a_c",
+                "x (1)",
+                "X",
+                "x (2)",
+            ],
+        ),
     ] {
         let targets = super::super::paste_targets(&sources, &destination, fat_family, &kinds);
         assert_eq!(

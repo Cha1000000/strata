@@ -128,121 +128,63 @@ pub(super) struct PlanEntry<'a> {
     pub fixing: bool,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct Planned {
+    pub target: OsString,
+    /// The folder takes the name for a sibling's that keeps it, so it was
+    /// numbered although it needs no fix.
+    pub alias: bool,
+}
+
 /// The names of a folder's entries, in their order. A name that needs no
-/// fix is kept, even where another entry's fixed name would take it, and
-/// fixed names are numbered past it and each other in the byte order of
-/// the names they were fixed from, so the plan depends only on the entries.
+/// fix is kept unless the folder takes it for another kept name, which
+/// sorts first. Fixed names, and the kept names that sort later, are
+/// numbered past the kept names and each other in the byte order of the
+/// names they come from, so the plan depends only on the entries.
 pub(super) fn plan_names(
     entries: &[PlanEntry<'_>],
     profile: &NameProfile,
     key: Key,
-) -> Vec<OsString> {
-    let mut fixed = entries
-        .iter()
-        .enumerate()
-        .filter(|(_, entry)| entry.fixing)
-        .filter_map(|(index, entry)| {
-            let fixed = fix::fix_name(entry.name, profile, entry.is_directory);
-            fixed.cause.map(|_| (index, fixed.name.into_owned()))
-        })
-        .collect::<Vec<_>>();
+) -> Vec<Planned> {
     let mut planned = entries
         .iter()
-        .map(|entry| entry.name.to_os_string())
+        .map(|entry| Planned {
+            target: entry.name.to_os_string(),
+            alias: false,
+        })
         .collect::<Vec<_>>();
-    if fixed.is_empty() {
-        return planned;
+    let mut numbered = Vec::new();
+    let mut kept = Vec::new();
+    for (index, entry) in entries.iter().enumerate().filter(|(_, entry)| entry.fixing) {
+        let fixed = fix::fix_name(entry.name, profile, entry.is_directory);
+        match fixed.cause {
+            Some(_) => numbered.push((index, fixed.name.into_owned())),
+            None => kept.push(index),
+        }
     }
-    let mut changed = vec![false; entries.len()];
-    for (index, _) in &fixed {
-        changed[*index] = true;
+    // Distinct names never meet under exact keys.
+    if numbered.is_empty() && (key == Key::Exact || kept.is_empty()) {
+        return planned;
     }
     let mut taken = entries
         .iter()
-        .zip(&changed)
-        .filter(|(_, changed)| !**changed)
-        .map(|(entry, _)| key.of(entry.name))
+        .filter(|entry| !entry.fixing)
+        .map(|entry| key.of(entry.name))
         .collect::<HashSet<_>>();
-    fixed.sort_by(|(left, _), (right, _)| entries[*left].name.cmp(entries[*right].name));
-    for (index, name) in fixed {
-        let numbered = numbered_names(&name, entries[index].is_directory, profile.limit);
-        planned[index] = std::iter::once(name.clone())
-            .chain(numbered)
+    kept.sort_by_key(|index| entries[*index].name);
+    for index in kept {
+        if !taken.insert(key.of(entries[index].name)) {
+            planned[index].alias = true;
+            numbered.push((index, entries[index].name.to_os_string()));
+        }
+    }
+    numbered.sort_by(|(left, _), (right, _)| entries[*left].name.cmp(entries[*right].name));
+    for (index, name) in numbered {
+        let candidates = numbered_names(&name, entries[index].is_directory, profile.limit);
+        planned[index].target = std::iter::once(name.clone())
+            .chain(candidates)
             .find(|candidate| taken.insert(key.of(candidate)))
             .unwrap_or_else(|| name.clone());
     }
     planned
-}
-
-/// A folder's names planned as its children arrive: a child that keeps its
-/// name is named at once, and one whose name is fixed waits until all its
-/// siblings are known.
-pub(super) struct Arrivals {
-    fixing: bool,
-    profile: NameProfile,
-    key: Key,
-    kept: Vec<OsString>,
-    held: Vec<(OsString, bool)>,
-}
-
-pub(super) struct Arrived {
-    pub name: OsString,
-    pub is_directory: bool,
-    pub target: OsString,
-}
-
-impl Arrivals {
-    pub(super) fn new(fixing: bool, profile: NameProfile, key: Key) -> Self {
-        Self {
-            fixing,
-            profile,
-            key,
-            kept: Vec::new(),
-            held: Vec::new(),
-        }
-    }
-
-    /// Whether `name` is kept; a name that is not waits for [`Self::planned`].
-    pub(super) fn keeps(&mut self, name: &OsStr, is_directory: bool) -> bool {
-        if !self.fixing {
-            return true;
-        }
-        if fix::fix_name(name, &self.profile, is_directory)
-            .cause
-            .is_none()
-        {
-            self.kept.push(name.to_os_string());
-            return true;
-        }
-        self.held.push((name.to_os_string(), is_directory));
-        false
-    }
-
-    /// The children that waited, with the names planned for them.
-    pub(super) fn planned(self) -> Vec<Arrived> {
-        if self.held.is_empty() {
-            return Vec::new();
-        }
-        let kept = self.kept.iter().map(|name| PlanEntry {
-            name,
-            is_directory: false,
-            fixing: false,
-        });
-        let held = self.held.iter().map(|(name, is_directory)| PlanEntry {
-            name,
-            is_directory: *is_directory,
-            fixing: true,
-        });
-        let entries = kept.chain(held).collect::<Vec<_>>();
-        let targets = plan_names(&entries, &self.profile, self.key);
-        self.held
-            .into_iter()
-            .zip(targets.into_iter().skip(self.kept.len()))
-            .map(|((name, is_directory), target)| Arrived {
-                name,
-                is_directory,
-                target,
-            })
-            .collect()
-    }
 }
