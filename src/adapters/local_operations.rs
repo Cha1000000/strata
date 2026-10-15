@@ -2635,9 +2635,38 @@ async fn restore_renamed(record: &MoveRecord, progress: &TransferProgressTracker
         })
         .collect::<Vec<_>>();
     renamed.sort_by_key(|(depth, ..)| std::cmp::Reverse(*depth));
+    let native = renamed
+        .iter()
+        .map(|(_, saved_as, requested, _)| {
+            Some((
+                saved_as.native_path()?.to_path_buf(),
+                requested.native_path()?.to_path_buf(),
+            ))
+        })
+        .collect::<Option<Vec<_>>>();
+    let restored = match native {
+        Some(paths) => {
+            let count = paths.len();
+            run_blocking(move || Ok(restore_native_names(&paths)))
+                .await
+                .unwrap_or_else(|error| {
+                    let error = crate::services::gio_error_detail(&error);
+                    (0..count)
+                        .map(|_| Err(NameKept::Failed(error.clone())))
+                        .collect()
+                })
+        }
+        None => {
+            let mut restored = Vec::with_capacity(renamed.len());
+            for (_, saved_as, requested, _) in &renamed {
+                restored.push(restore_name(saved_as, requested).await);
+            }
+            restored
+        }
+    };
     let mut report = TransferReport::default();
-    for (_, saved_as, requested, cause) in renamed {
-        let cause = match restore_name(&saved_as, &requested).await {
+    for ((_, saved_as, requested, cause), restored) in renamed.into_iter().zip(restored) {
+        let cause = match restored {
             Ok(()) | Err(NameKept::Gone) => continue,
             Err(NameKept::Taken) => RenameCause::Taken,
             Err(NameKept::Refused) => cause,
@@ -2680,35 +2709,65 @@ enum NameKept {
     Failed(String),
 }
 
+/// Gives each entry at the first path of a pair the name of the second, in
+/// their order, opening each folder once.
+fn restore_native_names(paths: &[(PathBuf, PathBuf)]) -> Vec<Result<(), NameKept>> {
+    let mut folders = HashMap::<&Path, Result<Arc<OwnedFd>, String>>::new();
+    let mut open = |folder| {
+        folders
+            .entry(folder)
+            .or_insert_with(|| open_local_parent_directory(folder).map(Arc::new))
+            .clone()
+    };
+    paths
+        .iter()
+        .map(|(from, to)| {
+            let (Some(from_folder), Some(from_name), Some(to_folder), Some(to_name)) =
+                (from.parent(), from.file_name(), to.parent(), to.file_name())
+            else {
+                return Err(NameKept::Failed(crate::i18n::tr(
+                    "Invalid move destination",
+                )));
+            };
+            let folders = open(from_folder).and_then(|from| Ok((from, open(to_folder)?)));
+            let (from_dir, to_dir) = match folders {
+                Ok(folders) => folders,
+                // As where the folder holding it is gone.
+                Err(_)
+                    if std::fs::symlink_metadata(from)
+                        .is_err_and(|error| error.kind() == io::ErrorKind::NotFound) =>
+                {
+                    return Err(NameKept::Gone);
+                }
+                Err(error) => {
+                    return Err(NameKept::Failed(crate::services::gio_error_detail(
+                        &io_error(error),
+                    )));
+                }
+            };
+            let renamed = placement::rename_in_place(
+                fs(),
+                Entry::new(&*from_dir, from_name),
+                Entry::new(&*to_dir, to_name),
+            );
+            match renamed {
+                Ok(_) => Ok(()),
+                Err(RenameFailure::Place(PlaceError::Exists)) => Err(NameKept::Taken),
+                Err(RenameFailure::Place(error)) if error.refuses_name() => Err(NameKept::Refused),
+                Err(RenameFailure::Place(PlaceError::Io(rustix::io::Errno::NOENT))) => {
+                    Err(NameKept::Gone)
+                }
+                Err(failure) => Err(NameKept::Failed(crate::services::gio_error_detail(
+                    &rename_failure_error(failure, from, to),
+                ))),
+            }
+        })
+        .collect()
+}
+
+/// Gives the entry at `saved_as`, a location GIO renames, the name of
+/// `requested`.
 async fn restore_name(saved_as: &Location, requested: &Location) -> Result<(), NameKept> {
-    if let (Some(from), Some(to)) = (saved_as.native_path(), requested.native_path()) {
-        return match renamed_native(from.to_path_buf(), to.to_path_buf()).await {
-            Ok(Ok(())) => Ok(()),
-            Ok(Err(RenameFailure::Place(PlaceError::Exists))) => Err(NameKept::Taken),
-            Ok(Err(RenameFailure::Place(error))) if error.refuses_name() => Err(NameKept::Refused),
-            Ok(Err(RenameFailure::Place(PlaceError::Io(rustix::io::Errno::NOENT)))) => {
-                Err(NameKept::Gone)
-            }
-            Ok(Err(failure)) => Err(NameKept::Failed(crate::services::gio_error_detail(
-                &rename_failure_error(failure, from, to),
-            ))),
-            // As where the folder holding it is gone.
-            Err(error) => {
-                let from = from.to_path_buf();
-                let gone = gio::spawn_blocking(move || {
-                    std::fs::symlink_metadata(from)
-                        .is_err_and(|error| error.kind() == io::ErrorKind::NotFound)
-                })
-                .await
-                .unwrap_or(false);
-                Err(if gone {
-                    NameKept::Gone
-                } else {
-                    NameKept::Failed(crate::services::gio_error_detail(&error))
-                })
-            }
-        };
-    }
     // GIO renames take a name as text.
     let Ok(name) = requested.file_name().unwrap_or_default().into_string() else {
         return Err(NameKept::Refused);
