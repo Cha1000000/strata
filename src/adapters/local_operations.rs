@@ -1204,7 +1204,7 @@ fn paste_targets(
     destination: &gio::File,
     fat_family: bool,
     kinds: &[Option<gio::FileType>],
-) -> Vec<Option<gio::File>> {
+) -> Result<Vec<Option<gio::File>>, PlaceError> {
     let names = sources.iter().map(transfer_source_name).collect::<Vec<_>>();
     let entries = names
         .iter()
@@ -1217,15 +1217,15 @@ fn paste_targets(
             })
         })
         .collect::<Vec<_>>();
-    let mut planned = plan_names(&entries, &naming::fat_family_profile(), Key::Folded).into_iter();
-    names
+    let mut planned = plan_names(&entries, &naming::fat_family_profile(), Key::Folded)?.into_iter();
+    Ok(names
         .iter()
         .map(|name| {
             name.as_ref()
                 .and_then(|_| planned.next())
                 .map(|planned| destination.child(planned.target))
         })
-        .collect()
+        .collect())
 }
 
 #[derive(Clone)]
@@ -1519,7 +1519,8 @@ async fn next_named_children(
             fixing,
         })
         .collect::<Vec<_>>();
-    let planned = plan_names(&entries, &naming::fat_family_profile(), Key::Folded);
+    let planned =
+        plan_names(&entries, &naming::fat_family_profile(), Key::Folded).map_err(placement_error)?;
     Ok(children
         .into_iter()
         .zip(planned)
@@ -5994,6 +5995,17 @@ impl OperationProvider for LocalOperationProvider {
                         return;
                     }
                 };
+            let targets = match paste_targets(&sources, &destination, fat_family, &kinds) {
+                Ok(targets) => targets,
+                Err(error) => {
+                    emit(OperationEvent::TransferFailed {
+                        request_id: request.id,
+                        completed_locations: Vec::new(),
+                        message: placement_reason(error),
+                    });
+                    return;
+                }
+            };
             let progress =
                 TransferProgressTracker::new(request.id, total_bytes, total_files, emit.clone());
             progress.emit();
@@ -6003,7 +6015,6 @@ impl OperationProvider for LocalOperationProvider {
                 fat_family,
                 ..Copying::default()
             };
-            let targets = paste_targets(&sources, &destination, fat_family, &kinds);
             if let Some((plans, worker_count)) = parallel_copy_plans(
                 &request,
                 &sources,

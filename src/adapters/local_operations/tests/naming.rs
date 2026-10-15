@@ -175,11 +175,36 @@ fn fixed_names_are_numbered_past_the_names_their_siblings_keep() {
                 .collect::<Vec<_>>();
             assert_eq!(
                 plan_names(&entries, &fat_family_profile(), key),
-                planned,
+                Ok(planned),
                 "{key:?} {row:?}"
             );
         }
     }
+}
+
+#[test]
+fn planning_fails_where_a_fixed_name_has_no_free_number() {
+    use super::super::placement::{NUMBERED_NAME_ATTEMPTS, PlaceError};
+    let taken = std::iter::once(OsString::from("a_b"))
+        .chain((1..=NUMBERED_NAME_ATTEMPTS).map(|number| OsString::from(format!("a_b ({number})"))))
+        .collect::<Vec<_>>();
+    let entries = taken
+        .iter()
+        .map(|name| PlanEntry {
+            name,
+            is_directory: false,
+            fixing: false,
+        })
+        .chain([PlanEntry {
+            name: OsStr::new("a:b"),
+            is_directory: false,
+            fixing: true,
+        }])
+        .collect::<Vec<_>>();
+    assert_eq!(
+        plan_names(&entries, &fat_family_profile(), Key::Exact),
+        Err(PlaceError::Exists)
+    );
 }
 
 #[test]
@@ -581,7 +606,8 @@ fn pasted_names_fixed_for_fat_are_planned_after_the_names_kept() {
             ],
         ),
     ] {
-        let targets = super::super::paste_targets(&sources, &destination, fat_family, &kinds);
+        let targets = super::super::paste_targets(&sources, &destination, fat_family, &kinds)
+            .expect("free names");
         assert_eq!(
             targets
                 .iter()
@@ -599,6 +625,7 @@ fn transfer_targets_resolve_trash_leaf_names() {
     let target_name = |source: &gio::File| {
         let target =
             super::super::paste_targets(std::slice::from_ref(source), &destination, false, &[None])
+                .ok()?
                 .pop()??;
         Some(
             target

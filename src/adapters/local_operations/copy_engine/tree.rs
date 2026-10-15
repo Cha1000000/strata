@@ -460,7 +460,7 @@ fn target_children(
             fixing,
         })
         .collect::<Vec<_>>();
-    let planned = plan_names(&entries, &fat_family_profile(), naming.key());
+    let planned = plan_names(&entries, &fat_family_profile(), naming.key())?;
     Ok(children
         .into_iter()
         .zip(planned)

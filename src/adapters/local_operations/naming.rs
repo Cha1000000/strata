@@ -7,7 +7,10 @@ use std::{
     path::Path,
 };
 
-use super::{copy_engine::stage, placement};
+use super::{
+    copy_engine::stage,
+    placement::{self, PlaceError},
+};
 use crate::adapters::volume::{NameEncoding, NameLimit, NameProfile, Reserved};
 
 pub(super) mod fix;
@@ -151,12 +154,13 @@ pub(super) struct Planned {
 /// fix is kept unless the folder takes it for another kept name, which
 /// sorts first. Fixed names, and the kept names that sort later, are
 /// numbered past the kept names and each other in the byte order of the
-/// names they come from, so the plan depends only on the entries.
+/// names they come from, so the plan depends only on the entries. Fails
+/// when a name has no free number left.
 pub(super) fn plan_names(
     entries: &[PlanEntry<'_>],
     profile: &NameProfile,
     key: Key,
-) -> Vec<Planned> {
+) -> Result<Vec<Planned>, PlaceError> {
     let mut planned = entries
         .iter()
         .map(|entry| Planned {
@@ -175,7 +179,7 @@ pub(super) fn plan_names(
     }
     // Distinct names never meet under exact keys.
     if numbered.is_empty() && (key == Key::Exact || kept.is_empty()) {
-        return planned;
+        return Ok(planned);
     }
     let mut taken = entries
         .iter()
@@ -206,7 +210,7 @@ pub(super) fn plan_names(
                 break;
             }
         }
-        planned[index].target = free.unwrap_or_else(|| name.clone());
+        planned[index].target = free.ok_or(PlaceError::Exists)?;
     }
-    planned
+    Ok(planned)
 }
