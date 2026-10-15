@@ -410,7 +410,9 @@ Undoing a move fixes only names the original mount cannot hold at all, such as m
 then gives the entries inside the item the names they had, deepest first, also where the item came
 from a GVfs location onto a local disk or the other way round. An entry whose name another item took
 meanwhile keeps the name it was saved as and is reported as taken; one whose name the location now
-refuses is reported as fixed again; any other failure is listed with its error.
+refuses is reported as fixed again; any other failure is listed with the name the entry kept and the
+error. An entry no longer at the name it was saved as, because it was deleted or renamed since, is
+passed over without a report.
 
 ### Hard links
 
