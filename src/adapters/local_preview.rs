@@ -265,9 +265,8 @@ impl LocalPreviewProvider {
                 }
                 None => None,
             };
-            let (guessed_type, uncertain) =
-                gio::content_type_guess(Some(Path::new(&entry.native_name)), None::<&[u8]>);
-            let mut content_type = guessed_type.to_string();
+            let (mut content_type, uncertain) =
+                crate::services::guess_content_type(Path::new(&entry.native_name));
             let mut content = content_family(&content_type);
             if crate::services::is_model(&entry.native_name) {
                 content = PreviewContent::Unsupported;

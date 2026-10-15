@@ -884,6 +884,11 @@ fn preview_families_follow_file_bytes_not_names() {
             &b"FUJIFILMCCD-RAW 0201FF383501"[..],
             Resolved::Image,
         ),
+        (
+            "GOPR0001.GPR",
+            &[0u8, 1, 2, 3, 255, 254][..],
+            Resolved::Image,
+        ),
     ] {
         let path = directory.path().join(name);
         fs::write(&path, bytes).expect("preview fixture");
@@ -918,7 +923,7 @@ fn preview_families_follow_file_bytes_not_names() {
             request,
             Rc::new(move |event| events_for_emit.borrow_mut().push(event)),
             move |_, operation, _, _, _| {
-                let expected = if name.ends_with(".RAF") {
+                let expected = if name.ends_with(".RAF") || name.ends_with(".GPR") {
                     matches!(operation, crate::sandbox::ParseOperation::PreviewRaw)
                 } else {
                     matches!(
