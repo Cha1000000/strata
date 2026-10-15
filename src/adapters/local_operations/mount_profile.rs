@@ -8,6 +8,7 @@ mod tests;
 
 use std::{
     collections::HashMap,
+    hash::{DefaultHasher, Hash, Hasher},
     ffi::OsStr,
     os::fd::{AsFd, BorrowedFd},
     path::{Component, Path, PathBuf},
@@ -26,6 +27,7 @@ use crate::{
         Family, FuseFormat, MountCapabilities, MountKey, MountNames, MountType, NameLimit,
         NameProfile, NameRules, Strictness, family, gvfs_bridge_profile, gvfs_profile,
         holds_symlinks, learn_mount_capability, max_file_size, mount_capabilities,
+        teach_mount_capability,
     },
     services::NameMode,
 };
@@ -114,14 +116,24 @@ pub(super) struct MountProfile {
 }
 
 impl MountProfile {
-    /// Of a mount as `seen`, inside its folder `dir` where that is open.
-    fn of(seen: MountCapabilities, dir: Option<BorrowedFd<'_>>) -> Self {
+    /// Of a mount as `seen`, at `site`, which refusals taught `taught`.
+    fn of(seen: MountCapabilities, site: &Site, taught: MountCapabilities) -> Self {
         Self {
-            names: dir.map_or_else(|| NameProfile::unknown(0), |dir| names_in(seen.names, dir)),
-            strictness: seen.strictness,
-            symlinks: seen.symlinks,
+            names: site.rules,
+            strictness: taught.strictness,
+            symlinks: taught.symlinks,
             max_file_size: seen.max_file_size,
             family: seen.family.unwrap_or(Family::Other),
+        }
+    }
+
+    fn unknown() -> Self {
+        Self {
+            names: NameProfile::unknown(0),
+            strictness: Strictness::default(),
+            symlinks: None,
+            max_file_size: None,
+            family: Family::Other,
         }
     }
 
@@ -167,45 +179,58 @@ impl Profiles {
 
     #[cfg(test)]
     pub(super) fn of(&self, fs: &dyn FsOps, dir: BorrowedFd<'_>) -> MountProfile {
-        MountProfile::of(self.mount(fs, dir).1, Some(dir))
+        let (key, seen) = self.mount(fs, dir);
+        let site = self.site(key, seen.names, dir);
+        MountProfile::of(seen, &site, self.taught(&site))
     }
 
-    /// What refusals taught the mount `key` up to now.
-    fn strictness(&self, key: MountKey) -> Strictness {
-        self.seen()
-            .get(&key)
-            .map_or_else(Strictness::default, |seen| seen.strictness)
+    /// The site of `dir`, on the mount `key` whose names are `names`. A
+    /// GVfs bridge backend is seen from then on as it is now.
+    pub(super) fn site(
+        &self,
+        key: MountKey,
+        names: Option<MountNames>,
+        dir: BorrowedFd<'_>,
+    ) -> Site {
+        let site = Site::of(key, names, dir);
+        if site.key() != key {
+            self.seen()
+                .entry(site.key())
+                .or_insert_with(|| mount_capabilities(site.key()));
+        }
+        site
     }
 
-    /// Teaches the mount `key`, which learns, that names must also follow
-    /// the Windows rules in `strictness`: in this operation, and in later
-    /// ones until the mount changes.
-    pub(super) fn learn(&self, key: MountKey, strictness: Strictness) {
-        self.teach(key, |capabilities| {
+    /// What refusals at `site` taught it up to now.
+    fn taught(&self, site: &Site) -> MountCapabilities {
+        self.seen().get(&site.key()).copied().unwrap_or_default()
+    }
+
+    /// Teaches `site`, which learns, that names must also follow the
+    /// Windows rules in `strictness`: in this operation, and in later ones
+    /// until its mount changes.
+    pub(super) fn learn(&self, site: &Site, strictness: Strictness) {
+        self.teach(site, |capabilities| {
             capabilities.strictness = capabilities.strictness.and(strictness);
         });
     }
 
-    /// Whether the mount `key` may hold symbolic links, as far as this
-    /// operation knows.
-    pub(super) fn holds_links(&self, key: MountKey) -> bool {
-        self.seen().get(&key).and_then(|seen| seen.symlinks) != Some(false)
+    /// Whether `site` may hold symbolic links, as far as this operation
+    /// knows.
+    pub(super) fn holds_links(&self, site: &Site) -> bool {
+        self.taught(site).symlinks != Some(false)
     }
 
-    /// Teaches the mount `key` that it holds no symbolic links.
-    pub(super) fn refuse_links(&self, key: MountKey) {
-        self.teach(key, |capabilities| capabilities.symlinks = Some(false));
+    /// Teaches `site` that it holds no symbolic links.
+    pub(super) fn refuse_links(&self, site: &Site) {
+        self.teach(site, |capabilities| capabilities.symlinks = Some(false));
     }
 
-    fn teach(&self, key: MountKey, learn: impl Fn(&mut MountCapabilities)) {
-        if let Some(seen) = self.seen().get_mut(&key) {
+    fn teach(&self, site: &Site, learn: impl Fn(&mut MountCapabilities)) {
+        if let Some(seen) = self.seen().get_mut(&site.key()) {
             learn(seen);
         }
-        learn_mount_capability(key, |capabilities| {
-            if capabilities.names.is_some() {
-                learn(capabilities);
-            }
-        });
+        teach_mount_capability(site.mount, site.key(), learn);
     }
 
     fn seen(&self) -> MutexGuard<'_, HashMap<MountKey, MountCapabilities>> {
@@ -246,19 +271,18 @@ impl NamePolicy {
         }
     }
 
-    /// How names are made in a folder on the mount `key`, whose rules are
-    /// `rules`, with what its refusals taught it so far.
-    pub(super) fn in_folder(&self, key: MountKey, rules: NameProfile) -> FolderRules {
-        let strictness = if rules.learns {
-            self.profiles.strictness(key)
+    /// How names are made in a folder at `site`, with what its refusals
+    /// taught it so far.
+    pub(super) fn in_folder(&self, site: &Site) -> FolderRules {
+        let strictness = if site.rules.learns {
+            self.profiles.taught(site).strictness
         } else {
             Strictness::default()
         };
         FolderRules {
-            fixed: self.applied(rules, strictness),
-            limit: rules.taught(strictness).limit,
-            key,
-            learns: rules.learns,
+            fixed: self.applied(site.rules, strictness),
+            limit: site.rules.taught(strictness).limit,
+            site: *site,
         }
     }
 
@@ -295,7 +319,7 @@ impl NamePolicy {
         gio::spawn_blocking(move || native_destination(&profiles, &path, &folders))
             .await
             .unwrap_or_else(|_| PasteDestination {
-                profile: MountProfile::of(MountCapabilities::default(), None),
+                profile: MountProfile::unknown(),
                 crossing: vec![Some(true); unknown],
                 filesystem: None,
             })
@@ -328,22 +352,22 @@ impl NamePolicy {
             let fs = fs();
             let target = open_local_parent_directory(&target_path).map_err(io_error)?;
             let (key, seen) = profiles.mount(fs, target.as_fd());
-            let links = profiles.holds_links(key);
-            let rules = names_in(seen.names, target.as_fd());
+            let site = profiles.site(key, seen.names, target.as_fd());
+            let taught = profiles.taught(&site);
             let crossing = match source_path {
                 Some(source) => {
                     let source = open_local_parent_directory(&source).map_err(io_error)?;
-                    let device = |dir| {
-                        fs.stat_fd(dir)
-                            .map(|stat| stat.identity.device)
-                            .map_err(|error| io_error(os_error_detail(error)))
-                    };
-                    let source = (device(source.as_fd())?, fs.mount_key(source.as_fd()));
-                    crosses(source, (device(target.as_fd())?, key), seen.names)
+                    let device = fs
+                        .stat_fd(target.as_fd())
+                        .map_err(|error| io_error(os_error_detail(error)))?
+                        .identity
+                        .device;
+                    crosses_into(fs, source.as_fd(), (device, &site))
                 }
                 None => true,
             };
-            Ok((rules, seen.strictness, crossing, links))
+            let links = taught.symlinks != Some(false);
+            Ok((site.rules, taught.strictness, crossing, links))
         })
         .await?;
         Ok(FolderNames {
@@ -387,19 +411,16 @@ fn native_destination(
     folders: &[Option<PathBuf>],
 ) -> PasteDestination {
     let fs = fs();
-    let device = |dir: BorrowedFd<'_>| fs.stat_fd(dir).ok().map(|stat| stat.identity.device);
     let destination = open_local_parent_directory(path).ok().and_then(|dir| {
         let (key, seen) = profiles.mount(fs, dir.as_fd());
-        let device = device(dir.as_fd())?;
-        Some((
-            MountProfile::of(seen, Some(dir.as_fd())),
-            (device, key),
-            seen.names,
-        ))
+        let site = profiles.site(key, seen.names, dir.as_fd());
+        let device = fs.stat_fd(dir.as_fd()).ok()?.identity.device;
+        let profile = MountProfile::of(seen, &site, profiles.taught(&site));
+        Some((profile, (device, site)))
     });
-    let Some((profile, target, names)) = destination else {
+    let Some((profile, (device, site))) = destination else {
         return PasteDestination {
-            profile: MountProfile::of(MountCapabilities::default(), None),
+            profile: MountProfile::unknown(),
             crossing: vec![Some(true); folders.len()],
             filesystem: None,
         };
@@ -414,8 +435,7 @@ fn native_destination(
             let crossing = *seen.entry(folder).or_insert_with(|| {
                 open_local_parent_directory(folder)
                     .ok()
-                    .and_then(|dir| Some((device(dir.as_fd())?, fs.mount_key(dir.as_fd()))))
-                    .is_none_or(|source| crosses(source, target, names))
+                    .is_none_or(|dir| crosses_into(fs, dir.as_fd(), (device, &site)))
             });
             Some(crossing)
         })
@@ -434,9 +454,7 @@ pub(super) struct FolderRules {
     pub fixed: NameProfile,
     /// How long names numbered there may be.
     pub limit: NameLimit,
-    pub key: MountKey,
-    /// Whether a name the mount refuses teaches it.
-    pub learns: bool,
+    pub site: Site,
 }
 
 /// How names are given to what a transfer copies into one folder.
@@ -449,16 +467,77 @@ pub(super) struct FolderNames {
     pub links: bool,
 }
 
-/// Whether names listed in a folder on `source`, a device and the mount it
-/// was reached through, are brought onto another filesystem in a folder on
-/// `target`, whose mount has `names`. The GVfs bridge serves every backend
-/// from one device, so names going onto it always are.
-pub(super) fn crosses(
-    source: (u64, MountKey),
-    target: (u64, MountKey),
-    names: Option<MountNames>,
-) -> bool {
-    source != target || matches!(names, Some(MountNames::PerBackend { .. }))
+/// Where a folder takes its names from: its mount, or on the GVfs bridge,
+/// which serves every backend from one mount, the backend serving it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct Site {
+    /// The rules of names there.
+    pub rules: NameProfile,
+    pub mount: MountKey,
+    /// `mount`, or a key of the bridge backend's own; `None` on the bridge
+    /// where no backend is known.
+    backend: Option<MountKey>,
+}
+
+impl Site {
+    /// The site of `dir`, on the mount `mount` whose names are `names`.
+    pub(super) fn of(mount: MountKey, names: Option<MountNames>, dir: BorrowedFd<'_>) -> Self {
+        let (rules, backend) = match names {
+            Some(MountNames::Profile(rules)) => (rules, Some(mount)),
+            Some(MountNames::PerBackend { depth }) => {
+                let path = opened_path(dir).ok();
+                let folder = path
+                    .as_deref()
+                    .and_then(|path| folders(path).nth(usize::from(depth)));
+                (
+                    gvfs_bridge_profile(folder),
+                    folder.map(|folder| backend_key(mount, folder)),
+                )
+            }
+            None => (NameProfile::unknown(0), Some(mount)),
+        };
+        Self {
+            rules,
+            mount,
+            backend,
+        }
+    }
+
+    /// The key what refusals at the site teach is kept under.
+    pub(super) fn key(&self) -> MountKey {
+        self.backend.unwrap_or(self.mount)
+    }
+}
+
+/// A key of the backend the bridge serves from `folder`, which it names
+/// `<scheme>:<details>`, such as `mtp:host=…` or `smb-share:server=…`.
+fn backend_key(bridge: MountKey, folder: &OsStr) -> MountKey {
+    let mut hasher = DefaultHasher::new();
+    (bridge, folder).hash(&mut hasher);
+    MountKey::Backend(hasher.finish())
+}
+
+/// Whether names listed in a folder on `source`, a device and a site, are
+/// brought onto another filesystem in a folder on `target`. Names on a GVfs
+/// bridge backend no one knows always are.
+pub(super) fn crosses(source: (u64, &Site), target: (u64, &Site)) -> bool {
+    source.0 != target.0 || source.1.backend.is_none() || source.1.backend != target.1.backend
+}
+
+/// [`crosses`] from the folder `source` into a folder on `target`, looking
+/// up the source's mount only where it may share the target's.
+fn crosses_into(fs: &dyn FsOps, source: BorrowedFd<'_>, target: (u64, &Site)) -> bool {
+    let Ok(stat) = fs.stat_fd(source) else {
+        return true;
+    };
+    if stat.identity.device != target.0 {
+        return true;
+    }
+    let (key, seen) = known_mount(fs, source);
+    crosses(
+        (stat.identity.device, &Site::of(key, seen.names, source)),
+        target,
+    )
 }
 
 /// GIO's id of the filesystem holding `file`, as Nautilus compares them.
@@ -479,29 +558,12 @@ pub(super) async fn filesystem_id(
     Ok(info.attribute_string(gio::FILE_ATTRIBUTE_ID_FILESYSTEM))
 }
 
-/// The name rules inside `dir`, on a mount whose rules are `names`.
-pub(super) fn names_in(names: Option<MountNames>, dir: BorrowedFd<'_>) -> NameProfile {
-    match names {
-        Some(MountNames::Profile(names)) => names,
-        Some(MountNames::PerBackend { depth }) => backend(dir, depth),
-        None => NameProfile::unknown(0),
-    }
-}
-
-/// The bridge names a backend's folder `<scheme>:<details>`, such as
-/// `mtp:host=…` or `smb-share:server=…,share=…`.
-fn backend(dir: BorrowedFd<'_>, depth: u16) -> NameProfile {
-    let path = opened_path(dir).ok();
-    gvfs_bridge_profile(
-        path.as_deref()
-            .and_then(|path| folders(path).nth(usize::from(depth))),
-    )
-}
-
 /// How long a name may be in `dir`, for numbering a name taken there.
 pub(super) fn name_limit(fs: &dyn FsOps, dir: BorrowedFd<'_>) -> NameLimit {
-    let (_, seen) = known_mount(fs, dir);
-    names_in(seen.names, dir).taught(seen.strictness).limit
+    let (key, seen) = known_mount(fs, dir);
+    let site = Site::of(key, seen.names, dir);
+    let strictness = mount_capabilities(site.key()).strictness;
+    site.rules.taught(strictness).limit
 }
 
 /// [`name_limit`] of `folder`, read off the main thread where it is native,

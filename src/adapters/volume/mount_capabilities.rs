@@ -17,6 +17,9 @@ pub(crate) enum MountKey {
         device: u64,
     },
     Device(u64),
+    /// One backend of the GVfs FUSE bridge, which serves every backend
+    /// from one mount, keyed by the bridge and the backend's folder.
+    Backend(u64),
     #[cfg(test)]
     Test(u64),
 }
@@ -104,6 +107,22 @@ pub(crate) fn mount_capabilities(key: MountKey) -> MountCapabilities {
 
 pub(crate) fn learn_mount_capability(key: MountKey, learn: impl FnOnce(&mut MountCapabilities)) {
     learn(capabilities().entry(key).or_default());
+}
+
+/// Learns of `key`, the mount `mount` or a part of it such as a GVfs
+/// bridge backend, while what was learned of that mount stands.
+pub(crate) fn teach_mount_capability(
+    mount: MountKey,
+    key: MountKey,
+    learn: impl FnOnce(&mut MountCapabilities),
+) {
+    let mut capabilities = capabilities();
+    if capabilities
+        .get(&mount)
+        .is_some_and(|capabilities| capabilities.names.is_some())
+    {
+        learn(capabilities.entry(key).or_default());
+    }
 }
 
 /// Mount ids can be reused once a mount goes away, so a mount change drops

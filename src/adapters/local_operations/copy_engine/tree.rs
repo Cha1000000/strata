@@ -41,7 +41,7 @@ use crate::{
             LocalFileIdentity, StageContent, StagedSibling, cancelled_local_operation,
             fs_ops::{Entry, EntryStat, FsOps},
             io_error,
-            mount_profile::{FolderRules, crosses, names_in},
+            mount_profile::{FolderRules, Site, crosses},
             naming::{Key, PlanEntry, Planned, numbered_names, plan_names},
             os_error_detail, placement,
             placement::{COPY_PREFIX, PlaceError},
@@ -68,7 +68,8 @@ pub(super) struct Tree {
     stages: Mutex<Vec<StagedSibling>>,
     placed: Mutex<Vec<PathBuf>>,
     nested: Mutex<Nested>,
-    source: OnceLock<Mount>,
+    /// The mount the tree's source is read through, and its site there.
+    source: OnceLock<(Mount, Site)>,
 }
 
 #[derive(Default)]
@@ -121,23 +122,25 @@ impl Tree {
     }
 
     fn source_in(&self, fs: &dyn FsOps, folder: BorrowedFd<'_>) {
-        self.source.get_or_init(|| Mount::new(fs, folder));
+        self.source.get_or_init(|| {
+            let mount = Mount::new(fs, folder);
+            (mount, Site::of(mount.key, mount.names, folder))
+        });
     }
 
     fn opens_one_name_per_file(&self) -> bool {
-        self.source.get().map(|mount| mount.family) == Some(Family::Smb)
+        self.source.get().map(|(mount, _)| mount.family) == Some(Family::Smb)
     }
 
     /// Whether the names of a source folder on `source`'s device are brought
-    /// onto another filesystem in a target folder on `target`'s, of `mount`.
-    /// The tree's source is read through one mount, which in practice holds
-    /// every source folder on its device.
-    fn crosses(&self, source: &EntryStat, target: &EntryStat, mount: &Mount) -> bool {
-        self.source.get().is_none_or(|source_mount| {
+    /// onto another filesystem in a target folder on `target`'s, at `site`.
+    /// The tree's source is read through one mount and site, which in
+    /// practice hold every source folder on its device.
+    fn crosses(&self, source: &EntryStat, target: &EntryStat, site: &Site) -> bool {
+        self.source.get().is_none_or(|(_, source_site)| {
             crosses(
-                (source.identity.device, source_mount.key),
-                (target.identity.device, mount.key),
-                mount.names,
+                (source.identity.device, source_site),
+                (target.identity.device, site),
             )
         })
     }
@@ -433,8 +436,8 @@ pub(super) struct Folder {
     pub(super) parent: EntryStat,
     pub(super) path: PathBuf,
     pub(super) naming: Naming,
-    /// The name rules of the target's mount.
-    pub(super) rules: NameProfile,
+    /// Where the target takes its names from.
+    pub(super) site: Site,
     pub(super) mount: Mount,
     /// Names link only within one scope, whose restrictive folders get their
     /// modes together: the made tree, or one merge stage.
@@ -471,8 +474,8 @@ impl Folder {
         }
         let snapshot = Snapshot::read(fs, source.as_fd(), &source_stat)?;
         let naming = self.naming.decide(fs, self.mount.family, target.as_fd());
-        let fixing = tree.crosses(&source_stat, &target_stat, &self.mount);
-        let rules = copy.names.in_folder(self.mount.key, self.rules);
+        let fixing = tree.crosses(&source_stat, &target_stat, &self.site);
+        let rules = copy.names.in_folder(&self.site);
         let children = tree.plan(source.as_fd(), &rules, fixing, naming.key())?;
         let requested = children
             .iter()
@@ -484,7 +487,7 @@ impl Folder {
             stat: target_stat,
             path: self.path,
             names: Names::new(requested, naming, self.mount.family, rules),
-            rules: self.rules,
+            site: self.site,
             mount: self.mount,
             scope: self.scope,
             recorded: self
@@ -541,7 +544,7 @@ struct Made {
     path: PathBuf,
     naming: Naming,
     names: Arc<Names>,
-    rules: NameProfile,
+    site: Site,
     mount: Mount,
     scope: usize,
     recorded: Option<Arc<manifest::Folder>>,
@@ -619,7 +622,7 @@ impl Made {
                         parent: self.stat,
                         path,
                         naming: self.naming,
-                        rules: self.rules,
+                        site: self.site,
                         mount: self.mount,
                         scope: self.scope,
                         recorded_in: self.recorded.clone(),
@@ -657,8 +660,7 @@ impl Made {
             }
             FileType::Symlink => {
                 let source = Entry::new(&**source, name);
-                let key = self.mount.key;
-                let made = copy.names.profiles.holds_links(key).then(|| {
+                let made = copy.names.profiles.holds_links(&self.site).then(|| {
                     make_numbered(copy, names, &path, false, alias, |name| {
                         copy_link(
                             copy,
@@ -671,7 +673,7 @@ impl Made {
                 });
                 let (path, link) = match made {
                     Some(Ok(made)) => made,
-                    Some(Err(failure)) if copy.refused_link(key, &failure).is_none() => {
+                    Some(Err(failure)) if copy.refused_link(&self.site, &failure).is_none() => {
                         return Err(failure);
                     }
                     _ => {
@@ -1208,9 +1210,9 @@ pub(super) struct Merged {
     pub(super) path: PathBuf,
     pub(super) recorded_in: Option<Arc<manifest::Folder>>,
     pub(super) placing: Option<Arc<Placing>>,
-    /// The mount of the folder merged into the parent, and its name rules,
-    /// which a folder on that mount shares.
-    pub(super) rules: Option<(MountKey, NameProfile)>,
+    /// Where the folder merged into the parent takes its names from, which
+    /// a folder on that mount shares.
+    pub(super) site: Option<Site>,
 }
 
 impl Merged {
@@ -1245,14 +1247,14 @@ impl Merged {
             .recorded_in
             .as_ref()
             .map(|folder| folder.folder(source_name, source_stat.identity));
-        let rules = match self.rules {
-            Some((key, rules)) if key == mount.key => rules,
-            _ => names_in(mount.names, target.as_fd()),
+        let site = match self.site {
+            Some(site) if site.mount == mount.key => site,
+            _ => copy.site(&mount, target.as_fd()),
         };
         // A stage made in the live folder inherits its casefolding.
         let naming = Naming::Decide.decide(fs, mount.family, target.as_fd());
-        let fixing = tree.crosses(&source_stat, &target_stat, &mount);
-        let folder = copy.names.in_folder(mount.key, rules);
+        let fixing = tree.crosses(&source_stat, &target_stat, &site);
+        let folder = copy.names.in_folder(&site);
         // As the merge planner, which cannot read a folder's casefolding.
         let children = tree.plan(source.as_fd(), &folder, fixing, Key::Folded)?;
         let requested = children
@@ -1261,7 +1263,7 @@ impl Merged {
             .collect();
         let live = Live {
             names: Names::new(requested, naming, mount.family, folder),
-            rules,
+            site,
             naming,
             source: Arc::new(source),
             dir: Arc::new(target),
@@ -1297,7 +1299,7 @@ impl Merged {
                             path: self.path.join(target_name),
                             recorded_in: live.recorded.clone(),
                             placing: live.placing.clone(),
-                            rules: Some((live.mount.key, live.rules)),
+                            site: Some(live.site),
                         },
                     ));
                 }
@@ -1317,7 +1319,7 @@ struct Live {
     mount: Mount,
     path: PathBuf,
     names: Arc<Names>,
-    rules: NameProfile,
+    site: Site,
     naming: Naming,
     name: OsString,
     recorded: Option<Arc<manifest::Folder>>,
@@ -1370,7 +1372,7 @@ impl Live {
             stat: self.stat,
             path: self.path.clone(),
             names: self.names.clone(),
-            rules: self.rules,
+            site: self.site,
             mount: self.mount,
             scope,
             recorded: self.recorded.clone(),

@@ -40,7 +40,7 @@ use super::{
     cancelled_local_operation, copy_failure_after_cleanup,
     fs_ops::{Entry, EntryStat, FsOps, fs},
     io_error, local_delete_worker_count, local_device_is_rotational,
-    mount_profile::{FolderRules, NamePolicy, known_mount, names_in},
+    mount_profile::{FolderRules, NamePolicy, Site, known_mount},
     naming::{Taken, may_be_refused, numbered_names, stricter_names},
     open_local_parent_directory, os_error_detail, os_error_text,
     parallel_delete_local_blocking_with_workers, placement,
@@ -767,8 +767,8 @@ fn retry_refused<T>(
     for (strictness, stricter, cause) in stricter_names(name, &rules.fixed, is_directory) {
         match make(&stricter) {
             Ok((made, value)) => {
-                if rules.learns {
-                    copy.names.profiles.learn(rules.key, strictness);
+                if rules.site.rules.learns {
+                    copy.names.profiles.learn(&rules.site, strictness);
                 }
                 return Ok((made, value, cause));
             }
@@ -815,7 +815,8 @@ fn copy_new(
         FileType::Symlink => {
             copy.check_cancelled()?;
             let mount = copy.mount(parent.as_fd());
-            let linked = copy.names.profiles.holds_links(mount.key).then(|| {
+            let site = copy.site(&mount, parent.as_fd());
+            let linked = copy.names.profiles.holds_links(&site).then(|| {
                 let names = taken.names(name, false, || copy.name_limit(parent.as_fd()));
                 first_free(copy, parent.as_fd(), names, (taken, false), |name| {
                     tree::copy_link(
@@ -829,7 +830,7 @@ fn copy_new(
             });
             let (name, link) = match linked {
                 Some(Ok(linked)) => linked,
-                Some(Err(failure)) => match copy.refused_link(mount.key, &failure) {
+                Some(Err(failure)) => match copy.refused_link(&site, &failure) {
                     Some(error) => return Err(Failure::LinkRefused(error)),
                     None => return Err(failure),
                 },
@@ -899,8 +900,8 @@ fn copy_stage(
         }
         FileType::Symlink => {
             copy.check_cancelled()?;
-            let key = copy.mount(parent.as_fd()).key;
-            if !copy.names.profiles.holds_links(key) {
+            let site = copy.site(&copy.mount(parent.as_fd()), parent.as_fd());
+            if !copy.names.profiles.holds_links(&site) {
                 return Err(Failure::LinkRefused(Errno::OPNOTSUPP));
             }
             let link = tree::read_link(copy.fs, source.entry())?;
@@ -912,7 +913,7 @@ fn copy_stage(
                             || matches!(error, Errno::INVAL | Errno::ILSEQ) =>
                     {
                         let refused = Failure::LinkRefused(error);
-                        copy.refused_link(key, &refused);
+                        copy.refused_link(&site, &refused);
                         return Err(refused);
                     }
                     staged => staged?,
@@ -1059,7 +1060,7 @@ fn fill(
         parent,
         path: PathBuf::new(),
         naming: tree::Naming::Decide,
-        rules: names_in(mount.names, root.parent.as_fd()),
+        site: copy.site(&mount, root.parent.as_fd()),
         mount,
         scope: 0,
         recorded_in: source.recorded_in.clone(),
@@ -1236,7 +1237,7 @@ fn merge(
         path: PathBuf::new(),
         recorded_in: source.recorded_in.clone(),
         placing,
-        rules: None,
+        site: None,
     };
     let (
         walked,
@@ -1613,8 +1614,12 @@ impl Copy {
     }
 
     fn folder_rules(&self, dir: BorrowedFd<'_>) -> FolderRules {
-        let mount = self.mount(dir);
-        self.names.in_folder(mount.key, names_in(mount.names, dir))
+        self.names.in_folder(&self.site(&self.mount(dir), dir))
+    }
+
+    /// Where `dir`, on `mount`, takes its names from.
+    fn site(&self, mount: &Mount, dir: BorrowedFd<'_>) -> Site {
+        self.names.profiles.site(mount.key, mount.names, dir)
     }
 
     /// The item a forward copy was given, which the mount refused to name
@@ -1650,17 +1655,17 @@ impl Copy {
         Ok((made, value))
     }
 
-    /// The error with which the mount `key` refused to hold a symbolic link,
+    /// The error with which `site` refused to hold a symbolic link,
     /// as `failure` shows. A target the mount refuses fails as a name that
     /// stricter rules could not help. A mount without links at all learns.
-    fn refused_link(&self, key: MountKey, failure: &Failure) -> Option<Errno> {
+    fn refused_link(&self, site: &Site, failure: &Failure) -> Option<Errno> {
         let error = match failure {
             Failure::LinkRefused(error) => *error,
             Failure::NameRefused(error @ (Errno::INVAL | Errno::ILSEQ)) => *error,
             _ => return None,
         };
         if error == Errno::NOSYS || is_unsupported(error) {
-            self.names.profiles.refuse_links(key);
+            self.names.profiles.refuse_links(site);
         }
         Some(error)
     }

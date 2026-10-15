@@ -386,7 +386,9 @@ top-level items, that sorts first in bytes (`Readme.txt` beside `README.txt`): i
 as an alias before copying. Fixed names that equal another name are numbered too, in the byte order
 of the names they replace. The completion report lists every fixed name with the name it was saved
 as. In a merge, a planned name equal to an existing item replaces that item like any other
-same-named one.
+same-named one. Under `/run/user/$UID/gvfs`, where one FUSE mount serves every GVfs location, the
+folder of each location counts as a filesystem of its own, with the rules of its kind, and what its
+refusals teach stays with it.
 
 A mount may still refuse a name: a call that creates it fails with `EINVAL`, `EILSEQ`, `EBADMSG`,
 `ENAMETOOLONG`, or `ENOENT` in a folder that exists, or placing a staged copy fails with an error the

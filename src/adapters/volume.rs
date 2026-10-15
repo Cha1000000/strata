@@ -27,6 +27,7 @@ use crate::{
 pub(crate) use mount_capabilities::forget_test_mount_capabilities;
 pub(crate) use mount_capabilities::{
     MountCapabilities, MountKey, XattrNamespace, learn_mount_capability, mount_capabilities,
+    teach_mount_capability,
 };
 pub(crate) use mount_snapshot::{RemovableRoot, invalidate_mount_snapshot, with_mount_snapshot};
 #[cfg(test)]
