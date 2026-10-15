@@ -9,8 +9,8 @@ use super::super::{
 };
 use super::{MountProfile, Profiles, folder_name_limit};
 use crate::adapters::volume::{
-    FAT32_MAX_FILE_SIZE, MountNames, NameEncoding, NameLimit, NameProfile, NameRules, PrivateUse,
-    Reserved, Strip, gvfs_profile, learn_mount_capability,
+    FAT32_MAX_FILE_SIZE, MountNames, NameEncoding, NameLimit, NameProfile, NameRules, Reserved,
+    Strip, gvfs_profile, learn_mount_capability,
 };
 
 fn profile_of(profiles: &Profiles, folder: &Path) -> Result<MountProfile, Box<dyn Error>> {
@@ -55,16 +55,6 @@ fn each_mount_is_profiled_from_what_its_folder_reports() -> Result<(), Box<dyn E
         symlinks,
         max_file_size,
     };
-    let smb = |encoding| NameProfile {
-        encoding,
-        mapped: Some(PrivateUse::Sfm),
-        limit: NameLimit {
-            bytes: Some(255),
-            units: Some(255),
-            folder_bytes: Some(213),
-        },
-        ..windows(Reserved::Full, false)
-    };
     let unknown_udev = || Quirks {
         device_format: None,
         ..Quirks::exfat_fuse()
@@ -80,16 +70,11 @@ fn each_mount_is_profiled_from_what_its_folder_reports() -> Result<(), Box<dyn E
     };
     let no_symlinks = Some(false);
     let fat32 = Some(FAT32_MAX_FILE_SIZE);
-    let cases: [(&str, Preset, MountProfile); 12] = [
+    let cases: [(&str, Preset, MountProfile); 5] = [
         (
             "vfat",
             Quirks::vfat,
             profile(windows(Reserved::Bare, false), no_symlinks, fat32),
-        ),
-        (
-            "exfat",
-            Quirks::exfat,
-            profile(windows(Reserved::Bare, false), no_symlinks, None),
         ),
         (
             "exfat-fuse",
@@ -100,48 +85,6 @@ fn each_mount_is_profiled_from_what_its_folder_reports() -> Result<(), Box<dyn E
             "fuseblk without udev",
             unknown_udev,
             profile(windows(Reserved::Bare, true), None, None),
-        ),
-        (
-            "ntfs3",
-            Quirks::ntfs3,
-            profile(windows(Reserved::Bare, false), None, None),
-        ),
-        (
-            "ntfs3 windows_names",
-            Quirks::ntfs3_windows_names,
-            profile(windows(Reserved::Full, false), None, None),
-        ),
-        (
-            "ntfs-3g",
-            Quirks::ntfs_3g,
-            profile(windows(Reserved::Full, false), None, None),
-        ),
-        (
-            "cifs",
-            Quirks::cifs,
-            profile(smb(NameEncoding::Utf8), None, None),
-        ),
-        (
-            "cifs nocase",
-            Quirks::cifs_nocase,
-            profile(smb(NameEncoding::Utf8Bmp), None, None),
-        ),
-        (
-            "cifs posix",
-            Quirks::cifs_posix,
-            profile(
-                NameProfile {
-                    encoding: NameEncoding::Utf8,
-                    limit: NameLimit {
-                        bytes: Some(255),
-                        folder_bytes: Some(213),
-                        ..NameLimit::default()
-                    },
-                    ..posix(None, false)
-                },
-                None,
-                None,
-            ),
         ),
         ("zfs", zfs, profile(posix(Some(1023), false), None, None)),
         (
