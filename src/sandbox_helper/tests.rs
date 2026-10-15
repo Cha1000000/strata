@@ -20,8 +20,8 @@ use gdk_pixbuf::prelude::*;
 use super::{
     bounded_output, bounded_output_with_timeout, bounded_surface_dimensions,
     exceeds_decoded_frame_budget, is_svg_head, pdf_render_request, read_exif_thumbnail,
-    read_limited, read_png_dimensions, render_camera_raw, render_pixbuf, render_raw,
-    render_simple_dcraw, run, scale_embedded_thumbnail, svg_source,
+    read_limited, read_png_dimensions, render_camera_raw, render_camera_raw_preview, render_pixbuf,
+    render_raw, render_simple_dcraw, run, scale_embedded_thumbnail, svg_source,
 };
 
 #[test]
@@ -562,6 +562,27 @@ fn raw_thumbnails_and_previews_use_embedded_preview_fallbacks() {
             }
         }
     }
+}
+
+#[test]
+fn raw_previews_prefer_imagemagick_over_a_thumbnail_sized_pixbuf_decode() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let input = directory.path().join("GOPR0001.GPR");
+    let source = gdk_pixbuf::Pixbuf::new(gdk_pixbuf::Colorspace::Rgb, false, 8, 40, 30)
+        .expect("allocate source");
+    source.fill(0x3366_99ff);
+    let tiff = source.save_to_bufferv("tiff", &[]).expect("encode tiff");
+    std::fs::write(&input, tiff).expect("write RAW stand-in");
+
+    let thumbnail = render_camera_raw(&input, 256).expect("RAW thumbnail");
+    assert_eq!(png_size(&thumbnail), Some((256, 192)));
+    let preview = render_camera_raw_preview(&input, 800).expect("RAW preview");
+    let expected = if imagemagick_installed() {
+        (40, 30)
+    } else {
+        (800, 600)
+    };
+    assert_eq!(png_size(&preview), Some(expected));
 }
 
 #[test]

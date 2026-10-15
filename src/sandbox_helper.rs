@@ -158,7 +158,7 @@ pub(crate) fn run(arguments: &[String]) -> Result<(), String> {
             render_camera_raw(input, numeric_value()?.clamp(16, 256))?,
             None,
         ),
-        "preview-raw" => (render_camera_raw(input, 800)?, None),
+        "preview-raw" => (render_camera_raw_preview(input, 800)?, None),
         "thumbnail-pdf" => (
             render_pdf_thumbnail(input, numeric_value()?.clamp(16, 256))?,
             None,
@@ -435,7 +435,9 @@ pub(crate) fn browser_render(
         Operation::PreviewImage => {
             response.png = document_media::image(input, 800).unwrap_or_default();
         }
-        Operation::PreviewRaw => response.png = render_camera_raw(input, 800).unwrap_or_default(),
+        Operation::PreviewRaw => {
+            response.png = render_camera_raw_preview(input, 800).unwrap_or_default();
+        }
         Operation::RawMetadata => response.metadata = raw_metadata::read(input).unwrap_or_default(),
         Operation::DocumentMermaid => {
             response.png = document_media::mermaid(input).unwrap_or_default();
@@ -600,6 +602,17 @@ fn render_camera_raw(path: &Path, size: i32) -> Result<Vec<u8>, String> {
     render_dcraw(path, size)
         .or_else(|_| render_pixbuf(path, size))
         .or_else(|_| render_imagemagick(path, size))
+}
+
+fn render_camera_raw_preview(path: &Path, size: i32) -> Result<Vec<u8>, String> {
+    let pixbuf_sees_thumbnail =
+        image_dimensions(path).is_some_and(|(width, height)| width.max(height) < size);
+    if !pixbuf_sees_thumbnail {
+        return render_camera_raw(path, size);
+    }
+    render_dcraw(path, size)
+        .or_else(|_| render_imagemagick(path, size))
+        .or_else(|_| render_pixbuf(path, size))
 }
 
 fn render_oversized(path: &Path, size: i32) -> Option<Vec<u8>> {
