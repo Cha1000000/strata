@@ -1376,7 +1376,7 @@ async fn execute_parallel_copy_plans(
                     )
                     .await?;
                     Ok(Transferred {
-                        target: gio::File::for_path(plan.written_path),
+                        target: gio::File::for_path(plan.written_path.with_file_name(copied.name)),
                         reported: copied.reported,
                         owed: Owed::default(),
                     })
@@ -1387,10 +1387,12 @@ async fn execute_parallel_copy_plans(
         for (plan, task) in chunk.iter().zip(tasks) {
             match task.await {
                 Ok(Ok(transferred)) => {
+                    // The engine reports a name the mount refused from the planned one.
                     if let (Some(cause), Some(name)) = (plan.renamed, plan.source_path.file_name())
                     {
                         let requested = gio::File::for_path(plan.written_path.with_file_name(name));
-                        renamed.extend(renamed_item(&requested, &transferred.target, cause));
+                        let planned = gio::File::for_path(&plan.written_path);
+                        renamed.extend(renamed_item(&requested, &planned, cause));
                     }
                     if let Some(progress) = &copying.progress {
                         progress.finish_item(
@@ -6557,12 +6559,24 @@ impl OperationProvider for LocalOperationProvider {
                 if let Some(target) = target_location.clone() {
                     affected_locations.insert(target);
                 }
-                if let (Some(cause), Some(name)) = (
-                    planned[index].as_ref().and_then(|planned| planned.cause),
+                if let (Some(planned), Some(name)) = (
+                    planned[index]
+                        .as_ref()
+                        .filter(|planned| planned.cause.is_some()),
                     transfer_source_name(&sources[index]),
                 ) {
+                    // Keep Both's numbers go unreported; the engine reports a
+                    // name the mount refused from the planned one.
+                    let saved_as = match taken {
+                        Taken::Fail => destination.child(&planned.target),
+                        Taken::Number => target.clone(),
+                    };
                     progress.report(TransferReport {
-                        renamed: renamed_item(&destination.child(name), &target, cause)
+                        renamed: planned
+                            .cause
+                            .and_then(|cause| {
+                                renamed_item(&destination.child(name), &saved_as, cause)
+                            })
                             .into_iter()
                             .collect(),
                         ..TransferReport::default()

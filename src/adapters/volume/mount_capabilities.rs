@@ -7,7 +7,7 @@
 
 use std::{collections::BTreeMap, ffi::OsStr, sync::Mutex, time::Duration};
 
-use super::{CoarseTimes, Family, FuseFormat, MountNames};
+use super::{CoarseTimes, Family, FuseFormat, MountNames, Strictness};
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub(crate) enum MountKey {
@@ -40,6 +40,8 @@ pub(crate) struct MountCapabilities {
     pub deferred_close: Option<Duration>,
     /// From mountinfo, udev and `statfs`.
     pub names: Option<MountNames>,
+    /// What names a mount whose rules nothing shows refused taught it.
+    pub strictness: Option<Strictness>,
     /// `Some(false)` where the driver has no symbolic links.
     pub symlinks: Option<bool>,
     pub max_file_size: Option<u64>,

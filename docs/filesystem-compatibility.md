@@ -238,11 +238,13 @@ item moved to one is deleted by Strata, as described under
   overlayfs) is written into an unnamed `O_TMPFILE` in the destination folder and linked to its
   name with an exclusive `linkat` once its data and metadata are complete; `AT_EMPTY_PATH` is
   tried first, then `/proc/self/fd`, which Linux before 6.10 needs. A crash leaves nothing
-  behind. If the link is refused for any reason other than a taken name or a full disk, the bytes
-  already written are copied on the same device into a hidden stage, without reading the source
-  again. SMB is left out although its client accepts `O_TMPFILE`: it fakes one with a visible
-  `.__smbfile_tmp*` file and reports write errors only after the name is published. FUSE daemons
-  that implement it are unprobed.
+  behind. A name the mount refuses is linked under stricter rules first, as described under
+  [Folders, names and case aliases](#folders-names-and-case-aliases). If the link is still refused
+  for any reason other than a taken name or a full disk, the bytes already written are copied on
+  the same device into a hidden stage, without reading the source again. A refused name never
+  turns `O_TMPFILE` off. SMB is left out although its client accepts `O_TMPFILE`: it fakes one
+  with a visible `.__smbfile_tmp*` file and reports write errors only after the name is published.
+  FUSE daemons that implement it are unprobed.
 - **Elsewhere, and for folders,** the copy is built in a hidden `.strata-copy-*` stage in the
   destination folder and published with the [placement routine](#placing-an-item-without-replacing).
   A file stage is created exclusively, and its identity is read from its own descriptor. Replace
@@ -384,6 +386,21 @@ as an alias before copying. Fixed names that equal another name are numbered too
 of the names they replace. The completion report lists every fixed name with the name it was saved
 as. In a merge, a planned name equal to an existing item replaces that item like any other
 same-named one.
+
+A mount may still refuse a name: a call that creates it fails with `EINVAL`, `EILSEQ`, `EBADMSG`,
+`ENAMETOOLONG`, or `ENOENT` in a folder that exists, or placing a staged copy fails with an error the
+placement routine puts down to the name. The entry is then tried again under the Windows rules, one
+level at a time: valid UTF-8, then the characters Windows refuses, trailing dots and spaces, device
+names, and 255 bytes and UTF-16 units, skipping levels that leave the name as it is. The first name
+the mount takes is used, numbered where it is taken, and reported as fixed, except as the name of a
+Keep Both copy, whose numbered name is not reported either. A mount whose type does
+not show its rules (sshfs and other FUSE daemons, 9p, virtiofs, vboxsf, a `fuseblk` device udev
+cannot name, unknown types) remembers the level that worked until it changes, so its later names
+are fixed before they are copied. Any other mount tries each refused name again on its own, so one
+odd folder never puts a whole disk under Windows rules. Undo tries entries inside an item again,
+but gives the item itself back under its own name or fails; copies through GIO do not try again.
+Where no level helps, the item fails with "The name isn’t valid at this location", or "The name is
+too long".
 
 Undoing a move fixes only names the original mount cannot hold at all, such as malformed UTF-8, and
 then gives the entries inside the item the names they had, deepest first, also where the item came

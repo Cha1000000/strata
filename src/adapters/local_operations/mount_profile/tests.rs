@@ -7,10 +7,10 @@ use super::super::{
     open_local_parent_directory,
     tests::fs_quirks::{FsQuirks, Preset, Quirks},
 };
-use super::{MountProfile, Profiles, folder_name_limit};
+use super::{MountProfile, Profiles, folder_name_limit, learn_mount_type};
 use crate::adapters::volume::{
     FAT32_MAX_FILE_SIZE, Family, MountNames, NameEncoding, NameLimit, NameProfile, NameRules,
-    Reserved, Strip, gvfs_bridge_profile, gvfs_profile, learn_mount_capability,
+    Reserved, Strip, gvfs_bridge_profile, gvfs_profile, learn_mount_capability, mount_capabilities,
 };
 
 fn profile_of(profiles: &Profiles, folder: &Path) -> Result<MountProfile, Box<dyn Error>> {
@@ -206,6 +206,25 @@ fn an_operation_keeps_the_profile_it_read_first_when_its_mount_changes()
         profile_of(&Profiles::default(), root.path())?.names,
         remounted
     );
+    Ok(())
+}
+
+#[test]
+fn a_mount_learned_again_keeps_what_was_learned_of_it_meanwhile() -> Result<(), Box<dyn Error>> {
+    let root = tempfile::tempdir()?;
+    let scope = FsQuirks::install(root.path(), Quirks::sshfs());
+    let folder = open_local_parent_directory(root.path())?;
+    learn_mount_type(fs(), folder.as_fd(), scope.key());
+    learn_mount_capability(scope.key(), |capabilities| {
+        capabilities.symlinks = Some(false);
+    });
+    let learned = mount_capabilities(scope.key());
+
+    // As a thread that read the mount before the refusal finishes.
+    let seen = learn_mount_type(fs(), folder.as_fd(), scope.key());
+
+    assert_eq!(seen, learned);
+    assert_eq!(mount_capabilities(scope.key()), learned);
     Ok(())
 }
 

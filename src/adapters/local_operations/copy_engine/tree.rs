@@ -24,7 +24,7 @@ use rustix::{
 };
 
 use super::{
-    Barrier, Copy, Created, Failure, Mount, Placing, Source, best_effort,
+    Barrier, Copy, Created, Failure, Mount, Placing, Source, best_effort, creation_failure,
     data::Data,
     direct_folder, from_stage, is_fatal, is_unsupported,
     links::{self, Links, Role},
@@ -41,13 +41,13 @@ use crate::{
             LocalFileIdentity, StageContent, StagedSibling, cancelled_local_operation,
             fs_ops::{Entry, EntryStat, FsOps},
             io_error,
-            mount_profile::{crosses, names_in},
+            mount_profile::{FolderRules, crosses, names_in},
             naming::{Key, PlanEntry, Planned, numbered_names, plan_names},
             os_error_detail, placement,
             placement::{COPY_PREFIX, PlaceError},
             work_queue::{self, Group, Job, WorkQueue},
         },
-        volume::{Family, MountKey, NameLimit, NameProfile},
+        volume::{Family, MountKey, NameProfile},
     },
     services::{KeptCause, RenameCause, SpecialKind},
 };
@@ -143,21 +143,15 @@ impl Tree {
     }
 
     /// The names of a folder's children as they arrive in a target folder
-    /// whose mount has `rules`.
+    /// whose names follow `rules`.
     fn plan(
         &self,
         source: BorrowedFd<'_>,
-        rules: &NameProfile,
+        rules: &FolderRules,
         fixing: bool,
         key: Key,
     ) -> Result<Vec<(OsString, FileType, Planned)>, Failure> {
-        target_children(
-            self.copy.fs,
-            source,
-            &self.copy.names.applied(*rules),
-            fixing,
-            key,
-        )
+        target_children(self.copy.fs, source, &rules.fixed, fixing, key)
     }
 
     fn settle_stage(&self, identity: LocalFileIdentity) {
@@ -297,7 +291,7 @@ pub(super) struct Names {
     /// listing alone cannot tell such an entry from another name's.
     made: Option<Mutex<HashMap<OsString, Vec<LocalFileIdentity>>>>,
     stable_inodes: bool,
-    limit: NameLimit,
+    rules: FolderRules,
 }
 
 impl Names {
@@ -305,7 +299,7 @@ impl Names {
         requested: Vec<OsString>,
         naming: Naming,
         family: Family,
-        limit: NameLimit,
+        rules: FolderRules,
     ) -> Arc<Self> {
         Arc::new(Self {
             requested,
@@ -313,7 +307,7 @@ impl Names {
             numbered: Mutex::default(),
             made: (naming == Naming::Claim).then(Mutex::default),
             stable_inodes: stable_inodes(family),
-            limit,
+            rules,
         })
     }
 
@@ -339,21 +333,30 @@ impl Names {
             .is_none_or(|made| self.stable_inodes && !made.contains(&identity))
     }
 
+    fn requested(&self) -> &HashSet<OsString> {
+        self.keys.get_or_init(|| {
+            self.requested
+                .iter()
+                .map(|name| stage::collision_key(name))
+                .collect()
+        })
+    }
+
+    /// Whether this job is the one to try `name`, which no entry of the
+    /// folder asks for.
+    fn claims(&self, name: &OsStr) -> bool {
+        let key = stage::collision_key(name);
+        !self.requested().contains(&key) && lock(&self.numbered).insert(key)
+    }
+
     fn number<T>(
         &self,
         name: &OsStr,
         is_directory: bool,
         mut make: impl FnMut(&OsStr) -> Result<T, Failure>,
     ) -> Result<(OsString, T), Failure> {
-        let requested = self.keys.get_or_init(|| {
-            self.requested
-                .iter()
-                .map(|name| stage::collision_key(name))
-                .collect()
-        });
-        for candidate in numbered_names(name, is_directory, self.limit) {
-            let key = stage::collision_key(&candidate);
-            if requested.contains(&key) || !lock(&self.numbered).insert(key) {
+        for candidate in numbered_names(name, is_directory, self.rules.limit) {
+            if !self.claims(&candidate) {
                 continue;
             }
             match make(&candidate) {
@@ -362,6 +365,23 @@ impl Names {
             }
         }
         Err(Failure::Place(PlaceError::Exists))
+    }
+
+    /// `name`, which stricter rules gave a name the mount refused, or a
+    /// number of it where it is taken.
+    fn stricter<T>(
+        &self,
+        name: &OsStr,
+        is_directory: bool,
+        mut make: impl FnMut(&OsStr) -> Result<T, Failure>,
+    ) -> Result<(OsString, T), Failure> {
+        if self.claims(name) {
+            match make(name) {
+                Err(Failure::Place(PlaceError::Exists)) => {}
+                made => return made.map(|value| (name.to_os_string(), value)),
+            }
+        }
+        self.number(name, is_directory, make)
     }
 }
 
@@ -374,15 +394,22 @@ pub(super) fn make_numbered<T>(
     mut make: impl FnMut(&OsStr) -> Result<T, Failure>,
 ) -> Result<(PathBuf, T), Failure> {
     let name = path.file_name().unwrap_or_default();
-    match make(name) {
+    let (saved, made, cause) = match make(name) {
         Err(Failure::Place(PlaceError::Exists)) => {
             let (saved, made) = names.number(name, is_directory, make)?;
-            let saved = path.with_file_name(saved);
-            copy.renamed(path.to_path_buf(), saved.clone(), cause);
-            Ok((saved, made))
+            (saved, made, cause)
         }
-        made => made.map(|value| (path.to_path_buf(), value)),
-    }
+        Err(refused) if refused.refuses_name() => {
+            let target = (name, is_directory);
+            super::retry_refused(copy, &names.rules, target, refused, |stricter| {
+                names.stricter(stricter, is_directory, &mut make)
+            })?
+        }
+        made => return made.map(|value| (path.to_path_buf(), value)),
+    };
+    let saved = path.with_file_name(saved);
+    copy.renamed(path.to_path_buf(), saved.clone(), cause);
+    Ok((saved, made))
 }
 
 /// Reports a child the plan named otherwise, from its own name to the
@@ -438,7 +465,8 @@ impl Folder {
         let snapshot = Snapshot::read(fs, source.as_fd(), &source_stat)?;
         let naming = self.naming.decide(fs, self.mount.family, target.as_fd());
         let fixing = tree.crosses(&source_stat, &target_stat, &self.mount);
-        let children = tree.plan(source.as_fd(), &self.rules, fixing, naming.key())?;
+        let rules = copy.names.in_folder(self.mount.key, self.rules);
+        let children = tree.plan(source.as_fd(), &rules, fixing, naming.key())?;
         let requested = children
             .iter()
             .map(|(_, _, planned)| planned.target.clone())
@@ -448,7 +476,7 @@ impl Folder {
             dir: Arc::new(target),
             stat: target_stat,
             path: self.path,
-            names: Names::new(requested, naming, self.mount.family, self.rules.limit),
+            names: Names::new(requested, naming, self.mount.family, rules),
             rules: self.rules,
             mount: self.mount,
             scope: self.scope,
@@ -769,7 +797,7 @@ fn claim_folder(
         Err(error) if taken(fs, entry, error) => adopt(fs, entry, Some(names), |stat| {
             stat.is_directory() && fs.names(entry).is_ok_and(|names| names.is_empty())
         }),
-        Err(error) => Err(error.into()),
+        Err(error) => Err(creation_failure(fs, entry, error)),
     }
 }
 
@@ -799,7 +827,7 @@ fn claim_file(
             {
                 copy.nodes_refused.store(true, Ordering::Relaxed);
             }
-            Err(error) => return Err(error.into()),
+            Err(error) => return Err(creation_failure(fs, entry, error)),
         }
     }
     match fs.create_readonly(entry, Mode::from_raw_mode(0o600)) {
@@ -810,7 +838,7 @@ fn claim_file(
             Ok(identity)
         }
         Err(error) if taken(fs, entry, error) => adopt(fs, entry, Some(names), fresh_file),
-        Err(error) => Err(error.into()),
+        Err(error) => Err(creation_failure(fs, entry, error)),
     }
 }
 
@@ -840,7 +868,7 @@ pub(super) fn copy_link(
     let link = read_link(fs, source)?;
     if let Err(error) = fs.symlink(&link, target) {
         if !taken(fs, target, error) {
-            return Err(error.into());
+            return Err(creation_failure(fs, target, error));
         }
         adopt(fs, target, names, |stat| {
             stat.kind == FileType::Symlink
@@ -882,7 +910,7 @@ pub(super) fn copy_fifo(
             adopt(fs, target, names, |stat| stat.kind == FileType::Fifo)?
         }
         Err(error) if refuses_pipes(error) => return Ok((stat, None)),
-        Err(error) => return Err(error.into()),
+        Err(error) => return Err(creation_failure(fs, target, error)),
     };
     let finished = finish_pipe(copy, &stat, (target, identity), parent, mount);
     // Closed by now, so the pipe is removed rather than renamed aside on NFS.
@@ -1018,7 +1046,9 @@ impl File {
                     let target = Entry::new(dir, name);
                     match fs.create_exclusive(target, Mode::from_raw_mode(0o600)) {
                         Ok(fd) => Ok((fd, None)),
-                        Err(error) if !taken(fs, target, error) => Err(error.into()),
+                        Err(error) if !taken(fs, target, error) => {
+                            Err(creation_failure(fs, target, error))
+                        }
                         Err(_) if self.names.adopts() => {
                             let identity = adopt(fs, target, Some(&self.names), fresh_file)?;
                             tree.made(&self.path.with_file_name(name), identity);
@@ -1189,14 +1219,15 @@ impl Merged {
         // A stage made in the live folder inherits its casefolding.
         let naming = Naming::Decide.decide(fs, mount.family, target.as_fd());
         let fixing = tree.crosses(&source_stat, &target_stat, &mount);
+        let folder = copy.names.in_folder(mount.key, rules);
         // As the merge planner, which cannot read a folder's casefolding.
-        let children = tree.plan(source.as_fd(), &rules, fixing, Key::Folded)?;
+        let children = tree.plan(source.as_fd(), &folder, fixing, Key::Folded)?;
         let requested = children
             .iter()
             .map(|(_, _, planned)| planned.target.clone())
             .collect();
         let live = Live {
-            names: Names::new(requested, naming, mount.family, rules.limit),
+            names: Names::new(requested, naming, mount.family, folder),
             rules,
             naming,
             source: Arc::new(source),

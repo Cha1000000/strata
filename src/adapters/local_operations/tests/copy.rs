@@ -1377,6 +1377,372 @@ fn a_copy_onto_a_posix_mount_leaves_windows_characters_untouched() -> Result<(),
     Ok(())
 }
 
+fn refuses_colons_as_bad_messages(name: &OsStr) -> Option<Errno> {
+    name.as_encoded_bytes()
+        .contains(&b':')
+        .then_some(Errno::BADMSG)
+}
+
+fn refuses_colons_as_missing(name: &OsStr) -> Option<Errno> {
+    name.as_encoded_bytes()
+        .contains(&b':')
+        .then_some(Errno::NOENT)
+}
+
+/// Pastes `items` into `destination`, which they are not on.
+fn paste_into(destination: &Path, items: &[PathBuf]) -> Vec<OperationEvent> {
+    run_paste(PasteRequest {
+        id: OperationRequestId(1590),
+        destination: Location::local(destination),
+        items: items
+            .iter()
+            .map(|source| PasteItem {
+                source: Location::local(source),
+                conflict: TransferConflict::FailIfExists,
+            })
+            .collect(),
+        move_sources: false,
+    })
+}
+
+/// What a paste brings onto a mount that refuses some names.
+struct Refusing {
+    label: &'static str,
+    quirks: Preset,
+    /// A refused name, and a sibling that has the name stricter rules give it.
+    first: [&'static str; 2],
+    /// A refused folder.
+    second: &'static str,
+    /// A refused item at the top, a folder or a file, and an item already
+    /// there with the name stricter rules give it.
+    top: (&'static str, bool, &'static str),
+    /// Pasted later: a refused name and one ending in a dot in a folder,
+    /// and a refused name at the top.
+    later: [&'static str; 3],
+    /// What `first`, `second`, `top` and `later` are saved as.
+    saved: [&'static str; 6],
+    /// The names the mount is asked for and refuses, in each paste.
+    refused: [&'static [&'static str]; 2],
+}
+
+#[test]
+fn a_refused_name_takes_the_first_stricter_rules_it_passes_and_teaches_only_a_mount_that_learns()
+-> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let unknown_daemon = || Quirks {
+        mount_type: Some(("fuse.strictfs", "rw,user_id=0,group_id=0")),
+        invalid_name: Some(refuses_colons_as_bad_messages),
+        ..Quirks::default()
+    };
+    let ntfs_3g_without_udev = || Quirks {
+        device_format: None,
+        ..Quirks::ntfs_3g()
+    };
+    // As a casefolded folder refuses names its filesystem takes elsewhere.
+    let strict_ext4 = || Quirks {
+        invalid_name: Some(has_colon),
+        ..Quirks::ext4()
+    };
+    // Each mount places the top item its own way: a staged folder, a
+    // staged file, and a file linked from an unnamed one.
+    let rows = [
+        Refusing {
+            label: "unknown FUSE daemon",
+            quirks: unknown_daemon,
+            first: ["a:b", "a_b"],
+            second: "c:d",
+            top: ("x:y", true, "x_y"),
+            later: ["e:f", "dot.", "g:h"],
+            saved: ["a_b (1)", "c_d", "x_y (1)", "e_f", "dot.", "g_h"],
+            refused: [&["a:b", "x:y"], &[]],
+        },
+        // The top name is fixed for Windows first, and then refused.
+        Refusing {
+            label: "ntfs-3g that udev cannot name",
+            quirks: ntfs_3g_without_udev,
+            first: ["aux.c", "aux_.c"],
+            second: "con.h",
+            top: ("prn.txt?", false, "prn_.txt_"),
+            later: ["com1.log", "dot.", "lpt1.ini"],
+            saved: [
+                "aux_ (1).c",
+                "con_.h",
+                "prn_ (1).txt_",
+                "com1_.log",
+                "dot",
+                "lpt1_.ini",
+            ],
+            refused: [&["aux.c", "prn.txt_"], &[]],
+        },
+        Refusing {
+            label: "ext4",
+            quirks: strict_ext4,
+            first: ["a:b", "a_b"],
+            second: "c:d",
+            top: ("x:y", false, "x_y"),
+            later: ["e:f", "dot.", "g:h"],
+            saved: ["a_b (1)", "c_d", "x_y (1)", "e_f", "dot.", "g_h"],
+            refused: [&["a:b", "c:d", "x:y"], &["e:f", "g:h"]],
+        },
+    ];
+    for row in rows {
+        let label = row.label;
+        let [first, kept] = row.first;
+        let (top, top_folder, existing) = row.top;
+        let [later, dotted, later_top] = row.later;
+        let root = tempfile::tempdir()?;
+        let source = root.path().join("source");
+        let disk = root.path().join("disk");
+        for folder in [
+            Path::new("one"),
+            &Path::new("two").join(row.second),
+            Path::new("three"),
+        ] {
+            fs::create_dir_all(source.join(folder))?;
+        }
+        let top_file = if top_folder {
+            fs::create_dir(source.join(top))?;
+            Path::new(top).join("top")
+        } else {
+            PathBuf::from(top)
+        };
+        fs::create_dir(&disk)?;
+        fs::write(disk.join(existing), "earlier")?;
+        for (path, contents) in [
+            (Path::new("one").join(first), "first"),
+            (Path::new("one").join(kept), "kept"),
+            (Path::new("two").join(row.second).join("inside"), "second"),
+            (top_file, "top"),
+            (Path::new("three").join(later), "later"),
+            (Path::new("three").join(dotted), "dotted"),
+            (PathBuf::from(later_top), "later top"),
+        ] {
+            fs::write(source.join(path), contents)?;
+        }
+        let quirks = (row.quirks)();
+        let refuses = quirks.invalid_name.ok_or("no refusal")?;
+        let scope = FsQuirks::install(&disk, quirks);
+        let refused_calls = || {
+            scope
+                .calls()
+                .iter()
+                .flat_map(|call| call.names.clone())
+                .filter(|name| refuses(name).is_some())
+                .map(|name| name.to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+        };
+
+        let events = paste_into(
+            &disk,
+            &[source.join("one"), source.join("two"), source.join(top)],
+        );
+
+        let invalid = crate::services::RenameCause::Invalid;
+        let [
+            first_saved,
+            second_saved,
+            top_saved,
+            later_saved,
+            dotted_saved,
+            later_top_saved,
+        ] = row.saved;
+        let second = row.second;
+        let mut renamed = vec![
+            (
+                format!("one/{first}"),
+                format!("one/{first_saved}"),
+                invalid,
+            ),
+            (
+                format!("two/{second}"),
+                format!("two/{second_saved}"),
+                invalid,
+            ),
+            (top.to_owned(), top_saved.to_owned(), invalid),
+        ];
+        renamed.sort_by(|left, right| left.0.cmp(&right.0));
+        assert_eq!(
+            renamed_beneath(&disk, &followed_report(&events)),
+            renamed,
+            "{label}"
+        );
+        let top_saved = if top_folder {
+            Path::new(top_saved).join("top")
+        } else {
+            PathBuf::from(top_saved)
+        };
+        for (name, contents) in [
+            (Path::new("one").join(kept), "kept"),
+            (Path::new("one").join(first_saved), "first"),
+            (Path::new("two").join(second_saved).join("inside"), "second"),
+            (top_saved, "top"),
+            (PathBuf::from(existing), "earlier"),
+        ] {
+            let read = fs::read(disk.join(&name))?;
+            assert_eq!(read, contents.as_bytes(), "{label}: {}", name.display());
+        }
+        // Names planned before the mount learned are refused once each.
+        assert_eq!(refused_calls(), row.refused[0], "{label}");
+        scope.clear_calls();
+
+        paste_into(&disk, &[source.join("three"), source.join(later_top)]);
+
+        for (name, contents) in [
+            (Path::new("three").join(later_saved), "later"),
+            (Path::new("three").join(dotted_saved), "dotted"),
+            (PathBuf::from(later_top_saved), "later top"),
+        ] {
+            let read = fs::read(disk.join(&name))?;
+            assert_eq!(read, contents.as_bytes(), "{label}: {}", name.display());
+        }
+        assert_eq!(refused_calls(), row.refused[1], "{label}");
+    }
+    Ok(())
+}
+
+#[test]
+fn a_name_refused_as_missing_neither_turns_unnamed_files_off_nor_writes_twice()
+-> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    // Names given back are refused as they are.
+    for (names, saved) in [(fixing(), Some("a_b")), (NamePolicy::default(), None)] {
+        let root = tempfile::tempdir()?;
+        let source = root.path().join("source");
+        let disk = root.path().join("disk");
+        fs::create_dir_all(&source)?;
+        fs::create_dir(&disk)?;
+        fs::write(source.join("a:b"), b"colon")?;
+        fs::write(source.join("plain"), b"plain")?;
+        let scope = FsQuirks::install(
+            &disk,
+            Quirks {
+                invalid_name: Some(refuses_colons_as_missing),
+                ..Quirks::ext4()
+            },
+        );
+        let copy = |name: &str| {
+            glib::MainContext::default().block_on(copy_new_recursively_on_filesystem(
+                gio::File::for_path(source.join(name)),
+                gio::File::for_path(disk.join(name)),
+                Taken::Fail,
+                gio::Cancellable::new(),
+                None,
+                names.clone(),
+            ))
+        };
+
+        let copied = copy("a:b");
+
+        match saved {
+            Some(saved) => {
+                assert_eq!(copied?.path(), Some(disk.join(saved)));
+                assert_eq!(fs::read(disk.join(saved))?, b"colon");
+                assert!(!scope.used_name(".strata-copy-*"), "{:?}", scope.calls());
+            }
+            None => assert!(copied.is_err()),
+        }
+        scope.clear_calls();
+
+        copy("plain")?;
+
+        assert_eq!(fs::read(disk.join("plain"))?, b"plain");
+        assert_eq!(
+            scope.count(Op::OpenTmpfile),
+            1,
+            "{saved:?}: {:?}",
+            scope.calls()
+        );
+    }
+    Ok(())
+}
+
+fn refused_as_invalid(name: &OsStr) -> Option<Errno> {
+    (name == "refused").then_some(Errno::INVAL)
+}
+
+fn refused_as_illegal(name: &OsStr) -> Option<Errno> {
+    (name == "refused").then_some(Errno::ILSEQ)
+}
+
+fn refused_as_bad_message(name: &OsStr) -> Option<Errno> {
+    (name == "refused").then_some(Errno::BADMSG)
+}
+
+fn refused_as_missing(name: &OsStr) -> Option<Errno> {
+    (name == "refused").then_some(Errno::NOENT)
+}
+
+fn refused_as_too_long(name: &OsStr) -> Option<Errno> {
+    (name == "refused").then_some(Errno::NAMETOOLONG)
+}
+
+#[test]
+fn a_name_no_stricter_rules_change_fails_naming_the_item_and_the_reason()
+-> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    type Refusal = fn(&OsStr) -> Option<Errno>;
+    let invalid = crate::services::INVALID_NAME_REASON;
+    let too_long = "The name is too long";
+    let rows: [(Refusal, bool, &str); 7] = [
+        (refused_as_invalid, true, invalid),
+        (refused_as_illegal, true, invalid),
+        (refused_as_bad_message, true, invalid),
+        (refused_as_missing, true, invalid),
+        (refused_as_too_long, true, too_long),
+        (refused_as_invalid, false, invalid),
+        (refused_as_bad_message, false, invalid),
+    ];
+    for (refusal, nested, reason) in rows {
+        let root = tempfile::tempdir()?;
+        let source = root.path().join("source");
+        let disk = root.path().join("disk");
+        fs::create_dir_all(&source)?;
+        fs::create_dir(&disk)?;
+        fs::write(source.join("refused"), b"refused")?;
+        let _disk = FsQuirks::install(
+            &disk,
+            Quirks {
+                invalid_name: Some(refusal),
+                ..Quirks::default()
+            },
+        );
+        let item = if nested {
+            source.clone()
+        } else {
+            source.join("refused")
+        };
+        let target = disk.join(item.file_name().ok_or("no name")?);
+
+        let error = glib::MainContext::default()
+            .block_on(copy_new_recursively_on_filesystem(
+                gio::File::for_path(&item),
+                gio::File::for_path(&target),
+                Taken::Fail,
+                gio::Cancellable::new(),
+                None,
+                fixing(),
+            ))
+            .expect_err("refused");
+
+        assert_eq!(
+            error.message(),
+            rust_i18n::t!(
+                "Could not copy %{name}: %{error}",
+                name = "refused",
+                error = crate::services::error_detail(crate::i18n::tr(reason))
+            ),
+            "{reason}, nested: {nested}"
+        );
+    }
+    Ok(())
+}
+
 fn stage(root: &Path, directory: bool) -> Result<StagedSibling, Box<dyn Error>> {
     if directory {
         staged(root, StageContent::Directory)

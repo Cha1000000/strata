@@ -35,17 +35,17 @@ use rustix::{
 };
 
 use super::{
-    LocalFileIdentity, PinnedEntry, Reported, StageContent, StagedSibling, TransferProgressTracker,
-    blocking_join_message, bounded_local_worker_count, cancelled_local_operation,
-    copy_failure_after_cleanup,
+    INVALID_NAME_REASON, LocalFileIdentity, PinnedEntry, Reported, StageContent, StagedSibling,
+    TransferProgressTracker, blocking_join_message, bounded_local_worker_count,
+    cancelled_local_operation, copy_failure_after_cleanup,
     fs_ops::{Entry, EntryStat, FsOps, fs},
     io_error, local_delete_worker_count, local_device_is_rotational,
-    mount_profile::{NamePolicy, known_mount, names_in},
-    naming::Taken,
+    mount_profile::{FolderRules, NamePolicy, known_mount, names_in},
+    naming::{Taken, may_be_refused, numbered_names, stricter_names},
     open_local_parent_directory, os_error_detail, os_error_text,
     parallel_delete_local_blocking_with_workers, placement,
     placement::{COPY_PREFIX, ENOTSUPP, PlaceError, STAGE_PREFIX},
-    placement_error, run_blocking, run_cancellable,
+    placement_error, placement_error_kind, placement_reason, run_blocking, run_cancellable,
 };
 use crate::{
     adapters::volume::{
@@ -54,7 +54,7 @@ use crate::{
     },
     model::Location,
     services::{
-        KeptCause, PlacedSnapshot, RenameCause, RenamedItem, SkippedItem, SpecialKind,
+        KeptCause, NameMode, PlacedSnapshot, RenameCause, RenamedItem, SkippedItem, SpecialKind,
         TransferReport,
     },
 };
@@ -547,6 +547,9 @@ struct Followed<T> {
 struct Left {
     renamed: Vec<(PathBuf, PathBuf, RenameCause)>,
     skipped: Vec<(PathBuf, SpecialKind)>,
+    /// The name the item was to have, where the mount refused it, and why
+    /// the one it took differs.
+    item: Option<(OsString, RenameCause)>,
 }
 
 fn rebase(path: &mut PathBuf, from: &Path, to: &Path) {
@@ -567,15 +570,23 @@ fn report(progress: Option<&TransferProgressTracker>, root: &Path, left: Left) {
 
 fn left_report(root: &Path, left: Left) -> TransferReport {
     let location = |path: PathBuf| Location::local(root.join(path));
+    let item = left.item.map(|(requested, cause)| RenamedItem {
+        requested: Location::local(root.with_file_name(requested)),
+        saved_as: Location::local(root.to_path_buf()),
+        cause,
+    });
     TransferReport {
-        renamed: left
-            .renamed
+        renamed: item
             .into_iter()
-            .map(|(requested, saved_as, cause)| RenamedItem {
-                requested: location(requested),
-                saved_as: location(saved_as),
-                cause,
-            })
+            .chain(
+                left.renamed
+                    .into_iter()
+                    .map(|(requested, saved_as, cause)| RenamedItem {
+                        requested: location(requested),
+                        saved_as: location(saved_as),
+                        cause,
+                    }),
+            )
             .collect(),
         skipped: left
             .skipped
@@ -721,18 +732,51 @@ fn split(path: &Path) -> Result<(Arc<OwnedFd>, OsString), glib::Error> {
     Ok((Arc::new(parent), name.to_os_string()))
 }
 
+/// The first of `names` that `attempt` makes in `dir` as `taken` allows,
+/// or what the mount takes for one it refused.
 fn first_free<T>(
+    copy: &Copy,
+    dir: BorrowedFd<'_>,
     names: impl IntoIterator<Item = OsString>,
-    taken: Taken,
+    (taken, is_directory): (Taken, bool),
     mut attempt: impl FnMut(&OsStr) -> Result<T, Failure>,
 ) -> Result<(OsString, T), Failure> {
     for name in names {
         match attempt(&name) {
             Err(Failure::Place(PlaceError::Exists)) if taken == Taken::Number => {}
+            Err(refused) if refused.refuses_name() => {
+                return copy.retry_item(dir, (&name, is_directory, taken), refused, attempt);
+            }
             result => return result.map(|value| (name, value)),
         }
     }
     Err(Failure::Place(PlaceError::Exists))
+}
+
+/// Makes what a mount refused under `name` under the names it may take
+/// for it instead, in a folder whose names follow `rules`, until one is
+/// made. A mount that learns keeps the level of rules that made it. Fails
+/// as at first where none is.
+fn retry_refused<T>(
+    copy: &Copy,
+    rules: &FolderRules,
+    (name, is_directory): (&OsStr, bool),
+    refused: Failure,
+    mut make: impl FnMut(&OsStr) -> Result<(OsString, T), Failure>,
+) -> Result<(OsString, T, RenameCause), Failure> {
+    for (strictness, stricter, cause) in stricter_names(name, &rules.fixed, is_directory) {
+        match make(&stricter) {
+            Ok((made, value)) => {
+                if rules.learns {
+                    copy.names.profiles.learn(rules.key, strictness);
+                }
+                return Ok((made, value, cause));
+            }
+            Err(failure) if failure.refuses_name() => {}
+            Err(failure) => return Err(failure),
+        }
+    }
+    Err(refused)
 }
 
 #[derive(Clone, Copy)]
@@ -771,8 +815,8 @@ fn copy_new(
         FileType::Symlink => {
             copy.check_cancelled()?;
             let mount = Mount::new(copy.fs, parent.as_fd());
-            let limit = || copy.name_limit(parent.as_fd());
-            let (name, link) = first_free(taken.names(name, false, limit), taken, |name| {
+            let names = taken.names(name, false, || copy.name_limit(parent.as_fd()));
+            let (name, link) = first_free(copy, parent.as_fd(), names, (taken, false), |name| {
                 tree::copy_link(
                     copy,
                     source.entry(),
@@ -789,8 +833,8 @@ fn copy_new(
         FileType::Directory => {
             let workers = workers.unwrap_or_else(|| worker_count(source, parent));
             if in_place || placement::can_place(copy.fs, parent.as_fd(), true) == Some(false) {
-                let limit = || copy.name_limit(parent.as_fd());
-                return first_free(taken.names(name, true, limit), taken, |name| {
+                let names = taken.names(name, true, || copy.name_limit(parent.as_fd()));
+                return first_free(copy, parent.as_fd(), names, (taken, true), |name| {
                     direct_folder(copy, source, stat.identity, parent, name, workers)
                 })
                 .map(|(name, ())| name);
@@ -802,8 +846,8 @@ fn copy_new(
             copy.check_cancelled()?;
             let mount = Mount::new(copy.fs, parent.as_fd());
             let parent_stat = copy.fs.stat_fd(parent.as_fd())?;
-            let limit = || copy.name_limit(parent.as_fd());
-            let (name, pipe) = first_free(taken.names(name, false, limit), taken, |name| {
+            let names = taken.names(name, false, || copy.name_limit(parent.as_fd()));
+            let (name, pipe) = first_free(copy, parent.as_fd(), names, (taken, false), |name| {
                 let target = Entry::new(&**parent, name);
                 match tree::copy_fifo(copy, source.entry(), target, &parent_stat, &mount, None)? {
                     (pipe, Some(_)) => Ok(pipe),
@@ -914,48 +958,49 @@ fn publish_folder(
     if let Err(failure) = copy.check_cancelled() {
         return Err(copy.discarding(staged, failure));
     }
-    let mut names = taken.names(name, true, || copy.name_limit(staged.parent.as_fd()));
-    while let Some(name) = names.next() {
-        let placed = stage::publish(
-            copy.fs,
-            staged.parent.as_fd(),
-            &staged.name,
-            staged.identity,
-            &name,
-        );
-        match placed {
-            Ok(_) => return Ok(name),
-            Err(PlaceError::Exists) if taken == Taken::Number => {}
-            // Either name may hold the copy, so neither is removed.
-            Err(PlaceError::Unconfirmed) => return Err(Failure::Place(PlaceError::Unconfirmed)),
-            Err(PlaceError::Unsupported) => {
-                let from = copy.uncounted();
-                let source = Source {
-                    parent: staged.parent.clone(),
-                    name: staged.name.clone(),
-                    recorded_in: None,
-                };
-                let copied = first_free(std::iter::once(name).chain(names), taken, |name| {
-                    direct_folder(
-                        &from,
-                        &source,
-                        staged.identity,
-                        &staged.parent,
-                        name,
-                        workers,
-                    )
-                });
-                let discarded = copy.discard(staged);
-                return match (copied, discarded) {
-                    (Ok((name, ())), Ok(())) => Ok(name),
-                    (Ok(_), Err(error)) => Err(Failure::Error(stage_left(&error))),
-                    (Err(failure), discarded) => Err(copy.after_cleanup(failure, discarded)),
-                };
+    let source = Source {
+        parent: staged.parent.clone(),
+        name: staged.name.clone(),
+        recorded_in: None,
+    };
+    // Where the stage cannot be placed, it is copied under the name instead.
+    let mut copied_from = None;
+    let names = taken.names(name, true, || copy.name_limit(staged.parent.as_fd()));
+    let published = first_free(copy, staged.parent.as_fd(), names, (taken, true), |name| {
+        if copied_from.is_none() {
+            match stage::publish(
+                copy.fs,
+                staged.parent.as_fd(),
+                &staged.name,
+                staged.identity,
+                name,
+            ) {
+                Err(PlaceError::Unsupported) => {}
+                published => return published.map(drop).map_err(Failure::Place),
             }
-            Err(error) => return Err(copy.discarding(staged, Failure::Place(error))),
         }
+        let from = copied_from.get_or_insert_with(|| copy.uncounted());
+        direct_folder(
+            from,
+            &source,
+            staged.identity,
+            &staged.parent,
+            name,
+            workers,
+        )
+    });
+    match published {
+        Ok((name, ())) if copied_from.is_some() => match copy.discard(staged) {
+            Ok(()) => Ok(name),
+            Err(error) => Err(Failure::Error(stage_left(&error))),
+        },
+        Ok((name, ())) => Ok(name),
+        // Either name may hold the copy, so neither is removed.
+        Err(Failure::Place(PlaceError::Unconfirmed)) if copied_from.is_none() => {
+            Err(Failure::Place(PlaceError::Unconfirmed))
+        }
+        Err(failure) => Err(copy.discarding(staged, failure)),
     }
-    Err(copy.discarding(staged, Failure::Place(PlaceError::Exists)))
 }
 
 fn stage_left(error: &glib::Error) -> glib::Error {
@@ -1105,7 +1150,7 @@ fn direct_folder(
         return Err(if tree::taken(fs, target, error) {
             Failure::Place(PlaceError::Exists)
         } else {
-            error.into()
+            creation_failure(fs, target, error)
         });
     }
     let identity = fs
@@ -1195,6 +1240,8 @@ fn merge(
 enum Failure {
     Cancelled,
     Os(Errno),
+    /// A call that creates a name failed as mounts fail names they refuse.
+    NameRefused(Errno),
     Place(PlaceError),
     Changed,
     NotCopyable,
@@ -1210,7 +1257,7 @@ impl From<Errno> for Failure {
 impl From<PlaceError> for Failure {
     fn from(error: PlaceError) -> Self {
         match error {
-            PlaceError::Io(error) => Self::Os(error),
+            PlaceError::Io(errno) if !error.refuses_name() => Self::Os(errno),
             error => Self::Place(error),
         }
     }
@@ -1219,6 +1266,14 @@ impl From<PlaceError> for Failure {
 impl Failure {
     fn named(self, name: &OsStr) -> Self {
         Self::Error(self.into_error(name))
+    }
+
+    fn refuses_name(&self) -> bool {
+        match self {
+            Self::NameRefused(_) => true,
+            Self::Place(error) => error.refuses_name(),
+            _ => false,
+        }
     }
 
     fn into_error(self, name: &OsStr) -> glib::Error {
@@ -1238,7 +1293,23 @@ impl Failure {
                     _ => io_error(message),
                 }
             }
-            Self::Place(error) => placement_error(error),
+            Self::NameRefused(error) => refused_name(&name, error == Errno::NAMETOOLONG),
+            Self::Place(error @ PlaceError::Io(errno)) if error.refuses_name() => {
+                refused_name(&name, errno == Errno::NAMETOOLONG)
+            }
+            Self::Place(PlaceError::IntoItself) => placement_error(PlaceError::IntoItself),
+            Self::Place(PlaceError::Changed) => io_error(rust_i18n::t!(
+                "%{name} changed while the operation was in progress",
+                name = name
+            )),
+            Self::Place(error) => glib::Error::new(
+                placement_error_kind(error),
+                &rust_i18n::t!(
+                    "Could not copy %{name}: %{error}",
+                    name = name,
+                    error = crate::services::error_detail(placement_reason(error))
+                ),
+            ),
             Self::Changed => io_error(rust_i18n::t!(
                 "%{name} changed while it was being copied",
                 name = name
@@ -1249,6 +1320,45 @@ impl Failure {
             )),
             Self::Error(error) => error,
         }
+    }
+}
+
+/// A name the mount refused, as a failure to copy the item `name`.
+fn refused_name(name: &str, too_long: bool) -> glib::Error {
+    let (kind, reason) = if too_long {
+        (
+            gio::IOErrorEnum::FilenameTooLong,
+            os_error_detail(Errno::NAMETOOLONG),
+        )
+    } else {
+        (
+            gio::IOErrorEnum::InvalidFilename,
+            crate::services::error_detail(crate::i18n::tr(INVALID_NAME_REASON)),
+        )
+    };
+    let message = rust_i18n::t!(
+        "Could not copy %{name}: %{error}",
+        name = name,
+        error = reason
+    );
+    glib::Error::new(kind, &message)
+}
+
+/// How a call that creates `at` failed: as mounts fail names they refuse,
+/// SMB and exfat-fuse with `ENOENT` in a folder that still exists.
+fn creation_failure(fs: &dyn FsOps, at: Entry<'_>, error: Errno) -> Failure {
+    if refuses_name(fs, at.dir, error) {
+        Failure::NameRefused(error)
+    } else {
+        Failure::Os(error)
+    }
+}
+
+fn refuses_name(fs: &dyn FsOps, dir: BorrowedFd<'_>, error: Errno) -> bool {
+    match error {
+        Errno::INVAL | Errno::ILSEQ | Errno::NAMETOOLONG | Errno::BADMSG => true,
+        Errno::NOENT => fs.stat_fd(dir).is_ok_and(|folder| folder.nlink > 0),
+        _ => false,
     }
 }
 
@@ -1384,9 +1494,11 @@ fn link_tmpfile(fs: &dyn FsOps, fd: BorrowedFd<'_>, to: Entry<'_>) -> Result<(),
             TMPFILE_LINK.store(TMPFILE_LINK_PROC, Ordering::Relaxed);
             Ok(())
         }
-        // Unless the folder itself was removed meanwhile.
+        // Unless the folder itself was removed meanwhile, or the mount may
+        // refuse the name, as SMB and exfat-fuse do with `ENOENT`.
         Err(Errno::NOENT)
             if known == TMPFILE_LINK_UNKNOWN
+                && !may_be_refused(to.name)
                 && fs.stat_fd(to.dir).is_ok_and(|folder| folder.nlink > 0) =>
         {
             TMPFILE_LINK.store(TMPFILE_LINK_UNAVAILABLE, Ordering::Relaxed);
@@ -1461,7 +1573,45 @@ impl Copy {
 
     /// How long a name may be in `dir`, for numbering one taken there.
     fn name_limit(&self, dir: BorrowedFd<'_>) -> NameLimit {
-        names_in(self.mount(dir).names, dir).limit
+        self.folder_rules(dir).limit
+    }
+
+    fn folder_rules(&self, dir: BorrowedFd<'_>) -> FolderRules {
+        let mount = self.mount(dir);
+        self.names.in_folder(mount.key, names_in(mount.names, dir))
+    }
+
+    /// The item a forward copy was given, which the mount refused to name
+    /// `name` in `dir`, under a name it takes instead, numbered where that
+    /// is taken. It is reported where `name` was planned for it, not where
+    /// it is one of Keep Both's numbers. Names given back, as undo does,
+    /// stay refused.
+    fn retry_item<T>(
+        &self,
+        dir: BorrowedFd<'_>,
+        (name, is_directory, taken): (&OsStr, bool, Taken),
+        refused: Failure,
+        mut attempt: impl FnMut(&OsStr) -> Result<T, Failure>,
+    ) -> Result<(OsString, T), Failure> {
+        if self.names.mode != NameMode::Fix {
+            return Err(refused);
+        }
+        let rules = self.folder_rules(dir);
+        let (made, value, cause) =
+            retry_refused(self, &rules, (name, is_directory), refused, |stricter| {
+                let numbered = numbered_names(stricter, is_directory, rules.limit);
+                for candidate in std::iter::once(stricter.to_os_string()).chain(numbered) {
+                    match attempt(&candidate) {
+                        Err(Failure::Place(PlaceError::Exists)) => {}
+                        made => return made.map(|value| (candidate, value)),
+                    }
+                }
+                Err(Failure::Place(PlaceError::Exists))
+            })?;
+        if taken == Taken::Fail {
+            lock(&self.left).item = Some((name.to_os_string(), cause));
+        }
+        Ok((made, value))
     }
 
     fn nested(&self) -> Arc<Self> {
@@ -1482,7 +1632,9 @@ impl Copy {
     }
 
     fn adopt(&self, nested: &Self, path: &Path) {
-        let Left { renamed, skipped } = std::mem::take(&mut *lock(&nested.left));
+        let Left {
+            renamed, skipped, ..
+        } = std::mem::take(&mut *lock(&nested.left));
         let mut left = lock(&self.left);
         left.renamed
             .extend(renamed.into_iter().map(|(requested, saved_as, cause)| {
@@ -2054,15 +2206,21 @@ impl<'a> FileCopy<'a> {
         let fs = self.copy.fs;
         match target {
             FileTarget::Final(name, taken) => {
-                for name in taken.names(name, false, || self.copy.name_limit(self.dir)) {
-                    match link_tmpfile(fs, tmpfile, self.at(&name)) {
-                        Err(error)
-                            if taken == Taken::Number
-                                && placement::file_creation_error(error) == PlaceError::Exists => {}
-                        linked => return linked.map(|()| name),
-                    }
-                }
-                Err(Errno::EXIST)
+                let names = taken.names(name, false, || self.copy.name_limit(self.dir));
+                first_free(self.copy, self.dir, names, (taken, false), |name| {
+                    let to = self.at(name);
+                    link_tmpfile(fs, tmpfile, to).map_err(|error| {
+                        match placement::file_creation_error(error) {
+                            PlaceError::Exists => Failure::Place(PlaceError::Exists),
+                            _ => creation_failure(fs, to, error),
+                        }
+                    })
+                })
+                .map(|(name, ())| name)
+                .map_err(|failure| match failure {
+                    Failure::Os(error) | Failure::NameRefused(error) => error,
+                    _ => Errno::EXIST,
+                })
             }
             FileTarget::Hidden => placement::reserve_hidden_name(STAGE_PREFIX, |name| {
                 link_tmpfile(fs, tmpfile, self.at(name)).map_err(|error| {
@@ -2213,45 +2371,38 @@ impl<'a> FileCopy<'a> {
             self.copy.add_file(0);
             return Ok((stage.name, stage.created.identity));
         };
-        let mut names = taken.names(name, false, || self.copy.name_limit(self.dir));
-        let published = loop {
-            let Some(name) = names.next() else {
-                return Err(self.discard(&stage, Failure::Place(PlaceError::Exists)));
-            };
-            match stage::publish(fs, self.dir, &stage.name, stage.created.identity, &name) {
-                Ok(_) => break (name, stage.created.identity),
-                Err(PlaceError::Exists) if taken == Taken::Number => {}
-                // Either name may hold the copy, so neither is removed.
-                Err(PlaceError::Unconfirmed) => {
-                    return Err(Failure::Place(PlaceError::Unconfirmed));
-                }
-                Err(PlaceError::Unsupported) => {
-                    let dir = self.dir;
-                    let staged = Entry {
-                        dir,
-                        name: &stage.name,
-                    };
-                    let created = first_free(std::iter::once(name).chain(names), taken, |name| {
-                        self.create_from(
-                            staged,
-                            stage.created.identity,
-                            Some(snapshot),
-                            name,
-                            parent,
-                        )
-                    });
-                    let created = match created {
-                        Ok(created) => created,
-                        Err(failure) => return Err(self.discard(&stage, failure)),
-                    };
-                    if let Err(error) = self.remove_made(&stage.name, stage.created.identity) {
-                        return Err(Failure::Error(stage_left(&error)));
-                    }
-                    break created;
-                }
-                Err(error) => return Err(self.discard(&stage, Failure::Place(error))),
-            }
+        let (copy, dir) = (self.copy, self.dir);
+        let staged = Entry {
+            dir,
+            name: &stage.name,
         };
+        // Where the stage cannot be placed, it is copied under the name instead.
+        let mut created_from = false;
+        let names = taken.names(name, false, || copy.name_limit(dir));
+        let published = first_free(copy, dir, names, (taken, false), |name| {
+            if !created_from {
+                match stage::publish(fs, dir, &stage.name, stage.created.identity, name) {
+                    Err(PlaceError::Unsupported) => created_from = true,
+                    published => {
+                        return published
+                            .map(|_| stage.created.identity)
+                            .map_err(Failure::Place);
+                    }
+                }
+            }
+            self.create_from(staged, stage.created.identity, Some(snapshot), name, parent)
+        });
+        let published = match published {
+            Ok(published) => published,
+            // Either name may hold the copy, so neither is removed.
+            Err(Failure::Place(PlaceError::Unconfirmed)) if !created_from => {
+                return Err(Failure::Place(PlaceError::Unconfirmed));
+            }
+            Err(failure) => return Err(self.discard(&stage, failure)),
+        };
+        if created_from && let Err(error) = self.remove_made(&stage.name, stage.created.identity) {
+            return Err(Failure::Error(stage_left(&error)));
+        }
         self.copy.add_file(0);
         Ok(published)
     }
@@ -2298,7 +2449,10 @@ impl<'a> FileCopy<'a> {
         let target = self.at(name);
         let fd = fs
             .create_exclusive(target, Mode::from_raw_mode(0o600))
-            .map_err(|error| Failure::Place(placement::file_creation_error(error)))?;
+            .map_err(|error| match creation_failure(fs, target, error) {
+                Failure::Os(error) => Failure::Place(placement::file_creation_error(error)),
+                refused => refused,
+            })?;
         let created = fs.stat_fd(fd.as_fd())?;
         // Takes `fd`, so a failed file is closed before it is removed: NFS
         // renames an open file aside instead.

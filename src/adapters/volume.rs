@@ -36,8 +36,8 @@ pub(crate) use mounts::{
     max_file_size,
 };
 pub(crate) use names::{
-    MountNames, NameEncoding, NameLimit, NameProfile, NameRules, PrivateUse, Reserved, Strip,
-    gvfs_bridge_profile, gvfs_profile,
+    MountNames, NameEncoding, NameLimit, NameProfile, NameRules, PrivateUse, Reserved, Strictness,
+    Strip, gvfs_bridge_profile, gvfs_profile,
 };
 
 pub(crate) const REMOTE_QUERY_TIMEOUT: Duration = Duration::from_secs(2);

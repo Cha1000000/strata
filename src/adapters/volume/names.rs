@@ -81,6 +81,27 @@ pub(crate) struct NameProfile {
     pub learns: bool,
 }
 
+/// How much of the Windows rules a mount that refused a name may need: each
+/// level holds those before it.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub(crate) enum Strictness {
+    Utf8,
+    Characters,
+    TrailingDots,
+    DeviceNames,
+    Length,
+}
+
+impl Strictness {
+    pub(crate) const ALL: [Self; 5] = [
+        Self::Utf8,
+        Self::Characters,
+        Self::TrailingDots,
+        Self::DeviceNames,
+        Self::Length,
+    ];
+}
+
 /// Where a mount's name rules come from.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum MountNames {
@@ -182,6 +203,40 @@ impl NameProfile {
             encoding: self.encoding,
             folds: self.folds,
             ..Self::posix(None)
+        }
+    }
+
+    /// These rules and the Windows rules up to `strictness`.
+    pub(crate) fn stricter(self, strictness: Strictness) -> Self {
+        let at = |level| strictness >= level;
+        let within = |limit: Option<u16>| {
+            Some(limit.map_or(WINDOWS_UNITS, |limit| limit.min(WINDOWS_UNITS)))
+        };
+        let mut rules = self;
+        if rules.encoding == NameEncoding::AnyBytes {
+            rules.encoding = NameEncoding::Utf8;
+        }
+        if at(Strictness::Characters) {
+            rules.rules = NameRules::Windows;
+        }
+        if at(Strictness::TrailingDots) && rules.strip == Strip::None {
+            rules.strip = Strip::Trailing;
+        }
+        if at(Strictness::DeviceNames) {
+            rules.reserved = Reserved::Full;
+        }
+        if at(Strictness::Length) {
+            rules.limit.bytes = within(rules.limit.bytes);
+            rules.limit.units = within(rules.limit.units);
+        }
+        rules
+    }
+
+    /// These rules and what refusals taught a mount that learns.
+    pub(crate) fn taught(self, strictness: Option<Strictness>) -> Self {
+        match strictness {
+            Some(strictness) if self.learns => self.stricter(strictness),
+            _ => self,
         }
     }
 }

@@ -12,7 +12,7 @@ use super::{
     placement::{self, PlaceError},
 };
 use crate::{
-    adapters::volume::{NameLimit, NameProfile},
+    adapters::volume::{NameLimit, NameProfile, Strictness},
     services::RenameCause,
 };
 
@@ -37,6 +37,33 @@ pub(super) fn parse_copy_suffix(stem: &OsStr) -> (&OsStr, Option<u64>) {
         }
     }
     (stem, None)
+}
+
+/// The names a mount that refused `name` may take for it, in a folder whose
+/// names follow `rules`: those that each level of the Windows rules in turn
+/// gives, where that changes the name, with why.
+pub(super) fn stricter_names(
+    name: &OsStr,
+    rules: &NameProfile,
+    is_directory: bool,
+) -> Vec<(Strictness, OsString, RenameCause)> {
+    let mut names = Vec::<(Strictness, OsString, RenameCause)>::new();
+    for strictness in Strictness::ALL {
+        let fixed = fix::fix_name(name, &rules.stricter(strictness), is_directory);
+        let Some(cause) = fixed.cause else {
+            continue;
+        };
+        if names.iter().all(|(_, tried, _)| **tried != *fixed.name) {
+            names.push((strictness, fixed.name.into_owned(), cause));
+        }
+    }
+    names
+}
+
+/// Whether a mount may refuse `name` for a reason the Windows rules know.
+pub(super) fn may_be_refused(name: &OsStr) -> bool {
+    let strictest = NameProfile::posix(None).stricter(Strictness::Length);
+    fix::fix_name(name, &strictest, false).cause.is_some()
 }
 
 /// Keep Both's names: "name (1)", or one past the number it has, with a

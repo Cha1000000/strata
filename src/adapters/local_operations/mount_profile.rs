@@ -24,8 +24,8 @@ use super::{
 use crate::{
     adapters::volume::{
         Family, FuseFormat, MountCapabilities, MountKey, MountNames, MountType, NameLimit,
-        NameProfile, NameRules, family, gvfs_bridge_profile, gvfs_profile, holds_symlinks,
-        learn_mount_capability, max_file_size, mount_capabilities,
+        NameProfile, NameRules, Strictness, family, gvfs_bridge_profile, gvfs_profile,
+        holds_symlinks, learn_mount_capability, max_file_size, mount_capabilities,
     },
     services::NameMode,
 };
@@ -45,6 +45,8 @@ fn known(fs: &dyn FsOps, dir: BorrowedFd<'_>, key: MountKey) -> MountCapabilitie
 }
 
 /// For `fuseblk`, udev's record of the device tells which daemon serves it.
+/// Where another thread learned the mount meanwhile, what it learned, and
+/// learned since, stays.
 fn learn_mount_type(fs: &dyn FsOps, dir: BorrowedFd<'_>, key: MountKey) -> MountCapabilities {
     let mount = fs.mount_type(dir);
     let mount_type = mount.as_ref().map(|(mount_type, _)| mount_type);
@@ -78,14 +80,16 @@ fn learn_mount_type(fs: &dyn FsOps, dir: BorrowedFd<'_>, key: MountKey) -> Mount
     let max_file_size = mount_type.and_then(|mount| max_file_size(&mount.fs_type, format));
     let mut learned = MountCapabilities::default();
     learn_mount_capability(key, |capabilities| {
-        capabilities.family = Some(family);
-        capabilities.stable_inodes = Some(stable);
-        capabilities.fuse_format = fuse_format;
-        capabilities.coarse_times = coarse_times;
-        capabilities.deferred_close = deferred_close;
-        capabilities.names = Some(names);
-        capabilities.symlinks = symlinks;
-        capabilities.max_file_size = max_file_size;
+        if capabilities.family.is_none() {
+            capabilities.family = Some(family);
+            capabilities.stable_inodes = Some(stable);
+            capabilities.fuse_format = fuse_format;
+            capabilities.coarse_times = coarse_times;
+            capabilities.deferred_close = deferred_close;
+            capabilities.names = Some(names);
+            capabilities.symlinks = symlinks;
+            capabilities.max_file_size = max_file_size;
+        }
         learned = *capabilities;
     });
     learned
@@ -111,7 +115,7 @@ impl MountProfile {
     /// Of a mount as `seen`, inside its folder `dir` where that is open.
     fn of(seen: MountCapabilities, dir: Option<BorrowedFd<'_>>) -> Self {
         Self {
-            names: dir.map_or_else(|| NameProfile::unknown(0), |dir| names_in(seen.names, dir)),
+            names: dir.map_or_else(|| NameProfile::unknown(0), |dir| rules_in(&seen, dir)),
             symlinks: seen.symlinks,
             max_file_size: seen.max_file_size,
             family: seen.family.unwrap_or(Family::Other),
@@ -162,6 +166,28 @@ impl Profiles {
         MountProfile::of(self.mount(fs, dir).1, Some(dir))
     }
 
+    /// What refusals taught the mount `key` up to now.
+    fn strictness(&self, key: MountKey) -> Option<Strictness> {
+        self.seen().get(&key).and_then(|seen| seen.strictness)
+    }
+
+    /// Teaches the mount `key`, which learns, that names must follow the
+    /// Windows rules up to `strictness`: in this operation, and in later ones
+    /// until the mount changes.
+    pub(super) fn learn(&self, key: MountKey, strictness: Strictness) {
+        let learn = |capabilities: &mut MountCapabilities| {
+            capabilities.strictness = capabilities.strictness.max(Some(strictness));
+        };
+        if let Some(seen) = self.seen().get_mut(&key) {
+            learn(seen);
+        }
+        learn_mount_capability(key, |capabilities| {
+            if capabilities.names.is_some() {
+                learn(capabilities);
+            }
+        });
+    }
+
     fn seen(&self) -> MutexGuard<'_, HashMap<MountKey, MountCapabilities>> {
         self.0.lock().unwrap_or_else(|error| error.into_inner())
     }
@@ -196,6 +222,22 @@ impl NamePolicy {
         match self.mode {
             NameMode::Fix => rules,
             NameMode::Keep => rules.encoding_rules(),
+        }
+    }
+
+    /// How names are made in a folder on the mount `key`, whose rules are
+    /// `rules`, with what its refusals taught it so far.
+    pub(super) fn in_folder(&self, key: MountKey, rules: NameProfile) -> FolderRules {
+        let strictness = rules
+            .learns
+            .then(|| self.profiles.strictness(key))
+            .flatten();
+        let fixed = self.applied(rules);
+        FolderRules {
+            fixed: strictness.map_or(fixed, |strictness| fixed.stricter(strictness)),
+            limit: rules.taught(strictness).limit,
+            key,
+            learns: rules.learns,
         }
     }
 
@@ -264,7 +306,7 @@ impl NamePolicy {
             let fs = fs();
             let target = open_local_parent_directory(&target_path).map_err(io_error)?;
             let (key, seen) = profiles.mount(fs, target.as_fd());
-            let rules = names_in(seen.names, target.as_fd());
+            let rules = rules_in(&seen, target.as_fd());
             let crossing = match source_path {
                 Some(source) => {
                     let source = open_local_parent_directory(&source).map_err(io_error)?;
@@ -361,6 +403,18 @@ fn native_destination(
     }
 }
 
+/// How names are made in one folder a transfer copies into.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct FolderRules {
+    /// What names brought into the folder are fixed by.
+    pub fixed: NameProfile,
+    /// How long names numbered there may be.
+    pub limit: NameLimit,
+    pub key: MountKey,
+    /// Whether a name the mount refuses teaches it.
+    pub learns: bool,
+}
+
 /// How names are given to what a transfer copies into one folder.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct FolderNames {
@@ -418,9 +472,15 @@ fn backend(dir: BorrowedFd<'_>, depth: u16) -> NameProfile {
     )
 }
 
+/// The name rules inside `dir` on a mount `seen` so, with what its
+/// refusals taught it.
+pub(super) fn rules_in(seen: &MountCapabilities, dir: BorrowedFd<'_>) -> NameProfile {
+    names_in(seen.names, dir).taught(seen.strictness)
+}
+
 /// How long a name may be in `dir`, for numbering a name taken there.
 pub(super) fn name_limit(fs: &dyn FsOps, dir: BorrowedFd<'_>) -> NameLimit {
-    names_in(known_mount(fs, dir).1.names, dir).limit
+    rules_in(&known_mount(fs, dir).1, dir).limit
 }
 
 /// [`name_limit`] of `folder`, read off the main thread where it is native,
