@@ -39,9 +39,10 @@ use crate::{
     adapters::{
         local_operations::{
             LocalFileIdentity, StageContent, StagedSibling, cancelled_local_operation,
-            fat_sanitized_name,
             fs_ops::{Entry, EntryStat, FsOps},
-            io_error, numbered_names, os_error_detail, placement,
+            io_error,
+            naming::{fat_sanitized_name, numbered_names},
+            os_error_detail, placement,
             placement::{COPY_PREFIX, PlaceError},
             work_queue::{self, Group, Job, WorkQueue},
         },

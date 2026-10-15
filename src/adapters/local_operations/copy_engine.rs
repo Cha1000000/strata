@@ -35,12 +35,14 @@ use rustix::{
 };
 
 use super::{
-    LocalFileIdentity, PinnedEntry, Reported, StageContent, StagedSibling, Taken,
-    TransferProgressTracker, blocking_join_message, bounded_local_worker_count,
-    cancelled_local_operation, copy_failure_after_cleanup,
+    LocalFileIdentity, PinnedEntry, Reported, StageContent, StagedSibling, TransferProgressTracker,
+    blocking_join_message, bounded_local_worker_count, cancelled_local_operation,
+    copy_failure_after_cleanup,
     fs_ops::{Entry, EntryStat, FsOps, fs},
-    io_error, local_delete_worker_count, local_device_is_rotational, open_local_parent_directory,
-    os_error_detail, os_error_text, parallel_delete_local_blocking_with_workers, placement,
+    io_error, local_delete_worker_count, local_device_is_rotational,
+    naming::Taken,
+    open_local_parent_directory, os_error_detail, os_error_text,
+    parallel_delete_local_blocking_with_workers, placement,
     placement::{COPY_PREFIX, ENOTSUPP, PlaceError, STAGE_PREFIX},
     placement_error, run_blocking, run_cancellable,
 };
