@@ -763,6 +763,7 @@ fn lab_corpus() -> Vec<Row> {
         file("...", &[(WINDOWS, "_", Invalid)]),
         file(" ", &[(WINDOWS, "_", Invalid)]),
         file(" x", &[(MTP, "x", Invalid)]),
+        file(" .x", &[]),
         file(".x", &[]),
         file("CON", &[(WINDOWS, "CON_", Invalid)]),
         file("con", &[(WINDOWS, "con_", Invalid)]),
@@ -825,6 +826,7 @@ fn lab_corpus() -> Vec<Row> {
         file("caf\u{e9}", &[]),
         file("cafe\u{301}", &[]),
         file("x\u{f022}y", &[(MAPPED, "x_y", Invalid)]),
+        file("x\u{f026}y", &[]),
         file("x\u{f03a}y", &[]),
         file("x\u{ff1a}y", &[]),
         file(format!("a{emoji}b"), &[(NOCASE, "a_b", Invalid)]),
@@ -997,8 +999,37 @@ fn cut_names_keep_their_extension_and_whole_clusters() {
 }
 
 #[test]
+fn only_the_characters_an_smb_mapping_reads_back_are_replaced() {
+    for (mapped, replaced, kept) in [
+        (
+            PrivateUse::Sfm,
+            &['\u{f001}', '\u{f01f}', '\u{f020}', '\u{f022}', '\u{f025}', '\u{f027}', '\u{f029}'][..],
+            &['\u{f000}', '\u{f026}', '\u{f02a}', '\u{f03a}'][..],
+        ),
+        (
+            PrivateUse::Sfu,
+            &['\u{f02a}', '\u{f03a}', '\u{f03c}', '\u{f03e}', '\u{f03f}', '\u{f07c}'][..],
+            &['\u{f001}', '\u{f022}', '\u{f029}', '\u{f05c}'][..],
+        ),
+    ] {
+        let profile = NameProfile {
+            mapped: Some(mapped),
+            ..NameProfile::smb(Some(255))
+        };
+        for (characters, changed) in [(replaced, true), (kept, false)] {
+            for character in characters {
+                let name = format!("x{character}y");
+                let fixed = fix_name(OsStr::new(&name), &profile, false).name;
+                let expected = if changed { "x_y" } else { name.as_str() };
+                assert_eq!(fixed, OsStr::new(expected), "{mapped:?} {name:?}");
+            }
+        }
+    }
+}
+
+#[test]
 fn fixing_a_fixed_name_changes_nothing() {
-    let starts: [&[u8]; 5] = [b"a", b"CON", b"nul", b"\xff", "\u{4e2d}".as_bytes()];
+    let starts: [&[u8]; 6] = [b"a", b" ", b"CON", b"nul", b"\xff", "\u{4e2d}".as_bytes()];
     let runs: [&[u8]; 14] = [
         b"a",
         b" ",

@@ -140,7 +140,10 @@ fn windows_refuses(character: char) -> bool {
 /// The private-use characters an SMB client turns back into ASCII.
 fn reads_back(mapped: PrivateUse, character: char) -> bool {
     match mapped {
-        PrivateUse::Sfm => ('\u{f001}'..='\u{f029}').contains(&character),
+        // The client reads U+F026 back unchanged.
+        PrivateUse::Sfm => {
+            ('\u{f001}'..='\u{f029}').contains(&character) && character != '\u{f026}'
+        }
         PrivateUse::Sfu => matches!(
             character,
             '\u{f02a}' | '\u{f03a}' | '\u{f03c}' | '\u{f03e}' | '\u{f03f}' | '\u{f07c}'
@@ -162,10 +165,11 @@ fn trimmed(name: Cow<'_, OsStr>, strip: Strip) -> Cow<'_, OsStr> {
         .rposition(|byte| !matches!(byte, b'.' | b' '))
         .map_or(0, |last| last + 1);
     let start = match strip {
-        Strip::Ends => bytes[..end]
-            .iter()
-            .position(|byte| *byte != b' ')
-            .unwrap_or(end),
+        // Stripping the spaces before a dot would hide the item.
+        Strip::Ends => match bytes[..end].iter().position(|byte| *byte != b' ') {
+            Some(first) if bytes[first] == b'.' => 0,
+            first => first.unwrap_or(end),
+        },
         Strip::None | Strip::Trailing => 0,
     };
     if start == end {
