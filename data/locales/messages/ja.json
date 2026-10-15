@@ -925,6 +925,7 @@
   "“%{name}” (device file)": "「%{name}」（デバイスファイル）",
   "“%{name}” (named pipe)": "「%{name}」（名前付きパイプ）",
   "“%{name}” (socket)": "「%{name}」（ソケット）",
+  "“%{name}” (symbolic link)": "「%{name}」（シンボリックリンク）",
   "“%{name}” already exists": "「%{name}」はすでに存在します",
   "“%{name}” can’t be replaced safely at this location. Delete or rename it first, then try again.": "「%{name}」はこの場所では安全に置き換えられません。先に削除するか名前を変更してから、もう一度お試しください。",
   "“%{name}” changed during the move and was left in “%{folder}”": "「%{name}」は移動中に変更されたため、「%{folder}」に残されました",

@@ -925,6 +925,7 @@
   "“%{name}” (device file)": "„%{name}“ (Gerätedatei)",
   "“%{name}” (named pipe)": "„%{name}“ (benannte Pipe)",
   "“%{name}” (socket)": "„%{name}“ (Socket)",
+  "“%{name}” (symbolic link)": "„%{name}“ (symbolischer Link)",
   "“%{name}” already exists": "„%{name}“ ist bereits vorhanden",
   "“%{name}” can’t be replaced safely at this location. Delete or rename it first, then try again.": "„%{name}“ kann an diesem Ort nicht sicher ersetzt werden. Löschen oder benennen Sie es zuerst um und versuchen Sie es dann erneut.",
   "“%{name}” changed during the move and was left in “%{folder}”": "„%{name}“ hat sich während des Verschiebens geändert und ist in „%{folder}“ geblieben",

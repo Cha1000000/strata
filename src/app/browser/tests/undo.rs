@@ -1289,41 +1289,58 @@ fn a_move_undo_record_keeps_the_names_the_move_changed_inside_its_item() {
 
 #[test]
 fn an_item_whose_move_left_entries_behind_is_excluded_from_the_move_undo() {
-    let browser = Browser::new(Rc::new(FakeFileSource));
-    browser.set_operation_provider(Rc::new(ImmediateOperationProvider));
     let project = Location::local("/fixture/project");
     let moved = Location::local("/fixture/report.txt");
-    let request_id = browser.begin_operation();
-    browser.transfer_operation.set(Some(true));
-    browser
-        .transfer_destination
-        .replace(Some(Location::local("/fixture/archive")));
-    let emit = browser.operation_callback(request_id, false, HashSet::new());
+    // An entry the move left in the project, and a link left out whole,
+    // which never moved.
+    for (left, moving, kept_out_of_undo) in [
+        ("/fixture/project/notes.txt", vec![project.clone()], true),
+        ("/fixture/link", Vec::new(), false),
+    ] {
+        let browser = Browser::new(Rc::new(FakeFileSource));
+        browser.set_operation_provider(Rc::new(ImmediateOperationProvider));
+        let shown = Rc::new(RefCell::new(Vec::new()));
+        let observed = shown.clone();
+        browser.observe(move |event| {
+            if let BrowserEvent::ItemsReported { report } = event {
+                observed.borrow_mut().push(report.kept_out_of_undo);
+            }
+        });
+        let request_id = browser.begin_operation();
+        browser.transfer_operation.set(Some(true));
+        browser
+            .transfer_destination
+            .replace(Some(Location::local("/fixture/archive")));
+        let emit = browser.operation_callback(request_id, false, HashSet::new());
 
-    emit(OperationEvent::ItemsReported {
-        request_id,
-        report: crate::services::TransferReport {
-            kept: vec![crate::services::KeptItem {
-                location: Location::local("/fixture/project/notes.txt"),
-                cause: crate::services::KeptCause::Changed,
-            }],
-            ..Default::default()
-        },
-    });
-    emit(OperationEvent::Pasted {
-        request_id,
-        locations: vec![project, moved.clone()],
-    });
+        emit(OperationEvent::ItemsReported {
+            request_id,
+            report: crate::services::TransferReport {
+                kept: vec![crate::services::KeptItem {
+                    location: Location::local(left),
+                    cause: crate::services::KeptCause::Changed,
+                }],
+                ..Default::default()
+            },
+        });
+        let mut locations = moving;
+        locations.push(moved.clone());
+        emit(OperationEvent::Pasted {
+            request_id,
+            locations,
+        });
 
-    assert_eq!(
-        pending_undo_entry(),
-        Some(UndoEntry::Move(vec![MoveRecord {
-            original: moved,
-            current: Location::local("/fixture/archive/report.txt"),
-            renamed: Vec::new(),
-        }])),
-        "moving the project back would replace the newer notes left in its folder"
-    );
+        assert_eq!(
+            pending_undo_entry(),
+            Some(UndoEntry::Move(vec![MoveRecord {
+                original: moved.clone(),
+                current: Location::local("/fixture/archive/report.txt"),
+                renamed: Vec::new(),
+            }])),
+            "moving the project back would replace the newer notes left in its folder"
+        );
+        assert_eq!(*shown.borrow(), [kept_out_of_undo], "{left}");
+    }
 }
 
 #[test]

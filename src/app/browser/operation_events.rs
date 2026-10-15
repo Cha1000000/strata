@@ -83,31 +83,33 @@ impl OperationCompletion {
         publish(UndoEntry::Trash(locations));
     }
 
+    /// Whether undo leaves out moved items whose sources kept entries.
     fn record_transfer_undo(
         &self,
         (moved, moved_to, report): (&[Location], &HashMap<Location, Location>, &TransferReport),
         created: Vec<Location>,
         merged: MergeUndoState,
         publish: fn(UndoEntry),
-    ) {
+    ) -> bool {
         if self.undoing {
-            return;
+            return false;
         }
         match self.moving {
             Some(true) => {
                 if let Some(destination) = &self.destination {
+                    let kept_back = |source: &Location| {
+                        report
+                            .kept
+                            .iter()
+                            .any(|kept| kept.location.is_within(source))
+                    };
                     // A merged move deletes its source, so it cannot be moved
                     // back, and moving an item back over what its move left
                     // behind would replace newer entries: exclude both.
                     let movable: Vec<_> = moved
                         .iter()
                         .filter(|source| !merged.sources.contains(*source))
-                        .filter(|source| {
-                            !report
-                                .kept
-                                .iter()
-                                .any(|kept| kept.location.is_within(source))
-                        })
+                        .filter(|source| !kept_back(source))
                         .cloned()
                         .collect();
                     publish(UndoEntry::Move(move_records(
@@ -116,13 +118,14 @@ impl OperationCompletion {
                         moved_to,
                         &report.renamed,
                     )));
+                    return moved.iter().any(kept_back);
                 }
             }
             Some(false) => {
                 let (merged_created, overwritten, mut placed) = merged.into_records();
                 if merged_created.is_empty() && overwritten.is_empty() {
                     publish(UndoEntry::Copy(created));
-                    return;
+                    return false;
                 }
                 let mut all_created = created;
                 all_created.extend(merged_created);
@@ -141,6 +144,7 @@ impl OperationCompletion {
             }
             None => {}
         }
+        false
     }
 }
 
@@ -495,12 +499,13 @@ impl Browser {
         self.state
             .borrow_mut()
             .retain_selectionless_removals(moved.iter().cloned());
-        completion.record_transfer_undo(
+        let kept_out_of_undo = completion.record_transfer_undo(
             (&moved, &moved_to, &self.transfer_report.borrow()),
             created,
             self.merged_undo.take(),
             push_pending_undo,
         );
+        self.transfer_report.borrow_mut().kept_out_of_undo = kept_out_of_undo;
         for location in &moved {
             self.retire_recent_target(location);
         }

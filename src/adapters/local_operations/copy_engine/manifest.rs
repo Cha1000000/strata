@@ -323,6 +323,29 @@ impl Manifest {
     pub(in crate::adapters::local_operations) fn copied_to(&mut self, copy: Published) {
         self.copy = Some(copy);
     }
+
+    /// Keeps the recorded entry at `path`, beneath the folder holding the
+    /// moved item, for `cause`.
+    pub(in crate::adapters::local_operations) fn keep(&self, path: &Path, cause: KeptCause) {
+        let mut folder = self.root.clone();
+        let mut names = path.iter().peekable();
+        while let Some(name) = names.next() {
+            let mut children = lock(&folder.children);
+            let Some((_, node)) = children.iter_mut().find(|(child, _)| child == name) else {
+                return;
+            };
+            if names.peek().is_none() {
+                *node = Node::Kept(cause);
+                return;
+            }
+            let Node::Folder(next) = node else {
+                return;
+            };
+            let next = next.clone();
+            drop(children);
+            folder = next;
+        }
+    }
 }
 
 pub(in crate::adapters::local_operations) struct Published {

@@ -925,6 +925,7 @@
   "“%{name}” (device file)": "“%{name}” (tệp thiết bị)",
   "“%{name}” (named pipe)": "“%{name}” (ống có tên)",
   "“%{name}” (socket)": "“%{name}” (socket)",
+  "“%{name}” (symbolic link)": "“%{name}” (liên kết tượng trưng)",
   "“%{name}” already exists": "“%{name}” đã tồn tại",
   "“%{name}” can’t be replaced safely at this location. Delete or rename it first, then try again.": "Không thể thay thế “%{name}” một cách an toàn tại vị trí này. Hãy xóa hoặc đổi tên mục đó trước rồi thử lại.",
   "“%{name}” changed during the move and was left in “%{folder}”": "“%{name}” đã thay đổi trong khi di chuyển nên được giữ lại trong “%{folder}”",

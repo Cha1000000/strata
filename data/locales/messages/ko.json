@@ -925,6 +925,7 @@
   "“%{name}” (device file)": "“%{name}” (장치 파일)",
   "“%{name}” (named pipe)": "“%{name}” (명명된 파이프)",
   "“%{name}” (socket)": "“%{name}” (소켓)",
+  "“%{name}” (symbolic link)": "“%{name}” (심볼릭 링크)",
   "“%{name}” already exists": "“%{name}”이(가) 이미 있습니다",
   "“%{name}” can’t be replaced safely at this location. Delete or rename it first, then try again.": "이 위치에서는 “%{name}”을(를) 안전하게 바꿀 수 없습니다. 먼저 삭제하거나 이름을 바꾼 다음 다시 시도하세요.",
   "“%{name}” changed during the move and was left in “%{folder}”": "“%{name}” 항목이 이동 중에 변경되어 “%{folder}”에 남겨졌습니다",

@@ -36,7 +36,7 @@ use rustix::{
 
 use super::{
     INVALID_NAME_REASON, LocalFileIdentity, PinnedEntry, Reported, StageContent, StagedSibling,
-    TransferProgressTracker, blocking_join_message, bounded_local_worker_count,
+    TransferProgressTracker, Unheld, blocking_join_message, bounded_local_worker_count,
     cancelled_local_operation, copy_failure_after_cleanup,
     fs_ops::{Entry, EntryStat, FsOps, fs},
     io_error, local_delete_worker_count, local_device_is_rotational,
@@ -814,17 +814,27 @@ fn copy_new(
             .map(|(name, _)| name),
         FileType::Symlink => {
             copy.check_cancelled()?;
-            let mount = Mount::new(copy.fs, parent.as_fd());
-            let names = taken.names(name, false, || copy.name_limit(parent.as_fd()));
-            let (name, link) = first_free(copy, parent.as_fd(), names, (taken, false), |name| {
-                tree::copy_link(
-                    copy,
-                    source.entry(),
-                    Entry::new(&**parent, name),
-                    &mount,
-                    None,
-                )
-            })?;
+            let mount = copy.mount(parent.as_fd());
+            let linked = copy.names.profiles.holds_links(mount.key).then(|| {
+                let names = taken.names(name, false, || copy.name_limit(parent.as_fd()));
+                first_free(copy, parent.as_fd(), names, (taken, false), |name| {
+                    tree::copy_link(
+                        copy,
+                        source.entry(),
+                        Entry::new(&**parent, name),
+                        &mount,
+                        None,
+                    )
+                })
+            });
+            let (name, link) = match linked {
+                Some(Ok(linked)) => linked,
+                Some(Err(failure)) => match copy.refused_link(mount.key, &failure) {
+                    Some(error) => return Err(Failure::LinkRefused(error)),
+                    None => return Err(failure),
+                },
+                None => return Err(Failure::LinkRefused(Errno::OPNOTSUPP)),
+            };
             if let Some(folder) = recorded_in {
                 folder.entry(&source.name, &link);
             }
@@ -889,8 +899,24 @@ fn copy_stage(
         }
         FileType::Symlink => {
             copy.check_cancelled()?;
+            let key = copy.mount(parent.as_fd()).key;
+            if !copy.names.profiles.holds_links(key) {
+                return Err(Failure::LinkRefused(Errno::OPNOTSUPP));
+            }
             let link = tree::read_link(copy.fs, source.entry())?;
-            let staged = StagedSibling::create(parent, STAGE_PREFIX, StageContent::Symlink(link))?;
+            let staged =
+                match StagedSibling::create(parent, STAGE_PREFIX, StageContent::Symlink(link)) {
+                    // The stage's name is valid everywhere, unlike the target.
+                    Err(PlaceError::Io(error))
+                        if tree::refuses_node(FileType::Symlink, error)
+                            || matches!(error, Errno::INVAL | Errno::ILSEQ) =>
+                    {
+                        let refused = Failure::LinkRefused(error);
+                        copy.refused_link(key, &refused);
+                        return Err(refused);
+                    }
+                    staged => staged?,
+                };
             // sshfs sets a link's times on what it points to.
             if Mount::new(copy.fs, staged.parent.as_fd()).family != Family::Fuse {
                 let link = Entry::new(&*staged.parent, &staged.name);
@@ -1242,6 +1268,8 @@ enum Failure {
     Os(Errno),
     /// A call that creates a name failed as mounts fail names they refuse.
     NameRefused(Errno),
+    /// The destination cannot hold a symbolic link, as this error says.
+    LinkRefused(Errno),
     Place(PlaceError),
     Changed,
     NotCopyable,
@@ -1294,6 +1322,14 @@ impl Failure {
                 }
             }
             Self::NameRefused(error) => refused_name(&name, error == Errno::NAMETOOLONG),
+            Self::LinkRefused(error) => glib::Error::new(
+                Unheld::Symlink,
+                &rust_i18n::t!(
+                    "Could not copy %{name}: %{error}",
+                    name = name,
+                    error = os_error_detail(error)
+                ),
+            ),
             Self::Place(error @ PlaceError::Io(errno)) if error.refuses_name() => {
                 refused_name(&name, errno == Errno::NAMETOOLONG)
             }
@@ -1612,6 +1648,21 @@ impl Copy {
             lock(&self.left).item = Some((name.to_os_string(), cause));
         }
         Ok((made, value))
+    }
+
+    /// The error with which the mount `key` refused to hold a symbolic link,
+    /// as `failure` shows. A target the mount refuses fails as a name that
+    /// stricter rules could not help. A mount without links at all learns.
+    fn refused_link(&self, key: MountKey, failure: &Failure) -> Option<Errno> {
+        let error = match failure {
+            Failure::LinkRefused(error) => *error,
+            Failure::NameRefused(error @ (Errno::INVAL | Errno::ILSEQ)) => *error,
+            _ => return None,
+        };
+        if error == Errno::NOSYS || is_unsupported(error) {
+            self.names.profiles.refuse_links(key);
+        }
+        Some(error)
     }
 
     fn nested(&self) -> Arc<Self> {

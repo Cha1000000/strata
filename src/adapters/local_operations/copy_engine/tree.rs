@@ -650,15 +650,29 @@ impl Made {
             }
             FileType::Symlink => {
                 let source = Entry::new(&**source, name);
-                let (path, link) = make_numbered(copy, names, &path, false, alias, |name| {
-                    copy_link(
-                        copy,
-                        source,
-                        Entry::new(dir, name),
-                        &self.mount,
-                        Some(names),
-                    )
-                })?;
+                let key = self.mount.key;
+                let made = copy.names.profiles.holds_links(key).then(|| {
+                    make_numbered(copy, names, &path, false, alias, |name| {
+                        copy_link(
+                            copy,
+                            source,
+                            Entry::new(dir, name),
+                            &self.mount,
+                            Some(names),
+                        )
+                    })
+                });
+                let (path, link) = match made {
+                    Some(Ok(made)) => made,
+                    Some(Err(failure)) if copy.refused_link(key, &failure).is_none() => {
+                        return Err(failure);
+                    }
+                    _ => {
+                        self.skip(copy, name, SpecialKind::Symlink)?;
+                        queue.complete(Some(group.clone()));
+                        return Ok(false);
+                    }
+                };
                 if tree.created.is_some() || names.adopts() {
                     let name = file_name(&path);
                     let made = fs.stat(Entry::new(dir, &name), false)?;
@@ -868,7 +882,12 @@ pub(super) fn copy_link(
     let link = read_link(fs, source)?;
     if let Err(error) = fs.symlink(&link, target) {
         if !taken(fs, target, error) {
-            return Err(creation_failure(fs, target, error));
+            return Err(match creation_failure(fs, target, error) {
+                Failure::Os(error) if refuses_node(FileType::Symlink, error) => {
+                    Failure::LinkRefused(error)
+                }
+                failure => failure,
+            });
         }
         adopt(fs, target, names, |stat| {
             stat.kind == FileType::Symlink
@@ -909,7 +928,7 @@ pub(super) fn copy_fifo(
         Err(error) if taken(fs, target, error) => {
             adopt(fs, target, names, |stat| stat.kind == FileType::Fifo)?
         }
-        Err(error) if refuses_pipes(error) => return Ok((stat, None)),
+        Err(error) if refuses_node(FileType::Fifo, error) => return Ok((stat, None)),
         Err(error) => return Err(creation_failure(fs, target, error)),
     };
     let finished = finish_pipe(copy, &stat, (target, identity), parent, mount);
@@ -950,10 +969,17 @@ fn finish_pipe(
     best_effort(fs.close(fd)).map_err(Failure::Os)
 }
 
-/// How filesystems without named pipes refuse one: vfat with `EPERM`,
-/// exfat-fuse with `EIO` and SMB with `EOPNOTSUPP`.
-fn refuses_pipes(error: Errno) -> bool {
-    matches!(error, Errno::PERM | Errno::IO | Errno::NOSYS | Errno::INVAL) || is_unsupported(error)
+/// How filesystems refuse a node of `kind` they cannot hold. Without named
+/// pipes, vfat answers `EPERM`, exfat-fuse `EIO` and SMB `EOPNOTSUPP`;
+/// without symbolic links, vfat answers `EPERM`, exfat-fuse `ENOSYS` and
+/// SMB `EOPNOTSUPP`, and ntfs3 refuses a target too long with `EFBIG`.
+pub(super) fn refuses_node(kind: FileType, error: Errno) -> bool {
+    let refused = match kind {
+        FileType::Fifo => &[Errno::PERM, Errno::IO, Errno::NOSYS, Errno::INVAL][..],
+        FileType::Symlink => &[Errno::PERM, Errno::NOSYS, Errno::FBIG],
+        _ => return false,
+    };
+    refused.contains(&error) || is_unsupported(error)
 }
 
 pub(super) struct File {

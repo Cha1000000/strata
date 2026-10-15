@@ -321,8 +321,8 @@ before the mode, so `user.*` attributes survive on read-only files and folders. 
   reopen, or by name. On SMB and FUSE, a forced stat after close catches times a writeback cache
   moved by 2 s or more, and sets them again.
 - **Symbolic links** keep their times, except on FUSE, where sshfs would apply them to the link's
-  target. Their owner is not set. A destination that refuses symbolic links fails the copy of a
-  folder holding one.
+  target. Their owner is not set. Links a destination cannot hold are left out; see
+  [Symbolic links the destination cannot hold](#symbolic-links-the-destination-cannot-hold).
 
 Mount options decide the mode on vfat, exFAT, exfat-fuse, ntfs-3g and SMB without POSIX
 extensions: `chmod` succeeds there without changing it, so a 0700 folder takes the mount's mode.
@@ -432,6 +432,27 @@ selected pipe is recreated where the destination allows it. A selected pipe it r
 socket or device file, and a pipe that Replace would stage fail with "it is not a regular file,
 directory, or symbolic link".
 
+### Symbolic links the destination cannot hold
+
+vfat, exFAT and exfat-fuse have no symbolic links, so links copied there are left out without
+asking the mount. A mount that refuses one with `ENOSYS` or `EOPNOTSUPP`, as SMB without POSIX
+extensions does, is not asked again until it changes, and a GVfs location that answers "not
+supported", as `smb://` and `mtp://` do, is not asked again for the rest of the item. A mount that
+refuses one link, with `EPERM` while its name is free, or its target with `EINVAL`, `EILSEQ` or
+`EFBIG`, as ntfs3 and ntfs-3g refuse malformed or overlong targets, leaves out that link only; a link
+whose name the mount refuses is first tried under stricter names, as above. A taken name stays a
+taken name. Every link left out is reported, and the rest of the copy goes on. A merge leaves an
+item at a link's name where the destination is known to hold no links; where it learns so only
+when it copies the link, that item was already moved out of the way, as any item a merge replaces.
+
+A selected link is left out the same way, and the paste goes on with the next item. A Replace by a
+link leaves the original as it is. A move keeps the source of each link it left out, with the
+folders that hold it, also where GIO copies the item, and lists them as left behind. Undo leaves
+those items out, and the report says so.
+
+Link targets are copied byte for byte, so a link pointing at an entry whose name was fixed no longer
+finds it at the destination.
+
 ### Merges
 
 Merge first moves the originals it replaces out of the way, as described in
@@ -482,10 +503,10 @@ if it is still what the copy read:
   is deleted.
 
 What stays is reported by cause: changed during the move, could not be deleted (with the error, as
-in a read-only folder), a special file the destination cannot store, or an item whose copy was
-moved away. An entry already gone is not reported, since a move leaves exactly that. A moved item
-with anything left behind is left out of Undo. Undoing a move gives back names that were numbered
-as aliases, where the original name is free.
+in a read-only folder), a special file or symbolic link the destination cannot store, or an item
+whose copy was moved away. An entry already gone is not reported, since a move leaves exactly that.
+A moved item with anything left behind is left out of Undo, and the report says so. Undoing a move
+gives back names that were numbered as aliases, where the original name is free.
 
 A native item moved to a GVfs destination is recorded before GIO copies it, then deleted the same
 way. Nothing can be flushed there and nothing is compared by content, and a file that changes
@@ -617,7 +638,7 @@ After a transfer, Strata reports what it could not do as asked:
 - names the destination doesn't allow or that are too long for it, names it took for another (case
   aliases), and names taken during a merge or an undo, each with the name the item was saved as, and
   an item saved under several names in turn once, from its first name to its last;
-- special files left out of a copy;
+- special files and symbolic links left out of a copy;
 - source entries a move left behind, entries a restore left in the Trash, originals an undo left
   there because what replaced them may have changed, and names an undo could not give back, with
   the reason.
@@ -659,7 +680,8 @@ reported.
   less is not corrected. On NFSv4, setting times again costs one more open per file.
 - **GVfs destinations.** A native item moved to one is not flushed and not compared by content, and
   a torn copy stays there while its source is kept. Sources on GVfs locations are deleted by GIO,
-  without a check of each entry.
+  without a check of each entry, except the links it left out. A selected link moved from a GVfs
+  location is left out only where the destination is known to hold no links.
 - **SMB sources.** Opening two names of one hard-linked file at once fails with `EINVAL` on the
   kernel client, so Strata opens one name of a file at a time when it reads from SMB, whatever link
   count the share reports. After this machine writes a file on a share, opening another name of it

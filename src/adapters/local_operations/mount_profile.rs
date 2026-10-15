@@ -175,9 +175,23 @@ impl Profiles {
     /// Windows rules up to `strictness`: in this operation, and in later ones
     /// until the mount changes.
     pub(super) fn learn(&self, key: MountKey, strictness: Strictness) {
-        let learn = |capabilities: &mut MountCapabilities| {
+        self.teach(key, |capabilities| {
             capabilities.strictness = capabilities.strictness.max(Some(strictness));
-        };
+        });
+    }
+
+    /// Whether the mount `key` may hold symbolic links, as far as this
+    /// operation knows.
+    pub(super) fn holds_links(&self, key: MountKey) -> bool {
+        self.seen().get(&key).and_then(|seen| seen.symlinks) != Some(false)
+    }
+
+    /// Teaches the mount `key` that it holds no symbolic links.
+    pub(super) fn refuse_links(&self, key: MountKey) {
+        self.teach(key, |capabilities| capabilities.symlinks = Some(false));
+    }
+
+    fn teach(&self, key: MountKey, learn: impl Fn(&mut MountCapabilities)) {
         if let Some(seen) = self.seen().get_mut(&key) {
             learn(seen);
         }
@@ -298,14 +312,16 @@ impl NamePolicy {
             return Ok(FolderNames {
                 rules: self.applied(rules),
                 fixing: !same,
+                links: true,
             });
         };
         let source_path = source.path().filter(|_| source.is_native());
         let profiles = self.profiles.clone();
-        let (rules, crossing) = run_blocking(move || {
+        let (rules, crossing, links) = run_blocking(move || {
             let fs = fs();
             let target = open_local_parent_directory(&target_path).map_err(io_error)?;
             let (key, seen) = profiles.mount(fs, target.as_fd());
+            let links = profiles.holds_links(key);
             let rules = rules_in(&seen, target.as_fd());
             let crossing = match source_path {
                 Some(source) => {
@@ -320,12 +336,13 @@ impl NamePolicy {
                 }
                 None => true,
             };
-            Ok((rules, crossing))
+            Ok((rules, crossing, links))
         })
         .await?;
         Ok(FolderNames {
             rules: self.applied(rules),
             fixing: crossing,
+            links,
         })
     }
 }
@@ -421,6 +438,8 @@ pub(super) struct FolderNames {
     pub rules: NameProfile,
     /// Whether the names come from another filesystem, and so are fixed.
     pub fixing: bool,
+    /// Whether the folder may hold symbolic links.
+    pub links: bool,
 }
 
 /// Whether names listed in a folder on `source`, a device and the mount it

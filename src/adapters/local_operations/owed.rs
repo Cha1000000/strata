@@ -20,18 +20,22 @@ use super::{
     copy_engine::{self, Barrier, Manifest, Unlinks},
     delete_moved_sources, device_flush_failure, io_error,
     merge_aside::MergeAside,
-    original_not_removed, permanently_delete_maybe_local, removable_roots_for_paths,
-    remove_displaced_original,
+    original_not_removed, permanently_delete_keeping, permanently_delete_maybe_local,
+    removable_roots_for_paths, remove_displaced_original,
 };
 use crate::{
-    adapters::volume::MountKey,
+    adapters::{location_for_file, volume::MountKey},
     model::Location,
-    services::{OperationEvent, OperationRequestId, PasteRequest, TransferConflict},
+    services::{
+        KeptCause, KeptItem, OperationEvent, OperationRequestId, PasteRequest, SpecialKind,
+        TransferConflict, TransferReport,
+    },
 };
 
 pub(super) enum Deletion {
     Sources(gio::File, Manifest),
-    Source(gio::File),
+    /// With the links a GIO copy left out of it, which stay.
+    Source(gio::File, Vec<gio::File>),
     /// With the replaced item's name.
     Displaced(DisplacedOriginal, String),
     Aside(MergeAside),
@@ -49,8 +53,25 @@ impl Deletion {
                 delete_moved_sources(&source, manifest, unlinks.clone(), progress, cancellable)
                     .await
             }
-            Self::Source(source) => {
+            Self::Source(source, kept) if kept.is_empty() => {
                 permanently_delete_maybe_local(source, true, cancellable.clone()).await
+            }
+            Self::Source(source, kept) => {
+                if let Some(progress) = progress {
+                    progress.report(TransferReport {
+                        kept: kept
+                            .iter()
+                            .filter_map(|link| {
+                                Some(KeptItem {
+                                    location: location_for_file(link)?,
+                                    cause: KeptCause::Skipped(SpecialKind::Symlink),
+                                })
+                            })
+                            .collect(),
+                        ..TransferReport::default()
+                    });
+                }
+                permanently_delete_keeping(source, Rc::new(kept), cancellable.clone()).await
             }
             Self::Displaced(original, name) => remove_displaced_original(original, &name).await,
             Self::Aside(aside) => aside.remove().await,
@@ -59,7 +80,7 @@ impl Deletion {
 
     fn kept(&self, flush: &str) -> String {
         match self {
-            Self::Sources(..) | Self::Source(_) => flush.to_owned(),
+            Self::Sources(..) | Self::Source(..) => flush.to_owned(),
             Self::Displaced(original, name) => {
                 original_not_removed(name, &original.name, &io_error(flush))
             }

@@ -70,8 +70,8 @@ use crate::{
         DeleteRequest, ExtractRequest, KeptCause, KeptItem, LoadHandle, MoveRecord, NameMode,
         OperationEvent, OperationProvider, OperationRequestId, PasteRequest, PlacedSnapshot,
         RenameCause, RenameRequest, RenamedItem, ReplacedOriginal, RestoreRequest, RestoreSource,
-        TransferConflict, TransferReport, TrashedOriginal, UndoCopyRequest, UndoMergeRequest,
-        UndoMoveRequest, UndoRenameRequest, validate_basename,
+        SkippedItem, SpecialKind, TransferConflict, TransferReport, TrashedOriginal,
+        UndoCopyRequest, UndoMergeRequest, UndoMoveRequest, UndoRenameRequest, validate_basename,
     },
 };
 
@@ -80,6 +80,48 @@ const UNCONFIRMED_REASON: &str =
     "The result could not be confirmed. Check both locations before trying again.";
 const UNSUPPORTED_REASON: &str =
     "This location can\u{2019}t guarantee that another item won\u{2019}t be overwritten";
+
+/// Why a transfer leaves out an item it was given, which the destination
+/// cannot hold, instead of failing it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, glib::ErrorDomain)]
+#[error_domain(name = "strata-unheld")]
+enum Unheld {
+    Symlink,
+}
+
+fn unheld(error: &glib::Error) -> Option<SpecialKind> {
+    error.kind::<Unheld>().map(|kind| match kind {
+        Unheld::Symlink => SpecialKind::Symlink,
+    })
+}
+
+/// What a transfer reports of the item at `source` it left out, as
+/// `destination` cannot hold it: a move keeps its source.
+fn left_out(
+    source: &Location,
+    destination: &gio::File,
+    kind: SpecialKind,
+    moving: bool,
+) -> TransferReport {
+    if moving {
+        return TransferReport {
+            kept: vec![KeptItem {
+                location: source.clone(),
+                cause: KeptCause::Skipped(kind),
+            }],
+            ..TransferReport::default()
+        };
+    }
+    let target = source.file_name().map(|name| destination.child(name));
+    TransferReport {
+        skipped: target
+            .and_then(|target| location_for_file(&target))
+            .map(|location| SkippedItem { location, kind })
+            .into_iter()
+            .collect(),
+        ..TransferReport::default()
+    }
+}
 
 #[derive(Clone, Debug)]
 pub(crate) struct MountFlushHint {
@@ -1492,13 +1534,15 @@ struct GioNames {
     policy: NamePolicy,
     /// The names in the parent target folder.
     parent: Option<FolderNames>,
+    left: LeftOut,
 }
 
 impl GioNames {
-    fn new(policy: NamePolicy) -> Self {
+    fn new(policy: NamePolicy, left: LeftOut) -> Self {
         Self {
             policy,
             parent: None,
+            left,
         }
     }
 
@@ -1523,6 +1567,69 @@ impl GioNames {
         Self {
             policy: self.policy.clone(),
             parent: Some(folder),
+            left: self.left.clone(),
+        }
+    }
+}
+
+/// The symbolic links a GIO copy of one item left out, as the destination
+/// cannot hold them.
+#[derive(Clone, Default)]
+struct LeftOut {
+    /// Whether the destination refused one, so the rest need no call.
+    refused: Rc<Cell<bool>>,
+    /// Each at its source, and where it was to go.
+    links: Rc<RefCell<Vec<(gio::File, gio::File)>>>,
+}
+
+impl LeftOut {
+    fn add(&self, source: gio::File, target: gio::File) {
+        self.links.borrow_mut().push((source, target));
+    }
+
+    fn sources(&self) -> Vec<gio::File> {
+        self.links
+            .borrow()
+            .iter()
+            .map(|(source, _)| source.clone())
+            .collect()
+    }
+
+    /// What a copy reports of them.
+    fn report(&self, progress: Option<&TransferProgressTracker>) {
+        let Some(progress) = progress else {
+            return;
+        };
+        let skipped = self
+            .links
+            .borrow()
+            .iter()
+            .filter_map(|(_, target)| {
+                Some(SkippedItem {
+                    location: location_for_file(target)?,
+                    kind: SpecialKind::Symlink,
+                })
+            })
+            .collect::<Vec<_>>();
+        if !skipped.is_empty() {
+            progress.report(TransferReport {
+                skipped,
+                ..TransferReport::default()
+            });
+        }
+    }
+
+    /// Keeps their sources in `sources`, the record of the moved `source`.
+    fn keep_in(&self, sources: &copy_engine::Manifest, source: &Path) {
+        let Some(parent) = source.parent() else {
+            return;
+        };
+        for (link, _) in self.links.borrow().iter() {
+            if let Some(path) = link.path()
+                && let Ok(path) = path.strip_prefix(parent)
+            {
+                sources.keep(path, KeptCause::Skipped(SpecialKind::Symlink));
+            }
         }
     }
 }
@@ -1588,32 +1695,33 @@ fn renamed_item(
     })
 }
 
-/// The next of a folder's children, as their names, whether each is a
-/// folder, and the names they take in the target, with why those differ:
-/// batch by batch, or all at once where names are fixed, since which of two
-/// names a folder takes for one keeps it depends on both.
+/// The next of a folder's children, as their names, their kinds, and the
+/// names they take in the target, with why those differ: batch by batch, or
+/// all at once where names are fixed, since which of two names a folder
+/// takes for one keeps it depends on both.
 async fn next_named_children(
     enumerator: &gio::FileEnumerator,
     cancellable: &gio::Cancellable,
     names: &FolderNames,
-) -> Result<Vec<(OsString, bool, Planned)>, glib::Error> {
+) -> Result<Vec<(OsString, gio::FileType, Planned)>, glib::Error> {
     let mut children = Vec::new();
     loop {
         let batch = next_children(enumerator, cancellable).await?;
         let listed = batch.is_empty();
-        children.extend(batch.iter().map(|child| {
-            let is_directory = child.file_type() == gio::FileType::Directory;
-            (child.name().into_os_string(), is_directory)
-        }));
+        children.extend(
+            batch
+                .iter()
+                .map(|child| (child.name().into_os_string(), child.file_type())),
+        );
         if listed || !names.fixing {
             break;
         }
     }
     let entries = children
         .iter()
-        .map(|(name, is_directory)| PlanEntry {
+        .map(|(name, kind)| PlanEntry {
             name,
-            is_directory: *is_directory,
+            is_directory: *kind == gio::FileType::Directory,
             fixing: names.fixing,
         })
         .collect::<Vec<_>>();
@@ -1621,7 +1729,7 @@ async fn next_named_children(
     Ok(children
         .into_iter()
         .zip(planned)
-        .map(|((name, is_directory), planned)| (name, is_directory, planned))
+        .map(|((name, kind), planned)| (name, kind, planned))
         .collect())
 }
 
@@ -1913,8 +2021,13 @@ fn copy_recursively_with_progress(
                     if children.is_empty() {
                         return Ok::<_, glib::Error>(());
                     }
-                    for (name, _, planned) in children {
-                        copy_recursively_with_progress(
+                    for (name, kind, planned) in children {
+                        let link = kind == gio::FileType::SymbolicLink;
+                        if link && (!folder.links || names.left.refused.get()) {
+                            names.left.add(source.child(&name), target.child(&name));
+                            continue;
+                        }
+                        let copied = copy_recursively_with_progress(
                             source.child(&name),
                             target.child(&planned.target),
                             into,
@@ -1923,7 +2036,16 @@ fn copy_recursively_with_progress(
                             progress.clone(),
                             names.clone(),
                         )
-                        .await?;
+                        .await;
+                        if let Err(error) = &copied
+                            && link
+                            && unheld(error).is_some()
+                        {
+                            names.left.refused.set(true);
+                            names.left.add(source.child(&name), target.child(&name));
+                            continue;
+                        }
+                        copied?;
                         if let Some(cause) = planned.cause {
                             renamed.extend(renamed_item(
                                 &target.child(&name),
@@ -1966,6 +2088,7 @@ fn copy_recursively_with_progress(
             let reporter = file_progress
                 .as_ref()
                 .and_then(FileTransferProgress::reporter);
+            let link = (info.file_type() == gio::FileType::SymbolicLink).then(|| source.clone());
             let result = copy_file_with_progress(
                 source,
                 target.clone(),
@@ -1973,7 +2096,21 @@ fn copy_recursively_with_progress(
                 cancellable.clone(),
                 reporter,
             )
-            .await;
+            .await
+            .map_err(|error| match link {
+                // As SMB and MTP backends refuse links.
+                Some(link) if error.matches(gio::IOErrorEnum::NotSupported) => {
+                    let message = rust_i18n::t!(
+                        "Could not copy %{name}: %{error}",
+                        name = transfer_source_name(&link)
+                            .unwrap_or_default()
+                            .to_string_lossy(),
+                        error = crate::services::gio_error_detail(&error)
+                    );
+                    glib::Error::new(Unheld::Symlink, &message)
+                }
+                _ => error,
+            });
             if result.is_ok()
                 && let CopyRecord::Placing(Some(placing)) = record
                 && let Some(path) = target.path().filter(|path| placing.wants(path))
@@ -2015,12 +2152,15 @@ fn copy_recursively(
             cancellable,
             None,
             NamePolicy::default(),
+            None,
         )
         .await
         .map(drop)
     })
 }
 
+/// A move gives `left` to collect the links GIO left out, whose sources it
+/// keeps; a copy reports them.
 async fn copy_new_recursively_on_filesystem(
     source: gio::File,
     target: gio::File,
@@ -2028,6 +2168,7 @@ async fn copy_new_recursively_on_filesystem(
     cancellable: gio::Cancellable,
     progress: Option<Rc<TransferProgressTracker>>,
     names: NamePolicy,
+    left: Option<LeftOut>,
 ) -> Result<gio::File, glib::Error> {
     if source.is_native()
         && target.is_native()
@@ -2074,7 +2215,7 @@ async fn copy_new_recursively_on_filesystem(
             cancellable,
             Rc::new(move |source, stage, cancellable| {
                 let progress = copy_progress.clone();
-                let names = GioNames::new(copy_names.clone());
+                let names = GioNames::new(copy_names.clone(), LeftOut::default());
                 Box::pin(async move {
                     copy_recursively_with_progress(
                         source,
@@ -2107,10 +2248,11 @@ async fn copy_new_recursively_on_filesystem(
         .await;
     }
 
+    let left_out = left.clone().unwrap_or_default();
     let copied = first_free_target(&target, taken, is_directory, &cancellable, |target| {
         let (source, cancellable, progress) =
             (source.clone(), cancellable.clone(), progress.clone());
-        let names = GioNames::new(names.clone());
+        let names = GioNames::new(names.clone(), left_out.clone());
         async move {
             let created_root = Rc::new(CreatedCopyRoot::new());
             let result = copy_recursively_with_progress(
@@ -2148,6 +2290,9 @@ async fn copy_new_recursively_on_filesystem(
         }
     })
     .await?;
+    if left.is_none() {
+        left_out.report(progress.as_deref());
+    }
     Ok(copied.0)
 }
 
@@ -2165,12 +2310,14 @@ type MoveAttempt = Rc<
     ) -> Pin<Box<dyn Future<Output = Result<Moved, glib::Error>>>>,
 >;
 
+/// Collects the links it leaves out in its `LeftOut`.
 type RemoteCopy = Rc<
     dyn Fn(
         gio::File,
         gio::File,
         Taken,
         gio::Cancellable,
+        LeftOut,
     ) -> Pin<Box<dyn Future<Output = Result<gio::File, glib::Error>>>>,
 >;
 
@@ -2228,14 +2375,23 @@ async fn move_local_owing(
             let target = gio::File::for_path(target_path.with_file_name(copied.name));
             let deletion = match copied.manifest {
                 Some(sources) => Deletion::Sources(source, sources),
-                None => Deletion::Source(source),
+                None => Deletion::Source(source, Vec::new()),
             };
             (target, copied.reported, deletion)
         }
         // Recorded before GIO copies it, so a change during the copy shows.
         (Some(source_path), None) => {
-            let sources = copy_engine::snapshot(source_path, &cancellable).await?;
-            let target = remote_copy(source.clone(), target, taken, cancellable.clone()).await?;
+            let sources = copy_engine::snapshot(source_path.clone(), &cancellable).await?;
+            let left = LeftOut::default();
+            let target = remote_copy(
+                source.clone(),
+                target,
+                taken,
+                cancellable.clone(),
+                left.clone(),
+            )
+            .await?;
+            left.keep_in(&sources, &source_path);
             (
                 target,
                 Reported::default(),
@@ -2243,6 +2399,7 @@ async fn move_local_owing(
             )
         }
         _ => {
+            let left = LeftOut::default();
             let target = copy_new_recursively_on_filesystem(
                 source.clone(),
                 target,
@@ -2250,6 +2407,7 @@ async fn move_local_owing(
                 cancellable.clone(),
                 progress.clone(),
                 names,
+                Some(left.clone()),
             )
             .await?;
             if let Some(path) = native_path(&target)
@@ -2260,7 +2418,8 @@ async fn move_local_owing(
             {
                 copy_engine::sync_files(vec![path], &cancellable).await?;
             }
-            (target, Reported::default(), Deletion::Source(source))
+            let kept = left.sources();
+            (target, Reported::default(), Deletion::Source(source, kept))
         }
     };
     owed.owe(deletion);
@@ -2884,7 +3043,7 @@ fn attempt_move(progress: Option<Rc<TransferProgressTracker>>) -> MoveAttempt {
 }
 
 fn remote_copy(copying: Copying) -> RemoteCopy {
-    Rc::new(move |source, target, taken, cancellable| {
+    Rc::new(move |source, target, taken, cancellable, left| {
         let Copying {
             progress, names, ..
         } = copying.clone();
@@ -2895,6 +3054,7 @@ fn remote_copy(copying: Copying) -> RemoteCopy {
             cancellable,
             progress,
             names,
+            Some(left),
         ))
     })
 }
@@ -3074,6 +3234,8 @@ struct MergeCopy {
 struct MergeCopied {
     sources: Option<copy_engine::Manifest>,
     nested: Vec<copy_engine::Barrier>,
+    /// The links GIO left out of a move of a source it deletes.
+    left: Vec<gio::File>,
 }
 
 fn cannot_replace_safely(name: &str) -> String {
@@ -3841,10 +4003,14 @@ fn classify_merge<'a>(
             if children.is_empty() {
                 return Ok(());
             }
-            for (name, is_directory, planned) in children {
+            for (name, kind, planned) in children {
+                // Left out, so nothing at its name is replaced.
+                if kind == gio::FileType::SymbolicLink && !names.links {
+                    continue;
+                }
                 let child = (
                     source.child(name),
-                    is_directory,
+                    kind == gio::FileType::Directory,
                     target.child(planned.target),
                 );
                 classify_merge_child(child, plan, cancellable, (policy, names)).await?;
@@ -4075,7 +4241,7 @@ async fn merge_owing(
     if move_source {
         owed.owe(match copied.sources {
             Some(sources) => Deletion::Sources(source, sources),
-            None => Deletion::Source(source),
+            None => Deletion::Source(source, copied.left),
         });
     }
     Ok(owed)
@@ -4154,28 +4320,42 @@ fn merge_copy(progress: Option<Rc<TransferProgressTracker>>, names: NamePolicy) 
                         Ok(MergeCopied {
                             sources: copied.manifest,
                             nested: copied.nested,
+                            left: Vec::new(),
                         })
                     }
                     (source_path, _) => {
                         // Recorded before GIO copies it, so a change during the copy shows.
-                        let sources = match source_path.filter(|_| moving) {
-                            Some(source_path) => {
-                                Some(copy_engine::snapshot(source_path, &cancellable).await?)
-                            }
+                        let sources = match source_path.as_ref().filter(|_| moving) {
+                            Some(source_path) => Some(
+                                copy_engine::snapshot(source_path.clone(), &cancellable).await?,
+                            ),
                             None => None,
                         };
+                        let left = LeftOut::default();
                         copy_recursively_with_progress(
                             source,
                             target,
                             CopyInto::Existing,
                             cancellable,
                             CopyRecord::Placing(placing),
-                            progress,
-                            GioNames::new(names),
+                            progress.clone(),
+                            GioNames::new(names, left.clone()),
                         )
                         .await?;
+                        let left = match (&sources, source_path) {
+                            (Some(sources), Some(path)) => {
+                                left.keep_in(sources, &path);
+                                Vec::new()
+                            }
+                            _ if moving => left.sources(),
+                            _ => {
+                                left.report(progress.as_deref());
+                                Vec::new()
+                            }
+                        };
                         Ok(MergeCopied {
                             sources,
+                            left,
                             ..MergeCopied::default()
                         })
                     }
@@ -4254,6 +4434,48 @@ fn permanently_delete(
             });
         })
         .await
+    })
+}
+
+/// [`permanently_delete`] of `file` but for the `kept` entries beneath it
+/// and the folders holding them.
+fn permanently_delete_keeping(
+    file: gio::File,
+    kept: Rc<Vec<gio::File>>,
+    cancellable: gio::Cancellable,
+) -> Pin<Box<dyn Future<Output = Result<(), glib::Error>>>> {
+    Box::pin(async move {
+        if kept.iter().any(|kept| kept.equal(&file)) {
+            return Ok(());
+        }
+        if !kept.iter().any(|kept| kept.has_prefix(&file)) {
+            return permanently_delete(file, true, cancellable).await;
+        }
+        let enumerator = await_cancellable(&file, &cancellable, |file, cancellable, result| {
+            file.enumerate_children_async(
+                "standard::name,standard::type",
+                gio::FileQueryInfoFlags::NOFOLLOW_SYMLINKS,
+                glib::Priority::DEFAULT,
+                Some(cancellable),
+                move |output| result.resolve(output),
+            );
+        })
+        .await?;
+        loop {
+            let children = next_children(&enumerator, &cancellable).await?;
+            if children.is_empty() {
+                return Ok(());
+            }
+            for child in children {
+                let child_file = file.child(child.name());
+                if child.file_type() == gio::FileType::Directory {
+                    permanently_delete_keeping(child_file, kept.clone(), cancellable.clone())
+                        .await?;
+                } else if !kept.iter().any(|kept| kept.equal(&child_file)) {
+                    permanently_delete(child_file, false, cancellable.clone()).await?;
+                }
+            }
+        }
     })
 }
 
@@ -6424,7 +6646,12 @@ impl OperationProvider for LocalOperationProvider {
                 let replaced_permanently = Rc::new(Cell::new(false));
                 let undone = item.conflict != TransferConflict::Merge
                     && undone_when_cancelled(&source, &target);
-                let result = if is_duplicate {
+                // A destination known to hold no links is not asked to.
+                let result = if kinds[index] == Some(gio::FileType::SymbolicLink)
+                    && pasted_into.profile.symlinks == Some(false)
+                {
+                    Err(glib::Error::new(Unheld::Symlink, ""))
+                } else if is_duplicate {
                     copy_new_recursively_on_filesystem(
                         source,
                         target,
@@ -6432,6 +6659,7 @@ impl OperationProvider for LocalOperationProvider {
                         operation_cancellable.clone(),
                         Some(progress.clone()),
                         names.clone(),
+                        None,
                     )
                     .await
                     .map(|target| (target, Owed::default()))
@@ -6520,10 +6748,28 @@ impl OperationProvider for LocalOperationProvider {
                         operation_cancellable.clone(),
                         Some(progress.clone()),
                         names.clone(),
+                        None,
                     )
                     .await
                     .map(|target| (target, Owed::default()))
                 };
+                if let Err(error) = &result
+                    && let Some(kind) = unheld(error)
+                {
+                    progress.report(left_out(
+                        &item.source,
+                        &destination,
+                        kind,
+                        request.move_sources,
+                    ));
+                    progress.finish_item(
+                        progress.reported().since(started),
+                        item_sizes[index],
+                        item_files[index],
+                        None,
+                    );
+                    continue;
+                }
                 let (target, owed) = match result {
                     Ok(result) => result,
                     Err(error) => {

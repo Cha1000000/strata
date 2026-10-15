@@ -339,6 +339,8 @@ pub enum SpecialKind {
     Pipe,
     Socket,
     Device,
+    /// A symbolic link the destination refuses.
+    Symlink,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -376,6 +378,8 @@ pub struct TransferReport {
     pub kept: Vec<KeptItem>,
     /// Left in the Trash by a restore.
     pub kept_in_trash: Vec<KeptItem>,
+    /// Whether undo leaves out the moved items whose sources kept entries.
+    pub kept_out_of_undo: bool,
 }
 
 impl TransferReport {
@@ -391,6 +395,7 @@ impl TransferReport {
         self.skipped.extend(other.skipped);
         self.kept.extend(other.kept);
         self.kept_in_trash.extend(other.kept_in_trash);
+        self.kept_out_of_undo |= other.kept_out_of_undo;
     }
 
     /// Joins the entries of an item saved under one name after another, as

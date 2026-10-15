@@ -993,6 +993,328 @@ fn a_selected_named_pipe_is_recreated_where_the_destination_can() -> Result<(), 
     Ok(())
 }
 
+fn links_refused_as_not_permitted() -> Quirks {
+    Quirks {
+        symlinks: Support::Rejected(Errno::PERM),
+        ..Quirks::ext4()
+    }
+}
+
+fn link_targets_refused_as_invalid() -> Quirks {
+    Quirks {
+        symlinks: Support::Rejected(Errno::INVAL),
+        ..Quirks::ext4()
+    }
+}
+
+fn links_refused_for_space() -> Quirks {
+    Quirks {
+        symlinks: Support::Rejected(Errno::NOSPC),
+        ..Quirks::ext4()
+    }
+}
+
+/// How a destination takes the symbolic links of a copied folder.
+struct Links {
+    label: &'static str,
+    quirks: Preset,
+    /// Whether the links are left out, or else fail the copy.
+    left_out: Option<bool>,
+    /// How many links two copies in turn ask the mount for.
+    asked: [usize; 2],
+}
+
+#[test]
+fn links_inside_a_copied_folder_are_left_out_where_the_destination_cannot_hold_them()
+-> Result<(), Box<dyn Error>> {
+    use crate::services::SpecialKind;
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let rows = [
+        Links {
+            label: "ext4",
+            quirks: Quirks::ext4,
+            left_out: Some(false),
+            asked: [2, 2],
+        },
+        // The driver has none, so it is never asked.
+        Links {
+            label: "vfat",
+            quirks: Quirks::vfat,
+            left_out: Some(true),
+            asked: [0, 0],
+        },
+        Links {
+            label: "exfat-fuse",
+            quirks: Quirks::exfat_fuse,
+            left_out: Some(true),
+            asked: [0, 0],
+        },
+        // One refusal teaches the mount, for later copies too.
+        Links {
+            label: "cifs",
+            quirks: Quirks::cifs,
+            left_out: Some(true),
+            asked: [1, 0],
+        },
+        // A refusal of one link, or of its target, teaches nothing.
+        Links {
+            label: "refusing each link",
+            quirks: links_refused_as_not_permitted,
+            left_out: Some(true),
+            asked: [2, 2],
+        },
+        Links {
+            label: "refusing each target",
+            quirks: link_targets_refused_as_invalid,
+            left_out: Some(true),
+            asked: [2, 2],
+        },
+        Links {
+            label: "full",
+            quirks: links_refused_for_space,
+            left_out: None,
+            asked: [1, 1],
+        },
+    ];
+    for row in rows {
+        let label = row.label;
+        let root = tempfile::tempdir()?;
+        let source = root.path().join("source");
+        let disk = root.path().join("disk");
+        fs::create_dir_all(source.join("sub"))?;
+        fs::create_dir(&disk)?;
+        fs::write(source.join("a.txt"), b"a")?;
+        fs::write(source.join("sub/b.txt"), b"b")?;
+        std::os::unix::fs::symlink("a.txt", source.join("link"))?;
+        std::os::unix::fs::symlink("../a.txt", source.join("sub/link"))?;
+        let scope = FsQuirks::install(&disk, (row.quirks)());
+        for (copy, asked) in ["first", "second"].into_iter().zip(row.asked) {
+            let target = disk.join(copy);
+            scope.clear_calls();
+
+            let (copied, report) = reporting(
+                &source,
+                Destination::New(target.clone(), Taken::Fail),
+                Options {
+                    names: fixing(),
+                    ..Options::default()
+                },
+            );
+
+            let calls = scope.calls();
+            let symlinks = calls.iter().filter(|call| call.op == Op::Symlink).count();
+            assert_eq!(symlinks, asked, "{label}: {copy}");
+            let Some(left_out) = row.left_out else {
+                assert!(copied.is_err(), "{label}: {copy}");
+                assert_eq!(names(&disk)?, Vec::<String>::new(), "{label}");
+                continue;
+            };
+            copied.map_err(|error| format!("{label}: {error}"))?;
+            assert_eq!(fs::read(target.join("sub/b.txt"))?, b"b", "{label}");
+            let mut skipped = report
+                .skipped
+                .into_iter()
+                .map(|item| (item.location, item.kind))
+                .collect::<Vec<_>>();
+            skipped.sort_by(|left, right| left.0.compare(&right.0));
+            if left_out {
+                assert_eq!(names(&target)?, ["a.txt", "sub"], "{label}");
+                assert_eq!(names(&target.join("sub"))?, ["b.txt"], "{label}");
+                assert_eq!(
+                    skipped,
+                    [
+                        (Location::local(target.join("link")), SpecialKind::Symlink),
+                        (
+                            Location::local(target.join("sub/link")),
+                            SpecialKind::Symlink
+                        ),
+                    ],
+                    "{label}"
+                );
+            } else {
+                assert_eq!(
+                    fs::read_link(target.join("sub/link"))?,
+                    Path::new("../a.txt")
+                );
+                assert_eq!(skipped, [], "{label}");
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Two selected symbolic links pasted, before a file, onto a destination
+/// that cannot hold them.
+struct SelectedLinks {
+    label: &'static str,
+    quirks: Preset,
+    moving: bool,
+    /// Whether a file at the second link's name is to be replaced.
+    replacing: bool,
+    /// How many links the paste asks the mount for.
+    asked: usize,
+}
+
+#[test]
+fn selected_links_the_destination_cannot_hold_are_left_out_and_the_paste_goes_on()
+-> Result<(), Box<dyn Error>> {
+    use crate::services::{KeptCause, KeptItem, SkippedItem, SpecialKind};
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let row = |label, quirks: Preset, moving, replacing, asked| SelectedLinks {
+        label,
+        quirks,
+        moving,
+        replacing,
+        asked,
+    };
+    // vfat has no links, cifs refuses the first one it is asked for, and
+    // the last mount each link's target.
+    let targets = link_targets_refused_as_invalid;
+    let rows = [
+        row("vfat", Quirks::vfat, false, false, 0),
+        row("vfat, moved", Quirks::vfat, true, false, 0),
+        row("vfat, replacing", Quirks::vfat, false, true, 0),
+        row("cifs", Quirks::cifs, false, false, 1),
+        row("cifs, moved", Quirks::cifs, true, false, 1),
+        row("cifs, replacing", Quirks::cifs, false, true, 1),
+        row("refusing each target", targets, false, false, 2),
+        row("refusing each target, replacing", targets, false, true, 2),
+    ];
+    for row in rows {
+        let label = row.label;
+        let root = tempfile::tempdir()?;
+        let source = root.path().join("source");
+        let disk = root.path().join("disk");
+        fs::create_dir_all(&source)?;
+        fs::create_dir(&disk)?;
+        let links = ["a-link", "b-link"].map(|name| source.join(name));
+        let file = source.join("file.txt");
+        for link in &links {
+            std::os::unix::fs::symlink("file.txt", link)?;
+        }
+        fs::write(&file, b"file")?;
+        if row.replacing {
+            fs::write(disk.join("b-link"), b"earlier")?;
+        }
+        let scope = FsQuirks::install(&disk, (row.quirks)());
+        let conflict = if row.replacing {
+            TransferConflict::ReplaceExisting
+        } else {
+            TransferConflict::FailIfExists
+        };
+        let item = |source: &Path, conflict| PasteItem {
+            source: Location::local(source),
+            conflict,
+        };
+
+        let events = run_paste(PasteRequest {
+            id: OperationRequestId(1590),
+            destination: Location::local(&disk),
+            items: vec![
+                item(&links[0], TransferConflict::FailIfExists),
+                item(&links[1], conflict),
+                item(&file, TransferConflict::FailIfExists),
+            ],
+            move_sources: row.moving,
+        });
+
+        let symlinks = scope
+            .calls()
+            .iter()
+            .filter(|call| call.op == Op::Symlink)
+            .count();
+        assert_eq!(symlinks, row.asked, "{label}");
+        for link in &links {
+            assert_eq!(fs::read_link(link)?, Path::new("file.txt"), "{label}");
+        }
+        assert_eq!(fs::read(disk.join("file.txt"))?, b"file", "{label}");
+        assert_eq!(file.exists(), !row.moving, "{label}");
+        assert!(
+            fs::symlink_metadata(disk.join("a-link")).is_err(),
+            "{label}"
+        );
+        if row.replacing {
+            assert_eq!(fs::read(disk.join("b-link"))?, b"earlier", "{label}");
+        } else {
+            assert!(
+                fs::symlink_metadata(disk.join("b-link")).is_err(),
+                "{label}"
+            );
+        }
+        let report = followed_report(&events);
+        if row.moving {
+            assert_eq!(
+                item_moves(&events),
+                [(
+                    Location::local(&file),
+                    Location::local(disk.join("file.txt"))
+                )],
+                "{label}"
+            );
+            let kept = links.clone().map(|link| KeptItem {
+                location: Location::local(link),
+                cause: KeptCause::Skipped(SpecialKind::Symlink),
+            });
+            assert_eq!(report.kept, kept, "{label}");
+            assert_eq!(report.skipped, [], "{label}");
+        } else {
+            let skipped = ["a-link", "b-link"].map(|name| SkippedItem {
+                location: Location::local(disk.join(name)),
+                kind: SpecialKind::Symlink,
+            });
+            assert_eq!(report.skipped, skipped, "{label}");
+            assert_eq!(report.kept, [], "{label}");
+        }
+        assert!(
+            matches!(
+                terminal_transfer(&events),
+                Some(OperationEvent::Pasted { locations, .. })
+                    if *locations == [Location::local(&file)]
+            ),
+            "{label}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn a_selected_link_whose_name_sshfs_answers_as_not_permitted_is_numbered_not_left_out()
+-> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let root = tempfile::tempdir()?;
+    let source = root.path().join("source");
+    let disk = root.path().join("disk");
+    fs::create_dir_all(&source)?;
+    fs::create_dir(&disk)?;
+    let link = source.join("link");
+    std::os::unix::fs::symlink("file.txt", &link)?;
+    for taken in ["link", "link (1)"] {
+        fs::write(disk.join(taken), b"earlier")?;
+    }
+    let _disk = FsQuirks::install(&disk, Quirks::sshfs());
+
+    let events = run_paste(PasteRequest {
+        id: OperationRequestId(1590),
+        destination: Location::local(&disk),
+        items: vec![PasteItem {
+            source: Location::local(&link),
+            conflict: TransferConflict::KeepBoth,
+        }],
+        move_sources: false,
+    });
+
+    assert_eq!(fs::read(disk.join("link (1)"))?, b"earlier");
+    assert_eq!(fs::read_link(disk.join("link (2)"))?, Path::new("file.txt"));
+    assert!(followed_report(&events).is_empty());
+    Ok(())
+}
+
 #[test]
 fn a_paste_through_a_symbolic_link_takes_the_rules_of_the_mount_behind_it()
 -> Result<(), Box<dyn Error>> {
@@ -1200,6 +1522,7 @@ fn fat_family_copies_number_fixed_names_past_the_names_their_siblings_keep()
                     cancellable,
                     Some(progress),
                     fixing(),
+                    None,
                 )
                 .await
                 .map(drop)
@@ -1213,7 +1536,7 @@ fn fat_family_copies_number_fixed_names_past_the_names_their_siblings_keep()
                 cancellable,
                 super::super::CopyRecord::Nothing,
                 Some(progress),
-                super::super::GioNames::new(fixing()),
+                super::super::GioNames::new(fixing(), Default::default()),
             )
         }),
     ];
@@ -1329,6 +1652,7 @@ fn a_copy_into_a_case_sensitive_folder_keeps_a_cut_name_apart_by_case_only()
         gio::Cancellable::new(),
         Some(progress),
         fixing(),
+        None,
     ))?;
 
     assert_eq!(
@@ -1632,6 +1956,7 @@ fn a_name_refused_as_missing_neither_turns_unnamed_files_off_nor_writes_twice()
                 gio::Cancellable::new(),
                 None,
                 names.clone(),
+                None,
             ))
         };
 
@@ -1727,6 +2052,7 @@ fn a_name_no_stricter_rules_change_fails_naming_the_item_and_the_reason()
                 gio::Cancellable::new(),
                 None,
                 fixing(),
+                None,
             ))
             .expect_err("refused");
 

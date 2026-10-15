@@ -925,6 +925,7 @@
   "“%{name}” (device file)": "“%{name}”（设备文件）",
   "“%{name}” (named pipe)": "“%{name}”（命名管道）",
   "“%{name}” (socket)": "“%{name}”（套接字）",
+  "“%{name}” (symbolic link)": "“%{name}”（符号链接）",
   "“%{name}” already exists": "“%{name}”已存在",
   "“%{name}” can’t be replaced safely at this location. Delete or rename it first, then try again.": "无法在此位置安全地替换“%{name}”。先将其删除或重命名，然后重试。",
   "“%{name}” changed during the move and was left in “%{folder}”": "“%{name}”在移动过程中发生了变化，已留在“%{folder}”中",

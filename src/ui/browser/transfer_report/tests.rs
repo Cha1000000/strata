@@ -205,6 +205,56 @@ fn items_left_out_or_left_behind_make_the_report_a_warning_or_follow_a_stop() {
 }
 
 #[test]
+fn links_left_out_get_their_own_section_and_undo_says_what_it_leaves_out() {
+    let skipped = |kind| SkippedItem {
+        location: Location::local("/copy/env/bin/python"),
+        kind,
+    };
+    let report = TransferReport {
+        skipped: vec![skipped(SpecialKind::Socket), skipped(SpecialKind::Symlink)],
+        ..TransferReport::default()
+    };
+    let Some(Presentation::Warning { detail }) = presentation(&report) else {
+        panic!("anything left out makes a warning");
+    };
+    let sections = detail
+        .split("\n\n")
+        .filter(|line| !line.starts_with('•'))
+        .collect::<Vec<_>>();
+    assert_eq!(sections.len(), 2, "{detail}");
+    assert_ne!(sections[0], sections[1]);
+    assert_eq!(detail.matches('•').count(), 2);
+
+    let kept = KeptItem {
+        location: Location::local("/source/env/bin/python"),
+        cause: KeptCause::Skipped(SpecialKind::Symlink),
+    };
+    for (in_trash, kept_out_of_undo, noted) in [
+        (false, false, false),
+        (false, true, true),
+        (true, true, false),
+    ] {
+        let row = format!("in Trash: {in_trash}, kept out of undo: {kept_out_of_undo}");
+        let mut report = TransferReport {
+            kept_out_of_undo,
+            ..TransferReport::default()
+        };
+        if in_trash {
+            report.kept_in_trash.push(kept.clone());
+        } else {
+            report.kept.push(kept.clone());
+        }
+        let Some(Presentation::Warning { detail }) = presentation(&report) else {
+            panic!("{row}");
+        };
+        // A heading, the line, and the note after it.
+        let paragraphs = detail.split("\n\n").collect::<Vec<_>>();
+        assert_eq!(paragraphs.len(), 2 + usize::from(noted), "{row}: {detail}");
+        assert!(paragraphs[1].starts_with('•'), "{row}");
+    }
+}
+
+#[test]
 fn a_stop_lists_renamed_items_by_cause_under_its_outcome() {
     let outcome = "Could not copy keys: Permission denied";
     let mut report = renamed(LISTED_ITEMS + 2);

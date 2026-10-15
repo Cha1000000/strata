@@ -64,6 +64,7 @@ fn special_line(name: &str, kind: SpecialKind) -> String {
         SpecialKind::Pipe => rust_i18n::t!("“%{name}” (named pipe)", name = name),
         SpecialKind::Socket => rust_i18n::t!("“%{name}” (socket)", name = name),
         SpecialKind::Device => rust_i18n::t!("“%{name}” (device file)", name = name),
+        SpecialKind::Symlink => rust_i18n::t!("“%{name}” (symbolic link)", name = name),
     }
     .into_owned()
 }
@@ -119,10 +120,12 @@ fn kept_line(item: &KeptItem, in_trash: bool) -> String {
     }
 }
 
-/// A section's first lines, the only ones formatted, and how many it has.
+/// A section's first lines, the only ones formatted, how many it has, and
+/// what follows them.
 struct Lines {
     listed: Vec<String>,
     count: usize,
+    note: Option<String>,
 }
 
 impl Lines {
@@ -130,6 +133,7 @@ impl Lines {
         Self {
             listed: Vec::new(),
             count: 0,
+            note: None,
         }
     }
 
@@ -163,6 +167,10 @@ fn bullets(lines: &Lines) -> String {
             lines.count - LISTED_ITEMS,
         ));
     }
+    if let Some(note) = &lines.note {
+        text.push_str("\n\n");
+        text.push_str(note);
+    }
     text
 }
 
@@ -195,17 +203,35 @@ fn sections(sections: Vec<(String, Lines)>) -> String {
 
 fn left_sections(report: &TransferReport) -> Vec<(String, Lines)> {
     let mut left = Vec::new();
-    if !report.skipped.is_empty() {
-        let heading =
-            crate::i18n::tr("These special files can\u{2019}t be copied and were left out");
-        left.push((heading, Lines::of(&report.skipped, skipped_line)));
+    let (links, special): (Vec<_>, Vec<_>) = report
+        .skipped
+        .iter()
+        .partition(|item| item.kind == SpecialKind::Symlink);
+    for (skipped, heading) in [
+        (
+            special,
+            "These special files can\u{2019}t be copied and were left out",
+        ),
+        (
+            links,
+            "These symbolic links can\u{2019}t be stored at the destination and were left out",
+        ),
+    ] {
+        if !skipped.is_empty() {
+            left.push((crate::i18n::tr(heading), Lines::of(skipped, skipped_line)));
+        }
     }
     for (kept, heading, in_trash) in [
         (&report.kept, "items_kept", false),
         (&report.kept_in_trash, "items_kept_in_trash", true),
     ] {
         if !kept.is_empty() {
-            let lines = Lines::of(kept, |item| kept_line(item, in_trash));
+            let mut lines = Lines::of(kept, |item| kept_line(item, in_trash));
+            if !in_trash && report.kept_out_of_undo {
+                lines.note = Some(crate::i18n::tr(
+                    "Undo can\u{2019}t move these items back, as part of each stayed in its original folder.",
+                ));
+            }
             left.push((crate::i18n::count(heading, lines.count), lines));
         }
     }

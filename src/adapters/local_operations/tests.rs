@@ -91,9 +91,17 @@ fn copy_recursively_fixing(
                 .await
                 .map(drop);
         }
-        copy_new_recursively_on_filesystem(source, target, Taken::Fail, cancellable, None, names)
-            .await
-            .map(drop)
+        copy_new_recursively_on_filesystem(
+            source,
+            target,
+            Taken::Fail,
+            cancellable,
+            None,
+            names,
+            None,
+        )
+        .await
+        .map(drop)
     })
 }
 
@@ -308,6 +316,7 @@ async fn copy_new_recursively_with_progress(
         cancellable,
         progress,
         NamePolicy::default(),
+        None,
     )
     .await
     .map(drop)

@@ -925,6 +925,7 @@
   "“%{name}” (device file)": "“%{name}” (device file)",
   "“%{name}” (named pipe)": "“%{name}” (named pipe)",
   "“%{name}” (socket)": "“%{name}” (socket)",
+  "“%{name}” (symbolic link)": "“%{name}” (symbolic link)",
   "“%{name}” already exists": "“%{name}” already exists",
   "“%{name}” can’t be replaced safely at this location. Delete or rename it first, then try again.": "“%{name}” can’t be replaced safely at this location. Delete or rename it first, then try again.",
   "“%{name}” changed during the move and was left in “%{folder}”": "“%{name}” changed during the move and was left in “%{folder}”",

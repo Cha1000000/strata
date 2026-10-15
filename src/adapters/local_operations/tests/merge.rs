@@ -18,7 +18,7 @@ fn real_copy() -> CopyStep {
 fn gio_merge_copy(names: NamePolicy) -> CopyStep {
     Rc::new(
         move |source, target, copy: super::super::MergeCopy, cancellable| {
-            let names = super::super::GioNames::new(names.clone());
+            let names = super::super::GioNames::new(names.clone(), Default::default());
             Box::pin(async move {
                 super::super::copy_recursively_with_progress(
                     source,
@@ -58,6 +58,54 @@ fn rename_stage(staging: PathBuf) -> (StageOverwrite, Rc<RefCell<Vec<Location>>>
         })
     });
     (stage, calls)
+}
+
+#[test]
+fn a_merge_replaces_nothing_with_a_link_the_destination_cannot_hold() -> Result<(), Box<dyn Error>>
+{
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    for (row, quirks, links) in [
+        ("vfat", Quirks::vfat as Preset, false),
+        ("ext4", Quirks::ext4, true),
+    ] {
+        let root = tempfile::tempdir()?;
+        let source = root.path().join("source");
+        let target = root.path().join("target");
+        fs::create_dir_all(&source)?;
+        fs::create_dir_all(&target)?;
+        fs::write(source.join("a.txt"), b"a")?;
+        std::os::unix::fs::symlink("a.txt", source.join("link"))?;
+        fs::write(target.join("link"), b"earlier")?;
+        let _target = FsQuirks::install(&target, quirks());
+        let (stage, staged) = rename_stage(root.path().join("staging"));
+        let (_plans, on_merged) = recorded_plans();
+
+        glib::MainContext::default().block_on(merge_local_with(
+            gio::File::for_path(&source),
+            gio::File::for_path(&target),
+            false,
+            gio::Cancellable::new(),
+            None,
+            MergeHooks {
+                names: fixing(),
+                copy_into_target: super::super::merge_copy(None, fixing()),
+                stage_overwrite: stage,
+                on_merged: &on_merged,
+            },
+        ))?;
+
+        assert_eq!(fs::read(target.join("a.txt"))?, b"a", "{row}");
+        if links {
+            assert_eq!(*staged.borrow(), [Location::local(target.join("link"))]);
+            assert_eq!(fs::read_link(target.join("link"))?, Path::new("a.txt"));
+        } else {
+            assert_eq!(*staged.borrow(), Vec::<Location>::new());
+            assert_eq!(fs::read(target.join("link"))?, b"earlier");
+        }
+    }
+    Ok(())
 }
 
 #[test]

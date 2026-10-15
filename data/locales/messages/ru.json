@@ -925,6 +925,7 @@
   "“%{name}” (device file)": "«%{name}» (файл устройства)",
   "“%{name}” (named pipe)": "«%{name}» (именованный канал)",
   "“%{name}” (socket)": "«%{name}» (сокет)",
+  "“%{name}” (symbolic link)": "«%{name}» (символическая ссылка)",
   "“%{name}” already exists": "«%{name}» уже существует",
   "“%{name}” can’t be replaced safely at this location. Delete or rename it first, then try again.": "«%{name}» невозможно безопасно заменить в этом расположении. Сначала удалите или переименуйте его, затем повторите попытку.",
   "“%{name}” changed during the move and was left in “%{folder}”": "Элемент «%{name}» изменился во время перемещения и остался в «%{folder}»",
