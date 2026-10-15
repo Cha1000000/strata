@@ -1126,7 +1126,10 @@ fn undoing_a_move_gives_fixed_names_back_and_reports_those_it_cannot() -> Result
         report.kept,
         [crate::services::KeptItem {
             location: Location::local(project.join("failed:3")),
-            cause: KeptCause::NameNotRestored(denied),
+            cause: KeptCause::NameNotRestored {
+                saved_as: Location::local(project.join("failed_3")),
+                error: denied,
+            },
         }]
     );
     Ok(())

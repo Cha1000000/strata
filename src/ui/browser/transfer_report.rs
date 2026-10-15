@@ -111,8 +111,9 @@ fn kept_line(item: &KeptItem, in_trash: bool) -> String {
         )
         .into_owned(),
         KeptCause::Skipped(kind) => special_line(&name, *kind),
-        KeptCause::NameNotRestored(error) => rust_i18n::t!(
-            "Could not restore %{name}: %{error}",
+        KeptCause::NameNotRestored { saved_as, error } => rust_i18n::t!(
+            "“%{new_name}” could not be renamed back to “%{name}”: %{error}",
+            new_name = display_name(saved_as),
             name = name,
             error = error
         )

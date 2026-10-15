@@ -940,6 +940,7 @@
   "“%{name}” was left in “%{folder}”, as its copy was no longer where the move put it": "„%{name}“ ist in „%{folder}“ geblieben, weil seine Kopie nicht mehr dort war, wo das Verschieben sie abgelegt hatte",
   "“%{name}” was replaced, but its original could not be removed from “%{kept}”: %{error}": "„%{name}“ wurde ersetzt, aber das Original konnte nicht aus „%{kept}“ entfernt werden: %{error}",
   "“%{name}” was saved as “%{new_name}”": "„%{name}“ wurde als „%{new_name}“ gespeichert",
+  "“%{new_name}” could not be renamed back to “%{name}”: %{error}": "„%{new_name}“ konnte nicht wieder in „%{name}“ umbenannt werden: %{error}",
   "“%{path}” does not contain an action.toml file": "„%{path}“ enthält keine action.toml-Datei",
   "“%{path}” is not an absolute path, so it cannot be passed to an action": "„%{path}“ ist kein absoluter Pfad und kann daher nicht an eine Aktion übergeben werden",
   "“%{program}” was not found on your PATH": "„%{program}“ wurde in Ihrem PATH nicht gefunden"

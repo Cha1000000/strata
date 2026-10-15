@@ -359,8 +359,12 @@ pub enum KeptCause {
     Skipped(SpecialKind),
     /// Its copy was no longer where the move put it.
     CopyGone,
-    /// An undo could not give it back the name it had, for this reason.
-    NameNotRestored(String),
+    /// An undo could not give it back the name it had, so it is still at
+    /// `saved_as`, for the reason `error`.
+    NameNotRestored {
+        saved_as: Location,
+        error: String,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

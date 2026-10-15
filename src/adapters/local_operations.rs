@@ -2644,7 +2644,7 @@ async fn restore_renamed(record: &MoveRecord, progress: &TransferProgressTracker
             Err(NameKept::Failed(error)) => {
                 report.kept.push(KeptItem {
                     location: requested,
-                    cause: KeptCause::NameNotRestored(error),
+                    cause: KeptCause::NameNotRestored { saved_as, error },
                 });
                 continue;
             }

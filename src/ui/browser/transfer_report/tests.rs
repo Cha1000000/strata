@@ -127,7 +127,10 @@ fn items_left_out_or_left_behind_make_the_report_a_warning_or_follow_a_stop() {
         kept(KeptCause::Undeletable(denied)),
         kept(KeptCause::Skipped(SpecialKind::Socket)),
         kept(KeptCause::CopyGone),
-        kept(KeptCause::NameNotRestored(reason.clone())),
+        kept(KeptCause::NameNotRestored {
+            saved_as: Location::local("/source/run/data_1"),
+            error: reason.clone(),
+        }),
     ];
     let left_in_trash = [
         in_trash(KeptCause::Changed),
@@ -179,7 +182,8 @@ fn items_left_out_or_left_behind_make_the_report_a_warning_or_follow_a_stop() {
         );
         assert_eq!(detail.contains(&*gone), kept_count > 0, "{row}");
         let unrestored = rust_i18n::t!(
-            "Could not restore %{name}: %{error}",
+            "“%{new_name}” could not be renamed back to “%{name}”: %{error}",
+            new_name = "data_1",
             name = "data",
             error = reason
         );

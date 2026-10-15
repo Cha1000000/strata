@@ -940,6 +940,7 @@
   "“%{name}” was left in “%{folder}”, as its copy was no longer where the move put it": "“%{name}” được giữ lại trong “%{folder}” vì bản sao của nó không còn ở nơi thao tác di chuyển đã đặt",
   "“%{name}” was replaced, but its original could not be removed from “%{kept}”: %{error}": "Đã thay thế “%{name}”, nhưng không thể xóa bản gốc khỏi “%{kept}”: %{error}",
   "“%{name}” was saved as “%{new_name}”": "“%{name}” đã được lưu thành “%{new_name}”",
+  "“%{new_name}” could not be renamed back to “%{name}”: %{error}": "Không thể đổi tên “%{new_name}” trở lại thành “%{name}”: %{error}",
   "“%{path}” does not contain an action.toml file": "“%{path}” không chứa tệp action.toml",
   "“%{path}” is not an absolute path, so it cannot be passed to an action": "“%{path}” không phải là đường dẫn tuyệt đối nên không thể chuyển cho hành động",
   "“%{program}” was not found on your PATH": "Không tìm thấy “%{program}” trong PATH"
