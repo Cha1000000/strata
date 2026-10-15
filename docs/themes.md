@@ -11,10 +11,21 @@ Strata defines its named colors as `@strata_bg`, `@strata_surface`,
 `@theme_*` names; user stylesheets referencing those names must be updated.
 Custom theme TOML keys are unchanged.
 
-Strata's token provider takes precedence over GTK theme defaults, but user
-`~/.config/gtk-4.0/gtk.css` retains GTK's higher user priority. The namespace
-prevents accidental collisions with other stylesheets' `@theme_*` colors;
-it does not override deliberate user selectors or `@strata_*` definitions.
+Strata isolates its appearance from desktop GTK styling:
+
+- The GTK theme is pinned to GTK's built-in `Default` theme. A desktop theme
+  selected through the settings portal, `settings.ini`, or `GTK_THEME` is
+  ignored; `GTK_THEME` is dropped from the environment before GTK starts.
+- The built-in theme's light or dark variant follows the active Strata theme's
+  background, not the desktop color scheme, and the high-contrast variant is
+  never used.
+- Above GTK's user priority, Strata unsets every property and restates the
+  built-in theme before its own stylesheets, so `~/.config/gtk-4.0/gtk.css`
+  cannot change any property of Strata's widgets.
+
+The `@strata_*` namespace prevents accidental collisions with other
+stylesheets' `@theme_*` colors; it does not stop deliberate `@strata_*`
+redefinitions in a user stylesheet.
 
 ## Custom theme files
 

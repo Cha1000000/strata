@@ -16,6 +16,7 @@ use gtk::prelude::*;
 use gtk::{glib, graphene};
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
+use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 use std::rc::{Rc, Weak};
 use std::time::Duration;
@@ -809,21 +810,61 @@ pub(super) fn copy_path_text(location: &Location, is_directory: bool) -> String 
 }
 
 fn shell_escape_path(path: &Path) -> String {
-    let path = path.to_string_lossy();
+    let bytes = path.as_os_str().as_bytes();
+    let Ok(path) = std::str::from_utf8(bytes) else {
+        return bytes
+            .split(|&byte| byte == b'/')
+            .map(|segment| match std::str::from_utf8(segment) {
+                Ok(segment) if !segment.contains('\n') => backslash_escape(segment),
+                _ => ansi_c_quote(segment),
+            })
+            .collect::<Vec<_>>()
+            .join("/");
+    };
     if path.contains('\n') {
         return format!("'{}'", path.replace('\'', "'\\''"));
     }
+    backslash_escape(path)
+}
 
-    let mut escaped = String::new();
-    for c in path.chars() {
+fn backslash_escape(text: &str) -> String {
+    let mut escaped = String::with_capacity(text.len());
+    for c in text.chars() {
         if needs_shell_escape(c) {
             escaped.push('\\');
-            escaped.push(c);
-        } else {
-            escaped.push(c);
         }
+        escaped.push(c);
     }
     escaped
+}
+
+fn ansi_c_quote(bytes: &[u8]) -> String {
+    let mut quoted = String::from("$'");
+    for chunk in bytes.utf8_chunks() {
+        for c in chunk.valid().chars() {
+            match c {
+                '\'' | '\\' => {
+                    quoted.push('\\');
+                    quoted.push(c);
+                }
+                c if c.is_control() => {
+                    push_hex_escapes(&mut quoted, c.encode_utf8(&mut [0; 4]).as_bytes())
+                }
+                c => quoted.push(c),
+            }
+        }
+        push_hex_escapes(&mut quoted, chunk.invalid());
+    }
+    quoted.push('\'');
+    quoted
+}
+
+fn push_hex_escapes(text: &mut String, bytes: &[u8]) {
+    use std::fmt::Write;
+
+    for byte in bytes {
+        let _ = write!(text, "\\x{byte:02x}");
+    }
 }
 
 fn needs_shell_escape(c: char) -> bool {

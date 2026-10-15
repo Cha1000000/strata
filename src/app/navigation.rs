@@ -1900,26 +1900,35 @@ impl NavigationState {
             .collect()
     }
 
-    /// The pane's committed fill in listing order, or its cursor item when
-    /// nothing is filled. A load cursor is not a fill, and another pane's
-    /// open-path marker is never a target.
+    /// The pane's committed fill in listing order. A load cursor is not a fill,
+    /// and another pane's open-path marker is never a target.
+    pub fn filled_entries(&self, depth: usize) -> Vec<FileEntry> {
+        let Some(column) = self.columns.get(depth) else {
+            return Vec::new();
+        };
+        if column.load_cursor.is_some() || column.selected_locations.is_empty() {
+            return Vec::new();
+        }
+        let visible = |entry: &FileEntry| column.preferences.show_hidden || !entry.is_hidden;
+        column
+            .selected_positions()
+            .iter()
+            .map(|position| &column.entries[*position])
+            .filter(|entry| visible(entry))
+            .cloned()
+            .collect()
+    }
+
+    /// `filled_entries`, or the pane's cursor item when nothing is filled.
     pub fn command_entries(&self, depth: usize) -> Vec<FileEntry> {
+        let filled = self.filled_entries(depth);
+        if !filled.is_empty() {
+            return filled;
+        }
         let Some(column) = self.columns.get(depth) else {
             return Vec::new();
         };
         let visible = |entry: &FileEntry| column.preferences.show_hidden || !entry.is_hidden;
-        if column.load_cursor.is_none() && !column.selected_locations.is_empty() {
-            let filled: Vec<FileEntry> = column
-                .selected_positions()
-                .iter()
-                .map(|position| &column.entries[*position])
-                .filter(|entry| visible(entry))
-                .cloned()
-                .collect();
-            if !filled.is_empty() {
-                return filled;
-            }
-        }
         column
             .selected
             .and_then(|position| column.entries.get(position))

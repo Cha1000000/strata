@@ -311,7 +311,12 @@ impl InlineSearch {
         if state.stack.visible_child_name().as_deref() != Some("search") {
             return false;
         }
-        state.collection.view.grab_focus()
+        if let Some(position) = state.collection.current_position() {
+            state.collection.restore_focus(position);
+            true
+        } else {
+            state.collection.view.grab_focus()
+        }
     }
 
     pub(super) fn selected_anchor(&self) -> Option<(gtk::Widget, FileEntry)> {
@@ -624,6 +629,13 @@ pub(super) fn wrap(
     let stack = gtk::Stack::builder().hexpand(true).vexpand(true).build();
     stack.add_named(content, Some("files"));
     let recursive = Rc::new(Cell::new(false));
+    let weak_entry = entry.downgrade();
+    let focus_entry = Rc::new(move || {
+        weak_entry
+            .upgrade()
+            .filter(|entry| entry.is_mapped())
+            .is_some_and(|entry| entry.grab_focus_without_selecting())
+    });
     let (collection, scroll, overlay) = build_collection(
         presentation,
         recursive.clone(),
@@ -633,6 +645,7 @@ pub(super) fn wrap(
             activate: activate.clone(),
             single_click,
             focus_items,
+            focus_entry,
         },
     );
     let status = gtk::Label::new(None);

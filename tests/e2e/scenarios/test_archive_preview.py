@@ -26,7 +26,12 @@ ENCRYPTED_ARCHIVES = {
 @pytest.fixture
 def fixture_tree(request):
     extension = request.param
-    if extension == "plain":
+    if extension == "mixed":
+        tree = FixtureTree.create({"a.txt": "before", "bundle.zip": "", "c.txt": "middle", "encrypted.zip": ""})
+        with zipfile.ZipFile(tree.path("bundle.zip"), "w") as archive:
+            archive.writestr("top.txt", "top")
+        tree.path("encrypted.zip").write_bytes(base64.b64decode(ENCRYPTED_ARCHIVES["zip"]))
+    elif extension == "plain":
         tree = FixtureTree.create({"a.txt": "before", "bundle.zip": "", "z.txt": "after"})
         with zipfile.ZipFile(tree.path("bundle.zip"), "w") as archive:
             archive.writestr("docs/inside.txt", "inside")
@@ -95,6 +100,38 @@ def test_columns_archive_preview_waits_for_explicit_entry(strata, fixture_tree, 
     strata.wait_for_focused_entry("z.txt")
     assert strata.current_directory() == root
     assert sorted(path.name for path in fixture_tree.root.iterdir()) == ["a.txt", "bundle.zip", "z.txt"]
+
+
+@pytest.mark.parametrize("fixture_tree", ["mixed"], indirect=True)
+@pytest.mark.parametrize("browser_mode", [
+    pytest.param("list", marks=pytest.mark.preferences(browser_mode="list"), id="list"),
+    pytest.param("icons", marks=pytest.mark.preferences(browser_mode="icons"), id="icons"),
+])
+@pytest.mark.preferences(type_to_search=False)
+def test_open_preview_does_not_take_focus_when_navigating_onto_archives(strata, fixture_tree, browser_mode):
+    strata.select_entry_with_keyboard("a.txt")
+    strata.keyboard.press("space")
+    strata.wait(lambda: strata.preview_shows("before"), "the text preview")
+    next_key = "Down" if browser_mode == "list" else "Right"
+
+    strata.keyboard.press(next_key)
+    strata.wait_for_focused_entry("bundle.zip")
+    strata.wait(lambda: strata.preview_shows("top.txt"), "the passive archive contents")
+    time.sleep(SETTLE_HOLD)
+    assert strata.focused_name() == "bundle.zip", "the archive took the keys"
+    assert strata.preview().find(states={"selected"}) is None
+
+    strata.keyboard.press(next_key)
+    strata.wait_for_focused_entry("c.txt")
+    strata.keyboard.press(next_key)
+    strata.wait_for_focused_entry("encrypted.zip")
+    strata.wait(lambda: strata.preview_shows("Password-protected archive"), "the password prompt")
+    time.sleep(SETTLE_HOLD)
+    assert strata.focused_name() == "encrypted.zip", "the password prompt took the keys"
+    assert strata.preview().find(states={"editable", "focused"}) is None
+
+    strata.keyboard.press("Home")
+    strata.wait_for_focused_entry("a.txt")
 
 
 @pytest.mark.parametrize("fixture_tree", ["plain"], indirect=True)

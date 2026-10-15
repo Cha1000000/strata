@@ -101,7 +101,8 @@ admission pass after a frame, outside layout, so a final scroll cannot strand wo
 classified against old allocations. Icons reserves a font-sized details line even when
 empty; metadata truncates within the caption width instead of resizing the grid.
 Cut styling, tooltips and date
-bindings refresh once per GTK frame, outside layout, for visible/overscan items.
+bindings refresh outside layout, for visible/overscan items, once scrolling has been still for
+25 ms and at least two frames.
 These presentation refreshes never resubmit file work or reset a name label or active
 rename editor. Identical active thumbnail/metadata requests are reused. Missing
 bindings retain the existing fallback path. Pane assembly, headers, grouping/filtering, and Icons factories

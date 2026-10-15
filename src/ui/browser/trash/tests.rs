@@ -379,3 +379,62 @@ fn unsupported_trash_fallback_explains_and_focuses_cancel() {
         },
     );
 }
+
+#[test]
+fn permanent_delete_symlink_to_folder_counts_only_link_and_labels_folder_link() {
+    crate::test_support::gtk_test(
+        "ui::browser::trash::tests::permanent_delete_symlink_to_folder_counts_only_link_and_labels_folder_link",
+        || {
+            let fixture = tempfile::tempdir().expect("fixture");
+            let real_dir = fixture.path().join("realdir");
+            fs::create_dir(&real_dir).expect("realdir");
+            for i in 1..=5 {
+                fs::write(real_dir.join(format!("file{i}")), b"x").expect("file");
+            }
+            let link = fixture.path().join("0dirlink");
+            std::os::unix::fs::symlink(&real_dir, &link).expect("symlink");
+
+            let context = glib::MainContext::new();
+            let entry = context
+                .block_on(crate::adapters::query_file_entry(Location::local(&link)))
+                .expect("entry");
+            assert_eq!(entry.kind, EntryKind::DirectorySymbolicLink);
+
+            let view = view();
+            let window = window(&view);
+            view.state.show_delete_confirmation(vec![entry]);
+
+            assert!(
+                has_label(&window, "Folder link"),
+                "dialog row must label directory symlink as Folder link"
+            );
+
+            wait_until(|| delete_summary_loaded(&window));
+            let summary_label = find_widget(window.upcast_ref(), &|label: &gtk::Label| {
+                let text = normalized(label);
+                text.contains(" · ") && text.ends_with("will be permanently deleted")
+            })
+            .expect("summary label");
+            assert_eq!(
+                normalized(&summary_label),
+                "1 item · 0 B will be permanently deleted"
+            );
+
+            let confirm =
+                button(window.upcast_ref(), "Permanently delete 1 item").expect("confirm button");
+            confirm.emit_clicked();
+            wait_until(|| button(window.upcast_ref(), "Permanently delete 1 item").is_none());
+            wait_until(|| link.symlink_metadata().is_err());
+            assert!(real_dir.is_dir(), "target folder must still exist");
+            for i in 1..=5 {
+                assert!(
+                    real_dir.join(format!("file{i}")).exists(),
+                    "target file{i} must be preserved"
+                );
+            }
+
+            window.destroy();
+            view.browser().clear_observer();
+        },
+    );
+}

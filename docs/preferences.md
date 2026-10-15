@@ -90,11 +90,13 @@ control that might be midway through synchronization.
 | Remember sort and icon size per folder | On by default. Browsers and the portal chooser bind at construction, before Settings opens, and resolve each column's folder sort and the Icons folder's size live. Off restores the last-sort-wins defaults; saved folder values stay stored but unused. See [Per-folder sort and thumbnail size](#per-folder-sort-and-thumbnail-size). |
 | Type-to-search, opening search results directly | Keyboard/search actions read the current manager value at dispatch. |
 | Global search exclusions | Each global-search invocation reads the current rules before indexing, including before Settings opens. Existing search snapshots keep their rules until reopened. Exclusion editors synchronize across windows. Pane filters, 10xer path search, folder-history search, and destination pickers retain their explicit browsing scope and ignore these rules. |
+| Search time limit, search entry limit | Global search, pane filters, 10xer path search, and folder pickers read the current limits when they start a query, including before Settings opens. A changed limit restarts the next query's index walk; an open result snapshot keeps its limits until it requeries. See [Search limits](#search-limits). |
 | 10xer mode | Interactive browsers and the portal file chooser bind pane Close/filter/refresh/sort chrome and the Yazi-style keymap at construction, including lazily rebuilt views. Window Search hides in interactive browsers. Window Close, chooser Accept/Cancel, and List column headings stay. Unclaimed letter commands return focus from non-text window chrome to the listing; text fields, menus, and previews retain their own input. Off by default; toggle with `Ctrl+Shift+M` or Settings → General → Browsing. Enabling shows a brief non-interactive splash that respects Reduce motion; reopening an already-enabled window does not replay it. |
 | Include subfolders | Every pane filter binds at construction, including lazy view rebuilds. Enabled by default; disabling indexes only immediate files and folders, without traversing descendants. Live changes cancel pending queries and invalidate old result streams before refreshing the active filter. Global search remains recursive. 10xer mode ignores it: entering or leaving the mode re-runs active filters in the new scope. |
 | File icon colors | Brand colors by default: Catppuccin file-type icons keep their own palette, Mocha on dark themes and Latte on light ones. Theme colors draws every one of their strokes in the theme accent instead. `ThemeManager` applies the choice with the other appearance preferences, before Settings opens and live across windows and rebuilt views; Lucide interface icons and folders are unaffected. Set under **Settings → Appearance → File icons**. |
 | Element glow | Shared semantic glow color is applied by `ThemeManager` when the appearance preferences change, before Settings opens and live across windows, dialogs, menus, and rebuilt views. Focus outlines and ordinary depth shadows are preserved. The video preview's ambient light, and the band it needs around the frame, follow the same switch live. |
 | Reduced motion | Set before any window is constructed; animation helpers read the current process-wide value. |
+| Corner roundness | `corner_roundness` stores a percent of the stylesheet's corner radii (0–200, default 60). `ThemeManager` reparses the shared stylesheet with every pixel radius scaled when the value changes, before Settings opens and live across windows, dialogs, menus, and rebuilt views; percentage radii that draw circles are unchanged. Set under **Settings → Appearance → Shape**. |
 | Theme, Omarchy following/variant, text size | `ThemeManager` applies shared CSS when theme selection, Omarchy following, Omarchy variant, text size, or element glow change; controls and theme-card selections bind to preferences through `ThemeManager::bind_theme_preference`. Newly saved custom themes appear in other open theme pages. Missing themes/Omarchy use the existing fallback policy. |
 | Language | Initialized before application UI from the saved manual language or system locale priorities. The selection and Restart button synchronize across Settings windows, but the running interface keeps its startup language until a full restart. This deliberate restart-to-apply exception avoids rebuilding active browsers, dialogs, and operations. |
 | Interface renderer | GTK selects the renderer at process startup. The saved GTK default or Cairo choice is read before GTK initializes; GTK default is selected for new installs. The control and Restart button synchronize across Settings windows, but changes take effect only after restarting Strata (via the button or after fully quitting and reopening). An explicit `GSK_RENDERER` always overrides the saved choice. |
@@ -370,6 +372,18 @@ are literal, not glob patterns. Built-in tool/cache exclusions remain in effect.
 Rules are stored as `search_exclusions`; invalid saved rules are ignored. Root,
 the entire home directory, relative paths, and paths containing `..` are rejected.
 Changes apply the next time global search opens, across all windows.
+
+## Search limits
+
+In **Settings → General → Search & filtering**, **Search time limit** (10 s by
+default, up to 15 min or No limit) and **Search entry limit** (200,000 by default,
+up to 5,000,000 or No limit) bound every index walk. A walk stops when either is
+reached and the results show the **Partial results** hint; hovering it lists the
+reasons and, for a limit stop, points back to these settings. Longer limits let slow
+or network mounts list every folder; the entry limit bounds index memory, since
+every indexed entry keeps its path. Stored as `search_time_limit` (seconds) and
+`search_entry_limit`; 0 means no limit, and other unlisted values round up to the
+next choice. Changes apply to the next query in every window.
 
 ## Filter scope
 

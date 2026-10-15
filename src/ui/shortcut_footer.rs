@@ -689,7 +689,7 @@ impl ShortcutFooter {
 
         let more = gtk::ToggleButton::new();
         let reference = Keys::One(bindings::REFERENCE);
-        let more_label = with_keys("%{keys}  Shortcuts", reference);
+        let more_label = with_keys("%{keys} Shortcuts", reference);
         more.set_child(Some(&gtk::Label::new(Some(&more_label))));
         more.add_css_class("shortcut-footer-button");
         super::accessibility::set_label(&more, &more_label);

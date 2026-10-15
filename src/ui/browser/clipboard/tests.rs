@@ -146,7 +146,6 @@ fn drag_preview_icon_renders_single_and_multiple_entries() {
 
             let themes = crate::ui::theme::ThemeManager::shared();
             themes.select_theme("tokyo-night");
-            crate::ui::window::load_styles();
             let window = gtk::Window::new();
             let base = gtk::Box::new(gtk::Orientation::Horizontal, 0);
             window.set_child(Some(&base));
@@ -775,6 +774,59 @@ fn shell_escape_path_preserves_newlines_and_single_quotes() {
         shell_escape_path(Path::new("/tmp/line\nbob's notes")),
         "'/tmp/line\nbob'\\''s notes'"
     );
+}
+
+#[test]
+fn shell_escape_path_quotes_only_non_utf8_components() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    for (path, expected) in [
+        (
+            &b"/mnt/Mass 1/bad\xff.txt"[..],
+            "/mnt/Mass\\ 1/$'bad\\xff.txt'",
+        ),
+        (b"/path/to/caf\xc3\xa9\xff.txt", "/path/to/$'café\\xff.txt'"),
+        (b"bad\xff it's\\.txt", "$'bad\\xff it\\'s\\\\.txt'"),
+        (
+            b"/tmp/line\nbreak/bad\xff\xc2\x85",
+            "/tmp/$'line\\x0abreak'/$'bad\\xff\\xc2\\x85'",
+        ),
+    ] {
+        assert_eq!(
+            shell_escape_path(Path::new(OsStr::from_bytes(path))),
+            expected
+        );
+    }
+    assert_eq!(
+        copy_path_text(
+            &Location::local(Path::new(OsStr::from_bytes(b"/path/to/bad\xff"))),
+            true
+        ),
+        "/path/to/$'bad\\xff'/"
+    );
+}
+
+#[test]
+fn copied_non_utf8_paths_resolve_in_bash() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    let dir = tempfile::tempdir().expect("temporary directory");
+    let directory = dir.path().join(OsStr::from_bytes(b"line\nbreak \xfe"));
+    std::fs::create_dir(&directory).expect("create directory");
+    let file = directory.join(OsStr::from_bytes(b"bad\xff it's\x85.txt"));
+    std::fs::write(&file, b"content").expect("write file");
+
+    for (path, is_directory) in [(&directory, true), (&file, false)] {
+        let copied = copy_path_text(&Location::local(path), is_directory);
+        let status = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(format!("test -e {copied}"))
+            .status()
+            .expect("run bash");
+        assert!(status.success(), "bash could not resolve {copied:?}");
+    }
 }
 
 fn pump_main_loop_until(timeout: Duration, condition: impl Fn() -> bool) {

@@ -556,9 +556,17 @@ fn global_search_combines_home_and_drives_and_refreshes_mounts() {
             };
             render_results(&dialog.state, Vec::new(), false, coverage);
             assert!(dialog.state.truncated_hint.is_visible());
-            assert!(dialog.state.truncated_hint.tooltip_text().is_none());
+            let tooltip = dialog.state.truncated_hint.tooltip_text();
+            assert_eq!(tooltip.as_deref(), Some(coverage.message().as_str()));
+            assert!(
+                tooltip
+                    .as_deref()
+                    .is_some_and(|text| text.contains("Settings → General → Search & filtering")),
+                "a limit stop points to the search limit settings"
+            );
             render_results(&dialog.state, Vec::new(), false, SearchCoverage::default());
             assert!(!dialog.state.truncated_hint.is_visible());
+            assert!(dialog.state.truncated_hint.tooltip_text().is_none());
 
             dialog.show(vec![home, usb.clone()], false);
             dialog.state.field.set_text("needle");
@@ -648,6 +656,70 @@ fn global_search_reads_saved_exclusions_before_settings_and_on_each_window_invoc
                 hide(&dialog.state);
                 window.destroy();
             }
+        },
+    );
+}
+
+#[test]
+fn global_search_reads_saved_limits_before_settings_and_on_each_invocation() {
+    crate::test_support::gtk_test(
+        "ui::search::tests::global_search_reads_saved_limits_before_settings_and_on_each_invocation",
+        || {
+            let config = glib::user_config_dir().join("strata");
+            std::fs::create_dir_all(&config).expect("isolated config directory");
+            std::fs::write(
+                config.join("settings.toml"),
+                "search_time_limit = 0\nsearch_entry_limit = 0\n",
+            )
+            .expect("saved limits");
+            let fixture = tempfile::tempdir().expect("search fixture");
+            let root = fixture.path().to_path_buf();
+            std::fs::write(root.join("needle.txt"), "visible").expect("visible file");
+            let manager = super::super::preferences::PreferenceManager::shared();
+            assert_eq!(
+                manager.search_limits(),
+                crate::services::SearchLimits {
+                    time_budget: None,
+                    max_entries: None,
+                }
+            );
+            let index_with_current_limits = || {
+                index_trees_with_exclusions(
+                    vec![root.clone()],
+                    false,
+                    Vec::new(),
+                    manager.search_limits(),
+                )
+                .0
+            };
+            let unlimited = index_with_current_limits();
+            let dialog = SearchDialog::new(Rc::new(|_| {}), Rc::new(|_| {}), Rc::new(|| {}));
+            let window = gtk::Window::builder().child(&dialog.widget()).build();
+            window.present();
+            let dialog_shares = |handle: &SearchHandle| {
+                dialog
+                    .state
+                    .search
+                    .borrow()
+                    .as_ref()
+                    .is_some_and(|current| current.shares_index_with(handle))
+            };
+            dialog.show(vec![root.clone()], false);
+            assert!(
+                dialog_shares(&unlimited),
+                "saved limits apply before Settings opens"
+            );
+            manager.set_search_time_limit(10);
+            manager.set_search_entry_limit(200_000);
+            let capped = index_with_current_limits();
+            dialog.show(vec![root.clone()], false);
+            assert!(
+                dialog_shares(&capped),
+                "a changed limit applies to the next search"
+            );
+            assert!(!dialog_shares(&unlimited));
+            hide(&dialog.state);
+            window.destroy();
         },
     );
 }

@@ -425,6 +425,38 @@ fn a_fill_follows_every_listing_change() {
 }
 
 #[test]
+fn filled_entries_distinguishes_a_committed_fill_from_load_cursor_and_selectionless_cursor() {
+    let mut state = NavigationState::default();
+    listing_with_the_first_entry_selected(&mut state);
+    assert_eq!(state.command_entries(0).len(), 1);
+    assert!(
+        state.filled_entries(0).is_empty(),
+        "a load cursor is not a fill"
+    );
+
+    assert!(state.select(0, 1));
+    assert_eq!(
+        state
+            .filled_entries(0)
+            .into_iter()
+            .map(|entry| entry.display_name)
+            .collect::<Vec<_>>(),
+        ["bravo"]
+    );
+
+    assert!(state.clear_active_selection().is_some());
+    assert_eq!(
+        state.command_entries(0).len(),
+        1,
+        "command_entries falls back to cursor"
+    );
+    assert!(
+        state.filled_entries(0).is_empty(),
+        "cleared selection leaves no filled entries"
+    );
+}
+
+#[test]
 fn keyboard_range_selection_extends_and_contracts_from_its_anchor() {
     let mut state = NavigationState::default();
     state.navigate(location("/fixture"), RequestId(1));

@@ -1506,6 +1506,7 @@ fn build_chooser_hosted(
         .default_height(initial_height)
         .modal(request.modal)
         .build();
+    crate::ui::decoration::claim_titlebar(&window);
     if let Some(host) = &host {
         window.set_transient_for(Some(&host.parent));
         window.set_destroy_with_parent(true);

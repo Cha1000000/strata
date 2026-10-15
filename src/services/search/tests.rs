@@ -14,9 +14,10 @@ use std::{
 mod scope;
 
 use super::{
-    PathAdmission, RefusedFolders, SearchEvent, SearchItem, admit_path, fuzzy_score_normalized,
-    fuzzy_subsequence_score, index_folder_paths, index_tree, index_trees, index_trees_with_budget,
-    index_trees_with_budget_and_exclusions, index_trees_with_scheduler_budget,
+    PathAdmission, RefusedFolders, SearchEvent, SearchItem, SearchLimits, admit_path,
+    fuzzy_score_normalized, fuzzy_subsequence_score, index_folder_paths, index_tree, index_trees,
+    index_trees_with_budget, index_trees_with_budget_and_exclusions, index_trees_with_exclusions,
+    index_trees_with_scheduler_budget,
 };
 
 fn score_path(path: &str, query: &str, root: &Path) -> Option<i64> {
@@ -626,6 +627,7 @@ fn folder_path_search_offers_only_folders_below_the_root() {
         false,
         crate::services::path_match::Frecency::default(),
         RefusedFolders::default(),
+        SearchLimits::default(),
     );
     search.query("rep");
     let SearchEvent::Results { items, .. } = wait_for_results(&events).expect("results");
@@ -650,7 +652,13 @@ fn folder_hits(
         root,
         visited.iter().map(|folder| (root.join(folder), 100.0)),
     );
-    let (search, events) = index_folder_paths(root.to_path_buf(), false, frecency, refused);
+    let (search, events) = index_folder_paths(
+        root.to_path_buf(),
+        false,
+        frecency,
+        refused,
+        SearchLimits::default(),
+    );
     search.query(query);
     let SearchEvent::Results { items, .. } = wait_for_results(&events).expect("results");
     items.into_iter().map(|item| item.path).collect()
@@ -770,6 +778,83 @@ fn index_reports_truncated_once_the_entry_budget_is_exceeded() {
         items.len() <= 2,
         "the index should stop growing once the entry budget is reached"
     );
+}
+
+#[test]
+fn limit_stops_point_to_the_search_limit_settings() {
+    let settings_pointer = "Raise the limits in Settings → General → Search & filtering.";
+    for coverage in [
+        super::SearchCoverage {
+            time_limit: true,
+            ..Default::default()
+        },
+        super::SearchCoverage {
+            entry_limit: true,
+            unreadable: true,
+            ..Default::default()
+        },
+    ] {
+        let message = coverage.message();
+        assert!(message.starts_with("Partial search — "), "{message}");
+        assert!(message.ends_with(settings_pointer), "{message}");
+    }
+    let unreadable = super::SearchCoverage {
+        unreadable: true,
+        depth_limit: true,
+        ..Default::default()
+    }
+    .message();
+    assert!(!unreadable.contains(settings_pointer), "{unreadable}");
+}
+
+#[test]
+fn each_limit_keys_its_own_shared_index_and_none_lifts_the_cap() {
+    let root = unique_fixture_root("limits");
+    fs::create_dir_all(&root).expect("the search fixture should be created");
+    for index in 0..5 {
+        fs::write(root.join(format!("file-{index}.txt")), b"content")
+            .expect("the search fixture file should be written");
+    }
+    let capped = SearchLimits {
+        max_entries: Some(2),
+        ..SearchLimits::default()
+    };
+    let uncapped = SearchLimits {
+        time_budget: None,
+        max_entries: None,
+    };
+    let (limited, limited_events) =
+        index_trees_with_exclusions(vec![root.clone()], false, Vec::new(), capped);
+    let (unlimited, unlimited_events) =
+        index_trees_with_exclusions(vec![root.clone()], false, Vec::new(), uncapped);
+    let (same_limits, _) =
+        index_trees_with_exclusions(vec![root.clone()], false, Vec::new(), capped);
+    assert!(!limited.shares_index_with(&unlimited));
+    assert!(limited.shares_index_with(&same_limits));
+    limited.query("file");
+    unlimited.query("file");
+    let limited_result = wait_for_results(&limited_events);
+    let unlimited_result = wait_for_results(&unlimited_events);
+
+    drop((limited, unlimited, same_limits));
+    fs::remove_dir_all(&root).expect("the search fixture should be removed");
+
+    let Some(SearchEvent::Results {
+        coverage, items, ..
+    }) = limited_result
+    else {
+        panic!("the capped worker should publish a result");
+    };
+    assert!(coverage.entry_limit);
+    assert!(items.len() <= 2);
+    let Some(SearchEvent::Results {
+        coverage, items, ..
+    }) = unlimited_result
+    else {
+        panic!("the uncapped worker should publish a result");
+    };
+    assert_eq!(coverage, super::SearchCoverage::default());
+    assert_eq!(items.len(), 5);
 }
 
 #[test]

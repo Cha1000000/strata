@@ -7,6 +7,7 @@ use std::{
     os::unix::fs::MetadataExt,
     path::{Component, Path, PathBuf},
     rc::Rc,
+    time::Duration,
 };
 
 use gtk::{glib, prelude::*};
@@ -15,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     model::{FolderColorValue, SortDirection, SortKey, ViewPreferences},
     sandbox::MediaPreviewBackend,
-    services::{Channel, CrossVolumeDropStrategy},
+    services::{Channel, CrossVolumeDropStrategy, SearchLimits},
 };
 
 use super::icons_cell::{MAX_ICONS_THUMBNAIL_SIZE, MIN_ICONS_THUMBNAIL_SIZE};
@@ -23,6 +24,7 @@ use super::icons_cell::{MAX_ICONS_THUMBNAIL_SIZE, MIN_ICONS_THUMBNAIL_SIZE};
 pub(in crate::ui) const SEND_TO_RECENT_DESTINATIONS_LIMIT: usize = 3;
 
 mod bindings;
+mod corner_roundness;
 #[cfg(test)]
 pub(in crate::ui) mod fixtures;
 mod folder_view_settings;
@@ -32,6 +34,7 @@ mod save_notice;
 mod text_size;
 mod trashed;
 pub(in crate::ui) use bindings::notify_live;
+pub use corner_roundness::CornerRoundness;
 pub(crate) use folder_view_settings::flush_pending_folder_views;
 pub use text_size::TextSize;
 
@@ -88,6 +91,10 @@ pub(in crate::ui) struct Preferences {
     search_open_files_directly: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     search_exclusions: Vec<String>,
+    #[serde(default = "default_search_time_limit")]
+    search_time_limit: u32,
+    #[serde(default = "default_search_entry_limit")]
+    search_entry_limit: u32,
     #[serde(default = "default_enabled")]
     type_to_search: bool,
     #[serde(default)]
@@ -158,6 +165,8 @@ pub(in crate::ui) struct Preferences {
     show_hidden: bool,
     #[serde(default)]
     text_size: TextSize,
+    #[serde(default)]
+    corner_roundness: CornerRoundness,
     #[serde(default)]
     interface_renderer: InterfaceRenderer,
     #[serde(default)]
@@ -252,6 +261,8 @@ impl Default for Preferences {
             video_preview_backend: default_video_preview_backend(),
             search_open_files_directly: false,
             search_exclusions: Vec::new(),
+            search_time_limit: default_search_time_limit(),
+            search_entry_limit: default_search_entry_limit(),
             type_to_search: true,
             arrow_navigation_scoped: false,
             tenxer_mode: false,
@@ -287,6 +298,7 @@ impl Default for Preferences {
             sidebar_compact: false,
             show_hidden: false,
             text_size: TextSize::default(),
+            corner_roundness: CornerRoundness::default(),
             interface_renderer: InterfaceRenderer::default(),
             language: crate::i18n::Language::default(),
             folders_first: true,
@@ -382,6 +394,20 @@ fn default_sidebar_order() -> Vec<String> {
     ]
 }
 
+fn default_search_time_limit() -> u32 {
+    SearchLimits::default()
+        .time_budget
+        .and_then(|budget| u32::try_from(budget.as_secs()).ok())
+        .unwrap_or(0)
+}
+
+fn default_search_entry_limit() -> u32 {
+    SearchLimits::default()
+        .max_entries
+        .and_then(|entries| u32::try_from(entries).ok())
+        .unwrap_or(0)
+}
+
 fn default_sort_key() -> String {
     "name".to_owned()
 }
@@ -437,6 +463,37 @@ fn normalized_auto_refresh_interval(secs: u32) -> u32 {
         .unwrap_or(AUTO_REFRESH_CHOICES[AUTO_REFRESH_CHOICES.len() - 1].1)
 }
 
+pub(in crate::ui) const SEARCH_TIME_LIMIT_CHOICES: [(&str, u32); 6] = [
+    ("10 s", 10),
+    ("30 s", 30),
+    ("1 min", 60),
+    ("5 min", 300),
+    ("15 min", 900),
+    ("No limit", 0),
+];
+
+pub(in crate::ui) const SEARCH_ENTRY_LIMIT_CHOICES: [(&str, u32); 5] = [
+    ("200,000", 200_000),
+    ("500,000", 500_000),
+    ("1,000,000", 1_000_000),
+    ("5,000,000", 5_000_000),
+    ("No limit", 0),
+];
+
+/// Unlisted limits round up to the next choice; 0 and anything past the largest
+/// choice mean no limit.
+fn normalized_search_limit(value: u32, choices: &[(&str, u32)]) -> u32 {
+    if value == 0 {
+        return 0;
+    }
+    choices
+        .iter()
+        .map(|(_, limit)| *limit)
+        .filter(|limit| *limit != 0)
+        .find(|limit| *limit >= value)
+        .unwrap_or(0)
+}
+
 pub(in crate::ui) fn is_valid_send_to_relative_path(path: &Path) -> bool {
     let mut components = path.components();
     matches!(components.next(), Some(Component::Normal(_)))
@@ -485,6 +542,10 @@ impl PreferenceManager {
         preferences.preview_volume = normalized_volume(preferences.preview_volume);
         preferences.auto_refresh_interval =
             normalized_auto_refresh_interval(preferences.auto_refresh_interval);
+        preferences.search_time_limit =
+            normalized_search_limit(preferences.search_time_limit, &SEARCH_TIME_LIMIT_CHOICES);
+        preferences.search_entry_limit =
+            normalized_search_limit(preferences.search_entry_limit, &SEARCH_ENTRY_LIMIT_CHOICES);
         preferences.thumbnail_workers = preferences
             .thumbnail_workers
             .clamp(1, crate::sandbox::browser::MAX_WORKERS);
@@ -776,6 +837,38 @@ impl PreferenceManager {
     pub fn set_search_exclusions(&self, exclusions: Vec<String>) {
         self.preferences.borrow_mut().search_exclusions = exclusions;
         self.save_preferences();
+    }
+
+    /// Seconds one search walk may index; 0 means no limit.
+    pub fn search_time_limit(&self) -> u32 {
+        self.preferences.borrow().search_time_limit
+    }
+
+    pub fn set_search_time_limit(&self, secs: u32) {
+        self.preferences.borrow_mut().search_time_limit =
+            normalized_search_limit(secs, &SEARCH_TIME_LIMIT_CHOICES);
+        self.save_preferences();
+    }
+
+    /// Files and folders one search walk may index; 0 means no limit.
+    pub fn search_entry_limit(&self) -> u32 {
+        self.preferences.borrow().search_entry_limit
+    }
+
+    pub fn set_search_entry_limit(&self, entries: u32) {
+        self.preferences.borrow_mut().search_entry_limit =
+            normalized_search_limit(entries, &SEARCH_ENTRY_LIMIT_CHOICES);
+        self.save_preferences();
+    }
+
+    pub fn search_limits(&self) -> SearchLimits {
+        let preferences = self.preferences.borrow();
+        SearchLimits {
+            time_budget: (preferences.search_time_limit != 0)
+                .then(|| Duration::from_secs(u64::from(preferences.search_time_limit))),
+            max_entries: (preferences.search_entry_limit != 0)
+                .then(|| preferences.search_entry_limit as usize),
+        }
     }
 
     pub fn filter_include_subfolders(&self) -> bool {
@@ -1246,6 +1339,18 @@ impl PreferenceManager {
             return;
         }
         self.preferences.borrow_mut().text_size = size;
+        self.save_preferences();
+    }
+
+    pub fn corner_roundness(&self) -> CornerRoundness {
+        self.preferences.borrow().corner_roundness
+    }
+
+    pub fn set_corner_roundness(&self, roundness: CornerRoundness) {
+        if self.corner_roundness() == roundness {
+            return;
+        }
+        self.preferences.borrow_mut().corner_roundness = roundness;
         self.save_preferences();
     }
 

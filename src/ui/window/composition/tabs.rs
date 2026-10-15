@@ -53,6 +53,7 @@ impl TabWindow {
         preferences: &Rc<PreferenceManager>,
         persist: bool,
     ) -> Rc<Self> {
+        crate::ui::decoration::claim_titlebar(window);
         let stack = gtk::Stack::new();
         stack.set_hhomogeneous(false);
         stack.set_vhomogeneous(false);

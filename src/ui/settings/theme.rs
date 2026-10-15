@@ -12,7 +12,8 @@ use crate::{
     ui::{
         controls::segmented_control,
         preferences::{
-            FileIconColors, InterfaceRenderer, OmarchyVariant, PreferenceManager, TextSize,
+            CornerRoundness, FileIconColors, InterfaceRenderer, OmarchyVariant, PreferenceManager,
+            TextSize,
         },
         theme::{Theme, ThemeManager, ThemeTokens},
     },
@@ -149,6 +150,7 @@ pub(super) fn theme_page(
     rendering.append(&renderer_row);
 
     append_text_size_option(&content, &preferences);
+    append_corner_roundness_option(&content, &preferences);
     append_file_icon_colors_option(&content, &preferences);
     let effects = super::settings_group(&content, "EFFECTS");
     let (row, toggle) = super::settings_option(
@@ -351,25 +353,29 @@ fn append_omarchy_variant_option(
     content.append(&row);
 }
 
-fn append_text_size_option(content: &gtk::Box, preferences: &Rc<PreferenceManager>) {
-    let group = super::settings_group(content, "TEXT");
-    let text_size_control =
-        gtk::SpinButton::with_range(f64::from(TextSize::MIN), f64::from(TextSize::MAX), 1.0);
-    text_size_control.set_numeric(true);
-    text_size_control.set_width_chars(3);
-    text_size_control.set_alignment(0.5);
-    // Keep GTK's native spin actions, with decrement before the numeric entry.
-    let mut child = text_size_control.first_child();
+/// A numeric stepper with GTK's native spin actions, decrement before the entry.
+fn stepper(min: u32, max: u32, step: u32) -> gtk::SpinButton {
+    let control = gtk::SpinButton::with_range(f64::from(min), f64::from(max), f64::from(step));
+    control.set_numeric(true);
+    control.set_width_chars(3);
+    control.set_alignment(0.5);
+    let mut child = control.first_child();
     while let Some(widget) = child {
         child = widget.next_sibling();
         if widget.has_css_class("down") {
-            widget.insert_before(&text_size_control, text_size_control.first_child().as_ref());
+            widget.insert_before(&control, control.first_child().as_ref());
             break;
         }
     }
-    text_size_control.set_update_policy(gtk::SpinButtonUpdatePolicy::IfValid);
-    text_size_control.add_css_class("form-control");
-    text_size_control.add_css_class("text-size-control");
+    control.set_update_policy(gtk::SpinButtonUpdatePolicy::IfValid);
+    control.add_css_class("form-control");
+    control.add_css_class("text-size-control");
+    control
+}
+
+fn append_text_size_option(content: &gtk::Box, preferences: &Rc<PreferenceManager>) {
+    let group = super::settings_group(content, "TEXT");
+    let text_size_control = stepper(TextSize::MIN, TextSize::MAX, 1);
     crate::ui::accessibility::set_label(
         &text_size_control,
         &crate::i18n::tr("Text size in pixels"),
@@ -441,6 +447,47 @@ fn append_text_size_option(content: &gtk::Box, preferences: &Rc<PreferenceManage
     text_size_row.append(&text_size_copy);
     text_size_row.append(&controls);
     group.append(&text_size_row);
+}
+
+fn append_corner_roundness_option(content: &gtk::Box, preferences: &Rc<PreferenceManager>) {
+    let group = super::settings_group(content, "SHAPE");
+    let control = stepper(
+        CornerRoundness::MIN,
+        CornerRoundness::MAX,
+        CornerRoundness::STEP,
+    );
+    crate::ui::accessibility::set_label(&control, &crate::i18n::tr("Corner roundness in percent"));
+    bind_number(
+        preferences,
+        &control,
+        |manager| f64::from(manager.corner_roundness().percent()),
+        |manager, value| manager.set_corner_roundness(CornerRoundness::new(value as u32)),
+    );
+    control.set_halign(gtk::Align::Start);
+    let controls = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    controls.set_valign(gtk::Align::Center);
+    controls.append(&control);
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 16);
+    row.add_css_class("settings-option");
+    row.add_css_class("settings-text-size-row");
+    super::search::tag(&row, "Corner roundness");
+    let copy = gtk::Box::new(gtk::Orientation::Vertical, 2);
+    copy.set_hexpand(true);
+    let title = gtk::Label::new(Some(&crate::i18n::tr("Corner roundness")));
+    title.set_xalign(0.0);
+    title.add_css_class("settings-option-title");
+    let description = gtk::Label::new(Some(&crate::i18n::tr(
+        "Percent of the default corner radius, 0–200. 0 squares every corner.",
+    )));
+    description.set_xalign(0.0);
+    description.set_wrap(true);
+    description.set_wrap_mode(gtk::pango::WrapMode::WordChar);
+    description.add_css_class("settings-option-description");
+    copy.append(&title);
+    copy.append(&description);
+    row.append(&copy);
+    row.append(&controls);
+    group.append(&row);
 }
 
 fn theme_grid() -> gtk::FlowBox {

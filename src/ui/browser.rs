@@ -1904,13 +1904,31 @@ impl BrowserView {
         self.state.sync_mode_selection();
         let selected = self.state.browser.selected_entries();
         let location = selected_terminal_location(&selected).or_else(|| {
-            let mode = self.view_mode();
-            let depth = if mode == BrowserMode::Columns {
-                self.state.destination_depth()
-            } else {
-                self.state.browser.active_depth()
-            };
-            depth.and_then(|depth| self.state.browser.location_at(depth))
+            if self.view_mode() != BrowserMode::Columns {
+                let depth = self.state.browser.active_depth()?;
+                return self.state.browser.location_at(depth);
+            }
+            let depth = self.state.destination_depth()?;
+            let directory = self.state.browser.location_at(depth);
+            // A click opens the folder as the active column while the pointer can
+            // leave its parent as the destination; prefer the folder it opened.
+            let opened = self.state.browser.location_at(depth + 1);
+            let selected_in_destination: Vec<_> = self
+                .state
+                .browser
+                .selected_positions(depth)
+                .into_iter()
+                .filter_map(|position| self.state.browser.entry_at(depth, position))
+                .collect();
+            match selected_terminal_location(&selected_in_destination) {
+                Some(selected)
+                    if self.state.browser.active_depth() == Some(depth + 1)
+                        && opened.as_ref() == Some(&selected) =>
+                {
+                    Some(selected)
+                }
+                _ => directory,
+            }
         });
         let Some(location) = location else {
             return;
@@ -2508,6 +2526,9 @@ impl ViewState {
     pub(super) fn restore_listing_focus(&self) {
         if self.mode.get() == BrowserMode::Columns {
             self.focus_rebuilt_active_column();
+            return;
+        }
+        if self.mode_views.borrow().focus_search_results() {
             return;
         }
         self.browser.focus_active();

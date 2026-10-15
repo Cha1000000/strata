@@ -750,6 +750,53 @@ fn ctrl_alt_n_groups_selected_items_into_a_named_folder() {
 }
 
 #[test]
+fn ctrl_alt_n_with_no_selection_creates_plain_new_folder() {
+    crate::test_support::gtk_test(
+        "ui::window::tests::keyboard_dispatch::file_commands::ctrl_alt_n_with_no_selection_creates_plain_new_folder",
+        || {
+            let fixture = KeyboardFixture::new();
+            let directory = fixture._directory.path().to_path_buf();
+            let browser = fixture.view.browser();
+
+            browser.clear_active_selection();
+            assert_eq!(browser.selected_count(), 0);
+            focus_files(&fixture);
+            assert!(fixture.press(Key::n, ModifierType::CONTROL_MASK | ModifierType::ALT_MASK));
+            wait_until(|| directory.join("new folder").is_dir());
+            wait_until(|| fixture.view.rename_is_active());
+            assert_eq!(
+                directory_names(&directory.join("new folder")),
+                Vec::<String>::new()
+            );
+            assert!(directory.join("a.txt").is_file());
+            assert!(directory.join("b.txt").is_file());
+            assert!(directory.join("c.txt").is_file());
+            plain(&fixture, Key::Escape);
+
+            let sub = directory.join("sub");
+            std::fs::create_dir(&sub).expect("sub directory");
+            std::fs::write(sub.join("x.txt"), b"x").expect("file");
+            std::fs::write(sub.join("y.txt"), b"y").expect("file");
+            browser.navigate(Location::local(&sub));
+            wait_until(|| browser.active_location() == Some(Location::local(&sub)));
+            wait_loaded(&browser, 0);
+            focus_files(&fixture);
+            wait_until(|| browser.selection_is_load_cursor());
+            assert!(fixture.press(Key::n, ModifierType::CONTROL_MASK | ModifierType::ALT_MASK));
+            wait_until(|| sub.join("new folder").is_dir());
+            wait_until(|| fixture.view.rename_is_active());
+            assert_eq!(
+                directory_names(&sub.join("new folder")),
+                Vec::<String>::new()
+            );
+            assert!(sub.join("x.txt").is_file());
+            assert!(sub.join("y.txt").is_file());
+            plain(&fixture, Key::Escape);
+        },
+    );
+}
+
+#[test]
 fn undo_and_redo_run_only_on_their_exact_chords() {
     crate::test_support::gtk_test(
         "ui::window::tests::keyboard_dispatch::file_commands::undo_and_redo_run_only_on_their_exact_chords",

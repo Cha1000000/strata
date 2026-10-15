@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: MIT
 
 use super::*;
-use crate::{test_support::gtk_test, ui::preferences::fixtures::seed_omarchy_for_test};
+use crate::{
+    test_support::gtk_test,
+    ui::preferences::{CornerRoundness, fixtures::seed_omarchy_for_test},
+};
 
 #[test]
 fn variant_choices_sync_across_windows_without_initialization_writes() {
@@ -65,6 +68,53 @@ fn variant_choices_sync_across_windows_without_initialization_writes() {
             for (row, button) in &controls {
                 assert!(row.is_sensitive());
                 assert_eq!(button.label().as_deref(), Some("Original"));
+            }
+            for window in windows {
+                window.close();
+            }
+        },
+    );
+}
+
+#[test]
+fn corner_roundness_controls_follow_the_preference_across_windows() {
+    gtk_test(
+        "ui::settings::theme::tests::corner_roundness_controls_follow_the_preference_across_windows",
+        || {
+            let preferences = PreferenceManager::shared();
+            preferences.set_corner_roundness(CornerRoundness::new(40));
+            let settings = crate::ui::preferences::config_directory().join("settings.toml");
+            let before = std::fs::read(&settings).expect("saved settings");
+            let windows = [gtk::Window::new(), gtk::Window::new()];
+            let controls: Vec<gtk::SpinButton> = windows
+                .iter()
+                .map(|window| {
+                    let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
+                    append_corner_roundness_option(&content, &preferences);
+                    window.set_child(Some(&content));
+                    window.present();
+                    content
+                        .last_child()
+                        .and_then(|group| group.first_child())
+                        .and_then(|row| row.last_child())
+                        .and_then(|controls| controls.first_child())
+                        .and_downcast::<gtk::SpinButton>()
+                        .expect("roundness control")
+                })
+                .collect();
+            assert_eq!(
+                std::fs::read(&settings).expect("unchanged settings"),
+                before
+            );
+            for control in &controls {
+                assert_eq!(control.value(), 40.0);
+            }
+            controls[0].set_value(130.0);
+            assert_eq!(preferences.corner_roundness(), CornerRoundness::new(130));
+            assert_eq!(controls[1].value(), 130.0);
+            preferences.set_corner_roundness(CornerRoundness::new(0));
+            for control in &controls {
+                assert_eq!(control.value(), 0.0);
             }
             for window in windows {
                 window.close();

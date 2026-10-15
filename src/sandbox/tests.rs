@@ -329,6 +329,54 @@ fn metadata_probe_retains_software_sandbox_limits_and_narrow_runtime_access() {
 }
 
 #[test]
+fn non_media_helpers_expose_gl_dispatch_links_without_the_whole_directory() {
+    let command = sandbox_command(
+        Path::new("/usr/bin/bwrap"),
+        Path::new("/tmp/strata"),
+        Path::new("/home/alice/Pictures/photo.jpg"),
+        Path::new("/tmp/private-output"),
+        ParseOperation::ThumbnailImage,
+        256,
+        MediaPreviewBackend::Software,
+        &[],
+    );
+    let arguments: Vec<_> = command
+        .get_args()
+        .map(|arg| arg.to_string_lossy())
+        .collect();
+    assert!(
+        !arguments
+            .iter()
+            .any(|argument| argument == "/etc/alternatives")
+    );
+    let mut exposed: Vec<_> = arguments
+        .windows(3)
+        .filter(|bind| bind[0] == "--ro-bind-try" && bind[1].starts_with("/etc/alternatives/glx--"))
+        .map(|bind| format!("{} {}", bind[1], bind[2]))
+        .collect();
+    let mut expected = Vec::new();
+    for architecture in ["x86_64-linux-gnu", "aarch64-linux-gnu"] {
+        for library in [
+            "libGL.so.1",
+            "libEGL.so.1",
+            "libGLESv2.so.2",
+            "libGLESv1_CM.so.1",
+            "libGL.so",
+            "libEGL.so",
+            "libGLESv2.so",
+            "libGLESv1_CM.so",
+            "libGLX_indirect.so.0",
+        ] {
+            let path = format!("/etc/alternatives/glx--{library}-{architecture}");
+            expected.push(format!("{path} {path}"));
+        }
+    }
+    exposed.sort();
+    expected.sort();
+    assert_eq!(exposed, expected);
+}
+
+#[test]
 fn image_sandboxes_resolve_debian_imagemagick_alternatives() {
     let command = sandbox_command(
         Path::new("/usr/bin/bwrap"),

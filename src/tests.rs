@@ -140,6 +140,11 @@ fn version_line_is_the_package_name_and_installed_version() {
         "the --version line should include the installed version"
     );
     assert_eq!(
+        line.ends_with("+debug"),
+        cfg!(debug_assertions),
+        "only a debug build should mark its version"
+    );
+    assert_eq!(
         line.lines().count(),
         1,
         "the --version line should be a single line"

@@ -166,6 +166,20 @@ fn sibling_fixture(
 }
 
 #[test]
+fn browser_windows_keep_gtk_from_adding_a_default_title_bar() {
+    gtk_test(
+        "ui::window::composition::tabs::tests::browser_windows_keep_gtk_from_adding_a_default_title_bar",
+        || {
+            let (window, tabs) = open();
+            crate::ui::decoration::assert_default_decoration_absent(&window);
+            tabs.new_tab();
+            crate::ui::decoration::assert_default_decoration_absent(&window);
+            window.destroy();
+        },
+    );
+}
+
+#[test]
 fn saved_window_buttons_survive_tab_chrome_refreshes() {
     gtk_test(
         "ui::window::composition::tabs::tests::saved_window_buttons_survive_tab_chrome_refreshes",

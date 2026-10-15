@@ -288,3 +288,61 @@ fn directory_summary_does_not_stop_enumerating_siblings_after_one_branch_is_dept
          not just the first next_files_future batch"
     );
 }
+
+#[test]
+fn measure_entry_reads_no_unset_optional_attributes() {
+    let root = unique_fixture_root("missing-attributes");
+    std::fs::create_dir_all(&root).expect("the directory fixture should be created");
+    let critical_logs = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let recorded = critical_logs.clone();
+    let handler = glib::log_set_handler(
+        Some("GLib-GIO"),
+        glib::LogLevels::LEVEL_CRITICAL,
+        false,
+        false,
+        move |_, _, message| {
+            if message.contains("standard::") || message.contains("gfileinfo.c") {
+                recorded
+                    .lock()
+                    .expect("the critical log should be lockable")
+                    .push(message.to_owned());
+            }
+        },
+    );
+
+    let measure = |file_type| {
+        let info = gio::FileInfo::new();
+        info.set_name("entry");
+        info.set_file_type(file_type);
+        glib::MainContext::new()
+            .block_on(measure_entry(
+                gio::File::for_path(&root),
+                info,
+                0,
+                false,
+                Rc::new(MeasurementBudget {
+                    deadline: Instant::now() + TIME_BUDGET,
+                    max_depth: MAX_DEPTH,
+                    total: Cell::default(),
+                    reported: Cell::default(),
+                    on_progress: Box::new(|_| {}),
+                }),
+            ))
+            .expect("an entry without optional attributes should be measured")
+    };
+    let file = measure(gio::FileType::Regular);
+    let folder = measure(gio::FileType::Directory);
+    glib::log_remove_handler(Some("GLib-GIO"), handler);
+    std::fs::remove_dir_all(&root).expect("the directory fixture should be removed");
+
+    assert_eq!(
+        critical_logs
+            .lock()
+            .expect("the critical log should be lockable")
+            .as_slice(),
+        &[] as &[String]
+    );
+    assert_eq!((file.visible_file_count, file.total_size), (1, 0));
+    assert_eq!(folder.visible_folder_count, 1);
+    assert!(!folder.truncated());
+}

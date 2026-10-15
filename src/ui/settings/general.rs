@@ -385,6 +385,7 @@ fn append_browsing_options(content: &gtk::Box, manager: &Rc<PreferenceManager>) 
     ] {
         append_preference_switch(&search, manager, switch);
     }
+    append_search_limit_options(&search, manager);
     append_search_exclusions_option(&search, manager);
 }
 
@@ -447,6 +448,33 @@ fn append_folder_view_options(content: &gtk::Box, manager: &Rc<PreferenceManager
         "Forget all folder settings",
         "Return every folder to the default sort and thumbnail size.",
         &forget,
+    ));
+}
+
+fn append_search_limit_options(content: &gtk::Box, manager: &Rc<PreferenceManager>) {
+    let time_limit = super::bindings::choice_menu(
+        manager,
+        "Search time limit",
+        &crate::ui::preferences::SEARCH_TIME_LIMIT_CHOICES,
+        PreferenceManager::search_time_limit,
+        PreferenceManager::set_search_time_limit,
+    );
+    content.append(&super::control_row(
+        "Search time limit",
+        "Stop indexing a search after this long. Slow or network mounts need longer to list every folder.",
+        &time_limit,
+    ));
+    let entry_limit = super::bindings::choice_menu(
+        manager,
+        "Search entry limit",
+        &crate::ui::preferences::SEARCH_ENTRY_LIMIT_CHOICES,
+        PreferenceManager::search_entry_limit,
+        PreferenceManager::set_search_entry_limit,
+    );
+    content.append(&super::control_row(
+        "Search entry limit",
+        "Stop indexing a search after this many files and folders. Higher limits use more memory.",
+        &entry_limit,
     ));
 }
 

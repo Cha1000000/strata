@@ -758,6 +758,22 @@ fn runtime_command(bwrap: &Path, needs_media_libraries: bool) -> Command {
         let path = format!("/etc/alternatives/{tool}");
         command.arg("--ro-bind-try").arg(&path).arg(&path);
     }
+    for architecture in ["x86_64-linux-gnu", "aarch64-linux-gnu"] {
+        for library in [
+            "libGL.so.1",
+            "libEGL.so.1",
+            "libGLESv2.so.2",
+            "libGLESv1_CM.so.1",
+            "libGL.so",
+            "libEGL.so",
+            "libGLESv2.so",
+            "libGLESv1_CM.so",
+            "libGLX_indirect.so.0",
+        ] {
+            let path = format!("/etc/alternatives/glx--{library}-{architecture}");
+            command.arg("--ro-bind-try").arg(&path).arg(&path);
+        }
+    }
     command
 }
 

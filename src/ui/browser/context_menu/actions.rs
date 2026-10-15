@@ -42,6 +42,7 @@ pub(super) struct ActionMenuSection {
     monitor_handlers: RefCell<Vec<gtk::glib::SignalHandlerId>>,
     refresh_pending: Cell<bool>,
     selection: RefCell<Option<SelectionMenuContext>>,
+    pressed_inside: Rc<Cell<bool>>,
 }
 
 #[derive(Clone)]
@@ -175,6 +176,24 @@ impl ActionMenuSection {
             handler.replace(Some(id));
             clock.request_phase(gtk::gdk::FrameClockPhase::AFTER_PAINT);
         });
+        // GtkModelButton activates on an unpaired release, and some compositors
+        // (niri) deliver the release of the click that opened the menu to the
+        // popup. A release before any press inside the menu can only be that one.
+        let pressed_inside = Rc::new(Cell::new(false));
+        let seen_press = pressed_inside.clone();
+        let release_guard = gtk::EventControllerLegacy::new();
+        release_guard.set_propagation_phase(gtk::PropagationPhase::Capture);
+        // Also cover the nested submenu popovers, which are separate natives.
+        release_guard.set_propagation_limit(gtk::PropagationLimit::None);
+        release_guard.connect_event(move |_, event| match event.event_type() {
+            gtk::gdk::EventType::ButtonPress => {
+                seen_press.set(true);
+                gtk::glib::Propagation::Proceed
+            }
+            gtk::gdk::EventType::ButtonRelease if !seen_press.get() => gtk::glib::Propagation::Stop,
+            _ => gtk::glib::Propagation::Proceed,
+        });
+        popover.add_controller(release_guard);
         refresh_presentation(&popover, &navigation);
         let transfer_sections = commands.transfer_sections.clone();
         let menu = Rc::new(Self {
@@ -196,6 +215,7 @@ impl ActionMenuSection {
             monitor_handlers: RefCell::new(Vec::new()),
             refresh_pending: Cell::new(false),
             selection: RefCell::new(None),
+            pressed_inside,
         });
         let monitor = &menu.monitor;
         if menu.transfer_sections.is_some() {
@@ -246,6 +266,7 @@ impl ActionMenuSection {
     }
 
     pub(super) fn show(&self, anchor: &gtk::Widget, x: f64, y: f64) {
+        self.pressed_inside.set(false);
         if self.popover.parent().is_none()
             && let Some(owner) = self.owner.upgrade()
         {

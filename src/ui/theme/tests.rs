@@ -3,7 +3,9 @@
 mod syntax;
 mod text_size;
 
-use std::collections::HashSet;
+use std::{cell::Cell, collections::HashSet, rc::Rc};
+
+use crate::ui::preferences::{CornerRoundness, PreferenceManager};
 
 use super::{
     Theme, ThemeManager, ThemeTokens, azure_tokens, blend, builtins, canonical_color, color_to_hex,
@@ -11,7 +13,8 @@ use super::{
     slugify, source_palette_from_quattro, source_style_scheme_xml, themes_directory,
     title_case_slug, tokens_from_quattro, validate_tokens,
 };
-use crate::test_support::{gtk_test, texture_has_visible_pixels};
+use crate::test_support::{gtk_test, gtk_test_with_env, texture_has_visible_pixels};
+use gtk::prelude::*;
 
 #[test]
 fn bundled_catalog_is_valid_unique_and_alphabetical() {
@@ -733,6 +736,110 @@ fn file_icon_colors_repaint_catppuccin_icons_live_across_images() {
             for image in images.iter().chain([&later]) {
                 assert_eq!(image.paintable().as_ref(), Some(&brand));
             }
+        },
+    );
+}
+
+#[test]
+fn desktop_gtk_theme_and_user_stylesheet_do_not_restyle_widgets() {
+    let desktop = tempfile::tempdir().expect("desktop config");
+    let config = desktop.path().join("config");
+    let data = desktop.path().join("data");
+    let gtk_config = config.join("gtk-4.0");
+    let theme = data.join("themes/Scratch/gtk-4.0");
+    std::fs::create_dir_all(&gtk_config).expect("gtk config");
+    std::fs::create_dir_all(&theme).expect("theme directory");
+    std::fs::write(
+        gtk_config.join("settings.ini"),
+        "[Settings]\ngtk-theme-name=Scratch\ngtk-application-prefer-dark-theme=0\n",
+    )
+    .expect("settings.ini");
+    std::fs::write(
+        theme.join("gtk.css"),
+        "@import url(\"resource:///org/gtk/libgtk/theme/Default/gtk.css\");\nlabel { color: rgb(0, 255, 0); }\n",
+    )
+    .expect("desktop theme");
+    std::fs::write(
+        gtk_config.join("gtk.css"),
+        "window, label { color: rgb(255, 0, 0); }\n",
+    )
+    .expect("user stylesheet");
+    gtk_test_with_env(
+        "ui::theme::tests::desktop_gtk_theme_and_user_stylesheet_do_not_restyle_widgets",
+        [
+            ("GTK_THEME", String::new()),
+            ("XDG_CONFIG_HOME", config.display().to_string()),
+            ("XDG_DATA_HOME", data.display().to_string()),
+        ],
+        || {
+            let settings = gtk::Settings::default().expect("settings");
+            assert_eq!(settings.gtk_theme_name().as_deref(), Some("Scratch"));
+
+            let manager = ThemeManager::shared();
+            let window = gtk::Window::new();
+            let label = gtk::Label::new(Some("isolated"));
+            window.set_child(Some(&label));
+            window.present();
+            for _ in 0..20 {
+                gtk::glib::MainContext::default().iteration(false);
+            }
+
+            assert_eq!(settings.gtk_theme_name().as_deref(), Some("Default"));
+            let expected =
+                gtk::gdk::RGBA::parse(&manager.starter_tokens().text).expect("text color");
+            let actual = label.color();
+            assert!(
+                (actual.red() - expected.red()).abs() < 0.01
+                    && (actual.green() - expected.green()).abs() < 0.01
+                    && (actual.blue() - expected.blue()).abs() < 0.01,
+                "label color {actual} should be Strata's text color {expected}"
+            );
+            window.close();
+        },
+    );
+}
+
+#[test]
+fn corner_roundness_scales_the_stylesheet_before_settings_open_and_live() {
+    gtk_test(
+        "ui::theme::tests::corner_roundness_scales_the_stylesheet_before_settings_open_and_live",
+        || {
+            let settings = crate::ui::preferences::config_directory().join("settings.toml");
+            std::fs::create_dir_all(settings.parent().expect("config directory"))
+                .expect("config directory");
+            std::fs::write(&settings, "corner_roundness = 0\n").expect("seed settings");
+            let preferences = PreferenceManager::shared();
+            let manager = ThemeManager::shared();
+            let parse_errors = Rc::new(Cell::new(0));
+            let errors = parse_errors.clone();
+            manager
+                .base_provider
+                .connect_parsing_error(move |_, _, _| errors.set(errors.get() + 1));
+
+            // GTK serializes the parsed sheet as one longhand per corner.
+            let radii = |css: &str| -> Vec<String> {
+                css.lines()
+                    .filter_map(|line| line.trim().split_once("-radius: "))
+                    .map(|(_, value)| value.trim_end_matches(';').to_owned())
+                    .collect()
+            };
+            let squared = radii(&manager.base_stylesheet());
+            assert!(
+                !squared.is_empty(),
+                "stylesheet keeps its radius declarations"
+            );
+            assert!(
+                squared
+                    .iter()
+                    .all(|value| value == "0px" || value == "0" || value.ends_with('%')),
+                "saved roundness 0 squares every pixel radius: {squared:?}"
+            );
+
+            preferences.set_corner_roundness(CornerRoundness::new(200));
+            let doubled = radii(&manager.base_stylesheet());
+            assert!(doubled.contains(&"10px".to_owned()));
+            assert!(!doubled.contains(&"5px".to_owned()));
+            assert_eq!(parse_errors.get(), 0, "scaled stylesheet parses cleanly");
         },
     );
 }

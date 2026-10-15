@@ -4,6 +4,7 @@ use std::{
     cell::Cell,
     collections::{HashMap, HashSet},
     rc::Rc,
+    sync::OnceLock,
     time::Duration,
 };
 
@@ -19,6 +20,50 @@ use super::{
     },
     recent_apps,
 };
+
+/// Inside a Flatpak sandbox GIO only sees the runtime's desktop entries, so
+/// files are handed to the host through the OpenURI portal instead.
+pub(in crate::ui) fn uses_portal() -> bool {
+    static FLATPAK: OnceLock<bool> = OnceLock::new();
+    *FLATPAK.get_or_init(|| std::path::Path::new("/.flatpak-info").exists())
+}
+
+/// Opens each file with the host's default handler, or lets the desktop's
+/// own chooser pick one when `always_ask` is set. Files open one after
+/// another so choosers do not stack; dismissing one stops the rest.
+pub(in crate::ui) fn launch_with_portal(
+    parent: &impl IsA<gtk::Widget>,
+    files: Vec<gio::File>,
+    always_ask: bool,
+) {
+    let window = parent
+        .as_ref()
+        .root()
+        .and_downcast::<gtk::Window>()
+        .map(|window| window.downgrade());
+    let parent = parent.as_ref().downgrade();
+    glib::MainContext::default().spawn_local(async move {
+        for file in files {
+            let window = window.as_ref().and_then(glib::WeakRef::upgrade);
+            let launcher = gtk::FileLauncher::new(Some(&file));
+            launcher.set_always_ask(always_ask);
+            let Err(error) = launcher.launch_future(window.as_ref()).await else {
+                continue;
+            };
+            if !error.matches(gtk::DialogError::Dismissed)
+                && !error.matches(gio::IOErrorEnum::Cancelled)
+                && let Some(parent) = parent.upgrade()
+            {
+                show_error_dialog(
+                    &parent,
+                    &crate::i18n::tr("Unable to open file"),
+                    error.message(),
+                );
+            }
+            return;
+        }
+    });
+}
 
 pub(super) fn categorized_apps(
     content_type: &str,
@@ -144,7 +189,7 @@ pub(super) struct Applications {
 
 impl Applications {
     pub(super) fn unavailable_reason(&self) -> Option<&'static str> {
-        if !self.recommended.is_empty() || !self.other.is_empty() {
+        if uses_portal() || !self.recommended.is_empty() || !self.other.is_empty() {
             None
         } else if self.content_types.len() > 1 {
             Some("No application can open all selected file types")
@@ -628,6 +673,11 @@ pub(super) fn show(
     context: OpenWithContext,
     on_close: Rc<dyn Fn()>,
 ) {
+    if uses_portal() {
+        launch_with_portal(parent, files, matches!(context, OpenWithContext::Explicit));
+        on_close();
+        return;
+    }
     let Some(window_overlay) = parent
         .root()
         .and_downcast::<gtk::Window>()

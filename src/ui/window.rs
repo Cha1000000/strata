@@ -300,7 +300,6 @@ pub(super) fn present_target(
     crate::assets::register_icon_theme();
     let _theme_manager = super::theme::ThemeManager::shared();
     let preference_manager = super::preferences::PreferenceManager::shared();
-    load_styles();
     tracing::debug!(
         elapsed_ms = present_started.elapsed().as_millis() as u64,
         "present theme and styles ready"
@@ -1833,6 +1832,9 @@ impl SidebarState {
                 | BrowserEvent::ColumnsTruncated { .. }
                 | BrowserEvent::ColumnsRelocated { .. }
                 | BrowserEvent::FocusChanged { .. }
+                // A clicked place is highlighted before validation; a rejection
+                // leaves the previous location open, including while a mount runs.
+                | BrowserEvent::LocationNavigationRejected { .. }
         )
     }
 
@@ -4166,24 +4168,3 @@ fn startup_location(manager: &PreferenceManager) -> Location {
 
 #[cfg(test)]
 mod tests;
-
-pub(super) fn load_styles() {
-    thread_local! {
-        static STYLED_DISPLAY: RefCell<glib::WeakRef<gtk::gdk::Display>> =
-            RefCell::new(glib::WeakRef::new());
-    }
-    let Some(display) = gtk::gdk::Display::default() else {
-        return;
-    };
-    if STYLED_DISPLAY.with_borrow(|styled| styled.upgrade().as_ref() == Some(&display)) {
-        return;
-    }
-    let provider = gtk::CssProvider::new();
-    provider.load_from_string(include_str!("../style.css"));
-    gtk::style_context_add_provider_for_display(
-        &display,
-        &provider,
-        gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
-    );
-    STYLED_DISPLAY.with_borrow_mut(|styled| styled.set(Some(&display)));
-}

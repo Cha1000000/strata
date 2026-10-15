@@ -68,7 +68,7 @@ The last navigation input determines the destination of Ctrl+V:
 3. Ctrl+V itself does **not** change ownership. A parked pointer cannot override subsequent keyboard navigation. Layout/scroll changes underneath an unmoving pointer do not count as pointer motion.
 4. Outside the columns, pointer mode falls back to the focused/active directory. Stale depths are discarded. Icons and List continue to use their single active directory.
 
-The terminal shortcut uses the same directory fallback, but still prefers an explicitly selected directory. New Folder remains keyboard-focus scoped. Context-menu paste and drag-and-drop retain their explicit destinations.
+The terminal shortcut uses the same directory fallback, but still prefers an explicitly selected directory: the one selected in the active column, or in Columns the folder selected in the pointer's column when it is open as the active column, such as a folder just clicked open. New Folder remains keyboard-focus scoped. Context-menu paste and drag-and-drop retain their explicit destinations.
 
 Keyboard navigation suppresses stale row-hover effects and pending folder peeks until deliberate pointer input resumes. It does not erase selection or the open folder path.
 
@@ -207,8 +207,12 @@ first member. Enter opens the preview even when automatic previews are disabled;
 double-click and the archive's context menu still offer extraction. In Icons
 and List, Enter retains its archive extraction behavior.
 
-Other archive previews start at the archive root with the first member
-highlighted. In List and Columns modes, arrow keys act on the focused pane,
+In every view, moving the cursor onto an archive while the preview is open
+updates the preview without taking keyboard focus: a plain archive shows its
+members with none highlighted, and a password-protected archive shows its
+password prompt unfocused. Opening the preview on an archive with **Space**
+enters it directly, highlighting the first member or focusing the password
+field. In List and Columns modes, arrow keys act on the focused pane,
 not merely on an open preview. From the listing, **Right** enters the open
 preview. While the preview owns focus, its header shows the accent top border
 instead of the Miller column. Returning to the listing restores its cursor
