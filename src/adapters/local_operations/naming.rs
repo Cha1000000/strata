@@ -3,17 +3,13 @@
 use std::{
     collections::HashSet,
     ffi::{OsStr, OsString},
-    os::unix::ffi::{OsStrExt, OsStringExt},
+    os::unix::ffi::OsStrExt,
     path::Path,
 };
 
-use super::placement;
+use super::{copy_engine::stage, placement};
 use crate::adapters::volume::{NameEncoding, NameLimit, NameProfile, Reserved};
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "transfers fix names with it next")
-)]
 pub(super) mod fix;
 
 pub(super) fn parse_copy_suffix(stem: &OsStr) -> (&OsStr, Option<u64>) {
@@ -100,59 +96,153 @@ impl Taken {
     }
 }
 
-const FAT_INVALID_BYTES: &[u8] = b"\"*/:<>?\\|";
+/// The rules FAT-family destinations get until transfers read their
+/// destination's profile. Device names and malformed bytes are kept, which a
+/// move within the mount must not change.
+pub(super) fn fat_family_profile() -> NameProfile {
+    NameProfile::windows(Reserved::None, NameEncoding::AnyBytes)
+}
 
-pub(super) fn fat_sanitized_name(name: &OsStr) -> OsString {
-    let mut bytes: Vec<u8> = name
-        .as_bytes()
+/// How a folder tells its names apart.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum Key {
+    Exact,
+    /// As a filesystem that may take two names for one does, and where a
+    /// folder's casefolding is unknown.
+    Folded,
+}
+
+impl Key {
+    fn of(self, name: &OsStr) -> OsString {
+        match self {
+            Self::Exact => name.to_os_string(),
+            Self::Folded => stage::collision_key(name),
+        }
+    }
+}
+
+pub(super) struct PlanEntry<'a> {
+    pub name: &'a OsStr,
+    pub is_directory: bool,
+    /// Whether `profile` fixes the name, rather than it being kept.
+    pub fixing: bool,
+}
+
+/// The names of a folder's entries, in their order. A name that needs no
+/// fix is kept, even where another entry's fixed name would take it, and
+/// fixed names are numbered past it and each other in the byte order of
+/// the names they were fixed from, so the plan depends only on the entries.
+pub(super) fn plan_names(
+    entries: &[PlanEntry<'_>],
+    profile: &NameProfile,
+    key: Key,
+) -> Vec<OsString> {
+    let mut fixed = entries
         .iter()
-        .map(|&byte| {
-            if FAT_INVALID_BYTES.contains(&byte) || byte < 0x20 {
-                b'_'
-            } else {
-                byte
-            }
+        .enumerate()
+        .filter(|(_, entry)| entry.fixing)
+        .filter_map(|(index, entry)| {
+            let fixed = fix::fix_name(entry.name, profile, entry.is_directory);
+            fixed.cause.map(|_| (index, fixed.name.into_owned()))
         })
-        .collect();
-    // FAT drivers strip trailing dots and spaces.
-    while matches!(bytes.last(), Some(b'.' | b' ')) {
-        bytes.pop();
+        .collect::<Vec<_>>();
+    let mut planned = entries
+        .iter()
+        .map(|entry| entry.name.to_os_string())
+        .collect::<Vec<_>>();
+    if fixed.is_empty() {
+        return planned;
     }
-    if bytes.is_empty() {
-        bytes.push(b'_');
+    let mut changed = vec![false; entries.len()];
+    for (index, _) in &fixed {
+        changed[*index] = true;
     }
-    OsString::from_vec(bytes)
+    let mut taken = entries
+        .iter()
+        .zip(&changed)
+        .filter(|(_, changed)| !**changed)
+        .map(|(entry, _)| key.of(entry.name))
+        .collect::<HashSet<_>>();
+    fixed.sort_by(|(left, _), (right, _)| entries[*left].name.cmp(entries[*right].name));
+    for (index, name) in fixed {
+        let numbered = numbered_names(&name, entries[index].is_directory, profile.limit);
+        planned[index] = std::iter::once(name.clone())
+            .chain(numbered)
+            .find(|candidate| taken.insert(key.of(candidate)))
+            .unwrap_or_else(|| name.clone());
+    }
+    planned
 }
 
-fn fat_name_key(name: &OsStr) -> OsString {
-    match name.to_str() {
-        Some(name) => OsString::from(name.to_uppercase()),
-        None => OsString::from_vec(name.as_bytes().to_ascii_uppercase()),
-    }
+/// A folder's names planned as its children arrive: a child that keeps its
+/// name is named at once, and one whose name is fixed waits until all its
+/// siblings are known.
+pub(super) struct Arrivals {
+    fixing: bool,
+    profile: NameProfile,
+    key: Key,
+    kept: Vec<OsString>,
+    held: Vec<(OsString, bool)>,
 }
 
-pub(super) fn unique_fat_sibling_name(
-    candidate: OsString,
-    used: &mut HashSet<OsString>,
-) -> OsString {
-    if used.insert(fat_name_key(&candidate)) {
-        return candidate;
-    }
-    // vfat, msdos and exFAT all take the Windows formats' length in UTF-16 units.
-    let limit = NameProfile::windows(Reserved::Bare, NameEncoding::Utf8).limit;
-    let numbered =
-        numbered_names(&candidate, false, limit).find(|name| used.insert(fat_name_key(name)));
-    numbered.unwrap_or(candidate)
+pub(super) struct Arrived {
+    pub name: OsString,
+    pub is_directory: bool,
+    pub target: OsString,
 }
 
-pub(super) fn fat_family_child_name(
-    name: &OsStr,
-    fat_family: bool,
-    used: &mut HashSet<OsString>,
-) -> OsString {
-    if fat_family {
-        unique_fat_sibling_name(fat_sanitized_name(name), used)
-    } else {
-        name.to_os_string()
+impl Arrivals {
+    pub(super) fn new(fixing: bool, profile: NameProfile, key: Key) -> Self {
+        Self {
+            fixing,
+            profile,
+            key,
+            kept: Vec::new(),
+            held: Vec::new(),
+        }
+    }
+
+    /// Whether `name` is kept; a name that is not waits for [`Self::planned`].
+    pub(super) fn keeps(&mut self, name: &OsStr, is_directory: bool) -> bool {
+        if !self.fixing {
+            return true;
+        }
+        if fix::fix_name(name, &self.profile, is_directory)
+            .cause
+            .is_none()
+        {
+            self.kept.push(name.to_os_string());
+            return true;
+        }
+        self.held.push((name.to_os_string(), is_directory));
+        false
+    }
+
+    /// The children that waited, with the names planned for them.
+    pub(super) fn planned(self) -> Vec<Arrived> {
+        if self.held.is_empty() {
+            return Vec::new();
+        }
+        let kept = self.kept.iter().map(|name| PlanEntry {
+            name,
+            is_directory: false,
+            fixing: false,
+        });
+        let held = self.held.iter().map(|(name, is_directory)| PlanEntry {
+            name,
+            is_directory: *is_directory,
+            fixing: true,
+        });
+        let entries = kept.chain(held).collect::<Vec<_>>();
+        let targets = plan_names(&entries, &self.profile, self.key);
+        self.held
+            .into_iter()
+            .zip(targets.into_iter().skip(self.kept.len()))
+            .map(|((name, is_directory), target)| Arrived {
+                name,
+                is_directory,
+                target,
+            })
+            .collect()
     }
 }

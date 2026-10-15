@@ -126,10 +126,7 @@ use super::{
     fat32_file_size_limit, home_trash_entries_at, io_error, is_trash_unsupported_failure,
     join_local_tasks, local_file_identity, merge_local, merge_local_with, move_local,
     move_local_with,
-    naming::{
-        Taken, fat_sanitized_name, numbered_name, numbered_names, parse_copy_suffix,
-        unique_fat_sibling_name,
-    },
+    naming::{Taken, numbered_name, numbered_names, parse_copy_suffix},
     open_local_parent_directory, operation_error_summary, parallel_delete_local,
     permanently_delete_local, permanently_delete_local_path_if_unchanged, replace_local,
     replace_local_with, run_merge_undo, set_removable_roots_for_test, set_sync_observer,

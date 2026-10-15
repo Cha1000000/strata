@@ -52,7 +52,7 @@ use gtk::{gio, glib, prelude::*};
 
 use copy_engine::SharedProgress;
 use fs_ops::{Entry, EntryStat, OffMain, fs};
-use naming::{Taken, fat_family_child_name, numbered_names};
+use naming::{Arrivals, Key, PlanEntry, Taken, numbered_names, plan_names};
 use owed::{Deletion, Done, Owed, Settling};
 use placement::{COPY_PREFIX, Displacement, PlaceError, REPLACED_PREFIX, RenameFailure};
 use work_queue::{Group, Job, WorkQueue};
@@ -998,7 +998,7 @@ fn fat32_file_size_limit(fs_type: Option<&str>) -> Option<u64> {
 struct TransferEstimate {
     bytes: Option<u64>,
     files: usize,
-    regular_file: bool,
+    kind: gio::FileType,
 }
 
 fn transfer_size(
@@ -1034,7 +1034,7 @@ fn transfer_size(
             return Ok(TransferEstimate {
                 bytes: size,
                 files: 1,
-                regular_file: info.file_type() == gio::FileType::Regular,
+                kind: info.file_type(),
             });
         }
 
@@ -1068,7 +1068,7 @@ fn transfer_size(
                 return Ok(TransferEstimate {
                     bytes: total,
                     files,
-                    regular_file: false,
+                    kind: gio::FileType::Directory,
                 });
             }
             for chunk in children.chunks(MAX_LOCAL_IO_WORKERS) {
@@ -1107,7 +1107,7 @@ async fn transfer_sizes(
         Option<u64>,
         Vec<Option<usize>>,
         Option<usize>,
-        Vec<bool>,
+        Vec<Option<gio::FileType>>,
     ),
     glib::Error,
 > {
@@ -1115,7 +1115,7 @@ async fn transfer_sizes(
     let mut counts = Vec::with_capacity(files.len());
     let mut total = Some(0_u64);
     let mut total_files = Some(0_usize);
-    let mut regular_files = Vec::with_capacity(files.len());
+    let mut kinds = Vec::with_capacity(files.len());
     for chunk in files.chunks(MAX_LOCAL_IO_WORKERS) {
         let context = glib::MainContext::default();
         let tasks = chunk
@@ -1145,10 +1145,10 @@ async fn transfer_sizes(
                 total_files.and_then(|total| size.map(|size| total.saturating_add(size.files)));
             counts.push(size.map(|size| size.files));
             sizes.push(size.and_then(|size| size.bytes));
-            regular_files.push(size.is_some_and(|size| size.regular_file));
+            kinds.push(size.map(|size| size.kind));
         }
     }
-    Ok((sizes, total, counts, total_files, regular_files))
+    Ok((sizes, total, counts, total_files, kinds))
 }
 
 fn validated_child(parent: &gio::File, name: &str) -> Result<gio::File, &'static str> {
@@ -1196,14 +1196,36 @@ pub(crate) fn transfer_source_name(source: &gio::File) -> Option<OsString> {
     crate::model::transfer_file_name(source)
 }
 
-fn default_transfer_target(
-    source: &gio::File,
+/// Where each source goes in `destination`: under its own name, or under
+/// one fixed for a FAT-family destination and planned against the other
+/// sources' names. `None` for a source without a name.
+fn paste_targets(
+    sources: &[gio::File],
     destination: &gio::File,
     fat_family: bool,
-    used_names: &mut HashSet<OsString>,
-) -> Option<gio::File> {
-    let name = transfer_source_name(source)?;
-    Some(destination.child(fat_family_child_name(&name, fat_family, used_names)))
+    kinds: &[Option<gio::FileType>],
+) -> Vec<Option<gio::File>> {
+    let names = sources.iter().map(transfer_source_name).collect::<Vec<_>>();
+    let entries = names
+        .iter()
+        .zip(kinds)
+        .filter_map(|(name, kind)| {
+            Some(PlanEntry {
+                name: name.as_deref()?,
+                is_directory: *kind == Some(gio::FileType::Directory),
+                fixing: fat_family,
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut planned = plan_names(&entries, &naming::fat_family_profile(), Key::Folded).into_iter();
+    names
+        .iter()
+        .map(|name| {
+            name.as_ref()
+                .and_then(|_| planned.next())
+                .map(|name| destination.child(name))
+        })
+        .collect()
 }
 
 #[derive(Clone)]
@@ -1218,7 +1240,8 @@ async fn parallel_copy_plans(
     request: &PasteRequest,
     sources: &[gio::File],
     destination: &gio::File,
-    regular_files: Vec<bool>,
+    targets: &[Option<gio::File>],
+    kinds: &[Option<gio::FileType>],
     fat_family: bool,
 ) -> Option<(Vec<ParallelCopyPlan>, usize)> {
     if request.items.len() <= MAX_LOCAL_IO_WORKERS
@@ -1231,18 +1254,23 @@ async fn parallel_copy_plans(
         return None;
     }
 
+    let targets = targets
+        .iter()
+        .zip(kinds)
+        .map(|(target, kind)| {
+            target
+                .clone()
+                .filter(|_| *kind == Some(gio::FileType::Regular))
+        })
+        .collect::<Vec<_>>();
     let (sources, destination) = (sources.to_vec(), destination.clone());
     gio::spawn_blocking(move || {
-        let mut used_names = HashSet::new();
         let plans = sources
             .iter()
+            .zip(targets)
             .enumerate()
-            .map(|(index, source)| {
-                if !source.is_native() || regular_files.get(index) != Some(&true) {
-                    return None;
-                }
-                let target =
-                    default_transfer_target(source, &destination, fat_family, &mut used_names)?;
+            .map(|(index, (source, target))| {
+                let target = target.filter(|_| source.is_native())?;
                 if transfer_is_noop(source, &destination, &target) {
                     return None;
                 }
@@ -1443,37 +1471,23 @@ fn target_is_fat_family(target: &gio::File, mounts: &MountTable) -> bool {
         .is_some_and(|path| matches!(mounts.fs_type_for(&path), Some("msdos" | "vfat" | "exfat")))
 }
 
-async fn copy_children(
+async fn next_children(
     enumerator: &gio::FileEnumerator,
     cancellable: &gio::Cancellable,
-    fat_family: bool,
 ) -> Result<Vec<gio::FileInfo>, glib::Error> {
-    let mut children = Vec::new();
-    loop {
-        let batch = await_cancellable(
-            enumerator,
-            cancellable,
-            |enumerator, cancellable, result| {
-                enumerator.next_files_async(
-                    64,
-                    glib::Priority::DEFAULT,
-                    Some(cancellable),
-                    move |output| result.resolve(output),
-                );
-            },
-        )
-        .await?;
-        let finished = batch.is_empty();
-        children.extend(batch);
-        if !fat_family || finished {
-            break;
-        }
-    }
-    if fat_family {
-        // Planning and copying must allocate collision suffixes in the same order.
-        children.sort_by_key(|child| child.name());
-    }
-    Ok(children)
+    await_cancellable(
+        enumerator,
+        cancellable,
+        |enumerator, cancellable, result| {
+            enumerator.next_files_async(
+                64,
+                glib::Priority::DEFAULT,
+                Some(cancellable),
+                move |output| result.resolve(output),
+            );
+        },
+    )
+    .await
 }
 
 fn was_cancelled(error: &glib::Error) -> bool {
@@ -1746,7 +1760,7 @@ fn copy_recursively_with_progress(
             let enumerator =
                 await_cancellable(&source, &cancellable, |source, cancellable, result| {
                     source.enumerate_children_async(
-                        "standard::name",
+                        "standard::name,standard::type",
                         gio::FileQueryInfoFlags::NOFOLLOW_SYMLINKS,
                         glib::Priority::DEFAULT,
                         Some(cancellable),
@@ -1754,30 +1768,33 @@ fn copy_recursively_with_progress(
                     );
                 })
                 .await?;
-            let mut used_names = HashSet::new();
+            let copy_child = |name: &OsStr, target_name: &OsStr| {
+                copy_recursively_with_progress(
+                    source.child(name),
+                    target.child(target_name),
+                    into,
+                    cancellable.clone(),
+                    record.clone(),
+                    progress.clone(),
+                    fat_family,
+                )
+            };
+            let mut arrivals = Arrivals::new(fat_family, naming::fat_family_profile(), Key::Folded);
             loop {
-                let children = copy_children(&enumerator, &cancellable, fat_family).await?;
+                let children = next_children(&enumerator, &cancellable).await?;
                 if children.is_empty() {
                     break;
                 }
                 for child in children {
-                    let child_name = child.name();
-                    let target_name =
-                        fat_family_child_name(child_name.as_os_str(), fat_family, &mut used_names);
-                    copy_recursively_with_progress(
-                        source.child(&child_name),
-                        target.child(&target_name),
-                        into,
-                        cancellable.clone(),
-                        record.clone(),
-                        progress.clone(),
-                        fat_family,
-                    )
-                    .await?;
+                    let name = child.name();
+                    let is_directory = child.file_type() == gio::FileType::Directory;
+                    if arrivals.keeps(name.as_os_str(), is_directory) {
+                        copy_child(name.as_os_str(), name.as_os_str()).await?;
+                    }
                 }
-                if fat_family {
-                    break;
-                }
+            }
+            for arrived in arrivals.planned() {
+                copy_child(&arrived.name, &arrived.target).await?;
             }
             if let CopyRecord::Placing(Some(placing)) = record
                 && let Some(path) = target.path().filter(|path| placing.wants(path))
@@ -3586,79 +3603,87 @@ fn classify_merge<'a>(
             );
         })
         .await?;
-        let mut used_names = HashSet::new();
+        let mut arrivals = Arrivals::new(fat_family, naming::fat_family_profile(), Key::Folded);
         loop {
-            let children = copy_children(&enumerator, cancellable, fat_family).await?;
+            let children = next_children(&enumerator, cancellable).await?;
             if children.is_empty() {
-                return Ok(());
+                break;
             }
             for child in children {
-                if cancellable.is_cancelled() {
-                    return Err(cancelled_local_operation());
+                let name = child.name();
+                let is_directory = child.file_type() == gio::FileType::Directory;
+                if arrivals.keeps(name.as_os_str(), is_directory) {
+                    let child = (source.child(&name), is_directory, target.child(&name));
+                    classify_merge_child(child, plan, cancellable, fat_family).await?;
                 }
-                let child_name = child.name();
-                let target_name =
-                    fat_family_child_name(child_name.as_os_str(), fat_family, &mut used_names);
-                let child_source = source.child(&child_name);
-                let child_target = target.child(&target_name);
-                let target_type = match await_cancellable(
-                    &child_target,
-                    cancellable,
-                    |target, cancellable, result| {
-                        target.query_info_async(
-                            "standard::type",
-                            gio::FileQueryInfoFlags::NOFOLLOW_SYMLINKS,
-                            glib::Priority::DEFAULT,
-                            Some(cancellable),
-                            move |output| result.resolve(output),
-                        );
-                    },
-                )
-                .await
-                {
-                    Ok(info) => Some(info.file_type()),
-                    Err(error) if error.matches(gio::IOErrorEnum::NotFound) => None,
-                    Err(error) => return Err(error),
-                };
-                let source_is_directory = child.file_type() == gio::FileType::Directory;
-                match target_type {
-                    None => {
-                        if let Some(location) = location_for_file(&child_target) {
-                            plan.created.push(location);
-                        }
-                    }
-                    Some(gio::FileType::Directory) if source_is_directory => {
-                        classify_merge(&child_source, &child_target, plan, cancellable, fat_family)
-                            .await?;
-                    }
-                    Some(gio::FileType::Directory) => {
-                        return Err(glib::Error::new(
-                            gio::IOErrorEnum::NotSupported,
-                            &crate::i18n::tr(
-                                "A file and a folder cannot safely replace one another",
-                            ),
-                        ));
-                    }
-                    Some(_) if source_is_directory => {
-                        return Err(glib::Error::new(
-                            gio::IOErrorEnum::NotSupported,
-                            &crate::i18n::tr(
-                                "A file and a folder cannot safely replace one another",
-                            ),
-                        ));
-                    }
-                    Some(_) => {
-                        if let Some(location) = location_for_file(&child_target) {
-                            plan.overwritten.push(location);
-                        }
-                    }
-                }
-            }
-            if fat_family {
-                return Ok(());
             }
         }
+        for arrived in arrivals.planned() {
+            let child = (
+                source.child(&arrived.name),
+                arrived.is_directory,
+                target.child(&arrived.target),
+            );
+            classify_merge_child(child, plan, cancellable, fat_family).await?;
+        }
+        Ok(())
     })
+}
+
+/// Classifies a source child against the destination entry it lands on.
+async fn classify_merge_child(
+    (child_source, source_is_directory, child_target): (gio::File, bool, gio::File),
+    plan: &mut MergePlan,
+    cancellable: &gio::Cancellable,
+    fat_family: bool,
+) -> Result<(), glib::Error> {
+    if cancellable.is_cancelled() {
+        return Err(cancelled_local_operation());
+    }
+    let target_type =
+        match await_cancellable(&child_target, cancellable, |target, cancellable, result| {
+            target.query_info_async(
+                "standard::type",
+                gio::FileQueryInfoFlags::NOFOLLOW_SYMLINKS,
+                glib::Priority::DEFAULT,
+                Some(cancellable),
+                move |output| result.resolve(output),
+            );
+        })
+        .await
+        {
+            Ok(info) => Some(info.file_type()),
+            Err(error) if error.matches(gio::IOErrorEnum::NotFound) => None,
+            Err(error) => return Err(error),
+        };
+    match target_type {
+        None => {
+            if let Some(location) = location_for_file(&child_target) {
+                plan.created.push(location);
+            }
+        }
+        Some(gio::FileType::Directory) if source_is_directory => {
+            classify_merge(&child_source, &child_target, plan, cancellable, fat_family).await?;
+        }
+        Some(gio::FileType::Directory) => {
+            return Err(glib::Error::new(
+                gio::IOErrorEnum::NotSupported,
+                &crate::i18n::tr("A file and a folder cannot safely replace one another"),
+            ));
+        }
+        Some(_) if source_is_directory => {
+            return Err(glib::Error::new(
+                gio::IOErrorEnum::NotSupported,
+                &crate::i18n::tr("A file and a folder cannot safely replace one another"),
+            ));
+        }
+        Some(_) => {
+            if let Some(location) = location_for_file(&child_target) {
+                plan.overwritten.push(location);
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Combines the source folder into the existing destination folder: every
@@ -5921,7 +5946,6 @@ impl OperationProvider for LocalOperationProvider {
             let max_file_size = destination
                 .path()
                 .and_then(|path| fat32_file_size_limit(mounts.fs_type_for(&path)));
-            let mut used_names = HashSet::new();
             let mut affected_locations = HashSet::from([request.destination.clone()]);
             for parent in request.items.iter().filter_map(|item| item.source.parent()) {
                 affected_locations.insert(parent);
@@ -5931,7 +5955,7 @@ impl OperationProvider for LocalOperationProvider {
                 .iter()
                 .map(|item| gio_file_for_location(&item.source))
                 .collect::<Vec<_>>();
-            let (item_sizes, total_bytes, item_files, total_files, regular_files) =
+            let (item_sizes, total_bytes, item_files, total_files, kinds) =
                 match transfer_sizes(&sources, &operation_cancellable, max_file_size).await {
                     Ok(sizes) => sizes,
                     Err(error) if was_cancelled(&error) => {
@@ -5966,9 +5990,16 @@ impl OperationProvider for LocalOperationProvider {
                 fat_family,
                 ..Copying::default()
             };
-            if let Some((plans, worker_count)) =
-                parallel_copy_plans(&request, &sources, &destination, regular_files, fat_family)
-                    .await
+            let targets = paste_targets(&sources, &destination, fat_family, &kinds);
+            if let Some((plans, worker_count)) = parallel_copy_plans(
+                &request,
+                &sources,
+                &destination,
+                &targets,
+                &kinds,
+                fat_family,
+            )
+            .await
             {
                 for plan in &plans {
                     affected_locations.insert(request.items[plan.index].source.clone());
@@ -6077,9 +6108,7 @@ impl OperationProvider for LocalOperationProvider {
                 }
                 let source = sources[index].clone();
                 let started = progress.reported();
-                let Some(target) =
-                    default_transfer_target(&source, &destination, fat_family, &mut used_names)
-                else {
+                let Some(target) = targets[index].clone() else {
                     settling.finish().await;
                     let flush_error = flush_written_roots(&written_paths, &emit, request.id)
                         .await

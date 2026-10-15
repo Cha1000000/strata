@@ -69,7 +69,7 @@ pub(super) fn colliding(names: &[&OsStr]) -> Vec<bool> {
     keys.iter().map(|key| counts[key.as_str()] > 1).collect()
 }
 
-pub(super) fn collision_key(name: &OsStr) -> OsString {
+pub(in crate::adapters::local_operations) fn collision_key(name: &OsStr) -> OsString {
     fold(name).map_or_else(|| name.to_os_string(), OsString::from)
 }
 

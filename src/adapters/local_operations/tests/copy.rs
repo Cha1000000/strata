@@ -950,59 +950,6 @@ fn a_selected_named_pipe_is_recreated_where_the_destination_can() -> Result<(), 
 }
 
 #[test]
-fn fat_sanitized_name_replaces_invalid_characters_and_trims_trailing_dots_and_spaces() {
-    assert_eq!(
-        fat_sanitized_name(OsStr::new("sc_macroorganizer?tabid:short=1.png")),
-        OsStr::new("sc_macroorganizer_tabid_short=1.png")
-    );
-    assert_eq!(
-        fat_sanitized_name(OsStr::new(r#"a"*/:<>?\|b"#)),
-        OsStr::new("a_________b")
-    );
-    assert_eq!(
-        fat_sanitized_name(OsStr::new("trailing dots.. ")),
-        OsStr::new("trailing dots")
-    );
-    assert_eq!(fat_sanitized_name(OsStr::new("...")), OsStr::new("_"));
-    assert_eq!(
-        fat_sanitized_name(OsStr::new("plain.txt")),
-        OsStr::new("plain.txt")
-    );
-}
-
-#[test]
-fn unique_fat_sibling_name_numbers_a_collision_instead_of_overwriting() {
-    let mut used = HashSet::new();
-    let first = unique_fat_sibling_name(OsString::from("a_b.txt"), &mut used);
-    let second = unique_fat_sibling_name(OsString::from("a_b.txt"), &mut used);
-    let third = unique_fat_sibling_name(OsString::from("a_b.txt"), &mut used);
-    assert_eq!(first, OsString::from("a_b.txt"));
-    assert_eq!(second, OsString::from("a_b (1).txt"));
-    assert_eq!(third, OsString::from("a_b (2).txt"));
-    assert_eq!(
-        unique_fat_sibling_name(OsString::from("A_B.txt"), &mut used),
-        OsString::from("A_B (3).txt")
-    );
-    let maximum = OsString::from("a (18446744073709551615).txt");
-    assert_eq!(unique_fat_sibling_name(maximum.clone(), &mut used), maximum);
-    let almost_maximum = OsString::from("a (18446744073709551614).txt");
-    assert_eq!(
-        unique_fat_sibling_name(almost_maximum.clone(), &mut used),
-        almost_maximum
-    );
-    assert_eq!(
-        unique_fat_sibling_name(almost_maximum, &mut used),
-        OsString::from("a (1).txt")
-    );
-    let long = format!("{}.txt", "\u{4e2d}".repeat(250));
-    unique_fat_sibling_name(OsString::from(&long), &mut used);
-    assert_eq!(
-        unique_fat_sibling_name(OsString::from(&long), &mut used),
-        OsString::from(format!("{} (1).txt", "\u{4e2d}".repeat(247)))
-    );
-}
-
-#[test]
 fn target_is_fat_family_reads_the_reported_filesystem_type() {
     let mount_point = std::env::temp_dir().join("strata-fat-family-mount-probe");
     let mounts = MountTable::parse(format!(
@@ -1061,40 +1008,70 @@ fn fat_family_copy_sanitizes_an_invalid_name_instead_of_discarding_the_whole_tre
 }
 
 #[test]
-fn fat_family_copy_disambiguates_sibling_names_that_collide_after_sanitizing()
+fn fat_family_copies_number_fixed_names_past_the_names_their_siblings_keep()
 -> Result<(), Box<dyn Error>> {
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
         .lock()
         .map_err(|error| error.to_string())?;
-    let root = tempfile::tempdir()?;
-    let source = root.path().join("source");
-    let destination = root.path().join("destination");
-    let target = destination.join("target");
-    fs::create_dir_all(&source)?;
-    fs::create_dir(&destination)?;
-    fs::write(source.join("a?.txt"), b"first")?;
-    fs::write(source.join("a:.txt"), b"second")?;
-    fs::write(source.join("A*.txt"), b"third")?;
-    let _destination = FsQuirks::install(&destination, Quirks::vfat());
-
-    let result = glib::MainContext::default().block_on(copy_recursively_fat_family(
-        gio::File::for_path(&source),
-        gio::File::for_path(&target),
-        false,
-        gio::Cancellable::new(),
-    ));
-
-    assert!(result.is_ok(), "{result:?}");
-    let mut contents = [
-        fs::read(target.join("A_.txt"))?,
-        fs::read(target.join("a_ (1).txt"))?,
-        fs::read(target.join("a_ (2).txt"))?,
+    type CopyTree = fn(
+        gio::File,
+        gio::File,
+        gio::Cancellable,
+    ) -> Pin<Box<dyn Future<Output = Result<(), glib::Error>>>>;
+    let copies: [(&str, CopyTree); 2] = [
+        ("engine", |source, target, cancellable| {
+            copy_recursively_fat_family(source, target, false, cancellable)
+        }),
+        ("GIO", |source, target, cancellable| {
+            super::super::copy_recursively_with_progress(
+                source,
+                target,
+                super::super::CopyInto::New,
+                cancellable,
+                super::super::CopyRecord::Nothing,
+                None,
+                true,
+            )
+        }),
     ];
-    contents.sort();
-    assert_eq!(
-        contents,
-        [b"first".to_vec(), b"second".to_vec(), b"third".to_vec()]
-    );
+    for (row, copy) in copies {
+        let root = tempfile::tempdir()?;
+        let source = root.path().join("source");
+        let destination = root.path().join("destination");
+        let target = destination.join("target");
+        fs::create_dir_all(&source)?;
+        fs::create_dir(&destination)?;
+        fs::write(source.join("a?.txt"), b"question")?;
+        // Enough siblings that GIO lists them in several batches.
+        for index in 0..130 {
+            fs::write(source.join(format!("pad {index:03}")), b"")?;
+        }
+        fs::write(source.join("a:.txt"), b"colon")?;
+        fs::write(source.join("A*.txt"), b"star")?;
+        fs::write(source.join("a_.txt"), b"kept")?;
+        let _destination = FsQuirks::install(&destination, Quirks::vfat());
+
+        let result = glib::MainContext::default().block_on(copy(
+            gio::File::for_path(&source),
+            gio::File::for_path(&target),
+            gio::Cancellable::new(),
+        ));
+
+        assert!(result.is_ok(), "{row}: {result:?}");
+        for (name, contents) in [
+            ("a_.txt", "kept"),
+            ("A_ (1).txt", "star"),
+            ("a_ (2).txt", "colon"),
+            ("a_ (3).txt", "question"),
+        ] {
+            assert_eq!(
+                fs::read(target.join(name))?,
+                contents.as_bytes(),
+                "{row}: {name}"
+            );
+        }
+        assert_eq!(names(&target)?.len(), 134, "{row}");
+    }
     Ok(())
 }
 

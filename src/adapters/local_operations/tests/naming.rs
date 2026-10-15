@@ -5,7 +5,11 @@ use rustix::fs::Mode;
 use super::super::{
     fs_ops::{Entry, fs},
     mount_profile::Profiles,
-    naming::fix::{Cause, fix_name},
+    naming::{
+        Key, PlanEntry, fat_family_profile,
+        fix::{Cause, fix_name},
+        plan_names,
+    },
 };
 use super::*;
 use crate::adapters::volume::{
@@ -59,6 +63,86 @@ fn copy_suffix_parsing_and_candidate_naming() {
             ),
             OsString::from(expected)
         );
+    }
+    assert_eq!(
+        numbered_names(
+            OsStr::new("a (18446744073709551614).txt"),
+            false,
+            NameLimit::default()
+        )
+        .take(2)
+        .collect::<Vec<_>>(),
+        ["a (18446744073709551615).txt", "a (1).txt"]
+    );
+}
+
+#[test]
+fn fixed_names_are_numbered_past_the_names_their_siblings_keep() {
+    // An entry's name, whether it is a folder, whether it is fixed, and the
+    // name planned for it.
+    let file = |name: &str, planned: &str| (name.to_owned(), false, true, planned.to_owned());
+    let folder = |name: &str, planned: &str| (name.to_owned(), true, true, planned.to_owned());
+    let unfixed = |name: &str| (name.to_owned(), false, false, name.to_owned());
+    let cjk = |count| "\u{4e2d}".repeat(count);
+    let rows = [
+        (
+            Key::Folded,
+            vec![file("a:b", "a_b (1)"), file("a_b", "a_b")],
+        ),
+        (
+            Key::Folded,
+            vec![
+                file("a?b", "a_b (3)"),
+                file("a_b (1)", "a_b (1)"),
+                file("a:b", "a_b (2)"),
+                file("a_b", "a_b"),
+            ],
+        ),
+        (
+            Key::Folded,
+            vec![file("A:b", "A_b (1)"), file("a_b", "a_b")],
+        ),
+        (Key::Exact, vec![file("A:b", "A_b"), file("a_b", "a_b")]),
+        (Key::Folded, vec![unfixed("x:y"), file("x?y", "x_y")]),
+        (
+            Key::Folded,
+            vec![folder("v1.2:", "v1.2_ (1)"), folder("v1.2_", "v1.2_")],
+        ),
+        (
+            Key::Folded,
+            vec![
+                file(
+                    &format!("{}.txt.", cjk(250)),
+                    &format!("{} (1).txt", cjk(247)),
+                ),
+                file(&format!("{}.txt", cjk(250)), &format!("{}.txt", cjk(250))),
+            ],
+        ),
+    ];
+    for (key, row) in rows {
+        for reversed in [false, true] {
+            let mut row = row.clone();
+            if reversed {
+                row.reverse();
+            }
+            let entries = row
+                .iter()
+                .map(|(name, is_directory, fixing, _)| PlanEntry {
+                    name: OsStr::new(name),
+                    is_directory: *is_directory,
+                    fixing: *fixing,
+                })
+                .collect::<Vec<_>>();
+            let planned = row
+                .iter()
+                .map(|(.., planned)| OsString::from(planned))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                plan_names(&entries, &fat_family_profile(), key),
+                planned,
+                "{key:?} {row:?}"
+            );
+        }
     }
 }
 
@@ -424,15 +508,34 @@ fn duplicating_multi_extension_file_uses_last_extension_for_candidate_name()
 }
 
 #[test]
+fn pasted_names_fixed_for_fat_are_planned_after_the_names_kept() {
+    use gtk::gio::FileType::{Directory, Regular};
+    let destination = gio::File::for_path("/media/stick");
+    let sources = ["/one/a:b", "/two/a_b", "/one/v1.2:", "/two/v1.2:"].map(gio::File::for_path);
+    let kinds = [Some(Regular), Some(Regular), Some(Regular), Some(Directory)];
+    for (fat_family, expected) in [
+        (false, ["a:b", "a_b", "v1.2:", "v1.2:"]),
+        (true, ["a_b (1)", "a_b", "v1.2_", "v1.2_ (1)"]),
+    ] {
+        let targets = super::super::paste_targets(&sources, &destination, fat_family, &kinds);
+        assert_eq!(
+            targets
+                .iter()
+                .map(|target| target.as_ref().and_then(gio::File::basename))
+                .collect::<Vec<_>>(),
+            expected.map(|name| Some(PathBuf::from(name))),
+            "{fat_family}"
+        );
+    }
+}
+
+#[test]
 fn transfer_targets_resolve_trash_leaf_names() {
     let destination = gio::File::for_path("/home/user/Documents");
     let target_name = |source: &gio::File| {
-        let target = super::super::default_transfer_target(
-            source,
-            &destination,
-            false,
-            &mut HashSet::new(),
-        )?;
+        let target =
+            super::super::paste_targets(std::slice::from_ref(source), &destination, false, &[None])
+                .pop()??;
         Some(
             target
                 .path()?

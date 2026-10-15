@@ -290,7 +290,7 @@ fn names_a_fat_target_takes_for_one_are_numbered_and_reported() -> Result<(), Bo
     let destination = root.path().join("destination");
     fs::create_dir_all(&source)?;
     fs::create_dir(&destination)?;
-    // `a:b` is saved as `a_b`, which the real `a_b` asks for too.
+    // `a:b` would be saved as `a_b`, which the real `a_b` keeps.
     for name in ["Makefile", "a:b", "a_b", "makefile"] {
         fs::write(source.join(name), name)?;
     }
@@ -321,16 +321,13 @@ fn names_a_fat_target_takes_for_one_are_numbered_and_reported() -> Result<(), Bo
             RenameCause::Alias,
         )
     };
-    assert_eq!(
-        renamed,
-        [alias("a_b", "a_b (1)"), alias("makefile", "makefile (1)")]
-    );
+    assert_eq!(renamed, [alias("makefile", "makefile (1)")]);
     assert_eq!(
         names(&target)?,
         ["Makefile", "a_b", "a_b (1)", "makefile (1)"]
     );
-    assert_eq!(fs::read(target.join("a_b"))?, b"a:b");
-    assert_eq!(fs::read(target.join("a_b (1)"))?, b"a_b");
+    assert_eq!(fs::read(target.join("a_b"))?, b"a_b");
+    assert_eq!(fs::read(target.join("a_b (1)"))?, b"a:b");
     assert_eq!(fs::read(target.join("makefile (1)"))?, b"makefile");
     Ok(())
 }

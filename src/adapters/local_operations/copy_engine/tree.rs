@@ -41,7 +41,7 @@ use crate::{
             LocalFileIdentity, StageContent, StagedSibling, cancelled_local_operation,
             fs_ops::{Entry, EntryStat, FsOps},
             io_error,
-            naming::{fat_sanitized_name, numbered_names},
+            naming::{Key, PlanEntry, fat_family_profile, numbered_names, plan_names},
             os_error_detail, placement,
             placement::{COPY_PREFIX, PlaceError},
             work_queue::{self, Group, Job, WorkQueue},
@@ -227,6 +227,14 @@ pub(super) enum Naming {
 }
 
 impl Naming {
+    fn key(self) -> Key {
+        if self == Self::Create {
+            Key::Exact
+        } else {
+            Key::Folded
+        }
+    }
+
     fn decide(self, fs: &dyn FsOps, family: Family, folder: BorrowedFd<'_>) -> Self {
         if self != Self::Decide {
             return self;
@@ -386,8 +394,8 @@ impl Folder {
             return Err(Failure::Place(PlaceError::Changed));
         }
         let snapshot = Snapshot::read(fs, source.as_fd(), &source_stat)?;
-        let children = target_children(fs, source.as_fd(), copy.fat_family)?;
         let naming = self.naming.decide(fs, self.mount.family, target.as_fd());
+        let children = target_children(fs, source.as_fd(), copy.fat_family, naming)?;
         let requested = children.iter().map(|(_, _, name)| name.clone()).collect();
         let limit = self.mount.name_limit(target.as_fd());
         let made = Made {
@@ -425,18 +433,23 @@ impl Folder {
 fn target_children(
     fs: &dyn FsOps,
     source: BorrowedFd<'_>,
-    fat_family: bool,
+    fixing: bool,
+    naming: Naming,
 ) -> Result<Vec<(OsString, FileType, OsString)>, Failure> {
-    Ok(children(fs, source)?
-        .into_iter()
-        .map(|(name, kind)| {
-            let target_name = if fat_family {
-                fat_sanitized_name(&name)
-            } else {
-                name.clone()
-            };
-            (name, kind, target_name)
+    let children = children(fs, source)?;
+    let entries = children
+        .iter()
+        .map(|(name, kind)| PlanEntry {
+            name,
+            is_directory: *kind == FileType::Directory,
+            fixing,
         })
+        .collect::<Vec<_>>();
+    let targets = plan_names(&entries, &fat_family_profile(), naming.key());
+    Ok(children
+        .into_iter()
+        .zip(targets)
+        .map(|((name, kind), target)| (name, kind, target))
         .collect())
 }
 
@@ -1101,9 +1114,9 @@ impl Merged {
             Some(folder) => Some(folder.folder(source_name, fs.stat_fd(source.as_fd())?.identity)),
             None => None,
         };
-        let children = target_children(fs, source.as_fd(), copy.fat_family)?;
         // A stage made in the live folder inherits its casefolding.
         let naming = Naming::Decide.decide(fs, mount.family, target.as_fd());
+        let children = target_children(fs, source.as_fd(), copy.fat_family, naming)?;
         let requested = children.iter().map(|(_, _, name)| name.clone()).collect();
         let limit = mount.name_limit(target.as_fd());
         let live = Live {

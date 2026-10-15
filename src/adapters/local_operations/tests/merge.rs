@@ -40,54 +40,108 @@ fn rename_stage(staging: PathBuf) -> (StageOverwrite, Rc<RefCell<Vec<Location>>>
 }
 
 #[test]
-fn fat_merge_backs_up_sanitized_collisions_and_records_actual_paths() -> Result<(), Box<dyn Error>>
-{
+fn fat_merge_overwrites_the_names_it_plans_and_keeps_the_names_that_need_no_fix()
+-> Result<(), Box<dyn Error>> {
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
         .lock()
         .map_err(|error| error.to_string())?;
-    let root = tempfile::tempdir()?;
-    let source = root.path().join("source");
-    let target = root.path().join("target");
-    fs::create_dir_all(source.join("nested?"))?;
-    fs::create_dir_all(target.join("nested_"))?;
-    fs::write(source.join("nested?/a?.txt"), b"question")?;
-    fs::write(source.join("nested?/a:.txt"), b"colon")?;
-    fs::write(target.join("nested_/a_.txt"), b"original")?;
-    let _sources = FsQuirks::install(&source, Quirks::default());
-    let _target = FsQuirks::install(&target, Quirks::vfat());
-    let staging = root.path().join("staging");
-    let (stage, staged) = rename_stage(staging.clone());
-    let (plans, on_merged) = recorded_plans();
-    glib::MainContext::default().block_on(merge_local_with(
-        gio::File::for_path(&source),
-        gio::File::for_path(&target),
-        false,
-        gio::Cancellable::new(),
-        None,
-        MergeHooks {
-            fat_family: true,
-            copy_into_target: Rc::new(|source, target, _, cancellable| {
-                let copied = copy_recursively_fat_family(source, target, true, cancellable);
-                Box::pin(async move { copied.await.map(|()| MergeCopied::default()) })
-            }),
-            stage_overwrite: stage,
-            on_merged: &on_merged,
+    let gio_copy: CopyStep = Rc::new(
+        |source, target, copy: super::super::MergeCopy, cancellable| {
+            Box::pin(async move {
+                super::super::copy_recursively_with_progress(
+                    source,
+                    target,
+                    super::super::CopyInto::Existing,
+                    cancellable,
+                    super::super::CopyRecord::Placing(copy.placing),
+                    None,
+                    true,
+                )
+                .await
+                .map(|()| MergeCopied::default())
+            })
         },
-    ))?;
-    assert_eq!(fs::read(staging.join("staged-0"))?, b"original");
-    assert_eq!(fs::read(target.join("nested_/a_.txt"))?, b"colon");
-    assert_eq!(fs::read(target.join("nested_/a_ (1).txt"))?, b"question");
-    assert_eq!(
-        *staged.borrow(),
-        vec![Location::local(target.join("nested_/a_.txt"))]
     );
-    let plans = plans.borrow();
-    assert_eq!(plans.len(), 1);
-    assert_eq!(
-        plans[0].created,
-        vec![Location::local(target.join("nested_/a_ (1).txt"))]
-    );
-    assert_eq!(plans[0].overwritten, *staged.borrow());
+    for (row, copy) in [
+        ("engine", super::super::merge_copy(None, true)),
+        ("GIO", gio_copy),
+    ] {
+        let root = tempfile::tempdir()?;
+        let source = root.path().join("source");
+        let target = root.path().join("target");
+        fs::create_dir_all(source.join("nested?"))?;
+        fs::create_dir_all(target.join("nested_"))?;
+        for (name, contents) in [
+            ("a?.txt", "question"),
+            ("a:.txt", "colon"),
+            ("b:.txt", "b colon"),
+            ("b_.txt", "b kept"),
+        ] {
+            fs::write(source.join("nested?").join(name), contents)?;
+        }
+        // `b_ (1).txt` is what an earlier merge of `b:.txt` saved.
+        for (name, contents) in [
+            ("a_.txt", "original a"),
+            ("b_.txt", "original b"),
+            ("b_ (1).txt", "earlier b colon"),
+        ] {
+            fs::write(target.join("nested_").join(name), contents)?;
+        }
+        let _sources = FsQuirks::install(&source, Quirks::default());
+        let _target = FsQuirks::install(&target, Quirks::vfat());
+        let staging = root.path().join("staging");
+        let (stage, staged) = rename_stage(staging.clone());
+        let (plans, on_merged) = recorded_plans();
+        glib::MainContext::default().block_on(merge_local_with(
+            gio::File::for_path(&source),
+            gio::File::for_path(&target),
+            false,
+            gio::Cancellable::new(),
+            None,
+            MergeHooks {
+                fat_family: true,
+                copy_into_target: copy,
+                stage_overwrite: stage,
+                on_merged: &on_merged,
+            },
+        ))?;
+        let nested = target.join("nested_");
+        for (name, contents) in [
+            ("a_.txt", "colon"),
+            ("a_ (1).txt", "question"),
+            ("b_.txt", "b kept"),
+            ("b_ (1).txt", "b colon"),
+        ] {
+            assert_eq!(
+                fs::read(nested.join(name))?,
+                contents.as_bytes(),
+                "{row}: {name}"
+            );
+        }
+        assert_eq!(names(&nested)?.len(), 4, "{row}");
+        let mut staged_contents = (0..staged.borrow().len())
+            .map(|index| fs::read_to_string(staging.join(format!("staged-{index}"))))
+            .collect::<io::Result<Vec<_>>>()?;
+        staged_contents.sort();
+        assert_eq!(
+            staged_contents,
+            ["earlier b colon", "original a", "original b"],
+            "{row}"
+        );
+        let plans = plans.borrow();
+        assert_eq!(plans.len(), 2, "{row}");
+        assert_eq!(
+            plans[0].created,
+            [Location::local(nested.join("a_ (1).txt"))],
+            "{row}"
+        );
+        assert_eq!(plans[0].overwritten, *staged.borrow(), "{row}");
+        assert_eq!(
+            plans[1].placed.keys().collect::<HashSet<_>>(),
+            plans[0].overwritten.iter().collect(),
+            "{row}"
+        );
+    }
     Ok(())
 }
 
