@@ -52,6 +52,7 @@ use gtk::{gio, glib, prelude::*};
 
 use copy_engine::SharedProgress;
 use fs_ops::{Entry, EntryStat, OffMain, fs};
+use mount_profile::{FolderNames, NamePolicy};
 use naming::{Key, PlanEntry, Taken, numbered_names, plan_names};
 use owed::{Deletion, Done, Owed, Settling};
 use placement::{COPY_PREFIX, Displacement, PlaceError, REPLACED_PREFIX, RenameFailure};
@@ -61,14 +62,14 @@ use crate::{
     adapters::{
         gio_file_for_location, location_for_file,
         trash_restore::{RestoreContext, plan_restore_for_location},
-        volume::{MountTable, max_file_size},
+        volume::{MountTable, NameProfile},
     },
     model::{FileEntry, Location},
     services::{
         CancelledOperation, CompressRequest, CreateDirectoryRequest, CreateFileRequest,
-        DeleteRequest, ExtractRequest, KeptCause, KeptItem, LoadHandle, MoveRecord, OperationEvent,
-        OperationProvider, OperationRequestId, PasteRequest, PlacedSnapshot, RenameCause,
-        RenameRequest, RenamedItem, ReplacedOriginal, RestoreRequest, RestoreSource,
+        DeleteRequest, ExtractRequest, KeptCause, KeptItem, LoadHandle, MoveRecord, NameMode,
+        OperationEvent, OperationProvider, OperationRequestId, PasteRequest, PlacedSnapshot,
+        RenameCause, RenameRequest, RenamedItem, ReplacedOriginal, RestoreRequest, RestoreSource,
         TransferConflict, TransferReport, TrashedOriginal, UndoCopyRequest, UndoMergeRequest,
         UndoMoveRequest, UndoRenameRequest, validate_basename,
     },
@@ -990,15 +991,12 @@ fn fat32_file_too_large(name: &str) -> glib::Error {
     )
 }
 
-fn fat32_file_size_limit(fs_type: Option<&str>) -> Option<u64> {
-    fs_type.and_then(|fs_type| max_file_size(fs_type, None))
-}
-
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct TransferEstimate {
     bytes: Option<u64>,
     files: usize,
     kind: gio::FileType,
+    filesystem: Option<glib::GString>,
 }
 
 fn transfer_size(
@@ -1009,7 +1007,7 @@ fn transfer_size(
     Box::pin(async move {
         let info = await_cancellable(&file, &cancellable, |file, cancellable, result| {
             file.query_info_async(
-                "standard::type,standard::size",
+                "standard::type,standard::size,id::filesystem",
                 gio::FileQueryInfoFlags::NOFOLLOW_SYMLINKS,
                 glib::Priority::DEFAULT,
                 Some(cancellable),
@@ -1017,6 +1015,7 @@ fn transfer_size(
             );
         })
         .await?;
+        let filesystem = info.attribute_string(gio::FILE_ATTRIBUTE_ID_FILESYSTEM);
         if info.file_type() != gio::FileType::Directory {
             let size = info
                 .has_attribute(gio::FILE_ATTRIBUTE_STANDARD_SIZE)
@@ -1035,6 +1034,7 @@ fn transfer_size(
                 bytes: size,
                 files: 1,
                 kind: info.file_type(),
+                filesystem,
             });
         }
 
@@ -1069,6 +1069,7 @@ fn transfer_size(
                     bytes: total,
                     files,
                     kind: gio::FileType::Directory,
+                    filesystem,
                 });
             }
             for chunk in children.chunks(MAX_LOCAL_IO_WORKERS) {
@@ -1097,25 +1098,29 @@ fn transfer_size(
     })
 }
 
+/// Each item's size, file count, kind and GIO's id of its filesystem, as
+/// far as they could be read, and the totals.
+#[derive(Debug)]
+struct TransferSizes {
+    sizes: Vec<Option<u64>>,
+    total: Option<u64>,
+    files: Vec<Option<usize>>,
+    total_files: Option<usize>,
+    kinds: Vec<Option<gio::FileType>>,
+    filesystems: Vec<Option<glib::GString>>,
+}
+
 async fn transfer_sizes(
     files: &[gio::File],
     cancellable: &gio::Cancellable,
     max_file_size: Option<u64>,
-) -> Result<
-    (
-        Vec<Option<u64>>,
-        Option<u64>,
-        Vec<Option<usize>>,
-        Option<usize>,
-        Vec<Option<gio::FileType>>,
-    ),
-    glib::Error,
-> {
+) -> Result<TransferSizes, glib::Error> {
     let mut sizes = Vec::with_capacity(files.len());
     let mut counts = Vec::with_capacity(files.len());
     let mut total = Some(0_u64);
     let mut total_files = Some(0_usize);
     let mut kinds = Vec::with_capacity(files.len());
+    let mut filesystems = Vec::with_capacity(files.len());
     for chunk in files.chunks(MAX_LOCAL_IO_WORKERS) {
         let context = glib::MainContext::default();
         let tasks = chunk
@@ -1139,16 +1144,25 @@ async fn transfer_sizes(
                 Ok(Err(_)) | Err(_) => None,
             };
             total = total.and_then(|total| {
-                size.and_then(|size| size.bytes.and_then(|bytes| total.checked_add(bytes)))
+                size.as_ref()
+                    .and_then(|size| size.bytes.and_then(|bytes| total.checked_add(bytes)))
             });
-            total_files =
-                total_files.and_then(|total| size.map(|size| total.saturating_add(size.files)));
-            counts.push(size.map(|size| size.files));
-            sizes.push(size.and_then(|size| size.bytes));
-            kinds.push(size.map(|size| size.kind));
+            total_files = total_files
+                .and_then(|total| size.as_ref().map(|size| total.saturating_add(size.files)));
+            counts.push(size.as_ref().map(|size| size.files));
+            sizes.push(size.as_ref().and_then(|size| size.bytes));
+            kinds.push(size.as_ref().map(|size| size.kind));
+            filesystems.push(size.and_then(|size| size.filesystem));
         }
     }
-    Ok((sizes, total, counts, total_files, kinds))
+    Ok(TransferSizes {
+        sizes,
+        total,
+        files: counts,
+        total_files,
+        kinds,
+        filesystems,
+    })
 }
 
 fn validated_child(parent: &gio::File, name: &str) -> Result<gio::File, &'static str> {
@@ -1196,28 +1210,31 @@ pub(crate) fn transfer_source_name(source: &gio::File) -> Option<OsString> {
     crate::model::transfer_file_name(source)
 }
 
-/// Where each source goes in `destination`: under its own name, or, on a
-/// FAT-family destination, under one planned against the other sources'
-/// names. `None` for a source without a name.
+/// Where each source goes in `destination`: under its own name, or one
+/// planned against the other sources' names where `fixing` says it comes
+/// from another filesystem than the destination's, whose rules are `rules`.
+/// `None` for a source without a name.
 fn paste_targets(
     sources: &[gio::File],
     destination: &gio::File,
-    fat_family: bool,
+    rules: &NameProfile,
+    fixing: &[bool],
     kinds: &[Option<gio::FileType>],
 ) -> Result<Vec<Option<gio::File>>, PlaceError> {
     let names = sources.iter().map(transfer_source_name).collect::<Vec<_>>();
     let entries = names
         .iter()
         .zip(kinds)
-        .filter_map(|(name, kind)| {
+        .zip(fixing)
+        .filter_map(|((name, kind), fixing)| {
             Some(PlanEntry {
                 name: name.as_deref()?,
                 is_directory: *kind == Some(gio::FileType::Directory),
-                fixing: fat_family,
+                fixing: *fixing,
             })
         })
         .collect::<Vec<_>>();
-    let mut planned = plan_names(&entries, &naming::fat_family_profile(), Key::Folded)?.into_iter();
+    let mut planned = plan_names(&entries, rules, Key::Folded)?.into_iter();
     Ok(names
         .iter()
         .map(|name| {
@@ -1242,7 +1259,7 @@ async fn parallel_copy_plans(
     destination: &gio::File,
     targets: &[Option<gio::File>],
     kinds: &[Option<gio::FileType>],
-    fat_family: bool,
+    windows_disk: bool,
 ) -> Option<(Vec<ParallelCopyPlan>, usize)> {
     if request.items.len() <= MAX_LOCAL_IO_WORKERS
         || !destination.is_native()
@@ -1285,7 +1302,8 @@ async fn parallel_copy_plans(
         let available = thread::available_parallelism()
             .map(usize::from)
             .unwrap_or(1);
-        // A rotational disk on either side reads or writes one file at a time.
+        // A rotational disk on either side reads or writes one file at a time;
+        // a disk Windows formats is taken for one where its device does not say.
         let source_folders: HashSet<&Path> = plans
             .iter()
             .filter_map(|plan| plan.source_path.parent())
@@ -1294,7 +1312,7 @@ async fn parallel_copy_plans(
             .path()
             .and_then(|path| std::fs::File::open(path).ok())
             .and_then(|directory| local_device_is_rotational(&directory))
-            .unwrap_or(fat_family)
+            .unwrap_or(windows_disk)
             || source_folders.into_iter().any(|folder| {
                 open_local_parent_directory(folder)
                     .ok()
@@ -1346,10 +1364,14 @@ async fn execute_parallel_copy_plans(
                         let target = gio::File::for_path(&plan.written_path);
                         return move_owing(source, target, Taken::Fail, cancellable, copying).await;
                     }
+                    let options = copy_engine::Options {
+                        names: copying.names,
+                        ..copy_engine::Options::default()
+                    };
                     let copied = copy_engine::copy_local(
                         plan.source_path,
                         copy_engine::Destination::New(plan.written_path.clone(), Taken::Fail),
-                        copy_engine::Options::default(),
+                        options,
                         copying.progress,
                         &cancellable,
                     )
@@ -1451,6 +1473,63 @@ impl CopyInto {
     }
 }
 
+/// What the GIO path knows of the names in the target folder it copies into.
+#[derive(Clone, Default)]
+struct GioNames {
+    policy: NamePolicy,
+    /// The names in the parent target folder.
+    parent: Option<FolderNames>,
+}
+
+impl GioNames {
+    fn new(policy: NamePolicy) -> Self {
+        Self {
+            policy,
+            parent: None,
+        }
+    }
+
+    /// The names in `target`, a folder the copy `made` or one it copies into.
+    async fn of(
+        &self,
+        source: &gio::File,
+        target: &gio::File,
+        made: bool,
+        cancellable: &gio::Cancellable,
+    ) -> Result<FolderNames, glib::Error> {
+        match self.parent {
+            Some(parent) if made => Ok(parent),
+            Some(parent) => {
+                existing_folder_names(&self.policy, parent, (source, target), cancellable).await
+            }
+            None => self.policy.folder(source, target, cancellable).await,
+        }
+    }
+
+    fn within(&self, folder: FolderNames) -> Self {
+        Self {
+            policy: self.policy.clone(),
+            parent: Some(folder),
+        }
+    }
+}
+
+/// The names in `target`, a folder that existed in one whose names are
+/// `parent`: those of its own mount where it is native, since another may be
+/// mounted there.
+async fn existing_folder_names(
+    policy: &NamePolicy,
+    parent: FolderNames,
+    (source, target): (&gio::File, &gio::File),
+    cancellable: &gio::Cancellable,
+) -> Result<FolderNames, glib::Error> {
+    if target.is_native() {
+        policy.folder(source, target, cancellable).await
+    } else {
+        Ok(parent)
+    }
+}
+
 async fn query_exists(file: &gio::File, cancellable: &gio::Cancellable) -> bool {
     await_cancellable(file, cancellable, |file, cancellable, result| {
         file.query_info_async(
@@ -1463,12 +1542,6 @@ async fn query_exists(file: &gio::File, cancellable: &gio::Cancellable) -> bool 
     })
     .await
     .is_ok()
-}
-
-fn target_is_fat_family(target: &gio::File, mounts: &MountTable) -> bool {
-    target
-        .path()
-        .is_some_and(|path| matches!(mounts.fs_type_for(&path), Some("msdos" | "vfat" | "exfat")))
 }
 
 async fn next_children(
@@ -1497,7 +1570,7 @@ async fn next_children(
 async fn next_named_children(
     enumerator: &gio::FileEnumerator,
     cancellable: &gio::Cancellable,
-    fixing: bool,
+    names: &FolderNames,
 ) -> Result<Vec<(OsString, bool, OsString)>, glib::Error> {
     let mut children = Vec::new();
     loop {
@@ -1507,7 +1580,7 @@ async fn next_named_children(
             let is_directory = child.file_type() == gio::FileType::Directory;
             (child.name().into_os_string(), is_directory)
         }));
-        if listed || !fixing {
+        if listed || !names.fixing {
             break;
         }
     }
@@ -1516,11 +1589,10 @@ async fn next_named_children(
         .map(|(name, is_directory)| PlanEntry {
             name,
             is_directory: *is_directory,
-            fixing,
+            fixing: names.fixing,
         })
         .collect::<Vec<_>>();
-    let planned = plan_names(&entries, &naming::fat_family_profile(), Key::Folded)
-        .map_err(placement_error)?;
+    let planned = plan_names(&entries, &names.rules, Key::Folded).map_err(placement_error)?;
     Ok(children
         .into_iter()
         .zip(planned)
@@ -1770,7 +1842,7 @@ fn copy_recursively_with_progress(
     cancellable: gio::Cancellable,
     record: CopyRecord,
     progress: Option<Rc<TransferProgressTracker>>,
-    fat_family: bool,
+    names: GioNames,
 ) -> Pin<Box<dyn Future<Output = Result<(), glib::Error>>>> {
     Box::pin(async move {
         let info = await_cancellable(&source, &cancellable, |source, cancellable, result| {
@@ -1784,13 +1856,15 @@ fn copy_recursively_with_progress(
         })
         .await?;
         if info.file_type() == gio::FileType::Directory {
-            if into.makes_folder(&target, &cancellable).await {
+            let made = into.makes_folder(&target, &cancellable).await;
+            if made {
                 let created_root = match &record {
                     CopyRecord::Root(root) => Some(root.clone()),
                     _ => None,
                 };
                 make_copy_folder(&target, &cancellable, &created_root).await?;
             }
+            let folder = names.of(&source, &target, made, &cancellable).await?;
             let record = match record {
                 CopyRecord::Root(_) => CopyRecord::Nothing,
                 record => record,
@@ -1806,8 +1880,9 @@ fn copy_recursively_with_progress(
                     );
                 })
                 .await?;
+            let names = names.within(folder);
             loop {
-                let children = next_named_children(&enumerator, &cancellable, fat_family).await?;
+                let children = next_named_children(&enumerator, &cancellable, &folder).await?;
                 if children.is_empty() {
                     break;
                 }
@@ -1819,7 +1894,7 @@ fn copy_recursively_with_progress(
                         cancellable.clone(),
                         record.clone(),
                         progress.clone(),
-                        fat_family,
+                        names.clone(),
                     )
                     .await?;
                 }
@@ -1881,13 +1956,25 @@ fn copy_recursively(
 ) -> Pin<Box<dyn Future<Output = Result<(), glib::Error>>>> {
     Box::pin(async move {
         if merge {
-            return merge_copy(None, false)(source, target, MergeCopy::default(), cancellable)
-                .await
-                .map(drop);
-        }
-        copy_new_recursively_on_filesystem(source, target, Taken::Fail, cancellable, None, false)
+            return merge_copy(None, NamePolicy::default())(
+                source,
+                target,
+                MergeCopy::default(),
+                cancellable,
+            )
             .await
-            .map(drop)
+            .map(drop);
+        }
+        copy_new_recursively_on_filesystem(
+            source,
+            target,
+            Taken::Fail,
+            cancellable,
+            None,
+            NamePolicy::default(),
+        )
+        .await
+        .map(drop)
     })
 }
 
@@ -1897,14 +1984,14 @@ async fn copy_new_recursively_on_filesystem(
     taken: Taken,
     cancellable: gio::Cancellable,
     progress: Option<Rc<TransferProgressTracker>>,
-    fat_family: bool,
+    names: NamePolicy,
 ) -> Result<gio::File, glib::Error> {
     if source.is_native()
         && target.is_native()
         && let (Some(source_path), Some(target_path)) = (source.path(), target.path())
     {
         let options = copy_engine::Options {
-            fat_family,
+            names,
             ..copy_engine::Options::default()
         };
         let copied = copy_engine::copy_local(
@@ -1936,6 +2023,7 @@ async fn copy_new_recursively_on_filesystem(
     let is_directory = source_type == Some(gio::FileType::Directory);
     if !target.is_native() && !is_directory {
         let copy_progress = progress.clone();
+        let copy_names = names.clone();
         return copy_new_remote_file_with(
             source,
             target,
@@ -1943,6 +2031,7 @@ async fn copy_new_recursively_on_filesystem(
             cancellable,
             Rc::new(move |source, stage, cancellable| {
                 let progress = copy_progress.clone();
+                let names = GioNames::new(copy_names.clone());
                 Box::pin(async move {
                     copy_recursively_with_progress(
                         source,
@@ -1951,7 +2040,7 @@ async fn copy_new_recursively_on_filesystem(
                         cancellable,
                         CopyRecord::Nothing,
                         progress,
-                        fat_family,
+                        names,
                     )
                     .await
                 })
@@ -1978,6 +2067,7 @@ async fn copy_new_recursively_on_filesystem(
     let copied = first_free_target(&target, taken, is_directory, &cancellable, |target| {
         let (source, cancellable, progress) =
             (source.clone(), cancellable.clone(), progress.clone());
+        let names = GioNames::new(names.clone());
         async move {
             let created_root = Rc::new(CreatedCopyRoot::new());
             let result = copy_recursively_with_progress(
@@ -1987,7 +2077,7 @@ async fn copy_new_recursively_on_filesystem(
                 cancellable.clone(),
                 CopyRecord::Root(created_root.clone()),
                 progress,
-                fat_family,
+                names,
             )
             .await;
             match result {
@@ -2070,9 +2160,7 @@ async fn move_local_owing(
         });
     }
     let Copying {
-        progress,
-        fat_family,
-        ..
+        progress, names, ..
     } = copying;
     let mut owed = Owed::default();
     if let Some(target_path) = native_path(&target) {
@@ -2081,7 +2169,7 @@ async fn move_local_owing(
     let (target, reported, deletion) = match (native_path(&source), native_path(&target)) {
         (Some(source_path), Some(target_path)) => {
             let options = copy_engine::Options {
-                fat_family,
+                names,
                 manifest: true,
                 durable: true,
                 ..copy_engine::Options::default()
@@ -2118,7 +2206,7 @@ async fn move_local_owing(
                 taken,
                 cancellable.clone(),
                 progress.clone(),
-                fat_family,
+                names,
             )
             .await?;
             if let Some(path) = native_path(&target)
@@ -2571,11 +2659,11 @@ async fn move_local(
     taken: Taken,
     cancellable: gio::Cancellable,
     progress: Option<Rc<TransferProgressTracker>>,
-    fat_family: bool,
+    names: NamePolicy,
 ) -> Result<gio::File, glib::Error> {
     let copying = Copying {
         progress: progress.clone(),
-        fat_family,
+        names,
         ..Copying::default()
     };
     move_local_with_progress(
@@ -2678,9 +2766,7 @@ fn attempt_move(progress: Option<Rc<TransferProgressTracker>>) -> MoveAttempt {
 fn remote_copy(copying: Copying) -> RemoteCopy {
     Rc::new(move |source, target, taken, cancellable| {
         let Copying {
-            progress,
-            fat_family,
-            ..
+            progress, names, ..
         } = copying.clone();
         Box::pin(copy_new_recursively_on_filesystem(
             source,
@@ -2688,7 +2774,7 @@ fn remote_copy(copying: Copying) -> RemoteCopy {
             taken,
             cancellable,
             progress,
-            fat_family,
+            names,
         ))
     })
 }
@@ -3211,7 +3297,7 @@ async fn replace_through_stage(
         _ => error,
     };
     let options = copy_engine::Options {
-        fat_family: copying.fat_family,
+        names: copying.names,
         manifest: moving,
         durable,
         ..copy_engine::Options::default()
@@ -3540,7 +3626,7 @@ type StagedCopy = (Option<copy_engine::Manifest>, TransferReport);
 #[derive(Clone)]
 struct Copying {
     progress: Option<Rc<TransferProgressTracker>>,
-    fat_family: bool,
+    names: NamePolicy,
     /// Shared by all the records of what one paste placed.
     placed_entries: Arc<AtomicUsize>,
 }
@@ -3549,7 +3635,7 @@ impl Default for Copying {
     fn default() -> Self {
         Self {
             progress: None,
-            fat_family: false,
+            names: NamePolicy::default(),
             placed_entries: copy_engine::placed_budget(),
         }
     }
@@ -3607,18 +3693,17 @@ fn trash_stage_overwrite(
 
 /// The injectable steps of a merge, bundled to keep the call sites small.
 struct MergeHooks<'a> {
-    fat_family: bool,
+    names: NamePolicy,
     copy_into_target: CopyStep,
     stage_overwrite: StageOverwrite,
     on_merged: &'a dyn Fn(MergePlan),
 }
 
 fn classify_merge<'a>(
-    source: &'a gio::File,
-    target: &'a gio::File,
+    (source, target): (&'a gio::File, &'a gio::File),
     plan: &'a mut MergePlan,
     cancellable: &'a gio::Cancellable,
-    fat_family: bool,
+    (policy, names): (&'a NamePolicy, FolderNames),
 ) -> Pin<Box<dyn Future<Output = Result<(), glib::Error>> + 'a>> {
     Box::pin(async move {
         let enumerator = await_cancellable(source, cancellable, |source, cancellable, result| {
@@ -3632,13 +3717,13 @@ fn classify_merge<'a>(
         })
         .await?;
         loop {
-            let children = next_named_children(&enumerator, cancellable, fat_family).await?;
+            let children = next_named_children(&enumerator, cancellable, &names).await?;
             if children.is_empty() {
                 return Ok(());
             }
             for (name, is_directory, target_name) in children {
                 let child = (source.child(name), is_directory, target.child(target_name));
-                classify_merge_child(child, plan, cancellable, fat_family).await?;
+                classify_merge_child(child, plan, cancellable, (policy, names)).await?;
             }
         }
     })
@@ -3649,7 +3734,7 @@ async fn classify_merge_child(
     (child_source, source_is_directory, child_target): (gio::File, bool, gio::File),
     plan: &mut MergePlan,
     cancellable: &gio::Cancellable,
-    fat_family: bool,
+    (policy, names): (&NamePolicy, FolderNames),
 ) -> Result<(), glib::Error> {
     if cancellable.is_cancelled() {
         return Err(cancelled_local_operation());
@@ -3677,7 +3762,9 @@ async fn classify_merge_child(
             }
         }
         Some(gio::FileType::Directory) if source_is_directory => {
-            classify_merge(&child_source, &child_target, plan, cancellable, fat_family).await?;
+            let folders = (&child_source, &child_target);
+            let names = existing_folder_names(policy, names, folders, cancellable).await?;
+            classify_merge(folders, plan, cancellable, (policy, names)).await?;
         }
         Some(gio::FileType::Directory) => {
             return Err(glib::Error::new(
@@ -3737,7 +3824,9 @@ async fn merge_owing(
         }
     }
     let mut plan = MergePlan::default();
-    classify_merge(&source, &target, &mut plan, cancellable, hooks.fat_family).await?;
+    let names = hooks.names.folder(&source, &target, cancellable).await?;
+    let folders = (&source, &target);
+    classify_merge(folders, &mut plan, cancellable, (&hooks.names, names)).await?;
     let target_path = target.path();
     // Stage every overwritten original in Trash before the copy so undo can
     // restore it; on failure, report what was staged so it stays recoverable.
@@ -3899,18 +3988,18 @@ async fn merge_local_with(
 
 fn progress_merge_hooks(
     progress: Option<Rc<TransferProgressTracker>>,
-    fat_family: bool,
+    names: NamePolicy,
     on_merged: &dyn Fn(MergePlan),
 ) -> MergeHooks<'_> {
     MergeHooks {
-        fat_family,
-        copy_into_target: merge_copy(progress, fat_family),
+        names: names.clone(),
+        copy_into_target: merge_copy(progress, names),
         stage_overwrite: Rc::new(trash_stage_overwrite),
         on_merged,
     }
 }
 
-fn merge_copy(progress: Option<Rc<TransferProgressTracker>>, fat_family: bool) -> CopyStep {
+fn merge_copy(progress: Option<Rc<TransferProgressTracker>>, names: NamePolicy) -> CopyStep {
     Rc::new(
         move |source,
               target,
@@ -3920,12 +4009,12 @@ fn merge_copy(progress: Option<Rc<TransferProgressTracker>>, fat_family: bool) -
                   placing,
               },
               cancellable| {
-            let progress = progress.clone();
+            let (progress, names) = (progress.clone(), names.clone());
             Box::pin(async move {
                 match (native_path(&source), native_path(&target)) {
                     (Some(source_path), Some(target_path)) => {
                         let options = copy_engine::Options {
-                            fat_family,
+                            names,
                             manifest: moving,
                             durable,
                             ..copy_engine::Options::default()
@@ -3958,7 +4047,7 @@ fn merge_copy(progress: Option<Rc<TransferProgressTracker>>, fat_family: bool) -
                             cancellable,
                             CopyRecord::Placing(placing),
                             progress,
-                            fat_family,
+                            GioNames::new(names),
                         )
                         .await?;
                         Ok(MergeCopied {
@@ -3986,7 +4075,7 @@ async fn merge_local(
         move_source,
         cancellable,
         None,
-        progress_merge_hooks(None, false, on_merged),
+        progress_merge_hooks(None, NamePolicy::default(), on_merged),
     )
     .await
 }
@@ -5955,11 +6044,6 @@ impl OperationProvider for LocalOperationProvider {
         let operation_cancellable = cancellable.clone();
         let _task = glib::MainContext::default().spawn_local(async move {
             let destination = gio_file_for_location(&request.destination);
-            let mounts = MountTable::load().await;
-            let fat_family = target_is_fat_family(&destination, &mounts);
-            let max_file_size = destination
-                .path()
-                .and_then(|path| fat32_file_size_limit(mounts.fs_type_for(&path)));
             let mut affected_locations = HashSet::from([request.destination.clone()]);
             for parent in request.items.iter().filter_map(|item| item.source.parent()) {
                 affected_locations.insert(parent);
@@ -5969,33 +6053,46 @@ impl OperationProvider for LocalOperationProvider {
                 .iter()
                 .map(|item| gio_file_for_location(&item.source))
                 .collect::<Vec<_>>();
-            let (item_sizes, total_bytes, item_files, total_files, kinds) =
-                match transfer_sizes(&sources, &operation_cancellable, max_file_size).await {
-                    Ok(sizes) => sizes,
-                    Err(error) if was_cancelled(&error) => {
-                        emit(cancelled_event(
-                            request.id,
-                            Vec::new(),
-                            Vec::new(),
-                            request
-                                .items
-                                .iter()
-                                .map(|item| item.source.clone())
-                                .collect(),
-                            affected_locations,
-                        ));
-                        return;
-                    }
-                    Err(error) => {
-                        emit(OperationEvent::TransferFailed {
-                            request_id: request.id,
-                            completed_locations: Vec::new(),
-                            message: crate::services::gio_error_message(&error),
-                        });
-                        return;
-                    }
-                };
-            let targets = match paste_targets(&sources, &destination, fat_family, &kinds) {
+            let names = NamePolicy::new(NameMode::Fix);
+            let pasted_into = names
+                .destination(&destination, &sources, &operation_cancellable)
+                .await;
+            let max_file_size = pasted_into.profile.max_file_size;
+            let TransferSizes {
+                sizes: item_sizes,
+                total: total_bytes,
+                files: item_files,
+                total_files,
+                kinds,
+                filesystems,
+            } = match transfer_sizes(&sources, &operation_cancellable, max_file_size).await {
+                Ok(sizes) => sizes,
+                Err(error) if was_cancelled(&error) => {
+                    emit(cancelled_event(
+                        request.id,
+                        Vec::new(),
+                        Vec::new(),
+                        request
+                            .items
+                            .iter()
+                            .map(|item| item.source.clone())
+                            .collect(),
+                        affected_locations,
+                    ));
+                    return;
+                }
+                Err(error) => {
+                    emit(OperationEvent::TransferFailed {
+                        request_id: request.id,
+                        completed_locations: Vec::new(),
+                        message: crate::services::gio_error_message(&error),
+                    });
+                    return;
+                }
+            };
+            let rules = names.applied(pasted_into.profile.names);
+            let fixing = pasted_into.fixing(&filesystems);
+            let targets = match paste_targets(&sources, &destination, &rules, &fixing, &kinds) {
                 Ok(targets) => targets,
                 Err(error) => {
                     emit(OperationEvent::TransferFailed {
@@ -6012,7 +6109,7 @@ impl OperationProvider for LocalOperationProvider {
             let mut settling = Settling::paste(&request, emit.clone(), progress.clone());
             let copying = Copying {
                 progress: Some(progress.clone()),
-                fat_family,
+                names: names.clone(),
                 ..Copying::default()
             };
             if let Some((plans, worker_count)) = parallel_copy_plans(
@@ -6021,7 +6118,7 @@ impl OperationProvider for LocalOperationProvider {
                 &destination,
                 &targets,
                 &kinds,
-                fat_family,
+                pasted_into.profile.windows_disk(),
             )
             .await
             {
@@ -6202,7 +6299,7 @@ impl OperationProvider for LocalOperationProvider {
                         taken,
                         operation_cancellable.clone(),
                         Some(progress.clone()),
-                        fat_family,
+                        names.clone(),
                     )
                     .await
                     .map(|target| (target, Owed::default()))
@@ -6214,7 +6311,7 @@ impl OperationProvider for LocalOperationProvider {
                         &operation_cancellable,
                         Some(&mut affected_locations),
                         &copying.placed_entries,
-                        progress_merge_hooks(Some(progress.clone()), fat_family, &|plan| {
+                        progress_merge_hooks(Some(progress.clone()), names.clone(), &|plan| {
                             emit(OperationEvent::Merged {
                                 request_id: request.id,
                                 source: item.source.clone(),
@@ -6290,7 +6387,7 @@ impl OperationProvider for LocalOperationProvider {
                         taken,
                         operation_cancellable.clone(),
                         Some(progress.clone()),
-                        fat_family,
+                        names.clone(),
                     )
                     .await
                     .map(|target| (target, Owed::default()))
@@ -6435,33 +6532,38 @@ impl OperationProvider for LocalOperationProvider {
                 .iter()
                 .map(|item| gio_file_for_location(&item.record.current))
                 .collect::<Vec<_>>();
-            let (item_sizes, total_bytes, item_files, total_files, _) =
-                match transfer_sizes(&sources, &operation_cancellable, None).await {
-                    Ok(sizes) => sizes,
-                    Err(error) if was_cancelled(&error) => {
-                        emit(cancelled_event(
-                            request.id,
-                            Vec::new(),
-                            Vec::new(),
-                            request
-                                .items
-                                .iter()
-                                .map(|item| item.record.current.clone())
-                                .collect(),
-                            affected_locations,
-                        ));
-                        return;
-                    }
-                    Err(error) => {
-                        emit(OperationEvent::TransferFailed {
-                            request_id: request.id,
-                            completed_locations: Vec::new(),
-                            message: crate::services::gio_error_message(&error),
-                        });
-                        return;
-                    }
-                };
-            let mounts = MountTable::load().await;
+            let TransferSizes {
+                sizes: item_sizes,
+                total: total_bytes,
+                files: item_files,
+                total_files,
+                ..
+            } = match transfer_sizes(&sources, &operation_cancellable, None).await {
+                Ok(sizes) => sizes,
+                Err(error) if was_cancelled(&error) => {
+                    emit(cancelled_event(
+                        request.id,
+                        Vec::new(),
+                        Vec::new(),
+                        request
+                            .items
+                            .iter()
+                            .map(|item| item.record.current.clone())
+                            .collect(),
+                        affected_locations,
+                    ));
+                    return;
+                }
+                Err(error) => {
+                    emit(OperationEvent::TransferFailed {
+                        request_id: request.id,
+                        completed_locations: Vec::new(),
+                        message: crate::services::gio_error_message(&error),
+                    });
+                    return;
+                }
+            };
+            let names = NamePolicy::new(request.names);
             let progress =
                 TransferProgressTracker::new(request.id, total_bytes, total_files, emit.clone());
             progress.emit();
@@ -6511,7 +6613,7 @@ impl OperationProvider for LocalOperationProvider {
                 let undone = undone_when_cancelled(&source, &target);
                 let copying = Copying {
                     progress: Some(progress.clone()),
-                    fat_family: target_is_fat_family(&target, &mounts),
+                    names: names.clone(),
                     ..Copying::default()
                 };
                 let result = if item.conflict == TransferConflict::ReplaceExisting {

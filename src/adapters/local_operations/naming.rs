@@ -11,7 +11,7 @@ use super::{
     copy_engine::stage,
     placement::{self, PlaceError},
 };
-use crate::adapters::volume::{NameEncoding, NameLimit, NameProfile, Reserved};
+use crate::adapters::volume::{NameLimit, NameProfile};
 
 pub(super) mod fix;
 
@@ -110,13 +110,6 @@ impl Taken {
     }
 }
 
-/// The rules FAT-family destinations get until transfers read their
-/// destination's profile. Device names and malformed bytes are kept, which a
-/// move within the mount must not change.
-pub(super) fn fat_family_profile() -> NameProfile {
-    NameProfile::windows(Reserved::None, NameEncoding::AnyBytes)
-}
-
 /// How a folder tells its names apart.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum Key {
@@ -151,9 +144,9 @@ pub(super) struct Planned {
 }
 
 /// The names of a folder's entries, in their order. A name that needs no
-/// fix is kept unless the folder takes it for another kept name, which
-/// sorts first. Fixed names, and the kept names that sort later, are
-/// numbered past the kept names and each other in the byte order of the
+/// fix is kept unless a mount that folds names takes it for another kept
+/// name, which sorts first. Fixed names, and the kept names that sort later,
+/// are numbered past the kept names and each other in the byte order of the
 /// names they come from, so the plan depends only on the entries. Fails
 /// when a name has no free number left.
 pub(super) fn plan_names(
@@ -177,8 +170,10 @@ pub(super) fn plan_names(
             None => kept.push(index),
         }
     }
-    // Distinct names never meet under exact keys.
-    if numbered.is_empty() && (key == Key::Exact || kept.is_empty()) {
+    // Distinct names never meet under exact keys, and kept names meet only
+    // where the mount is known to fold them; elsewhere it decides.
+    let folds = key == Key::Folded && profile.folds;
+    if numbered.is_empty() && (!folds || kept.is_empty()) {
         return Ok(planned);
     }
     let mut taken = entries
@@ -188,7 +183,7 @@ pub(super) fn plan_names(
         .collect::<HashSet<_>>();
     kept.sort_by_key(|index| entries[*index].name);
     for index in kept {
-        if !taken.insert(key.of(entries[index].name)) {
+        if !taken.insert(key.of(entries[index].name)) && folds {
             planned[index].alias = true;
             numbered.push((index, entries[index].name.to_os_string()));
         }

@@ -73,6 +73,9 @@ pub(crate) struct NameProfile {
     pub encoding: NameEncoding,
     pub mapped: Option<PrivateUse>,
     pub limit: NameLimit,
+    /// Whether the mount takes names that differ only in case for one, as
+    /// FAT and exFAT do.
+    pub folds: bool,
     /// Whether names the mount refuses may teach it stricter rules, where
     /// nothing it reports shows its rules.
     pub learns: bool,
@@ -112,6 +115,7 @@ impl NameProfile {
                 bytes,
                 ..NameLimit::default()
             },
+            folds: false,
             learns: false,
         }
     }
@@ -128,6 +132,7 @@ impl NameProfile {
                 units: Some(WINDOWS_UNITS),
                 ..NameLimit::default()
             },
+            folds: false,
             learns: false,
         }
     }
@@ -168,6 +173,15 @@ impl NameProfile {
         Self {
             learns: true,
             ..self
+        }
+    }
+
+    /// Only the encoding, which every name the mount lists already has.
+    pub(crate) fn encoding_rules(self) -> Self {
+        Self {
+            encoding: self.encoding,
+            folds: self.folds,
+            ..Self::posix(None)
         }
     }
 }

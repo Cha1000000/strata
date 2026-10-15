@@ -6,15 +6,25 @@ use super::super::{
     fs_ops::{Entry, fs},
     mount_profile::Profiles,
     naming::{
-        Key, PlanEntry, Planned, fat_family_profile,
+        Key, PlanEntry, Planned,
         fix::{Cause, fix_name},
         plan_names,
     },
 };
 use super::*;
 use crate::adapters::volume::{
-    NameEncoding, NameLimit, NameProfile, PrivateUse, Reserved, gvfs_bridge_profile, gvfs_profile,
+    MountType, NameEncoding, NameLimit, NameProfile, PrivateUse, Reserved, gvfs_bridge_profile,
+    gvfs_profile,
 };
+
+/// The rules of vfat as udisks mounts it.
+fn fat() -> NameProfile {
+    MountType {
+        fs_type: "vfat".to_owned(),
+        super_options: "rw,utf8".to_owned(),
+    }
+    .name_profile(None, 1530)
+}
 
 #[test]
 fn copy_suffix_parsing_and_candidate_naming() {
@@ -166,7 +176,17 @@ fn fixed_names_are_numbered_past_the_names_their_siblings_keep() {
             ],
         ),
     ];
-    for (key, row) in rows {
+    // NTFS keeps names that differ in case apart, so only fixed names avoid them.
+    let ntfs = NameProfile::windows(Reserved::Bare, NameEncoding::Utf8);
+    let case_kept = [
+        vec![file("A.txt", "A.txt"), file("a.txt", "a.txt")],
+        vec![file("a:b", "a_b (1)"), file("A_b", "A_b")],
+    ];
+    let rows = rows
+        .into_iter()
+        .map(|(key, row)| (fat(), key, row))
+        .chain(case_kept.map(|row| (ntfs, Key::Folded, row)));
+    for (profile, key, row) in rows {
         for reversed in [false, true] {
             let mut row = row.clone();
             if reversed {
@@ -188,9 +208,10 @@ fn fixed_names_are_numbered_past_the_names_their_siblings_keep() {
                 })
                 .collect::<Vec<_>>();
             assert_eq!(
-                plan_names(&entries, &fat_family_profile(), key),
+                plan_names(&entries, &profile, key),
                 Ok(planned),
-                "{key:?} {row:?}"
+                "{:?} {key:?} {row:?}",
+                profile.folds
             );
         }
     }
@@ -216,7 +237,7 @@ fn planning_fails_where_a_fixed_name_has_no_free_number() {
         }])
         .collect::<Vec<_>>();
     assert_eq!(
-        plan_names(&entries, &fat_family_profile(), Key::Exact),
+        plan_names(&entries, &fat(), Key::Exact),
         Err(PlaceError::Exists)
     );
 }
@@ -620,7 +641,8 @@ fn pasted_names_fixed_for_fat_are_planned_after_the_names_kept() {
             ],
         ),
     ] {
-        let targets = super::super::paste_targets(&sources, &destination, fat_family, &kinds)
+        let fixing = [fat_family; 9];
+        let targets = super::super::paste_targets(&sources, &destination, &fat(), &fixing, &kinds)
             .expect("free names");
         assert_eq!(
             targets
@@ -637,10 +659,15 @@ fn pasted_names_fixed_for_fat_are_planned_after_the_names_kept() {
 fn transfer_targets_resolve_trash_leaf_names() {
     let destination = gio::File::for_path("/home/user/Documents");
     let target_name = |source: &gio::File| {
-        let target =
-            super::super::paste_targets(std::slice::from_ref(source), &destination, false, &[None])
-                .ok()?
-                .pop()??;
+        let target = super::super::paste_targets(
+            std::slice::from_ref(source),
+            &destination,
+            &NameProfile::posix(Some(255)),
+            &[false],
+            &[None],
+        )
+        .ok()?
+        .pop()??;
         Some(
             target
                 .path()?

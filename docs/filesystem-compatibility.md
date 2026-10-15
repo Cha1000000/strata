@@ -373,13 +373,17 @@ Where `mknodat` is refused, and always on SMB, it is an exclusive read-only crea
 made by `mknodat` and looked up by name while other files were being written stalled the folder's
 publication for Samba's 35 s lease-break timeout.
 
-On FAT-family destinations, characters FAT cannot store are replaced before copying, without a
-report. A name that needs no change keeps it, even where a replaced name would equal it, unless FAT
-takes it for another such name in its folder, or among a paste's top-level items, that sorts first
-in bytes (`Readme.txt` beside `README.txt`): it is then numbered as an alias before copying.
-Replaced names that equal another name are numbered too, in the byte order of the names they
-replace, without a report. In a merge, a planned name equal to an existing item replaces that item
-like any other same-named one.
+Names an item brings from another filesystem are fixed before copying, without a report, by the
+rules of the mount that holds each target folder, found through symbolic links and nested mounts:
+characters the mount cannot store become `_`, trailing dots and spaces are dropped, device names
+Windows reserves get `_`, and names too long for the mount are shortened. Names already on the
+destination's filesystem, as in a duplicate, are kept, and undoing a move fixes only names its
+mount cannot hold at all, such as malformed UTF-8. A name that needs no change keeps it, even where
+a fixed name would equal it, unless FAT or exFAT takes it for another such name in its folder, or
+among a paste's top-level items, that sorts first in bytes (`Readme.txt` beside `README.txt`): it is
+then numbered as an alias before copying. Fixed names that equal another name are numbered too, in
+the byte order of the names they replace, without a report. In a merge, a planned name equal to an
+existing item replaces that item like any other same-named one.
 
 ### Hard links
 

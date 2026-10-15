@@ -66,7 +66,7 @@ pub(crate) use native_fs::{is_hidden_name, native_hidden_names, native_kind};
 pub(crate) use navigation_history::NavigationHistory;
 pub use operations::{
     ArchiveFormat, CancelledOperation, CompressRequest, CreateDirectoryRequest, CreateFileRequest,
-    DeleteRequest, ExtractRequest, KeptCause, KeptItem, MoveRecord, OperationEvent,
+    DeleteRequest, ExtractRequest, KeptCause, KeptItem, MoveRecord, NameMode, OperationEvent,
     OperationProvider, OperationRequestId, PasswordFailure, PasteItem, PasteRequest,
     PlacedSnapshot, RenameCause, RenameRecord, RenameRequest, RenamedItem, ReplacedOriginal,
     RestoreRequest, RestoreSource, RestoreTrashItem, SkippedItem, SpecialKind, TransferConflict,

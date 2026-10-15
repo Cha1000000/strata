@@ -9,8 +9,8 @@ use super::super::{
 };
 use super::{MountProfile, Profiles, folder_name_limit};
 use crate::adapters::volume::{
-    FAT32_MAX_FILE_SIZE, MountNames, NameEncoding, NameLimit, NameProfile, NameRules, Reserved,
-    Strip, gvfs_bridge_profile, gvfs_profile, learn_mount_capability,
+    FAT32_MAX_FILE_SIZE, Family, MountNames, NameEncoding, NameLimit, NameProfile, NameRules,
+    Reserved, Strip, gvfs_bridge_profile, gvfs_profile, learn_mount_capability,
 };
 
 fn profile_of(profiles: &Profiles, folder: &Path) -> Result<MountProfile, Box<dyn Error>> {
@@ -29,6 +29,7 @@ fn posix(bytes: Option<u16>, learns: bool) -> NameProfile {
             bytes,
             ..NameLimit::default()
         },
+        folds: false,
         learns,
     }
 }
@@ -44,16 +45,22 @@ fn windows(reserved: Reserved, learns: bool) -> NameProfile {
             units: Some(255),
             ..NameLimit::default()
         },
+        folds: false,
         learns,
     }
 }
 
 #[test]
 fn each_mount_is_profiled_from_what_its_folder_reports() -> Result<(), Box<dyn Error>> {
-    let profile = |names, symlinks, max_file_size| MountProfile {
+    let profile = |names, symlinks, max_file_size, family| MountProfile {
         names,
         symlinks,
         max_file_size,
+        family,
+    };
+    let fat = NameProfile {
+        folds: true,
+        ..windows(Reserved::Bare, false)
     };
     let unknown_udev = || Quirks {
         device_format: None,
@@ -74,23 +81,27 @@ fn each_mount_is_profiled_from_what_its_folder_reports() -> Result<(), Box<dyn E
         (
             "vfat",
             Quirks::vfat,
-            profile(windows(Reserved::Bare, false), no_symlinks, fat32),
+            profile(fat, no_symlinks, fat32, Family::Fat),
         ),
         (
             "exfat-fuse",
             Quirks::exfat_fuse,
-            profile(windows(Reserved::Bare, false), no_symlinks, None),
+            profile(fat, no_symlinks, None, Family::Fuse),
         ),
         (
             "fuseblk without udev",
             unknown_udev,
-            profile(windows(Reserved::Bare, true), None, None),
+            profile(windows(Reserved::Bare, true), None, None, Family::Fuse),
         ),
-        ("zfs", zfs, profile(posix(Some(1023), false), None, None)),
+        (
+            "zfs",
+            zfs,
+            profile(posix(Some(1023), false), None, None, Family::Zfs),
+        ),
         (
             "sshfs reporting no name length",
             silent_daemon,
-            profile(posix(None, true), None, None),
+            profile(posix(None, true), None, None, Family::Fuse),
         ),
     ];
     for (case, quirks, expected) in cases {

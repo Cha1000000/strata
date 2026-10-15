@@ -37,6 +37,7 @@ fn undoing_a_move_returns_each_item_to_its_original_directory() -> Result<(), Bo
         let emitted = events.clone();
         let _operation = LocalOperationProvider.undo_move(
             UndoMoveRequest {
+                names: NameMode::Keep,
                 cleanup_locations: Vec::new(),
                 id: OperationRequestId(40),
                 items: vec![UndoMoveItem {
@@ -86,6 +87,7 @@ fn undoing_a_move_stops_at_an_unconfirmed_conflict() -> Result<(), Box<dyn Error
     let emitted = events.clone();
     let _operation = LocalOperationProvider.undo_move(
         UndoMoveRequest {
+            names: NameMode::Keep,
             cleanup_locations: Vec::new(),
             id: OperationRequestId(41),
             items: vec![
@@ -152,6 +154,7 @@ fn a_confirmed_undo_conflict_replaces_the_newer_item() -> Result<(), Box<dyn Err
     let emitted = events.clone();
     let _operation = LocalOperationProvider.undo_move(
         UndoMoveRequest {
+            names: NameMode::Keep,
             cleanup_locations: Vec::new(),
             id: OperationRequestId(42),
             items: vec![UndoMoveItem {
@@ -174,6 +177,86 @@ fn a_confirmed_undo_conflict_replaces_the_newer_item() -> Result<(), Box<dyn Err
     ));
     assert!(!moved.exists());
     assert_eq!(fs::read(&original)?, b"moved");
+    Ok(())
+}
+
+#[test]
+fn an_undone_move_gives_names_back_as_they_were_and_a_redone_one_fixes_them()
+-> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let malformed = || OsString::from_vec(b"x\xc0\xafy".to_vec());
+    let rows: [(&str, Preset, NameMode, Vec<OsString>, [&str; 2]); 4] = [
+        (
+            "ntfs3 undo",
+            Quirks::ntfs3,
+            NameMode::Keep,
+            vec!["a:b".into(), "CON".into()],
+            ["CON", "a:b"],
+        ),
+        (
+            "ntfs3 redo",
+            Quirks::ntfs3,
+            NameMode::Fix,
+            vec!["a:b".into(), "CON".into()],
+            ["CON_", "a_b"],
+        ),
+        // Whatever the mode, exfat-fuse never gets a name it would corrupt.
+        (
+            "exfat-fuse undo",
+            Quirks::exfat_fuse,
+            NameMode::Keep,
+            vec![malformed(), "CON".into()],
+            ["CON", "x__y"],
+        ),
+        (
+            "exfat-fuse redo",
+            Quirks::exfat_fuse,
+            NameMode::Fix,
+            vec![malformed(), "CON".into()],
+            ["CON_", "x__y"],
+        ),
+    ];
+    for (row, preset, mode, moved_names, expected) in rows {
+        let root = tempfile::tempdir()?;
+        let disk = root.path().join("disk");
+        let moved = root.path().join("moved").join("project");
+        fs::create_dir(&disk)?;
+        fs::create_dir_all(&moved)?;
+        for name in &moved_names {
+            fs::write(moved.join(name), b"contents")?;
+        }
+        let _disk = FsQuirks::install(&disk, preset());
+
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let emitted = events.clone();
+        let _operation = LocalOperationProvider.undo_move(
+            UndoMoveRequest {
+                names: mode,
+                cleanup_locations: Vec::new(),
+                id: OperationRequestId(1530),
+                items: vec![UndoMoveItem {
+                    record: MoveRecord {
+                        original: Location::local(disk.join("project")),
+                        current: Location::local(&moved),
+                        renamed: Vec::new(),
+                    },
+                    conflict: TransferConflict::FailIfExists,
+                }],
+            },
+            Rc::new(move |event| emitted.borrow_mut().push(event)),
+        );
+        drive_until_transfer_settles(&events);
+
+        assert!(
+            matches!(events.borrow().last(), Some(OperationEvent::Pasted { .. })),
+            "{row}: {:?}",
+            events.borrow()
+        );
+        assert_eq!(names(&disk.join("project"))?, expected, "{row}");
+        assert!(!moved.exists(), "{row}");
+    }
     Ok(())
 }
 
@@ -466,6 +549,7 @@ fn undo_items(
     let emitted = events.clone();
     let operation = LocalOperationProvider.undo_move(
         UndoMoveRequest {
+            names: NameMode::Keep,
             cleanup_locations: Vec::new(),
             id: OperationRequestId(id),
             items: moved
@@ -594,6 +678,7 @@ fn a_cancel_that_cuts_off_a_move_back_counts_it_as_not_attempted() -> Result<(),
     let mut operation = Some(
         LocalOperationProvider.undo_move(
             UndoMoveRequest {
+                names: NameMode::Keep,
                 id: OperationRequestId(1615),
                 items: names
                     .map(|name| UndoMoveItem {
@@ -695,6 +780,7 @@ fn undoing_a_grouping_reports_the_trashed_group_folder() {
             let emitted = events.clone();
             let _operation = LocalOperationProvider.undo_move(
                 UndoMoveRequest {
+                    names: NameMode::Keep,
                     cleanup_locations: vec![Location::local(&group)],
                     id: OperationRequestId(42),
                     items: vec![UndoMoveItem {
@@ -781,6 +867,7 @@ fn undoing_a_move_gives_back_names_numbered_as_aliases() -> Result<(), Box<dyn E
         let emitted = events.clone();
         let _operation = LocalOperationProvider.undo_move(
             UndoMoveRequest {
+                names: NameMode::Keep,
                 cleanup_locations: Vec::new(),
                 id: OperationRequestId(45),
                 items: vec![UndoMoveItem {

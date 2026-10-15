@@ -146,7 +146,7 @@ fn isolated_trash_supports_read_copy_move_restore_and_delete() {
                 Taken::Fail,
                 gio::Cancellable::new(),
                 None,
-                false,
+                NamePolicy::default(),
             ))
             .is_err()
     );
@@ -158,7 +158,7 @@ fn isolated_trash_supports_read_copy_move_restore_and_delete() {
             Taken::Fail,
             gio::Cancellable::new(),
             None,
-            false,
+            NamePolicy::default(),
         ))
         .expect("move whole item out of Trash");
     assert_eq!(

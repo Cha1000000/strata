@@ -40,7 +40,7 @@ use super::{
     copy_failure_after_cleanup,
     fs_ops::{Entry, EntryStat, FsOps, fs},
     io_error, local_delete_worker_count, local_device_is_rotational,
-    mount_profile::{known_mount, name_limit, names_in},
+    mount_profile::{NamePolicy, known_mount, names_in},
     naming::Taken,
     open_local_parent_directory, os_error_detail, os_error_text,
     parallel_delete_local_blocking_with_workers, placement,
@@ -306,9 +306,9 @@ pub(super) struct Copied {
     pub nested: Vec<Barrier>,
 }
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Default)]
 pub(super) struct Options {
-    pub fat_family: bool,
+    pub names: NamePolicy,
     pub workers: Option<usize>,
     pub manifest: bool,
     /// What only the copy will hold is deleted once its [`Barrier`] is reached,
@@ -326,6 +326,7 @@ pub(super) async fn copy_local(
     let (Destination::New(target, _) | Destination::Merge(target, _)) = &destination;
     let target = target.clone();
     let merging = matches!(destination, Destination::Merge(..));
+    let workers = options.workers;
     let followed = following(
         Item::Path(source),
         options,
@@ -335,7 +336,7 @@ pub(super) async fn copy_local(
             Destination::New(target, taken) => {
                 let (parent, name) = split(&target).map_err(Failure::Error)?;
                 let new = NewItem::Published(taken);
-                let name = copy_new(copy, source, (&parent, &name), new, options.workers)?;
+                let name = copy_new(copy, source, (&parent, &name), new, workers)?;
                 let published = match source.recorded_in {
                     Some(_) => Some(Published::at(copy.fs, parent, name.clone())?),
                     None => None,
@@ -344,8 +345,7 @@ pub(super) async fn copy_local(
             }
             Destination::Merge(folder, placing) => {
                 let name = folder.file_name().unwrap_or_default().to_os_string();
-                merge(copy, source, &folder, options.workers, placing)
-                    .map(|nested| (name, nested, None))
+                merge(copy, source, &folder, workers, placing).map(|nested| (name, nested, None))
             }
         },
     )
@@ -386,13 +386,14 @@ pub(super) async fn copy_to_stage(
     cancellable: &gio::Cancellable,
 ) -> Result<(StagedSibling, Option<Manifest>, TransferReport), glib::Error> {
     let root = target.clone();
+    let workers = options.workers;
     let followed = following(
         Item::Path(source),
         options,
         progress.clone(),
         cancellable,
         move |copy, source| {
-            let staged = copy_stage(copy, source, &target, options.workers)?;
+            let staged = copy_stage(copy, source, &target, workers)?;
             match copy.check_cancelled() {
                 Ok(()) => Ok(staged),
                 Err(failure) => Err(copy.discarding(staged, failure)),
@@ -419,6 +420,7 @@ pub(super) async fn copy_in_place(
         manifest: true,
         ..options
     };
+    let workers = options.workers;
     let followed = following(
         Item::Pinned(source, name),
         options,
@@ -426,7 +428,7 @@ pub(super) async fn copy_in_place(
         cancellable,
         move |copy, source| {
             let new = NewItem::InPlace(expected);
-            copy_new(copy, source, (&parent, &target_name), new, options.workers)
+            copy_new(copy, source, (&parent, &target_name), new, workers)
         },
     )
     .await?;
@@ -769,7 +771,7 @@ fn copy_new(
         FileType::Symlink => {
             copy.check_cancelled()?;
             let mount = Mount::new(copy.fs, parent.as_fd());
-            let limit = || mount.name_limit(parent.as_fd());
+            let limit = || copy.name_limit(parent.as_fd());
             let (name, link) = first_free(taken.names(name, false, limit), taken, |name| {
                 tree::copy_link(
                     copy,
@@ -787,7 +789,7 @@ fn copy_new(
         FileType::Directory => {
             let workers = workers.unwrap_or_else(|| worker_count(source, parent));
             if in_place || placement::can_place(copy.fs, parent.as_fd(), true) == Some(false) {
-                let limit = || name_limit(copy.fs, parent.as_fd());
+                let limit = || copy.name_limit(parent.as_fd());
                 return first_free(taken.names(name, true, limit), taken, |name| {
                     direct_folder(copy, source, stat.identity, parent, name, workers)
                 })
@@ -800,7 +802,7 @@ fn copy_new(
             copy.check_cancelled()?;
             let mount = Mount::new(copy.fs, parent.as_fd());
             let parent_stat = copy.fs.stat_fd(parent.as_fd())?;
-            let limit = || mount.name_limit(parent.as_fd());
+            let limit = || copy.name_limit(parent.as_fd());
             let (name, pipe) = first_free(taken.names(name, false, limit), taken, |name| {
                 let target = Entry::new(&**parent, name);
                 match tree::copy_fifo(copy, source.entry(), target, &parent_stat, &mount, None)? {
@@ -912,7 +914,7 @@ fn publish_folder(
     if let Err(failure) = copy.check_cancelled() {
         return Err(copy.discarding(staged, failure));
     }
-    let mut names = taken.names(name, true, || name_limit(copy.fs, staged.parent.as_fd()));
+    let mut names = taken.names(name, true, || copy.name_limit(staged.parent.as_fd()));
     while let Some(name) = names.next() {
         let placed = stage::publish(
             copy.fs,
@@ -979,13 +981,14 @@ fn fill(
 ) -> Result<Vec<Restrictive>, Failure> {
     let fs = copy.fs;
     let parent = fs.stat_fd(root.parent.as_fd())?;
-    let mount = Mount::new(fs, root.parent.as_fd());
+    let mount = copy.mount(root.parent.as_fd());
     let folder = tree::Folder {
         source: (source.parent.clone(), source.name.clone(), Some(expected)),
         target: (root.parent.clone(), root.name.clone(), root.identity),
         parent,
         path: PathBuf::new(),
         naming: tree::Naming::Decide,
+        rules: names_in(mount.names, root.parent.as_fd()),
         mount,
         scope: 0,
         recorded_in: source.recorded_in.clone(),
@@ -1162,6 +1165,7 @@ fn merge(
         path: PathBuf::new(),
         recorded_in: source.recorded_in.clone(),
         placing,
+        rules: None,
     };
     let (
         walked,
@@ -1320,6 +1324,10 @@ struct Mount {
 impl Mount {
     fn new(fs: &dyn FsOps, dir: BorrowedFd<'_>) -> Self {
         let (key, capabilities) = known_mount(fs, dir);
+        Self::with(key, capabilities)
+    }
+
+    fn with(key: MountKey, capabilities: MountCapabilities) -> Self {
         Self {
             key,
             family: capabilities.family.unwrap_or(Family::Other),
@@ -1328,10 +1336,6 @@ impl Mount {
             deferred_close: capabilities.deferred_close,
             names: capabilities.names,
         }
-    }
-
-    fn name_limit(&self, dir: BorrowedFd<'_>) -> NameLimit {
-        names_in(self.names, dir).limit
     }
 
     fn keeps_inode_numbers(fs: &dyn FsOps, dir: BorrowedFd<'_>) -> bool {
@@ -1400,7 +1404,7 @@ struct Copy {
     /// False for a copy from a stage, whose bytes were counted already and
     /// which is removed afterwards, so the copy may leave nothing out.
     counted: bool,
-    fat_family: bool,
+    names: NamePolicy,
     data: Mutex<Vec<Data>>,
     refused_xattrs: Mutex<HashSet<OsString>>,
     nodes_refused: AtomicBool,
@@ -1424,7 +1428,7 @@ impl Copy {
             cancelled,
             progress,
             counted,
-            fat_family: options.fat_family,
+            names: options.names,
             data: Mutex::default(),
             refused_xattrs: Mutex::default(),
             nodes_refused: AtomicBool::new(false),
@@ -1442,15 +1446,27 @@ impl Copy {
             self.progress.clone(),
             false,
             Options {
+                names: self.names.clone(),
                 durable: self.durable,
                 ..Options::default()
             },
         )
     }
 
+    /// The mount holding `dir`, as this operation first saw it.
+    fn mount(&self, dir: BorrowedFd<'_>) -> Mount {
+        let (key, capabilities) = self.names.profiles.mount(self.fs, dir);
+        Mount::with(key, capabilities)
+    }
+
+    /// How long a name may be in `dir`, for numbering one taken there.
+    fn name_limit(&self, dir: BorrowedFd<'_>) -> NameLimit {
+        names_in(self.mount(dir).names, dir).limit
+    }
+
     fn nested(&self) -> Arc<Self> {
         let options = Options {
-            fat_family: self.fat_family,
+            names: self.names.clone(),
             workers: None,
             manifest: self.recording,
             durable: self.durable,
@@ -2038,7 +2054,7 @@ impl<'a> FileCopy<'a> {
         let fs = self.copy.fs;
         match target {
             FileTarget::Final(name, taken) => {
-                for name in taken.names(name, false, || self.target.name_limit(self.dir)) {
+                for name in taken.names(name, false, || self.copy.name_limit(self.dir)) {
                     match link_tmpfile(fs, tmpfile, self.at(&name)) {
                         Err(error)
                             if taken == Taken::Number
@@ -2197,7 +2213,7 @@ impl<'a> FileCopy<'a> {
             self.copy.add_file(0);
             return Ok((stage.name, stage.created.identity));
         };
-        let mut names = taken.names(name, false, || self.target.name_limit(self.dir));
+        let mut names = taken.names(name, false, || self.copy.name_limit(self.dir));
         let published = loop {
             let Some(name) = names.next() else {
                 return Err(self.discard(&stage, Failure::Place(PlaceError::Exists)));

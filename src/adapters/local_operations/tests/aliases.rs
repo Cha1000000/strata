@@ -202,20 +202,20 @@ fn two_names_are_never_taken_for_one_where_the_listing_changes_their_case()
     use super::fs_quirks::{Op, Racer, renumbered};
     use crate::services::{PasteItem, PasteRequest};
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock()?;
-    // Samba with `preserve case = no` and vfat with `shortname=lower` list
-    // `Makefile` as `makefile` once it is made; a racer renames it so. Where
-    // inode numbers are not kept, the entry then reports another number.
+    // Samba with `preserve case = no` lists `Makefile` as `makefile` once it
+    // is made; a racer renames it so. Where inode numbers are not kept, the
+    // entry then reports another number. FAT plans such names apart before.
     let fuse = || Quirks {
         mount_type: Some(("fuse.ciopfs", "rw")),
         case_insensitive: true,
         ..Quirks::default()
     };
-    let rows: [(&str, Preset, bool, bool); 3] = [
-        ("copy", Quirks::vfat, false, false),
-        ("move", Quirks::vfat, true, false),
-        ("unstable inodes", fuse, false, true),
+    let rows: [(&str, Preset, Op, bool, bool); 3] = [
+        ("copy", Quirks::cifs, Op::CreateReadonly, false, false),
+        ("move", Quirks::cifs, Op::CreateReadonly, true, false),
+        ("unstable inodes", fuse, Op::CreateNode, false, true),
     ];
-    for (row, preset, moving, renumber) in rows {
+    for (row, preset, claim, moving, renumber) in rows {
         let root = tempfile::tempdir()?;
         let sources = root.path().join("sources");
         let folder = sources.join("folder");
@@ -241,7 +241,7 @@ fn two_names_are_never_taken_for_one_where_the_listing_changes_their_case()
         let _destination = FsQuirks::install(
             &destination,
             Quirks {
-                before: vec![(Op::CreateNode, "makefile", 0, racer)],
+                before: vec![(claim, "makefile", 0, racer)],
                 ..preset()
             },
         );
@@ -298,7 +298,7 @@ fn names_a_fat_target_takes_for_one_are_numbered_and_reported() -> Result<(), Bo
     let _destination = FsQuirks::install(&destination, Quirks::vfat());
     let target = destination.join("copy");
     let options = super::super::copy_engine::Options {
-        fat_family: true,
+        names: NamePolicy::new(NameMode::Fix),
         ..super::super::copy_engine::Options::default()
     };
 

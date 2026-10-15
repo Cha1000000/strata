@@ -261,6 +261,7 @@ fn name_rules_follow_the_driver_its_options_and_its_name_length() {
             bytes,
             ..NameLimit::default()
         },
+        folds: false,
         learns,
     };
     let windows = |reserved, encoding, learns| NameProfile {
@@ -273,7 +274,12 @@ fn name_rules_follow_the_driver_its_options_and_its_name_length() {
             units: Some(255),
             ..NameLimit::default()
         },
+        folds: false,
         learns,
+    };
+    let fat = |encoding| NameProfile {
+        folds: true,
+        ..windows(Reserved::Bare, encoding, false)
     };
     let smb = |encoding, mapped| NameProfile {
         mapped,
@@ -294,6 +300,7 @@ fn name_rules_follow_the_driver_its_options_and_its_name_length() {
         ..posix(Some(255), false)
     };
     let bare = windows(Reserved::Bare, NameEncoding::Utf8, false);
+    let fat_utf8 = fat(NameEncoding::Utf8);
     let full = windows(Reserved::Full, NameEncoding::Utf8, false);
     let fat32 = Some(FAT32_MAX_FILE_SIZE);
     let table = MountTable::parse(NAME_MOUNTS);
@@ -302,12 +309,12 @@ fn name_rules_follow_the_driver_its_options_and_its_name_length() {
         (1128, None, 255, posix(Some(255), false), None, None),
         (1128, None, 0, posix(None, false), None, None),
         // `f_namelen` 1530 means 255 UTF-16 units of up to six bytes.
-        (1150, None, 1530, bare, Some(false), fat32),
+        (1150, None, 1530, fat_utf8, Some(false), fat32),
         (
             2001,
             None,
             1530,
-            windows(Reserved::Bare, NameEncoding::Utf8Bmp, false),
+            fat(NameEncoding::Utf8Bmp),
             Some(false),
             fat32,
         ),
@@ -315,24 +322,24 @@ fn name_rules_follow_the_driver_its_options_and_its_name_length() {
             2002,
             None,
             1530,
-            windows(Reserved::Bare, NameEncoding::Ascii, false),
+            fat(NameEncoding::Ascii),
             Some(false),
             fat32,
         ),
-        (2003, None, 1530, bare, Some(false), fat32),
-        (2013, None, 1530, bare, Some(false), fat32),
-        (2004, None, 12, bare, Some(false), fat32),
-        (1167, None, 1530, bare, Some(false), None),
+        (2003, None, 1530, fat_utf8, Some(false), fat32),
+        (2013, None, 1530, fat_utf8, Some(false), fat32),
+        (2004, None, 12, fat_utf8, Some(false), fat32),
+        (1167, None, 1530, fat_utf8, Some(false), None),
         (
             2014,
             None,
             1530,
-            windows(Reserved::Bare, NameEncoding::Ascii, false),
+            fat(NameEncoding::Ascii),
             Some(false),
             None,
         ),
-        (1262, Some("exfat"), 255, bare, Some(false), None),
-        (1262, Some("vfat"), 255, bare, Some(false), fat32),
+        (1262, Some("exfat"), 255, fat_utf8, Some(false), None),
+        (1262, Some("vfat"), 255, fat_utf8, Some(false), fat32),
         (1262, Some("ntfs"), 255, full, None, None),
         (
             1262,

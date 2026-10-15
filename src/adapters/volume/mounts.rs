@@ -105,7 +105,10 @@ impl MountType {
         let has = |name| self.super_options.split(',').any(|option| option == name);
         let bytes = byte_limit(name_max);
         if fat_format(&self.fs_type, device_format).is_some() {
-            return NameProfile::windows(Reserved::Bare, self.fat_encoding());
+            return NameProfile {
+                folds: true,
+                ..NameProfile::windows(Reserved::Bare, self.fat_encoding())
+            };
         }
         match (self.fs_type.as_str(), device_format) {
             ("ntfs3" | "ntfs", _) if has("windows_names") => {

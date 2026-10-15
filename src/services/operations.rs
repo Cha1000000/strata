@@ -92,11 +92,21 @@ pub struct UndoMoveItem {
     pub conflict: TransferConflict,
 }
 
+/// How a transfer names what it brings onto another filesystem.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NameMode {
+    /// By the destination's rules, as forward transfers do.
+    Fix,
+    /// As they were, as an undo gives items back to where they came from.
+    Keep,
+}
+
 #[derive(Clone, Debug)]
 pub struct UndoMoveRequest {
     pub id: OperationRequestId,
     pub items: Vec<UndoMoveItem>,
     pub cleanup_locations: Vec<Location>,
+    pub names: NameMode,
 }
 
 #[derive(Clone, Debug)]

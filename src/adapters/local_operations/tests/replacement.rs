@@ -150,7 +150,7 @@ fn a_replacement_reports_what_it_left_out_only_once_it_is_published() -> Result<
             None,
             Copying {
                 progress: Some(progress),
-                fat_family: false,
+                names: NamePolicy::default(),
                 ..Default::default()
             },
             &|_, _| {},
@@ -455,7 +455,7 @@ fn replacement_move_does_not_delete_a_substituted_source() -> Result<(), Box<dyn
         None,
         Copying {
             progress: Some(progress),
-            fat_family: false,
+            names: NamePolicy::default(),
             ..Default::default()
         },
         &|_, _| {},

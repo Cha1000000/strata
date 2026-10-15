@@ -41,12 +41,13 @@ use crate::{
             LocalFileIdentity, StageContent, StagedSibling, cancelled_local_operation,
             fs_ops::{Entry, EntryStat, FsOps},
             io_error,
-            naming::{Key, PlanEntry, Planned, fat_family_profile, numbered_names, plan_names},
+            mount_profile::{crosses, names_in},
+            naming::{Key, PlanEntry, Planned, numbered_names, plan_names},
             os_error_detail, placement,
             placement::{COPY_PREFIX, PlaceError},
             work_queue::{self, Group, Job, WorkQueue},
         },
-        volume::{Family, MountKey, NameLimit},
+        volume::{Family, MountKey, NameLimit, NameProfile},
     },
     services::{KeptCause, RenameCause, SpecialKind},
 };
@@ -67,7 +68,7 @@ pub(super) struct Tree {
     stages: Mutex<Vec<StagedSibling>>,
     placed: Mutex<Vec<PathBuf>>,
     nested: Mutex<Nested>,
-    source_family: OnceLock<Family>,
+    source: OnceLock<Mount>,
 }
 
 #[derive(Default)]
@@ -120,12 +121,43 @@ impl Tree {
     }
 
     fn source_in(&self, fs: &dyn FsOps, folder: BorrowedFd<'_>) {
-        self.source_family
-            .get_or_init(|| Mount::new(fs, folder).family);
+        self.source.get_or_init(|| Mount::new(fs, folder));
     }
 
     fn opens_one_name_per_file(&self) -> bool {
-        self.source_family.get() == Some(&Family::Smb)
+        self.source.get().map(|mount| mount.family) == Some(Family::Smb)
+    }
+
+    /// Whether the names of a source folder on `source`'s device are brought
+    /// onto another filesystem in a target folder on `target`'s, of `mount`.
+    /// The tree's source is read through one mount, which in practice holds
+    /// every source folder on its device.
+    fn crosses(&self, source: &EntryStat, target: &EntryStat, mount: &Mount) -> bool {
+        self.source.get().is_none_or(|source_mount| {
+            crosses(
+                (source.identity.device, source_mount.key),
+                (target.identity.device, mount.key),
+                mount.names,
+            )
+        })
+    }
+
+    /// The names of a folder's children as they arrive in a target folder
+    /// whose mount has `rules`.
+    fn plan(
+        &self,
+        source: BorrowedFd<'_>,
+        rules: &NameProfile,
+        fixing: bool,
+        key: Key,
+    ) -> Result<Vec<(OsString, FileType, Planned)>, Failure> {
+        target_children(
+            self.copy.fs,
+            source,
+            &self.copy.names.applied(*rules),
+            fixing,
+            key,
+        )
     }
 
     fn settle_stage(&self, identity: LocalFileIdentity) {
@@ -195,7 +227,7 @@ pub(super) fn walk(
         stages: Mutex::default(),
         placed: Mutex::default(),
         nested: Mutex::default(),
-        source_family: OnceLock::new(),
+        source: OnceLock::new(),
     });
     let queue = Arc::new(Queue::new(copy.cancelled.clone()));
     queue.enqueue(root(tree.clone()));
@@ -371,6 +403,8 @@ pub(super) struct Folder {
     pub(super) parent: EntryStat,
     pub(super) path: PathBuf,
     pub(super) naming: Naming,
+    /// The name rules of the target's mount.
+    pub(super) rules: NameProfile,
     pub(super) mount: Mount,
     /// Names link only within one scope, whose restrictive folders get their
     /// modes together: the made tree, or one merge stage.
@@ -407,18 +441,19 @@ impl Folder {
         }
         let snapshot = Snapshot::read(fs, source.as_fd(), &source_stat)?;
         let naming = self.naming.decide(fs, self.mount.family, target.as_fd());
-        let children = target_children(fs, source.as_fd(), copy.fat_family, naming)?;
+        let fixing = tree.crosses(&source_stat, &target_stat, &self.mount);
+        let children = tree.plan(source.as_fd(), &self.rules, fixing, naming.key())?;
         let requested = children
             .iter()
             .map(|(_, _, planned)| planned.target.clone())
             .collect();
-        let limit = self.mount.name_limit(target.as_fd());
         let made = Made {
             naming,
             dir: Arc::new(target),
             stat: target_stat,
             path: self.path,
-            names: Names::new(requested, naming, self.mount.family, limit),
+            names: Names::new(requested, naming, self.mount.family, self.rules.limit),
+            rules: self.rules,
             mount: self.mount,
             scope: self.scope,
             recorded: self
@@ -448,8 +483,9 @@ impl Folder {
 fn target_children(
     fs: &dyn FsOps,
     source: BorrowedFd<'_>,
+    rules: &NameProfile,
     fixing: bool,
-    naming: Naming,
+    key: Key,
 ) -> Result<Vec<(OsString, FileType, Planned)>, Failure> {
     let children = children(fs, source)?;
     let entries = children
@@ -460,7 +496,7 @@ fn target_children(
             fixing,
         })
         .collect::<Vec<_>>();
-    let planned = plan_names(&entries, &fat_family_profile(), naming.key())?;
+    let planned = plan_names(&entries, rules, key)?;
     Ok(children
         .into_iter()
         .zip(planned)
@@ -474,6 +510,7 @@ struct Made {
     path: PathBuf,
     naming: Naming,
     names: Arc<Names>,
+    rules: NameProfile,
     mount: Mount,
     scope: usize,
     recorded: Option<Arc<manifest::Folder>>,
@@ -548,6 +585,7 @@ impl Made {
                         parent: self.stat,
                         path,
                         naming: self.naming,
+                        rules: self.rules,
                         mount: self.mount,
                         scope: self.scope,
                         recorded_in: self.recorded.clone(),
@@ -1097,6 +1135,9 @@ pub(super) struct Merged {
     pub(super) path: PathBuf,
     pub(super) recorded_in: Option<Arc<manifest::Folder>>,
     pub(super) placing: Option<Arc<Placing>>,
+    /// The mount of the folder merged into the parent, and its name rules,
+    /// which a folder on that mount shares.
+    pub(super) rules: Option<(MountKey, NameProfile)>,
 }
 
 impl Merged {
@@ -1114,32 +1155,39 @@ impl Merged {
             .open_dir(Entry::new(&**source_parent, source_name))
             .map_err(|error| open_failure(source_name, error))?;
         tree.source_in(fs, source.as_fd());
+        let source_stat = fs.stat_fd(source.as_fd())?;
         let (target_parent, target_name, expected) = &self.target;
         let target = fs
             .open_dir(Entry::new(&**target_parent, target_name))
             .map_err(|error| open_failure(target_name, error))?;
         let target_stat = fs.stat_fd(target.as_fd())?;
-        let mount = Mount::new(fs, target.as_fd());
+        let mount = copy.mount(target.as_fd());
         if expected.is_some_and(|expected| !same_entry(&target_stat, expected, mount.family)) {
             return Err(Failure::Changed);
         }
         if copy.durable {
             tree.reach(fs, &mount, target.as_fd(), &self.path)?;
         }
-        let recorded = match &self.recorded_in {
-            Some(folder) => Some(folder.folder(source_name, fs.stat_fd(source.as_fd())?.identity)),
-            None => None,
+        let recorded = self
+            .recorded_in
+            .as_ref()
+            .map(|folder| folder.folder(source_name, source_stat.identity));
+        let rules = match self.rules {
+            Some((key, rules)) if key == mount.key => rules,
+            _ => names_in(mount.names, target.as_fd()),
         };
         // A stage made in the live folder inherits its casefolding.
         let naming = Naming::Decide.decide(fs, mount.family, target.as_fd());
-        let children = target_children(fs, source.as_fd(), copy.fat_family, naming)?;
+        let fixing = tree.crosses(&source_stat, &target_stat, &mount);
+        // As the merge planner, which cannot read a folder's casefolding.
+        let children = tree.plan(source.as_fd(), &rules, fixing, Key::Folded)?;
         let requested = children
             .iter()
             .map(|(_, _, planned)| planned.target.clone())
             .collect();
-        let limit = mount.name_limit(target.as_fd());
         let live = Live {
-            names: Names::new(requested, naming, mount.family, limit),
+            names: Names::new(requested, naming, mount.family, rules.limit),
+            rules,
             naming,
             source: Arc::new(source),
             dir: Arc::new(target),
@@ -1175,6 +1223,7 @@ impl Merged {
                             path: self.path.join(target_name),
                             recorded_in: live.recorded.clone(),
                             placing: live.placing.clone(),
+                            rules: Some((live.mount.key, live.rules)),
                         },
                     ));
                 }
@@ -1194,6 +1243,7 @@ struct Live {
     mount: Mount,
     path: PathBuf,
     names: Arc<Names>,
+    rules: NameProfile,
     naming: Naming,
     name: OsString,
     recorded: Option<Arc<manifest::Folder>>,
@@ -1246,6 +1296,7 @@ impl Live {
             stat: self.stat,
             path: self.path.clone(),
             names: self.names.clone(),
+            rules: self.rules,
             mount: self.mount,
             scope,
             recorded: self.recorded.clone(),

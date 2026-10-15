@@ -158,24 +158,18 @@ fn fat32_size_check_rejects_oversized_nested_file_before_copy() -> Result<(), Bo
         .block_on(transfer_sizes(
             std::slice::from_ref(&source),
             &cancellable,
-            fat32_file_size_limit(Some("vfat")),
+            Some(FAT32_MAX_FILE_SIZE),
         ))
         .expect_err("FAT32 cannot store an individual file larger than 4 GiB");
     assert!(error.message().contains(" is too large for a FAT32 drive "));
     assert!(error.to_string().contains("ubuntu.iso"));
     assert!(error.to_string().contains("exFAT"));
-    assert!(fat32_file_size_limit(Some("msdos")).is_some());
-    assert!(fat32_file_size_limit(Some("exfat")).is_none());
 
-    let (_, bytes, counts, total_files, _) =
-        glib::MainContext::default().block_on(transfer_sizes(
-            &[source],
-            &cancellable,
-            fat32_file_size_limit(Some("exfat")),
-        ))?;
-    assert_eq!(bytes, Some(FAT32_MAX_FILE_SIZE + 1));
-    assert_eq!(counts, vec![Some(1)]);
-    assert_eq!(total_files, Some(1));
+    let sizes =
+        glib::MainContext::default().block_on(transfer_sizes(&[source], &cancellable, None))?;
+    assert_eq!(sizes.total, Some(FAT32_MAX_FILE_SIZE + 1));
+    assert_eq!(sizes.files, vec![Some(1)]);
+    assert_eq!(sizes.total_files, Some(1));
     Ok(())
 }
 

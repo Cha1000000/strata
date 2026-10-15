@@ -950,43 +950,142 @@ fn a_selected_named_pipe_is_recreated_where_the_destination_can() -> Result<(), 
 }
 
 #[test]
-fn target_is_fat_family_reads_the_reported_filesystem_type() {
-    let mount_point = std::env::temp_dir().join("strata-fat-family-mount-probe");
-    let mounts = MountTable::parse(format!(
-        "1 0 8:1 / / rw - ext4 /dev/sda1 rw\n22 1 8:2 / {} rw - exfat /dev/sdb1 rw\n",
-        mount_point.display()
-    ));
-    assert!(target_is_fat_family(
-        &gio::File::for_path(mount_point.join("photo.jpg")),
-        &mounts
-    ));
-    assert!(!target_is_fat_family(
-        &gio::File::for_path("/some/other/path"),
-        &mounts
-    ));
-    assert!(!target_is_fat_family(
-        &gio::File::for_uri("sftp://example.com/remote"),
-        &mounts
-    ));
-}
-
-#[test]
-fn fat_family_copy_sanitizes_an_invalid_name_instead_of_discarding_the_whole_tree()
+fn a_paste_through_a_symbolic_link_takes_the_rules_of_the_mount_behind_it()
 -> Result<(), Box<dyn Error>> {
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
         .lock()
         .map_err(|error| error.to_string())?;
     let root = tempfile::tempdir()?;
     let source = root.path().join("source");
-    let target = root.path().join("target");
+    let stick = root.path().join("stick");
+    let link = root.path().join("link");
+    fs::create_dir_all(source.join("photos?"))?;
+    fs::create_dir(&stick)?;
+    std::os::unix::fs::symlink(&stick, &link)?;
+    fs::write(source.join("a:b"), b"colon")?;
+    fs::write(source.join("photos?/x*y.jpg"), b"star")?;
+    fs::File::create(source.join("disk.img"))?.set_len(FAT32_MAX_FILE_SIZE + 1)?;
+    let _stick = FsQuirks::install(&stick, Quirks::vfat());
+    let paste = |names: &[&str]| PasteRequest {
+        id: OperationRequestId(1530),
+        destination: Location::local(&link),
+        items: names
+            .iter()
+            .map(|name| PasteItem {
+                source: Location::local(source.join(name)),
+                conflict: TransferConflict::FailIfExists,
+            })
+            .collect(),
+        move_sources: false,
+    };
+
+    run_paste(paste(&["a:b", "photos?"]));
+
+    assert_eq!(names(&stick)?, ["a_b", "photos_"]);
+    assert_eq!(fs::read(stick.join("a_b"))?, b"colon");
+    assert_eq!(fs::read(stick.join("photos_/x_y.jpg"))?, b"star");
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let emitted = events.clone();
+    let _operation = LocalOperationProvider.paste(
+        paste(&["disk.img"]),
+        Rc::new(move |event| emitted.borrow_mut().push(event)),
+    );
+    drive_until_transfer_settles(&events);
+
+    assert!(
+        matches!(
+            events.borrow().last(),
+            Some(OperationEvent::TransferFailed { .. })
+        ),
+        "{:?}",
+        events.borrow()
+    );
+    assert_eq!(names(&stick)?, ["a_b", "photos_"]);
+    Ok(())
+}
+
+#[test]
+fn a_paste_fixes_the_names_it_brings_onto_fat_and_keeps_those_already_there()
+-> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let root = tempfile::tempdir()?;
+    let (one, two, stick) = (
+        root.path().join("one"),
+        root.path().join("two"),
+        root.path().join("stick"),
+    );
+    let earlier = stick.join("earlier");
+    for folder in [&one, &two, &earlier.join("kept")] {
+        fs::create_dir_all(folder)?;
+    }
+    for (path, contents) in [
+        (one.join("a:b"), "colon"),
+        (two.join("a_b"), "kept"),
+        (one.join("x"), "lower"),
+        (two.join("X"), "upper"),
+        (earlier.join("CON"), "device"),
+        (earlier.join("kept/CON"), "nested device"),
+    ] {
+        fs::write(path, contents)?;
+    }
+    let _stick = FsQuirks::install(&stick, Quirks::vfat());
+
+    run_paste(PasteRequest {
+        id: OperationRequestId(1590),
+        destination: Location::local(&stick),
+        items: [
+            one.join("a:b"),
+            two.join("a_b"),
+            one.join("x"),
+            two.join("X"),
+            earlier.join("CON"),
+            earlier.join("kept"),
+        ]
+        .iter()
+        .map(|source| PasteItem {
+            source: Location::local(source),
+            conflict: TransferConflict::FailIfExists,
+        })
+        .collect(),
+        move_sources: false,
+    });
+
+    for (name, contents) in [
+        ("a_b (1)", "colon"),
+        ("a_b", "kept"),
+        ("x (1)", "lower"),
+        ("X", "upper"),
+        ("CON", "device"),
+        ("kept/CON", "nested device"),
+    ] {
+        assert_eq!(fs::read(stick.join(name))?, contents.as_bytes(), "{name}");
+    }
+    assert_eq!(names(&stick)?.len(), 7);
+    Ok(())
+}
+
+#[test]
+fn a_fat_copy_fixes_an_invalid_name_instead_of_discarding_the_whole_tree()
+-> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let root = tempfile::tempdir()?;
+    let source = root.path().join("source");
+    let stick = root.path().join("stick");
+    let target = stick.join("target");
     fs::create_dir_all(source.join("nested"))?;
+    fs::create_dir(&stick)?;
     fs::write(source.join("ok.txt"), b"fine")?;
     fs::write(
         source.join("nested/sc_macroorganizer?tabid:short=1.png"),
         b"cached icon",
     )?;
+    let _stick = FsQuirks::install(&stick, Quirks::vfat());
 
-    let result = glib::MainContext::default().block_on(copy_recursively_fat_family(
+    let result = glib::MainContext::default().block_on(copy_recursively_fixing(
         gio::File::for_path(&source),
         gio::File::for_path(&target),
         false,
@@ -999,11 +1098,7 @@ fn fat_family_copy_sanitizes_an_invalid_name_instead_of_discarding_the_whole_tre
         fs::read(target.join("nested/sc_macroorganizer_tabid_short=1.png"))?,
         b"cached icon"
     );
-    assert!(
-        !target
-            .join("nested/sc_macroorganizer?tabid:short=1.png")
-            .exists()
-    );
+    assert_eq!(names(&target.join("nested"))?.len(), 1);
     Ok(())
 }
 
@@ -1020,7 +1115,7 @@ fn fat_family_copies_number_fixed_names_past_the_names_their_siblings_keep()
     ) -> Pin<Box<dyn Future<Output = Result<(), glib::Error>>>>;
     let copies: [(&str, CopyTree); 2] = [
         ("engine", |source, target, cancellable| {
-            copy_recursively_fat_family(source, target, false, cancellable)
+            copy_recursively_fixing(source, target, false, cancellable)
         }),
         ("GIO", |source, target, cancellable| {
             super::super::copy_recursively_with_progress(
@@ -1030,7 +1125,7 @@ fn fat_family_copies_number_fixed_names_past_the_names_their_siblings_keep()
                 cancellable,
                 super::super::CopyRecord::Nothing,
                 None,
-                true,
+                super::super::GioNames::new(fixing()),
             )
         }),
     ];
@@ -1051,7 +1146,6 @@ fn fat_family_copies_number_fixed_names_past_the_names_their_siblings_keep()
         fs::write(source.join("a_.txt"), b"kept")?;
         fs::write(source.join("README.txt"), b"upper")?;
         fs::write(source.join("Readme.txt"), b"mixed")?;
-        // Kept until transfers know whether it is already on the stick.
         fs::write(source.join("CON"), b"device")?;
         for folder in ["Photos.2024", "photos.2024"] {
             fs::create_dir(source.join(folder))?;
@@ -1073,7 +1167,7 @@ fn fat_family_copies_number_fixed_names_past_the_names_their_siblings_keep()
             ("a_ (3).txt", "question"),
             ("README.txt", "upper"),
             ("Readme (1).txt", "mixed"),
-            ("CON", "device"),
+            ("CON_", "device"),
             ("Photos.2024/photo", "Photos.2024"),
             ("photos.2024 (1)/photo", "photos.2024"),
         ] {
@@ -1089,25 +1183,38 @@ fn fat_family_copies_number_fixed_names_past_the_names_their_siblings_keep()
 }
 
 #[test]
-fn a_fat_family_copy_into_a_case_sensitive_folder_keeps_case_variants_apart()
+fn a_copy_into_a_case_sensitive_folder_keeps_a_cut_name_apart_by_case_only()
 -> Result<(), Box<dyn Error>> {
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
         .lock()
         .map_err(|error| error.to_string())?;
     let root = tempfile::tempdir()?;
     let source = root.path().join("source");
-    let target = root.path().join("target");
+    let disk = root.path().join("disk");
+    let target = disk.join("target");
     fs::create_dir_all(&source)?;
+    fs::create_dir(&disk)?;
+    let (long, short) = (
+        format!("A{}", "b".repeat(70)),
+        format!("a{}", "b".repeat(63)),
+    );
     for (name, contents) in [
-        ("A:b", "colon"),
-        ("a_b", "kept"),
+        (long.as_str(), "long"),
+        (short.as_str(), "short"),
         ("README", "upper"),
         ("Readme", "mixed"),
     ] {
         fs::write(source.join(name), contents)?;
     }
+    let _disk = FsQuirks::install(
+        &disk,
+        Quirks {
+            name_max: Some(64),
+            ..Quirks::ext4()
+        },
+    );
 
-    glib::MainContext::default().block_on(copy_recursively_fat_family(
+    glib::MainContext::default().block_on(copy_recursively_fixing(
         gio::File::for_path(&source),
         gio::File::for_path(&target),
         false,
@@ -1115,29 +1222,32 @@ fn a_fat_family_copy_into_a_case_sensitive_folder_keeps_case_variants_apart()
     ))?;
 
     for (name, contents) in [
-        ("A_b", "colon"),
-        ("a_b", "kept"),
-        ("README", "upper"),
-        ("Readme", "mixed"),
+        (format!("A{}", "b".repeat(63)), "long"),
+        (short, "short"),
+        ("README".to_owned(), "upper"),
+        ("Readme".to_owned(), "mixed"),
     ] {
-        assert_eq!(fs::read(target.join(name))?, contents.as_bytes(), "{name}");
+        assert_eq!(fs::read(target.join(&name))?, contents.as_bytes(), "{name}");
     }
     assert_eq!(names(&target)?.len(), 4);
     Ok(())
 }
 
 #[test]
-fn non_fat_copy_leaves_invalid_characters_untouched() -> Result<(), Box<dyn Error>> {
+fn a_copy_onto_a_posix_mount_leaves_windows_characters_untouched() -> Result<(), Box<dyn Error>> {
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
         .lock()
         .map_err(|error| error.to_string())?;
     let root = tempfile::tempdir()?;
     let source = root.path().join("source");
-    let target = root.path().join("target");
+    let disk = root.path().join("disk");
+    let target = disk.join("target");
     fs::create_dir_all(&source)?;
+    fs::create_dir(&disk)?;
     fs::write(source.join("a?b:c.txt"), b"unchanged")?;
+    let _disk = FsQuirks::install(&disk, Quirks::ext4());
 
-    let result = glib::MainContext::default().block_on(copy_recursively(
+    let result = glib::MainContext::default().block_on(copy_recursively_fixing(
         gio::File::for_path(&source),
         gio::File::for_path(&target),
         false,

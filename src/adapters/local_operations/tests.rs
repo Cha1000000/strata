@@ -72,19 +72,26 @@ impl Drop for CopyActivity {
     }
 }
 
-fn copy_recursively_fat_family(
+/// Names fixed, as forward transfers fix them.
+fn fixing() -> NamePolicy {
+    NamePolicy::new(NameMode::Fix)
+}
+
+/// A copy that fixes names, as forward transfers do.
+fn copy_recursively_fixing(
     source: gio::File,
     target: gio::File,
     merge: bool,
     cancellable: gio::Cancellable,
 ) -> Pin<Box<dyn Future<Output = Result<(), glib::Error>>>> {
     Box::pin(async move {
+        let names = fixing();
         if merge {
-            return super::merge_copy(None, true)(source, target, Default::default(), cancellable)
+            return super::merge_copy(None, names)(source, target, Default::default(), cancellable)
                 .await
                 .map(drop);
         }
-        copy_new_recursively_on_filesystem(source, target, Taken::Fail, cancellable, None, true)
+        copy_new_recursively_on_filesystem(source, target, Taken::Fail, cancellable, None, names)
             .await
             .map(drop)
     })
@@ -119,25 +126,24 @@ fn staged(
 
 use super::{
     CopyStep, FailedAction, LocalFileIdentity, LocalOperationProvider, MergeCopied, MergeHooks,
-    MergePlan, MountTable, PinnedEntry, RestoreEntry, StageOverwrite, StagedOriginalLookup,
+    MergePlan, NamePolicy, PinnedEntry, RestoreEntry, StageOverwrite, StagedOriginalLookup,
     TRANSFER_PROGRESS_INTERVAL, TransferProgressTracker, TransferStop, await_cancellable,
     copy_failure_after_cleanup, copy_failure_on_fat32, copy_new_recursively_on_filesystem,
     copy_new_remote_file_with, copy_recursively, deletion_error_message, deletion_error_summary,
-    fat32_file_size_limit, home_trash_entries_at, io_error, is_trash_unsupported_failure,
-    join_local_tasks, local_file_identity, merge_local, merge_local_with, move_local,
-    move_local_with,
+    home_trash_entries_at, io_error, is_trash_unsupported_failure, join_local_tasks,
+    local_file_identity, merge_local, merge_local_with, move_local, move_local_with,
     naming::{Taken, numbered_name, numbered_names, parse_copy_suffix},
     open_local_parent_directory, operation_error_summary, parallel_delete_local,
     permanently_delete_local, permanently_delete_local_path_if_unchanged, replace_local,
     replace_local_with, run_merge_undo, set_removable_roots_for_test, set_sync_observer,
-    stop_transfer, sync_probe_observations, target_is_fat_family, transfer_is_noop, transfer_sizes,
+    stop_transfer, sync_probe_observations, transfer_is_noop, transfer_sizes,
     trash_stage_overwrite, validated_child, was_cancelled,
 };
 use crate::{
     adapters::volume::FAT32_MAX_FILE_SIZE,
     model::{EntryKind, FileEntry, Location, MetadataValue},
     services::{
-        DeleteRequest, LoadHandle, MoveRecord, OperationEvent, OperationProvider,
+        DeleteRequest, LoadHandle, MoveRecord, NameMode, OperationEvent, OperationProvider,
         OperationRequestId, PasteItem, PasteRequest, PlacedSnapshot, RestoreRequest, RestoreSource,
         RestoreTrashItem, TransferConflict, TrashedOriginal, UndoMoveItem, UndoMoveRequest,
         UndoRenameRequest,
@@ -239,9 +245,16 @@ async fn copy_new_recursively_with_progress(
     cancellable: gio::Cancellable,
     progress: Option<Rc<TransferProgressTracker>>,
 ) -> Result<(), glib::Error> {
-    copy_new_recursively_on_filesystem(source, target, Taken::Fail, cancellable, progress, false)
-        .await
-        .map(drop)
+    copy_new_recursively_on_filesystem(
+        source,
+        target,
+        Taken::Fail,
+        cancellable,
+        progress,
+        NamePolicy::default(),
+    )
+    .await
+    .map(drop)
 }
 
 async fn copy_new_recursively(

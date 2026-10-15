@@ -127,7 +127,7 @@ fn a_plain_move_relocates_the_entry_via_the_hardened_rename_path() -> Result<(),
         Taken::Fail,
         gio::Cancellable::new(),
         None,
-        false,
+        NamePolicy::default(),
     ));
 
     assert!(result.is_ok());
@@ -144,7 +144,7 @@ fn move_native(source: &Path, target: &Path) -> Result<(), glib::Error> {
             Taken::Fail,
             gio::Cancellable::new(),
             None,
-            false,
+            NamePolicy::default(),
         ))
         .map(drop)
 }
@@ -290,7 +290,7 @@ fn items_without_noreplace_or_a_usable_link_are_renamed_without_copying()
                 Taken::Fail,
                 gio::Cancellable::new(),
                 Some(progress.clone()),
-                false,
+                NamePolicy::default(),
             ))
             .map_err(|error| format!("{case}: {error}"))?;
 
@@ -420,7 +420,7 @@ fn move_accepts_a_symlink_in_the_sources_parent_path() -> Result<(), Box<dyn Err
         Taken::Fail,
         gio::Cancellable::new(),
         None,
-        false,
+        NamePolicy::default(),
     ));
 
     assert!(result.is_ok(), "{result:?}");
@@ -448,7 +448,7 @@ fn move_accepts_a_symlink_in_the_destinations_parent_path() -> Result<(), Box<dy
         Taken::Fail,
         gio::Cancellable::new(),
         None,
-        false,
+        NamePolicy::default(),
     ));
 
     assert!(result.is_ok(), "{result:?}");
@@ -1538,7 +1538,7 @@ fn a_move_cancelled_while_deleting_its_sources_reports_what_stays() -> Result<()
     );
     let copying = super::super::Copying {
         progress: Some(progress),
-        fat_family: false,
+        names: super::super::NamePolicy::default(),
         ..Default::default()
     };
 
@@ -1605,7 +1605,7 @@ fn moving_to_a_remote_target_keeps_a_source_entry_changed_during_the_copy()
         gio::Cancellable::new(),
         super::super::Copying {
             progress: Some(progress),
-            fat_family: false,
+            names: super::super::NamePolicy::default(),
             ..Default::default()
         },
         super::super::attempt_move(None),

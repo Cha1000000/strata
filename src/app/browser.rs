@@ -15,11 +15,11 @@ use crate::{
         ArchiveFormat, CompressRequest, CreateDirectoryRequest, CreateFileRequest, DeleteRequest,
         DirectoryChange, DirectoryRequest, ExtractRequest, FileSource, LoadHandle,
         LocationIdentity, LocationValidationError, MetadataOutcome, MetadataRequest, MoveRecord,
-        OperationEvent, OperationProvider, OperationRequestId, PasswordFailure, PasteItem,
-        PasteRequest, PlacedSnapshot, RenameRecord, RenameRequest, RenamedItem, RequestId,
-        RestoreRequest, RestoreSource, RestoreTrashItem, TransferConflict, TransferReport,
-        TrashedOriginal, UndoCopyRequest, UndoMergeRequest, UndoMoveItem, UndoMoveRequest,
-        UndoRenameRequest, validate_basename, validate_uri_credentials,
+        NameMode, OperationEvent, OperationProvider, OperationRequestId, PasswordFailure,
+        PasteItem, PasteRequest, PlacedSnapshot, RenameRecord, RenameRequest, RenamedItem,
+        RequestId, RestoreRequest, RestoreSource, RestoreTrashItem, TransferConflict,
+        TransferReport, TrashedOriginal, UndoCopyRequest, UndoMergeRequest, UndoMoveItem,
+        UndoMoveRequest, UndoRenameRequest, validate_basename, validate_uri_credentials,
     },
 };
 
@@ -3002,6 +3002,7 @@ impl Browser {
                 id: request_id,
                 items,
                 cleanup_locations: vec![folder],
+                names: NameMode::Keep,
             },
             self.operation_callback(request_id, false, refresh_locations),
         );
@@ -3041,6 +3042,7 @@ impl Browser {
             UndoMoveRequest {
                 id: request_id,
                 cleanup_locations: Vec::new(),
+                names: if redo { NameMode::Fix } else { NameMode::Keep },
                 items: items
                     .into_iter()
                     .map(|item| {

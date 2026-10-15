@@ -1564,6 +1564,7 @@ fn a_new_operation_clears_the_redo() {
 fn an_undone_move_can_be_redone() {
     let browser = Browser::new(Rc::new(FakeFileSource));
     browser.set_operation_provider(Rc::new(ImmediateOperationProvider));
+    UNDO_MOVE_NAMES.with(|names| names.borrow_mut().clear());
     let events = Rc::new(RefCell::new(Vec::new()));
     let observed = events.clone();
     browser.observe(move |event| observed.borrow_mut().push(event.clone()));
@@ -1639,6 +1640,10 @@ fn an_undone_move_can_be_redone() {
             }]]
         );
     });
+    assert_eq!(
+        UNDO_MOVE_NAMES.with(|names| names.borrow().clone()),
+        [NameMode::Keep, NameMode::Fix]
+    );
 }
 
 #[test]
@@ -2223,6 +2228,7 @@ fn undoing_a_group_moves_back_and_trashes_the_folder_in_one_operation() {
     browser.set_operation_provider(Rc::new(ImmediateOperationProvider));
     UNDO_MOVE_REQUESTS.with(|requests| requests.borrow_mut().clear());
     UNDO_MOVE_CLEANUPS.with(|requests| requests.borrow_mut().clear());
+    UNDO_MOVE_NAMES.with(|names| names.borrow_mut().clear());
     let created = Location::local("/fixture/new folder");
     push_pending_undo(UndoEntry::Copy(vec![created.clone()]));
     browser.expect_group_folder(created.clone());
@@ -2254,6 +2260,10 @@ fn undoing_a_group_moves_back_and_trashes_the_folder_in_one_operation() {
     assert_eq!(
         UNDO_MOVE_CLEANUPS.with(|requests| requests.borrow().clone()),
         vec![vec![created]]
+    );
+    assert_eq!(
+        UNDO_MOVE_NAMES.with(|names| names.borrow().clone()),
+        [NameMode::Keep]
     );
     assert_eq!(pending_undo_entry(), None);
     assert!(peek_replay(true).is_none(), "a group undo offers no redo");

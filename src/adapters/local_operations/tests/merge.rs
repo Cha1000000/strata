@@ -12,12 +12,13 @@ use crate::{
 };
 
 fn real_copy() -> CopyStep {
-    super::super::merge_copy(None, false)
+    super::super::merge_copy(None, NamePolicy::default())
 }
 
-fn gio_merge_copy(fat_family: bool) -> CopyStep {
+fn gio_merge_copy(names: NamePolicy) -> CopyStep {
     Rc::new(
         move |source, target, copy: super::super::MergeCopy, cancellable| {
+            let names = super::super::GioNames::new(names.clone());
             Box::pin(async move {
                 super::super::copy_recursively_with_progress(
                     source,
@@ -26,7 +27,7 @@ fn gio_merge_copy(fat_family: bool) -> CopyStep {
                     cancellable,
                     super::super::CopyRecord::Placing(copy.placing),
                     None,
-                    fat_family,
+                    names,
                 )
                 .await
                 .map(|()| MergeCopied::default())
@@ -66,8 +67,8 @@ fn fat_merge_overwrites_the_names_it_plans_and_keeps_the_names_that_need_no_fix(
         .lock()
         .map_err(|error| error.to_string())?;
     for (row, copy) in [
-        ("engine", super::super::merge_copy(None, true)),
-        ("GIO", gio_merge_copy(true)),
+        ("engine", super::super::merge_copy(None, fixing())),
+        ("GIO", gio_merge_copy(fixing())),
     ] {
         let root = tempfile::tempdir()?;
         let source = root.path().join("source");
@@ -104,7 +105,7 @@ fn fat_merge_overwrites_the_names_it_plans_and_keeps_the_names_that_need_no_fix(
             gio::Cancellable::new(),
             None,
             MergeHooks {
-                fat_family: true,
+                names: fixing(),
                 copy_into_target: copy,
                 stage_overwrite: stage,
                 on_merged: &on_merged,
@@ -160,7 +161,10 @@ fn a_merge_off_fat_keeps_the_names_fat_would_fix() -> Result<(), Box<dyn Error>>
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
         .lock()
         .map_err(|error| error.to_string())?;
-    for (row, copy) in [("engine", real_copy()), ("GIO", gio_merge_copy(false))] {
+    for (row, copy) in [
+        ("engine", super::super::merge_copy(None, fixing())),
+        ("GIO", gio_merge_copy(fixing())),
+    ] {
         let root = tempfile::tempdir()?;
         let source = root.path().join("source");
         let target = root.path().join("target");
@@ -170,6 +174,7 @@ fn a_merge_off_fat_keeps_the_names_fat_would_fix() -> Result<(), Box<dyn Error>>
             fs::write(source.join("nested").join(name), contents)?;
         }
         fs::write(target.join("nested/a_b"), "original")?;
+        let _target = FsQuirks::install(&target, Quirks::ext4());
         let (stage, staged) = rename_stage(root.path().join("staging"));
         let (plans, on_merged) = recorded_plans();
 
@@ -180,7 +185,7 @@ fn a_merge_off_fat_keeps_the_names_fat_would_fix() -> Result<(), Box<dyn Error>>
             gio::Cancellable::new(),
             None,
             MergeHooks {
-                fat_family: false,
+                names: fixing(),
                 copy_into_target: copy,
                 stage_overwrite: stage,
                 on_merged: &on_merged,
@@ -215,6 +220,126 @@ fn a_merge_off_fat_keeps_the_names_fat_would_fix() -> Result<(), Box<dyn Error>>
 
 fn no_plan(_: MergePlan) {}
 
+#[test]
+fn a_merge_onto_fat_keeps_the_names_a_posix_mount_inside_it_holds() -> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    for (row, copy) in [
+        ("engine", super::super::merge_copy(None, fixing())),
+        ("GIO", gio_merge_copy(fixing())),
+    ] {
+        let root = tempfile::tempdir()?;
+        let source = root.path().join("source");
+        let stick = root.path().join("stick");
+        let disk = stick.join("disk");
+        fs::create_dir_all(source.join("disk"))?;
+        fs::create_dir_all(&disk)?;
+        fs::write(source.join("x:y"), "top")?;
+        fs::write(source.join("disk/a:b"), "colon")?;
+        fs::write(disk.join("a_b"), "original")?;
+        let _stick = FsQuirks::install(&stick, Quirks::vfat());
+        let _disk = FsQuirks::install(&disk, Quirks::ext4());
+        let (stage, staged) = rename_stage(root.path().join("staging"));
+        let (plans, on_merged) = recorded_plans();
+
+        glib::MainContext::default().block_on(merge_local_with(
+            gio::File::for_path(&source),
+            gio::File::for_path(&stick),
+            false,
+            gio::Cancellable::new(),
+            None,
+            MergeHooks {
+                names: fixing(),
+                copy_into_target: copy,
+                stage_overwrite: stage,
+                on_merged: &on_merged,
+            },
+        ))?;
+
+        for (name, contents) in [
+            ("x_y", "top"),
+            ("disk/a:b", "colon"),
+            ("disk/a_b", "original"),
+        ] {
+            assert_eq!(
+                fs::read(stick.join(name))?,
+                contents.as_bytes(),
+                "{row}: {name}"
+            );
+        }
+        assert!(staged.borrow().is_empty(), "{row}");
+        assert_eq!(
+            plans.borrow()[0].created.iter().collect::<HashSet<_>>(),
+            [stick.join("x_y"), disk.join("a:b")]
+                .map(Location::local)
+                .iter()
+                .collect(),
+            "{row}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn a_merge_records_the_names_its_copy_gives_a_cut_name() -> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    for (row, copy) in [
+        ("engine", super::super::merge_copy(None, fixing())),
+        ("GIO", gio_merge_copy(fixing())),
+    ] {
+        let root = tempfile::tempdir()?;
+        let source = root.path().join("source");
+        let disk = root.path().join("disk");
+        fs::create_dir_all(&source)?;
+        fs::create_dir(&disk)?;
+        // Cut to 64 bytes, the long name differs from the short one in case only.
+        fs::write(source.join(format!("A{}", "b".repeat(70))), "long")?;
+        fs::write(source.join(format!("a{}", "b".repeat(63))), "short")?;
+        let _disk = FsQuirks::install(
+            &disk,
+            Quirks {
+                name_max: Some(64),
+                ..Quirks::ext4()
+            },
+        );
+        let (stage, _) = rename_stage(root.path().join("staging"));
+        let (plans, on_merged) = recorded_plans();
+
+        glib::MainContext::default().block_on(merge_local_with(
+            gio::File::for_path(&source),
+            gio::File::for_path(&disk),
+            false,
+            gio::Cancellable::new(),
+            None,
+            MergeHooks {
+                names: fixing(),
+                copy_into_target: copy,
+                stage_overwrite: stage,
+                on_merged: &on_merged,
+            },
+        ))?;
+
+        let made = names(&disk)?
+            .into_iter()
+            .map(|name| Location::local(disk.join(name)))
+            .collect::<HashSet<_>>();
+        assert_eq!(made.len(), 2, "{row}");
+        assert_eq!(
+            plans.borrow()[0]
+                .created
+                .iter()
+                .cloned()
+                .collect::<HashSet<_>>(),
+            made,
+            "{row}"
+        );
+    }
+    Ok(())
+}
+
 fn recorded_plans() -> (Rc<RefCell<Vec<MergePlan>>>, impl Fn(MergePlan)) {
     let plans = Rc::new(RefCell::new(Vec::new()));
     let recorded = plans.clone();
@@ -246,7 +371,7 @@ fn merging_folders_unites_contents_and_overwrites_shared_names() -> Result<(), B
         gio::Cancellable::new(),
         None,
         MergeHooks {
-            fat_family: false,
+            names: NamePolicy::default(),
             copy_into_target: real_copy(),
             stage_overwrite: stage,
             on_merged: &on_merged,
@@ -314,7 +439,7 @@ fn merging_recurses_into_subdirectories_shared_by_both_sides() -> Result<(), Box
         gio::Cancellable::new(),
         None,
         MergeHooks {
-            fat_family: false,
+            names: NamePolicy::default(),
             copy_into_target: real_copy(),
             stage_overwrite: stage,
             on_merged: &on_merged,
@@ -372,7 +497,7 @@ fn a_merge_from_a_location_without_paths_records_what_it_copied_over_an_original
         gio::Cancellable::new(),
         None,
         MergeHooks {
-            fat_family: false,
+            names: NamePolicy::default(),
             copy_into_target: real_copy(),
             stage_overwrite: stage,
             on_merged: &on_merged,
@@ -514,7 +639,7 @@ fn a_staging_failure_aborts_the_merge_and_reports_only_what_was_staged()
         gio::Cancellable::new(),
         None,
         MergeHooks {
-            fat_family: false,
+            names: NamePolicy::default(),
             copy_into_target: real_copy(),
             stage_overwrite: stage,
             on_merged: &on_merged,
@@ -1206,7 +1331,7 @@ fn a_failed_merge_preserves_the_destinations_existing_contents() -> Result<(), B
         gio::Cancellable::new(),
         None,
         MergeHooks {
-            fat_family: false,
+            names: NamePolicy::default(),
             copy_into_target: Rc::new(|_, target, _, _| {
                 Box::pin(async move {
                     fs::write(
@@ -1481,7 +1606,8 @@ fn undoing_a_merge_with_numbered_aliases_removes_only_its_items() -> Result<(), 
         fs::write(sources.join("folder").join(name), name)?;
     }
     fs::write(folder.join("keep.txt"), b"keep me")?;
-    let _scope = FsQuirks::install(&destination, without_trash(Quirks::vfat()));
+    // The SMB client learns that a name is taken only when it is refused.
+    let _scope = FsQuirks::install(&destination, without_trash(Quirks::cifs()));
 
     let events = run_paste(PasteRequest {
         id: OperationRequestId(94),
@@ -2220,7 +2346,7 @@ fn a_merge_undo_deletes_only_what_the_merge_left_unchanged() -> Result<(), Box<d
             gio::Cancellable::new(),
             None,
             MergeHooks {
-                fat_family: false,
+                names: NamePolicy::default(),
                 copy_into_target: real_copy(),
                 stage_overwrite: stage,
                 on_merged: &on_merged,
@@ -2779,7 +2905,7 @@ fn an_undo_keeps_what_was_too_big_to_record() -> Result<(), Box<dyn Error>> {
             gio::Cancellable::new(),
             None,
             MergeHooks {
-                fat_family: false,
+                names: NamePolicy::default(),
                 copy_into_target: real_copy(),
                 stage_overwrite: stage,
                 on_merged: &on_merged,
@@ -2927,7 +3053,7 @@ fn a_merge_records_what_it_creates_only_where_undo_cannot_trash_it() -> Result<(
             gio::Cancellable::new(),
             None,
             MergeHooks {
-                fat_family: false,
+                names: NamePolicy::default(),
                 copy_into_target: real_copy(),
                 stage_overwrite: stage,
                 on_merged: &on_merged,
@@ -3261,7 +3387,7 @@ fn merge_through_trash(
         gio::Cancellable::new(),
         None,
         MergeHooks {
-            fat_family: false,
+            names: NamePolicy::default(),
             copy_into_target,
             stage_overwrite: Rc::new(trash_stage_overwrite),
             on_merged: &on_merged,
