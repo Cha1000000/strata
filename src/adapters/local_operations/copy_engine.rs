@@ -732,22 +732,22 @@ fn split(path: &Path) -> Result<(Arc<OwnedFd>, OsString), glib::Error> {
     Ok((Arc::new(parent), name.to_os_string()))
 }
 
-/// The first of `names` that `attempt` makes in `dir` as `taken` allows,
-/// or what the mount takes for one it refused.
+/// The first of the names `taken` allows for `name` that `attempt` makes
+/// in `dir`, or what the mount takes for one it refused.
 fn first_free<T>(
     copy: &Copy,
     dir: BorrowedFd<'_>,
-    names: impl IntoIterator<Item = OsString>,
-    (taken, is_directory): (Taken, bool),
+    (name, taken, is_directory): (&OsStr, Taken, bool),
     mut attempt: impl FnMut(&OsStr) -> Result<T, Failure>,
 ) -> Result<(OsString, T), Failure> {
-    for name in names {
-        match attempt(&name) {
+    for candidate in taken.names(name, is_directory, || copy.name_limit(dir)) {
+        match attempt(&candidate) {
             Err(Failure::Place(PlaceError::Exists)) if taken == Taken::Number => {}
             Err(refused) if refused.refuses_name() => {
-                return copy.retry_item(dir, (&name, is_directory, taken), refused, attempt);
+                let names = (name, candidate.as_os_str());
+                return copy.retry_item(dir, (names, is_directory, taken), refused, attempt);
             }
-            result => return result.map(|value| (name, value)),
+            result => return result.map(|value| (candidate, value)),
         }
     }
     Err(Failure::Place(PlaceError::Exists))
@@ -817,8 +817,7 @@ fn copy_new(
             let mount = copy.mount(parent.as_fd());
             let site = copy.site(&mount, parent.as_fd());
             let linked = copy.names.profiles.holds_links(&site).then(|| {
-                let names = taken.names(name, false, || copy.name_limit(parent.as_fd()));
-                first_free(copy, parent.as_fd(), names, (taken, false), |name| {
+                first_free(copy, parent.as_fd(), (name, taken, false), |name| {
                     tree::copy_link(
                         copy,
                         source.entry(),
@@ -844,8 +843,7 @@ fn copy_new(
         FileType::Directory => {
             let workers = workers.unwrap_or_else(|| worker_count(source, parent));
             if in_place || placement::can_place(copy.fs, parent.as_fd(), true) == Some(false) {
-                let names = taken.names(name, true, || copy.name_limit(parent.as_fd()));
-                return first_free(copy, parent.as_fd(), names, (taken, true), |name| {
+                return first_free(copy, parent.as_fd(), (name, taken, true), |name| {
                     direct_folder(copy, source, stat.identity, parent, name, workers)
                 })
                 .map(|(name, ())| name);
@@ -857,8 +855,7 @@ fn copy_new(
             copy.check_cancelled()?;
             let mount = Mount::new(copy.fs, parent.as_fd());
             let parent_stat = copy.fs.stat_fd(parent.as_fd())?;
-            let names = taken.names(name, false, || copy.name_limit(parent.as_fd()));
-            let (name, pipe) = first_free(copy, parent.as_fd(), names, (taken, false), |name| {
+            let (name, pipe) = first_free(copy, parent.as_fd(), (name, taken, false), |name| {
                 let target = Entry::new(&**parent, name);
                 match tree::copy_fifo(copy, source.entry(), target, &parent_stat, &mount, None)? {
                     (pipe, Some(_)) => Ok(pipe),
@@ -992,8 +989,7 @@ fn publish_folder(
     };
     // Where the stage cannot be placed, it is copied under the name instead.
     let mut copied_from = None;
-    let names = taken.names(name, true, || copy.name_limit(staged.parent.as_fd()));
-    let published = first_free(copy, staged.parent.as_fd(), names, (taken, true), |name| {
+    let published = first_free(copy, staged.parent.as_fd(), (name, taken, true), |name| {
         if copied_from.is_none() {
             match stage::publish(
                 copy.fs,
@@ -1623,14 +1619,15 @@ impl Copy {
     }
 
     /// The item a forward copy was given, which the mount refused to name
-    /// `name` in `dir`, under a name it takes instead, numbered where that
-    /// is taken. It is reported where `name` was planned for it, not where
-    /// it is one of Keep Both's numbers. Names given back, as undo does,
-    /// stay refused.
+    /// `refused_name`, one of the names `taken` allows for `name`, in `dir`,
+    /// under a name it takes instead, numbered where that is taken. It is
+    /// reported from `name` where that was planned for it, or for Keep Both,
+    /// where it is the item's own name; a name planned otherwise is reported
+    /// by the planner. Names given back, as undo does, stay refused.
     fn retry_item<T>(
         &self,
         dir: BorrowedFd<'_>,
-        (name, is_directory, taken): (&OsStr, bool, Taken),
+        ((name, refused_name), is_directory, taken): ((&OsStr, &OsStr), bool, Taken),
         refused: Failure,
         mut attempt: impl FnMut(&OsStr) -> Result<T, Failure>,
     ) -> Result<(OsString, T), Failure> {
@@ -1638,18 +1635,18 @@ impl Copy {
             return Err(refused);
         }
         let rules = self.folder_rules(dir);
-        let (made, value, cause) =
-            retry_refused(self, &rules, (name, is_directory), refused, |stricter| {
-                let numbered = numbered_names(stricter, is_directory, rules.limit);
-                for candidate in std::iter::once(stricter.to_os_string()).chain(numbered) {
-                    match attempt(&candidate) {
-                        Err(Failure::Place(PlaceError::Exists)) => {}
-                        made => return made.map(|value| (candidate, value)),
-                    }
+        let target = (refused_name, is_directory);
+        let (made, value, cause) = retry_refused(self, &rules, target, refused, |stricter| {
+            let numbered = numbered_names(stricter, is_directory, rules.limit);
+            for candidate in std::iter::once(stricter.to_os_string()).chain(numbered) {
+                match attempt(&candidate) {
+                    Err(Failure::Place(PlaceError::Exists)) => {}
+                    made => return made.map(|value| (candidate, value)),
                 }
-                Err(Failure::Place(PlaceError::Exists))
-            })?;
-        if taken == Taken::Fail {
+            }
+            Err(Failure::Place(PlaceError::Exists))
+        })?;
+        if taken == Taken::Fail || *name == *self.item {
             lock(&self.left).item = Some((name.to_os_string(), cause));
         }
         Ok((made, value))
@@ -2262,8 +2259,7 @@ impl<'a> FileCopy<'a> {
         let fs = self.copy.fs;
         match target {
             FileTarget::Final(name, taken) => {
-                let names = taken.names(name, false, || self.copy.name_limit(self.dir));
-                first_free(self.copy, self.dir, names, (taken, false), |name| {
+                first_free(self.copy, self.dir, (name, taken, false), |name| {
                     let to = self.at(name);
                     link_tmpfile(fs, tmpfile, to).map_err(|error| {
                         match placement::file_creation_error(error) {
@@ -2443,8 +2439,7 @@ impl<'a> FileCopy<'a> {
         };
         // Where the stage cannot be placed, it is copied under the name instead.
         let mut created_from = false;
-        let names = taken.names(name, false, || copy.name_limit(dir));
-        let published = first_free(copy, dir, names, (taken, false), |name| {
+        let published = first_free(copy, dir, (name, taken, false), |name| {
             if !created_from {
                 match stage::publish(fs, dir, &stage.name, stage.created.identity, name) {
                     Err(PlaceError::Unsupported) => created_from = true,

@@ -396,8 +396,8 @@ placement routine puts down to the name. The entry is then tried again under the
 rules give, then under each of the Windows rules that changes it on its own (valid UTF-8, the
 characters Windows refuses, trailing dots and spaces, device names, 255 bytes and UTF-16 units), and
 then under those rules together, fewest first, skipping names already tried. The first name the
-mount takes is used, numbered where it is taken, and reported as fixed, except as the name of a Keep
-Both copy, whose numbered name is not reported either. A mount whose type does not show its rules
+mount takes is used, numbered where it is taken, and reported as fixed, for a Keep Both copy from
+the item's own name to the numbered one. A mount whose type does not show its rules
 (sshfs and other FUSE daemons, 9p, virtiofs, vboxsf, a `fuseblk` device udev cannot name, unknown
 types) remembers the rules that worked until it changes, so later names brought onto it are fixed by
 them before they are copied; names undo gives back are not. Any other mount tries each refused name

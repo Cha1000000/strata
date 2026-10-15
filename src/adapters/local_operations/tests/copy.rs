@@ -2119,6 +2119,50 @@ fn a_mount_that_learns_keeps_only_the_rules_its_refused_names_needed() -> Result
 }
 
 #[test]
+fn a_kept_copy_the_mount_refused_is_reported_with_the_name_it_took() -> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let root = tempfile::tempdir()?;
+    let source = root.path().join("source");
+    let disk = root.path().join("disk");
+    fs::create_dir_all(&source)?;
+    fs::create_dir(&disk)?;
+    fs::write(source.join("a:b"), b"incoming")?;
+    // As the server made it.
+    fs::write(disk.join("a:b"), b"earlier")?;
+    let _disk = FsQuirks::install(
+        &disk,
+        Quirks {
+            mount_type: Some(("fuse.strictfs", "rw,user_id=0,group_id=0")),
+            invalid_name: Some(refuses_colons_as_bad_messages),
+            ..Quirks::default()
+        },
+    );
+
+    let events = run_paste(PasteRequest {
+        id: OperationRequestId(1590),
+        destination: Location::local(&disk),
+        items: vec![PasteItem {
+            source: Location::local(source.join("a:b")),
+            conflict: TransferConflict::KeepBoth,
+        }],
+        move_sources: false,
+    });
+
+    assert_eq!(fs::read(disk.join("a_b (1)"))?, b"incoming");
+    assert_eq!(
+        renamed_beneath(&disk, &followed_report(&events)),
+        [(
+            "a:b".to_owned(),
+            "a_b (1)".to_owned(),
+            crate::services::RenameCause::Invalid
+        )]
+    );
+    Ok(())
+}
+
+#[test]
 fn a_bulk_copy_records_for_undo_where_a_refused_name_was_saved() -> Result<(), Box<dyn Error>> {
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
         .lock()
