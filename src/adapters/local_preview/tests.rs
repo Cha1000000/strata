@@ -881,7 +881,7 @@ fn preview_families_follow_file_bytes_not_names() {
         ("wide.txt", &utf16[..], Resolved::Text("hi\n".into())),
         (
             "DSCF0001.RAF",
-            &b"FUJIFILMCCD-RAW 0201FF383501"[..],
+            &b"FUJIFILMCCD-RAW 0201FF383501\0"[..],
             Resolved::Image,
         ),
         (
