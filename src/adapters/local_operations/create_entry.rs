@@ -1,15 +1,16 @@
 // SPDX-License-Identifier: MIT
 
 use super::{
-    await_cancellable, cancellation_handle, cancelled_event, validated_child, was_cancelled,
+    await_cancellable, cancellation_handle, cancelled_event, mount_profile::folder_name_limit,
+    naming::numbered_name, validated_child, was_cancelled,
 };
 use crate::{
-    adapters::{gio_file_for_location, location_for_file},
+    adapters::{gio_file_for_location, location_for_file, volume::NameLimit},
     model::Location,
     services::{LoadHandle, OperationEvent, OperationRequestId},
 };
 use gtk::{gio, glib, prelude::*};
-use std::{collections::HashSet, rc::Rc};
+use std::{collections::HashSet, ffi::OsStr, rc::Rc};
 
 pub(super) fn start(
     id: OperationRequestId,
@@ -24,11 +25,19 @@ pub(super) fn start(
     let _task = glib::MainContext::default().spawn_local(async move {
         let directory = gio_file_for_location(&parent);
         let mut suffix = 0u64;
+        let mut limit = NameLimit::default();
         loop {
             let candidate = if suffix == 0 {
                 name.clone()
             } else {
-                format!("{name} ({suffix})")
+                let numbered = numbered_name(
+                    OsStr::new(&name),
+                    suffix,
+                    OsStr::new(""),
+                    limit,
+                    is_directory,
+                );
+                numbered.to_string_lossy().into_owned()
             };
             let file = match validated_child(&directory, &candidate) {
                 Ok(file) => file,
@@ -116,6 +125,9 @@ pub(super) fn start(
                 Err(error)
                     if unique_name && name_taken(&error, is_directory) && suffix < u64::MAX =>
                 {
+                    if suffix == 0 {
+                        limit = folder_name_limit(&directory).await;
+                    }
                     suffix += 1;
                     continue;
                 }

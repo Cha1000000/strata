@@ -351,6 +351,50 @@ fn a_remote_keep_both_copy_takes_the_next_name_when_one_is_taken_meanwhile()
 }
 
 #[test]
+fn a_remote_keep_both_copy_numbers_a_long_name_within_the_limit() -> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let root = tempfile::tempdir()?;
+    let source = root.path().join("source.bin");
+    let target = root.path().join(format!("{}.bin", "t".repeat(251)));
+    let numbered = root.path().join(format!("{} (1).bin", "t".repeat(247)));
+    fs::write(&source, b"source contents")?;
+    fs::write(&target, b"existing")?;
+
+    let copied = glib::MainContext::default().block_on(copy_new_remote_file_with(
+        gio::File::for_path(&source),
+        gio::File::for_path(&target),
+        Taken::Number,
+        gio::Cancellable::new(),
+        Rc::new(|source, stage, _| {
+            Box::pin(async move {
+                fs::copy(
+                    source.path().expect("native source"),
+                    stage.path().expect("native stage"),
+                )
+                .map(drop)
+                .map_err(super::io_error)
+            })
+        }),
+        Rc::new(|stage, target, _| {
+            Box::pin(async move {
+                fs::rename(
+                    stage.path().expect("native stage"),
+                    target.path().expect("native target"),
+                )
+                .map_err(super::io_error)
+            })
+        }),
+    ))?;
+
+    assert_eq!(copied.path(), Some(numbered.clone()));
+    assert_eq!(fs::read(numbered)?, b"source contents");
+    assert_eq!(fs::read(&target)?, b"existing");
+    Ok(())
+}
+
+#[test]
 fn failed_incomplete_copy_cleanup_is_reported_as_a_failure() {
     let error = copy_failure_after_cleanup(
         glib::Error::new(gio::IOErrorEnum::Cancelled, "injected cancellation"),
@@ -949,6 +993,12 @@ fn unique_fat_sibling_name_numbers_a_collision_instead_of_overwriting() {
     assert_eq!(
         unique_fat_sibling_name(almost_maximum, &mut used),
         OsString::from("a (1).txt")
+    );
+    let long = format!("{}.txt", "\u{4e2d}".repeat(250));
+    unique_fat_sibling_name(OsString::from(&long), &mut used);
+    assert_eq!(
+        unique_fat_sibling_name(OsString::from(&long), &mut used),
+        OsString::from(format!("{} (1).txt", "\u{4e2d}".repeat(247)))
     );
 }
 

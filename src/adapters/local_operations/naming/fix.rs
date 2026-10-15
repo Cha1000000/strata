@@ -313,21 +313,48 @@ fn units(name: &[u8]) -> usize {
     pieces(name).map(|(_, units)| units).sum()
 }
 
-/// Cuts the stem, keeping an extension that takes at most half the limit,
-/// and never cuts the stem away.
+/// `stem`, `tail` and `extension` joined, with the end of `stem` cut until
+/// the name fits. Only the stem [`split_extension`] finds in `stem` and
+/// `extension` together is cut, so `.tar` stays before ` (1).gz`; where
+/// that extension takes more than half the limit, the whole name is cut and
+/// `tail` goes last.
+pub(in crate::adapters::local_operations) fn fit(
+    stem: &OsStr,
+    tail: &str,
+    extension: &OsStr,
+    limit: NameLimit,
+    is_directory: bool,
+) -> OsString {
+    let limit = Limit::of(limit, is_directory);
+    let joined = [stem.as_bytes(), tail.as_bytes(), extension.as_bytes()].concat();
+    if limit.fits(&joined) {
+        return OsString::from_vec(joined);
+    }
+    let name = [stem.as_bytes(), extension.as_bytes()].concat();
+    OsString::from_vec(cut(&name, stem.len(), tail.as_bytes(), limit, is_directory))
+}
+
 fn shortened(name: &OsStr, limit: Limit, is_directory: bool) -> OsString {
-    let (stem, extension) = match split_extension(name, is_directory) {
-        (stem, extension) if limit.half().fits(extension.as_bytes()) => (stem, extension),
-        _ => (name, OsStr::new("")),
+    OsString::from_vec(cut(name.as_bytes(), name.len(), b"", limit, is_directory))
+}
+
+/// `name` with `tail` put at `at`, cutting the stem before it and keeping
+/// an extension that takes at most half the limit; the stem is never cut
+/// away.
+fn cut(name: &[u8], at: usize, tail: &[u8], limit: Limit, is_directory: bool) -> Vec<u8> {
+    let (stem, _) = split_extension(OsStr::from_bytes(name), is_directory);
+    let (stem_end, at) = if limit.half().fits(&name[stem.len()..]) {
+        (stem.len().min(at), at)
+    } else {
+        (name.len(), name.len())
     };
-    let stem = stem.as_bytes();
-    let end = match limit.without(extension.as_bytes()).prefix_end(stem) {
+    let stem = &name[..stem_end];
+    let kept = [&name[stem_end..at], tail, &name[at..]].concat();
+    let end = match limit.without(&kept).prefix_end(stem) {
         0 => pieces(stem).next().map_or(0, |(bytes, _)| bytes),
         end => cluster_start(stem, end),
     };
-    let mut shortened = stem[..end].to_vec();
-    shortened.extend_from_slice(extension.as_bytes());
-    OsString::from_vec(shortened)
+    [&stem[..end], &kept].concat()
 }
 
 /// The furthest a cut moves back to keep a grapheme cluster whole: longer

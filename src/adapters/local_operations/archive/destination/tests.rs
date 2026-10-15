@@ -366,6 +366,31 @@ fn publish_staging_as_folder_skips_taken_names() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
+fn numbered_names_fit_the_destination() -> Result<(), Box<dyn Error>> {
+    let root = tempfile::tempdir()?;
+    let folder = "b".repeat(253);
+    let file = format!("{}.txt", "r".repeat(251));
+    let numbered_file = format!("{} (2).txt", "r".repeat(247));
+    fs::write(root.path().join(&folder), b"taken")?;
+    fs::write(root.path().join(&file), b"taken")?;
+    let destination = ExtractionDestination::open(root.path())?;
+
+    let (name, _) = stage(&destination, &["a.txt"])?;
+    let published = destination.publish_staging_as_folder(&name, &format!("{folder}.zip"))?;
+    assert_eq!(published, format!("{} (1)", "b".repeat(251)));
+
+    let (name, staging) = stage(&destination, &[&file])?;
+    let published = destination.publish_single_root(&staging, Path::new(&file))?;
+    assert_eq!(published, OsString::from(&numbered_file));
+    destination.remove_directory_only_staging(&name)?;
+
+    fs::remove_file(root.path().join(&numbered_file))?;
+    let (_, created) = destination.create_file(Path::new(&file), None)?;
+    assert_eq!(created, Path::new(&numbered_file));
+    Ok(())
+}
+
+#[test]
 fn remove_empty_staging_reports_non_empty() -> Result<(), Box<dyn Error>> {
     let root = tempfile::tempdir()?;
     let destination = ExtractionDestination::open(root.path())?;

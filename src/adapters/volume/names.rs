@@ -178,10 +178,6 @@ pub(crate) fn byte_limit(name_max: u32) -> Option<u16> {
 
 /// The rules of a GVfs backend, by its URI scheme or by the text before the
 /// colon of its folder on the FUSE bridge (`smb-share:server=…`).
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "transfers take their profiles from here next")
-)]
 pub(crate) fn gvfs_profile(backend: &str) -> NameProfile {
     match backend {
         "smb" | "smb-share" => NameProfile::smb(Some(SAMBA_BYTES)),

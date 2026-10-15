@@ -46,7 +46,7 @@ use crate::{
             placement::{COPY_PREFIX, PlaceError},
             work_queue::{self, Group, Job, WorkQueue},
         },
-        volume::{Family, MountKey},
+        volume::{Family, MountKey, NameLimit},
     },
     services::{KeptCause, RenameCause, SpecialKind},
 };
@@ -257,16 +257,23 @@ pub(super) struct Names {
     /// listing alone cannot tell such an entry from another name's.
     made: Option<Mutex<HashMap<OsString, Vec<LocalFileIdentity>>>>,
     stable_inodes: bool,
+    limit: NameLimit,
 }
 
 impl Names {
-    fn new(requested: Vec<OsString>, naming: Naming, family: Family) -> Arc<Self> {
+    fn new(
+        requested: Vec<OsString>,
+        naming: Naming,
+        family: Family,
+        limit: NameLimit,
+    ) -> Arc<Self> {
         Arc::new(Self {
             requested,
             keys: OnceLock::new(),
             numbered: Mutex::default(),
             made: (naming == Naming::Claim).then(Mutex::default),
             stable_inodes: stable_inodes(family),
+            limit,
         })
     }
 
@@ -304,7 +311,7 @@ impl Names {
                 .map(|name| stage::collision_key(name))
                 .collect()
         });
-        for candidate in numbered_names(name, is_directory) {
+        for candidate in numbered_names(name, is_directory, self.limit) {
             let key = stage::collision_key(&candidate);
             if requested.contains(&key) || !lock(&self.numbered).insert(key) {
                 continue;
@@ -382,12 +389,13 @@ impl Folder {
         let children = target_children(fs, source.as_fd(), copy.fat_family)?;
         let naming = self.naming.decide(fs, self.mount.family, target.as_fd());
         let requested = children.iter().map(|(_, _, name)| name.clone()).collect();
+        let limit = self.mount.name_limit(target.as_fd());
         let made = Made {
             naming,
             dir: Arc::new(target),
             stat: target_stat,
             path: self.path,
-            names: Names::new(requested, naming, self.mount.family),
+            names: Names::new(requested, naming, self.mount.family, limit),
             mount: self.mount,
             scope: self.scope,
             recorded: self
@@ -1097,8 +1105,9 @@ impl Merged {
         // A stage made in the live folder inherits its casefolding.
         let naming = Naming::Decide.decide(fs, mount.family, target.as_fd());
         let requested = children.iter().map(|(_, _, name)| name.clone()).collect();
+        let limit = mount.name_limit(target.as_fd());
         let live = Live {
-            names: Names::new(requested, naming, mount.family),
+            names: Names::new(requested, naming, mount.family, limit),
             naming,
             source: Arc::new(source),
             dir: Arc::new(target),

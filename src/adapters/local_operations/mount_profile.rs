@@ -9,15 +9,21 @@ mod tests;
 use std::{
     collections::HashMap,
     ffi::OsStr,
-    os::fd::BorrowedFd,
+    os::fd::{AsFd, BorrowedFd},
     path::{Component, Path},
     sync::{Arc, Mutex, MutexGuard},
 };
 
-use super::fs_ops::{FsOps, opened_path};
+use gtk::{gio, prelude::*};
+
+use super::{
+    fs_ops::{FsOps, fs, opened_path},
+    open_local_parent_directory,
+};
 use crate::adapters::volume::{
-    Family, FuseFormat, MountCapabilities, MountKey, MountNames, MountType, NameProfile, family,
-    gvfs_profile, holds_symlinks, learn_mount_capability, max_file_size, mount_capabilities,
+    Family, FuseFormat, MountCapabilities, MountKey, MountNames, MountType, NameLimit, NameProfile,
+    family, gvfs_profile, holds_symlinks, learn_mount_capability, max_file_size,
+    mount_capabilities,
 };
 
 /// The mount holding `dir`, with what its type tells learned on first sight.
@@ -117,13 +123,8 @@ impl Profiles {
             let capabilities = known(fs, dir, key);
             *self.seen().entry(key).or_insert(capabilities)
         });
-        let names = match seen.names {
-            Some(MountNames::Profile(names)) => names,
-            Some(MountNames::PerBackend { depth }) => Self::backend(dir, depth),
-            None => NameProfile::unknown(0),
-        };
         MountProfile {
-            names,
+            names: names_in(seen.names, dir),
             symlinks: seen.symlinks,
             max_file_size: seen.max_file_size,
         }
@@ -132,16 +133,45 @@ impl Profiles {
     fn seen(&self) -> MutexGuard<'_, HashMap<MountKey, MountCapabilities>> {
         self.0.lock().unwrap_or_else(|error| error.into_inner())
     }
+}
 
-    /// The bridge names a backend's folder `<scheme>:<details>`, such as
-    /// `mtp:host=…` or `smb-share:server=…,share=…`.
-    fn backend(dir: BorrowedFd<'_>, depth: u16) -> NameProfile {
-        let path = opened_path(dir).unwrap_or_default();
-        let scheme = folders(&path).nth(usize::from(depth)).and_then(|folder| {
-            let folder = folder.as_encoded_bytes();
-            let colon = folder.iter().position(|byte| *byte == b':')?;
-            std::str::from_utf8(&folder[..colon]).ok()
-        });
-        gvfs_profile(scheme.unwrap_or_default())
+/// The name rules inside `dir`, on a mount whose rules are `names`.
+pub(super) fn names_in(names: Option<MountNames>, dir: BorrowedFd<'_>) -> NameProfile {
+    match names {
+        Some(MountNames::Profile(names)) => names,
+        Some(MountNames::PerBackend { depth }) => backend(dir, depth),
+        None => NameProfile::unknown(0),
     }
+}
+
+/// The bridge names a backend's folder `<scheme>:<details>`, such as
+/// `mtp:host=…` or `smb-share:server=…,share=…`.
+fn backend(dir: BorrowedFd<'_>, depth: u16) -> NameProfile {
+    let path = opened_path(dir).unwrap_or_default();
+    let scheme = folders(&path).nth(usize::from(depth)).and_then(|folder| {
+        let folder = folder.as_encoded_bytes();
+        let colon = folder.iter().position(|byte| *byte == b':')?;
+        std::str::from_utf8(&folder[..colon]).ok()
+    });
+    gvfs_profile(scheme.unwrap_or_default())
+}
+
+/// How long a name may be in `dir`, for numbering a name taken there.
+pub(super) fn name_limit(fs: &dyn FsOps, dir: BorrowedFd<'_>) -> NameLimit {
+    names_in(known_mount(fs, dir).1.names, dir).limit
+}
+
+/// [`name_limit`] of `folder`, read off the main thread where it is native,
+/// and from its scheme elsewhere.
+pub(super) async fn folder_name_limit(folder: &gio::File) -> NameLimit {
+    let Some(path) = folder.path().filter(|_| folder.is_native()) else {
+        return gvfs_profile(folder.uri_scheme().as_deref().unwrap_or_default()).limit;
+    };
+    gio::spawn_blocking(move || {
+        open_local_parent_directory(&path).map(|dir| name_limit(fs(), dir.as_fd()))
+    })
+    .await
+    .ok()
+    .and_then(Result::ok)
+    .unwrap_or_default()
 }

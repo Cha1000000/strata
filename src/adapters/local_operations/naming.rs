@@ -8,6 +8,7 @@ use std::{
 };
 
 use super::placement;
+use crate::adapters::volume::{NameEncoding, NameLimit, NameProfile, Reserved};
 
 #[cfg_attr(
     not(test),
@@ -36,41 +37,45 @@ pub(super) fn parse_copy_suffix(stem: &OsStr) -> (&OsStr, Option<u64>) {
     (stem, None)
 }
 
-pub(super) fn duplicate_candidate_name(
-    base_stem: &OsStr,
-    extension: Option<&OsStr>,
-    copy_number: u64,
-) -> OsString {
-    let mut candidate = base_stem.as_bytes().to_vec();
-    candidate.extend_from_slice(b" (");
-    candidate.extend_from_slice(copy_number.to_string().as_bytes());
-    candidate.push(b')');
-    if let Some(extension) = extension {
-        candidate.push(b'.');
-        candidate.extend_from_slice(extension.as_bytes());
-    }
-    OsString::from_vec(candidate)
-}
-
 /// Keep Both's names: "name (1)", or one past the number it has, with a
-/// file's extension kept, wrapping past the largest number.
+/// file's last extension kept, wrapping past the largest number, and each
+/// cut to fit `limit`.
 pub(super) fn numbered_names(
     name: &OsStr,
     is_directory: bool,
+    limit: NameLimit,
 ) -> impl Iterator<Item = OsString> + '_ {
-    let (stem, extension) = if is_directory {
-        (name, None)
-    } else {
-        let path = Path::new(name);
-        let extension = path.extension().filter(|extension| !extension.is_empty());
-        (path.file_stem().unwrap_or(name), extension)
+    let path = Path::new(name);
+    let stem = match path.extension() {
+        Some(extension) if !is_directory && !extension.is_empty() => {
+            path.file_stem().unwrap_or(name)
+        }
+        _ => name,
     };
+    let extension = OsStr::from_bytes(&name.as_bytes()[stem.len()..]);
     let (base_stem, copy_num) = parse_copy_suffix(stem);
     let start = copy_num.map_or(1, |number| number + 1);
     (start..=u64::MAX)
         .chain(1..start)
         .take(placement::NUMBERED_NAME_ATTEMPTS as usize)
-        .map(move |index| duplicate_candidate_name(base_stem, extension, index))
+        .map(move |index| numbered_name(base_stem, index, extension, limit, is_directory))
+}
+
+/// `stem (number)` and `extension`, cut to fit `limit`.
+pub(super) fn numbered_name(
+    stem: &OsStr,
+    number: u64,
+    extension: &OsStr,
+    limit: NameLimit,
+    is_directory: bool,
+) -> OsString {
+    fix::fit(
+        stem,
+        &format!(" ({number})"),
+        extension,
+        limit,
+        is_directory,
+    )
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -80,14 +85,16 @@ pub(super) enum Taken {
 }
 
 impl Taken {
+    /// `limit` is read only to number names.
     pub(super) fn names(
         self,
         name: &OsStr,
         is_directory: bool,
+        limit: impl FnOnce() -> NameLimit,
     ) -> impl Iterator<Item = OsString> + '_ {
         let (plain, numbered) = match self {
             Self::Fail => (Some(name.to_os_string()), None),
-            Self::Number => (None, Some(numbered_names(name, is_directory))),
+            Self::Number => (None, Some(numbered_names(name, is_directory, limit()))),
         };
         plain.into_iter().chain(numbered.into_iter().flatten())
     }
@@ -131,7 +138,10 @@ pub(super) fn unique_fat_sibling_name(
     if used.insert(fat_name_key(&candidate)) {
         return candidate;
     }
-    let numbered = numbered_names(&candidate, false).find(|name| used.insert(fat_name_key(name)));
+    // vfat, msdos and exFAT all take the Windows formats' length in UTF-16 units.
+    let limit = NameProfile::windows(Reserved::Bare, NameEncoding::Utf8).limit;
+    let numbered =
+        numbered_names(&candidate, false, limit).find(|name| used.insert(fat_name_key(name)));
     numbered.unwrap_or(candidate)
 }
 

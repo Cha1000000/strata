@@ -113,6 +113,21 @@ fn unique_creation_uses_the_first_available_name() {
 }
 
 #[test]
+fn unique_creation_numbers_a_long_name_within_the_limit() {
+    for directory in [false, true] {
+        let fixture = tempfile::tempdir().expect("fixture");
+        let name = "n".repeat(253);
+        fs::write(fixture.path().join(&name), b"keep").expect("existing file");
+        let numbered = fixture.path().join(format!("{} (1)", "n".repeat(251)));
+        assert!(
+            matches!(create(fixture.path(), &name, true, 1, directory).as_slice(), [OperationEvent::EntryCreated { location, .. }] if location == &Location::local(&numbered)),
+            "directory: {directory}"
+        );
+        assert_eq!(numbered.is_dir(), directory);
+    }
+}
+
+#[test]
 fn exact_creation_reports_conflicts_and_unique_creation_rejects_invalid_names() {
     for directory in [false, true] {
         let fixture = tempfile::tempdir().expect("fixture");

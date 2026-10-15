@@ -8,8 +8,10 @@ mod tests;
 use super::super::{
     DisplacedOriginal, LocalFileIdentity, cannot_replace_safely, copy_engine,
     fs_ops::{Entry, EntryStat, OffMain, fs},
-    local_directory_children, open_local_child_directory, open_local_parent_directory,
-    original_kept_aside,
+    local_directory_children,
+    mount_profile::name_limit,
+    naming::{fix::split_extension, numbered_name},
+    open_local_child_directory, open_local_parent_directory, original_kept_aside,
     owed::{Deletion, Owed},
     placement::{
         COMPRESSION_STAGE_PREFIX, Displacement, NUMBERED_NAME_ATTEMPTS, PlaceError,
@@ -400,6 +402,7 @@ impl Publication {
 
     fn publish_numbered(&self, stage: &Stage) -> Result<Published, ArchiveError> {
         let mut candidate = self.name.clone();
+        let mut limit = None;
         for suffix in 1..NUMBERED_NAME_ATTEMPTS {
             match stage.place(OsStr::new(&candidate)) {
                 Ok(()) => {
@@ -409,15 +412,18 @@ impl Publication {
                     });
                 }
                 Err(PlaceError::Exists) => {
-                    let (stem, extension) = self
-                        .name
-                        .strip_suffix(".tar.gz")
-                        .map(|stem| (stem, "tar.gz"))
-                        .or_else(|| self.name.rsplit_once('.'))
-                        .ok_or_else(|| {
-                            crate::i18n::tr("Archive filename must have a format extension")
-                        })?;
-                    candidate = format!("{stem} ({suffix}).{extension}");
+                    let (stem, extension) = split_extension(OsStr::new(&self.name), false);
+                    if extension.is_empty() {
+                        return Err(crate::i18n::tr(
+                            "Archive filename must have a format extension",
+                        )
+                        .into());
+                    }
+                    let limit =
+                        *limit.get_or_insert_with(|| name_limit(fs(), stage.parent.as_fd()));
+                    candidate = numbered_name(stem, suffix, extension, limit, false)
+                        .to_string_lossy()
+                        .into_owned();
                 }
                 Err(error) => return Err(self.creation_failed(placement_reason(error))),
             }

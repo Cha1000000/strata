@@ -127,7 +127,7 @@ use super::{
     join_local_tasks, local_file_identity, merge_local, merge_local_with, move_local,
     move_local_with,
     naming::{
-        Taken, duplicate_candidate_name, fat_sanitized_name, parse_copy_suffix,
+        Taken, fat_sanitized_name, numbered_name, numbered_names, parse_copy_suffix,
         unique_fat_sibling_name,
     },
     open_local_parent_directory, operation_error_summary, parallel_delete_local,

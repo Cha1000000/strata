@@ -278,6 +278,70 @@ fn keeping_both_while_moving_renames_the_destination_instead_of_replacing_it()
 }
 
 #[test]
+fn keeping_both_numbers_a_long_name_within_the_limit_of_its_mount() -> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let repeat = |text: &str, count| text.repeat(count);
+    let rows = [
+        (
+            format!("{}.txt", repeat("a", 251)),
+            false,
+            format!("{} (1).txt", repeat("a", 247)),
+        ),
+        (repeat("d", 254), true, format!("{} (1)", repeat("d", 251))),
+        (
+            format!("{}.tar.gz", repeat("a", 247)),
+            false,
+            format!("{}.tar (1).gz", repeat("a", 244)),
+        ),
+    ];
+    // The host's filesystem counts bytes, and vfat UTF-16 units.
+    let mounts: [(&str, Option<Preset>); 2] = [("host", None), ("vfat", Some(Quirks::vfat))];
+    for (mount, preset) in mounts {
+        for moving in [false, true] {
+            for (name, folder, numbered) in &rows {
+                let context = format!("{mount}, moving: {moving}, {name}");
+                let root = tempfile::tempdir()?;
+                let _quirks = preset.map(|preset| FsQuirks::install(root.path(), preset()));
+                let sources = root.path().join("sources");
+                let source = sources.join(name);
+                let destination = root.path().join("destination");
+                fs::create_dir(&sources)?;
+                fs::create_dir(&destination)?;
+                let incoming = if *folder {
+                    fs::create_dir(&source)?;
+                    fs::create_dir(destination.join(name))?;
+                    fs::write(source.join("inside.txt"), b"incoming")?;
+                    destination.join(numbered).join("inside.txt")
+                } else {
+                    fs::write(&source, b"incoming")?;
+                    fs::write(destination.join(name), b"existing")?;
+                    destination.join(numbered)
+                };
+
+                run_paste(PasteRequest {
+                    id: OperationRequestId(78),
+                    destination: Location::local(&destination),
+                    items: vec![PasteItem {
+                        source: Location::local(&source),
+                        conflict: TransferConflict::KeepBoth,
+                    }],
+                    move_sources: moving,
+                });
+
+                let mut expected = vec![name.clone(), numbered.clone()];
+                expected.sort();
+                assert_eq!(names(&destination)?, expected, "{context}");
+                assert_eq!(fs::read(incoming)?, b"incoming", "{context}");
+                assert_eq!(source.exists(), !moving, "{context}");
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn mixed_conflict_choices_apply_independently_across_a_multi_item_paste()
 -> Result<(), Box<dyn Error>> {
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT

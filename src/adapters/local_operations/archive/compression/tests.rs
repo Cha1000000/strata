@@ -225,6 +225,44 @@ fn keep_both_retries_publication_collisions_without_encoding_again() -> Result<(
     Ok(())
 }
 
+#[test]
+fn keep_both_numbers_a_long_archive_name_within_the_limit() -> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let root = tempfile::tempdir()?;
+    for (name, numbered) in [
+        (
+            format!("{}.zip", "c".repeat(251)),
+            format!("{} (1).zip", "c".repeat(247)),
+        ),
+        (
+            format!("{}.tar.gz", "c".repeat(248)),
+            format!("{} (1).tar.gz", "c".repeat(244)),
+        ),
+    ] {
+        let archive = root.path().join(&name);
+        fs::write(&archive, b"existing")?;
+
+        let (published, _, _) = glib::MainContext::default().block_on(write_staged_archive(
+            root.path(),
+            &archive,
+            TransferConflict::KeepBoth,
+            never_cancelled(),
+            |mut file| {
+                file.write_all(b"new archive")
+                    .map_err(|error| error.to_string())?;
+                Ok(())
+            },
+        ))?;
+
+        assert_eq!(published, numbered);
+        assert_eq!(fs::read(root.path().join(&numbered))?, b"new archive");
+        assert_eq!(fs::read(&archive)?, b"existing");
+    }
+    Ok(())
+}
+
 const NFS_SUPER_MAGIC: rustix::fs::FsWord = 0x6969;
 const TMPFS_MAGIC: rustix::fs::FsWord = 0x0102_1994;
 const FUSE_SUPER_MAGIC: rustix::fs::FsWord = 0x6573_5546;

@@ -7,7 +7,7 @@ use std::{
     ffi::{OsStr, OsString},
     os::{
         fd::{AsFd, BorrowedFd, OwnedFd},
-        unix::ffi::{OsStrExt, OsStringExt},
+        unix::ffi::OsStrExt,
     },
     path::{Component, Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
@@ -15,6 +15,8 @@ use std::{
 
 use super::super::{
     fs_ops::{Entry, fs},
+    mount_profile::name_limit,
+    naming::numbered_name,
     placement::{
         EXTRACTION_STAGE_PREFIX, NUMBERED_NAME_ATTEMPTS, PlaceError, creation_error, place,
         reserve_hidden_name,
@@ -22,7 +24,7 @@ use super::super::{
     placement_reason,
 };
 use super::extraction::MemberMetadata;
-use crate::services::error_detail;
+use crate::{adapters::volume::NameLimit, services::error_detail};
 
 /// Reading procfs avoids a process-global umask(2) race in the multithreaded GUI.
 pub(super) fn process_umask() -> u32 {
@@ -170,17 +172,14 @@ fn no_available_name(name: &OsStr) -> String {
 
 /// Appends ` ({index})` to a directory name, or inserts it before a file's
 /// extension: `pkg-1.2.3 (2)`, `readme (2).txt`.
-fn suffixed_name(name: &OsStr, index: u64, is_directory: bool) -> OsString {
+fn suffixed_name(name: &OsStr, index: u64, is_directory: bool, limit: NameLimit) -> OsString {
     let path = Path::new(name);
-    let extension = path.extension().filter(|_| !is_directory);
-    let stem = extension.map_or(name, |_| path.file_stem().unwrap_or(name));
-    let mut candidate = stem.as_bytes().to_vec();
-    candidate.extend_from_slice(format!(" ({index})").as_bytes());
-    if let Some(extension) = extension {
-        candidate.push(b'.');
-        candidate.extend_from_slice(extension.as_bytes());
-    }
-    OsString::from_vec(candidate)
+    let stem = match path.extension() {
+        Some(_) if !is_directory => path.file_stem().unwrap_or(name),
+        _ => name,
+    };
+    let extension = OsStr::from_bytes(&name.as_bytes()[stem.len()..]);
+    numbered_name(stem, index, extension, limit, is_directory)
 }
 
 pub(super) fn archive_stem(archive_name: &str) -> &str {
@@ -325,11 +324,15 @@ impl ExtractionDestination {
                 rust_i18n::t!("Invalid extraction folder name “%{name}”", name = stem).into_owned(),
             );
         }
+        let mut limit = None;
         for suffix in 0..NUMBERED_NAME_ATTEMPTS {
             let name = if suffix == 0 {
                 stem.to_owned()
             } else {
-                format!("{stem} ({suffix})")
+                let limit = *limit.get_or_insert_with(|| self.name_limit());
+                numbered_name(OsStr::new(stem), suffix, OsStr::new(""), limit, true)
+                    .to_string_lossy()
+                    .into_owned()
             };
             match place_without_replacing(&self.root, staging, &self.root, OsStr::new(&name)) {
                 Ok(()) => return Ok(name),
@@ -357,11 +360,13 @@ impl ExtractionDestination {
             .map_err(errno_text)?;
         let is_directory =
             rustix::fs::FileType::from_raw_mode(stat.st_mode) == rustix::fs::FileType::Directory;
+        let mut limit = None;
         for index in 1..=NUMBERED_NAME_ATTEMPTS {
             let candidate = if index == 1 {
                 leaf.to_owned()
             } else {
-                suffixed_name(leaf, index, is_directory)
+                let limit = *limit.get_or_insert_with(|| self.name_limit());
+                suffixed_name(leaf, index, is_directory, limit)
             };
             match place_without_replacing(&staging.root, root.as_os_str(), &self.root, &candidate) {
                 Ok(()) => return Ok(candidate),
@@ -403,12 +408,19 @@ impl ExtractionDestination {
         Ok(Some(stat.f_bavail.saturating_mul(block)))
     }
 
+    /// How long a name may be on the destination, read only to number one.
+    fn name_limit(&self) -> NameLimit {
+        name_limit(fs(), self.root.as_fd())
+    }
+
     fn available_name<Fd: AsFd>(&self, directory: &Fd, name: &OsStr) -> Result<OsString, String> {
+        let mut limit = None;
         for index in 1..=NUMBERED_NAME_ATTEMPTS {
             let candidate = if index == 1 {
                 name.to_owned()
             } else {
-                suffixed_name(name, index, false)
+                let limit = *limit.get_or_insert_with(|| self.name_limit());
+                suffixed_name(name, index, false, limit)
             };
             match rustix::fs::statat(directory, &candidate, rustix::fs::AtFlags::SYMLINK_NOFOLLOW) {
                 Err(rustix::io::Errno::NOENT) => return Ok(candidate),

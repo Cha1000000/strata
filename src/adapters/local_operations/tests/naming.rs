@@ -8,7 +8,9 @@ use super::super::{
     naming::fix::{Cause, fix_name},
 };
 use super::*;
-use crate::adapters::volume::{NameEncoding, NameProfile, PrivateUse, Reserved, gvfs_profile};
+use crate::adapters::volume::{
+    NameEncoding, NameLimit, NameProfile, PrivateUse, Reserved, gvfs_profile,
+};
 
 #[test]
 fn copy_suffix_parsing_and_candidate_naming() {
@@ -37,19 +39,114 @@ fn copy_suffix_parsing_and_candidate_naming() {
     }
 
     for (stem, extension, number, expected) in [
-        ("name", Some("ext"), 1u64, "name (1).ext"),
-        ("name", Some("ext"), 2, "name (2).ext"),
-        ("name", None, 1, "name (1)"),
-        ("name", None, 2, "name (2)"),
-        (".gitignore", None, 1, ".gitignore (1)"),
-        (".config", None, 2, ".config (2)"),
-        ("archive", Some("tar.gz"), 1, "archive (1).tar.gz"),
-        ("archive", Some("tar.gz"), 3, "archive (3).tar.gz"),
-        ("backup.tar", Some("gz"), 1, "backup.tar (1).gz"),
+        ("name", ".ext", 1u64, "name (1).ext"),
+        ("name", ".ext", 2, "name (2).ext"),
+        ("name", "", 1, "name (1)"),
+        ("name", "", 2, "name (2)"),
+        (".gitignore", "", 1, ".gitignore (1)"),
+        (".config", "", 2, ".config (2)"),
+        ("archive", ".tar.gz", 1, "archive (1).tar.gz"),
+        ("archive", ".tar.gz", 3, "archive (3).tar.gz"),
+        ("backup.tar", ".gz", 1, "backup.tar (1).gz"),
     ] {
         assert_eq!(
-            duplicate_candidate_name(OsStr::new(stem), extension.map(OsStr::new), number),
+            numbered_name(
+                OsStr::new(stem),
+                number,
+                OsStr::new(extension),
+                NameLimit::default(),
+                false
+            ),
             OsString::from(expected)
+        );
+    }
+}
+
+#[test]
+fn numbered_names_are_cut_to_the_limit_of_their_mount() {
+    let bytes = NameProfile::posix(Some(255)).limit;
+    let units = NameProfile::windows(Reserved::Bare, NameEncoding::Utf8).limit;
+    let smb = NameProfile::smb(Some(255)).limit;
+    let repeat = |text: &str, count| text.repeat(count);
+    let (cjk, emoji, flag) = ("\u{4e2d}", "\u{1f600}", "\u{1f1eb}\u{1f1f7}");
+    for (name, folder, limit, expected) in [
+        (
+            format!("{}.txt", repeat("a", 251)),
+            false,
+            bytes,
+            format!("{} (1).txt", repeat("a", 247)),
+        ),
+        (
+            format!("{} (1).txt", repeat("a", 247)),
+            false,
+            bytes,
+            format!("{} (2).txt", repeat("a", 247)),
+        ),
+        (
+            format!("{}.tar.gz", repeat("a", 247)),
+            false,
+            bytes,
+            format!("{}.tar (1).gz", repeat("a", 244)),
+        ),
+        (
+            format!("{}.v2", repeat("d", 250)),
+            false,
+            bytes,
+            format!("{} (1).v2", repeat("d", 248)),
+        ),
+        (
+            format!("{}.v2", repeat("d", 250)),
+            true,
+            bytes,
+            format!("{}. (1)", repeat("d", 250)),
+        ),
+        (
+            format!("x.{}", repeat("a", 250)),
+            false,
+            bytes,
+            format!("x.{} (1)", repeat("a", 249)),
+        ),
+        (
+            repeat(cjk, 85),
+            false,
+            bytes,
+            format!("{} (1)", repeat(cjk, 83)),
+        ),
+        (
+            repeat(cjk, 85),
+            false,
+            units,
+            format!("{} (1)", repeat(cjk, 85)),
+        ),
+        (
+            repeat(emoji, 126),
+            false,
+            units,
+            format!("{} (1)", repeat(emoji, 125)),
+        ),
+        (
+            format!("abcd{}", repeat(flag, 31)),
+            false,
+            bytes,
+            format!("abcd{} (1)", repeat(flag, 30)),
+        ),
+        (
+            repeat("a", 212),
+            true,
+            smb,
+            format!("{} (1)", repeat("a", 209)),
+        ),
+        (
+            repeat("a", 212),
+            false,
+            smb,
+            format!("{} (1)", repeat("a", 212)),
+        ),
+    ] {
+        assert_eq!(
+            numbered_names(OsStr::new(&name), folder, limit).next(),
+            Some(OsString::from(&expected)),
+            "{name:?} {limit:?}"
         );
     }
 }

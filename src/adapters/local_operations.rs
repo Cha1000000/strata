@@ -1380,7 +1380,8 @@ async fn first_free_target<T, F: Future<Output = Result<T, glib::Error>>>(
             .map(|value| (target.clone(), value));
     }
     if let (Some(parent), Some(name)) = (target.parent(), target.basename()) {
-        for name in numbered_names(name.as_os_str(), is_directory) {
+        let limit = mount_profile::folder_name_limit(&parent).await;
+        for name in numbered_names(name.as_os_str(), is_directory, limit) {
             cancellable.set_error_if_cancelled()?;
             let candidate = parent.child(&name);
             if query_exists(&candidate, cancellable).await {
@@ -2342,7 +2343,8 @@ fn move_local_path(
                     Err(error) => return Ok(Err(PlaceError::Io(error))),
                 },
             };
-            for name in taken.names(&target_name, is_directory) {
+            let limit = || mount_profile::name_limit(fs(), target_parent.as_fd());
+            for name in taken.names(&target_name, is_directory, limit) {
                 let to = Entry::new(&target_parent, &name);
                 let placed = placement::place(fs(), from, to, None);
                 if taken == Taken::Number && matches!(placed, Err(PlaceError::Exists)) {

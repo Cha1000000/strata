@@ -110,6 +110,58 @@ fn case_aliases_inside_a_copied_folder_are_numbered_and_reported() -> Result<(),
 }
 
 #[test]
+fn aliases_of_long_names_are_numbered_within_the_limit() -> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock()?;
+    let names_never_collide = || Quirks {
+        case_insensitive: true,
+        ..Quirks::ext4()
+    };
+    let claimed = || Quirks {
+        mount_type: Some(("fuse.ciopfs", "rw")),
+        case_insensitive: true,
+        ..Quirks::default()
+    };
+    let (upper, lower) = (
+        format!("A{}.txt", "a".repeat(250)),
+        format!("{}.txt", "a".repeat(251)),
+    );
+    let rows: [(&str, Preset, &str, String); 2] = [
+        (
+            "claimed",
+            claimed,
+            &lower,
+            format!("{} (1).txt", "a".repeat(247)),
+        ),
+        (
+            "made",
+            names_never_collide,
+            &upper,
+            format!("A{} (1).txt", "a".repeat(246)),
+        ),
+    ];
+    for (row, preset, aliased, saved_as) in rows {
+        let root = tempfile::tempdir()?;
+        let source = root.path().join("source");
+        let destination = root.path().join("destination");
+        fs::create_dir(&source)?;
+        fs::create_dir(&destination)?;
+        fs::write(source.join(&upper), "upper")?;
+        fs::write(source.join(&lower), "lower")?;
+        let _destination = FsQuirks::install(&destination, preset());
+        let target = destination.join("copy");
+
+        let renamed = copy_renaming(&source, &target, Some(1))?;
+
+        assert_eq!(renamed, [(aliased.to_owned(), saved_as.clone())], "{row}");
+        let kept = if aliased == upper { &lower } else { &upper };
+        let mut expected = vec![kept.clone(), saved_as.clone()];
+        expected.sort();
+        assert_eq!(names(&target)?, expected, "{row}");
+    }
+    Ok(())
+}
+
+#[test]
 fn a_linked_name_that_aliases_another_is_numbered_and_reported() -> Result<(), Box<dyn Error>> {
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock()?;
     let root = tempfile::tempdir()?;

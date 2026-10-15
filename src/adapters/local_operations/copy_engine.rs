@@ -40,7 +40,7 @@ use super::{
     copy_failure_after_cleanup,
     fs_ops::{Entry, EntryStat, FsOps, fs},
     io_error, local_delete_worker_count, local_device_is_rotational,
-    mount_profile::known_mount,
+    mount_profile::{known_mount, name_limit, names_in},
     naming::Taken,
     open_local_parent_directory, os_error_detail, os_error_text,
     parallel_delete_local_blocking_with_workers, placement,
@@ -49,8 +49,8 @@ use super::{
 };
 use crate::{
     adapters::volume::{
-        CoarseTimes, Family, FuseFormat, MountCapabilities, MountKey, learn_mount_capability,
-        mount_capabilities,
+        CoarseTimes, Family, FuseFormat, MountCapabilities, MountKey, MountNames, NameLimit,
+        learn_mount_capability, mount_capabilities,
     },
     model::Location,
     services::{
@@ -769,7 +769,8 @@ fn copy_new(
         FileType::Symlink => {
             copy.check_cancelled()?;
             let mount = Mount::new(copy.fs, parent.as_fd());
-            let (name, link) = first_free(taken.names(name, false), taken, |name| {
+            let limit = || mount.name_limit(parent.as_fd());
+            let (name, link) = first_free(taken.names(name, false, limit), taken, |name| {
                 tree::copy_link(
                     copy,
                     source.entry(),
@@ -786,7 +787,8 @@ fn copy_new(
         FileType::Directory => {
             let workers = workers.unwrap_or_else(|| worker_count(source, parent));
             if in_place || placement::can_place(copy.fs, parent.as_fd(), true) == Some(false) {
-                return first_free(taken.names(name, true), taken, |name| {
+                let limit = || name_limit(copy.fs, parent.as_fd());
+                return first_free(taken.names(name, true, limit), taken, |name| {
                     direct_folder(copy, source, stat.identity, parent, name, workers)
                 })
                 .map(|(name, ())| name);
@@ -798,7 +800,8 @@ fn copy_new(
             copy.check_cancelled()?;
             let mount = Mount::new(copy.fs, parent.as_fd());
             let parent_stat = copy.fs.stat_fd(parent.as_fd())?;
-            let (name, pipe) = first_free(taken.names(name, false), taken, |name| {
+            let limit = || mount.name_limit(parent.as_fd());
+            let (name, pipe) = first_free(taken.names(name, false, limit), taken, |name| {
                 let target = Entry::new(&**parent, name);
                 match tree::copy_fifo(copy, source.entry(), target, &parent_stat, &mount, None)? {
                     (pipe, Some(_)) => Ok(pipe),
@@ -909,7 +912,7 @@ fn publish_folder(
     if let Err(failure) = copy.check_cancelled() {
         return Err(copy.discarding(staged, failure));
     }
-    let mut names = taken.names(name, true);
+    let mut names = taken.names(name, true, || name_limit(copy.fs, staged.parent.as_fd()));
     while let Some(name) = names.next() {
         let placed = stage::publish(
             copy.fs,
@@ -1311,6 +1314,7 @@ struct Mount {
     fuse_format: Option<FuseFormat>,
     coarse_times: Option<CoarseTimes>,
     deferred_close: Option<Duration>,
+    names: Option<MountNames>,
 }
 
 impl Mount {
@@ -1322,7 +1326,12 @@ impl Mount {
             fuse_format: capabilities.fuse_format,
             coarse_times: capabilities.coarse_times,
             deferred_close: capabilities.deferred_close,
+            names: capabilities.names,
         }
+    }
+
+    fn name_limit(&self, dir: BorrowedFd<'_>) -> NameLimit {
+        names_in(self.names, dir).limit
     }
 
     fn keeps_inode_numbers(fs: &dyn FsOps, dir: BorrowedFd<'_>) -> bool {
@@ -2029,7 +2038,7 @@ impl<'a> FileCopy<'a> {
         let fs = self.copy.fs;
         match target {
             FileTarget::Final(name, taken) => {
-                for name in taken.names(name, false) {
+                for name in taken.names(name, false, || self.target.name_limit(self.dir)) {
                     match link_tmpfile(fs, tmpfile, self.at(&name)) {
                         Err(error)
                             if taken == Taken::Number
@@ -2188,7 +2197,7 @@ impl<'a> FileCopy<'a> {
             self.copy.add_file(0);
             return Ok((stage.name, stage.created.identity));
         };
-        let mut names = taken.names(name, false);
+        let mut names = taken.names(name, false, || self.target.name_limit(self.dir));
         let published = loop {
             let Some(name) = names.next() else {
                 return Err(self.discard(&stage, Failure::Place(PlaceError::Exists)));
