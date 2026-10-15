@@ -281,3 +281,60 @@ fn a_gvfs_location_is_numbered_within_the_limit_of_its_scheme() {
         );
     }
 }
+
+#[test]
+fn what_an_operation_learns_after_its_mount_changed_stays_with_the_operation()
+-> Result<(), Box<dyn Error>> {
+    use crate::adapters::volume::{MountCapabilities, StrictRule};
+    let root = tempfile::tempdir()?;
+    let bridge = root.path().join("bridge");
+    let server = bridge.join("sftp:host=example.org");
+    let disk = root.path().join("disk");
+    for folder in [&server, &disk] {
+        fs::create_dir_all(folder)?;
+    }
+    let _bridge = FsQuirks::install(
+        &bridge,
+        Quirks {
+            mount_type: Some(("fuse.gvfsd-fuse", "rw,user_id=1000,group_id=1000")),
+            ..Quirks::default()
+        },
+    );
+    let _disk = FsQuirks::install(&disk, Quirks::sshfs());
+    let characters = Strictness::of([StrictRule::Characters]);
+    for folder in [&disk, &server] {
+        let operation = Profiles::default();
+        let opened = open_local_parent_directory(folder)?;
+        let (key, seen) = operation.mount(fs(), opened.as_fd());
+        let site = operation.site(key, seen.names, opened.as_fd());
+        // As a mount change drops what was learned of the mount.
+        learn_mount_capability(key, |capabilities| {
+            *capabilities = MountCapabilities::default();
+        });
+
+        operation.learn(&site, characters);
+        operation.refuse_links(&site);
+
+        assert_eq!(operation.taught(&site).strictness, characters, "{folder:?}");
+        assert!(!operation.holds_links(&site), "{folder:?}");
+        let learned = mount_capabilities(site.key());
+        assert_eq!(learned.strictness, Strictness::default(), "{folder:?}");
+        assert_eq!(learned.symlinks, None, "{folder:?}");
+    }
+    Ok(())
+}
+
+#[test]
+fn items_on_the_gvfs_filesystem_of_a_destination_keep_their_names() {
+    use gtk::glib::GString;
+    let share = || Some(GString::from("smb-share:server=nas,share=media"));
+    let destination = super::PasteDestination {
+        profile: MountProfile::gvfs("smb"),
+        crossing: vec![None, None, None, Some(true)],
+        filesystem: share(),
+    };
+
+    let fixing = destination.fixing(&[share(), Some(GString::from("mtp:host=x")), None, share()]);
+
+    assert_eq!(fixing, [false, true, true, true]);
+}

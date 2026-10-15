@@ -993,6 +993,7 @@ fn a_selected_named_pipe_is_recreated_where_the_destination_can() -> Result<(), 
     Ok(())
 }
 
+/// A made-up mount that refuses each link with `EPERM`.
 fn links_refused_as_not_permitted() -> Quirks {
     Quirks {
         symlinks: Support::Rejected(Errno::PERM),
@@ -1000,17 +1001,44 @@ fn links_refused_as_not_permitted() -> Quirks {
     }
 }
 
-fn link_targets_refused_as_invalid() -> Quirks {
+/// As ntfs3 refuses a malformed target.
+fn ntfs3_refusing_targets_as_invalid() -> Quirks {
     Quirks {
         symlinks: Support::Rejected(Errno::INVAL),
-        ..Quirks::ext4()
+        ..Quirks::ntfs3()
     }
 }
 
-fn links_refused_for_space() -> Quirks {
+/// As ntfs3 refuses a 4095-byte target.
+fn ntfs3_refusing_targets_as_too_large() -> Quirks {
+    Quirks {
+        symlinks: Support::Rejected(Errno::FBIG),
+        ..Quirks::ntfs3()
+    }
+}
+
+/// As ntfs-3g refuses a malformed target.
+fn ntfs_3g_refusing_targets_as_illegal() -> Quirks {
+    Quirks {
+        symlinks: Support::Rejected(Errno::ILSEQ),
+        ..Quirks::ntfs_3g()
+    }
+}
+
+/// As exfat-fuse is where udev cannot name its device.
+fn exfat_fuse_without_udev() -> Quirks {
+    Quirks {
+        device_format: None,
+        ..Quirks::exfat_fuse()
+    }
+}
+
+/// As a share with POSIX extensions refuses a target past 1003 UTF-16
+/// units, and any disk that is full.
+fn cifs_posix_refusing_links_for_space() -> Quirks {
     Quirks {
         symlinks: Support::Rejected(Errno::NOSPC),
-        ..Quirks::ext4()
+        ..Quirks::cifs_posix()
     }
 }
 
@@ -1058,22 +1086,40 @@ fn links_inside_a_copied_folder_are_left_out_where_the_destination_cannot_hold_t
             left_out: Some(true),
             asked: [1, 0],
         },
+        Links {
+            label: "exfat-fuse udev cannot name",
+            quirks: exfat_fuse_without_udev,
+            left_out: Some(true),
+            asked: [1, 0],
+        },
         // A refusal of one link, or of its target, teaches nothing.
         Links {
-            label: "refusing each link",
+            label: "refusing each link (made up)",
             quirks: links_refused_as_not_permitted,
             left_out: Some(true),
             asked: [2, 2],
         },
         Links {
-            label: "refusing each target",
-            quirks: link_targets_refused_as_invalid,
+            label: "ntfs3, malformed targets",
+            quirks: ntfs3_refusing_targets_as_invalid,
             left_out: Some(true),
             asked: [2, 2],
         },
         Links {
-            label: "full",
-            quirks: links_refused_for_space,
+            label: "ntfs3, targets too long",
+            quirks: ntfs3_refusing_targets_as_too_large,
+            left_out: Some(true),
+            asked: [2, 2],
+        },
+        Links {
+            label: "ntfs-3g, malformed targets",
+            quirks: ntfs_3g_refusing_targets_as_illegal,
+            left_out: Some(true),
+            asked: [2, 2],
+        },
+        Links {
+            label: "cifs with POSIX extensions, full",
+            quirks: cifs_posix_refusing_links_for_space,
             left_out: None,
             asked: [1, 1],
         },
@@ -1172,8 +1218,8 @@ fn selected_links_the_destination_cannot_hold_are_left_out_and_the_paste_goes_on
         asked,
     };
     // vfat has no links, cifs refuses the first one it is asked for, and
-    // the last mount each link's target.
-    let targets = link_targets_refused_as_invalid;
+    // ntfs3 refuses each link's target.
+    let targets = ntfs3_refusing_targets_as_invalid;
     let rows = [
         row("vfat", Quirks::vfat, false, false, 0),
         row("vfat, moved", Quirks::vfat, true, false, 0),
@@ -1181,8 +1227,14 @@ fn selected_links_the_destination_cannot_hold_are_left_out_and_the_paste_goes_on
         row("cifs", Quirks::cifs, false, false, 1),
         row("cifs, moved", Quirks::cifs, true, false, 1),
         row("cifs, replacing", Quirks::cifs, false, true, 1),
-        row("refusing each target", targets, false, false, 2),
-        row("refusing each target, replacing", targets, false, true, 2),
+        row("ntfs3, malformed targets", targets, false, false, 2),
+        row(
+            "ntfs3, malformed targets, replacing",
+            targets,
+            false,
+            true,
+            2,
+        ),
     ];
     for row in rows {
         let label = row.label;
@@ -1798,28 +1850,119 @@ fn a_copy_into_a_case_sensitive_folder_keeps_a_cut_name_apart_by_case_only()
 }
 
 #[test]
-fn a_copy_onto_a_posix_mount_leaves_windows_characters_untouched() -> Result<(), Box<dyn Error>> {
+fn copies_onto_mounts_with_windows_rules_fix_names_and_report_them() -> Result<(), Box<dyn Error>> {
+    use crate::services::RenameCause::{Invalid, TooLong};
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
         .lock()
         .map_err(|error| error.to_string())?;
-    let root = tempfile::tempdir()?;
-    let source = root.path().join("source");
-    let disk = root.path().join("disk");
-    let target = disk.join("target");
-    fs::create_dir_all(&source)?;
-    fs::create_dir(&disk)?;
-    fs::write(source.join("a?b:c.txt"), b"unchanged")?;
-    let _disk = FsQuirks::install(&disk, Quirks::ext4());
+    type CopyTree = fn(
+        gio::File,
+        gio::File,
+        Rc<TransferProgressTracker>,
+    ) -> Pin<Box<dyn Future<Output = Result<(), glib::Error>>>>;
+    let copies: [(&str, CopyTree); 2] = [
+        ("engine", |source, target, progress| {
+            Box::pin(async move {
+                copy_new_recursively_on_filesystem(
+                    source,
+                    target,
+                    Taken::Fail,
+                    gio::Cancellable::new(),
+                    Some(progress),
+                    fixing(),
+                    None,
+                )
+                .await
+                .map(drop)
+            })
+        }),
+        ("GIO", |source, target, progress| {
+            super::super::copy_recursively_with_progress(
+                source,
+                target,
+                super::super::CopyInto::New,
+                gio::Cancellable::new(),
+                super::super::CopyRecord::Nothing,
+                Some(progress),
+                super::super::GioNames::new(fixing(), Default::default()),
+            )
+        }),
+    ];
+    let (folder, cut) = ("d".repeat(220), "d".repeat(213));
+    let rows: [(&str, Preset, &str, bool, &str, _); 7] = [
+        ("ext4", Quirks::ext4, "a?b:c.txt", false, "a?b:c.txt", None),
+        (
+            "exfat-fuse",
+            Quirks::exfat_fuse,
+            "a:b",
+            false,
+            "a_b",
+            Some(Invalid),
+        ),
+        ("ntfs3", Quirks::ntfs3, "CON", false, "CON_", Some(Invalid)),
+        (
+            "ntfs-3g",
+            Quirks::ntfs_3g,
+            "con.txt",
+            false,
+            "con_.txt",
+            Some(Invalid),
+        ),
+        ("cifs", Quirks::cifs, "x:y", false, "x_y", Some(Invalid)),
+        // Samba makes a folder under a longer name first.
+        ("cifs", Quirks::cifs, &folder, true, &cut, Some(TooLong)),
+        (
+            "cifs nocase",
+            Quirks::cifs_nocase,
+            "😀.txt",
+            false,
+            "_.txt",
+            Some(Invalid),
+        ),
+    ];
+    for (copy_label, copy) in copies {
+        for (preset, quirks, name, is_folder, saved, cause) in &rows {
+            let row = format!("{copy_label}, {preset}, {name}");
+            let root = tempfile::tempdir()?;
+            let source = root.path().join("source");
+            let disk = root.path().join("disk");
+            let target = disk.join("target");
+            fs::create_dir_all(&source)?;
+            fs::create_dir(&disk)?;
+            if *is_folder {
+                fs::create_dir(source.join(name))?;
+                fs::write(source.join(name).join("inside"), name)?;
+            } else {
+                fs::write(source.join(name), name)?;
+            }
+            let _disk = FsQuirks::install(&disk, quirks());
+            let (progress, events) = recording_progress();
 
-    let result = glib::MainContext::default().block_on(copy_recursively_fixing(
-        gio::File::for_path(&source),
-        gio::File::for_path(&target),
-        false,
-        gio::Cancellable::new(),
-    ));
+            let result = glib::MainContext::default().block_on(copy(
+                gio::File::for_path(&source),
+                gio::File::for_path(&target),
+                progress,
+            ));
 
-    assert!(result.is_ok(), "{result:?}");
-    assert_eq!(fs::read(target.join("a?b:c.txt"))?, b"unchanged");
+            assert!(result.is_ok(), "{row}: {result:?}");
+            assert_eq!(names(&target)?, [*saved], "{row}");
+            let contents = if *is_folder {
+                target.join(saved).join("inside")
+            } else {
+                target.join(saved)
+            };
+            assert_eq!(fs::read(contents)?, name.as_bytes(), "{row}");
+            let expected = cause
+                .map(|cause| (name.to_string(), saved.to_string(), cause))
+                .into_iter()
+                .collect::<Vec<_>>();
+            assert_eq!(
+                renamed_beneath(&target, &followed_report(&events.borrow())),
+                expected,
+                "{row}"
+            );
+        }
+    }
     Ok(())
 }
 
