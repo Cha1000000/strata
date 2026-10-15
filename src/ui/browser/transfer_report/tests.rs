@@ -86,6 +86,8 @@ fn renamed_items_are_grouped_by_why_they_were_renamed() {
         .filter(|line| !line.starts_with('•'))
         .collect::<Vec<_>>();
     assert_eq!(sections, causes.map(heading));
+    let distinct = sections.iter().collect::<std::collections::HashSet<_>>();
+    assert_eq!(distinct.len(), causes.len(), "{sections:?}");
     for cause in causes {
         let only = TransferReport {
             renamed: report
