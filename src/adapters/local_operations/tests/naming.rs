@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 
-use rustix::fs::Mode;
+use rustix::{fs::Mode, io::Errno};
 
 use super::super::{
     fs_ops::{Entry, fs},
@@ -929,6 +929,265 @@ fn each_mount_gets_a_name_it_stores_as_is_for_every_lab_name() -> Result<(), Box
                 "{backend}: {:?}",
                 row.name
             );
+        }
+    }
+    Ok(())
+}
+
+/// What a lab mount did with a name it was given as is.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Lab {
+    Stored,
+    Listed(&'static str),
+    /// Listed under a Samba 8.3 alias.
+    Mangled,
+    Refused(Errno),
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Kind {
+    File,
+    Folder,
+    Symlink,
+}
+
+/// The lab's cells, in the order of [`LAB_MOUNTS`]: ext4, nfs42, nfs3,
+/// sshfs, vfat, exfat, exfat-fuse, ntfs3, ntfs3 +windows_names, ntfs-3g,
+/// cifs, cifs-nocase, cifs-posix. exfat-fuse stored overlong and surrogate
+/// names and then failed; its preset refuses them with `EUCLEAN`.
+fn lab_cells() -> Vec<(Vec<u8>, Kind, [Lab; 13])> {
+    use Kind::{File, Folder, Symlink};
+    use Lab::{Listed, Mangled, Stored as OK};
+    let (inval, noent, ilseq) = (
+        Lab::Refused(Errno::INVAL),
+        Lab::Refused(Errno::NOENT),
+        Lab::Refused(Errno::ILSEQ),
+    );
+    let windows = [
+        OK, OK, OK, OK, inval, inval, noent, OK, inval, inval, OK, OK, OK,
+    ];
+    let reserved = [
+        OK, OK, OK, OK, OK, OK, OK, OK, inval, inval, Mangled, Mangled, OK,
+    ];
+    let unreserved = [OK, OK, OK, OK, OK, OK, OK, OK, inval, inval, OK, OK, OK];
+    let malformed = |fuse: Lab, ntfs_3g: Lab, posix: &'static str| {
+        [
+            OK,
+            OK,
+            OK,
+            OK,
+            inval,
+            ilseq,
+            fuse,
+            inval,
+            inval,
+            ntfs_3g,
+            noent,
+            inval,
+            Listed(posix),
+        ]
+    };
+    let corrupts = Lab::Refused(Errno::UCLEAN);
+    let mut rows = Vec::new();
+    for forbidden in ":*?\"<>|".chars() {
+        rows.push((format!("x{forbidden}y").into_bytes(), File, windows));
+    }
+    let mut backslash = windows;
+    backslash[10] = inval;
+    backslash[11] = inval;
+    rows.push((b"x\\y".to_vec(), File, backslash));
+    rows.push((b"x\x01y".to_vec(), File, windows));
+    rows.push((b"x\x1fy".to_vec(), File, windows));
+    rows.extend([
+        (b"x\x7fy".to_vec(), File, [OK; 13]),
+        (b" x".to_vec(), File, [OK; 13]),
+        (b".x".to_vec(), File, [OK; 13]),
+        (
+            b"x.".to_vec(),
+            File,
+            [
+                OK,
+                OK,
+                OK,
+                OK,
+                Listed("x"),
+                Listed("x"),
+                OK,
+                OK,
+                inval,
+                inval,
+                OK,
+                OK,
+                OK,
+            ],
+        ),
+        (
+            b"x ".to_vec(),
+            File,
+            [OK, OK, OK, OK, inval, OK, OK, OK, inval, inval, OK, OK, OK],
+        ),
+        (
+            b"x .".to_vec(),
+            File,
+            [
+                OK,
+                OK,
+                OK,
+                OK,
+                inval,
+                Listed("x "),
+                OK,
+                OK,
+                inval,
+                inval,
+                OK,
+                OK,
+                OK,
+            ],
+        ),
+        (
+            b"...".to_vec(),
+            File,
+            [
+                OK, OK, OK, OK, noent, noent, OK, OK, inval, inval, OK, OK, OK,
+            ],
+        ),
+        (b"CON".to_vec(), File, reserved),
+        (b"con".to_vec(), File, reserved),
+        (b"CON.txt".to_vec(), File, reserved),
+        (b"NUL".to_vec(), File, reserved),
+        (b"COM1".to_vec(), File, reserved),
+        (b"PRN.tar.gz".to_vec(), File, reserved),
+        (b"LPT9.log".to_vec(), File, unreserved),
+        (b"CONIN$".to_vec(), File, [OK; 13]),
+        ("COM\u{b9}".as_bytes().to_vec(), File, [OK; 13]),
+        (b"x\xffy".to_vec(), File, malformed(ilseq, ilseq, "x?y")),
+        (b"x\x80y".to_vec(), File, malformed(ilseq, ilseq, "x?y")),
+        (
+            b"x\xc0\xafy".to_vec(),
+            File,
+            malformed(corrupts, ilseq, "x??y"),
+        ),
+        (
+            b"x\xed\xa0\x80y".to_vec(),
+            File,
+            malformed(corrupts, OK, "x???y"),
+        ),
+        ("cafe\u{301}".as_bytes().to_vec(), File, [OK; 13]),
+        (
+            "x\u{f022}y".as_bytes().to_vec(),
+            File,
+            [
+                OK,
+                OK,
+                OK,
+                OK,
+                OK,
+                OK,
+                OK,
+                OK,
+                OK,
+                OK,
+                Listed("x:y"),
+                Listed("x:y"),
+                OK,
+            ],
+        ),
+        ("x\u{f03a}y".as_bytes().to_vec(), File, [OK; 13]),
+        ("x\u{ff1a}y".as_bytes().to_vec(), File, [OK; 13]),
+        (
+            "\u{1f600}".repeat(63).into_bytes(),
+            File,
+            [OK, OK, OK, OK, OK, OK, OK, OK, OK, OK, OK, inval, OK],
+        ),
+        (vec![b'a'; 255], File, [OK; 13]),
+        (vec![b'a'; 217], Folder, [OK; 13]),
+        (
+            vec![b'a'; 218],
+            Folder,
+            [OK, OK, OK, OK, OK, OK, OK, OK, OK, OK, noent, noent, noent],
+        ),
+        (
+            vec![b'a'; 256],
+            File,
+            [
+                Lab::Refused(Errno::NAMETOOLONG),
+                Lab::Refused(Errno::NAMETOOLONG),
+                Lab::Refused(Errno::NAMETOOLONG),
+                Lab::Refused(Errno::BADMSG),
+                Lab::Refused(Errno::NAMETOOLONG),
+                Lab::Refused(Errno::NAMETOOLONG),
+                Lab::Refused(Errno::NAMETOOLONG),
+                Lab::Refused(Errno::NAMETOOLONG),
+                Lab::Refused(Errno::NAMETOOLONG),
+                Lab::Refused(Errno::NAMETOOLONG),
+                Lab::Refused(Errno::NAMETOOLONG),
+                Lab::Refused(Errno::NAMETOOLONG),
+                Lab::Refused(Errno::NAMETOOLONG),
+            ],
+        ),
+        (
+            b"s".to_vec(),
+            Symlink,
+            [
+                OK,
+                OK,
+                OK,
+                OK,
+                Lab::Refused(Errno::PERM),
+                Lab::Refused(Errno::PERM),
+                Lab::Refused(Errno::NOSYS),
+                OK,
+                OK,
+                OK,
+                Lab::Refused(Errno::OPNOTSUPP),
+                Lab::Refused(Errno::OPNOTSUPP),
+                OK,
+            ],
+        ),
+    ]);
+    rows
+}
+
+#[test]
+fn each_preset_does_with_a_raw_name_what_its_lab_mount_did() -> Result<(), Box<dyn Error>> {
+    let root = tempfile::tempdir()?;
+    let rows = lab_cells();
+    for (column, (mount, preset, _)) in LAB_MOUNTS.into_iter().enumerate() {
+        let quirk_root = root.path().join(column.to_string());
+        fs::create_dir(&quirk_root)?;
+        let _quirks = FsQuirks::install(&quirk_root, preset());
+        for (case, (name, kind, cells)) in rows.iter().enumerate() {
+            let name = std::os::unix::ffi::OsStrExt::from_bytes(name.as_slice());
+            let context = format!("{mount}: {name:?}");
+            let folder = quirk_root.join(case.to_string());
+            fs::create_dir(&folder)?;
+            let parent = open_local_parent_directory(&folder)?;
+            let at = Entry::new(&parent, name);
+            let created = match kind {
+                Kind::File => fs()
+                    .create_exclusive(at, Mode::from_raw_mode(0o644))
+                    .map(drop),
+                Kind::Folder => fs().mkdir(at, Mode::from_raw_mode(0o755)),
+                Kind::Symlink => fs().symlink(OsStr::new("t"), at),
+            };
+            let listed = fs::read_dir(&folder)?
+                .map(|entry| entry.map(|entry| entry.file_name()))
+                .collect::<Result<Vec<_>, _>>()?;
+            let outcome = match (created, listed.as_slice()) {
+                (Err(error), []) => Lab::Refused(error),
+                (Ok(()), [listed]) if listed == name => Lab::Stored,
+                (Ok(()), [listed]) if cells[column] == Lab::Mangled => {
+                    assert!(listed.as_encoded_bytes().contains(&b'~'), "{context}");
+                    Lab::Mangled
+                }
+                (Ok(()), [listed]) => match cells[column] {
+                    Lab::Listed(expected) if listed == expected => cells[column],
+                    _ => panic!("{context}: listed as {listed:?}"),
+                },
+                (created, listed) => panic!("{context}: {created:?}, listed {listed:?}"),
+            };
+            assert_eq!(outcome, cells[column], "{context}");
         }
     }
     Ok(())

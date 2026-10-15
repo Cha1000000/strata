@@ -355,6 +355,7 @@ impl Quirks {
             fs_type: Some(FUSE_SUPER_MAGIC),
             name_max: Some(255),
             invalid_name: Some(exfat_fuse_refuses),
+            links: Support::Rejected(Errno::NOSYS),
             symlinks: Support::Rejected(Errno::NOSYS),
             case_insensitive: true,
             no_birth_time: true,
@@ -401,6 +402,7 @@ impl Quirks {
             fs_type: Some(0xfe53_4d42),
             name_max: Some(255),
             invalid_name: Some(cifs_refuses),
+            stored_as: Some(smb_listed),
             folder_name_limit: Some((217, Errno::NOENT)),
             symlinks: Support::Rejected(Errno::OPNOTSUPP),
             case_insensitive: true,
@@ -566,12 +568,14 @@ fn exfat_refuses(name: &OsStr) -> Option<Errno> {
     }
 }
 
-/// Overlong forms and encoded surrogates pass, and corrupt the volume.
+/// The daemon stores overlong forms and encoded surrogates, writing an
+/// overlong `/` as a real one and aborting at the next listing. Nothing may
+/// send them, so they fail with an errno no driver gives.
 fn exfat_fuse_refuses(name: &OsStr) -> Option<Errno> {
-    if utf8_fault(name) == Utf8Fault::Shape {
-        Some(Errno::ILSEQ)
-    } else {
-        has_windows_forbidden(name).then_some(Errno::NOENT)
+    match utf8_fault(name) {
+        Utf8Fault::Shape => Some(Errno::ILSEQ),
+        Utf8Fault::Overlong | Utf8Fault::Surrogate => Some(Errno::UCLEAN),
+        Utf8Fault::None => has_windows_forbidden(name).then_some(Errno::NOENT),
     }
 }
 
@@ -615,6 +619,46 @@ fn cifs_nocase_refuses(name: &OsStr) -> Option<Errno> {
         .is_some_and(|name| name.chars().any(|character| u32::from(character) > 0xffff));
     (utf8_fault(name) != Utf8Fault::None || astral || cifs_refuses(name).is_some())
         .then_some(Errno::INVAL)
+}
+
+/// What the SMB client lists: the character each `mapposix` code point
+/// stands for, and an 8.3 alias for a name Samba takes for a device.
+fn smb_listed(name: &OsStr) -> Option<OsString> {
+    let name = name.to_str()?;
+    let (base, extension) = name.split_once('.').unwrap_or((name, ""));
+    let reserved = [
+        "AUX", "CLOCK$", "COM1", "COM2", "COM3", "COM4", "CON", "LPT1", "LPT2", "LPT3", "NUL",
+        "PRN",
+    ];
+    if reserved
+        .iter()
+        .any(|device| base.eq_ignore_ascii_case(device))
+    {
+        let extension = extension.rsplit('.').next().unwrap_or_default();
+        let extension = extension.get(..3).unwrap_or(extension).to_ascii_uppercase();
+        let dot = if extension.is_empty() { "" } else { "." };
+        let first = base[..1].to_ascii_uppercase();
+        return Some(OsString::from(format!("{first}MANGL~F{dot}{extension}")));
+    }
+    let listed = name
+        .chars()
+        .map(|character| match character {
+            '\u{f001}'..='\u{f01f}' => {
+                char::from_u32(u32::from(character) - 0xf000).unwrap_or(character)
+            }
+            '\u{f020}' => '"',
+            '\u{f021}' => '*',
+            '\u{f022}' => ':',
+            '\u{f023}' => '<',
+            '\u{f024}' => '>',
+            '\u{f025}' => '?',
+            '\u{f027}' => '|',
+            '\u{f028}' => ' ',
+            '\u{f029}' => '.',
+            character => character,
+        })
+        .collect::<String>();
+    (listed != name).then(|| OsString::from(listed))
 }
 
 fn without_trailing_dots(name: &OsStr) -> Option<OsString> {
