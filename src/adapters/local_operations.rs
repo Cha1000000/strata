@@ -6511,11 +6511,12 @@ impl OperationProvider for LocalOperationProvider {
                     ));
                     return;
                 }
+                // A file too large for FAT32, which says so.
                 Err(error) => {
                     emit(OperationEvent::TransferFailed {
                         request_id: request.id,
                         completed_locations: Vec::new(),
-                        message: crate::services::gio_error_message(&error),
+                        message: error.message().to_owned(),
                     });
                     return;
                 }

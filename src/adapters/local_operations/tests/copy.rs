@@ -1358,10 +1358,14 @@ fn a_paste_through_a_symbolic_link_takes_the_rules_of_the_mount_behind_it()
     );
     drive_until_transfer_settles(&events);
 
+    let too_large = rust_i18n::t!(
+        "%{name} is too large for a FAT32 drive (maximum file size: 4 GiB). Use an exFAT or another large-file-capable drive instead.",
+        name = "disk.img"
+    );
     assert!(
         matches!(
             events.borrow().last(),
-            Some(OperationEvent::TransferFailed { .. })
+            Some(OperationEvent::TransferFailed { message, .. }) if *message == too_large
         ),
         "{:?}",
         events.borrow()
