@@ -9,7 +9,7 @@ use std::{
         fd::{AsFd, AsRawFd, BorrowedFd, IntoRawFd, OwnedFd},
         unix::ffi::OsStringExt,
     },
-    path::Path,
+    path::{Path, PathBuf},
 };
 
 use gtk::{gio, glib, prelude::*};
@@ -26,6 +26,13 @@ use crate::adapters::volume::{MountKey, MountTable, MountType};
 
 /// `STATX_MNT_ID_UNIQUE` (Linux 6.8), which rustix does not name yet.
 const STATX_MNT_ID_UNIQUE: u32 = 0x4000;
+
+#[derive(Clone, Copy, Debug)]
+pub(super) struct FsStat {
+    pub kind: FsWord,
+    /// `f_namelen`, which only byte-counting filesystems mean.
+    pub name_max: u32,
+}
 
 #[derive(Clone, Copy)]
 pub(super) struct Entry<'a> {
@@ -80,7 +87,7 @@ pub(super) trait FsOps: Send + Sync {
     fn create_exclusive(&self, at: Entry<'_>, mode: Mode) -> Result<OwnedFd, Errno>;
     fn names(&self, dir: Entry<'_>) -> Result<Vec<OsString>, Errno>;
     fn mount_key(&self, dir: BorrowedFd<'_>) -> MountKey;
-    fn fs_type(&self, dir: BorrowedFd<'_>) -> Option<FsWord>;
+    fn statfs(&self, dir: BorrowedFd<'_>) -> Option<FsStat>;
     fn can_trash(&self, path: &Path) -> bool;
     /// GLib's own result: `Ok(false)` is a failure without an error (GLib #4060).
     fn trash(&self, path: &Path, cancellable: &gio::Cancellable) -> Result<bool, glib::Error>;
@@ -130,7 +137,8 @@ pub(super) trait FsOps: Send + Sync {
     fn xattr_names(&self, fd: BorrowedFd<'_>) -> Result<Vec<OsString>, Errno>;
     fn get_xattr(&self, fd: BorrowedFd<'_>, name: &OsStr) -> Result<Vec<u8>, Errno>;
     fn set_xattr(&self, fd: BorrowedFd<'_>, name: &OsStr, value: &[u8]) -> Result<(), Errno>;
-    fn mount_type(&self, fd: BorrowedFd<'_>) -> Option<MountType>;
+    /// The mount holding `fd`, and where it is mounted.
+    fn mount_type(&self, fd: BorrowedFd<'_>) -> Option<(MountType, PathBuf)>;
     /// The format udev's database records (`ID_FS_TYPE`) for the block
     /// device holding `fd`, where it has a record.
     fn device_format(&self, fd: BorrowedFd<'_>) -> Result<Option<String>, Errno>;
@@ -173,6 +181,11 @@ pub(super) fn assert_off_main_thread() {
         !glib::MainContext::default().is_owner(),
         "filesystem calls must not run on the main thread"
     );
+}
+
+/// The path the kernel resolved `fd` to.
+pub(super) fn opened_path(fd: BorrowedFd<'_>) -> std::io::Result<PathBuf> {
+    std::fs::read_link(format!("/proc/self/fd/{}", fd.as_raw_fd()))
 }
 
 pub(super) fn drop_off_main_thread<T: Send + 'static>(held: T) {
@@ -426,9 +439,12 @@ impl FsOps for System {
         }
     }
 
-    fn fs_type(&self, dir: BorrowedFd<'_>) -> Option<FsWord> {
+    fn statfs(&self, dir: BorrowedFd<'_>) -> Option<FsStat> {
         assert_off_main_thread();
-        rustix::fs::fstatfs(dir).ok().map(|stat| stat.f_type)
+        rustix::fs::fstatfs(dir).ok().map(|stat| FsStat {
+            kind: stat.f_type,
+            name_max: u32::try_from(stat.f_namelen).unwrap_or(0),
+        })
     }
 
     fn can_trash(&self, path: &Path) -> bool {
@@ -660,10 +676,10 @@ impl FsOps for System {
         rustix::fs::fsetxattr(fd, name, value, rustix::fs::XattrFlags::empty())
     }
 
-    fn mount_type(&self, fd: BorrowedFd<'_>) -> Option<MountType> {
+    fn mount_type(&self, fd: BorrowedFd<'_>) -> Option<(MountType, PathBuf)> {
         assert_off_main_thread();
         let mounts = MountTable::current();
-        let mount_type = match rustix::fs::statx(
+        let (mount_type, mount_point) = match rustix::fs::statx(
             fd,
             "",
             AtFlags::EMPTY_PATH | AtFlags::STATX_DONT_SYNC,
@@ -672,15 +688,12 @@ impl FsOps for System {
             Ok(stat)
                 if StatxFlags::from_bits_retain(stat.stx_mask).contains(StatxFlags::MNT_ID) =>
             {
-                mounts.mount_type_of(stat.stx_mnt_id)
+                mounts.mount_of(stat.stx_mnt_id)
             }
             // Before Linux 5.8.
-            _ => {
-                let path = std::fs::read_link(format!("/proc/self/fd/{}", fd.as_raw_fd())).ok()?;
-                mounts.mount_type_for(&path)
-            }
-        };
-        mount_type.cloned()
+            _ => mounts.mount_for(&opened_path(fd).ok()?),
+        }?;
+        Some((mount_type.clone(), mount_point.to_path_buf()))
     }
 
     fn device_format(&self, fd: BorrowedFd<'_>) -> Result<Option<String>, Errno> {

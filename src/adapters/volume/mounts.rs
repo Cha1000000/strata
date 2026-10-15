@@ -13,6 +13,8 @@ use std::{
 
 use gtk::gio;
 
+use super::names::{NameEncoding, NameProfile, NameRules, PrivateUse, Reserved, Strip, byte_limit};
+
 /// Parsed without touching mounted filesystems, including unresponsive mounts.
 #[derive(Clone)]
 pub(crate) struct MountTable {
@@ -23,6 +25,12 @@ struct MountEntry {
     id: u64,
     mount_point: PathBuf,
     mount_type: MountType,
+}
+
+impl MountEntry {
+    fn parts(&self) -> (&MountType, &Path) {
+        (&self.mount_type, &self.mount_point)
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -80,6 +88,103 @@ impl MountType {
             _ => None,
         }
     }
+
+    /// `device_format` is udev's `ID_FS_TYPE`, read for `fuseblk` only, and
+    /// `name_max` the mount's `f_namelen`, which only byte-counting
+    /// filesystems mean. A `fuseblk` mount whose device udev cannot tell is
+    /// taken for a Windows format, as for `coarse_times`.
+    pub(crate) fn name_profile(&self, device_format: Option<&str>, name_max: u32) -> NameProfile {
+        let has = |name| self.super_options.split(',').any(|option| option == name);
+        let bytes = byte_limit(name_max);
+        match (self.fs_type.as_str(), device_format) {
+            ("vfat", _) => {
+                let iocharset = self
+                    .super_options
+                    .split(',')
+                    .find_map(|option| option.strip_prefix("iocharset="));
+                // Without `utf8`, the I/O charset converts names; other code
+                // pages than these store any bytes and are not supported.
+                let encoding = match iocharset {
+                    Some("utf8") if !has("utf8") => NameEncoding::Utf8Bmp,
+                    Some("ascii") if !has("utf8") => NameEncoding::Ascii,
+                    _ => NameEncoding::Utf8,
+                };
+                NameProfile::windows(Reserved::Bare, encoding)
+            }
+            ("msdos" | "exfat", _) | ("fuseblk", Some("exfat" | "vfat")) => {
+                NameProfile::windows(Reserved::Bare, NameEncoding::Utf8)
+            }
+            ("ntfs3" | "ntfs", _) if has("windows_names") => {
+                NameProfile::windows(Reserved::Full, NameEncoding::Utf8)
+            }
+            ("ntfs3" | "ntfs", _) => NameProfile::windows(Reserved::Bare, NameEncoding::Utf8),
+            // udisks mounts ntfs-3g with `windows_names`, which mountinfo hides.
+            ("fuseblk", Some("ntfs")) => NameProfile::windows(Reserved::Full, NameEncoding::Utf8),
+            ("fuseblk", _) => NameProfile::windows(Reserved::Bare, NameEncoding::Utf8).learning(),
+            ("cifs" | "smb3", _) if has("posix") || has("unix") && has("posixpaths") => {
+                NameProfile::smb_posix(bytes)
+            }
+            ("cifs" | "smb3", _) => NameProfile {
+                encoding: if has("nocase") {
+                    NameEncoding::Utf8Bmp
+                } else {
+                    NameEncoding::Utf8
+                },
+                mapped: if has("mapposix") {
+                    Some(PrivateUse::Sfm)
+                } else if has("mapchars") {
+                    Some(PrivateUse::Sfu)
+                } else {
+                    None
+                },
+                ..NameProfile::smb(bytes)
+            },
+            // Counted in UTF-16 units like the Windows formats, without their rules.
+            ("hfsplus", _) => NameProfile {
+                rules: NameRules::Posix,
+                strip: Strip::None,
+                ..NameProfile::windows(Reserved::None, NameEncoding::Utf8)
+            },
+            (fs_type, _) => match family(fs_type) {
+                Family::Ext
+                | Family::Xfs
+                | Family::Btrfs
+                | Family::F2fs
+                | Family::Tmpfs
+                | Family::Bcachefs
+                | Family::Zfs
+                | Family::Overlay
+                | Family::Nfs
+                | Family::Nfs4 => NameProfile::posix(bytes),
+                _ => NameProfile::unknown(name_max),
+            },
+        }
+    }
+
+    /// The bridge mounts every GVfs backend in a folder of its own.
+    pub(crate) fn is_gvfs_bridge(&self) -> bool {
+        self.fs_type == "fuse.gvfsd-fuse"
+    }
+}
+
+pub(crate) const FAT32_MAX_FILE_SIZE: u64 = u32::MAX as u64;
+
+/// Drivers without symbolic links: the kernel's FAT and exFAT have no
+/// `symlink`, and exfat-fuse implements none.
+pub(crate) fn holds_symlinks(fs_type: &str, device_format: Option<&str>) -> Option<bool> {
+    matches!(
+        (fs_type, device_format),
+        ("vfat" | "msdos" | "exfat", _) | ("fuseblk", Some("exfat" | "vfat"))
+    )
+    .then_some(false)
+}
+
+pub(crate) fn max_file_size(fs_type: &str, device_format: Option<&str>) -> Option<u64> {
+    matches!(
+        (fs_type, device_format),
+        ("vfat" | "msdos", _) | ("fuseblk", Some("vfat"))
+    )
+    .then_some(FAT32_MAX_FILE_SIZE)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -194,19 +299,19 @@ impl MountTable {
     }
 
     pub(crate) fn fs_type_for(&self, path: &Path) -> Option<&str> {
-        self.mount_type_for(path)
-            .map(|mount_type| mount_type.fs_type.as_str())
+        self.innermost(path)
+            .map(|entry| entry.mount_type.fs_type.as_str())
     }
 
-    pub(crate) fn mount_type_for(&self, path: &Path) -> Option<&MountType> {
-        self.innermost(path).map(|entry| &entry.mount_type)
-    }
-
-    pub(crate) fn mount_type_of(&self, id: u64) -> Option<&MountType> {
+    pub(crate) fn mount_of(&self, id: u64) -> Option<(&MountType, &Path)> {
         self.entries
             .iter()
             .find(|entry| entry.id == id)
-            .map(|entry| &entry.mount_type)
+            .map(MountEntry::parts)
+    }
+
+    pub(crate) fn mount_for(&self, path: &Path) -> Option<(&MountType, &Path)> {
+        self.innermost(path).map(MountEntry::parts)
     }
 
     pub(super) fn is_remote_path(&self, path: &Path) -> bool {

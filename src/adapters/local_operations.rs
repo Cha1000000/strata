@@ -8,6 +8,7 @@ mod copy_engine;
 mod create_entry;
 mod fs_ops;
 mod merge_aside;
+mod mount_profile;
 mod naming;
 mod owed;
 mod placement;
@@ -60,7 +61,7 @@ use crate::{
     adapters::{
         gio_file_for_location, location_for_file,
         trash_restore::{RestoreContext, plan_restore_for_location},
-        volume::MountTable,
+        volume::{MountTable, max_file_size},
     },
     model::{FileEntry, Location},
     services::{
@@ -954,8 +955,6 @@ async fn move_file_with_progress(
     .await
 }
 
-const FAT32_MAX_FILE_SIZE: u64 = u32::MAX as u64;
-
 fn copy_failure_on_fat32(error: &glib::Error, fat32_destination: bool) -> (Option<String>, bool) {
     if was_cancelled(error) {
         return (None, false);
@@ -992,7 +991,7 @@ fn fat32_file_too_large(name: &str) -> glib::Error {
 }
 
 fn fat32_file_size_limit(fs_type: Option<&str>) -> Option<u64> {
-    matches!(fs_type, Some("msdos" | "vfat")).then_some(FAT32_MAX_FILE_SIZE)
+    fs_type.and_then(|fs_type| max_file_size(fs_type, None))
 }
 
 #[derive(Clone, Copy)]

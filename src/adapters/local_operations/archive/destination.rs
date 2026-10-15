@@ -534,7 +534,7 @@ impl ExtractionDestination {
         })?;
         // A link's time is cosmetic, and FUSE daemons such as sshfs apply it to the target.
         if let Some(times) = modified.and_then(timestamps)
-            && fs().fs_type(parent.as_fd()) != Some(FUSE_SUPER_MAGIC)
+            && fs().statfs(parent.as_fd()).map(|stat| stat.kind) != Some(FUSE_SUPER_MAGIC)
         {
             let _ = (self.calls.set_link_times)(parent.as_fd(), &name, &times);
         }

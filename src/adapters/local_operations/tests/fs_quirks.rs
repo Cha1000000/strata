@@ -6,9 +6,13 @@
 //! separate mounts.
 
 use std::{
+    borrow::Cow,
     collections::{HashMap, HashSet},
     ffi::{OsStr, OsString},
-    os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd, RawFd},
+    os::{
+        fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd, RawFd},
+        unix::ffi::OsStringExt,
+    },
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex, MutexGuard,
@@ -24,7 +28,7 @@ use rustix::{
 };
 
 use super::super::copy_engine::{clock_for_test, forget_learned_copy_support};
-use super::super::fs_ops::{Entry, EntryStat, FsOps, System, assert_off_main_thread};
+use super::super::fs_ops::{Entry, EntryStat, FsOps, FsStat, System, assert_off_main_thread};
 use crate::adapters::volume::{MountKey, MountType, forget_test_mount_capabilities};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -42,7 +46,7 @@ pub(crate) enum Op {
     Create,
     Names,
     MountKey,
-    FsType,
+    Statfs,
     CanTrash,
     Trash,
     OpenSource,
@@ -164,10 +168,22 @@ pub(crate) struct Quirks {
     /// A rename whose reply is lost leaves its target name reporting the inode
     /// number it had, as libfuse without `use_ino` moves a node only on success.
     pub lost_renames_keep_inodes: bool,
-    /// Names rejected with `EINVAL` by rename, mkdir, symlink and create,
-    /// and with `EPERM` by link, as on vfat.
-    pub invalid_name: Option<fn(&OsStr) -> bool>,
+    /// Names rejected with the returned errno by rename and every create,
+    /// and with `EPERM` by link, as vfat refuses them.
+    pub invalid_name: Option<fn(&OsStr) -> Option<Errno>>,
+    /// The name a create or rename stores instead, which lookups of the
+    /// requested name then find, as vfat and exFAT drop trailing dots.
+    pub stored_as: Option<fn(&OsStr) -> Option<OsString>>,
+    /// Creating or renaming to a name longer than this many bytes fails
+    /// with the errno. Every root's own filesystem already stops at 255.
+    pub name_limit: Option<(usize, Errno)>,
+    /// Creating a folder whose name is longer than this many bytes fails
+    /// with the errno, as Samba makes it under a longer temporary name.
+    pub folder_name_limit: Option<(usize, Errno)>,
+    pub symlinks: Support,
     pub fs_type: Option<FsWord>,
+    /// `f_namelen`.
+    pub name_max: Option<u32>,
     pub trash: Trash,
     /// Reports the first inode number seen at each matching name for whatever
     /// is there later, as ext4, NFS and CIFS hand a freed number straight out,
@@ -301,12 +317,18 @@ impl Quirks {
         }
     }
 
-    /// No hard links, named pipes or xattrs, and names compared without case.
+    /// No hard links, symbolic links, named pipes or xattrs, and names
+    /// compared without case. This and the presets after it carry the
+    /// mountinfo line of a lab mount, and refuse and store names as it did.
     pub(crate) fn vfat() -> Self {
         Self {
-            mount_type: Some(("vfat", "rw,flush")),
+            mount_type: Some(("vfat", VFAT_OPTIONS)),
             fs_type: Some(0x4d44),
+            name_max: Some(1530),
+            invalid_name: Some(vfat_refuses),
+            stored_as: Some(without_trailing_dots),
             links: Support::Rejected(Errno::PERM),
+            symlinks: Support::Rejected(Errno::PERM),
             fifos: Support::Rejected(Errno::PERM),
             case_insensitive: true,
             xattrs_refused: vec![("", Errno::OPNOTSUPP)],
@@ -314,10 +336,101 @@ impl Quirks {
         }
     }
 
+    /// The kernel's exFAT, which lacks what vfat lacks.
+    pub(crate) fn exfat() -> Self {
+        Self {
+            mount_type: Some(("exfat", EXFAT_OPTIONS)),
+            fs_type: Some(0x2011_bab0),
+            invalid_name: Some(exfat_refuses),
+            ..Self::vfat()
+        }
+    }
+
+    pub(crate) fn exfat_fuse() -> Self {
+        Self {
+            mount_type: Some(("fuseblk", FUSEBLK_OPTIONS)),
+            device_format: Some("exfat"),
+            fs_type: Some(FUSE_SUPER_MAGIC),
+            name_max: Some(255),
+            invalid_name: Some(exfat_fuse_refuses),
+            symlinks: Support::Rejected(Errno::NOSYS),
+            case_insensitive: true,
+            no_birth_time: true,
+            ..Self::default()
+        }
+    }
+
+    pub(crate) fn ntfs3() -> Self {
+        Self {
+            mount_type: Some(("ntfs3", NTFS3_OPTIONS)),
+            fs_type: Some(0x7366_746e),
+            name_max: Some(255),
+            invalid_name: Some(ntfs3_refuses),
+            ..Self::default()
+        }
+    }
+
+    pub(crate) fn ntfs3_windows_names() -> Self {
+        Self {
+            mount_type: Some(("ntfs3", NTFS3_WINDOWS_NAMES_OPTIONS)),
+            invalid_name: Some(windows_names_refuses),
+            ..Self::ntfs3()
+        }
+    }
+
+    /// udisks passes `windows_names`, which mountinfo does not show.
+    pub(crate) fn ntfs_3g() -> Self {
+        Self {
+            mount_type: Some(("fuseblk", FUSEBLK_OPTIONS)),
+            device_format: Some("ntfs"),
+            fs_type: Some(FUSE_SUPER_MAGIC),
+            name_max: Some(255),
+            invalid_name: Some(ntfs_3g_refuses),
+            no_birth_time: true,
+            ..Self::default()
+        }
+    }
+
+    /// Samba with the client's default `mapposix`, which stores characters
+    /// Windows refuses as private-use ones.
+    pub(crate) fn cifs() -> Self {
+        Self {
+            mount_type: Some(("cifs", CIFS_OPTIONS)),
+            fs_type: Some(0xfe53_4d42),
+            name_max: Some(255),
+            invalid_name: Some(cifs_refuses),
+            folder_name_limit: Some((217, Errno::NOENT)),
+            symlinks: Support::Rejected(Errno::OPNOTSUPP),
+            case_insensitive: true,
+            ..Self::default()
+        }
+    }
+
+    pub(crate) fn cifs_nocase() -> Self {
+        Self {
+            mount_type: Some(("cifs", CIFS_NOCASE_OPTIONS)),
+            invalid_name: Some(cifs_nocase_refuses),
+            ..Self::cifs()
+        }
+    }
+
+    pub(crate) fn cifs_posix() -> Self {
+        Self {
+            mount_type: Some(("cifs", CIFS_POSIX_OPTIONS)),
+            invalid_name: None,
+            stored_as: Some(question_marks),
+            symlinks: Support::Supported,
+            case_insensitive: false,
+            ..Self::cifs()
+        }
+    }
+
     pub(crate) fn sshfs() -> Self {
         Self {
-            mount_type: Some(("fuse.sshfs", "rw")),
-            fs_type: Some(0x6573_5546),
+            mount_type: Some(("fuse.sshfs", "rw,user_id=0,group_id=0,allow_other")),
+            fs_type: Some(FUSE_SUPER_MAGIC),
+            name_max: Some(255),
+            name_limit: Some((255, Errno::BADMSG)),
             xattrs_refused: vec![("", Errno::OPNOTSUPP)],
             rename_flags: Support::Rejected(Errno::INVAL),
             collisions_as_eperm: true,
@@ -328,6 +441,197 @@ impl Quirks {
             ..Self::default()
         }
     }
+}
+
+const FUSE_SUPER_MAGIC: FsWord = 0x6573_5546;
+const VFAT_OPTIONS: &str = concat!(
+    "rw,uid=1000,gid=1000,fmask=0022,dmask=0022,codepage=437,iocharset=ascii,",
+    "shortname=mixed,showexec,utf8,flush,errors=remount-ro"
+);
+const EXFAT_OPTIONS: &str =
+    "rw,uid=1000,gid=1000,fmask=0022,dmask=0022,iocharset=utf8,errors=remount-ro";
+const FUSEBLK_OPTIONS: &str =
+    "rw,user_id=0,group_id=0,default_permissions,allow_other,blksize=4096";
+const NTFS3_OPTIONS: &str = "rw,uid=1000,gid=1000,acl,iocharset=utf8,prealloc";
+const NTFS3_WINDOWS_NAMES_OPTIONS: &str =
+    "rw,uid=1000,gid=1000,windows_names,acl,iocharset=utf8,prealloc";
+const CIFS_OPTIONS: &str = concat!(
+    "rw,vers=3.1.1,cache=strict,uid=1000,forceuid,gid=1000,forcegid,soft,nounix,serverino,",
+    "mapposix,reparse=nfs,nativesocket,symlink=native,actimeo=1,closetimeo=1"
+);
+const CIFS_NOCASE_OPTIONS: &str = concat!(
+    "rw,vers=3.1.1,cache=strict,uid=1000,forceuid,gid=1000,forcegid,nocase,soft,nounix,",
+    "serverino,mapposix,reparse=nfs,nativesocket,symlink=native,actimeo=1,closetimeo=1"
+);
+const CIFS_POSIX_OPTIONS: &str = concat!(
+    "rw,vers=3.1.1,cache=strict,uid=1000,forceuid,gid=1000,forcegid,soft,posix,posixpaths,",
+    "serverino,reparse=nfs,nonativesocket,symlink=native,actimeo=1,closetimeo=1"
+);
+
+/// How a name breaks UTF-8, worst last. A decoder that only checks the
+/// shape of each sequence takes overlong forms and encoded surrogates.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum Utf8Fault {
+    None,
+    Surrogate,
+    Overlong,
+    Shape,
+}
+
+fn utf8_fault(name: &OsStr) -> Utf8Fault {
+    let bytes = name.as_encoded_bytes();
+    let mut worst = Utf8Fault::None;
+    let mut index = 0;
+    while index < bytes.len() {
+        let len = match bytes[index] {
+            0x00..=0x7f => 1,
+            0xc0..=0xdf => 2,
+            0xe0..=0xef => 3,
+            0xf0..=0xf7 => 4,
+            _ => return Utf8Fault::Shape,
+        };
+        let Some(sequence) = bytes
+            .get(index..index + len)
+            .filter(|sequence| sequence[1..].iter().all(|byte| byte & 0xc0 == 0x80))
+        else {
+            return Utf8Fault::Shape;
+        };
+        let fault = match std::str::from_utf8(sequence) {
+            Ok(_) => Utf8Fault::None,
+            Err(_) if sequence[0] == 0xed => Utf8Fault::Surrogate,
+            Err(_) => Utf8Fault::Overlong,
+        };
+        worst = worst.max(fault);
+        index += len;
+    }
+    worst
+}
+
+fn has_windows_forbidden(name: &OsStr) -> bool {
+    name.as_encoded_bytes()
+        .iter()
+        .any(|byte| b"\\:*?\"<>|".contains(byte) || (0x01..0x20).contains(byte))
+}
+
+fn trimmed_dots(name: &OsStr) -> &[u8] {
+    let bytes = name.as_encoded_bytes();
+    let end = bytes
+        .iter()
+        .rposition(|byte| *byte != b'.')
+        .map_or(0, |last| last + 1);
+    &bytes[..end]
+}
+
+fn ends_with_dot_or_space(name: &OsStr) -> bool {
+    matches!(name.as_encoded_bytes().last(), Some(b'.' | b' '))
+}
+
+/// The device names both `windows_names` drivers check: `CON`, `PRN`,
+/// `AUX`, `NUL`, `COM1`-`COM9` and `LPT1`-`LPT9`, alone or before a dot.
+fn device_name(name: &OsStr) -> bool {
+    let bytes = name.as_encoded_bytes();
+    let ends_at = |len: usize| bytes.len() == len || bytes.get(len) == Some(&b'.');
+    let base = |len: usize| bytes.get(..len).map(<[u8]>::to_ascii_uppercase);
+    let three = base(3).is_some_and(|base| {
+        [&b"CON"[..], b"PRN", b"AUX", b"NUL"].contains(&base.as_slice()) && ends_at(3)
+    });
+    let numbered = base(3).is_some_and(|base| [&b"COM"[..], b"LPT"].contains(&base.as_slice()))
+        && bytes
+            .get(3)
+            .is_some_and(|digit| (b'1'..=b'9').contains(digit))
+        && ends_at(4);
+    three || numbered
+}
+
+fn vfat_refuses(name: &OsStr) -> Option<Errno> {
+    if utf8_fault(name) != Utf8Fault::None || has_windows_forbidden(name) {
+        return Some(Errno::INVAL);
+    }
+    match trimmed_dots(name) {
+        [] => Some(Errno::NOENT),
+        [.., b' '] => Some(Errno::INVAL),
+        _ => None,
+    }
+}
+
+fn exfat_refuses(name: &OsStr) -> Option<Errno> {
+    if utf8_fault(name) != Utf8Fault::None {
+        Some(Errno::ILSEQ)
+    } else if has_windows_forbidden(name) {
+        Some(Errno::INVAL)
+    } else {
+        trimmed_dots(name).is_empty().then_some(Errno::NOENT)
+    }
+}
+
+/// Overlong forms and encoded surrogates pass, and corrupt the volume.
+fn exfat_fuse_refuses(name: &OsStr) -> Option<Errno> {
+    if utf8_fault(name) == Utf8Fault::Shape {
+        Some(Errno::ILSEQ)
+    } else {
+        has_windows_forbidden(name).then_some(Errno::NOENT)
+    }
+}
+
+fn ntfs3_refuses(name: &OsStr) -> Option<Errno> {
+    (utf8_fault(name) != Utf8Fault::None).then_some(Errno::INVAL)
+}
+
+fn windows_names_refuses(name: &OsStr) -> Option<Errno> {
+    (utf8_fault(name) != Utf8Fault::None
+        || has_windows_forbidden(name)
+        || ends_with_dot_or_space(name)
+        || device_name(name))
+    .then_some(Errno::INVAL)
+}
+
+/// Encoded surrogates pass.
+fn ntfs_3g_refuses(name: &OsStr) -> Option<Errno> {
+    if utf8_fault(name) >= Utf8Fault::Overlong {
+        Some(Errno::ILSEQ)
+    } else {
+        (has_windows_forbidden(name) || ends_with_dot_or_space(name) || device_name(name))
+            .then_some(Errno::INVAL)
+    }
+}
+
+/// Only `\` is refused; `mapposix` maps the other characters.
+fn cifs_refuses(name: &OsStr) -> Option<Errno> {
+    if utf8_fault(name) != Utf8Fault::None {
+        Some(Errno::NOENT)
+    } else {
+        name.as_encoded_bytes()
+            .contains(&b'\\')
+            .then_some(Errno::INVAL)
+    }
+}
+
+/// `nocase` also refuses every character above U+FFFF.
+fn cifs_nocase_refuses(name: &OsStr) -> Option<Errno> {
+    let astral = name
+        .to_str()
+        .is_some_and(|name| name.chars().any(|character| u32::from(character) > 0xffff));
+    (utf8_fault(name) != Utf8Fault::None || astral || cifs_refuses(name).is_some())
+        .then_some(Errno::INVAL)
+}
+
+fn without_trailing_dots(name: &OsStr) -> Option<OsString> {
+    let trimmed = trimmed_dots(name);
+    (trimmed.len() < name.len()).then(|| OsString::from_vec(trimmed.to_vec()))
+}
+
+/// SMB carries UTF-16, so the client sends `?` for every byte that is not UTF-8.
+fn question_marks(name: &OsStr) -> Option<OsString> {
+    let bytes = name.as_encoded_bytes();
+    if std::str::from_utf8(bytes).is_ok() {
+        return None;
+    }
+    let mut stored = Vec::with_capacity(bytes.len());
+    for chunk in bytes.utf8_chunks() {
+        stored.extend_from_slice(chunk.valid().as_bytes());
+        stored.extend(chunk.invalid().iter().map(|_| b'?'));
+    }
+    Some(OsString::from_vec(stored))
 }
 
 #[derive(Clone, Debug)]
@@ -629,17 +933,59 @@ impl Scope {
         read(&self.state().quirks)
     }
 
-    fn invalid(&self, name: &OsStr) -> bool {
+    fn invalid(&self, name: &OsStr) -> Option<Errno> {
         self.quirk(|quirks| quirks.invalid_name)
-            .is_some_and(|invalid| invalid(name))
+            .and_then(|invalid| invalid(name))
     }
 
-    /// The differently-cased existing name a case-insensitive lookup of
-    /// `entry` would find. Lookups revalidate, so an already case-insensitive
+    fn too_long(
+        &self,
+        name: &OsStr,
+        limit: impl FnOnce(&Quirks) -> Option<(usize, Errno)>,
+    ) -> Option<Errno> {
+        self.quirk(limit)
+            .filter(|(bytes, _)| name.len() > *bytes)
+            .map(|(_, errno)| errno)
+    }
+
+    /// Why creating `name` fails, before anything is created.
+    fn refusal(&self, name: &OsStr) -> Option<Errno> {
+        self.invalid(name)
+            .or_else(|| self.too_long(name, |quirks| quirks.name_limit))
+    }
+
+    fn stored<'a>(&self, name: &'a OsStr) -> Cow<'a, OsStr> {
+        match self
+            .quirk(|quirks| quirks.stored_as)
+            .and_then(|stored| stored(name))
+        {
+            Some(stored) if !stored.is_empty() => Cow::Owned(stored),
+            _ => Cow::Borrowed(name),
+        }
+    }
+
+    /// The other existing name a lookup of `entry` would find: one that
+    /// differs in case on a case-insensitive mount, or the name a create of
+    /// `entry` stores. Lookups revalidate, so an already case-insensitive
     /// FUSE mount cannot answer from its cache for a name that has moved.
     fn alias(&self, entry: Entry<'_>) -> Option<OsString> {
-        if !self.quirk(|quirks| quirks.case_insensitive) || System.stat(entry, true).is_ok() {
+        let (case_insensitive, stored_as) =
+            self.quirk(|quirks| (quirks.case_insensitive, quirks.stored_as.is_some()));
+        if !(case_insensitive || stored_as) || System.stat(entry, true).is_ok() {
             return None;
+        }
+        let stored = self.stored(entry.name);
+        if !case_insensitive {
+            let found = System
+                .stat(
+                    Entry {
+                        dir: entry.dir,
+                        name: &stored,
+                    },
+                    true,
+                )
+                .is_ok();
+            return (found && stored != entry.name).then(|| stored.into_owned());
         }
         System
             .names(Entry {
@@ -648,7 +994,7 @@ impl Scope {
             })
             .ok()?
             .into_iter()
-            .find(|name| name != entry.name && name.eq_ignore_ascii_case(entry.name))
+            .find(|name| name != entry.name && name.eq_ignore_ascii_case(&stored))
     }
 
     fn stat(
@@ -707,15 +1053,20 @@ impl Scope {
     fn creating<T>(
         &self,
         at: Entry<'_>,
-        create: impl FnOnce() -> Result<T, Errno>,
+        create: impl FnOnce(Entry<'_>) -> Result<T, Errno>,
     ) -> Result<T, Errno> {
-        if self.invalid(at.name) {
-            return Err(Errno::INVAL);
+        if let Some(errno) = self.refusal(at.name) {
+            return Err(errno);
         }
         if self.alias(at).is_some() {
             return Err(self.collision());
         }
-        create().map_err(|error| {
+        let stored = self.stored(at.name);
+        create(Entry {
+            dir: at.dir,
+            name: &stored,
+        })
+        .map_err(|error| {
             if error == Errno::EXIST {
                 self.collision()
             } else {
@@ -740,9 +1091,14 @@ impl Scope {
                 return Err(error);
             }
         }
-        if self.invalid(to.name) {
-            return Err(Errno::INVAL);
+        if let Some(errno) = self.refusal(to.name) {
+            return Err(errno);
         }
+        let stored = self.stored(to.name);
+        let to = Entry {
+            dir: to.dir,
+            name: &stored,
+        };
         if flags.contains(RenameFlags::EXCHANGE) {
             match exchange {
                 Exchange::Supported => {}
@@ -781,9 +1137,17 @@ impl Scope {
     }
 
     fn link(&self, from: Entry<'_>, to: Entry<'_>) -> Result<(), Errno> {
-        if self.invalid(to.name) {
+        if self.invalid(to.name).is_some() {
             return Err(Errno::PERM);
         }
+        if let Some(errno) = self.too_long(to.name, |quirks| quirks.name_limit) {
+            return Err(errno);
+        }
+        let stored = self.stored(to.name);
+        let to = Entry {
+            dir: to.dir,
+            name: &stored,
+        };
         if self.occupied(to) {
             return Err(self.collision());
         }
@@ -1065,7 +1429,12 @@ impl FsOps for Scoped {
         assert_off_main_thread();
         match scope_for(at.dir) {
             Some(scope) => scope.run(Op::Mkdir, &[at.name], |scope| {
-                scope.creating(at, || System.mkdir(at, mode))
+                scope.creating(at, |at| {
+                    match scope.too_long(at.name, |quirks| quirks.folder_name_limit) {
+                        Some(errno) => Err(errno),
+                        None => System.mkdir(at, mode),
+                    }
+                })
             }),
             None => System.mkdir(at, mode),
         }
@@ -1075,7 +1444,14 @@ impl FsOps for Scoped {
         assert_off_main_thread();
         match scope_for(at.dir) {
             Some(scope) => scope.run(Op::Symlink, &[at.name], |scope| {
-                scope.creating(at, || System.symlink(target, at))
+                if let Support::Rejected(error) = scope.quirk(|quirks| quirks.symlinks) {
+                    return Err(if scope.occupied(at) {
+                        scope.collision()
+                    } else {
+                        error
+                    });
+                }
+                scope.creating(at, |at| System.symlink(target, at))
             }),
             None => System.symlink(target, at),
         }
@@ -1134,7 +1510,7 @@ impl FsOps for Scoped {
         assert_off_main_thread();
         match scope_for(at.dir) {
             Some(scope) => scope.run(Op::Create, &[at.name], |scope| {
-                scope.creating(at, || System.create_exclusive(at, mode))
+                scope.creating(at, |at| System.create_exclusive(at, mode))
             }),
             None => System.create_exclusive(at, mode),
         }
@@ -1158,18 +1534,21 @@ impl FsOps for Scoped {
         }
     }
 
-    fn fs_type(&self, dir: BorrowedFd<'_>) -> Option<FsWord> {
+    fn statfs(&self, dir: BorrowedFd<'_>) -> Option<FsStat> {
         assert_off_main_thread();
         match scope_for(dir) {
             Some(scope) => scope
-                .run(Op::FsType, &[], |scope| {
-                    Ok(scope
-                        .quirk(|quirks| quirks.fs_type)
-                        .or_else(|| System.fs_type(dir)))
+                .run(Op::Statfs, &[], |scope| {
+                    let system = System.statfs(dir);
+                    let (kind, name_max) = scope.quirk(|quirks| (quirks.fs_type, quirks.name_max));
+                    Ok(kind.or(system.map(|stat| stat.kind)).map(|kind| FsStat {
+                        kind,
+                        name_max: name_max.or(system.map(|stat| stat.name_max)).unwrap_or(0),
+                    }))
                 })
                 .ok()
                 .flatten(),
-            None => System.fs_type(dir),
+            None => System.statfs(dir),
         }
     }
 
@@ -1279,7 +1658,7 @@ impl FsOps for Scoped {
             return System.link_fd(fd, to, through_proc);
         };
         scope.run(Op::LinkFd, &[to.name], |scope| {
-            scope.creating(to, || {
+            scope.creating(to, |to| {
                 let (links, tmpfile_link) =
                     scope.quirk(|quirks| (quirks.links, quirks.tmpfile_link));
                 if let Support::Rejected(error) = links {
@@ -1513,16 +1892,19 @@ impl FsOps for Scoped {
         })
     }
 
-    fn mount_type(&self, fd: BorrowedFd<'_>) -> Option<MountType> {
+    fn mount_type(&self, fd: BorrowedFd<'_>) -> Option<(MountType, PathBuf)> {
         assert_off_main_thread();
         match scope_for(fd) {
             Some(scope) => scope
                 .run(Op::MountType, &[], |scope| {
                     Ok(scope
                         .quirk(|quirks| quirks.mount_type)
-                        .map(|(fs_type, super_options)| MountType {
-                            fs_type: fs_type.to_owned(),
-                            super_options: super_options.to_owned(),
+                        .map(|(fs_type, super_options)| {
+                            let mount_type = MountType {
+                                fs_type: fs_type.to_owned(),
+                                super_options: super_options.to_owned(),
+                            };
+                            (mount_type, scope.root.clone())
                         })
                         .or_else(|| System.mount_type(fd)))
                 })
@@ -1571,7 +1953,7 @@ impl FsOps for Scoped {
                     FileType::Fifo => quirks.fifos,
                     _ => quirks.node_create,
                 });
-                scope.creating(at, || match support {
+                scope.creating(at, |at| match support {
                     Support::Rejected(error) => Err(error),
                     Support::Supported => System.create_node(at, kind, mode),
                 })
@@ -1594,7 +1976,7 @@ impl FsOps for Scoped {
         assert_off_main_thread();
         match scope_for(at.dir) {
             Some(scope) => scope.run(Op::CreateReadonly, &[at.name], |scope| {
-                scope.creating(at, || System.create_readonly(at, mode))
+                scope.creating(at, |at| System.create_readonly(at, mode))
             }),
             None => System.create_readonly(at, mode),
         }

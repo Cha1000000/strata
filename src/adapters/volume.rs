@@ -3,6 +3,7 @@
 mod mount_capabilities;
 mod mount_snapshot;
 mod mounts;
+mod names;
 #[cfg(test)]
 mod tests;
 
@@ -28,7 +29,14 @@ pub(crate) use mount_capabilities::{
     MountCapabilities, MountKey, XattrNamespace, learn_mount_capability, mount_capabilities,
 };
 pub(crate) use mount_snapshot::{RemovableRoot, invalidate_mount_snapshot, with_mount_snapshot};
-pub(crate) use mounts::{CoarseTimes, Family, FuseFormat, MountTable, MountType, family};
+#[cfg(test)]
+pub(crate) use mounts::FAT32_MAX_FILE_SIZE;
+pub(crate) use mounts::{
+    CoarseTimes, Family, FuseFormat, MountTable, MountType, family, holds_symlinks, max_file_size,
+};
+pub(crate) use names::{MountNames, NameProfile, gvfs_profile};
+#[cfg(test)]
+pub(crate) use names::{NameEncoding, NameLimit, NameRules, PrivateUse, Reserved, Strip};
 
 pub(crate) const REMOTE_QUERY_TIMEOUT: Duration = Duration::from_secs(2);
 

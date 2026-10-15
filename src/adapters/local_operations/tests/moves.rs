@@ -1775,11 +1775,8 @@ fn files_read_within_a_coarse_time_tick_are_compared_before_their_move_deletes_t
     };
     fn exfat_fuse() -> Quirks {
         Quirks {
-            mount_type: Some(("fuseblk", "rw")),
-            device_format: Some("exfat"),
             ctime_is_mtime: true,
-            no_birth_time: true,
-            ..Quirks::default()
+            ..Quirks::exfat_fuse()
         }
     }
     // exfat-fuse on a device udev has no record of, or cannot read.
@@ -1803,9 +1800,8 @@ fn files_read_within_a_coarse_time_tick_are_compared_before_their_move_deletes_t
     // An SMB share of a FAT disk, whose times only their lack of a fraction
     // of a second tells coarse.
     let fat_share = || Quirks {
-        mount_type: Some(("cifs", "rw")),
         ctime_is_mtime: true,
-        ..Quirks::default()
+        ..Quirks::cifs()
     };
     // Reads of four bytes, so the copy and the comparison read in chunks.
     let chunked = || Quirks {

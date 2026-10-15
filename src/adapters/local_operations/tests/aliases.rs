@@ -42,8 +42,14 @@ fn case_aliases_inside_a_copied_folder_are_numbered_and_reported() -> Result<(),
         case_insensitive: true,
         ..Quirks::ext4()
     };
+    // ciopfs folds case like FAT, and holds links, which FAT cannot.
+    let claimed = || Quirks {
+        mount_type: Some(("fuse.ciopfs", "rw")),
+        case_insensitive: true,
+        ..Quirks::default()
+    };
     let rows: [(&str, Preset, &str, &str); 2] = [
-        ("claimed", Quirks::vfat, "makefile", "makefile (2)"),
+        ("claimed", claimed, "makefile", "makefile (2)"),
         ("made", names_never_collide, "Makefile", "Makefile (2)"),
     ];
     for (row, preset, aliased, saved_as) in rows {

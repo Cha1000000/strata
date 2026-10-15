@@ -914,11 +914,11 @@ fn make(path: &Path, folder: bool) -> io::Result<()> {
 fn a_case_only_rename_goes_through_a_temporary_name() -> Result<(), Box<dyn Error>> {
     let smb = || Quirks {
         stale_aliases: true,
-        ..Quirks::default()
+        ..Quirks::cifs()
     };
     let exfat_fuse = || Quirks {
         alias_inodes: true,
-        ..Quirks::default()
+        ..Quirks::exfat_fuse()
     };
     let shapes: [Preset; 4] = [Quirks::default, Quirks::vboxsf, smb, exfat_fuse];
     for quirks in shapes {

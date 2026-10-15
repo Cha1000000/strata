@@ -928,8 +928,8 @@ const EXCHANGE_FILESYSTEMS: [u32; 8] = [
 
 /// Reads the filesystem type afresh on every call; it is never cached.
 pub(super) fn exchange_allowed(fs: &dyn FsOps, dir: BorrowedFd<'_>) -> bool {
-    fs.fs_type(dir)
-        .is_some_and(|fs_type| EXCHANGE_FILESYSTEMS.contains(&(fs_type as u32)))
+    fs.statfs(dir)
+        .is_some_and(|stat| EXCHANGE_FILESYSTEMS.contains(&(stat.kind as u32)))
         && Mount::new(fs, dir).capabilities().exchange != Some(false)
 }
 

@@ -118,14 +118,14 @@ fn staged(
 }
 
 use super::{
-    CopyStep, FAT32_MAX_FILE_SIZE, FailedAction, LocalFileIdentity, LocalOperationProvider,
-    MergeCopied, MergeHooks, MergePlan, MountTable, PinnedEntry, RestoreEntry, StageOverwrite,
-    StagedOriginalLookup, TRANSFER_PROGRESS_INTERVAL, TransferProgressTracker, TransferStop,
-    await_cancellable, copy_failure_after_cleanup, copy_failure_on_fat32,
-    copy_new_recursively_on_filesystem, copy_new_remote_file_with, copy_recursively,
-    deletion_error_message, deletion_error_summary, fat32_file_size_limit, home_trash_entries_at,
-    io_error, is_trash_unsupported_failure, join_local_tasks, local_file_identity, merge_local,
-    merge_local_with, move_local, move_local_with,
+    CopyStep, FailedAction, LocalFileIdentity, LocalOperationProvider, MergeCopied, MergeHooks,
+    MergePlan, MountTable, PinnedEntry, RestoreEntry, StageOverwrite, StagedOriginalLookup,
+    TRANSFER_PROGRESS_INTERVAL, TransferProgressTracker, TransferStop, await_cancellable,
+    copy_failure_after_cleanup, copy_failure_on_fat32, copy_new_recursively_on_filesystem,
+    copy_new_remote_file_with, copy_recursively, deletion_error_message, deletion_error_summary,
+    fat32_file_size_limit, home_trash_entries_at, io_error, is_trash_unsupported_failure,
+    join_local_tasks, local_file_identity, merge_local, merge_local_with, move_local,
+    move_local_with,
     naming::{
         Taken, duplicate_candidate_name, fat_sanitized_name, parse_copy_suffix,
         unique_fat_sibling_name,
@@ -137,6 +137,7 @@ use super::{
     trash_stage_overwrite, validated_child, was_cancelled,
 };
 use crate::{
+    adapters::volume::FAT32_MAX_FILE_SIZE,
     model::{EntryKind, FileEntry, Location, MetadataValue},
     services::{
         DeleteRequest, LoadHandle, MoveRecord, OperationEvent, OperationProvider,
@@ -229,8 +230,10 @@ fn set_times(path: &Path, seconds: u64, nanoseconds: u32) -> io::Result<()> {
     Ok(())
 }
 
-fn has_colon(name: &OsStr) -> bool {
-    name.as_encoded_bytes().contains(&b':')
+fn has_colon(name: &OsStr) -> Option<rustix::io::Errno> {
+    name.as_encoded_bytes()
+        .contains(&b':')
+        .then_some(rustix::io::Errno::INVAL)
 }
 
 async fn copy_new_recursively_with_progress(

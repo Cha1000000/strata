@@ -2,7 +2,12 @@
 
 use std::{path::Path, time::Duration};
 
-use super::{MountTable, is_remote_fs_type, unescape};
+use super::{
+    FAT32_MAX_FILE_SIZE, MountTable, holds_symlinks, is_remote_fs_type, max_file_size, unescape,
+};
+use crate::adapters::volume::names::{
+    NameEncoding, NameLimit, NameProfile, NameRules, PrivateUse, Reserved, Strip,
+};
 
 mod byte_paths;
 
@@ -23,7 +28,7 @@ fn parses_mount_points_and_filesystem_types() {
         Some("ext4")
     );
     assert_eq!(table.fs_type_for(Path::new("/mnt/nfs/docs")), Some("nfs4"));
-    let fs_type_of = |id| table.mount_type_of(id).map(|mount| mount.fs_type.as_str());
+    let fs_type_of = |id| table.mount_of(id).map(|(mount, _)| mount.fs_type.as_str());
     assert_eq!(fs_type_of(41), Some("ext4"));
     assert_eq!(fs_type_of(60), Some("cifs"));
     assert_eq!(fs_type_of(99), None);
@@ -49,7 +54,7 @@ fn inode_numbers_are_unstable_on_fat_fuse_and_cifs_without_server_inodes() {
 77 22 8:35 / /mnt/h rw - msdos /dev/sdc4 rw
 ",
     );
-    let stable = |id| table.mount_type_of(id).map(super::MountType::stable_inodes);
+    let stable = |id| table.mount_of(id).map(|(mount, _)| mount.stable_inodes());
     assert_eq!(stable(70), Some(true));
     assert_eq!(stable(71), Some(false));
     assert_eq!(stable(72), Some(false));
@@ -71,8 +76,8 @@ fn smb_mounts_keep_closed_handles_for_their_close_timeout() {
     );
     let deferred = |id| {
         table
-            .mount_type_of(id)
-            .and_then(super::MountType::deferred_close)
+            .mount_of(id)
+            .and_then(|(mount, _)| mount.deferred_close())
     };
     assert_eq!(deferred(80), Some(Duration::from_secs(1)));
     assert_eq!(deferred(81), Some(Duration::ZERO));
@@ -181,5 +186,207 @@ fn network_and_fuse_filesystems_are_remote() {
     }
     for fs_type in ["ext4", "btrfs", "xfs", "tmpfs", "vfat", "exfat", "overlay"] {
         assert!(!is_remote_fs_type(fs_type), "{fs_type} should be local");
+    }
+}
+
+/// The lab's mountinfo lines (2026-10-14), then options it did not mount.
+const NAME_MOUNTS: &str = "\
+1241 1219 0:135 / /tmp rw,nosuid,nodev,relatime - tmpfs tmpfs rw,size=16777216k,inode64,huge=advise
+1128 1219 7:0 / /mnt/fslab/ext4 rw,relatime - ext4 /dev/loop0 rw,errors=remount-ro
+1150 1219 7:2 / /mnt/fslab/vfat rw,relatime - vfat /dev/loop2 rw,uid=1000,gid=1000,fmask=0022,dmask=0022,codepage=437,iocharset=ascii,shortname=mixed,showexec,utf8,flush,errors=remount-ro
+1167 1219 7:3 / /mnt/fslab/exfat rw,relatime - exfat /dev/loop3 rw,uid=1000,gid=1000,fmask=0022,dmask=0022,iocharset=utf8,errors=remount-ro
+1262 1219 7:10 / /mnt/fslab/exfat-fuse rw,nosuid,nodev,relatime - fuseblk /dev/loop10 rw,user_id=0,group_id=0,default_permissions,allow_other,blksize=4096
+1168 1219 7:4 / /mnt/fslab/ntfs3 rw,relatime - ntfs3 /dev/loop4 rw,uid=1000,gid=1000,acl,iocharset=utf8,prealloc
+1170 1219 7:4 / /mnt/fslab/ntfs3-wn rw,relatime - ntfs3 /dev/loop4 rw,uid=1000,gid=1000,windows_names,acl,iocharset=utf8,prealloc
+1177 1219 0:137 / /mnt/fslab/nfs42 rw,relatime - nfs4 127.0.0.1:/v42 rw,vers=4.2,rsize=1048576,wsize=1048576,namlen=255,hard,proto=tcp,timeo=600,retrans=2,sec=sys,clientaddr=127.0.0.1,local_lock=none,addr=127.0.0.1
+1178 1219 0:138 / /mnt/fslab/cifs rw,relatime - cifs //127.0.0.1/cifs rw,vers=3.1.1,cache=strict,username=strata,uid=1000,forceuid,gid=1000,forcegid,addr=127.0.0.1,soft,nounix,serverino,mapposix,reparse=nfs,nativesocket,symlink=native,actimeo=1,closetimeo=1
+1179 1219 0:139 / /mnt/fslab/cifs-nocase rw,relatime - cifs //127.0.0.1/nocase rw,vers=3.1.1,cache=strict,username=strata,uid=1000,forceuid,gid=1000,forcegid,addr=127.0.0.1,nocase,soft,nounix,serverino,mapposix,reparse=nfs,nativesocket,symlink=native,actimeo=1,closetimeo=1
+1180 1219 0:140 / /mnt/fslab/cifs-posix rw,relatime - cifs //127.0.0.1/posix rw,vers=3.1.1,cache=strict,username=strata,uid=1000,forceuid,gid=1000,forcegid,addr=127.0.0.1,soft,posix,posixpaths,serverino,reparse=nfs,nonativesocket,symlink=native,actimeo=1,closetimeo=1
+1261 1219 0:142 / /mnt/fslab/sshfs rw,nosuid,nodev,relatime - fuse.sshfs 127.0.0.1:/srv/sshfs rw,user_id=0,group_id=0,allow_other
+2001 22 8:1 / /mnt/a rw - vfat /dev/sdb1 rw,codepage=437,iocharset=utf8
+2002 22 8:2 / /mnt/b rw - vfat /dev/sdb2 rw,codepage=437,iocharset=ascii
+2003 22 8:3 / /mnt/c rw - vfat /dev/sdb3 rw,codepage=850,iocharset=iso8859-1
+2004 22 8:4 / /mnt/d rw - msdos /dev/sdb4 rw
+2005 22 0:50 / /mnt/e rw - cifs //server/e rw,unix,mapposix
+2006 22 0:51 / /mnt/f rw - cifs //server/f rw,unix,posixpaths
+2007 22 0:52 / /mnt/g rw - smb3 //server/g rw,nounix,mapchars
+2008 22 0:53 / /mnt/h rw - zfs pool/h rw,xattr,posixacl
+2009 22 0:54 / /mnt/i rw - ecryptfs /mnt/i rw,ecryptfs_cipher=aes
+2010 22 8:5 / /mnt/j rw - hfsplus /dev/sdb5 rw,umask=22,nls=utf8
+2011 22 0:55 / /mnt/k rw - 9p shared rw,trans=virtio
+2012 22 0:56 / /mnt/l rw - fuse.example example rw,user_id=1000
+2013 22 8:6 / /mnt/m rw - vfat /dev/sdb6 rw,shortname=mixed,iocharset=utf8,utf8,flush
+";
+
+#[test]
+fn name_rules_follow_the_driver_its_options_and_its_name_length() {
+    let posix = |bytes, learns| NameProfile {
+        rules: NameRules::Posix,
+        strip: Strip::None,
+        reserved: Reserved::None,
+        encoding: NameEncoding::AnyBytes,
+        mapped: None,
+        limit: NameLimit {
+            bytes,
+            ..NameLimit::default()
+        },
+        learns,
+    };
+    let windows = |reserved, encoding, learns| NameProfile {
+        rules: NameRules::Windows,
+        strip: Strip::Trailing,
+        reserved,
+        encoding,
+        mapped: None,
+        limit: NameLimit {
+            units: Some(255),
+            ..NameLimit::default()
+        },
+        learns,
+    };
+    let smb = |encoding, mapped| NameProfile {
+        mapped,
+        limit: NameLimit {
+            bytes: Some(255),
+            units: Some(255),
+            folder_bytes: Some(213),
+        },
+        ..windows(Reserved::Full, encoding, false)
+    };
+    let smb_posix = NameProfile {
+        encoding: NameEncoding::Utf8,
+        limit: NameLimit {
+            bytes: Some(255),
+            folder_bytes: Some(213),
+            ..NameLimit::default()
+        },
+        ..posix(Some(255), false)
+    };
+    let bare = windows(Reserved::Bare, NameEncoding::Utf8, false);
+    let full = windows(Reserved::Full, NameEncoding::Utf8, false);
+    let fat32 = Some(FAT32_MAX_FILE_SIZE);
+    let table = MountTable::parse(NAME_MOUNTS);
+    for (id, device_format, name_max, profile, symlinks, max_size) in [
+        (1241, None, 255, posix(Some(255), false), None, None),
+        (1128, None, 255, posix(Some(255), false), None, None),
+        (1128, None, 0, posix(None, false), None, None),
+        // `f_namelen` 1530 means 255 UTF-16 units of up to six bytes.
+        (1150, None, 1530, bare, Some(false), fat32),
+        (
+            2001,
+            None,
+            1530,
+            windows(Reserved::Bare, NameEncoding::Utf8Bmp, false),
+            Some(false),
+            fat32,
+        ),
+        (
+            2002,
+            None,
+            1530,
+            windows(Reserved::Bare, NameEncoding::Ascii, false),
+            Some(false),
+            fat32,
+        ),
+        (2003, None, 1530, bare, Some(false), fat32),
+        (2013, None, 1530, bare, Some(false), fat32),
+        (2004, None, 12, bare, Some(false), fat32),
+        (1167, None, 1530, bare, Some(false), None),
+        (1262, Some("exfat"), 255, bare, Some(false), None),
+        (1262, Some("vfat"), 255, bare, Some(false), fat32),
+        (1262, Some("ntfs"), 255, full, None, None),
+        (
+            1262,
+            None,
+            255,
+            windows(Reserved::Bare, NameEncoding::Utf8, true),
+            None,
+            None,
+        ),
+        (
+            1262,
+            Some("ext4"),
+            255,
+            windows(Reserved::Bare, NameEncoding::Utf8, true),
+            None,
+            None,
+        ),
+        (1168, None, 255, bare, None, None),
+        (1170, None, 255, full, None, None),
+        (1177, None, 255, posix(Some(255), false), None, None),
+        (
+            1178,
+            None,
+            255,
+            smb(NameEncoding::Utf8, Some(PrivateUse::Sfm)),
+            None,
+            None,
+        ),
+        (
+            1179,
+            None,
+            255,
+            smb(NameEncoding::Utf8Bmp, Some(PrivateUse::Sfm)),
+            None,
+            None,
+        ),
+        (1180, None, 255, smb_posix, None, None),
+        (
+            2005,
+            None,
+            255,
+            smb(NameEncoding::Utf8, Some(PrivateUse::Sfm)),
+            None,
+            None,
+        ),
+        (2006, None, 255, smb_posix, None, None),
+        (
+            2007,
+            None,
+            255,
+            smb(NameEncoding::Utf8, Some(PrivateUse::Sfu)),
+            None,
+            None,
+        ),
+        (1261, None, 255, posix(Some(255), true), None, None),
+        (2008, None, 1023, posix(Some(1023), false), None, None),
+        (2009, None, 143, posix(Some(143), true), None, None),
+        (
+            2010,
+            None,
+            255,
+            NameProfile {
+                encoding: NameEncoding::Utf8,
+                limit: NameLimit {
+                    units: Some(255),
+                    ..NameLimit::default()
+                },
+                ..posix(None, false)
+            },
+            None,
+            None,
+        ),
+        (2011, None, 255, posix(Some(255), true), None, None),
+        // A FUSE daemon's `f_namelen` is whatever it reports.
+        (2012, None, 0, posix(None, true), None, None),
+        (2012, None, 10, posix(Some(64), true), None, None),
+        (2012, None, 10_000, posix(Some(4095), true), None, None),
+    ] {
+        let (mount, _) = table.mount_of(id).expect("listed mount");
+        assert_eq!(
+            mount.name_profile(device_format, name_max),
+            profile,
+            "{id} {device_format:?} {name_max}"
+        );
+        assert_eq!(
+            holds_symlinks(&mount.fs_type, device_format),
+            symlinks,
+            "{id} {device_format:?}"
+        );
+        assert_eq!(
+            max_file_size(&mount.fs_type, device_format),
+            max_size,
+            "{id} {device_format:?}"
+        );
     }
 }

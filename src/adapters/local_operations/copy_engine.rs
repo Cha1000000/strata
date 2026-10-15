@@ -40,6 +40,7 @@ use super::{
     copy_failure_after_cleanup,
     fs_ops::{Entry, EntryStat, FsOps, fs},
     io_error, local_delete_worker_count, local_device_is_rotational,
+    mount_profile::known_mount,
     naming::Taken,
     open_local_parent_directory, os_error_detail, os_error_text,
     parallel_delete_local_blocking_with_workers, placement,
@@ -48,8 +49,8 @@ use super::{
 };
 use crate::{
     adapters::volume::{
-        CoarseTimes, Family, FuseFormat, MountCapabilities, MountKey, MountType, family,
-        learn_mount_capability, mount_capabilities,
+        CoarseTimes, Family, FuseFormat, MountCapabilities, MountKey, learn_mount_capability,
+        mount_capabilities,
     },
     model::Location,
     services::{
@@ -1314,11 +1315,7 @@ struct Mount {
 
 impl Mount {
     fn new(fs: &dyn FsOps, dir: BorrowedFd<'_>) -> Self {
-        let key = fs.mount_key(dir);
-        let mut capabilities = mount_capabilities(key);
-        if capabilities.family.is_none() {
-            capabilities = learn_mount_type(fs, dir, key);
-        }
+        let (key, capabilities) = known_mount(fs, dir);
         Self {
             key,
             family: capabilities.family.unwrap_or(Family::Other),
@@ -1329,11 +1326,7 @@ impl Mount {
     }
 
     fn keeps_inode_numbers(fs: &dyn FsOps, dir: BorrowedFd<'_>) -> bool {
-        let key = fs.mount_key(dir);
-        mount_capabilities(key)
-            .stable_inodes
-            .or_else(|| learn_mount_type(fs, dir, key).stable_inodes)
-            .unwrap_or(true)
+        known_mount(fs, dir).1.stable_inodes.unwrap_or(true)
     }
 
     fn capabilities(&self) -> MountCapabilities {
@@ -1343,34 +1336,6 @@ impl Mount {
     fn learn(&self, learn: impl FnOnce(&mut MountCapabilities)) {
         learn_mount_capability(self.key, learn);
     }
-}
-
-/// For `fuseblk`, udev's record of the device tells which daemon serves it.
-fn learn_mount_type(fs: &dyn FsOps, dir: BorrowedFd<'_>, key: MountKey) -> MountCapabilities {
-    let mount_type = fs.mount_type(dir);
-    let family = mount_type
-        .as_ref()
-        .map_or(Family::Other, |mount| family(&mount.fs_type));
-    let stable = mount_type.as_ref().is_none_or(MountType::stable_inodes);
-    let fuse_format = mount_type
-        .as_ref()
-        .filter(|mount| mount.fs_type == "fuseblk")
-        .and_then(|_| fs.device_format(dir).ok().flatten())
-        .and_then(|format| FuseFormat::of(&format));
-    let coarse_times = mount_type
-        .as_ref()
-        .and_then(|mount| mount.coarse_times(fuse_format));
-    let deferred_close = mount_type.and_then(|mount| mount.deferred_close());
-    let mut learned = MountCapabilities::default();
-    learn_mount_capability(key, |capabilities| {
-        capabilities.family = Some(family);
-        capabilities.stable_inodes = Some(stable);
-        capabilities.fuse_format = fuse_format;
-        capabilities.coarse_times = coarse_times;
-        capabilities.deferred_close = deferred_close;
-        learned = *capabilities;
-    });
-    learned
 }
 
 const TMPFILE_LINK_UNKNOWN: u8 = 0;
