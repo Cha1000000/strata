@@ -2,11 +2,11 @@
 
 use std::{
     cell::RefCell,
-    path::PathBuf,
+    path::{Path, PathBuf},
     rc::{Rc, Weak},
 };
 
-use gtk::{gio, prelude::*};
+use gtk::prelude::*;
 
 use crate::{
     adapters::LocalActionStore,
@@ -115,8 +115,8 @@ fn content_type_for(kind: InputKind, name: &std::ffi::OsStr) -> Option<String> {
     }
     // Menu matching must not read file contents.
     let guessed_name = name.to_string_lossy();
-    let (guessed, _) = gio::content_type_guess(Some(guessed_name.as_ref()), None::<&[u8]>);
-    (!guessed.is_empty()).then(|| guessed.to_string())
+    let (guessed, _) = crate::services::guess_content_type(Path::new(guessed_name.as_ref()));
+    (!guessed.is_empty()).then_some(guessed)
 }
 
 pub(crate) fn native_paths(entries: &[FileEntry]) -> Option<Vec<PathBuf>> {

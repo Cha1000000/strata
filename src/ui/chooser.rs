@@ -253,8 +253,7 @@ fn file_filter_matches(filter: &gtk::FileFilter, entry: &FileEntry) -> bool {
     info.set_name(Path::new(&entry.native_name));
     info.set_display_name(&entry.display_name);
     info.set_file_type(gio::FileType::Regular);
-    let (content_type, _) =
-        gio::content_type_guess(Some(Path::new(&entry.native_name)), None::<&[u8]>);
+    let (content_type, _) = crate::services::guess_content_type(Path::new(&entry.native_name));
     info.set_content_type(&content_type);
     filter.match_(&info)
 }
