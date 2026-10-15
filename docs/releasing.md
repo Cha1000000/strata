@@ -34,7 +34,7 @@ Run the **Release** workflow from GitHub's Actions tab on the default branch, ch
 - the `prepare` job refuses to proceed if a release candidate tag exists for the target core version whose commit is not yet reachable from the release source -- promote or discard that RC first, so a stable release can never silently supersede an untested one;
 - after maintainer approval, the isolated `sign` job signs the manifest using tools from the workflow revision, binding both archive digests to the tag and original build source commit;
 - after the separate release approval, the `release` job commits the new version into `Cargo.toml` and `Cargo.lock`, tags the commit `vX.Y.Z`, and pushes both to the default branch; and
-- it publishes x86-64 and ARM64 archives, matching debug-symbol files, `install.sh` from the release source, checksums, the signed manifest, and build-provenance attestations as an ordinary (non-prerelease) GitHub release -- the endpoint a Stable install polls and the `releases/latest/download/install.sh` URL the README tells users to verify.
+- it publishes x86-64 and ARM64 archives, matching debug-symbol files, checksums, the signed manifest, and build-provenance attestations as an ordinary (non-prerelease) GitHub release -- the endpoint a Stable install polls.
 
 ## Cutting and promoting prereleases
 

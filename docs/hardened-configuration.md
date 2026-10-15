@@ -9,14 +9,11 @@ hardware acceleration. None of them are required.
 
 ## Installation
 
-- Install from a release, not from the `main` branch. Download `install.sh` and
-  `install.sh.sha256` from the latest release, run `sha256sum --check`, and verify
-  provenance with `gh attestation verify install.sh --repo lgse/strata` before
-  running it. The [README](../README.md#interactive-installation) has the exact
-  commands; the manual archive installation follows the same pattern.
-- If you can, authenticate GitHub CLI before running the installer. The installer
-  then also verifies the release archive's provenance instead of relying on its
-  checksum alone.
+- If you can, authenticate GitHub CLI before running the
+  [installer](../README.md#interactive-installation). The installer then also
+  verifies the release archive's provenance instead of relying on its checksum
+  alone. A [manual installation](../README.md#manual-installation) can run the
+  same `gh attestation verify` check before extracting the archive.
 - Package-managed installations are updated only by the system package manager.
 
 ## Updates

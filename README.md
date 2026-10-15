@@ -72,40 +72,30 @@ The interactive installer detects the Linux architecture, glibc version, Arch
 Linux, and Omarchy 3 or 4. It installs the latest verified stable release and
 offers optional desktop-menu, default-folder-handler, "Open file location", system
 file chooser, encrypted-volume unlock, SMB, broader image/RAW, and Omarchy keybind
-integration.
-
-Each release publishes the installer as an attested asset. Download it from the
-latest stable release and verify it before running it:
+integration:
 
 ```bash
-curl -fsSLO https://github.com/lgse/strata/releases/latest/download/install.sh
-curl -fsSLO https://github.com/lgse/strata/releases/latest/download/install.sh.sha256
-sha256sum --check install.sh.sha256
-gh attestation verify install.sh --repo lgse/strata   # if GitHub CLI is authenticated
-bash install.sh
+curl -fsSL https://raw.githubusercontent.com/lgse/strata/main/install.sh | bash
 ```
 
-Every verification you run must succeed. Read `install.sh` before running it if
-you want to review exactly what it will do. Do not pipe the installer from the
-`main` branch into a shell: that copy has not been released or verified.
-
 The installer shows every privileged package operation before asking to run it.
-It verifies the release archive's published SHA-256 digest, and its GitHub Actions
-provenance when GitHub CLI is authenticated, before installing anything from it.
-The binary is installed per-user at `~/.local/bin/strata`.
+It verifies both the published SHA-256 digest and GitHub Actions provenance before
+installing anything from the release archive. The binary is installed per-user at
+`~/.local/bin/strata`.
 
 For an unattended Arch or Omarchy installation, pass `--non-interactive`. This
 installs required dependencies and the binary without prompting; optional
 integrations remain disabled unless explicitly selected:
 
 ```bash
-bash install.sh --non-interactive \
-  --with-smb \
-  --with-raw \
-  --with-desktop-entry \
-  --with-folder-association \
-  --with-omarchy-keybinds \
-  --with-udiskie-unlock
+curl -fsSL https://raw.githubusercontent.com/lgse/strata/main/install.sh \
+  | bash -s -- --non-interactive \
+      --with-smb \
+      --with-raw \
+      --with-desktop-entry \
+      --with-folder-association \
+      --with-omarchy-keybinds \
+      --with-udiskie-unlock
 ```
 
 Each `--with-*` flag implies `--non-interactive`, and folder association implies
@@ -121,7 +111,7 @@ never installs the `udiskie` package. Unattended installs need
 leave it declined. Restore on Arch with `strata --uninstall-udiskie-unlock`, not
 Settings.
 
-Non-interactive package installation requires passwordless sudo or cached credentials. Run `bash install.sh --help` for the full option list.
+Non-interactive package installation requires passwordless sudo or cached credentials. Run `./install.sh --help` for the full option list.
 
 Phone backends are not installed by the script. For optional iPhone/iPad or Android
 access, follow [Connecting phones](#connecting-phones) after installation.
