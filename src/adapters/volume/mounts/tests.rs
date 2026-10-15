@@ -217,6 +217,15 @@ const NAME_MOUNTS: &str = "\
 2012 22 0:56 / /mnt/l rw - fuse.example example rw,user_id=1000
 2013 22 8:6 / /mnt/m rw - vfat /dev/sdb6 rw,shortname=mixed,iocharset=utf8,utf8,flush
 2014 22 8:7 / /mnt/n rw - exfat /dev/sdb7 rw,fmask=0022,dmask=0022,iocharset=ascii,errors=remount-ro
+2015 22 0:57 / /mnt/o rw - nfs 127.0.0.1:/v3 rw,vers=3,namlen=255,hard,proto=tcp,sec=sys
+2016 22 8:8 / /mnt/p rw - xfs /dev/sdb8 rw,attr2,inode64,logbufs=8,noquota
+2017 22 0:58 / /mnt/q rw - btrfs /dev/sdb9 rw,ssd,space_cache=v2,subvolid=5,subvol=/
+2018 22 8:10 / /mnt/r rw - f2fs /dev/sdb10 rw,lazytime,background_gc=on
+2019 22 8:11 / /mnt/s rw - bcachefs /dev/sdb11 rw
+2020 22 0:59 / /mnt/t rw - overlay overlay rw,lowerdir=/l,upperdir=/u,workdir=/w
+2021 22 8:12 / /mnt/u rw - ntfs /dev/sdb12 rw,uid=1000,gid=1000,iocharset=utf8
+2022 22 8:13 / /mnt/v rw - ntfs /dev/sdb13 rw,uid=1000,gid=1000,windows_names,iocharset=utf8
+2023 22 0:60 / /mnt/w rw - smb3 //server/w rw,vers=3.1.1,posix,serverino
 ";
 
 #[test]
@@ -323,6 +332,15 @@ fn name_rules_follow_the_driver_its_options_and_its_name_length() {
         (1168, None, 255, bare, None, None),
         (1170, None, 255, full, None, None),
         (1177, None, 255, posix(Some(255), false), None, None),
+        (2015, None, 255, posix(Some(255), false), None, None),
+        (2016, None, 255, posix(Some(255), false), None, None),
+        (2017, None, 255, posix(Some(255), false), None, None),
+        (2018, None, 255, posix(Some(255), false), None, None),
+        (2019, None, 255, posix(Some(255), false), None, None),
+        (2020, None, 255, posix(Some(255), false), None, None),
+        (2021, None, 255, bare, None, None),
+        (2022, None, 255, full, None, None),
+        (2023, None, 255, smb_posix, None, None),
         (
             1178,
             None,
