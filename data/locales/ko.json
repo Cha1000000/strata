@@ -945,7 +945,7 @@
   "The name isn’t valid at this location": "이 위치에서 사용할 수 없는 이름입니다",
   "The result could not be confirmed. Check both locations before trying again.": "결과를 확인할 수 없습니다. 다시 시도하기 전에 두 위치를 모두 확인하세요.",
   "These names were already taken": "이 이름들은 이미 사용 중이었습니다",
-  "These names were too long for the destination": "이 이름들은 대상 위치에 비해 너무 길었습니다",
+  "These names were too long for the destination": "이 이름들은 대상 위치에서 사용하기에 너무 깁니다",
   "These special files can’t be copied and were left out": "이 특수 파일은 복사할 수 없어 제외되었습니다",
   "These symbolic links can’t be stored at the destination and were left out": "이 심볼릭 링크는 대상 위치에 저장할 수 없어 제외되었습니다",
   "This location can’t guarantee that another item won’t be overwritten": "이 위치에서는 다른 항목을 덮어쓰지 않는다고 보장할 수 없습니다",
