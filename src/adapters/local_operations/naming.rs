@@ -9,6 +9,12 @@ use std::{
 
 use super::placement;
 
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "transfers fix names with it next")
+)]
+pub(super) mod fix;
+
 pub(super) fn parse_copy_suffix(stem: &OsStr) -> (&OsStr, Option<u64>) {
     let bytes = stem.as_bytes();
     if let Some(without_closing_parenthesis) = bytes.strip_suffix(b")")
