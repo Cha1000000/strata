@@ -283,7 +283,8 @@ impl Naming {
 /// another job's entry mistaken for one whose reply was lost.
 pub(super) struct Names {
     requested: Vec<OsString>,
-    keys: OnceLock<HashSet<OsString>>,
+    /// How many entries ask for each collision key.
+    keys: OnceLock<HashMap<OsString, usize>>,
     numbered: Mutex<HashSet<OsString>>,
     /// What the folder's jobs made, by collision key, where a taken name may
     /// be the copy's own entry whose reply was lost; `None` elsewhere. Some
@@ -333,20 +334,26 @@ impl Names {
             .is_none_or(|made| self.stable_inodes && !made.contains(&identity))
     }
 
-    fn requested(&self) -> &HashSet<OsString> {
+    fn requested(&self) -> &HashMap<OsString, usize> {
         self.keys.get_or_init(|| {
-            self.requested
-                .iter()
-                .map(|name| stage::collision_key(name))
-                .collect()
+            let mut keys = HashMap::new();
+            for name in &self.requested {
+                *keys.entry(stage::collision_key(name)).or_default() += 1;
+            }
+            keys
         })
     }
 
     /// Whether this job is the one to try `name`, which no entry of the
-    /// folder asks for.
-    fn claims(&self, name: &OsStr) -> bool {
+    /// folder asks for but `own`, the job's own entry.
+    fn claims(&self, name: &OsStr, own: Option<&OsStr>) -> bool {
         let key = stage::collision_key(name);
-        !self.requested().contains(&key) && lock(&self.numbered).insert(key)
+        let asked = match self.requested().get(&key) {
+            None => false,
+            Some(1) => own.is_none_or(|own| stage::collision_key(own) != key),
+            Some(_) => true,
+        };
+        !asked && lock(&self.numbered).insert(key)
     }
 
     fn number<T>(
@@ -356,7 +363,7 @@ impl Names {
         mut make: impl FnMut(&OsStr) -> Result<T, Failure>,
     ) -> Result<(OsString, T), Failure> {
         for candidate in numbered_names(name, is_directory, self.rules.limit) {
-            if !self.claims(&candidate) {
+            if !self.claims(&candidate, None) {
                 continue;
             }
             match make(&candidate) {
@@ -367,15 +374,15 @@ impl Names {
         Err(Failure::Place(PlaceError::Exists))
     }
 
-    /// `name`, which stricter rules gave a name the mount refused, or a
-    /// number of it where it is taken.
+    /// `name`, which stricter rules gave `refused`, a name the mount refused,
+    /// or a number of it where it is taken.
     fn stricter<T>(
         &self,
-        name: &OsStr,
+        (refused, name): (&OsStr, &OsStr),
         is_directory: bool,
         mut make: impl FnMut(&OsStr) -> Result<T, Failure>,
     ) -> Result<(OsString, T), Failure> {
-        if self.claims(name) {
+        if self.claims(name, Some(refused)) {
             match make(name) {
                 Err(Failure::Place(PlaceError::Exists)) => {}
                 made => return made.map(|value| (name.to_os_string(), value)),
@@ -402,7 +409,7 @@ pub(super) fn make_numbered<T>(
         Err(refused) if refused.refuses_name() => {
             let target = (name, is_directory);
             super::retry_refused(copy, &names.rules, target, refused, |stricter| {
-                names.stricter(stricter, is_directory, &mut make)
+                names.stricter((name, stricter), is_directory, &mut make)
             })?
         }
         made => return made.map(|value| (path.to_path_buf(), value)),

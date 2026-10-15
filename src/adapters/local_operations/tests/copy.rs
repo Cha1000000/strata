@@ -1926,6 +1926,46 @@ fn a_refused_name_takes_the_first_stricter_rules_it_passes_and_teaches_only_a_mo
     Ok(())
 }
 
+fn refuses_trailing_dots(name: &OsStr) -> Option<Errno> {
+    name.as_encoded_bytes()
+        .ends_with(b".")
+        .then_some(Errno::INVAL)
+}
+
+#[test]
+fn a_name_refused_for_its_trailing_dot_takes_the_name_without_it_unless_a_sibling_has_it()
+-> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    for (siblings, saved) in [(&["x."][..], &["x"][..]), (&["x.", "x"], &["x", "x (1)"])] {
+        let root = tempfile::tempdir()?;
+        let source = root.path().join("dots");
+        let disk = root.path().join("disk");
+        fs::create_dir_all(&source)?;
+        fs::create_dir(&disk)?;
+        for name in siblings {
+            fs::write(source.join(name), name)?;
+        }
+        let _disk = FsQuirks::install(
+            &disk,
+            Quirks {
+                invalid_name: Some(refuses_trailing_dots),
+                ..Quirks::ext4()
+            },
+        );
+
+        paste_into(&disk, &[source.clone()]);
+
+        assert_eq!(names(&disk.join("dots"))?, saved, "{siblings:?}");
+        assert_eq!(
+            fs::read(disk.join("dots").join(saved.last().ok_or("none")?))?,
+            b"x."
+        );
+    }
+    Ok(())
+}
+
 #[test]
 fn a_name_refused_as_missing_neither_turns_unnamed_files_off_nor_writes_twice()
 -> Result<(), Box<dyn Error>> {
