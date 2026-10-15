@@ -382,8 +382,9 @@ pub struct TransferReport {
     pub kept: Vec<KeptItem>,
     /// Left in the Trash by a restore.
     pub kept_in_trash: Vec<KeptItem>,
-    /// Whether undo leaves out the moved items whose sources kept entries.
-    pub kept_out_of_undo: bool,
+    /// The moved items, at their sources, that undo leaves out, as each
+    /// kept entries there.
+    pub kept_out_of_undo: Vec<Location>,
 }
 
 impl TransferReport {
@@ -399,7 +400,7 @@ impl TransferReport {
         self.skipped.extend(other.skipped);
         self.kept.extend(other.kept);
         self.kept_in_trash.extend(other.kept_in_trash);
-        self.kept_out_of_undo |= other.kept_out_of_undo;
+        self.kept_out_of_undo.extend(other.kept_out_of_undo);
     }
 
     /// Joins the entries of an item saved under one name after another, as

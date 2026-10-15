@@ -1299,19 +1299,19 @@ fn an_item_whose_move_left_entries_behind_is_excluded_from_the_move_undo() {
             "/fixture/project/notes.txt",
             KeptCause::Changed,
             vec![project.clone()],
-            true,
+            vec![project.clone()],
         ),
         (
             "/fixture/project",
             KeptCause::Changed,
             vec![project.clone()],
-            true,
+            vec![project.clone()],
         ),
         (
             "/fixture/link",
             KeptCause::Skipped(SpecialKind::Symlink),
             Vec::new(),
-            false,
+            Vec::new(),
         ),
     ] {
         let browser = Browser::new(Rc::new(FakeFileSource));
@@ -1320,7 +1320,7 @@ fn an_item_whose_move_left_entries_behind_is_excluded_from_the_move_undo() {
         let observed = shown.clone();
         browser.observe(move |event| {
             if let BrowserEvent::ItemsReported { report } = event {
-                observed.borrow_mut().push(report.kept_out_of_undo);
+                observed.borrow_mut().push(report.kept_out_of_undo.clone());
             }
         });
         let request_id = browser.begin_operation();

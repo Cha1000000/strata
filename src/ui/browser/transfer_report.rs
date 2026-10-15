@@ -238,9 +238,14 @@ fn left_sections(report: &TransferReport) -> Vec<(String, Lines)> {
     ] {
         if !kept.is_empty() {
             let mut lines = Lines::of(kept, |item| kept_line(item, in_trash));
-            if !in_trash && report.kept_out_of_undo {
-                lines.note = Some(crate::i18n::tr(
-                    "Undo can\u{2019}t move these items back, as part of each stayed in its original folder.",
+            if !in_trash && !report.kept_out_of_undo.is_empty() {
+                let left_out = Lines::of(&report.kept_out_of_undo, display_name);
+                lines.note = Some(format!(
+                    "{}\n\n{}",
+                    crate::i18n::tr(
+                        "Undo can\u{2019}t move these items back, as part of each stayed in its original folder."
+                    ),
+                    bullets(&left_out)
                 ));
             }
             left.push((crate::i18n::count(heading, lines.count), lines));

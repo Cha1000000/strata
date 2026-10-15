@@ -90,9 +90,9 @@ impl OperationCompletion {
         created: Vec<Location>,
         merged: MergeUndoState,
         publish: fn(UndoEntry),
-    ) -> bool {
+    ) -> Vec<Location> {
         if self.undoing {
-            return false;
+            return Vec::new();
         }
         match self.moving {
             Some(true) => {
@@ -113,14 +113,18 @@ impl OperationCompletion {
                         moved_to,
                         &report.renamed,
                     )));
-                    return !kept_back.is_empty();
+                    return moved
+                        .iter()
+                        .filter(|source| kept_back.contains(source))
+                        .cloned()
+                        .collect();
                 }
             }
             Some(false) => {
                 let (merged_created, overwritten, mut placed) = merged.into_records();
                 if merged_created.is_empty() && overwritten.is_empty() {
                     publish(UndoEntry::Copy(created));
-                    return false;
+                    return Vec::new();
                 }
                 let mut all_created = created;
                 all_created.extend(merged_created);
@@ -139,7 +143,7 @@ impl OperationCompletion {
             }
             None => {}
         }
-        false
+        Vec::new()
     }
 }
 

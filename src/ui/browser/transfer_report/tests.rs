@@ -251,14 +251,20 @@ fn links_left_out_get_their_own_section_and_undo_says_what_it_leaves_out() {
         location: Location::local("/source/env/bin/python"),
         cause: KeptCause::Skipped(SpecialKind::Symlink),
     };
-    for (in_trash, kept_out_of_undo, noted) in [
-        (false, false, false),
-        (false, true, true),
-        (true, true, false),
+    let note = crate::i18n::tr(
+        "Undo can\u{2019}t move these items back, as part of each stayed in its original folder.",
+    );
+    for (in_trash, left_out, noted) in [
+        (false, 0, false),
+        (false, 1, true),
+        (false, LISTED_ITEMS + 2, true),
+        (true, 1, false),
     ] {
-        let row = format!("in Trash: {in_trash}, kept out of undo: {kept_out_of_undo}");
+        let row = format!("in Trash: {in_trash}, kept out of undo: {left_out}");
         let mut report = TransferReport {
-            kept_out_of_undo,
+            kept_out_of_undo: (0..left_out)
+                .map(|index| Location::local(format!("/source/project {index}")))
+                .collect(),
             ..TransferReport::default()
         };
         if in_trash {
@@ -269,10 +275,23 @@ fn links_left_out_get_their_own_section_and_undo_says_what_it_leaves_out() {
         let Some(Presentation::Warning { detail }) = presentation(&report) else {
             panic!("{row}");
         };
-        // A heading, the line, and the note after it.
-        let paragraphs = detail.split("\n\n").collect::<Vec<_>>();
-        assert_eq!(paragraphs.len(), 2 + usize::from(noted), "{row}: {detail}");
-        assert!(paragraphs[1].starts_with('•'), "{row}");
+        let (kept_lines, after) = detail.split_once(&note).unwrap_or((&detail, ""));
+        assert_eq!(after.is_empty(), !noted, "{row}: {detail}");
+        assert_eq!(kept_lines.matches('•').count(), 1, "{row}");
+        let names = after
+            .split("\n\n")
+            .filter_map(|line| line.strip_prefix("• "))
+            .collect::<Vec<_>>();
+        let listed = (0..left_out.min(LISTED_ITEMS))
+            .filter(|_| noted)
+            .map(|index| format!("project {index}"))
+            .collect::<Vec<_>>();
+        assert_eq!(names, listed, "{row}");
+        assert_eq!(
+            after.ends_with(&crate::i18n::count("more_items", 2)),
+            left_out > LISTED_ITEMS,
+            "{row}"
+        );
     }
 }
 

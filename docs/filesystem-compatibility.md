@@ -456,7 +456,7 @@ when it copies the link, that item was already moved out of the way, as any item
 A selected link is left out the same way, and the paste goes on with the next item. A Replace by a
 link leaves the original as it is. A move keeps the source of each link it left out, with the
 folders that hold it, also where GIO copies the item, and lists them as left behind. Undo leaves
-those items out, and the report says so.
+those items out, and the report says so and names them.
 
 Link targets are copied byte for byte, so a link pointing at an entry whose name was fixed no longer
 finds it at the destination.
@@ -513,8 +513,9 @@ if it is still what the copy read:
 What stays is reported by cause: changed during the move, could not be deleted (with the error, as
 in a read-only folder), a special file or symbolic link the destination cannot store, or an item
 whose copy was moved away. An entry already gone is not reported, since a move leaves exactly that.
-A moved item with anything left behind is left out of Undo, and the report says so. Undoing a move
-gives back names that were numbered as aliases, where the original name is free.
+A moved item with anything left behind is left out of Undo, and the report says so, naming up to
+eight such items and counting the rest. Undoing a move gives back names that were numbered as
+aliases, where the original name is free.
 
 A native item moved to a GVfs destination is recorded before GIO copies it, then deleted the same
 way. Nothing can be flushed there and nothing is compared by content, and a file that changes
