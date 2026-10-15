@@ -950,32 +950,6 @@ fn an_item_put_at_a_placed_name_right_after_placing_stays_there() -> Result<(), 
     Ok(())
 }
 
-fn renamed_beneath(
-    target: &Path,
-    report: &crate::services::TransferReport,
-) -> Vec<(String, String, crate::services::RenameCause)> {
-    let relative = |location: &Location| {
-        location
-            .native_path()
-            .and_then(|path| path.strip_prefix(target).ok())
-            .map(|path| path.to_string_lossy().into_owned())
-            .unwrap_or_default()
-    };
-    let mut renamed = report
-        .renamed
-        .iter()
-        .map(|item| {
-            (
-                relative(&item.requested),
-                relative(&item.saved_as),
-                item.cause,
-            )
-        })
-        .collect::<Vec<_>>();
-    renamed.sort_by(|left, right| left.0.cmp(&right.0));
-    renamed
-}
-
 #[test]
 fn a_stopped_merge_reports_only_what_it_placed() -> Result<(), Box<dyn Error>> {
     use super::fs_quirks::Racer;

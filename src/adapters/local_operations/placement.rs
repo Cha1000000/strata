@@ -51,6 +51,17 @@ pub(super) enum PlaceError {
     Io(Errno),
 }
 
+impl PlaceError {
+    /// Whether the destination refused the name itself. `EINVAL` from a
+    /// rename may mean its flags, so only what the probe mapped counts.
+    pub(super) fn refuses_name(self) -> bool {
+        matches!(
+            self,
+            Self::InvalidName | Self::Io(Errno::NAMETOOLONG | Errno::ILSEQ | Errno::BADMSG)
+        )
+    }
+}
+
 /// The kernel's own "not supported", which NFS lets reach userspace.
 pub(super) const ENOTSUPP: Errno = Errno::from_raw_os_error(524);
 

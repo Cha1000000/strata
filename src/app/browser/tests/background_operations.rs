@@ -476,6 +476,17 @@ fn a_transfer_reports_its_items_once_after_it_ends() {
                 assert!(browser.background_file_operation(id));
             }
             operations.emit(id, report("README"));
+            // The same item then saved under yet another name.
+            let mut again = renamed("README (1)");
+            again.renamed[0].saved_as = Location::local("/fixture/destination/folder/README (2)");
+            again.renamed[0].cause = crate::services::RenameCause::Taken;
+            operations.emit(
+                id,
+                OperationEvent::ItemsReported {
+                    request_id: id,
+                    report: again.clone(),
+                },
+            );
             assert!(reported(&events.borrow()).is_empty(), "reported early");
 
             let ending = terminal(id);
@@ -484,7 +495,9 @@ fn a_transfer_reports_its_items_once_after_it_ends() {
 
             let events = events.borrow();
             let mut expected = renamed("Makefile");
-            expected.extend(renamed("README"));
+            let mut readme = renamed("README");
+            readme.renamed[0].saved_as = again.renamed[0].saved_as.clone();
+            expected.extend(readme);
             let reports = reported(&events);
             assert_eq!(
                 reports

@@ -497,29 +497,81 @@ fn complete_undo_item(
 struct MergeUndoState {
     sources: HashSet<Location>,
     created: Vec<Location>,
-    overwritten: Vec<Location>,
+    /// `None` once its incoming copy was saved under another name.
+    overwritten: Vec<Option<Location>>,
+    /// Where each location is in `created` and in `overwritten`, so that a
+    /// report costs one lookup per entry.
+    created_at: HashMap<Location, Vec<usize>>,
+    overwritten_at: HashMap<Location, Vec<usize>>,
     placed: HashMap<Location, PlacedSnapshot>,
 }
 
 impl MergeUndoState {
+    fn merged(
+        &mut self,
+        source: Location,
+        created: Vec<Location>,
+        overwritten: Vec<Location>,
+        placed: HashMap<Location, PlacedSnapshot>,
+    ) {
+        self.sources.insert(source);
+        for location in created {
+            self.create(location);
+        }
+        for location in overwritten {
+            self.overwritten_at
+                .entry(location.clone())
+                .or_default()
+                .push(self.overwritten.len());
+            self.overwritten.push(Some(location));
+        }
+        self.placed.extend(placed);
+    }
+
+    fn create(&mut self, location: Location) {
+        self.created_at
+            .entry(location.clone())
+            .or_default()
+            .push(self.created.len());
+        self.created.push(location);
+    }
+
     /// An overwritten original stays in Trash when its incoming copy was saved
-    /// elsewhere, as another item has its name.
+    /// elsewhere, as another item has its name. Entries apply as reported, not
+    /// followed: what a merge recorded under a name it planned moves with the
+    /// entry that starts there, never with the fix that led to it.
     fn rename(&mut self, renamed: &[RenamedItem]) {
         for item in renamed {
-            for created in &mut self.created {
-                if *created == item.requested {
-                    *created = item.saved_as.clone();
+            if let Some(positions) = self.created_at.remove(&item.requested) {
+                for &position in &positions {
+                    self.created[position] = item.saved_as.clone();
                 }
+                self.created_at
+                    .entry(item.saved_as.clone())
+                    .or_default()
+                    .extend(positions);
             }
-            if let Some(index) = self
-                .overwritten
-                .iter()
-                .position(|overwritten| *overwritten == item.requested)
-            {
-                self.overwritten.remove(index);
-                self.created.push(item.saved_as.clone());
+            let first = self
+                .overwritten_at
+                .get_mut(&item.requested)
+                .filter(|positions| !positions.is_empty())
+                .map(|positions| positions.remove(0));
+            if let Some(position) = first {
+                self.overwritten[position] = None;
+                self.create(item.saved_as.clone());
             }
         }
+    }
+
+    fn into_records(
+        self,
+    ) -> (
+        Vec<Location>,
+        Vec<Location>,
+        HashMap<Location, PlacedSnapshot>,
+    ) {
+        let overwritten = self.overwritten.into_iter().flatten().collect();
+        (self.created, overwritten, self.placed)
     }
 }
 
@@ -875,28 +927,41 @@ fn moved_target(
         .or_else(|| source.transfer_target(destination))
 }
 
-/// Items that never left their own directory carry no undo.
+/// Items that never left their own directory carry no undo. Each record
+/// keeps the followed `renamed` entries beneath where its item went.
 fn move_records(
     sources: &[Location],
     destination: &Location,
     moved_to: &HashMap<Location, Location>,
     renamed: &[RenamedItem],
 ) -> Vec<MoveRecord> {
-    sources
+    let mut records = sources
         .iter()
         .filter_map(|source| {
             let current = moved_target(source, destination, moved_to)?;
             (&current != source).then(|| MoveRecord {
                 original: source.clone(),
-                renamed: renamed
-                    .iter()
-                    .filter(|item| item.saved_as.is_within(&current))
-                    .cloned()
-                    .collect(),
                 current,
+                renamed: Vec::new(),
             })
         })
-        .collect()
+        .collect::<Vec<_>>();
+    let moved = records
+        .iter()
+        .enumerate()
+        .map(|(index, record)| (record.current.clone(), index))
+        .collect::<HashMap<_, _>>();
+    for item in renamed {
+        let mut folder = item.saved_as.parent();
+        while let Some(location) = folder {
+            if let Some(&index) = moved.get(&location) {
+                records[index].renamed.push(item.clone());
+                break;
+            }
+            folder = location.parent();
+        }
+    }
+    records
 }
 
 #[cfg(test)]

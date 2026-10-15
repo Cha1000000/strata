@@ -12,21 +12,19 @@ use std::{
 
 use gtk::pango;
 
-use crate::adapters::volume::{
-    NameEncoding, NameLimit, NameProfile, NameRules, PrivateUse, Reserved, Strip,
+use crate::{
+    adapters::volume::{
+        NameEncoding, NameLimit, NameProfile, NameRules, PrivateUse, Reserved, Strip,
+    },
+    services::RenameCause,
 };
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(in crate::adapters::local_operations) enum Cause {
-    Invalid,
-    /// Text was cut off the end.
-    TooLong,
-}
 
 #[derive(Debug)]
 pub(in crate::adapters::local_operations) struct Fixed<'a> {
     pub name: Cow<'a, OsStr>,
-    pub cause: Option<Cause>,
+    /// [`RenameCause::Invalid`], or [`RenameCause::TooLong`] where text
+    /// was cut off the end.
+    pub cause: Option<RenameCause>,
 }
 
 /// `name` as the mount stores it: unchanged where it can, and the same
@@ -39,7 +37,7 @@ pub(in crate::adapters::local_operations) fn fix_name<'a>(
     let limit = Limit::of(profile.limit, is_directory);
     let fixed = tidied(storable(Cow::Borrowed(name), profile), profile);
     if limit.fits(fixed.as_bytes()) {
-        let cause = (*fixed != *name).then_some(Cause::Invalid);
+        let cause = (*fixed != *name).then_some(RenameCause::Invalid);
         return Fixed { name: fixed, cause };
     }
     let mut fixed = tidied(Cow::Owned(shortened(&fixed, limit, is_directory)), profile);
@@ -52,7 +50,7 @@ pub(in crate::adapters::local_operations) fn fix_name<'a>(
     }
     Fixed {
         name: Cow::Owned(fixed.into_owned()),
-        cause: Some(Cause::TooLong),
+        cause: Some(RenameCause::TooLong),
     }
 }
 

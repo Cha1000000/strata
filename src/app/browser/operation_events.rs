@@ -118,21 +118,23 @@ impl OperationCompletion {
                     )));
                 }
             }
-            Some(false) if merged.overwritten.is_empty() && merged.created.is_empty() => {
-                publish(UndoEntry::Copy(created))
-            }
             Some(false) => {
+                let (merged_created, overwritten, mut placed) = merged.into_records();
+                if merged_created.is_empty() && overwritten.is_empty() {
+                    publish(UndoEntry::Copy(created));
+                    return;
+                }
                 let mut all_created = created;
-                all_created.extend(merged.created);
+                all_created.extend(merged_created);
                 // A replaced target reports as created through transfer
                 // progress; it must undo through the overwritten restore
                 // path instead, or the restored original would be trashed.
-                all_created.retain(|location| !merged.overwritten.contains(location));
-                let mut placed = merged.placed;
-                retain_merge_records(&mut placed, &all_created, &merged.overwritten);
+                let replaced = overwritten.iter().collect::<HashSet<_>>();
+                all_created.retain(|location| !replaced.contains(location));
+                retain_merge_records(&mut placed, &all_created, &overwritten);
                 publish(UndoEntry::Merge {
                     created: all_created,
-                    overwritten: merged.overwritten,
+                    overwritten,
                     originals: HashMap::new(),
                     placed,
                 });
@@ -316,11 +318,12 @@ impl Browser {
                 placed,
                 ..
             } => {
-                let mut merged = self.merged_undo.borrow_mut();
-                merged.sources.insert(source.clone());
-                merged.created.extend(created.iter().cloned());
-                merged.overwritten.extend(overwritten.iter().cloned());
-                merged.placed.extend(placed.clone());
+                self.merged_undo.borrow_mut().merged(
+                    source.clone(),
+                    created.clone(),
+                    overwritten.clone(),
+                    placed.clone(),
+                );
                 return true;
             }
             OperationEvent::ItemsReported { report, .. } => {
@@ -410,6 +413,7 @@ impl Browser {
             self.rename_operation.set(None);
         }
         let mut completion = OperationCompletion::take(self);
+        self.transfer_report.borrow_mut().follow_renames();
         self.flush_operation_changes(&completion);
         let mut refresh_depths = self
             .operation_rescan_depths

@@ -921,3 +921,172 @@ fn undoing_a_move_gives_back_names_numbered_as_aliases() -> Result<(), Box<dyn E
     }
     Ok(())
 }
+
+/// Moves `project` out of `origin` onto a vfat stick at `usb`, which fixes
+/// the names it cannot store, and returns the move's undo record as the
+/// browser keeps it.
+fn moved_onto_fat(project: &Path, usb: &Path) -> MoveRecord {
+    let moved = run_paste(PasteRequest {
+        id: OperationRequestId(1590),
+        destination: Location::local(usb),
+        items: vec![PasteItem {
+            source: Location::local(project),
+            conflict: TransferConflict::FailIfExists,
+        }],
+        move_sources: true,
+    });
+    let current = Location::local(usb.join("project"));
+    MoveRecord {
+        original: Location::local(project),
+        renamed: followed_report(&moved)
+            .renamed
+            .into_iter()
+            .filter(|item| item.saved_as != current && item.saved_as.is_within(&current))
+            .collect(),
+        current,
+    }
+}
+
+fn undone(record: MoveRecord) -> Vec<OperationEvent> {
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let emitted = events.clone();
+    let _operation = LocalOperationProvider.undo_move(
+        UndoMoveRequest {
+            names: NameMode::Keep,
+            cleanup_locations: Vec::new(),
+            id: OperationRequestId(1591),
+            items: vec![UndoMoveItem {
+                record,
+                conflict: TransferConflict::FailIfExists,
+            }],
+        },
+        Rc::new(move |event| emitted.borrow_mut().push(event)),
+    );
+    drive_until_transfer_settles(&events);
+    assert!(
+        matches!(events.borrow().last(), Some(OperationEvent::Pasted { .. })),
+        "{:?}",
+        events.borrow()
+    );
+    events.take()
+}
+
+fn refuses_refused(name: &OsStr) -> Option<Errno> {
+    name.as_encoded_bytes()
+        .starts_with(b"refused:")
+        .then_some(Errno::INVAL)
+}
+
+#[test]
+fn undoing_a_move_gives_fixed_names_back_and_reports_those_it_cannot() -> Result<(), Box<dyn Error>>
+{
+    use crate::services::{KeptCause, RenameCause};
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let root = tempfile::tempdir()?;
+    let origin = root.path().join("origin");
+    let usb = root.path().join("usb");
+    let project = origin.join("project");
+    fs::create_dir_all(project.join("x:y"))?;
+    fs::create_dir(&usb)?;
+    for name in [
+        "x:y/a:b",
+        "CON",
+        "taken:1",
+        "refused:2",
+        "failed:3",
+        "plain.txt",
+    ] {
+        fs::write(project.join(name), name)?;
+    }
+    let taker: super::fs_quirks::Racer = {
+        let taken = project.join("taken:1");
+        Box::new(move || fs::write(&taken, b"taken").expect("take the name"))
+    };
+    let _origin = FsQuirks::install(
+        &origin,
+        Quirks {
+            invalid_name: Some(refuses_refused),
+            fail: vec![(Op::Rename, "failed:3", 0, Errno::ACCESS)],
+            before: vec![(Op::Rename, "taken:1", 0, taker)],
+            ..Quirks::default()
+        },
+    );
+    let _usb = FsQuirks::install(&usb, Quirks::vfat());
+    let record = moved_onto_fat(&project, &usb);
+    assert_eq!(
+        names(&usb.join("project"))?,
+        [
+            "CON_",
+            "failed_3",
+            "plain.txt",
+            "refused_2",
+            "taken_1",
+            "x_y"
+        ]
+    );
+
+    let report = followed_report(&undone(record));
+
+    assert_eq!(
+        names(&project)?,
+        [
+            "CON",
+            "failed_3",
+            "plain.txt",
+            "refused_2",
+            "taken:1",
+            "taken_1",
+            "x:y"
+        ]
+    );
+    assert_eq!(fs::read(project.join("x:y/a:b"))?, b"x:y/a:b");
+    assert_eq!(fs::read(project.join("taken_1"))?, b"taken:1");
+    assert_eq!(fs::read(project.join("taken:1"))?, b"taken");
+    assert_eq!(
+        renamed_beneath(&project, &report),
+        [
+            ("refused:2", "refused_2", RenameCause::Invalid),
+            ("taken:1", "taken_1", RenameCause::Taken),
+        ]
+        .map(|(name, saved_as, cause)| (name.to_owned(), saved_as.to_owned(), cause))
+    );
+    let denied = crate::services::error_detail(super::super::os_error_text(Errno::ACCESS));
+    assert_eq!(
+        report.kept,
+        [crate::services::KeptItem {
+            location: Location::local(project.join("failed:3")),
+            cause: KeptCause::NameNotRestored(denied),
+        }]
+    );
+    Ok(())
+}
+
+#[test]
+fn undoing_a_move_back_to_another_kind_of_location_gives_fixed_names_back()
+-> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let root = tempfile::tempdir()?;
+    let origin = root.path().join("origin");
+    let usb = root.path().join("usb");
+    let project = origin.join("project");
+    fs::create_dir_all(project.join("x:y"))?;
+    fs::create_dir(&usb)?;
+    for name in ["x:y/a:b", "CON"] {
+        fs::write(project.join(name), name)?;
+    }
+    let _usb = FsQuirks::install(&usb, Quirks::vfat());
+    let mut record = moved_onto_fat(&project, &usb);
+    // As a share's location, which GIO renames.
+    record.original = Location::uri(gio::File::for_path(&project).uri());
+
+    let report = followed_report(&undone(record));
+
+    assert_eq!(names(&project)?, ["CON", "x:y"]);
+    assert_eq!(fs::read(project.join("x:y/a:b"))?, b"x:y/a:b");
+    assert!(report.is_empty(), "{report:?}");
+    Ok(())
+}

@@ -53,7 +53,7 @@ use gtk::{gio, glib, prelude::*};
 use copy_engine::SharedProgress;
 use fs_ops::{Entry, EntryStat, OffMain, fs};
 use mount_profile::{FolderNames, NamePolicy};
-use naming::{Key, PlanEntry, Taken, numbered_names, plan_names};
+use naming::{Key, PlanEntry, Planned, Taken, numbered_names, plan_names};
 use owed::{Deletion, Done, Owed, Settling};
 use placement::{COPY_PREFIX, Displacement, PlaceError, REPLACED_PREFIX, RenameFailure};
 use work_queue::{Group, Job, WorkQueue};
@@ -1210,17 +1210,16 @@ pub(crate) fn transfer_source_name(source: &gio::File) -> Option<OsString> {
     crate::model::transfer_file_name(source)
 }
 
-/// Where each source goes in `destination`: under its own name, or one
-/// planned against the other sources' names where `fixing` says it comes
-/// from another filesystem than the destination's, whose rules are `rules`.
+/// The name each source takes in the destination: its own, or one planned
+/// against the other sources' names where `fixing` says it comes from
+/// another filesystem than the destination's, whose rules are `rules`.
 /// `None` for a source without a name.
 fn paste_targets(
     sources: &[gio::File],
-    destination: &gio::File,
     rules: &NameProfile,
     fixing: &[bool],
     kinds: &[Option<gio::FileType>],
-) -> Result<Vec<Option<gio::File>>, PlaceError> {
+) -> Result<Vec<Option<Planned>>, PlaceError> {
     let names = sources.iter().map(transfer_source_name).collect::<Vec<_>>();
     let entries = names
         .iter()
@@ -1237,11 +1236,7 @@ fn paste_targets(
     let mut planned = plan_names(&entries, rules, Key::Folded)?.into_iter();
     Ok(names
         .iter()
-        .map(|name| {
-            name.as_ref()
-                .and_then(|_| planned.next())
-                .map(|planned| destination.child(planned.target))
-        })
+        .map(|name| name.as_ref().and_then(|_| planned.next()))
         .collect())
 }
 
@@ -1251,13 +1246,15 @@ struct ParallelCopyPlan {
     source_path: PathBuf,
     target_location: Location,
     written_path: PathBuf,
+    /// Why the target's name differs from the source's.
+    renamed: Option<RenameCause>,
 }
 
 async fn parallel_copy_plans(
     request: &PasteRequest,
     sources: &[gio::File],
     destination: &gio::File,
-    targets: &[Option<gio::File>],
+    planned: &[Option<Planned>],
     kinds: &[Option<gio::FileType>],
     windows_disk: bool,
 ) -> Option<(Vec<ParallelCopyPlan>, usize)> {
@@ -1271,13 +1268,14 @@ async fn parallel_copy_plans(
         return None;
     }
 
-    let targets = targets
+    let targets = planned
         .iter()
         .zip(kinds)
-        .map(|(target, kind)| {
-            target
-                .clone()
+        .map(|(planned, kind)| {
+            planned
+                .as_ref()
                 .filter(|_| *kind == Some(gio::FileType::Regular))
+                .map(|planned| (destination.child(&planned.target), planned.cause))
         })
         .collect::<Vec<_>>();
     let (sources, destination) = (sources.to_vec(), destination.clone());
@@ -1287,7 +1285,7 @@ async fn parallel_copy_plans(
             .zip(targets)
             .enumerate()
             .map(|(index, (source, target))| {
-                let target = target.filter(|_| source.is_native())?;
+                let (target, renamed) = target.filter(|_| source.is_native())?;
                 if transfer_is_noop(source, &destination, &target) {
                     return None;
                 }
@@ -1296,6 +1294,7 @@ async fn parallel_copy_plans(
                     source_path: source.path()?,
                     target_location: location_for_file(&target)?,
                     written_path: target.path()?,
+                    renamed,
                 })
             })
             .collect::<Option<Vec<_>>>()?;
@@ -1384,9 +1383,15 @@ async fn execute_parallel_copy_plans(
                 })
             })
             .collect::<Vec<_>>();
+        let mut renamed = Vec::new();
         for (plan, task) in chunk.iter().zip(tasks) {
             match task.await {
                 Ok(Ok(transferred)) => {
+                    if let (Some(cause), Some(name)) = (plan.renamed, plan.source_path.file_name())
+                    {
+                        let requested = gio::File::for_path(plan.written_path.with_file_name(name));
+                        renamed.extend(renamed_item(&requested, &transferred.target, cause));
+                    }
                     if let Some(progress) = &copying.progress {
                         progress.finish_item(
                             transferred.reported,
@@ -1408,6 +1413,12 @@ async fn execute_parallel_copy_plans(
                     .failed
                     .push((plan.index, io_error("Copy worker failed"))),
             }
+        }
+        if let Some(progress) = &copying.progress {
+            progress.report(TransferReport {
+                renamed,
+                ..TransferReport::default()
+            });
         }
         outcome.next = end;
         if !outcome.failed.is_empty() || settling.failure().is_some() {
@@ -1563,15 +1574,27 @@ async fn next_children(
     .await
 }
 
+fn renamed_item(
+    requested: &gio::File,
+    saved_as: &gio::File,
+    cause: RenameCause,
+) -> Option<RenamedItem> {
+    Some(RenamedItem {
+        requested: location_for_file(requested)?,
+        saved_as: location_for_file(saved_as)?,
+        cause,
+    })
+}
+
 /// The next of a folder's children, as their names, whether each is a
-/// folder, and the names they take in the target: batch by batch, or all at
-/// once where names are fixed, since which of two names a folder takes for
-/// one keeps it depends on both.
+/// folder, and the names they take in the target, with why those differ:
+/// batch by batch, or all at once where names are fixed, since which of two
+/// names a folder takes for one keeps it depends on both.
 async fn next_named_children(
     enumerator: &gio::FileEnumerator,
     cancellable: &gio::Cancellable,
     names: &FolderNames,
-) -> Result<Vec<(OsString, bool, OsString)>, glib::Error> {
+) -> Result<Vec<(OsString, bool, Planned)>, glib::Error> {
     let mut children = Vec::new();
     loop {
         let batch = next_children(enumerator, cancellable).await?;
@@ -1596,7 +1619,7 @@ async fn next_named_children(
     Ok(children
         .into_iter()
         .zip(planned)
-        .map(|((name, is_directory), planned)| (name, is_directory, planned.target))
+        .map(|((name, is_directory), planned)| (name, is_directory, planned))
         .collect())
 }
 
@@ -1881,24 +1904,42 @@ fn copy_recursively_with_progress(
                 })
                 .await?;
             let names = names.within(folder);
-            loop {
-                let children = next_named_children(&enumerator, &cancellable, &folder).await?;
-                if children.is_empty() {
-                    break;
-                }
-                for (name, _, target_name) in children {
-                    copy_recursively_with_progress(
-                        source.child(&name),
-                        target.child(&target_name),
-                        into,
-                        cancellable.clone(),
-                        record.clone(),
-                        progress.clone(),
-                        names.clone(),
-                    )
-                    .await?;
+            let mut renamed = Vec::new();
+            let copied = async {
+                loop {
+                    let children = next_named_children(&enumerator, &cancellable, &folder).await?;
+                    if children.is_empty() {
+                        return Ok::<_, glib::Error>(());
+                    }
+                    for (name, _, planned) in children {
+                        copy_recursively_with_progress(
+                            source.child(&name),
+                            target.child(&planned.target),
+                            into,
+                            cancellable.clone(),
+                            record.clone(),
+                            progress.clone(),
+                            names.clone(),
+                        )
+                        .await?;
+                        if let Some(cause) = planned.cause {
+                            renamed.extend(renamed_item(
+                                &target.child(&name),
+                                &target.child(&planned.target),
+                                cause,
+                            ));
+                        }
+                    }
                 }
             }
+            .await;
+            if let Some(progress) = &progress {
+                progress.report(TransferReport {
+                    renamed,
+                    ..TransferReport::default()
+                });
+            }
+            copied?;
             if let CopyRecord::Placing(Some(placing)) = record
                 && let Some(path) = target.path().filter(|path| placing.wants(path))
             {
@@ -2356,6 +2397,9 @@ fn could_not_move(name: &str, error: &str) -> String {
     .into_owned()
 }
 
+/// Gives the entries a move renamed beneath an item their names back once
+/// undo returned the item, deepest first, so that a renamed folder still
+/// has the name its entries' paths use. What keeps another name is reported.
 async fn restore_renamed(record: &MoveRecord, progress: &TransferProgressTracker) {
     let mut renamed = record
         .renamed
@@ -2363,41 +2407,108 @@ async fn restore_renamed(record: &MoveRecord, progress: &TransferProgressTracker
         .filter_map(|item| {
             let saved_as = item.saved_as.rebase(&record.current, &record.original)?;
             let requested = item.requested.rebase(&record.current, &record.original)?;
-            Some((saved_as, requested))
+            Some((depth(&item.saved_as), saved_as, requested, item.cause))
         })
         .collect::<Vec<_>>();
-    // Entries before the folders holding them, whose paths they still use.
-    renamed.sort_by_key(|(saved_as, _)| {
-        std::cmp::Reverse(saved_as.native_path().map(|path| path.components().count()))
-    });
-    let mut taken = Vec::new();
-    for (saved_as, requested) in renamed {
-        let (Some(from), Some(to)) = (saved_as.native_path(), requested.native_path()) else {
-            continue;
-        };
-        match rename_native(from.to_path_buf(), to.to_path_buf()).await {
-            Ok(()) => {}
-            Err(error) if error.matches(gio::IOErrorEnum::Exists) => taken.push(RenamedItem {
-                requested,
-                saved_as,
-                cause: RenameCause::Taken,
-            }),
-            Err(error) => {
-                tracing::warn!(
-                    ?from,
-                    ?to,
-                    "could not give back a renamed entry its name: {error}"
-                );
+    renamed.sort_by_key(|(depth, ..)| std::cmp::Reverse(*depth));
+    let mut report = TransferReport::default();
+    for (_, saved_as, requested, cause) in renamed {
+        let cause = match restore_name(&saved_as, &requested).await {
+            Ok(()) => continue,
+            Err(NameKept::Taken) => RenameCause::Taken,
+            Err(NameKept::Refused) => cause,
+            Err(NameKept::Failed(error)) => {
+                report.kept.push(KeptItem {
+                    location: requested,
+                    cause: KeptCause::NameNotRestored(error),
+                });
+                continue;
             }
-        }
+        };
+        report.renamed.push(RenamedItem {
+            requested,
+            saved_as,
+            cause,
+        });
     }
-    progress.report(TransferReport {
-        renamed: taken,
-        ..TransferReport::default()
-    });
+    progress.report(report);
+}
+
+/// How deep `location` is, comparable between locations of one kind.
+fn depth(location: &Location) -> usize {
+    match location.native_path() {
+        Some(path) => path.components().count(),
+        None => location
+            .uri_value()
+            .unwrap_or_default()
+            .matches('/')
+            .count(),
+    }
+}
+
+enum NameKept {
+    Taken,
+    /// The location cannot hold the name now.
+    Refused,
+    /// For this reason, ready for a `…: %{error}` slot.
+    Failed(String),
+}
+
+async fn restore_name(saved_as: &Location, requested: &Location) -> Result<(), NameKept> {
+    if let (Some(from), Some(to)) = (saved_as.native_path(), requested.native_path()) {
+        return match renamed_native(from.to_path_buf(), to.to_path_buf()).await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(RenameFailure::Place(PlaceError::Exists))) => Err(NameKept::Taken),
+            Ok(Err(RenameFailure::Place(error))) if error.refuses_name() => Err(NameKept::Refused),
+            Ok(Err(failure)) => Err(NameKept::Failed(crate::services::gio_error_detail(
+                &rename_failure_error(failure, from, to),
+            ))),
+            Err(error) => Err(NameKept::Failed(crate::services::gio_error_detail(&error))),
+        };
+    }
+    // GIO renames take a name as text.
+    let Ok(name) = requested.file_name().unwrap_or_default().into_string() else {
+        return Err(NameKept::Refused);
+    };
+    let file = gio_file_for_location(saved_as);
+    let renamed = await_cancellable(
+        &file,
+        &gio::Cancellable::new(),
+        move |file, cancellable, result| {
+            file.set_display_name_async(
+                &name,
+                glib::Priority::DEFAULT,
+                Some(cancellable),
+                move |output| result.resolve(output),
+            );
+        },
+    )
+    .await;
+    match renamed {
+        Ok(_) => Ok(()),
+        Err(error) if error.matches(gio::IOErrorEnum::Exists) => Err(NameKept::Taken),
+        Err(error)
+            if error.matches(gio::IOErrorEnum::InvalidFilename)
+                || error.matches(gio::IOErrorEnum::FilenameTooLong) =>
+        {
+            Err(NameKept::Refused)
+        }
+        Err(error) => Err(NameKept::Failed(crate::services::gio_error_detail(&error))),
+    }
 }
 
 async fn rename_native(source: PathBuf, target: PathBuf) -> Result<(), glib::Error> {
+    renamed_native(source.clone(), target.clone())
+        .await?
+        .map_err(|failure| rename_failure_error(failure, &source, &target))
+}
+
+/// Renames `source` to `target` off the main thread, with how the rename
+/// failed where it could be tried.
+async fn renamed_native(
+    source: PathBuf,
+    target: PathBuf,
+) -> Result<Result<(), RenameFailure>, glib::Error> {
     let (Some(source_parent), Some(source_name), Some(target_parent), Some(target_name)) = (
         source.parent().map(Path::to_path_buf),
         source.file_name().map(OsStr::to_os_string),
@@ -2406,8 +2517,6 @@ async fn rename_native(source: PathBuf, target: PathBuf) -> Result<(), glib::Err
     ) else {
         return Err(translated_io_error("Invalid move destination"));
     };
-    let name = source_name.to_string_lossy().into_owned();
-    let new_name = target_name.to_string_lossy().into_owned();
     let outcome = run_local_fs_step(move || {
         let source_dir = open_local_parent_directory(&source_parent)?;
         let target_dir = if target_parent == source_parent {
@@ -2422,19 +2531,28 @@ async fn rename_native(source: PathBuf, target: PathBuf) -> Result<(), glib::Err
         ))
     })
     .await?;
-    match outcome {
-        Ok(_) => Ok(()),
-        Err(RenameFailure::Place(PlaceError::Exists)) => Err(glib::Error::new(
+    Ok(outcome.map(drop))
+}
+
+fn rename_failure_error(failure: RenameFailure, source: &Path, target: &Path) -> glib::Error {
+    let name = |path: &Path| {
+        path.file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned()
+    };
+    match failure {
+        RenameFailure::Place(PlaceError::Exists) => glib::Error::new(
             gio::IOErrorEnum::Exists,
-            &rust_i18n::t!("“%{name}” already exists", name = new_name),
-        )),
-        Err(RenameFailure::Place(error)) => Err(placement_error(error)),
-        Err(RenameFailure::Stranded { temporary, error }) => Err(io_error(rust_i18n::t!(
+            &rust_i18n::t!("“%{name}” already exists", name = name(target)),
+        ),
+        RenameFailure::Place(error) => placement_error(error),
+        RenameFailure::Stranded { temporary, error } => io_error(rust_i18n::t!(
             "Could not rename “%{name}”; it was left as “%{temporary}”: %{error}",
-            name = name,
+            name = name(source),
             temporary = temporary.to_string_lossy(),
             error = crate::services::error_detail(placement_reason(error))
-        ))),
+        )),
     }
 }
 
@@ -3721,8 +3839,12 @@ fn classify_merge<'a>(
             if children.is_empty() {
                 return Ok(());
             }
-            for (name, is_directory, target_name) in children {
-                let child = (source.child(name), is_directory, target.child(target_name));
+            for (name, is_directory, planned) in children {
+                let child = (
+                    source.child(name),
+                    is_directory,
+                    target.child(planned.target),
+                );
                 classify_merge_child(child, plan, cancellable, (policy, names)).await?;
             }
         }
@@ -6092,8 +6214,8 @@ impl OperationProvider for LocalOperationProvider {
             };
             let rules = names.applied(pasted_into.profile.names);
             let fixing = pasted_into.fixing(&filesystems);
-            let targets = match paste_targets(&sources, &destination, &rules, &fixing, &kinds) {
-                Ok(targets) => targets,
+            let planned = match paste_targets(&sources, &rules, &fixing, &kinds) {
+                Ok(planned) => planned,
                 Err(error) => {
                     emit(OperationEvent::TransferFailed {
                         request_id: request.id,
@@ -6103,6 +6225,14 @@ impl OperationProvider for LocalOperationProvider {
                     return;
                 }
             };
+            let targets = planned
+                .iter()
+                .map(|planned| {
+                    planned
+                        .as_ref()
+                        .map(|planned| destination.child(&planned.target))
+                })
+                .collect::<Vec<_>>();
             let progress =
                 TransferProgressTracker::new(request.id, total_bytes, total_files, emit.clone());
             progress.emit();
@@ -6116,7 +6246,7 @@ impl OperationProvider for LocalOperationProvider {
                 &request,
                 &sources,
                 &destination,
-                &targets,
+                &planned,
                 &kinds,
                 pasted_into.profile.windows_disk(),
             )
@@ -6426,6 +6556,17 @@ impl OperationProvider for LocalOperationProvider {
                 let target_location = location_for_file(&target);
                 if let Some(target) = target_location.clone() {
                     affected_locations.insert(target);
+                }
+                if let (Some(cause), Some(name)) = (
+                    planned[index].as_ref().and_then(|planned| planned.cause),
+                    transfer_source_name(&sources[index]),
+                ) {
+                    progress.report(TransferReport {
+                        renamed: renamed_item(&destination.child(name), &target, cause)
+                            .into_iter()
+                            .collect(),
+                        ..TransferReport::default()
+                    });
                 }
                 // A merge reports its written paths through Merged instead:
                 // copy undo trashes recorded locations, and the merged folder

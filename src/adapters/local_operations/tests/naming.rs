@@ -5,16 +5,15 @@ use rustix::{fs::Mode, io::Errno};
 use super::super::{
     fs_ops::{Entry, fs},
     mount_profile::Profiles,
-    naming::{
-        Key, PlanEntry, Planned,
-        fix::{Cause, fix_name},
-        plan_names,
-    },
+    naming::{Key, PlanEntry, Planned, fix::fix_name, plan_names},
 };
 use super::*;
-use crate::adapters::volume::{
-    MountType, NameEncoding, NameLimit, NameProfile, PrivateUse, Reserved, gvfs_bridge_profile,
-    gvfs_profile,
+use crate::{
+    adapters::volume::{
+        MountType, NameEncoding, NameLimit, NameProfile, PrivateUse, Reserved, gvfs_bridge_profile,
+        gvfs_profile,
+    },
+    services::RenameCause,
 };
 
 /// The rules of vfat as udisks mounts it.
@@ -89,22 +88,29 @@ fn copy_suffix_parsing_and_candidate_naming() {
 #[test]
 fn fixed_names_are_numbered_past_the_names_their_siblings_keep() {
     // An entry's name, whether it is a folder, whether it is fixed, the name
-    // planned for it, and whether that is numbered as another kept name's
-    // alias.
-    let file =
-        |name: &str, planned: &str| (name.to_owned(), false, true, planned.to_owned(), false);
-    let folder =
-        |name: &str, planned: &str| (name.to_owned(), true, true, planned.to_owned(), false);
+    // planned for it, and why that differs.
+    let fixed = |name: &str, is_directory, planned: &str| {
+        let cause = (name != planned).then_some(RenameCause::Invalid);
+        (
+            name.to_owned(),
+            is_directory,
+            true,
+            planned.to_owned(),
+            cause,
+        )
+    };
+    let file = |name: &str, planned: &str| fixed(name, false, planned);
+    let folder = |name: &str, planned: &str| fixed(name, true, planned);
     let alias = |name: &str, is_directory, planned: &str| {
         (
             name.to_owned(),
             is_directory,
             true,
             planned.to_owned(),
-            true,
+            Some(RenameCause::Alias),
         )
     };
-    let unfixed = |name: &str| (name.to_owned(), false, false, name.to_owned(), false);
+    let unfixed = |name: &str| (name.to_owned(), false, false, name.to_owned(), None);
     let cjk = |count| "\u{4e2d}".repeat(count);
     let rows = [
         (
@@ -202,9 +208,9 @@ fn fixed_names_are_numbered_past_the_names_their_siblings_keep() {
                 .collect::<Vec<_>>();
             let planned = row
                 .iter()
-                .map(|(.., planned, alias)| Planned {
+                .map(|(.., planned, cause)| Planned {
                     target: OsString::from(planned),
-                    alias: *alias,
+                    cause: *cause,
                 })
                 .collect::<Vec<_>>();
             assert_eq!(
@@ -606,7 +612,6 @@ fn duplicating_multi_extension_file_uses_last_extension_for_candidate_name()
 #[test]
 fn pasted_names_fixed_for_fat_are_planned_after_the_names_kept() {
     use gtk::gio::FileType::{Directory, Regular};
-    let destination = gio::File::for_path("/media/stick");
     let sources = [
         "/one/a:b",
         "/two/a_b",
@@ -642,14 +647,14 @@ fn pasted_names_fixed_for_fat_are_planned_after_the_names_kept() {
         ),
     ] {
         let fixing = [fat_family; 9];
-        let targets = super::super::paste_targets(&sources, &destination, &fat(), &fixing, &kinds)
-            .expect("free names");
+        let targets =
+            super::super::paste_targets(&sources, &fat(), &fixing, &kinds).expect("free names");
         assert_eq!(
             targets
-                .iter()
-                .map(|target| target.as_ref().and_then(gio::File::basename))
+                .into_iter()
+                .map(|target| target.map(|target| target.target))
                 .collect::<Vec<_>>(),
-            expected.map(|name| Some(PathBuf::from(name))),
+            expected.map(|name| Some(OsString::from(name))),
             "{fat_family}"
         );
     }
@@ -657,25 +662,16 @@ fn pasted_names_fixed_for_fat_are_planned_after_the_names_kept() {
 
 #[test]
 fn transfer_targets_resolve_trash_leaf_names() {
-    let destination = gio::File::for_path("/home/user/Documents");
     let target_name = |source: &gio::File| {
-        let target = super::super::paste_targets(
+        let planned = super::super::paste_targets(
             std::slice::from_ref(source),
-            &destination,
             &NameProfile::posix(Some(255)),
             &[false],
             &[None],
         )
         .ok()?
         .pop()??;
-        Some(
-            target
-                .path()?
-                .strip_prefix(destination.path()?)
-                .ok()?
-                .as_os_str()
-                .to_os_string(),
-        )
+        Some(planned.target)
     };
     let local = gio::File::for_path("/home/user/notes.txt");
     assert_eq!(target_name(&local), Some(OsString::from("notes.txt")));
@@ -746,11 +742,11 @@ struct Row {
     name: OsString,
     folder: bool,
     /// The name each kind of mount gets instead, where it gets another.
-    fixed: Vec<(&'static [Rules], String, Cause)>,
+    fixed: Vec<(&'static [Rules], String, RenameCause)>,
 }
 
 impl Row {
-    fn expected(&self, rules: Rules) -> (&OsStr, Option<Cause>) {
+    fn expected(&self, rules: Rules) -> (&OsStr, Option<RenameCause>) {
         self.fixed
             .iter()
             .find(|(applies, ..)| applies.contains(&rules))
@@ -760,7 +756,11 @@ impl Row {
     }
 }
 
-fn row(name: impl AsRef<[u8]>, folder: bool, fixed: &[(&'static [Rules], &str, Cause)]) -> Row {
+fn row(
+    name: impl AsRef<[u8]>,
+    folder: bool,
+    fixed: &[(&'static [Rules], &str, RenameCause)],
+) -> Row {
     Row {
         name: OsString::from_vec(name.as_ref().to_vec()),
         folder,
@@ -771,13 +771,13 @@ fn row(name: impl AsRef<[u8]>, folder: bool, fixed: &[(&'static [Rules], &str, C
     }
 }
 
-fn file(name: impl AsRef<[u8]>, fixed: &[(&'static [Rules], &str, Cause)]) -> Row {
+fn file(name: impl AsRef<[u8]>, fixed: &[(&'static [Rules], &str, RenameCause)]) -> Row {
     row(name, false, fixed)
 }
 
 /// Every name the fslab mounts were probed with, and more device names.
 fn lab_corpus() -> Vec<Row> {
-    use Cause::{Invalid, TooLong};
+    use RenameCause::{Invalid, TooLong};
     use Rules::{AnyGvfs, Bare, Full, GvfsSmb, Mtp, Posix, Smb, SmbNocase, SmbPosix};
     const WINDOWS: &[Rules] = &[Bare, Full, Smb, SmbNocase, Mtp, GvfsSmb, AnyGvfs];
     const FULL: &[Rules] = &[Full, Smb, SmbNocase, Mtp, GvfsSmb, AnyGvfs];
@@ -1318,7 +1318,7 @@ fn cut_names_keep_their_extension_and_whole_clusters() {
         let fixed = fix_name(OsStr::new(&name), &profile, folder);
         assert_eq!(
             (fixed.name.as_ref(), fixed.cause),
-            (OsStr::new(&expected), Some(Cause::TooLong)),
+            (OsStr::new(&expected), Some(RenameCause::TooLong)),
             "{name:?}"
         );
         assert_eq!(

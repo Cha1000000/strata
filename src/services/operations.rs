@@ -319,6 +319,11 @@ pub enum RenameCause {
     /// case-insensitive filesystem takes `makefile` for `Makefile`.
     Alias,
     Taken,
+    /// Characters, trailing dots or spaces, a reserved name or an encoding
+    /// the destination cannot store.
+    Invalid,
+    /// Shortened to fit the destination's name length.
+    TooLong,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -352,6 +357,8 @@ pub enum KeptCause {
     Skipped(SpecialKind),
     /// Its copy was no longer where the move put it.
     CopyGone,
+    /// An undo could not give it back the name it had, for this reason.
+    NameNotRestored(String),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -384,6 +391,54 @@ impl TransferReport {
         self.skipped.extend(other.skipped);
         self.kept.extend(other.kept);
         self.kept_in_trash.extend(other.kept_in_trash);
+    }
+
+    /// Joins the entries of an item saved under one name after another, as
+    /// a fixed name that the destination then took for another's, into one
+    /// from the first name to the last, with the first cause, whatever order
+    /// they were reported in.
+    pub fn follow_renames(&mut self) {
+        let mut chains = Vec::<Option<RenamedItem>>::with_capacity(self.renamed.len());
+        let mut by_start = HashMap::<Location, usize>::new();
+        let mut by_end = HashMap::<Location, usize>::new();
+        for item in std::mem::take(&mut self.renamed) {
+            let before = by_end.remove(&item.requested);
+            let after = by_start
+                .remove(&item.saved_as)
+                .filter(|after| Some(*after) != before);
+            match (before, after) {
+                (Some(before), after) => {
+                    let saved_as = match after.and_then(|after| chains[after].take()) {
+                        Some(after) => {
+                            by_end.remove(&after.saved_as);
+                            after.saved_as
+                        }
+                        None => item.saved_as,
+                    };
+                    if let Some(chain) = &mut chains[before] {
+                        chain.saved_as = saved_as.clone();
+                    }
+                    by_end.insert(saved_as, before);
+                }
+                (None, Some(after)) => {
+                    if let Some(chain) = &mut chains[after] {
+                        chain.requested = item.requested.clone();
+                        chain.cause = item.cause;
+                    }
+                    by_start.insert(item.requested, after);
+                }
+                (None, None) => {
+                    by_start.insert(item.requested.clone(), chains.len());
+                    by_end.insert(item.saved_as.clone(), chains.len());
+                    chains.push(Some(item));
+                }
+            }
+        }
+        self.renamed = chains
+            .into_iter()
+            .flatten()
+            .filter(|chain| chain.requested != chain.saved_as)
+            .collect();
     }
 }
 

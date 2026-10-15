@@ -309,19 +309,14 @@ fn names_a_fat_target_takes_for_one_are_numbered_and_reported() -> Result<(), Bo
     );
 
     copied?;
-    let renamed = report
-        .renamed
-        .into_iter()
-        .map(|item| (item.requested, item.saved_as, item.cause))
-        .collect::<Vec<_>>();
-    let alias = |requested: &str, saved_as: &str| {
-        (
-            Location::local(target.join(requested)),
-            Location::local(target.join(saved_as)),
-            RenameCause::Alias,
-        )
-    };
-    assert_eq!(renamed, [alias("makefile", "makefile (1)")]);
+    assert_eq!(
+        renamed_beneath(&target, &report),
+        [
+            ("a:b", "a_b (1)", RenameCause::Invalid),
+            ("makefile", "makefile (1)", RenameCause::Alias),
+        ]
+        .map(|(name, saved_as, cause)| (name.to_owned(), saved_as.to_owned(), cause))
+    );
     assert_eq!(
         names(&target)?,
         ["Makefile", "a_b", "a_b (1)", "makefile (1)"]

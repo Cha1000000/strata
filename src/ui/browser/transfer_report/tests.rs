@@ -66,56 +66,41 @@ fn one_short_renamed_line_gets_a_notice_and_anything_more_a_dialog() {
 
 #[test]
 fn renamed_items_are_grouped_by_why_they_were_renamed() {
-    let mut report = renamed(2);
-    report.renamed[1].cause = RenameCause::Taken;
+    let causes = [
+        RenameCause::Invalid,
+        RenameCause::Alias,
+        RenameCause::TooLong,
+        RenameCause::Taken,
+    ];
+    let mut report = renamed(causes.len() * 2);
+    for (item, cause) in report.renamed.iter_mut().zip(causes.iter().cycle()) {
+        item.cause = *cause;
+    }
 
     let Some(Presentation::Information { detail, .. }) = presentation(&report) else {
-        panic!("two causes need a dialog");
+        panic!("several causes need a dialog");
     };
 
-    for cause in [RenameCause::Alias, RenameCause::Taken] {
-        assert_eq!(detail.matches(&heading(cause)).count(), 1, "{cause:?}");
-    }
-    let only_taken = TransferReport {
-        renamed: report.renamed[1..].to_vec(),
-        ..TransferReport::default()
-    };
-    let Some(Presentation::Notice { heading: shown, .. }) = presentation(&only_taken) else {
-        panic!("one renamed item gets a notice");
-    };
-    assert_eq!(shown, heading(RenameCause::Taken));
-}
-
-#[test]
-fn an_item_saved_under_two_names_in_turn_is_reported_once() {
-    let item = |requested: &str, saved_as: &str, cause| RenamedItem {
-        requested: Location::local(format!("/copy/{requested}")),
-        saved_as: Location::local(format!("/copy/{saved_as}")),
-        cause,
-    };
-    // An alias numbered in a merge stage, whose number was taken in the
-    // merged folder, reported in either order.
-    let alias = item("makefile", "makefile (1)", RenameCause::Alias);
-    let taken = item("makefile (1)", "makefile (2)", RenameCause::Taken);
-    for renamed in [vec![alias.clone(), taken.clone()], vec![taken, alias]] {
-        let report = TransferReport {
-            renamed,
+    let sections = detail
+        .split("\n\n")
+        .filter(|line| !line.starts_with('•'))
+        .collect::<Vec<_>>();
+    assert_eq!(sections, causes.map(heading));
+    for cause in causes {
+        let only = TransferReport {
+            renamed: report
+                .renamed
+                .iter()
+                .filter(|item| item.cause == cause)
+                .take(1)
+                .cloned()
+                .collect(),
             ..TransferReport::default()
         };
-
-        let Some(Presentation::Notice {
-            heading: shown,
-            text,
-        }) = presentation(&report)
-        else {
+        let Some(Presentation::Notice { heading: shown, .. }) = presentation(&only) else {
             panic!("one renamed item gets a notice");
         };
-
-        assert_eq!(shown, heading(RenameCause::Alias));
-        assert_eq!(
-            text,
-            renamed_line(&item("makefile", "makefile (2)", RenameCause::Alias))
-        );
+        assert_eq!(shown, heading(cause), "{cause:?}");
     }
 }
 
@@ -140,6 +125,7 @@ fn items_left_out_or_left_behind_make_the_report_a_warning_or_follow_a_stop() {
         kept(KeptCause::Undeletable(denied)),
         kept(KeptCause::Skipped(SpecialKind::Socket)),
         kept(KeptCause::CopyGone),
+        kept(KeptCause::NameNotRestored(reason.clone())),
     ];
     let left_in_trash = [
         in_trash(KeptCause::Changed),
@@ -150,8 +136,8 @@ fn items_left_out_or_left_behind_make_the_report_a_warning_or_follow_a_stop() {
         (0, 2, 0, 0),
         (1, 2, 0, 0),
         (3, 2, 0, 0),
-        (0, 0, 4, 0),
-        (1, 2, 4, 0),
+        (0, 0, 5, 0),
+        (1, 2, 5, 0),
         (0, 0, 0, 3),
     ] {
         let row = format!("{renamed_count}, {skipped_count}, {kept_count}, {in_trash_count}");
@@ -190,6 +176,12 @@ fn items_left_out_or_left_behind_make_the_report_a_warning_or_follow_a_stop() {
             folder = "run"
         );
         assert_eq!(detail.contains(&*gone), kept_count > 0, "{row}");
+        let unrestored = rust_i18n::t!(
+            "Could not restore %{name}: %{error}",
+            name = "data",
+            error = reason
+        );
+        assert_eq!(detail.contains(&*unrestored), kept_count > 0, "{row}");
         let heading = crate::i18n::count("items_kept_in_trash", in_trash_count);
         assert_eq!(detail.contains(&heading), in_trash_count > 0, "{row}");
         let changed = rust_i18n::t!(

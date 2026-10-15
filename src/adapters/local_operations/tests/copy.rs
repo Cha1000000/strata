@@ -792,6 +792,50 @@ fn special_files_inside_a_copied_folder_are_recreated_or_left_out_and_reported()
 }
 
 #[test]
+fn a_special_file_left_out_of_fat_is_reported_under_its_own_name() -> Result<(), Box<dyn Error>> {
+    use crate::services::SpecialKind;
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let root = tempfile::tempdir()?;
+    let source = root.path().join("source");
+    let stick = root.path().join("stick");
+    fs::create_dir_all(&source)?;
+    fs::create_dir(&stick)?;
+    make_fifo(&source.join("p:ipe"), 0o600)?;
+    let _socket = std::os::unix::net::UnixListener::bind(source.join("s:ock"))?;
+    let _stick = FsQuirks::install(&stick, Quirks::vfat());
+    let target = stick.join("copy");
+
+    let (copied, report) = reporting(
+        &source,
+        super::super::copy_engine::Destination::New(target.clone(), Taken::Fail),
+        super::super::copy_engine::Options {
+            names: fixing(),
+            ..super::super::copy_engine::Options::default()
+        },
+    );
+
+    copied?;
+    let mut skipped = report
+        .skipped
+        .into_iter()
+        .map(|item| (item.location, item.kind))
+        .collect::<Vec<_>>();
+    skipped.sort_by(|left, right| left.0.compare(&right.0));
+    assert_eq!(
+        skipped,
+        [
+            (Location::local(target.join("p:ipe")), SpecialKind::Pipe),
+            (Location::local(target.join("s:ock")), SpecialKind::Socket),
+        ]
+    );
+    assert_eq!(report.renamed, []);
+    assert_eq!(names(&target)?, Vec::<String>::new());
+    Ok(())
+}
+
+#[test]
 fn named_pipes_are_left_out_only_where_the_destination_refuses_them() -> Result<(), Box<dyn Error>>
 {
     use rustix::io::Errno;
@@ -1030,27 +1074,41 @@ fn a_paste_fixes_the_names_it_brings_onto_fat_and_keeps_those_already_there()
     ] {
         fs::write(path, contents)?;
     }
+    // More than eight files are copied in parallel.
+    let bulk = root.path().join("bulk");
+    fs::create_dir_all(stick.join("bulk"))?;
+    let mut bulk_items = vec![bulk.join("b?c")];
+    bulk_items.extend((0..8).map(|index| bulk.join(format!("file {index}"))));
+    fs::create_dir(&bulk)?;
+    for item in &bulk_items {
+        fs::write(item, "bulk")?;
+    }
     let _stick = FsQuirks::install(&stick, Quirks::vfat());
-
-    run_paste(PasteRequest {
+    let paste = |destination: &Path, items: &[PathBuf]| PasteRequest {
         id: OperationRequestId(1590),
-        destination: Location::local(&stick),
-        items: [
+        destination: Location::local(destination),
+        items: items
+            .iter()
+            .map(|source| PasteItem {
+                source: Location::local(source),
+                conflict: TransferConflict::FailIfExists,
+            })
+            .collect(),
+        move_sources: false,
+    };
+
+    let events = run_paste(paste(
+        &stick,
+        &[
             one.join("a:b"),
             two.join("a_b"),
             one.join("x"),
             two.join("X"),
             earlier.join("CON"),
             earlier.join("kept"),
-        ]
-        .iter()
-        .map(|source| PasteItem {
-            source: Location::local(source),
-            conflict: TransferConflict::FailIfExists,
-        })
-        .collect(),
-        move_sources: false,
-    });
+        ],
+    ));
+    let bulk_events = run_paste(paste(&stick.join("bulk"), &bulk_items));
 
     for (name, contents) in [
         ("a_b (1)", "colon"),
@@ -1059,10 +1117,27 @@ fn a_paste_fixes_the_names_it_brings_onto_fat_and_keeps_those_already_there()
         ("X", "upper"),
         ("CON", "device"),
         ("kept/CON", "nested device"),
+        ("bulk/b_c", "bulk"),
     ] {
         assert_eq!(fs::read(stick.join(name))?, contents.as_bytes(), "{name}");
     }
-    assert_eq!(names(&stick)?.len(), 7);
+    assert_eq!(names(&stick)?.len(), 8);
+    let renamed = |folder: &Path, events: &[OperationEvent]| {
+        renamed_beneath(folder, &followed_report(events))
+    };
+    use crate::services::RenameCause::{Alias, Invalid};
+    assert_eq!(
+        renamed(&stick, &events),
+        [("a:b", "a_b (1)", Invalid), ("x", "x (1)", Alias)].map(|(name, saved_as, cause)| (
+            name.to_owned(),
+            saved_as.to_owned(),
+            cause
+        ))
+    );
+    assert_eq!(
+        renamed(&stick.join("bulk"), &bulk_events),
+        [("b?c".to_owned(), "b_c".to_owned(), Invalid)]
+    );
     Ok(())
 }
 
@@ -1105,6 +1180,7 @@ fn a_fat_copy_fixes_an_invalid_name_instead_of_discarding_the_whole_tree()
 #[test]
 fn fat_family_copies_number_fixed_names_past_the_names_their_siblings_keep()
 -> Result<(), Box<dyn Error>> {
+    use crate::services::RenameCause::{Alias, Invalid};
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
         .lock()
         .map_err(|error| error.to_string())?;
@@ -1112,19 +1188,31 @@ fn fat_family_copies_number_fixed_names_past_the_names_their_siblings_keep()
         gio::File,
         gio::File,
         gio::Cancellable,
+        Rc<TransferProgressTracker>,
     ) -> Pin<Box<dyn Future<Output = Result<(), glib::Error>>>>;
     let copies: [(&str, CopyTree); 2] = [
-        ("engine", |source, target, cancellable| {
-            copy_recursively_fixing(source, target, false, cancellable)
+        ("engine", |source, target, cancellable, progress| {
+            Box::pin(async move {
+                copy_new_recursively_on_filesystem(
+                    source,
+                    target,
+                    Taken::Fail,
+                    cancellable,
+                    Some(progress),
+                    fixing(),
+                )
+                .await
+                .map(drop)
+            })
         }),
-        ("GIO", |source, target, cancellable| {
+        ("GIO", |source, target, cancellable, progress| {
             super::super::copy_recursively_with_progress(
                 source,
                 target,
                 super::super::CopyInto::New,
                 cancellable,
                 super::super::CopyRecord::Nothing,
-                None,
+                Some(progress),
                 super::super::GioNames::new(fixing()),
             )
         }),
@@ -1152,14 +1240,33 @@ fn fat_family_copies_number_fixed_names_past_the_names_their_siblings_keep()
             fs::write(source.join(folder).join("photo"), folder)?;
         }
         let _destination = FsQuirks::install(&destination, Quirks::vfat());
+        let (progress, events) = recording_progress();
 
         let result = glib::MainContext::default().block_on(copy(
             gio::File::for_path(&source),
             gio::File::for_path(&target),
             gio::Cancellable::new(),
+            progress,
         ));
 
         assert!(result.is_ok(), "{row}: {result:?}");
+        assert_eq!(
+            renamed_beneath(&target, &followed_report(&events.borrow())),
+            [
+                ("A*.txt", "A_ (1).txt", Invalid),
+                ("CON", "CON_", Invalid),
+                ("Readme.txt", "Readme (1).txt", Alias),
+                ("a:.txt", "a_ (2).txt", Invalid),
+                ("a?.txt", "a_ (3).txt", Invalid),
+                ("photos.2024", "photos.2024 (1)", Alias),
+            ]
+            .map(|(name, saved_as, cause)| (
+                name.to_owned(),
+                saved_as.to_owned(),
+                cause
+            )),
+            "{row}"
+        );
         for (name, contents) in [
             ("a_.txt", "kept"),
             ("A_ (1).txt", "star"),
@@ -1213,14 +1320,25 @@ fn a_copy_into_a_case_sensitive_folder_keeps_a_cut_name_apart_by_case_only()
             ..Quirks::ext4()
         },
     );
+    let (progress, events) = recording_progress();
 
-    glib::MainContext::default().block_on(copy_recursively_fixing(
+    glib::MainContext::default().block_on(copy_new_recursively_on_filesystem(
         gio::File::for_path(&source),
         gio::File::for_path(&target),
-        false,
+        Taken::Fail,
         gio::Cancellable::new(),
+        Some(progress),
+        fixing(),
     ))?;
 
+    assert_eq!(
+        renamed_beneath(&target, &followed_report(&events.borrow())),
+        [(
+            long.clone(),
+            format!("A{}", "b".repeat(63)),
+            crate::services::RenameCause::TooLong
+        )]
+    );
     for (name, contents) in [
         (format!("A{}", "b".repeat(63)), "long"),
         (short, "short"),

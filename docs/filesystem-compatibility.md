@@ -373,17 +373,23 @@ Where `mknodat` is refused, and always on SMB, it is an exclusive read-only crea
 made by `mknodat` and looked up by name while other files were being written stalled the folder's
 publication for Samba's 35 s lease-break timeout.
 
-Names an item brings from another filesystem are fixed before copying, without a report, by the
-rules of the mount that holds each target folder, found through symbolic links and nested mounts:
-characters the mount cannot store become `_`, trailing dots and spaces are dropped, device names
-Windows reserves get `_`, and names too long for the mount are shortened. Names already on the
-destination's filesystem, as in a duplicate, are kept, and undoing a move fixes only names its
-mount cannot hold at all, such as malformed UTF-8. A name that needs no change keeps it, even where
-a fixed name would equal it, unless FAT or exFAT takes it for another such name in its folder, or
-among a paste's top-level items, that sorts first in bytes (`Readme.txt` beside `README.txt`): it is
-then numbered as an alias before copying. Fixed names that equal another name are numbered too, in
-the byte order of the names they replace, without a report. In a merge, a planned name equal to an
-existing item replaces that item like any other same-named one.
+Names an item brings from another filesystem are fixed before copying, by the rules of the mount
+that holds each target folder, found through symbolic links and nested mounts: characters the mount
+cannot store become `_`, trailing dots and spaces are dropped, device names Windows reserves get
+`_`, and names too long for the mount are shortened. Names already on the destination's filesystem,
+as in a duplicate, are kept. A name that needs no change keeps it, even where a fixed name would
+equal it, unless FAT or exFAT takes it for another such name in its folder, or among a paste's
+top-level items, that sorts first in bytes (`Readme.txt` beside `README.txt`): it is then numbered
+as an alias before copying. Fixed names that equal another name are numbered too, in the byte order
+of the names they replace. The completion report lists every fixed name with the name it was saved
+as. In a merge, a planned name equal to an existing item replaces that item like any other
+same-named one.
+
+Undoing a move fixes only names the original mount cannot hold at all, such as malformed UTF-8, and
+then gives the entries inside the item the names they had, deepest first, also where the item came
+from a GVfs location onto a local disk or the other way round. An entry whose name another item took
+meanwhile keeps the name it was saved as and is reported as taken; one whose name the location now
+refuses is reported as fixed again; any other failure is listed with its error.
 
 ### Hard links
 
@@ -591,18 +597,20 @@ the second puts the first back by a rename.
 
 After a transfer, Strata reports what it could not do as asked:
 
-- names the destination took for another (case aliases), and names taken during a merge or an undo,
-  each with the name the item was saved as;
+- names the destination doesn't allow or that are too long for it, names it took for another (case
+  aliases), and names taken during a merge or an undo, each with the name the item was saved as, and
+  an item saved under several names in turn once, from its first name to its last;
 - special files left out of a copy;
-- source entries a move left behind, entries a restore left in the Trash, and originals an undo
-  left there because what replaced them may have changed, with the reason.
+- source entries a move left behind, entries a restore left in the Trash, originals an undo left
+  there because what replaced them may have changed, and names an undo could not give back, with
+  the reason.
 
 One short renamed line is shown as a notice. More are listed in an information dialog, up to eight
 lines and a count of the rest. Anything left out or left behind makes it a "Completed with errors"
 warning. When the transfer failed or was cancelled, or a restore or merge undo completed with
 errors, the dialog of that outcome lists the whole report under it instead, in the same sections.
-Keep Both numbers, which the user asked for, metadata a destination cannot store and replaced FAT
-characters are not reported.
+Keep Both numbers, which the user asked for, and metadata a destination cannot store are not
+reported.
 
 ### Limits
 

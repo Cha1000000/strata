@@ -166,7 +166,7 @@ fn remote_locations_keep_uri_parents_and_breadcrumbs() {
 }
 
 #[test]
-fn rebasing_preserves_uri_descendants_and_rejects_unrelated_or_mixed_locations() {
+fn rebasing_preserves_descendants_across_location_kinds_and_rejects_unrelated_ones() {
     for scheme in ["smb", "sftp"] {
         let from = Location::uri(format!("{scheme}://host/share/old"));
         let to = Location::uri(format!("{scheme}://host/share/new%20folder"));
@@ -185,8 +185,23 @@ fn rebasing_preserves_uri_descendants_and_rejects_unrelated_or_mixed_locations()
         ] {
             assert!(Location::uri(unrelated).rebase(&from, &to).is_none());
         }
+        let local = Location::local("/fixture/new");
+        let nested = Location::uri(format!("{scheme}://host/share/old/nested/a:b"));
+        assert_eq!(from.rebase(&from, &local), Some(local.clone()));
+        assert_eq!(
+            nested.rebase(&from, &local),
+            Some(Location::local("/fixture/new/nested/a:b"))
+        );
+        let back = Location::local("/fixture/new/nested/a:b")
+            .rebase(&local, &from)
+            .expect("rebased onto the share");
         assert!(
-            from.rebase(&from, &Location::local("/fixture/new"))
+            gio::File::for_uri(back.uri_value().expect("a URI"))
+                .equal(&gio::File::for_uri(nested.uri_value().expect("a URI")))
+        );
+        assert!(
+            Location::local("/fixture/newer/a:b")
+                .rebase(&local, &from)
                 .is_none()
         );
     }

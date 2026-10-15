@@ -11,7 +11,10 @@ use super::{
     copy_engine::stage,
     placement::{self, PlaceError},
 };
-use crate::adapters::volume::{NameLimit, NameProfile};
+use crate::{
+    adapters::volume::{NameLimit, NameProfile},
+    services::RenameCause,
+};
 
 pub(super) mod fix;
 
@@ -138,9 +141,10 @@ pub(super) struct PlanEntry<'a> {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct Planned {
     pub target: OsString,
-    /// The folder takes the name for a sibling's that keeps it, so it was
-    /// numbered although it needs no fix.
-    pub alias: bool,
+    /// Why `target` differs from the name: the fix's cause, or
+    /// [`RenameCause::Alias`] where the folder takes a name that needs no
+    /// fix for a sibling's that keeps it.
+    pub cause: Option<RenameCause>,
 }
 
 /// The names of a folder's entries, in their order. A name that needs no
@@ -158,7 +162,7 @@ pub(super) fn plan_names(
         .iter()
         .map(|entry| Planned {
             target: entry.name.to_os_string(),
-            alias: false,
+            cause: None,
         })
         .collect::<Vec<_>>();
     let mut numbered = Vec::new();
@@ -166,7 +170,10 @@ pub(super) fn plan_names(
     for (index, entry) in entries.iter().enumerate().filter(|(_, entry)| entry.fixing) {
         let fixed = fix::fix_name(entry.name, profile, entry.is_directory);
         match fixed.cause {
-            Some(_) => numbered.push((index, fixed.name.into_owned())),
+            Some(cause) => {
+                planned[index].cause = Some(cause);
+                numbered.push((index, fixed.name.into_owned()));
+            }
             None => kept.push(index),
         }
     }
@@ -184,7 +191,7 @@ pub(super) fn plan_names(
     kept.sort_by_key(|index| entries[*index].name);
     for index in kept {
         if !taken.insert(key.of(entries[index].name)) && folds {
-            planned[index].alias = true;
+            planned[index].cause = Some(RenameCause::Alias);
             numbered.push((index, entries[index].name.to_os_string()));
         }
     }

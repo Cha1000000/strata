@@ -385,15 +385,11 @@ pub(super) fn make_numbered<T>(
     }
 }
 
-/// Reports a child the plan numbered because the folder takes its name for
-/// a sibling's, as `make_numbered` reports one the folder refused.
-fn planned_alias(copy: &Copy, folder: &Path, name: &OsStr, planned: &Planned) {
-    if planned.alias {
-        copy.renamed(
-            folder.join(name),
-            folder.join(&planned.target),
-            RenameCause::Alias,
-        );
+/// Reports a child the plan named otherwise, from its own name to the
+/// planned one; `make_numbered` reports any later name from there.
+fn planned_rename(copy: &Copy, folder: &Path, name: &OsStr, planned: &Planned) {
+    if let Some(cause) = planned.cause {
+        copy.renamed(folder.join(name), folder.join(&planned.target), cause);
     }
 }
 
@@ -549,9 +545,12 @@ impl Made {
                 target_name: &planned.target,
                 claim: colliding,
             };
-            self.make(tree, queue, source, &child, group)
+            let made = self
+                .make(tree, queue, source, &child, group)
                 .map_err(|failure| failure.named(&name))?;
-            planned_alias(&tree.copy, &self.path, &name, &planned);
+            if made {
+                planned_rename(&tree.copy, &self.path, &name, &planned);
+            }
         }
         Ok(())
     }
@@ -563,7 +562,7 @@ impl Made {
         source: &Arc<OwnedFd>,
         child: &Child<'_>,
         group: &Arc<Group<TreeJob>>,
-    ) -> Result<(), Failure> {
+    ) -> Result<bool, Failure> {
         let copy = &tree.copy;
         let fs = copy.fs;
         let name = child.name;
@@ -660,16 +659,27 @@ impl Made {
                         names.made(&file_name(&path), identity);
                         self.record(name, &pipe);
                     }
-                    None => copy.skip(path, (name, self.recorded.as_deref()), SpecialKind::Pipe)?,
+                    None => {
+                        self.skip(copy, name, SpecialKind::Pipe)?;
+                        queue.complete(Some(group.clone()));
+                        return Ok(false);
+                    }
                 }
                 queue.complete(Some(group.clone()));
             }
             kind => {
-                copy.skip(path, (name, self.recorded.as_deref()), special_kind(kind))?;
+                self.skip(copy, name, special_kind(kind))?;
                 queue.complete(Some(group.clone()));
+                return Ok(false);
             }
         }
-        Ok(())
+        Ok(true)
+    }
+
+    /// Leaves a special file out, reported under its own name since nothing
+    /// took the planned one.
+    fn skip(&self, copy: &Copy, name: &OsStr, kind: SpecialKind) -> Result<(), Failure> {
+        copy.skip(self.path.join(name), (name, self.recorded.as_deref()), kind)
     }
 
     fn record(&self, name: &OsStr, stat: &EntryStat) {
@@ -1210,7 +1220,7 @@ impl Merged {
             };
             match existing {
                 Some(existing) if existing.is_directory() && kind == FileType::Directory => {
-                    planned_alias(copy, &self.path, &name, &planned);
+                    planned_rename(copy, &self.path, &name, &planned);
                     queue.enqueue(TreeJob::Merge(
                         tree.clone(),
                         Merged {
@@ -1269,7 +1279,7 @@ impl Live {
         for (name, _, planned) in in_place {
             self.copy_in_place(tree, &name, &planned.target)
                 .map_err(|failure| failure.named(&name))?;
-            planned_alias(&tree.copy, &self.path, &name, &planned);
+            planned_rename(&tree.copy, &self.path, &name, &planned);
         }
         Ok(())
     }

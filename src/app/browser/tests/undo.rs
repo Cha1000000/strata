@@ -1012,6 +1012,150 @@ fn a_merge_undo_removes_merged_items_under_the_names_they_were_saved_as() {
 }
 
 #[test]
+fn a_merge_undo_removes_a_fixed_name_the_destination_took_for_another_under_its_last_name() {
+    use crate::services::{RenameCause, RenamedItem, TransferReport};
+    let item = |requested: &str, saved_as: &str, cause| RenamedItem {
+        requested: Location::local(format!("/fixture/archive/folder/{requested}")),
+        saved_as: Location::local(format!("/fixture/archive/folder/{saved_as}")),
+        cause,
+    };
+    // The merge planned `a_b` for `a:b`; the folder then took `a_b` for an
+    // entry it already held, so the copy was saved as `a_b (1)`.
+    let fixed = item("a:b", "a_b", RenameCause::Invalid);
+    let alias = item("a_b", "a_b (1)", RenameCause::Alias);
+    for renamed in [
+        vec![fixed.clone(), alias.clone()],
+        vec![alias.clone(), fixed.clone()],
+    ] {
+        let browser = Browser::new(Rc::new(FakeFileSource));
+        browser.set_operation_provider(Rc::new(ImmediateOperationProvider));
+        let shown = Rc::new(RefCell::new(Vec::new()));
+        let observed = shown.clone();
+        browser.observe(move |event| {
+            if let BrowserEvent::ItemsReported { report } = event {
+                observed.borrow_mut().push(report.clone());
+            }
+        });
+        let source = Location::local("/fixture/folder");
+        let request_id = browser.begin_operation();
+        browser.transfer_operation.set(Some(false));
+        browser
+            .transfer_destination
+            .replace(Some(Location::local("/fixture/archive")));
+        let emit = browser.operation_callback(request_id, false, HashSet::new());
+
+        emit(OperationEvent::Merged {
+            request_id,
+            source: source.clone(),
+            created: vec![fixed.saved_as.clone()],
+            overwritten: Vec::new(),
+            placed: HashMap::new(),
+        });
+        emit(OperationEvent::ItemsReported {
+            request_id,
+            report: TransferReport {
+                renamed,
+                ..Default::default()
+            },
+        });
+        emit(OperationEvent::Pasted {
+            request_id,
+            locations: vec![source],
+        });
+
+        assert_eq!(
+            pending_undo_entry(),
+            Some(UndoEntry::Merge {
+                created: vec![alias.saved_as.clone()],
+                overwritten: Vec::new(),
+                originals: HashMap::new(),
+                placed: HashMap::new(),
+            })
+        );
+        assert_eq!(
+            *shown.borrow(),
+            [TransferReport {
+                renamed: vec![item("a:b", "a_b (1)", RenameCause::Invalid)],
+                ..Default::default()
+            }]
+        );
+    }
+}
+
+#[test]
+fn a_move_undo_record_keeps_each_renamed_entry_once_beneath_the_item_it_moved() {
+    use crate::services::{RenameCause, RenamedItem, TransferReport};
+    let browser = Browser::new(Rc::new(FakeFileSource));
+    browser.set_operation_provider(Rc::new(ImmediateOperationProvider));
+    let item = |requested: &str, saved_as: &str, cause| RenamedItem {
+        requested: Location::local(format!("/fixture/archive/{requested}")),
+        saved_as: Location::local(format!("/fixture/archive/{saved_as}")),
+        cause,
+    };
+    let request_id = browser.begin_operation();
+    browser.transfer_operation.set(Some(true));
+    browser
+        .transfer_destination
+        .replace(Some(Location::local("/fixture/archive")));
+    let emit = browser.operation_callback(request_id, false, HashSet::new());
+
+    emit(OperationEvent::ItemMoved {
+        request_id,
+        from: Location::local("/fixture/pro:ject"),
+        to: Location::local("/fixture/archive/project"),
+        merged: false,
+    });
+    emit(OperationEvent::ItemsReported {
+        request_id,
+        report: TransferReport {
+            renamed: vec![
+                item("project/x:y", "project/x_y", RenameCause::Invalid),
+                item("project/x_y/c_d", "project/x_y/c_d (1)", RenameCause::Alias),
+                item("notes/e?f", "notes/e_f", RenameCause::Invalid),
+                item("pro:ject", "project", RenameCause::Invalid),
+                item("elsewhere/g:h", "elsewhere/g_h", RenameCause::Invalid),
+                item("project/x_y/c:d", "project/x_y/c_d", RenameCause::Invalid),
+            ],
+            ..Default::default()
+        },
+    });
+    emit(OperationEvent::Pasted {
+        request_id,
+        locations: vec![
+            Location::local("/fixture/pro:ject"),
+            Location::local("/fixture/notes"),
+        ],
+    });
+
+    let Some(UndoEntry::Move(records)) = pending_undo_entry() else {
+        panic!("the move's undo");
+    };
+    assert_eq!(
+        records
+            .into_iter()
+            .map(|record| (record.original, record.renamed))
+            .collect::<Vec<_>>(),
+        [
+            (
+                Location::local("/fixture/pro:ject"),
+                vec![
+                    item("project/x:y", "project/x_y", RenameCause::Invalid),
+                    item(
+                        "project/x_y/c:d",
+                        "project/x_y/c_d (1)",
+                        RenameCause::Invalid
+                    ),
+                ]
+            ),
+            (
+                Location::local("/fixture/notes"),
+                vec![item("notes/e?f", "notes/e_f", RenameCause::Invalid)]
+            ),
+        ]
+    );
+}
+
+#[test]
 fn a_paste_mixing_plain_copies_and_a_merge_records_one_merge_undo() {
     let browser = Browser::new(Rc::new(FakeFileSource));
     browser.set_operation_provider(Rc::new(ImmediateOperationProvider));

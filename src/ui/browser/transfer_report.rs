@@ -45,6 +45,8 @@ fn heading(cause: RenameCause) -> String {
     crate::i18n::tr(match cause {
         RenameCause::Alias => "The destination can\u{2019}t tell these names apart",
         RenameCause::Taken => "These names were already taken",
+        RenameCause::Invalid => "The destination doesn\u{2019}t allow these names",
+        RenameCause::TooLong => "These names were too long for the destination",
     })
 }
 
@@ -108,57 +110,74 @@ fn kept_line(item: &KeptItem, in_trash: bool) -> String {
         )
         .into_owned(),
         KeptCause::Skipped(kind) => special_line(&name, *kind),
+        KeptCause::NameNotRestored(error) => rust_i18n::t!(
+            "Could not restore %{name}: %{error}",
+            name = name,
+            error = error
+        )
+        .into_owned(),
     }
 }
 
-fn bullets(lines: &[String]) -> String {
+/// A section's first lines, the only ones formatted, and how many it has.
+struct Lines {
+    listed: Vec<String>,
+    count: usize,
+}
+
+impl Lines {
+    fn new() -> Self {
+        Self {
+            listed: Vec::new(),
+            count: 0,
+        }
+    }
+
+    fn of<T>(items: impl IntoIterator<Item = T>, line: impl Fn(T) -> String) -> Self {
+        let mut lines = Self::new();
+        for item in items {
+            lines.push(|| line(item));
+        }
+        lines
+    }
+
+    fn push(&mut self, line: impl FnOnce() -> String) {
+        if self.count < LISTED_ITEMS {
+            self.listed.push(line());
+        }
+        self.count += 1;
+    }
+}
+
+fn bullets(lines: &Lines) -> String {
     let mut text = lines
+        .listed
         .iter()
-        .take(LISTED_ITEMS)
         .map(|line| format!("• {line}"))
         .collect::<Vec<_>>()
         .join("\n\n");
-    if lines.len() > LISTED_ITEMS {
+    if lines.count > LISTED_ITEMS {
         text.push_str("\n\n");
         text.push_str(&crate::i18n::count(
             "more_items",
-            lines.len() - LISTED_ITEMS,
+            lines.count - LISTED_ITEMS,
         ));
     }
     text
 }
 
-/// The renamed items, where one was saved again under another name as one:
-/// as an alias numbered inside a merge stage meets a taken name when it is
-/// placed. Each keeps the cause of the name first asked for.
-fn followed(renamed: &[RenamedItem]) -> Vec<RenamedItem> {
-    let mut items = Vec::<RenamedItem>::new();
+/// The renamed items by cause, in the order each cause first appears.
+fn renamed_sections(renamed: &[RenamedItem]) -> Vec<(String, Lines)> {
+    let mut sections = Vec::<(RenameCause, Lines)>::new();
     for item in renamed {
-        if let Some(earlier) = items
-            .iter_mut()
-            .find(|earlier| earlier.saved_as == item.requested)
-        {
-            earlier.saved_as = item.saved_as.clone();
-        } else if let Some(later) = items
-            .iter_mut()
-            .find(|later| later.requested == item.saved_as)
-        {
-            later.requested = item.requested.clone();
-            later.cause = item.cause;
-        } else {
-            items.push(item.clone());
-        }
-    }
-    items
-}
-
-fn renamed_sections(renamed: &[RenamedItem]) -> Vec<(String, Vec<String>)> {
-    let mut sections = Vec::<(RenameCause, Vec<String>)>::new();
-    for item in renamed {
-        match sections.iter_mut().find(|(cause, _)| *cause == item.cause) {
-            Some((_, lines)) => lines.push(renamed_line(item)),
-            None => sections.push((item.cause, vec![renamed_line(item)])),
-        }
+        let index = match sections.iter().position(|(cause, _)| *cause == item.cause) {
+            Some(index) => index,
+            None => {
+                sections.push((item.cause, Lines::new()));
+                sections.len() - 1
+            }
+        };
+        sections[index].1.push(|| renamed_line(item));
     }
     sections
         .into_iter()
@@ -166,7 +185,7 @@ fn renamed_sections(renamed: &[RenamedItem]) -> Vec<(String, Vec<String>)> {
         .collect()
 }
 
-fn sections(sections: Vec<(String, Vec<String>)>) -> String {
+fn sections(sections: Vec<(String, Lines)>) -> String {
     sections
         .into_iter()
         .map(|(heading, lines)| format!("{heading}\n\n{}", bullets(&lines)))
@@ -174,24 +193,20 @@ fn sections(sections: Vec<(String, Vec<String>)>) -> String {
         .join("\n\n")
 }
 
-fn left_sections(report: &TransferReport) -> Vec<(String, Vec<String>)> {
+fn left_sections(report: &TransferReport) -> Vec<(String, Lines)> {
     let mut left = Vec::new();
     if !report.skipped.is_empty() {
-        let skipped = report.skipped.iter().map(skipped_line).collect::<Vec<_>>();
         let heading =
             crate::i18n::tr("These special files can\u{2019}t be copied and were left out");
-        left.push((heading, skipped));
+        left.push((heading, Lines::of(&report.skipped, skipped_line)));
     }
     for (kept, heading, in_trash) in [
         (&report.kept, "items_kept", false),
         (&report.kept_in_trash, "items_kept_in_trash", true),
     ] {
         if !kept.is_empty() {
-            let lines = kept
-                .iter()
-                .map(|item| kept_line(item, in_trash))
-                .collect::<Vec<_>>();
-            left.push((crate::i18n::count(heading, lines.len()), lines));
+            let lines = Lines::of(kept, |item| kept_line(item, in_trash));
+            left.push((crate::i18n::count(heading, lines.count), lines));
         }
     }
     left
@@ -200,7 +215,7 @@ fn left_sections(report: &TransferReport) -> Vec<(String, Vec<String>)> {
 /// The detail of the dialog of an operation that failed, was cancelled or
 /// completed with errors: its `outcome`, then everything it reported.
 pub(super) fn outcome_detail(outcome: String, report: &TransferReport) -> String {
-    let mut reported = renamed_sections(&followed(&report.renamed));
+    let mut reported = renamed_sections(&report.renamed);
     reported.extend(left_sections(report));
     if reported.is_empty() {
         return outcome;
@@ -209,8 +224,7 @@ pub(super) fn outcome_detail(outcome: String, report: &TransferReport) -> String
 }
 
 fn presentation(report: &TransferReport) -> Option<Presentation> {
-    let followed = followed(&report.renamed);
-    let mut renamed = renamed_sections(&followed);
+    let mut renamed = renamed_sections(&report.renamed);
     let left = left_sections(report);
     if !left.is_empty() {
         renamed.extend(left);
@@ -218,7 +232,7 @@ fn presentation(report: &TransferReport) -> Option<Presentation> {
             detail: sections(renamed),
         });
     }
-    let message = crate::i18n::count("items_renamed", followed.len());
+    let message = crate::i18n::count("items_renamed", report.renamed.len());
     if renamed.len() > 1 {
         return Some(Presentation::Information {
             message,
@@ -227,7 +241,7 @@ fn presentation(report: &TransferReport) -> Option<Presentation> {
         });
     }
     let (heading, lines) = renamed.pop()?;
-    if let [line] = lines.as_slice()
+    if let [line] = lines.listed.as_slice()
         && line.chars().count() <= NOTICE_CHARS
     {
         return Some(Presentation::Notice {

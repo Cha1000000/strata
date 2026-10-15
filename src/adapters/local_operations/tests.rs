@@ -97,6 +97,62 @@ fn copy_recursively_fixing(
     })
 }
 
+/// A progress tracker that keeps what it emits.
+fn recording_progress() -> (
+    Rc<TransferProgressTracker>,
+    Rc<RefCell<Vec<OperationEvent>>>,
+) {
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let emitted = events.clone();
+    let progress = TransferProgressTracker::new(
+        OperationRequestId(1590),
+        None,
+        None,
+        Rc::new(move |event| emitted.borrow_mut().push(event)),
+    );
+    (progress, events)
+}
+
+/// Everything `events` report, with renames followed as the browser does.
+fn followed_report(events: &[OperationEvent]) -> crate::services::TransferReport {
+    let mut reported = crate::services::TransferReport::default();
+    for event in events {
+        if let OperationEvent::ItemsReported { report, .. } = event {
+            reported.extend(report.clone());
+        }
+    }
+    reported.follow_renames();
+    reported
+}
+
+/// The renames of `report` beneath `target`, relative to it, in the order
+/// of the names asked for.
+pub(super) fn renamed_beneath(
+    target: &Path,
+    report: &crate::services::TransferReport,
+) -> Vec<(String, String, crate::services::RenameCause)> {
+    let relative = |location: &Location| {
+        location
+            .native_path()
+            .and_then(|path| path.strip_prefix(target).ok())
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    };
+    let mut renamed = report
+        .renamed
+        .iter()
+        .map(|item| {
+            (
+                relative(&item.requested),
+                relative(&item.saved_as),
+                item.cause,
+            )
+        })
+        .collect::<Vec<_>>();
+    renamed.sort_by(|left, right| left.0.cmp(&right.0));
+    renamed
+}
+
 fn file_stage(root: &Path) -> Result<super::StagedSibling, Box<dyn Error>> {
     let parent = Arc::new(open_local_parent_directory(root)?);
     let (name, (_, created)) = super::copy_engine::stage::create_file(

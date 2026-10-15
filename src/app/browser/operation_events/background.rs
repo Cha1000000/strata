@@ -162,13 +162,10 @@ impl Browser {
                 overwritten,
                 placed,
                 ..
-            } => {
-                let mut merged = job.merged.borrow_mut();
-                merged.sources.insert(source);
-                merged.created.extend(created);
-                merged.overwritten.extend(overwritten);
-                merged.placed.extend(placed);
-            }
+            } => job
+                .merged
+                .borrow_mut()
+                .merged(source, created, overwritten, placed),
             OperationEvent::ItemsReported { report, .. } => {
                 job.merged.borrow_mut().rename(&report.renamed);
                 job.report.borrow_mut().extend(report);
@@ -217,6 +214,7 @@ impl Browser {
                     });
                 }
                 let mut report = job.report.take();
+                report.follow_renames();
                 match event {
                     OperationEvent::Pasted { .. } => {
                         let revealed = completion.destination.clone().filter(|_| {
