@@ -759,6 +759,26 @@ pub(super) fn build_appearance_menu(
             }
         });
     }
+    let (customize_columns, _, _) = appearance_option(
+        crate::assets::icons::COLUMNS,
+        "Customize columns…",
+        false,
+        true,
+        gtk::AccessibleRole::MenuItem,
+    );
+    customize_columns.set_visible(current_mode == BrowserMode::List);
+    {
+        let view = view.downgrade();
+        let popover_weak = popover_weak.clone();
+        customize_columns.connect_clicked(move |_| {
+            if let Some(popover) = popover_weak.upgrade() {
+                popover.popdown();
+            }
+            if let Some(view) = view.upgrade() {
+                view.open_list_columns_popover();
+            }
+        });
+    }
     for (button, mode) in [
         (&columns, BrowserMode::Columns),
         (&icons, BrowserMode::Icons),
@@ -791,6 +811,7 @@ pub(super) fn build_appearance_menu(
         let list_check = list_check.clone();
         let group_by_type = group_by_type.clone();
         let column_sizes = column_sizes.clone();
+        let customize_columns = customize_columns.clone();
         let button_icon = button_icon.clone();
         view.connect_view_mode_changed(move |mode| {
             columns_check.set_visible(mode == BrowserMode::Columns);
@@ -798,6 +819,7 @@ pub(super) fn build_appearance_menu(
             list_check.set_visible(mode == BrowserMode::List);
             group_by_type.set_sensitive(mode.supports_type_grouping());
             column_sizes.set_visible(mode == BrowserMode::Columns);
+            customize_columns.set_visible(mode == BrowserMode::List);
             crate::assets::set_primary_icon(&button_icon, browser_mode_icon(mode));
         });
     }
@@ -958,6 +980,7 @@ pub(super) fn build_appearance_menu(
 
     content.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
     content.append(&group_by_type);
+    content.append(&customize_columns);
     content.append(&column_sizes);
     let (hidden, hidden_check, hidden_icon) = appearance_option_with_shortcut(
         if hidden_files_shown {

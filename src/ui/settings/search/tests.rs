@@ -28,6 +28,7 @@ fn localized_setting_titles_keep_stable_search_targets() {
                 ("10xer", "tenxer"),
                 ("Modus", "tenxer"),
                 ("Doppelklick", "opening"),
+                ("Miniaturansichten", "show-thumbnails"),
                 ("double click", "opening"),
             ] {
                 assert!(
@@ -81,6 +82,8 @@ fn ranks_exact_labels_aliases_and_small_typing_errors() {
         ("show recent", "general", "sidebar-places"),
         ("tezt size", "theme", "text"),
         ("font size", "theme", "text"),
+        ("Show thumbnails", "theme", "show-thumbnails"),
+        ("photos", "theme", "show-thumbnails"),
         ("nightly", "updates", "channel"),
         ("relase chanel", "updates", "channel"),
         ("copyright", "about", "license"),

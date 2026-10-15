@@ -1196,6 +1196,14 @@ impl BrowserView {
             .set_group_by_type(enabled);
     }
 
+    pub fn set_list_columns(&self) {
+        self.state.mode_views.borrow().set_list_columns();
+    }
+
+    pub fn open_list_columns_popover(&self) {
+        self.state.mode_views.borrow().open_list_columns_popover();
+    }
+
     pub fn apply_resolved_icons_size(&self, size: i32) {
         self.state
             .mode_views

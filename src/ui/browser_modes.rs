@@ -26,13 +26,16 @@ use crate::{
     ui::browser::{ClipboardMark, ClipboardMarks, FilterFocus, mark_in, paths::is_trash_location},
 };
 
+use crate::ui::preferences::ListColumnId;
+
+mod column_options;
 mod events;
 mod list_factory;
 mod navigation;
 #[cfg(test)]
 mod tests;
 
-use list_factory::{ListFactory, refresh_list_section};
+use list_factory::{ListFactory, ListRow, refresh_list_section};
 
 const LIST_COLUMN_WIDTHS: [i32; 5] = [160, 160, 90, 120, 150];
 const LIST_COLUMN_MIN_WIDTHS: [i32; 5] = [160, 80, 70, 80, 110];
@@ -398,6 +401,8 @@ struct Pane {
     filter: gtk::CustomFilter,
     filter_query: Rc<RefCell<String>>,
     folder_context_trigger: Rc<dyn Fn(f64, f64)>,
+    list_headings: Option<gtk::Box>,
+    list_columns: Option<ListColumnLayout>,
 }
 
 impl Pane {
@@ -1390,6 +1395,30 @@ impl ModeViews {
         self.group_by_type = enabled;
         if self.mode.supports_type_grouping() {
             self.rebuild_list();
+        }
+    }
+
+    /// Also updates a hidden List pane, which is reused when List is shown again.
+    pub fn set_list_columns(&self) {
+        if let Some(pane) = &self.list_pane
+            && let (Some(headings), Some(columns)) = (&pane.list_headings, &pane.list_columns)
+        {
+            apply_columns_layout(headings, columns, &pane.section.bound_items);
+        }
+    }
+
+    pub fn open_list_columns_popover(&self) {
+        if self.mode == BrowserMode::List
+            && let Some(pane) = &self.list_pane
+            && let (Some(headings), Some(columns)) = (&pane.list_headings, &pane.list_columns)
+        {
+            column_options::open_column_options_popover(
+                headings,
+                headings,
+                columns,
+                &pane.section.bound_items,
+                None,
+            );
         }
     }
 
@@ -2644,6 +2673,8 @@ fn build_icons_pane(
         filter: filter_for_pane,
         filter_query,
         folder_context_trigger: Rc::new(|_, _| {}),
+        list_headings: None,
+        list_columns: None,
     };
     refresh_marquee_targets(&pane);
     pane
@@ -3086,10 +3117,92 @@ fn density_icons_columns(density: BrowserDensity) -> u32 {
     }
 }
 
+fn find_heading_cell(headings: &gtk::Box, col: ListColumnId) -> Option<gtk::Widget> {
+    let class = col.css_class();
+    let mut current = headings.first_child();
+    while let Some(child) = current {
+        if child.has_css_class(class) {
+            return Some(child);
+        }
+        current = child.next_sibling();
+    }
+    None
+}
+
+fn find_column_at_x(
+    headings: &gtk::Box,
+    x: f64,
+    columns: &ListColumnLayout,
+) -> Option<(ListColumnId, bool)> {
+    let manager = super::preferences::PreferenceManager::shared();
+    let order = manager.list_column_order();
+    let hidden = manager.list_hidden_columns();
+    let visible_cols: Vec<ListColumnId> = order
+        .into_iter()
+        .filter(|c| !hidden.contains(c) || *c == ListColumnId::Name)
+        .collect();
+
+    for &col in &visible_cols {
+        if let Some(cell) = find_heading_cell(headings, col)
+            && let Some(bounds) = cell.compute_bounds(headings)
+            && bounds.width() > 0.0
+        {
+            let left = f64::from(bounds.x());
+            let right = left + f64::from(bounds.width());
+            if x >= left && x <= right {
+                let is_resize = x >= (right - 8.0);
+                return Some((col, is_resize));
+            }
+        }
+    }
+
+    let mut x_acc = 0.0;
+    for col in visible_cols {
+        let w = f64::from(columns.widths[col.index()].get());
+        let left = x_acc;
+        let right = x_acc + w;
+        if x >= left && x <= right {
+            let is_resize = x >= (right - 8.0);
+            return Some((col, is_resize));
+        }
+        x_acc += w;
+    }
+    None
+}
+
+fn column_midpoint(
+    headings: &gtk::Box,
+    col: ListColumnId,
+    columns: &ListColumnLayout,
+) -> Option<f64> {
+    if let Some(cell) = find_heading_cell(headings, col)
+        && let Some(bounds) = cell.compute_bounds(headings)
+        && bounds.width() > 0.0
+    {
+        return Some(f64::from(bounds.x()) + (f64::from(bounds.width()) / 2.0));
+    }
+    let manager = super::preferences::PreferenceManager::shared();
+    let order = manager.list_column_order();
+    let hidden = manager.list_hidden_columns();
+    let mut x_acc = 0.0;
+    for c in order {
+        if hidden.contains(&c) && c != ListColumnId::Name {
+            continue;
+        }
+        let w = f64::from(columns.widths[c.index()].get());
+        if c == col {
+            return Some(x_acc + w / 2.0);
+        }
+        x_acc += w;
+    }
+    None
+}
+
 fn list_headings(
     browser: &Rc<Browser>,
     depth: usize,
     columns: ListColumnLayout,
+    bound_items: &Rc<RefCell<Vec<BoundModeItem>>>,
 ) -> (gtk::Box, ListSorting) {
     let headings = gtk::Box::new(gtk::Orientation::Horizontal, 0);
     headings.add_css_class("list-headings");
@@ -3099,19 +3212,27 @@ fn list_headings(
         arrows: RefCell::default(),
     });
 
-    for (index, (text, key)) in [
-        ("Name", Some(SortKey::Name)),
-        ("Mode", None),
-        ("Size", Some(SortKey::Size)),
-        ("Type", Some(SortKey::Type)),
-        ("Modified", Some(SortKey::Modified)),
-    ]
-    .into_iter()
-    .enumerate()
-    {
+    let manager = super::preferences::PreferenceManager::shared();
+    let order = manager.list_column_order();
+    let hidden = manager.list_hidden_columns();
+
+    for col in order {
+        let index = col.index();
+        let (text, key) = match col {
+            ListColumnId::Name => ("Name", Some(SortKey::Name)),
+            ListColumnId::Mode => ("Mode", None),
+            ListColumnId::Size => ("Size", Some(SortKey::Size)),
+            ListColumnId::Type => ("Type", Some(SortKey::Type)),
+            ListColumnId::Modified => ("Modified", Some(SortKey::Modified)),
+        };
+        let is_visible = !hidden.contains(&col) || col == ListColumnId::Name;
         let width = columns.widths[index].get();
         let cell = gtk::Box::new(gtk::Orientation::Horizontal, 0);
         cell.add_css_class("list-heading-cell");
+        cell.add_css_class(col.css_class());
+        if !is_visible {
+            cell.set_visible(false);
+        }
         register_list_column_cell(&columns, index, &cell);
 
         let row = gtk::Box::new(gtk::Orientation::Horizontal, 5);
@@ -3158,6 +3279,7 @@ fn list_headings(
             });
             sorting.arrows.borrow_mut().push((key, arrow));
         }
+
         let button_overlay = gtk::Overlay::new();
         button_overlay.set_child(Some(&button));
         button_overlay.set_hexpand(true);
@@ -3165,6 +3287,130 @@ fn list_headings(
         cell.append(&button_overlay);
         headings.append(&cell);
     }
+
+    let drag = gtk::GestureDrag::new();
+    drag.set_name(Some("column-drag"));
+    drag.set_button(1);
+    drag.set_propagation_phase(gtk::PropagationPhase::Capture);
+
+    let drag_state = Rc::new(Cell::new(None::<(ListColumnId, f64, bool)>));
+    let headings_weak = headings.downgrade();
+    let columns_weak = columns.clone();
+    let bound_items_weak = bound_items.clone();
+
+    drag.connect_drag_begin({
+        let drag_state = drag_state.clone();
+        let headings_weak = headings_weak.clone();
+        let columns_weak = columns_weak.clone();
+        move |gesture, start_x, _| {
+            let Some(headings) = headings_weak.upgrade() else {
+                drag_state.set(None);
+                return;
+            };
+            let Some((col, is_resize)) = find_column_at_x(&headings, start_x, &columns_weak) else {
+                drag_state.set(None);
+                return;
+            };
+            if is_resize {
+                gesture.set_state(gtk::EventSequenceState::Denied);
+                drag_state.set(None);
+                return;
+            }
+            drag_state.set(Some((col, start_x, false)));
+        }
+    });
+
+    drag.connect_drag_update({
+        let drag_state = drag_state.clone();
+        let headings_weak = headings_weak.clone();
+        let columns_weak = columns_weak.clone();
+        let bound_items_weak = bound_items_weak.clone();
+        move |gesture, offset_x, _| {
+            let Some((drag_col, start_x, drag_active)) = drag_state.get() else {
+                return;
+            };
+            if !drag_active {
+                if offset_x.abs() < 10.0 {
+                    return;
+                }
+                drag_state.set(Some((drag_col, start_x, true)));
+                gesture.set_state(gtk::EventSequenceState::Claimed);
+                if let Some(headings) = headings_weak.upgrade() {
+                    headings.set_cursor_from_name(Some("grabbing"));
+                }
+            }
+
+            let Some(headings) = headings_weak.upgrade() else {
+                return;
+            };
+            let current_x = start_x + offset_x;
+            let manager = super::preferences::PreferenceManager::shared();
+
+            loop {
+                let order = manager.list_column_order();
+                let hidden = manager.list_hidden_columns();
+                let visible_cols: Vec<ListColumnId> = order
+                    .into_iter()
+                    .filter(|c| !hidden.contains(c) || *c == ListColumnId::Name)
+                    .collect();
+
+                let Some(current_idx) = visible_cols.iter().position(|c| *c == drag_col) else {
+                    break;
+                };
+
+                let mut swapped = false;
+                if current_idx > 0 {
+                    let left_col = visible_cols[current_idx - 1];
+                    if let Some(left_mid) = column_midpoint(&headings, left_col, &columns_weak)
+                        && current_x < left_mid
+                    {
+                        manager.swap_list_columns(drag_col, left_col);
+                        apply_columns_layout(&headings, &columns_weak, &bound_items_weak);
+                        swapped = true;
+                    }
+                }
+                if !swapped && current_idx + 1 < visible_cols.len() {
+                    let right_col = visible_cols[current_idx + 1];
+                    if let Some(right_mid) = column_midpoint(&headings, right_col, &columns_weak)
+                        && current_x > right_mid
+                    {
+                        manager.swap_list_columns(drag_col, right_col);
+                        apply_columns_layout(&headings, &columns_weak, &bound_items_weak);
+                        swapped = true;
+                    }
+                }
+                if !swapped {
+                    break;
+                }
+            }
+        }
+    });
+
+    drag.connect_drag_end({
+        let drag_state = drag_state.clone();
+        let headings_weak = headings_weak.clone();
+        move |_, _, _| {
+            if let Some((_, _, true)) = drag_state.take()
+                && let Some(headings) = headings_weak.upgrade()
+            {
+                headings.set_cursor(None);
+            }
+        }
+    });
+
+    drag.connect_cancel({
+        let drag_state = drag_state.clone();
+        let headings_weak = headings_weak.clone();
+        move |_, _| {
+            if let Some((_, _, true)) = drag_state.take()
+                && let Some(headings) = headings_weak.upgrade()
+            {
+                headings.set_cursor(None);
+            }
+        }
+    });
+
+    headings.add_controller(drag);
     let scaled_columns = columns.clone();
     super::preferences::PreferenceManager::shared().bind_interface_scale(
         &headings,
@@ -3390,6 +3636,10 @@ fn build_list_pane(
     let location = browser.location_at(depth);
     let search_selection_handlers = options.search_selection_handlers.clone();
     let navigation = list_navigation(&browser);
+    let columns = ListColumnLayout::new(&browser);
+    let bound_items = Rc::new(RefCell::new(Vec::new()));
+    let (headings, sorting) = list_headings(&browser, depth, columns.clone(), &bound_items);
+
     let actions = gtk::Box::new(gtk::Orientation::Horizontal, 0);
     actions.add_css_class("icons-header-actions");
     let empty_trash = super::browser::empty_trash_button(&browser);
@@ -3420,9 +3670,22 @@ fn build_list_pane(
     if camera_photos || recent {
         actions.append(&super::browser::column_sort_menu(&browser, depth));
     }
+
+    let columns_popover =
+        column_options::create_column_options_popover(&headings, &columns, &bound_items);
+    let columns_menu = gtk::MenuButton::builder()
+        .tooltip_text(crate::i18n::tr("Columns"))
+        .popover(&columns_popover)
+        .build();
+    columns_menu.set_child(Some(&crate::assets::chrome_icon(
+        crate::assets::icons::COLUMNS,
+    )));
+    crate::ui::controls::pane_header_action(&columns_menu);
+    crate::ui::tenxer_mode::hide_while_enabled(&columns_menu);
+    actions.append(&columns_menu);
+
     let (filter_entry, filter_revealer, filter_button) = filter_controls("Filter list (%{keys})");
     actions.append(&filter_button);
-    let columns = ListColumnLayout::new(&browser);
     let (shell, header, content, model, stack, status, spinner, truncated_hint) = pane_base(
         title,
         BrowserMode::List,
@@ -3467,9 +3730,27 @@ fn build_list_pane(
     let syncing_selection = Rc::new(Cell::new(false));
     let sections: Rc<RefCell<Vec<PaneSection>>> = Rc::new(RefCell::new(Vec::new()));
 
-    let (headings, sorting) = list_headings(&browser, depth, columns.clone());
-
-    let bound_items = Rc::new(RefCell::new(Vec::new()));
+    {
+        let weak_headings = headings.downgrade();
+        let weak_columns = columns.clone();
+        let weak_bound_items = bound_items.clone();
+        let click = gtk::GestureClick::new();
+        click.set_button(3);
+        click.connect_pressed(move |gesture, _, x, y| {
+            let Some(headings) = weak_headings.upgrade() else {
+                return;
+            };
+            column_options::open_column_options_popover(
+                &headings,
+                &headings,
+                &weak_columns,
+                &weak_bound_items,
+                Some((x, y)),
+            );
+            gesture.set_state(gtk::EventSequenceState::Claimed);
+        });
+        headings.add_controller(click);
+    }
     let scrolling = Rc::new(Cell::new(false));
     let factory = ListFactory {
         browser: Rc::downgrade(&browser),
@@ -3483,7 +3764,7 @@ fn build_list_pane(
         activation: click_options.activation,
         transfers: transfer_handler.clone(),
         marks: clipboard_marks.clone(),
-        columns,
+        columns: columns.clone(),
         scrolling: scrolling.clone(),
         bound_items: bound_items.clone(),
         state: options.state.clone(),
@@ -3670,6 +3951,8 @@ fn build_list_pane(
         filter: filter_for_pane,
         filter_query,
         folder_context_trigger: Rc::new(|_, _| {}),
+        list_headings: Some(headings),
+        list_columns: Some(columns),
     };
     refresh_marquee_targets(&pane);
     pane
@@ -3730,9 +4013,27 @@ fn list_loading_skeleton(columns: &ListColumnLayout) -> gtk::Box {
     table.set_valign(gtk::Align::Start);
     let headings = gtk::Box::new(gtk::Orientation::Horizontal, 0);
     headings.add_css_class("list-headings");
-    for (index, width) in [40, 36, 28, 30, 58].into_iter().enumerate() {
+    let manager = super::preferences::PreferenceManager::shared();
+    let order = manager.list_column_order();
+    let hidden = manager.list_hidden_columns();
+
+    let heading_width_for_col = |col: ListColumnId| match col {
+        ListColumnId::Name => 40,
+        ListColumnId::Mode => 36,
+        ListColumnId::Size => 28,
+        ListColumnId::Type => 30,
+        ListColumnId::Modified => 58,
+    };
+
+    for &col in &order {
+        let index = col.index();
+        let width = heading_width_for_col(col);
         let cell = gtk::Box::new(gtk::Orientation::Horizontal, 0);
         cell.add_css_class("list-heading-cell");
+        let is_visible = !hidden.contains(&col) || col == ListColumnId::Name;
+        if !is_visible {
+            cell.set_visible(false);
+        }
         let bar = block(width, 8);
         bar.set_margin_start(12);
         cell.append(&bar);
@@ -3743,12 +4044,22 @@ fn list_loading_skeleton(columns: &ListColumnLayout) -> gtk::Box {
     for index in 0..ROW_COUNT {
         let row = gtk::Box::new(gtk::Orientation::Horizontal, 0);
         row.add_css_class("list-row");
-        for (column, width) in [name_width(index).min(92), 60, 38, 56, 94]
-            .into_iter()
-            .enumerate()
-        {
+        let row_width_for_col = |col: ListColumnId| match col {
+            ListColumnId::Name => name_width(index).min(92),
+            ListColumnId::Mode => 60,
+            ListColumnId::Size => 38,
+            ListColumnId::Type => 56,
+            ListColumnId::Modified => 94,
+        };
+        for &col in &order {
+            let column = col.index();
+            let width = row_width_for_col(col);
             let cell = gtk::Box::new(gtk::Orientation::Horizontal, 12);
             cell.add_css_class("list-metadata-cell");
+            let is_visible = !hidden.contains(&col) || col == ListColumnId::Name;
+            if !is_visible {
+                cell.set_visible(false);
+            }
             if column == 0 {
                 cell.append(&block(18, 18));
             }
@@ -5041,11 +5352,33 @@ fn assemble_list_row() -> gtk::Box {
     name_cell.append(&icon);
     name_cell.append(&name);
     name_cell.append(&field);
-    row.append(&name_cell);
-    row.append(&list_metadata_label());
-    row.append(&list_metadata_label());
-    row.append(&list_metadata_label());
-    row.append(&list_metadata_label());
+    let mode_label = list_metadata_label();
+    mode_label.add_css_class("list-col-mode");
+    let size_label = list_metadata_label();
+    size_label.add_css_class("list-col-size");
+    let kind_label = list_metadata_label();
+    kind_label.add_css_class("list-col-type");
+    let modified_label = list_metadata_label();
+    modified_label.add_css_class("list-col-modified");
+
+    let manager = super::preferences::PreferenceManager::shared();
+    let order = manager.list_column_order();
+    let hidden = manager.list_hidden_columns();
+
+    for col in order {
+        let is_visible = !hidden.contains(&col) || col == ListColumnId::Name;
+        let widget: gtk::Widget = match col {
+            ListColumnId::Name => name_cell.clone().upcast(),
+            ListColumnId::Mode => mode_label.clone().upcast(),
+            ListColumnId::Size => size_label.clone().upcast(),
+            ListColumnId::Type => kind_label.clone().upcast(),
+            ListColumnId::Modified => modified_label.clone().upcast(),
+        };
+        if !is_visible {
+            widget.set_visible(false);
+        }
+        row.append(&widget);
+    }
     row
 }
 
@@ -5060,18 +5393,94 @@ fn list_row_parts(
     gtk::Label,
     gtk::Label,
 )> {
-    let name_cell = row.first_child()?.downcast::<gtk::Box>().ok()?;
+    let mut name_cell: Option<gtk::Box> = None;
+    let mut mode: Option<gtk::Label> = None;
+    let mut size: Option<gtk::Label> = None;
+    let mut kind: Option<gtk::Label> = None;
+    let mut modified: Option<gtk::Label> = None;
+
+    let mut child = row.first_child();
+    while let Some(current) = child {
+        child = current.next_sibling();
+        if current.has_css_class("list-name-cell") {
+            name_cell = current.downcast::<gtk::Box>().ok();
+        } else if current.has_css_class("list-col-mode") {
+            mode = current.downcast::<gtk::Label>().ok();
+        } else if current.has_css_class("list-col-size") {
+            size = current.downcast::<gtk::Label>().ok();
+        } else if current.has_css_class("list-col-type") {
+            kind = current.downcast::<gtk::Label>().ok();
+        } else if current.has_css_class("list-col-modified") {
+            modified = current.downcast::<gtk::Label>().ok();
+        }
+    }
+
+    let name_cell = name_cell?;
     let icon = name_cell
         .first_child()?
         .downcast::<super::thumbnail::ThumbnailSlot>()
         .ok()?;
     let name = icon.next_sibling()?.downcast::<gtk::Label>().ok()?;
     let field = name.next_sibling()?.downcast::<gtk::Entry>().ok()?;
-    let mode = name_cell.next_sibling()?.downcast::<gtk::Label>().ok()?;
-    let size = mode.next_sibling()?.downcast::<gtk::Label>().ok()?;
-    let kind = size.next_sibling()?.downcast::<gtk::Label>().ok()?;
-    let modified = kind.next_sibling()?.downcast::<gtk::Label>().ok()?;
-    Some((icon, name, field, mode, size, kind, modified))
+    Some((icon, name, field, mode?, size?, kind?, modified?))
+}
+
+fn apply_columns_layout(
+    headings: &gtk::Box,
+    columns: &ListColumnLayout,
+    bound_items: &Rc<RefCell<Vec<BoundModeItem>>>,
+) {
+    let manager = super::preferences::PreferenceManager::shared();
+    let order = manager.list_column_order();
+    let hidden = manager.list_hidden_columns();
+
+    for col in ListColumnId::ALL {
+        let is_visible = !hidden.contains(&col) || col == ListColumnId::Name;
+        for weak in columns.cells[col.index()].borrow().iter() {
+            if let Some(widget) = weak.upgrade() {
+                widget.set_visible(is_visible);
+            }
+        }
+    }
+
+    let mut heading_children = Vec::new();
+    let mut current = headings.first_child();
+    while let Some(child) = current {
+        current = child.next_sibling();
+        heading_children.push(child);
+    }
+    let mut prev_heading: Option<gtk::Widget> = None;
+    for col in &order {
+        let class = col.css_class();
+        if let Some(heading_cell) = heading_children.iter().find(|c| c.has_css_class(class)) {
+            headings.reorder_child_after(heading_cell, prev_heading.as_ref());
+            prev_heading = Some(heading_cell.clone());
+        }
+    }
+
+    for bound in bound_items.borrow().iter() {
+        let Some(widget) = bound.widget.upgrade() else {
+            continue;
+        };
+        let Some(row) = widget.downcast::<gtk::Box>().ok() else {
+            continue;
+        };
+        let Some(row_struct) = ListRow::from_widget(row.clone()) else {
+            continue;
+        };
+        let mut prev_cell: Option<gtk::Widget> = None;
+        for col in &order {
+            let cell: gtk::Widget = match col {
+                ListColumnId::Name => row_struct.name_cell.clone(),
+                ListColumnId::Mode => row_struct.mode.clone().upcast(),
+                ListColumnId::Size => row_struct.size.clone().upcast(),
+                ListColumnId::Type => row_struct.kind.clone().upcast(),
+                ListColumnId::Modified => row_struct.modified.clone().upcast(),
+            };
+            row.reorder_child_after(&cell, prev_cell.as_ref());
+            prev_cell = Some(cell);
+        }
+    }
 }
 
 fn set_label_if_changed(label: &gtk::Label, text: &str) {

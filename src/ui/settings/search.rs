@@ -272,6 +272,12 @@ const TARGETS: &[Target] = &[
         aliases: "appearance corners radius rounded square shape borders",
     },
     Target {
+        id: "show-thumbnails",
+        page: "theme",
+        title: "Show thumbnails",
+        aliases: "appearance images pictures photos videos documents thumbnails icons previews disable",
+    },
+    Target {
         id: "file-icon-colors",
         page: "theme",
         title: "File icon colors",

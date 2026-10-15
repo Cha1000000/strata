@@ -96,7 +96,17 @@ def _inert_point(strata, name, mode):
 
 
 @pytest.mark.preferences(single_click_previews=True)
-@pytest.mark.parametrize("mode", ALL_MODES)
+@pytest.mark.parametrize("mode", [
+    *ALL_MODES,
+    pytest.param(
+        "List",
+        marks=pytest.mark.preferences(
+            browser_mode="list",
+            list_column_order=["mode", "size", "name", "type", "modified"],
+        ),
+        id="list-reordered",
+    ),
+])
 @pytest.mark.parametrize(
     "modifiers,select_all",
     [

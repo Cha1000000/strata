@@ -318,6 +318,18 @@ fn append_file_icon_colors_option(content: &gtk::Box, preferences: &Rc<Preferenc
         "Brand colors use each file type's own palette; theme colors use the accent.",
         &choice,
     ));
+    let (row, toggle) = super::settings_option(
+        "Show thumbnails",
+        "Show thumbnails instead of file-type icons. The preview panel stays available.",
+        preferences.show_thumbnails(),
+    );
+    bind_switch(
+        preferences,
+        &toggle,
+        PreferenceManager::show_thumbnails,
+        PreferenceManager::set_show_thumbnails,
+    );
+    group.append(&row);
 }
 
 fn append_omarchy_variant_option(
