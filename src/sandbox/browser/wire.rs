@@ -31,6 +31,7 @@ pub(crate) enum Operation {
     ThreeMfThumbnail = 11,
     FreeCadThumbnail = 12,
     PreviewRaw = 13,
+    RawMetadata = 14,
 }
 
 impl Operation {
@@ -49,6 +50,7 @@ impl Operation {
             11 => Ok(Self::ThreeMfThumbnail),
             12 => Ok(Self::FreeCadThumbnail),
             13 => Ok(Self::PreviewRaw),
+            14 => Ok(Self::RawMetadata),
             _ => Err(io::Error::other("Unknown browser operation")),
         }
     }

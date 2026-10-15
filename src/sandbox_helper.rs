@@ -436,6 +436,7 @@ pub(crate) fn browser_render(
             response.png = document_media::image(input, 800).unwrap_or_default();
         }
         Operation::PreviewRaw => response.png = render_camera_raw(input, 800).unwrap_or_default(),
+        Operation::RawMetadata => response.metadata = raw_metadata::read(input).unwrap_or_default(),
         Operation::DocumentMermaid => {
             response.png = document_media::mermaid(input).unwrap_or_default();
         }

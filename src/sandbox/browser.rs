@@ -178,18 +178,16 @@ pub(crate) fn metadata(
     image: bool,
     cancellation: &Cancellation,
 ) -> Result<MediaMetadata, String> {
-    request(
-        pool(),
-        path,
-        if image {
-            Operation::ImageMetadata
-        } else {
-            Operation::MediaMetadata
-        },
-        cancellation,
-    )?
-    .metadata
-    .ok_or_else(|| "Media details unavailable".into())
+    let operation = if super::raw_metadata::is_raw(path) {
+        Operation::RawMetadata
+    } else if image {
+        Operation::ImageMetadata
+    } else {
+        Operation::MediaMetadata
+    };
+    request(pool(), path, operation, cancellation)?
+        .metadata
+        .ok_or_else(|| "Media details unavailable".into())
 }
 
 pub(crate) fn preview(
@@ -234,6 +232,7 @@ fn parse_operation(operation: Operation) -> ParseOperation {
         Operation::ThreeMfThumbnail => ParseOperation::ThumbnailModel(ModelFormat::ThreeMf),
         Operation::FreeCadThumbnail => ParseOperation::ThumbnailModel(ModelFormat::FreeCad),
         Operation::ImageMetadata | Operation::MediaMetadata => ParseOperation::MediaMetadata,
+        Operation::RawMetadata => ParseOperation::RawMetadata,
         Operation::PreviewImage => ParseOperation::PreviewImage,
         Operation::PreviewRaw => ParseOperation::PreviewRaw,
         Operation::DocumentMermaid => ParseOperation::DocumentMermaid,
@@ -260,7 +259,7 @@ fn request(
     let key = FileKey::read(path, &file).map_err(|e| crate::services::io_error_message(&e))?;
     let metadata_only = matches!(
         operation,
-        Operation::ImageMetadata | Operation::MediaMetadata
+        Operation::ImageMetadata | Operation::MediaMetadata | Operation::RawMetadata
     );
     let input_limit = if matches!(
         operation,
@@ -319,11 +318,21 @@ fn request(
             cached.failed_thumbnail = true;
         }
         if !response.metadata.is_empty() {
-            let image = matches!(
-                operation,
-                Operation::Image | Operation::Raw | Operation::ImageMetadata
-            );
-            match MediaMetadata::from_json(&response.metadata, image) {
+            let metadata = if operation == Operation::RawMetadata {
+                super::raw_metadata::RawMetadata::from_json(&response.metadata).map(|raw| {
+                    MediaMetadata {
+                        dimensions: raw.dimensions,
+                        ..MediaMetadata::default()
+                    }
+                })
+            } else {
+                let image = matches!(
+                    operation,
+                    Operation::Image | Operation::Raw | Operation::ImageMetadata
+                );
+                MediaMetadata::from_json(&response.metadata, image)
+            };
+            match metadata {
                 Ok(metadata) => cached.metadata = Some(metadata),
                 Err(error) => {
                     lease.discard();
@@ -502,7 +511,7 @@ impl Pool {
     ) -> Result<Lease<'_>, String> {
         let metadata = matches!(
             operation,
-            Operation::ImageMetadata | Operation::MediaMetadata
+            Operation::ImageMetadata | Operation::MediaMetadata | Operation::RawMetadata
         );
         let slow = matches!(
             operation,
@@ -513,6 +522,7 @@ impl Pool {
                 | Operation::FreeCadThumbnail
                 | Operation::ImageMetadata
                 | Operation::MediaMetadata
+                | Operation::RawMetadata
         );
         let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
         if metadata {
@@ -688,17 +698,22 @@ impl Worker {
                     cancellation,
                 )
                 .map_err(io::Error::other)?;
-                Ok(if operation == ParseOperation::MediaMetadata {
-                    Response {
-                        png: Vec::new(),
-                        metadata: output.data,
-                    }
-                } else {
-                    Response {
-                        png: output.data,
-                        metadata: Vec::new(),
-                    }
-                })
+                Ok(
+                    if matches!(
+                        operation,
+                        ParseOperation::MediaMetadata | ParseOperation::RawMetadata
+                    ) {
+                        Response {
+                            png: Vec::new(),
+                            metadata: output.data,
+                        }
+                    } else {
+                        Response {
+                            png: output.data,
+                            metadata: Vec::new(),
+                        }
+                    },
+                )
             }
         }
     }
