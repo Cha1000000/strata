@@ -1,7 +1,3 @@
-* {
-  font-family: "JetBrains Mono", "JetBrainsMono Nerd Font", monospace;
-}
-
 .file-icon {
   min-width: 1.307692rem;
   min-height: 1.307692rem;
@@ -64,16 +60,8 @@ window.solid-csd headerbar {
   margin: 0;
 }
 
-/* GTK's default theme sets `font: initial` here, which drops the window font
-   and falls back to gtk-font-name (Adwaita Sans). */
-popover.background,
-popover.background > contents {
-  font-family: "JetBrains Mono", "JetBrainsMono Nerd Font", monospace;
-}
-
 popover.background label,
 popover.background button {
-  font-family: "JetBrains Mono", "JetBrainsMono Nerd Font", monospace;
   font-size: inherit;
   letter-spacing: 0;
 }
@@ -3870,7 +3858,8 @@ dropdown.form-control popover listview {
   padding: 8px;
 }
 
-dropdown.form-control popover listview {
+dropdown.form-control popover listview,
+.font-choice-list {
   background: @strata_surface;
   color: @strata_text;
 }
@@ -3882,6 +3871,7 @@ dropdown.form-control popover listview {
 }
 
 .column-menu-option,
+.font-choice-list > row,
 dropdown.form-control popover row {
   background: transparent;
   border: none;
@@ -3894,6 +3884,7 @@ dropdown.form-control popover row {
 }
 
 .column-menu-option:hover,
+.font-choice-list > row:hover,
 dropdown.form-control popover row:hover,
 dropdown.form-control popover row:selected {
   background: alpha(@strata_accent, 0.15);
@@ -3901,6 +3892,7 @@ dropdown.form-control popover row:selected {
 }
 
 .column-menu-option:active,
+.font-choice-list > row:active,
 dropdown.form-control popover row:active {
   background: alpha(@strata_accent, 0.22);
   transform: scale(0.97);
@@ -3908,6 +3900,7 @@ dropdown.form-control popover row:active {
 
 
 .column-menu-option:focus-visible,
+.font-choice-list > row:focus-visible,
 dropdown.form-control popover row:focus-visible {
   outline: 2px solid @strata_accent;
   outline-offset: -2px;
@@ -4291,7 +4284,6 @@ textview > popover.menu undershoot {
 .item-context-menu,
 text > popover.menu > contents > scrolledwindow > viewport > stack,
 textview > popover.menu > contents > scrolledwindow > viewport > stack {
-  font-family: "JetBrains Mono", "JetBrainsMono Nerd Font", monospace;
   padding: 8px;
 }
 

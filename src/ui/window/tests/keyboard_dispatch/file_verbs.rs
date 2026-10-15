@@ -1226,7 +1226,9 @@ fn open_with_hides_recently_used_for_uninstalled_applications() {
         "ui::window::tests::keyboard_dispatch::file_verbs::open_with_hides_recently_used_for_uninstalled_applications",
         || {
             let output = gtk::glib::user_data_dir().join("received");
+            let kept_output = gtk::glib::user_data_dir().join("received-kept");
             recorder_app("strata-gone", "Gone Editor", "text/plain;", &output);
+            recorder_app("strata-kept", "Kept Editor", "text/plain;", &kept_output);
             let fixture = KeyboardFixture::new();
             let directory = fixture._directory.path().to_path_buf();
             let browser = fixture.view.browser();

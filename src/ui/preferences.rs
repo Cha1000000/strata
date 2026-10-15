@@ -167,6 +167,8 @@ pub(in crate::ui) struct Preferences {
     text_size: TextSize,
     #[serde(default)]
     corner_roundness: CornerRoundness,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    interface_font: Option<String>,
     #[serde(default)]
     interface_renderer: InterfaceRenderer,
     #[serde(default)]
@@ -394,6 +396,7 @@ impl Default for Preferences {
             show_hidden: false,
             text_size: TextSize::default(),
             corner_roundness: CornerRoundness::default(),
+            interface_font: None,
             interface_renderer: InterfaceRenderer::default(),
             language: crate::i18n::Language::default(),
             folders_first: true,
@@ -1526,6 +1529,22 @@ impl PreferenceManager {
             return;
         }
         self.preferences.borrow_mut().corner_roundness = roundness;
+        self.save_preferences();
+    }
+
+    /// The chosen interface font family; `None` keeps the bundled default.
+    pub fn interface_font(&self) -> Option<String> {
+        self.preferences.borrow().interface_font.clone()
+    }
+
+    pub fn set_interface_font(&self, family: Option<String>) {
+        let family = family
+            .map(|family| family.trim().to_owned())
+            .filter(|family| !family.is_empty());
+        if self.interface_font() == family {
+            return;
+        }
+        self.preferences.borrow_mut().interface_font = family;
         self.save_preferences();
     }
 

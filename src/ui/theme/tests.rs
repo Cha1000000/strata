@@ -843,3 +843,71 @@ fn corner_roundness_scales_the_stylesheet_before_settings_open_and_live() {
         },
     );
 }
+
+#[test]
+fn interface_font_applies_before_settings_open_and_live_while_previews_stay_monospace() {
+    gtk_test(
+        "ui::theme::tests::interface_font_applies_before_settings_open_and_live_while_previews_stay_monospace",
+        || {
+            let settings = crate::ui::preferences::config_directory().join("settings.toml");
+            std::fs::create_dir_all(settings.parent().expect("config directory"))
+                .expect("config directory");
+            std::fs::write(&settings, "interface_font = \"Fixture Sans\"\n")
+                .expect("seed settings");
+            let preferences = PreferenceManager::shared();
+            let manager = ThemeManager::shared();
+            let parse_errors = Rc::new(Cell::new(0));
+            let errors = parse_errors.clone();
+            manager
+                .font_provider
+                .connect_parsing_error(move |_, _, _| errors.set(errors.get() + 1));
+
+            let interface = gtk::Label::new(Some("Interface"));
+            let preview = gtk::Label::new(Some("Preview"));
+            preview.add_css_class("preview-text");
+            let menu = gtk::Label::new(Some("Menu item"));
+            let popover = gtk::Popover::builder().child(&menu).build();
+            let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
+            content.append(&interface);
+            content.append(&preview);
+            popover.set_parent(&content);
+            let window = gtk::Window::builder().child(&content).build();
+            window.present();
+            let family = |label: &gtk::Label| {
+                label.measure(gtk::Orientation::Horizontal, -1);
+                label
+                    .pango_context()
+                    .font_description()
+                    .and_then(|description| description.family())
+                    .map(|family| family.to_string())
+                    .unwrap_or_default()
+            };
+            let font_name = || {
+                gtk::Settings::default()
+                    .and_then(|settings| settings.gtk_font_name())
+                    .map(|name| name.to_string())
+                    .unwrap_or_default()
+            };
+
+            assert!(family(&interface).starts_with("Fixture Sans,JetBrains Mono"));
+            assert!(
+                family(&menu).starts_with("Fixture Sans"),
+                "popovers follow the font"
+            );
+            assert!(font_name().starts_with("Fixture Sans,JetBrains Mono"));
+            assert!(family(&preview).starts_with("JetBrains Mono"));
+
+            preferences.set_interface_font(Some("Other \"Quoted\" Sans".into()));
+            assert!(family(&interface).starts_with("Other \"Quoted\" Sans,JetBrains Mono"));
+            assert!(family(&menu).starts_with("Other \"Quoted\" Sans"));
+
+            preferences.set_interface_font(None);
+            assert!(family(&interface).starts_with("JetBrains Mono"));
+            assert!(font_name().starts_with("JetBrains Mono"));
+            assert!(family(&preview).starts_with("JetBrains Mono"));
+            assert_eq!(parse_errors.get(), 0, "font stylesheet parses cleanly");
+            popover.unparent();
+            window.destroy();
+        },
+    );
+}

@@ -1527,6 +1527,7 @@ fn build_chooser_hosted(
         });
     }
     let header = gtk::HeaderBar::new();
+    header.add_css_class("browser-header");
     header.set_show_title_buttons(false);
     let sidebar_toggle = super::sidebar_toggle::SidebarToggle::new();
     let location = view.location_widget();

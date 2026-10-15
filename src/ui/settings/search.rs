@@ -254,6 +254,12 @@ const TARGETS: &[Target] = &[
         aliases: "appearance colors custom themes add edit light dark",
     },
     Target {
+        id: "interface-font",
+        page: "theme",
+        title: "Interface font",
+        aliases: "appearance font typeface family typography",
+    },
+    Target {
         id: "text",
         page: "theme",
         title: "Text size",
