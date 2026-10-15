@@ -2042,6 +2042,60 @@ fn a_mount_that_learns_keeps_only_the_rules_its_refused_names_needed() -> Result
 }
 
 #[test]
+fn a_bulk_copy_records_for_undo_where_a_refused_name_was_saved() -> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let root = tempfile::tempdir()?;
+    let source = root.path().join("source");
+    let disk = root.path().join("disk");
+    fs::create_dir_all(&source)?;
+    fs::create_dir(&disk)?;
+    // More than eight files are copied in parallel.
+    let mut items = vec![source.join("a:b")];
+    items.extend((0..8).map(|index| source.join(format!("file {index}"))));
+    for item in &items {
+        fs::write(item, "bulk")?;
+    }
+    let _disk = FsQuirks::install(
+        &disk,
+        Quirks {
+            invalid_name: Some(has_colon),
+            ..Quirks::ext4()
+        },
+    );
+
+    let created = run_paste_collecting_created(PasteRequest {
+        id: OperationRequestId(1590),
+        destination: Location::local(&disk),
+        items: items
+            .iter()
+            .map(|source| PasteItem {
+                source: Location::local(source),
+                conflict: TransferConflict::FailIfExists,
+            })
+            .collect(),
+        move_sources: false,
+    })?;
+
+    let mut created = created
+        .into_iter()
+        .flatten()
+        .map(|location| location.native_path().map(Path::to_path_buf))
+        .collect::<Option<Vec<_>>>()
+        .ok_or("not native")?;
+    created.sort();
+    let mut expected = names(&disk)?
+        .into_iter()
+        .map(|name| disk.join(name))
+        .collect::<Vec<_>>();
+    expected.sort();
+    assert!(expected.contains(&disk.join("a_b")), "{expected:?}");
+    assert_eq!(created, expected);
+    Ok(())
+}
+
+#[test]
 fn a_name_refused_as_missing_neither_turns_unnamed_files_off_nor_writes_twice()
 -> Result<(), Box<dyn Error>> {
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT

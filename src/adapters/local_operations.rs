@@ -1441,7 +1441,9 @@ async fn execute_parallel_copy_plans(
                             transferred.reported,
                             item_sizes[plan.index],
                             item_files[plan.index],
-                            (!moving).then(|| plan.target_location.clone()),
+                            (!moving)
+                                .then(|| location_for_file(&transferred.target))
+                                .flatten(),
                         );
                     }
                     let done = Done {
