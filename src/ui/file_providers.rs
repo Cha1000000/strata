@@ -52,6 +52,7 @@ struct Slot {
 }
 struct Hub {
     discovery: mpsc::Receiver<Vec<Registration>>,
+    discovered: bool,
     providers: Vec<Provider>,
     slots: HashMap<usize, Slot>,
     pending: HashMap<u64, Pending>,
@@ -68,15 +69,13 @@ fn with_hub<T>(f: impl FnOnce(&mut Hub) -> T) -> T {
             });
             cell.replace(Some(Hub {
                 discovery,
+                discovered: false,
                 providers: Vec::new(),
                 slots: HashMap::new(),
                 pending: HashMap::new(),
                 serial: 0,
             }));
-            glib::timeout_add_local(Duration::from_millis(100), || {
-                with_hub(Hub::tick);
-                glib::ControlFlow::Continue
-            });
+            glib::timeout_add_local(Duration::from_millis(100), tick_hub);
         }
         f(cell
             .borrow_mut()
@@ -84,6 +83,18 @@ fn with_hub<T>(f: impl FnOnce(&mut Hub) -> T) -> T {
             .expect("initialized provider hub"))
     })
 }
+fn tick_hub() -> glib::ControlFlow {
+    let idle = with_hub(|hub| {
+        hub.tick();
+        hub.has_no_providers()
+    });
+    if idle {
+        glib::ControlFlow::Break
+    } else {
+        glib::ControlFlow::Continue
+    }
+}
+
 pub(super) fn bind(slot: &ThumbnailSlot, path: Option<&Path>) {
     let path = path
         .and_then(Path::to_str)
@@ -101,6 +112,9 @@ pub(super) fn bind(slot: &ThumbnailSlot, path: Option<&Path>) {
 
 fn admit(slot: &ThumbnailSlot, path: String) -> bool {
     with_hub(|hub| {
+        if hub.has_no_providers() {
+            return true;
+        }
         let id = slot.as_ptr() as usize;
         if hub.slots.get(&id).is_some_and(|s| s.path == path) {
             return true;
@@ -165,6 +179,10 @@ pub(super) fn forget(id: usize) {
     });
 }
 impl Hub {
+    fn has_no_providers(&self) -> bool {
+        self.discovered && self.providers.is_empty()
+    }
+
     fn send(&mut self, provider: usize, mut r: Request, pending: Pending) {
         self.serial += 1;
         r.id = self.serial;
@@ -195,6 +213,10 @@ impl Hub {
     }
     fn tick(&mut self) {
         if let Ok(registrations) = self.discovery.try_recv() {
+            self.discovered = true;
+            if registrations.is_empty() {
+                self.slots.clear();
+            }
             for r in registrations {
                 let icons: HashMap<String, gdk::Texture> = r
                     .icons
