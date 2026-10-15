@@ -81,10 +81,18 @@ fn fixed_names_are_numbered_past_the_names_their_siblings_keep() {
     // An entry's name, whether it is a folder, whether it is fixed, the name
     // planned for it, and whether that is numbered as another kept name's
     // alias.
-    let file = |name: &str, planned: &str| (name.to_owned(), false, true, planned.to_owned(), false);
-    let folder = |name: &str, planned: &str| (name.to_owned(), true, true, planned.to_owned(), false);
+    let file =
+        |name: &str, planned: &str| (name.to_owned(), false, true, planned.to_owned(), false);
+    let folder =
+        |name: &str, planned: &str| (name.to_owned(), true, true, planned.to_owned(), false);
     let alias = |name: &str, is_directory, planned: &str| {
-        (name.to_owned(), is_directory, true, planned.to_owned(), true)
+        (
+            name.to_owned(),
+            is_directory,
+            true,
+            planned.to_owned(),
+            true,
+        )
     };
     let unfixed = |name: &str| (name.to_owned(), false, false, name.to_owned(), false);
     let cjk = |count| "\u{4e2d}".repeat(count);
@@ -134,8 +142,14 @@ fn fixed_names_are_numbered_past_the_names_their_siblings_keep() {
                 alias("photos.2024", true, "photos.2024 (1)"),
             ],
         ),
-        (Key::Folded, vec![unfixed("a.txt"), alias("A.txt", false, "A (1).txt")]),
-        (Key::Exact, vec![file("A.txt", "A.txt"), file("a.txt", "a.txt")]),
+        (
+            Key::Folded,
+            vec![unfixed("a.txt"), alias("A.txt", false, "A (1).txt")],
+        ),
+        (
+            Key::Exact,
+            vec![file("A.txt", "A.txt"), file("a.txt", "a.txt")],
+        ),
         (Key::Folded, vec![unfixed("x:y"), file("x?y", "x_y")]),
         (
             Key::Folded,
@@ -1028,7 +1042,11 @@ fn device_names_get_a_mark_where_windows_reserves_them() {
     let devices = ["CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"]
         .map(String::from)
         .into_iter()
-        .chain(["COM", "LPT"].into_iter().flat_map(|port| ports.map(|number| format!("{port}{number}"))));
+        .chain(
+            ["COM", "LPT"]
+                .into_iter()
+                .flat_map(|port| ports.map(|number| format!("{port}{number}"))),
+        );
     for device in devices {
         for word in [device.clone(), device.to_lowercase()] {
             let dotted = format!("{word}.txt");
@@ -1045,7 +1063,11 @@ fn device_names_get_a_mark_where_windows_reserves_them() {
         }
     }
     for name in ["COM10", "LPT", "CONOUT", "AUXX", "NULL.txt", "CON_"] {
-        assert_eq!(fix_name(OsStr::new(name), &full, false).cause, None, "{name}");
+        assert_eq!(
+            fix_name(OsStr::new(name), &full, false).cause,
+            None,
+            "{name}"
+        );
     }
 }
 
@@ -1054,12 +1076,16 @@ fn only_the_characters_an_smb_mapping_reads_back_are_replaced() {
     for (mapped, replaced, kept) in [
         (
             PrivateUse::Sfm,
-            &['\u{f001}', '\u{f01f}', '\u{f020}', '\u{f022}', '\u{f025}', '\u{f027}', '\u{f029}'][..],
+            &[
+                '\u{f001}', '\u{f01f}', '\u{f020}', '\u{f022}', '\u{f025}', '\u{f027}', '\u{f029}',
+            ][..],
             &['\u{f000}', '\u{f026}', '\u{f02a}', '\u{f03a}'][..],
         ),
         (
             PrivateUse::Sfu,
-            &['\u{f02a}', '\u{f03a}', '\u{f03c}', '\u{f03e}', '\u{f03f}', '\u{f07c}'][..],
+            &[
+                '\u{f02a}', '\u{f03a}', '\u{f03c}', '\u{f03e}', '\u{f03f}', '\u{f07c}',
+            ][..],
             &['\u{f001}', '\u{f022}', '\u{f029}', '\u{f05c}'][..],
         ),
     ] {
@@ -1150,13 +1176,14 @@ fn fixing_a_fixed_name_changes_nothing() {
             if profile.encoding != NameEncoding::AnyBytes {
                 let utf8 = fixed.to_str();
                 assert!(utf8.is_some(), "{name:?} {profile:?}");
-                let held = utf8.unwrap_or_default().chars().all(|character| {
-                    match profile.encoding {
-                        NameEncoding::Ascii => character.is_ascii(),
-                        NameEncoding::Utf8Bmp => character <= '\u{ffff}',
-                        NameEncoding::AnyBytes | NameEncoding::Utf8 => true,
-                    }
-                });
+                let held =
+                    utf8.unwrap_or_default()
+                        .chars()
+                        .all(|character| match profile.encoding {
+                            NameEncoding::Ascii => character.is_ascii(),
+                            NameEncoding::Utf8Bmp => character <= '\u{ffff}',
+                            NameEncoding::AnyBytes | NameEncoding::Utf8 => true,
+                        });
                 assert!(held, "{name:?} {profile:?}");
                 let units = utf8.map_or(0, |fixed| fixed.encode_utf16().count());
                 assert!(

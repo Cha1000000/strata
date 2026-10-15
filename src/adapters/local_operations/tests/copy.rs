@@ -1098,7 +1098,12 @@ fn a_fat_family_copy_into_a_case_sensitive_folder_keeps_case_variants_apart()
     let source = root.path().join("source");
     let target = root.path().join("target");
     fs::create_dir_all(&source)?;
-    for (name, contents) in [("A:b", "colon"), ("a_b", "kept"), ("README", "upper"), ("Readme", "mixed")] {
+    for (name, contents) in [
+        ("A:b", "colon"),
+        ("a_b", "kept"),
+        ("README", "upper"),
+        ("Readme", "mixed"),
+    ] {
         fs::write(source.join(name), contents)?;
     }
 
@@ -1109,7 +1114,12 @@ fn a_fat_family_copy_into_a_case_sensitive_folder_keeps_case_variants_apart()
         gio::Cancellable::new(),
     ))?;
 
-    for (name, contents) in [("A_b", "colon"), ("a_b", "kept"), ("README", "upper"), ("Readme", "mixed")] {
+    for (name, contents) in [
+        ("A_b", "colon"),
+        ("a_b", "kept"),
+        ("README", "upper"),
+        ("Readme", "mixed"),
+    ] {
         assert_eq!(fs::read(target.join(name))?, contents.as_bytes(), "{name}");
     }
     assert_eq!(names(&target)?.len(), 4);

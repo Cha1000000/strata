@@ -1519,8 +1519,8 @@ async fn next_named_children(
             fixing,
         })
         .collect::<Vec<_>>();
-    let planned =
-        plan_names(&entries, &naming::fat_family_profile(), Key::Folded).map_err(placement_error)?;
+    let planned = plan_names(&entries, &naming::fat_family_profile(), Key::Folded)
+        .map_err(placement_error)?;
     Ok(children
         .into_iter()
         .zip(planned)
