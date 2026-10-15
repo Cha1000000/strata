@@ -191,6 +191,8 @@ pub(in crate::ui) struct Preferences {
     auto_refresh_interval: u32,
     #[serde(default = "crate::sandbox::browser::default_worker_limit")]
     thumbnail_workers: usize,
+    #[serde(default = "default_enabled")]
+    show_thumbnails: bool,
     #[serde(default = "default_icons_thumbnail_size")]
     icons_thumbnail_size: i32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -223,6 +225,99 @@ pub(in crate::ui) struct Preferences {
     chooser_list_columns: Option<ListColumns>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     browser_list_columns: Option<ListColumns>,
+    #[serde(
+        default = "default_list_column_order",
+        skip_serializing_if = "is_default_list_column_order"
+    )]
+    list_column_order: Vec<ListColumnId>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    list_hidden_columns: Vec<ListColumnId>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum ListColumnId {
+    Name,
+    Mode,
+    Size,
+    #[serde(rename = "type")]
+    Type,
+    Modified,
+}
+
+impl ListColumnId {
+    pub const ALL: [Self; 5] = [
+        Self::Name,
+        Self::Mode,
+        Self::Size,
+        Self::Type,
+        Self::Modified,
+    ];
+
+    pub fn index(self) -> usize {
+        match self {
+            Self::Name => 0,
+            Self::Mode => 1,
+            Self::Size => 2,
+            Self::Type => 3,
+            Self::Modified => 4,
+        }
+    }
+
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::Name => "Name",
+            Self::Mode => "Mode",
+            Self::Size => "Size",
+            Self::Type => "Type",
+            Self::Modified => "Modified",
+        }
+    }
+
+    pub fn css_class(self) -> &'static str {
+        match self {
+            Self::Name => "list-col-name",
+            Self::Mode => "list-col-mode",
+            Self::Size => "list-col-size",
+            Self::Type => "list-col-type",
+            Self::Modified => "list-col-modified",
+        }
+    }
+}
+
+pub fn default_list_column_order() -> Vec<ListColumnId> {
+    ListColumnId::ALL.to_vec()
+}
+
+fn is_default_list_column_order(order: &[ListColumnId]) -> bool {
+    order == ListColumnId::ALL
+}
+
+pub(crate) fn sanitize_list_column_order(order: &[ListColumnId]) -> Vec<ListColumnId> {
+    let mut sanitized = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for col in order {
+        if seen.insert(*col) {
+            sanitized.push(*col);
+        }
+    }
+    for col in ListColumnId::ALL {
+        if seen.insert(col) {
+            sanitized.push(col);
+        }
+    }
+    sanitized
+}
+
+pub(crate) fn sanitize_list_hidden_columns(hidden: &[ListColumnId]) -> Vec<ListColumnId> {
+    let mut sanitized = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for col in hidden {
+        if *col != ListColumnId::Name && seen.insert(*col) {
+            sanitized.push(*col);
+        }
+    }
+    sanitized
 }
 
 /// Unscaled pixels; an unset `name` lets Name absorb the remaining space.
@@ -311,6 +406,7 @@ impl Default for Preferences {
             preview_autoplay: false,
             auto_refresh_interval: 0,
             thumbnail_workers: crate::sandbox::browser::default_worker_limit(),
+            show_thumbnails: true,
             icons_thumbnail_size: default_icons_thumbnail_size(),
             chooser_column_width: None,
             browser_column_width: None,
@@ -327,6 +423,8 @@ impl Default for Preferences {
             device_labels: HashMap::new(),
             chooser_list_columns: None,
             browser_list_columns: None,
+            list_column_order: default_list_column_order(),
+            list_hidden_columns: Vec::new(),
         }
     }
 }
@@ -562,6 +660,9 @@ impl PreferenceManager {
         preferences.browser_list_columns = preferences
             .browser_list_columns
             .filter(ListColumns::is_valid);
+        preferences.list_column_order = sanitize_list_column_order(&preferences.list_column_order);
+        preferences.list_hidden_columns =
+            sanitize_list_hidden_columns(&preferences.list_hidden_columns);
         super::motion::set_reduce_motion(preferences.reduce_motion);
         crate::util::set_date_format(crate::util::DateFormat::parse(&preferences.date_format));
 
@@ -1059,6 +1160,15 @@ impl PreferenceManager {
         }
     }
 
+    pub fn show_thumbnails(&self) -> bool {
+        self.preferences.borrow().show_thumbnails
+    }
+
+    pub fn set_show_thumbnails(&self, enabled: bool) {
+        self.preferences.borrow_mut().show_thumbnails = enabled;
+        self.save_preferences();
+    }
+
     pub fn thumbnail_workers(&self) -> usize {
         self.preferences.borrow().thumbnail_workers
     }
@@ -1113,6 +1223,71 @@ impl PreferenceManager {
     pub fn set_chooser_list_columns(&self, columns: Option<ListColumns>) {
         self.preferences.borrow_mut().chooser_list_columns = columns.filter(ListColumns::is_valid);
         self.save_preferences();
+    }
+
+    pub fn list_column_order(&self) -> Vec<ListColumnId> {
+        sanitize_list_column_order(&self.preferences.borrow().list_column_order)
+    }
+
+    pub fn set_list_column_order(&self, order: Vec<ListColumnId>) {
+        self.preferences.borrow_mut().list_column_order = sanitize_list_column_order(&order);
+        self.save_preferences();
+    }
+
+    pub fn list_hidden_columns(&self) -> Vec<ListColumnId> {
+        sanitize_list_hidden_columns(&self.preferences.borrow().list_hidden_columns)
+    }
+
+    pub fn set_list_hidden_columns(&self, hidden: Vec<ListColumnId>) {
+        self.preferences.borrow_mut().list_hidden_columns = sanitize_list_hidden_columns(&hidden);
+        self.save_preferences();
+    }
+
+    pub fn is_list_column_visible(&self, column: ListColumnId) -> bool {
+        if column == ListColumnId::Name {
+            return true;
+        }
+        !self.list_hidden_columns().contains(&column)
+    }
+
+    pub fn set_list_column_visible(&self, column: ListColumnId, visible: bool) {
+        if column == ListColumnId::Name {
+            return;
+        }
+        let mut hidden = self.list_hidden_columns();
+        if visible {
+            hidden.retain(|col| *col != column);
+        } else if !hidden.contains(&column) {
+            hidden.push(column);
+        }
+        self.set_list_hidden_columns(hidden);
+    }
+
+    pub fn swap_list_columns(&self, col1: ListColumnId, col2: ListColumnId) {
+        let mut order = self.list_column_order();
+        let pos1 = order.iter().position(|col| *col == col1);
+        let pos2 = order.iter().position(|col| *col == col2);
+        if let (Some(p1), Some(p2)) = (pos1, pos2) {
+            order.swap(p1, p2);
+            self.set_list_column_order(order);
+        }
+    }
+
+    pub fn reset_list_columns(&self) {
+        {
+            let mut prefs = self.preferences.borrow_mut();
+            prefs.list_column_order = default_list_column_order();
+            prefs.list_hidden_columns.clear();
+        }
+        self.save_preferences();
+    }
+
+    pub fn list_visible_columns(&self) -> Vec<ListColumnId> {
+        let hidden = self.list_hidden_columns();
+        self.list_column_order()
+            .into_iter()
+            .filter(|col| *col == ListColumnId::Name || !hidden.contains(col))
+            .collect()
     }
 
     pub fn auto_refresh_interval(&self) -> u32 {

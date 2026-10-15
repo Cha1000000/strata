@@ -18,6 +18,7 @@ mod imp {
         pub limit_fallback_height: Cell<bool>,
         pub fallback_scale: Cell<f64>,
         pub texture: RefCell<Option<gdk::Texture>>,
+        pub(super) thumbnail_source: RefCell<Option<super::super::ThumbnailSource>>,
         pub decoration: RefCell<Option<gdk::Texture>>,
         pub provider_path: RefCell<Option<String>>,
         pub provider_retry: Cell<bool>,
@@ -203,7 +204,25 @@ impl ThumbnailSlot {
         widget.imp().fallback_scale.set(1.0);
         widget.imp().base_opacity.set(1.0);
         widget.set_slot(slot);
+        crate::ui::preferences::PreferenceManager::shared().bind_preference(
+            &widget,
+            crate::ui::preferences::PreferenceManager::show_thumbnails,
+            |widget, _| {
+                let slot = widget
+                    .downcast_ref::<ThumbnailSlot>()
+                    .expect("thumbnail slot");
+                super::refresh_slot_thumbnail(slot);
+            },
+        );
         widget
+    }
+
+    pub(super) fn thumbnail_source(&self) -> Option<super::ThumbnailSource> {
+        self.imp().thumbnail_source.borrow().clone()
+    }
+
+    pub(super) fn set_thumbnail_source(&self, source: Option<super::ThumbnailSource>) {
+        self.imp().thumbnail_source.replace(source);
     }
 
     #[cfg(test)]

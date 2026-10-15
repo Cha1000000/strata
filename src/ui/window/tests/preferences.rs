@@ -1503,6 +1503,262 @@ fn unreadable_folder_settings_use_defaults_and_are_never_overwritten() {
     );
 }
 
+#[test]
+fn list_column_options_open_after_switching_from_columns() {
+    gtk_test(
+        "ui::window::tests::preferences::list_column_options_open_after_switching_from_columns",
+        || {
+            let open = OpenWindow::open();
+            let _directory = load_folder(&open);
+            assert_eq!(open.content.browser.view_mode(), BrowserMode::Columns);
+            open.content.browser.set_view_mode(BrowserMode::List);
+            let mut appearance = None;
+            walk(open.window.upcast_ref(), &mut |widget| {
+                if widget.has_css_class("header-action")
+                    && let Some(menu) = widget.downcast_ref::<gtk::MenuButton>()
+                {
+                    appearance = Some(menu.clone());
+                }
+            });
+            let appearance = appearance.expect("Appearance menu");
+            appearance.popup();
+            let popover = appearance.popover().expect("Appearance popover");
+            let customize = label_named(popover.upcast_ref(), "Customize columns…")
+                .ancestor(gtk::Button::static_type())
+                .and_downcast::<gtk::Button>()
+                .expect("customize columns action");
+            assert!(customize.is_sensitive());
+            customize.emit_clicked();
+            wait_until(|| {
+                class_in_shown_pane(&open.content.browser.widget(), "column-popover")
+                    .iter()
+                    .any(gtk::Widget::is_mapped)
+            });
+        },
+    );
+}
+
+#[test]
+fn list_column_customization_preserves_saved_and_live_folder_sorts() {
+    gtk_test(
+        "ui::window::tests::preferences::list_column_customization_preserves_saved_and_live_folder_sorts",
+        || {
+            use crate::model::{FolderSort, Location, SortDirection, SortKey};
+            use crate::ui::preferences::ListColumnId;
+
+            let directory = tempfile::tempdir().expect("sort fixture");
+            std::fs::write(directory.path().join("a-large.txt"), b"large file")
+                .expect("large file");
+            std::fs::write(directory.path().join("z-small.txt"), b"a").expect("small file");
+            let location = Location::local(directory.path());
+            write_settings("browser_mode = 'list'\nlist_hidden_columns = ['size']\n");
+            write_folder_views(&format!(
+                "version = 1\n[[folder]]\npath = \"{}\"\nsort = \"size\"\ndirection = \"descending\"\n",
+                directory.path().display()
+            ));
+            let manager = PreferenceManager::shared();
+            let first = OpenWindow::open();
+            let second = OpenWindow::open();
+            let sorting = |open: &OpenWindow| {
+                open.content
+                    .browser
+                    .browser()
+                    .column_preferences(0)
+                    .map(|preferences| preferences.sort())
+            };
+            let size_descending = (SortKey::Size, SortDirection::Descending);
+            let check_sort = |open: &OpenWindow, direction| {
+                let first_name = match direction {
+                    SortDirection::Ascending => "z-small.txt",
+                    SortDirection::Descending => "a-large.txt",
+                };
+                wait_until(|| {
+                    sorting(open) == Some((SortKey::Size, direction))
+                        && open
+                            .content
+                            .browser
+                            .browser()
+                            .entry_at(0, 0)
+                            .is_some_and(|entry| entry.display_name == first_name)
+                });
+            };
+            for open in [&first, &second] {
+                open.content.browser.navigate_location(location.clone());
+                wait_until(|| !column_loading(open, 0));
+                check_sort(open, SortDirection::Descending);
+                assert!(settings_closed(open));
+                assert!(!list_heading(&open.content.browser.widget(), "Size").is_mapped());
+            }
+            assert_eq!(
+                manager.default_sort(),
+                (SortKey::Name, SortDirection::Ascending)
+            );
+            assert_eq!(
+                manager.resolve_folder_sort(&location, false),
+                FolderSort::Saved(size_descending.0, size_descending.1)
+            );
+
+            manager.set_list_column_visible(ListColumnId::Size, true);
+            for open in [&first, &second] {
+                assert!(list_heading(&open.content.browser.widget(), "Size").is_mapped());
+                check_sort(open, SortDirection::Descending);
+            }
+            list_heading(&first.content.browser.widget(), "Size").emit_clicked();
+            for open in [&first, &second] {
+                check_sort(open, SortDirection::Ascending);
+            }
+            list_heading(&second.content.browser.widget(), "Size").emit_clicked();
+            for open in [&first, &second] {
+                check_sort(open, SortDirection::Descending);
+            }
+            manager.set_list_column_visible(ListColumnId::Size, false);
+            settle();
+            for open in [&first, &second] {
+                check_sort(open, SortDirection::Descending);
+                assert!(!list_heading(&open.content.browser.widget(), "Size").is_mapped());
+            }
+
+            for mode in [BrowserMode::Columns, BrowserMode::Icons, BrowserMode::List] {
+                manager.set_browser_mode(mode);
+                for open in [&first, &second] {
+                    wait_until(|| open.content.browser.view_mode() == mode);
+                    check_sort(open, SortDirection::Descending);
+                }
+                if mode == BrowserMode::Icons {
+                    manager.set_list_column_visible(ListColumnId::Size, true);
+                }
+            }
+            for open in [&first, &second] {
+                assert!(list_heading(&open.content.browser.widget(), "Size").is_mapped());
+            }
+            manager.set_list_column_visible(ListColumnId::Size, false);
+            settle();
+            manager.reset_list_columns();
+            for open in [&first, &second] {
+                assert!(list_heading(&open.content.browser.widget(), "Size").is_mapped());
+                check_sort(open, SortDirection::Descending);
+            }
+            assert_eq!(
+                manager.resolve_folder_sort(&location, false),
+                FolderSort::Saved(size_descending.0, size_descending.1)
+            );
+            manager.flush_folder_views();
+            assert!(folder_views_file().contains("sort = \"size\""));
+
+            manager.set_remember_folder_views(false);
+            let local_sorts = [
+                (&first, SortDirection::Ascending),
+                (&second, SortDirection::Descending),
+            ];
+            for (open, direction) in local_sorts {
+                open.content
+                    .browser
+                    .browser()
+                    .set_sort(0, SortKey::Size, direction);
+                check_sort(open, direction);
+                wait_until(|| manager.default_sort() == (SortKey::Size, direction));
+            }
+            manager.set_list_column_visible(ListColumnId::Size, false);
+            settle();
+            for (open, direction) in local_sorts {
+                check_sort(open, direction);
+            }
+            manager.set_list_column_visible(ListColumnId::Size, true);
+            for (open, direction) in local_sorts {
+                assert!(list_heading(&open.content.browser.widget(), "Size").is_mapped());
+                check_sort(open, direction);
+            }
+            assert_eq!(manager.default_sort(), size_descending);
+        },
+    );
+}
+
+#[test]
+fn show_thumbnails_saved_and_live_preferences_apply_across_windows_and_views() {
+    gtk_test(
+        "ui::window::tests::preferences::show_thumbnails_saved_and_live_preferences_apply_across_windows_and_views",
+        || {
+            use crate::ui::thumbnail::{
+                ThumbnailSlot, cached_thumbnail, remember_thumbnail_for_test,
+            };
+
+            write_settings("show_thumbnails = false\nbrowser_mode = 'list'\n");
+            let directory = tempfile::tempdir().expect("image folder");
+            let path = directory.path().join("photo.png");
+            let texture: gtk::gdk::Texture = gtk::gdk::MemoryTexture::new(
+                1,
+                1,
+                gtk::gdk::MemoryFormat::R8g8b8a8,
+                &gtk::glib::Bytes::from_owned(vec![120, 80, 40, 255]),
+                4,
+            )
+            .upcast();
+            texture.save_to_png(&path).expect("image fixture");
+            let manager = PreferenceManager::shared();
+            let windows = [OpenWindow::open(), OpenWindow::open()];
+            for open in &windows {
+                open.content
+                    .browser
+                    .navigate_location(crate::model::Location::local(directory.path()));
+                let entry = loaded_entry(open, &path);
+                remember_thumbnail_for_test(&entry, texture.clone());
+                assert_eq!(
+                    cached_thumbnail(&entry),
+                    Some(texture.clone()),
+                    "preview cache remains usable"
+                );
+            }
+            let slots = || {
+                windows
+                    .iter()
+                    .map(|open| {
+                        let mut found = Vec::new();
+                        walk(&open.content.browser.widget(), &mut |widget| {
+                            if widget.is_mapped()
+                                && let Some(slot) = widget.downcast_ref::<ThumbnailSlot>()
+                                && slot.provider_path().as_deref() == path.to_str()
+                            {
+                                found.push(slot.clone());
+                            }
+                        });
+                        found
+                    })
+                    .collect::<Vec<_>>()
+            };
+            let shown = |enabled| {
+                slots().iter().all(|window_slots| {
+                    !window_slots.is_empty()
+                        && window_slots
+                            .iter()
+                            .all(|slot| slot.texture().is_some() == enabled)
+                })
+            };
+            wait_until(|| shown(false));
+            for mode in [BrowserMode::List, BrowserMode::Columns, BrowserMode::Icons] {
+                manager.set_browser_mode(mode);
+                wait_until(|| {
+                    windows
+                        .iter()
+                        .all(|open| open.content.browser.view_mode() == mode)
+                });
+                wait_until(|| shown(false));
+                manager.set_show_thumbnails(true);
+                wait_until(|| shown(true));
+                manager.set_show_thumbnails(false);
+                wait_until(|| shown(false));
+            }
+            assert!(
+                std::fs::read_to_string(settings_file())
+                    .expect("saved settings")
+                    .contains("show_thumbnails = false")
+            );
+            for open in windows {
+                open.window.close();
+            }
+        },
+    );
+}
+
 struct OpenWindow {
     window: gtk::ApplicationWindow,
     content: super::super::composition::WindowContent,
