@@ -823,9 +823,12 @@ fn lab_corpus() -> Vec<Row> {
         file(b"x\x80y", &[(UTF8, "x_y", Invalid)]),
         file(b"x\xc0\xafy", &[(UTF8, "x__y", Invalid)]),
         file(b"x\xed\xa0\x80y", &[(UTF8, "x___y", Invalid)]),
+        file(b"x\xe4\xb8y", &[(UTF8, "x_y", Invalid)]),
         file("caf\u{e9}", &[]),
         file("cafe\u{301}", &[]),
         file("x\u{f022}y", &[(MAPPED, "x_y", Invalid)]),
+        file("x\u{f001}y", &[(MAPPED, "x_y", Invalid)]),
+        file("x\u{f029}y", &[(MAPPED, "x_y", Invalid)]),
         file("x\u{f026}y", &[]),
         file("x\u{f03a}y", &[]),
         file("x\u{ff1a}y", &[]),
@@ -919,6 +922,8 @@ fn cut_names_keep_their_extension_and_whole_clusters() {
     let scotland = "\u{1f3f4}\u{e0067}\u{e0062}\u{e0073}\u{e0063}\u{e0074}\u{e007f}";
     let family = "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}\u{200d}\u{1f466}";
     let heart = "\u{2764}\u{fe0f}";
+    // Pango keeps consonants joined by a virama together from 1.54 on.
+    let joins_conjuncts = gtk::pango::version_check(1, 54, 0).is_none();
     for (name, profile, folder, expected) in [
         (
             format!("abx{}.txt", repeat("\u{301}", 600)),
@@ -945,6 +950,18 @@ fn cut_names_keep_their_extension_and_whole_clusters() {
             bytes,
             false,
             format!("{}{}", repeat("a", 20), repeat(family, 9)),
+        ),
+        (
+            format!("aaaaaaa{}", repeat(scotland, 9)),
+            bytes,
+            false,
+            format!("aaaaaaa{}", repeat(scotland, 8)),
+        ),
+        (
+            format!("{}x{}", repeat("a", 230), repeat("\u{301}", 20)),
+            bytes,
+            false,
+            format!("{}x{}", repeat("a", 230), repeat("\u{301}", 12)),
         ),
         (repeat(heart, 50), bytes, false, repeat(heart, 42)),
         (
@@ -984,6 +1001,9 @@ fn cut_names_keep_their_extension_and_whole_clusters() {
             format!("CON_{}.txt", repeat(" ", 247)),
         ),
     ] {
+        if name.contains(conjunct) && !joins_conjuncts {
+            continue;
+        }
         let fixed = fix_name(OsStr::new(&name), &profile, folder);
         assert_eq!(
             (fixed.name.as_ref(), fixed.cause),
@@ -995,6 +1015,37 @@ fn cut_names_keep_their_extension_and_whole_clusters() {
             fixed.name,
             "{name:?}"
         );
+    }
+}
+
+#[test]
+fn device_names_get_a_mark_where_windows_reserves_them() {
+    let bare = NameProfile::windows(Reserved::Bare, NameEncoding::Utf8);
+    let full = NameProfile::windows(Reserved::Full, NameEncoding::Utf8);
+    let ports = [
+        "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "\u{b9}", "\u{b2}", "\u{b3}",
+    ];
+    let devices = ["CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"]
+        .map(String::from)
+        .into_iter()
+        .chain(["COM", "LPT"].into_iter().flat_map(|port| ports.map(|number| format!("{port}{number}"))));
+    for device in devices {
+        for word in [device.clone(), device.to_lowercase()] {
+            let dotted = format!("{word}.txt");
+            let marked = format!("{word}_.txt");
+            let bare_dotted = if device == "NUL" { &marked } else { &dotted };
+            for (profile, name, expected) in [
+                (bare, &word, &format!("{word}_")),
+                (bare, &dotted, bare_dotted),
+                (full, &dotted, &marked),
+            ] {
+                let fixed = fix_name(OsStr::new(name), &profile, false).name;
+                assert_eq!(fixed, OsStr::new(expected), "{name} {:?}", profile.reserved);
+            }
+        }
+    }
+    for name in ["COM10", "LPT", "CONOUT", "AUXX", "NULL.txt", "CON_"] {
+        assert_eq!(fix_name(OsStr::new(name), &full, false).cause, None, "{name}");
     }
 }
 
@@ -1099,6 +1150,14 @@ fn fixing_a_fixed_name_changes_nothing() {
             if profile.encoding != NameEncoding::AnyBytes {
                 let utf8 = fixed.to_str();
                 assert!(utf8.is_some(), "{name:?} {profile:?}");
+                let held = utf8.unwrap_or_default().chars().all(|character| {
+                    match profile.encoding {
+                        NameEncoding::Ascii => character.is_ascii(),
+                        NameEncoding::Utf8Bmp => character <= '\u{ffff}',
+                        NameEncoding::AnyBytes | NameEncoding::Utf8 => true,
+                    }
+                });
+                assert!(held, "{name:?} {profile:?}");
                 let units = utf8.map_or(0, |fixed| fixed.encode_utf16().count());
                 assert!(
                     limit.units.is_none_or(|limit| units <= usize::from(limit)),
