@@ -13,7 +13,7 @@ use super::super::{
 };
 use super::*;
 use crate::adapters::volume::{
-    NameEncoding, NameLimit, NameProfile, PrivateUse, Reserved, gvfs_profile,
+    NameEncoding, NameLimit, NameProfile, PrivateUse, Reserved, gvfs_bridge_profile, gvfs_profile,
 };
 
 #[test]
@@ -691,6 +691,8 @@ enum Rules {
     Mtp,
     /// GVfs, through libsmbclient, which maps nothing.
     GvfsSmb,
+    /// A GVfs bridge folder whose backend is unknown.
+    AnyGvfs,
 }
 
 const LAB_MOUNTS: [(&str, Preset, Rules); 13] = [
@@ -749,18 +751,18 @@ fn file(name: impl AsRef<[u8]>, fixed: &[(&'static [Rules], &str, Cause)]) -> Ro
 /// Every name the fslab mounts were probed with, and more device names.
 fn lab_corpus() -> Vec<Row> {
     use Cause::{Invalid, TooLong};
-    use Rules::{Bare, Full, GvfsSmb, Mtp, Posix, Smb, SmbNocase, SmbPosix};
-    const WINDOWS: &[Rules] = &[Bare, Full, Smb, SmbNocase, Mtp, GvfsSmb];
-    const FULL: &[Rules] = &[Full, Smb, SmbNocase, Mtp, GvfsSmb];
+    use Rules::{AnyGvfs, Bare, Full, GvfsSmb, Mtp, Posix, Smb, SmbNocase, SmbPosix};
+    const WINDOWS: &[Rules] = &[Bare, Full, Smb, SmbNocase, Mtp, GvfsSmb, AnyGvfs];
+    const FULL: &[Rules] = &[Full, Smb, SmbNocase, Mtp, GvfsSmb, AnyGvfs];
     const MAPPED: &[Rules] = &[Smb, SmbNocase];
-    const UTF8: &[Rules] = &[Bare, Full, Smb, SmbNocase, SmbPosix, Mtp, GvfsSmb];
+    const UTF8: &[Rules] = &[Bare, Full, Smb, SmbNocase, SmbPosix, Mtp, GvfsSmb, AnyGvfs];
     const ALL_BUT_MTP: &[Rules] = &[Posix, Bare, Full, Smb, SmbNocase, SmbPosix, GvfsSmb];
-    const BYTES: &[Rules] = &[Posix, Smb, SmbNocase, SmbPosix, Mtp, GvfsSmb];
-    const ASTRAL_BYTES: &[Rules] = &[Posix, Smb, SmbPosix, Mtp, GvfsSmb];
+    const BYTES: &[Rules] = &[Posix, Smb, SmbNocase, SmbPosix, Mtp, GvfsSmb, AnyGvfs];
+    const ASTRAL_BYTES: &[Rules] = &[Posix, Smb, SmbPosix, Mtp, GvfsSmb, AnyGvfs];
     const UNITS: &[Rules] = &[Bare, Full];
     const NOCASE: &[Rules] = &[SmbNocase];
-    const MTP: &[Rules] = &[Mtp];
-    const SAMBA_FOLDERS: &[Rules] = &[Smb, SmbNocase, SmbPosix, GvfsSmb];
+    const MTP: &[Rules] = &[Mtp, AnyGvfs];
+    const SAMBA_FOLDERS: &[Rules] = &[Smb, SmbNocase, SmbPosix, GvfsSmb, AnyGvfs];
     let repeat = |text: &str, count| text.repeat(count);
     let (cjk, emoji) = ("\u{4e2d}", "\u{1f600}");
 
@@ -913,17 +915,18 @@ fn each_mount_gets_a_name_it_stores_as_is_for_every_lab_name() -> Result<(), Box
             assert_eq!(listed, [fixed.name.into_owned()], "{context}");
         }
     }
-    for (scheme, rules) in [
-        ("mtp", Rules::Mtp),
-        ("smb", Rules::GvfsSmb),
-        ("sftp", Rules::Posix),
+    for (backend, profile, rules) in [
+        ("mtp", gvfs_profile("mtp"), Rules::Mtp),
+        ("smb", gvfs_profile("smb"), Rules::GvfsSmb),
+        ("sftp", gvfs_profile("sftp"), Rules::Posix),
+        ("unknown", gvfs_bridge_profile(None), Rules::AnyGvfs),
     ] {
         for row in &corpus {
-            let fixed = fix_name(&row.name, &gvfs_profile(scheme), row.folder);
+            let fixed = fix_name(&row.name, &profile, row.folder);
             assert_eq!(
                 (fixed.name.as_ref(), fixed.cause),
                 row.expected(rules),
-                "{scheme}: {:?}",
+                "{backend}: {:?}",
                 row.name
             );
         }

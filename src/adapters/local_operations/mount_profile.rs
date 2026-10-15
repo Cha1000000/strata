@@ -22,8 +22,8 @@ use super::{
 };
 use crate::adapters::volume::{
     Family, FuseFormat, MountCapabilities, MountKey, MountNames, MountType, NameLimit, NameProfile,
-    family, gvfs_profile, holds_symlinks, learn_mount_capability, max_file_size,
-    mount_capabilities,
+    family, gvfs_bridge_profile, gvfs_profile, holds_symlinks, learn_mount_capability,
+    max_file_size, mount_capabilities,
 };
 
 /// The mount holding `dir`, with what its type tells learned on first sight.
@@ -54,8 +54,13 @@ fn learn_mount_type(fs: &dyn FsOps, dir: BorrowedFd<'_>, key: MountKey) -> Mount
     let coarse_times = mount_type.and_then(|mount| mount.coarse_times(fuse_format));
     let deferred_close = mount_type.and_then(MountType::deferred_close);
     let names = match &mount {
-        Some((mount_type, mount_point)) if mount_type.is_gvfs_bridge() => MountNames::PerBackend {
-            depth: u16::try_from(folders(mount_point).count()).unwrap_or(u16::MAX),
+        Some((mount_type, site)) if mount_type.is_gvfs_bridge() => match folders(&site.root).next()
+        {
+            // A bind mount of one backend's folder, or of a folder inside it.
+            Some(backend) => MountNames::Profile(gvfs_bridge_profile(Some(backend))),
+            None => MountNames::PerBackend {
+                depth: u16::try_from(folders(&site.point).count()).unwrap_or(u16::MAX),
+            },
         },
         _ => {
             let name_max = fs.statfs(dir).map_or(0, |stat| stat.name_max);
@@ -147,13 +152,11 @@ pub(super) fn names_in(names: Option<MountNames>, dir: BorrowedFd<'_>) -> NamePr
 /// The bridge names a backend's folder `<scheme>:<details>`, such as
 /// `mtp:host=…` or `smb-share:server=…,share=…`.
 fn backend(dir: BorrowedFd<'_>, depth: u16) -> NameProfile {
-    let path = opened_path(dir).unwrap_or_default();
-    let scheme = folders(&path).nth(usize::from(depth)).and_then(|folder| {
-        let folder = folder.as_encoded_bytes();
-        let colon = folder.iter().position(|byte| *byte == b':')?;
-        std::str::from_utf8(&folder[..colon]).ok()
-    });
-    gvfs_profile(scheme.unwrap_or_default())
+    let path = opened_path(dir).ok();
+    gvfs_bridge_profile(
+        path.as_deref()
+            .and_then(|path| folders(path).nth(usize::from(depth))),
+    )
 }
 
 /// How long a name may be in `dir`, for numbering a name taken there.

@@ -22,7 +22,7 @@ use rustix::{
 };
 
 use super::{LocalFileIdentity, retry_local_open};
-use crate::adapters::volume::{MountKey, MountTable, MountType};
+use crate::adapters::volume::{MountKey, MountSite, MountTable, MountType};
 
 /// `STATX_MNT_ID_UNIQUE` (Linux 6.8), which rustix does not name yet.
 const STATX_MNT_ID_UNIQUE: u32 = 0x4000;
@@ -138,7 +138,7 @@ pub(super) trait FsOps: Send + Sync {
     fn get_xattr(&self, fd: BorrowedFd<'_>, name: &OsStr) -> Result<Vec<u8>, Errno>;
     fn set_xattr(&self, fd: BorrowedFd<'_>, name: &OsStr, value: &[u8]) -> Result<(), Errno>;
     /// The mount holding `fd`, and where it is mounted.
-    fn mount_type(&self, fd: BorrowedFd<'_>) -> Option<(MountType, PathBuf)>;
+    fn mount_type(&self, fd: BorrowedFd<'_>) -> Option<(MountType, MountSite)>;
     /// The format udev's database records (`ID_FS_TYPE`) for the block
     /// device holding `fd`, where it has a record.
     fn device_format(&self, fd: BorrowedFd<'_>) -> Result<Option<String>, Errno>;
@@ -676,10 +676,10 @@ impl FsOps for System {
         rustix::fs::fsetxattr(fd, name, value, rustix::fs::XattrFlags::empty())
     }
 
-    fn mount_type(&self, fd: BorrowedFd<'_>) -> Option<(MountType, PathBuf)> {
+    fn mount_type(&self, fd: BorrowedFd<'_>) -> Option<(MountType, MountSite)> {
         assert_off_main_thread();
         let mounts = MountTable::current();
-        let (mount_type, mount_point) = match rustix::fs::statx(
+        let (mount_type, site) = match rustix::fs::statx(
             fd,
             "",
             AtFlags::EMPTY_PATH | AtFlags::STATX_DONT_SYNC,
@@ -693,7 +693,7 @@ impl FsOps for System {
             // Before Linux 5.8.
             _ => mounts.mount_for(&opened_path(fd).ok()?),
         }?;
-        Some((mount_type.clone(), mount_point.to_path_buf()))
+        Some((mount_type.clone(), site.clone()))
     }
 
     fn device_format(&self, fd: BorrowedFd<'_>) -> Result<Option<String>, Errno> {

@@ -32,11 +32,12 @@ pub(crate) use mount_snapshot::{RemovableRoot, invalidate_mount_snapshot, with_m
 #[cfg(test)]
 pub(crate) use mounts::FAT32_MAX_FILE_SIZE;
 pub(crate) use mounts::{
-    CoarseTimes, Family, FuseFormat, MountTable, MountType, family, holds_symlinks, max_file_size,
+    CoarseTimes, Family, FuseFormat, MountSite, MountTable, MountType, family, holds_symlinks,
+    max_file_size,
 };
 pub(crate) use names::{
     MountNames, NameEncoding, NameLimit, NameProfile, NameRules, PrivateUse, Reserved, Strip,
-    gvfs_profile,
+    gvfs_bridge_profile, gvfs_profile,
 };
 
 pub(crate) const REMOTE_QUERY_TIMEOUT: Duration = Duration::from_secs(2);

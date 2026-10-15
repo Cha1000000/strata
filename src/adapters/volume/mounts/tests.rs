@@ -229,6 +229,27 @@ const NAME_MOUNTS: &str = "\
 ";
 
 #[test]
+fn a_bind_mount_shows_the_folder_of_its_filesystem_it_mounts() {
+    let table = MountTable::parse(
+        "\
+40 22 0:61 / /run/user/1000/gvfs rw,nosuid,nodev - fuse.gvfsd-fuse gvfsd-fuse rw,user_id=1000
+41 22 0:61 /mtp:host=Pixel/Internal\\040storage /home/u/phone rw - fuse.gvfsd-fuse gvfsd-fuse rw
+",
+    );
+    for (id, point, root) in [
+        (40, "/run/user/1000/gvfs", "/"),
+        (41, "/home/u/phone", "/mtp:host=Pixel/Internal storage"),
+    ] {
+        let (_, site) = table.mount_of(id).expect("listed mount");
+        assert_eq!(
+            (site.point.as_path(), site.root.as_path()),
+            (Path::new(point), Path::new(root)),
+            "{id}"
+        );
+    }
+}
+
+#[test]
 fn name_rules_follow_the_driver_its_options_and_its_name_length() {
     let posix = |bytes, learns| NameProfile {
         rules: NameRules::Posix,

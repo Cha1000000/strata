@@ -29,7 +29,7 @@ use rustix::{
 
 use super::super::copy_engine::{clock_for_test, forget_learned_copy_support};
 use super::super::fs_ops::{Entry, EntryStat, FsOps, FsStat, System, assert_off_main_thread};
-use crate::adapters::volume::{MountKey, MountType, forget_test_mount_capabilities};
+use crate::adapters::volume::{MountKey, MountSite, MountType, forget_test_mount_capabilities};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Op {
@@ -203,6 +203,8 @@ pub(crate) struct Quirks {
     /// Runs once, after the matching call after skipping the given number of matches.
     pub after: Vec<(Op, &'static str, usize, Racer)>,
     pub mount_type: Option<(&'static str, &'static str)>,
+    /// The folder of its filesystem a bind mount shows; `/` otherwise.
+    pub mount_root: Option<&'static str>,
     pub device_format: Option<&'static str>,
     pub tmpfile: Support,
     pub tmpfile_link: TmpfileLink,
@@ -1892,11 +1894,12 @@ impl FsOps for Scoped {
         })
     }
 
-    fn mount_type(&self, fd: BorrowedFd<'_>) -> Option<(MountType, PathBuf)> {
+    fn mount_type(&self, fd: BorrowedFd<'_>) -> Option<(MountType, MountSite)> {
         assert_off_main_thread();
         match scope_for(fd) {
             Some(scope) => scope
                 .run(Op::MountType, &[], |scope| {
+                    let root = scope.quirk(|quirks| quirks.mount_root).unwrap_or("/");
                     Ok(scope
                         .quirk(|quirks| quirks.mount_type)
                         .map(|(fs_type, super_options)| {
@@ -1904,7 +1907,11 @@ impl FsOps for Scoped {
                                 fs_type: fs_type.to_owned(),
                                 super_options: super_options.to_owned(),
                             };
-                            (mount_type, scope.root.clone())
+                            let site = MountSite {
+                                point: scope.root.clone(),
+                                root: PathBuf::from(root),
+                            };
+                            (mount_type, site)
                         })
                         .or_else(|| System.mount_type(fd)))
                 })

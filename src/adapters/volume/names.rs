@@ -5,6 +5,8 @@
 #[cfg(test)]
 mod tests;
 
+use std::ffi::OsStr;
+
 /// Which characters a mount refuses besides `/` and NUL.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum NameRules {
@@ -192,5 +194,26 @@ pub(crate) fn gvfs_profile(backend: &str) -> NameProfile {
         },
         "sftp" => NameProfile::posix(Some(SFTP_BYTES)).learning(),
         _ => NameProfile::posix(None).learning(),
+    }
+}
+
+/// The rules inside a GVfs FUSE bridge folder, by the folder the bridge
+/// serves its backend from (`mtp:host=…`). Where that is unknown, the
+/// strictest rules a backend needs apply, and refusals teach the rest.
+pub(crate) fn gvfs_bridge_profile(backend_folder: Option<&OsStr>) -> NameProfile {
+    let scheme = backend_folder.and_then(|folder| {
+        let folder = folder.as_encoded_bytes();
+        let colon = folder.iter().position(|byte| *byte == b':')?;
+        std::str::from_utf8(&folder[..colon]).ok()
+    });
+    match scheme {
+        Some(scheme) => gvfs_profile(scheme),
+        None => NameProfile {
+            limit: NameLimit {
+                folder_bytes: Some(SAMBA_FOLDER_BYTES),
+                ..gvfs_profile("mtp").limit
+            },
+            ..gvfs_profile("mtp").learning()
+        },
     }
 }

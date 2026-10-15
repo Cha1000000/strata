@@ -10,7 +10,7 @@ use super::super::{
 use super::{MountProfile, Profiles, folder_name_limit};
 use crate::adapters::volume::{
     FAT32_MAX_FILE_SIZE, MountNames, NameEncoding, NameLimit, NameProfile, NameRules, Reserved,
-    Strip, gvfs_profile, learn_mount_capability,
+    Strip, gvfs_bridge_profile, gvfs_profile, learn_mount_capability,
 };
 
 fn profile_of(profiles: &Profiles, folder: &Path) -> Result<MountProfile, Box<dyn Error>> {
@@ -127,19 +127,48 @@ fn the_gvfs_bridge_takes_the_rules_of_each_backend_from_its_folder() -> Result<(
     for folder in [&share, &server, &cloud, &nested] {
         fs::create_dir_all(folder)?;
     }
+    let unnamed = root.path().join("folder without a scheme");
+    fs::create_dir(&unnamed)?;
     let profiles = Profiles::default();
 
-    for (folder, backend) in [
-        (phone.join("Internal storage"), "mtp"),
-        (nested, "mtp"),
-        (share, "smb"),
-        (server, "sftp"),
-        (cloud, "dav"),
-        (root.path().to_path_buf(), ""),
+    for (folder, profile) in [
+        (phone.join("Internal storage"), gvfs_profile("mtp")),
+        (nested, gvfs_profile("mtp")),
+        (share, gvfs_profile("smb")),
+        (server, gvfs_profile("sftp")),
+        (cloud, gvfs_profile("dav")),
+        (unnamed, gvfs_bridge_profile(None)),
+        (root.path().to_path_buf(), gvfs_bridge_profile(None)),
     ] {
         assert_eq!(
             profile_of(&profiles, &folder)?.names,
-            gvfs_profile(backend),
+            profile,
+            "{}",
+            folder.display()
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn a_bind_mount_inside_the_gvfs_bridge_takes_the_rules_of_its_backend() -> Result<(), Box<dyn Error>>
+{
+    let root = tempfile::tempdir()?;
+    let _phone = FsQuirks::install(
+        root.path(),
+        Quirks {
+            mount_type: Some(("fuse.gvfsd-fuse", "rw,user_id=1000,group_id=1000")),
+            mount_root: Some("/mtp:host=Google_Pixel_8_Pro_3A101FDJG0012B/Internal storage"),
+            ..Quirks::default()
+        },
+    );
+    let camera = root.path().join("DCIM");
+    fs::create_dir(&camera)?;
+
+    for folder in [root.path(), &camera] {
+        assert_eq!(
+            profile_of(&Profiles::default(), folder)?.names,
+            gvfs_profile("mtp"),
             "{}",
             folder.display()
         );

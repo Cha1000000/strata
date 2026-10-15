@@ -23,14 +23,22 @@ pub(crate) struct MountTable {
 
 struct MountEntry {
     id: u64,
-    mount_point: PathBuf,
+    site: MountSite,
     mount_type: MountType,
 }
 
 impl MountEntry {
-    fn parts(&self) -> (&MountType, &Path) {
-        (&self.mount_type, &self.mount_point)
+    fn parts(&self) -> (&MountType, &MountSite) {
+        (&self.mount_type, &self.site)
     }
+}
+
+/// Where a mount sits: its mount point, and the folder of its filesystem
+/// shown there, which is `/` unless a bind mount shows a subfolder.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct MountSite {
+    pub point: PathBuf,
+    pub root: PathBuf,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -286,7 +294,8 @@ impl MountTable {
                 let (front, back) = (&line[..separator], &line[separator + 3..]);
                 let mut fields = front.split(|byte| *byte == b' ');
                 let id = std::str::from_utf8(fields.next()?).ok()?.parse().ok()?;
-                let mount_point = fields.nth(3)?;
+                let root = fields.nth(2)?;
+                let mount_point = fields.next()?;
                 let mut back = back.split(|byte| *byte == b' ');
                 let fs_type = std::str::from_utf8(back.next()?).ok()?;
                 let super_options = back
@@ -295,7 +304,10 @@ impl MountTable {
                     .unwrap_or_default();
                 Some(MountEntry {
                     id,
-                    mount_point: PathBuf::from(unescape(mount_point)),
+                    site: MountSite {
+                        point: PathBuf::from(unescape(mount_point)),
+                        root: PathBuf::from(unescape(root)),
+                    },
                     mount_type: MountType {
                         fs_type: fs_type.to_owned(),
                         super_options: super_options.to_owned(),
@@ -313,14 +325,14 @@ impl MountTable {
             .map(|entry| entry.mount_type.fs_type.as_str())
     }
 
-    pub(crate) fn mount_of(&self, id: u64) -> Option<(&MountType, &Path)> {
+    pub(crate) fn mount_of(&self, id: u64) -> Option<(&MountType, &MountSite)> {
         self.entries
             .iter()
             .find(|entry| entry.id == id)
             .map(MountEntry::parts)
     }
 
-    pub(crate) fn mount_for(&self, path: &Path) -> Option<(&MountType, &Path)> {
+    pub(crate) fn mount_for(&self, path: &Path) -> Option<(&MountType, &MountSite)> {
         self.innermost(path).map(MountEntry::parts)
     }
 
@@ -338,38 +350,37 @@ impl MountTable {
     pub(crate) fn has_mount_inside(&self, directory: &Path) -> bool {
         self.entries
             .iter()
-            .any(|entry| entry.mount_point.parent() == Some(directory))
+            .any(|entry| entry.site.point.parent() == Some(directory))
     }
 
     pub(super) fn query_may_block(&self, path: &Path) -> bool {
         // Prefix probes can trigger autofs even when a nested mount is local.
         self.is_remote_path(path)
             || self.entries.iter().any(|entry| {
-                entry.mount_type.fs_type == "autofs" && path.starts_with(&entry.mount_point)
+                entry.mount_type.fs_type == "autofs" && path.starts_with(&entry.site.point)
             })
     }
 
     pub(crate) fn is_mount_point(&self, path: &Path) -> bool {
-        self.entries.iter().any(|entry| entry.mount_point == path)
+        self.entries.iter().any(|entry| entry.site.point == path)
     }
 
     pub(crate) fn mount_point_for(&self, path: &Path) -> Option<&Path> {
-        self.innermost(path)
-            .map(|entry| entry.mount_point.as_path())
+        self.innermost(path).map(|entry| entry.site.point.as_path())
     }
 
     /// Excludes virtual or potentially blocking filesystems from fallback scans.
     pub(crate) fn trash_scan_mounts(&self) -> impl Iterator<Item = &Path> {
         self.entries.iter().filter_map(|entry| {
-            is_trash_scan_fs_type(&entry.mount_type.fs_type).then_some(entry.mount_point.as_path())
+            is_trash_scan_fs_type(&entry.mount_type.fs_type).then_some(entry.site.point.as_path())
         })
     }
 
     fn innermost(&self, path: &Path) -> Option<&MountEntry> {
         self.entries
             .iter()
-            .filter(|entry| path.starts_with(&entry.mount_point))
-            .max_by_key(|entry| entry.mount_point.as_os_str().len())
+            .filter(|entry| path.starts_with(&entry.site.point))
+            .max_by_key(|entry| entry.site.point.as_os_str().len())
     }
 }
 
