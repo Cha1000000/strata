@@ -24,6 +24,24 @@ fn renamed(count: usize) -> TransferReport {
 }
 
 #[test]
+fn a_name_fixed_for_its_control_characters_shows_where_they_were() {
+    let item = RenamedItem {
+        requested: Location::local("/stick/line\none\u{1}\u{85}.txt"),
+        saved_as: Location::local("/stick/line_one__.txt"),
+        cause: RenameCause::Invalid,
+    };
+
+    assert_eq!(
+        renamed_line(&item),
+        rust_i18n::t!(
+            "“%{name}” was saved as “%{new_name}”",
+            name = "line\u{fffd}one\u{fffd}\u{fffd}.txt",
+            new_name = "line_one__.txt"
+        )
+    );
+}
+
+#[test]
 fn one_short_renamed_line_gets_a_notice_and_anything_more_a_dialog() {
     assert_eq!(presentation(&TransferReport::default()), None);
     let long = "a name long enough that the notice would cut its line short";

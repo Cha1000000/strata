@@ -33,12 +33,22 @@ enum Presentation {
     },
 }
 
+/// The name of `location`, with a mark for each control character, which
+/// would otherwise break the line or not show.
 fn display_name(location: &Location) -> String {
     location
         .file_name()
         .unwrap_or_default()
         .to_string_lossy()
-        .into_owned()
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                char::REPLACEMENT_CHARACTER
+            } else {
+                character
+            }
+        })
+        .collect()
 }
 
 fn heading(cause: RenameCause) -> String {
