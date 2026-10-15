@@ -1581,6 +1581,47 @@ fn a_gio_copy_lists_a_whole_folder_first_only_where_the_mount_takes_two_names_fo
 }
 
 #[test]
+fn a_gio_copy_that_fails_reports_the_fixed_name_of_a_folder_it_made() -> Result<(), Box<dyn Error>>
+{
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let root = tempfile::tempdir()?;
+    let source = root.path().join("source");
+    let destination = root.path().join("destination");
+    let target = destination.join("target");
+    fs::create_dir_all(source.join("x:y"))?;
+    fs::create_dir(&destination)?;
+    // GIO copies no named pipe.
+    make_fifo(&source.join("x:y/pipe"), 0o644)?;
+    let _destination = FsQuirks::install(&destination, Quirks::vfat());
+    let (progress, events) = recording_progress();
+
+    let result =
+        glib::MainContext::default().block_on(super::super::copy_recursively_with_progress(
+            gio::File::for_path(&source),
+            gio::File::for_path(&target),
+            super::super::CopyInto::New,
+            gio::Cancellable::new(),
+            super::super::CopyRecord::Nothing,
+            Some(progress),
+            super::super::GioNames::new(fixing(), Default::default()),
+        ));
+
+    assert!(result.is_err());
+    assert_eq!(names(&target)?, ["x_y"]);
+    assert_eq!(
+        renamed_beneath(&target, &followed_report(&events.borrow())),
+        [(
+            "x:y".to_owned(),
+            "x_y".to_owned(),
+            crate::services::RenameCause::Invalid
+        )]
+    );
+    Ok(())
+}
+
+#[test]
 fn fat_family_copies_number_fixed_names_past_the_names_their_siblings_keep()
 -> Result<(), Box<dyn Error>> {
     use crate::services::RenameCause::{Alias, Invalid};

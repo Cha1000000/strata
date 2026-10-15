@@ -2107,14 +2107,14 @@ fn copy_recursively_with_progress(
                             names.left.add(source.child(&name), target.child(&name));
                             continue;
                         }
-                        copied?;
-                        if let Some(cause) = planned.cause {
-                            renamed.extend(renamed_item(
-                                &target.child(&name),
-                                &target.child(&planned.target),
-                                cause,
-                            ));
+                        let saved_as = target.child(&planned.target);
+                        // A folder that failed partway keeps its fixed name.
+                        if let Some(cause) = planned.cause
+                            && (copied.is_ok() || query_exists(&saved_as, &cancellable).await)
+                        {
+                            renamed.extend(renamed_item(&target.child(&name), &saved_as, cause));
                         }
+                        copied?;
                     }
                 }
             }
