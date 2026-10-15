@@ -96,24 +96,10 @@ impl MountType {
     pub(crate) fn name_profile(&self, device_format: Option<&str>, name_max: u32) -> NameProfile {
         let has = |name| self.super_options.split(',').any(|option| option == name);
         let bytes = byte_limit(name_max);
+        if fat_format(&self.fs_type, device_format).is_some() {
+            return NameProfile::windows(Reserved::Bare, self.fat_encoding());
+        }
         match (self.fs_type.as_str(), device_format) {
-            ("vfat", _) => {
-                let iocharset = self
-                    .super_options
-                    .split(',')
-                    .find_map(|option| option.strip_prefix("iocharset="));
-                // Without `utf8`, the I/O charset converts names; other code
-                // pages than these store any bytes and are not supported.
-                let encoding = match iocharset {
-                    Some("utf8") if !has("utf8") => NameEncoding::Utf8Bmp,
-                    Some("ascii") if !has("utf8") => NameEncoding::Ascii,
-                    _ => NameEncoding::Utf8,
-                };
-                NameProfile::windows(Reserved::Bare, encoding)
-            }
-            ("msdos" | "exfat", _) | ("fuseblk", Some("exfat" | "vfat")) => {
-                NameProfile::windows(Reserved::Bare, NameEncoding::Utf8)
-            }
             ("ntfs3" | "ntfs", _) if has("windows_names") => {
                 NameProfile::windows(Reserved::Full, NameEncoding::Utf8)
             }
@@ -161,6 +147,22 @@ impl MountType {
         }
     }
 
+    /// Without `utf8`, vfat converts names through its I/O charset, and so
+    /// does exFAT unless that is UTF-8. Code pages other than ASCII store
+    /// other bytes on vfat and refuse them on exFAT, and are not supported.
+    fn fat_encoding(&self) -> NameEncoding {
+        let has = |name| self.super_options.split(',').any(|option| option == name);
+        let iocharset = self
+            .super_options
+            .split(',')
+            .find_map(|option| option.strip_prefix("iocharset="));
+        match (self.fs_type.as_str(), iocharset) {
+            ("vfat", Some("utf8")) if !has("utf8") => NameEncoding::Utf8Bmp,
+            ("vfat" | "exfat", Some("ascii")) if !has("utf8") => NameEncoding::Ascii,
+            _ => NameEncoding::Utf8,
+        }
+    }
+
     /// The bridge mounts every GVfs backend in a folder of its own.
     pub(crate) fn is_gvfs_bridge(&self) -> bool {
         self.fs_type == "fuse.gvfsd-fuse"
@@ -169,22 +171,30 @@ impl MountType {
 
 pub(crate) const FAT32_MAX_FILE_SIZE: u64 = u32::MAX as u64;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FatFormat {
+    Fat,
+    Exfat,
+}
+
+/// FAT and exFAT, served by the kernel or by a FUSE daemon on a device udev
+/// names. `device_format` is udev's `ID_FS_TYPE`, read for `fuseblk` only.
+fn fat_format(fs_type: &str, device_format: Option<&str>) -> Option<FatFormat> {
+    match (fs_type, device_format) {
+        ("vfat" | "msdos", _) | ("fuseblk", Some("vfat")) => Some(FatFormat::Fat),
+        ("exfat", _) | ("fuseblk", Some("exfat")) => Some(FatFormat::Exfat),
+        _ => None,
+    }
+}
+
 /// Drivers without symbolic links: the kernel's FAT and exFAT have no
 /// `symlink`, and exfat-fuse implements none.
 pub(crate) fn holds_symlinks(fs_type: &str, device_format: Option<&str>) -> Option<bool> {
-    matches!(
-        (fs_type, device_format),
-        ("vfat" | "msdos" | "exfat", _) | ("fuseblk", Some("exfat" | "vfat"))
-    )
-    .then_some(false)
+    fat_format(fs_type, device_format).map(|_| false)
 }
 
 pub(crate) fn max_file_size(fs_type: &str, device_format: Option<&str>) -> Option<u64> {
-    matches!(
-        (fs_type, device_format),
-        ("vfat" | "msdos", _) | ("fuseblk", Some("vfat"))
-    )
-    .then_some(FAT32_MAX_FILE_SIZE)
+    (fat_format(fs_type, device_format) == Some(FatFormat::Fat)).then_some(FAT32_MAX_FILE_SIZE)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

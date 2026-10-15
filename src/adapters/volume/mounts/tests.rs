@@ -216,6 +216,7 @@ const NAME_MOUNTS: &str = "\
 2011 22 0:55 / /mnt/k rw - 9p shared rw,trans=virtio
 2012 22 0:56 / /mnt/l rw - fuse.example example rw,user_id=1000
 2013 22 8:6 / /mnt/m rw - vfat /dev/sdb6 rw,shortname=mixed,iocharset=utf8,utf8,flush
+2014 22 8:7 / /mnt/n rw - exfat /dev/sdb7 rw,fmask=0022,dmask=0022,iocharset=ascii,errors=remount-ro
 ";
 
 #[test]
@@ -292,6 +293,14 @@ fn name_rules_follow_the_driver_its_options_and_its_name_length() {
         (2013, None, 1530, bare, Some(false), fat32),
         (2004, None, 12, bare, Some(false), fat32),
         (1167, None, 1530, bare, Some(false), None),
+        (
+            2014,
+            None,
+            1530,
+            windows(Reserved::Bare, NameEncoding::Ascii, false),
+            Some(false),
+            None,
+        ),
         (1262, Some("exfat"), 255, bare, Some(false), None),
         (1262, Some("vfat"), 255, bare, Some(false), fat32),
         (1262, Some("ntfs"), 255, full, None, None),
