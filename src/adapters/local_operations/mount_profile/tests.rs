@@ -9,9 +9,9 @@ use super::super::{
 };
 use super::{MountProfile, Profiles, folder_name_limit, learn_mount_type};
 use crate::adapters::volume::{
-    FAT32_MAX_FILE_SIZE, Family, MountNames, NameEncoding, NameLimit, NameProfile, NameRules,
-    Reserved, Strictness, Strip, gvfs_bridge_profile, gvfs_profile, learn_mount_capability,
-    mount_capabilities,
+    FAT32_MAX_FILE_SIZE, Family, FuseFormat, MountNames, NameEncoding, NameLimit, NameProfile,
+    NameRules, Reserved, Strictness, Strip, gvfs_bridge_profile, gvfs_profile,
+    learn_mount_capability, mount_capabilities,
 };
 
 fn profile_of(profiles: &Profiles, folder: &Path) -> Result<MountProfile, Box<dyn Error>> {
@@ -59,6 +59,7 @@ fn each_mount_is_profiled_from_what_its_folder_reports() -> Result<(), Box<dyn E
         symlinks,
         max_file_size,
         family,
+        fuse_format: None,
     };
     let fat = NameProfile {
         folds: true,
@@ -88,7 +89,10 @@ fn each_mount_is_profiled_from_what_its_folder_reports() -> Result<(), Box<dyn E
         (
             "exfat-fuse",
             Quirks::exfat_fuse,
-            profile(fat, no_symlinks, None, Family::Fuse),
+            MountProfile {
+                fuse_format: Some(FuseFormat::Exfat),
+                ..profile(fat, no_symlinks, None, Family::Fuse)
+            },
         ),
         (
             "fuseblk without udev",
@@ -115,6 +119,37 @@ fn each_mount_is_profiled_from_what_its_folder_reports() -> Result<(), Box<dyn E
             expected,
             "{case}"
         );
+    }
+    Ok(())
+}
+
+#[test]
+fn only_disks_in_a_windows_format_are_taken_for_slow_ones_where_their_device_does_not_say()
+-> Result<(), Box<dyn Error>> {
+    let bridge = || Quirks {
+        mount_type: Some(("fuse.gvfsd-fuse", "rw,user_id=1000,group_id=1000")),
+        ..Quirks::default()
+    };
+    let cases: [(&str, Preset, bool); 9] = [
+        ("vfat", Quirks::vfat, true),
+        ("exfat", Quirks::exfat, true),
+        ("exfat-fuse", Quirks::exfat_fuse, true),
+        ("ntfs3", Quirks::ntfs3, true),
+        ("ntfs-3g", Quirks::ntfs_3g, true),
+        ("cifs", Quirks::cifs, false),
+        ("ext4", Quirks::ext4, false),
+        ("sshfs", Quirks::sshfs, false),
+        ("a share through the GVfs bridge", bridge, false),
+    ];
+    for (case, quirks, windows_disk) in cases {
+        let root = tempfile::tempdir()?;
+        let folder = root.path().join("smb-share:server=nas.local,share=media");
+        fs::create_dir(&folder)?;
+        let _scope = FsQuirks::install(root.path(), quirks());
+
+        let profile = profile_of(&Profiles::default(), &folder)?;
+
+        assert_eq!(profile.windows_disk(), windows_disk, "{case}: {profile:?}");
     }
     Ok(())
 }

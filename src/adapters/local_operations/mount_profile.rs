@@ -8,8 +8,8 @@ mod tests;
 
 use std::{
     collections::HashMap,
-    hash::{DefaultHasher, Hash, Hasher},
     ffi::OsStr,
+    hash::{DefaultHasher, Hash, Hasher},
     os::fd::{AsFd, BorrowedFd},
     path::{Component, Path, PathBuf},
     sync::{Arc, Mutex, MutexGuard},
@@ -25,9 +25,8 @@ use super::{
 use crate::{
     adapters::volume::{
         Family, FuseFormat, MountCapabilities, MountKey, MountNames, MountType, NameLimit,
-        NameProfile, NameRules, Strictness, family, gvfs_bridge_profile, gvfs_profile,
-        holds_symlinks, learn_mount_capability, max_file_size, mount_capabilities,
-        teach_mount_capability,
+        NameProfile, Strictness, family, gvfs_bridge_profile, gvfs_profile, holds_symlinks,
+        learn_mount_capability, max_file_size, mount_capabilities, teach_mount_capability,
     },
     services::NameMode,
 };
@@ -113,6 +112,8 @@ pub(super) struct MountProfile {
     pub symlinks: Option<bool>,
     pub max_file_size: Option<u64>,
     pub family: Family,
+    /// The format of a FUSE daemon's block device.
+    pub fuse_format: Option<FuseFormat>,
 }
 
 impl MountProfile {
@@ -124,6 +125,7 @@ impl MountProfile {
             symlinks: taught.symlinks,
             max_file_size: seen.max_file_size,
             family: seen.family.unwrap_or(Family::Other),
+            fuse_format: seen.fuse_format,
         }
     }
 
@@ -134,6 +136,7 @@ impl MountProfile {
             symlinks: None,
             max_file_size: None,
             family: Family::Other,
+            fuse_format: None,
         }
     }
 
@@ -145,13 +148,14 @@ impl MountProfile {
             symlinks: None,
             max_file_size: None,
             family: Family::Other,
+            fuse_format: None,
         }
     }
 
     /// Whether the mount is a disk in a format Windows writes, as sticks and
     /// memory cards are.
     pub(super) fn windows_disk(&self) -> bool {
-        self.names.rules == NameRules::Windows && self.family != Family::Smb
+        matches!(self.family, Family::Fat | Family::Ntfs3) || self.fuse_format.is_some()
     }
 }
 
