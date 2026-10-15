@@ -15,6 +15,26 @@ fn real_copy() -> CopyStep {
     super::super::merge_copy(None, false)
 }
 
+fn gio_merge_copy(fat_family: bool) -> CopyStep {
+    Rc::new(
+        move |source, target, copy: super::super::MergeCopy, cancellable| {
+            Box::pin(async move {
+                super::super::copy_recursively_with_progress(
+                    source,
+                    target,
+                    super::super::CopyInto::Existing,
+                    cancellable,
+                    super::super::CopyRecord::Placing(copy.placing),
+                    None,
+                    fat_family,
+                )
+                .await
+                .map(|()| MergeCopied::default())
+            })
+        },
+    )
+}
+
 /// Substitutes Trash staging with a rename into `staging`, recording the
 /// staged locations in call order.
 fn rename_stage(staging: PathBuf) -> (StageOverwrite, Rc<RefCell<Vec<Location>>>) {
@@ -45,26 +65,9 @@ fn fat_merge_overwrites_the_names_it_plans_and_keeps_the_names_that_need_no_fix(
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
         .lock()
         .map_err(|error| error.to_string())?;
-    let gio_copy: CopyStep = Rc::new(
-        |source, target, copy: super::super::MergeCopy, cancellable| {
-            Box::pin(async move {
-                super::super::copy_recursively_with_progress(
-                    source,
-                    target,
-                    super::super::CopyInto::Existing,
-                    cancellable,
-                    super::super::CopyRecord::Placing(copy.placing),
-                    None,
-                    true,
-                )
-                .await
-                .map(|()| MergeCopied::default())
-            })
-        },
-    );
     for (row, copy) in [
         ("engine", super::super::merge_copy(None, true)),
-        ("GIO", gio_copy),
+        ("GIO", gio_merge_copy(true)),
     ] {
         let root = tempfile::tempdir()?;
         let source = root.path().join("source");
@@ -146,6 +149,64 @@ fn fat_merge_overwrites_the_names_it_plans_and_keeps_the_names_that_need_no_fix(
         assert_eq!(
             plans[1].placed.keys().collect::<HashSet<_>>(),
             plans[0].overwritten.iter().collect(),
+            "{row}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn a_merge_off_fat_keeps_the_names_fat_would_fix() -> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    for (row, copy) in [("engine", real_copy()), ("GIO", gio_merge_copy(false))] {
+        let root = tempfile::tempdir()?;
+        let source = root.path().join("source");
+        let target = root.path().join("target");
+        fs::create_dir_all(source.join("nested"))?;
+        fs::create_dir_all(target.join("nested"))?;
+        for (name, contents) in [("a:b", "colon"), ("C.txt", "upper"), ("c.txt", "lower")] {
+            fs::write(source.join("nested").join(name), contents)?;
+        }
+        fs::write(target.join("nested/a_b"), "original")?;
+        let (stage, staged) = rename_stage(root.path().join("staging"));
+        let (plans, on_merged) = recorded_plans();
+
+        glib::MainContext::default().block_on(merge_local_with(
+            gio::File::for_path(&source),
+            gio::File::for_path(&target),
+            false,
+            gio::Cancellable::new(),
+            None,
+            MergeHooks {
+                fat_family: false,
+                copy_into_target: copy,
+                stage_overwrite: stage,
+                on_merged: &on_merged,
+            },
+        ))?;
+
+        let nested = target.join("nested");
+        for (name, contents) in [
+            ("a:b", "colon"),
+            ("a_b", "original"),
+            ("C.txt", "upper"),
+            ("c.txt", "lower"),
+        ] {
+            assert_eq!(
+                fs::read(nested.join(name))?,
+                contents.as_bytes(),
+                "{row}: {name}"
+            );
+        }
+        assert!(staged.borrow().is_empty(), "{row}");
+        assert_eq!(
+            plans.borrow()[0].created.iter().collect::<HashSet<_>>(),
+            ["a:b", "C.txt", "c.txt"]
+                .map(|name| Location::local(nested.join(name)))
+                .iter()
+                .collect(),
             "{row}"
         );
     }

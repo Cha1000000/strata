@@ -283,7 +283,7 @@ fn keeping_both_numbers_a_long_name_within_the_limit_of_its_mount() -> Result<()
         .lock()
         .map_err(|error| error.to_string())?;
     let repeat = |text: &str, count| text.repeat(count);
-    let rows = [
+    let rows = vec![
         (
             format!("{}.txt", repeat("a", 251)),
             false,
@@ -296,11 +296,15 @@ fn keeping_both_numbers_a_long_name_within_the_limit_of_its_mount() -> Result<()
             format!("{}.tar (1).gz", repeat("a", 244)),
         ),
     ];
-    // The host's filesystem counts bytes, and vfat UTF-16 units.
-    let mounts: [(&str, Option<Preset>); 2] = [("host", None), ("vfat", Some(Quirks::vfat))];
-    for (mount, preset) in mounts {
+    let samba_folder = vec![(repeat("d", 212), true, format!("{} (1)", repeat("d", 209)))];
+    let mounts: [(&str, Option<Preset>, _); 3] = [
+        ("host", None, &rows),
+        ("vfat", Some(Quirks::vfat), &rows),
+        ("cifs", Some(Quirks::cifs), &samba_folder),
+    ];
+    for (mount, preset, rows) in mounts {
         for moving in [false, true] {
-            for (name, folder, numbered) in &rows {
+            for (name, folder, numbered) in rows {
                 let context = format!("{mount}, moving: {moving}, {name}");
                 let root = tempfile::tempdir()?;
                 let _quirks = preset.map(|preset| FsQuirks::install(root.path(), preset()));

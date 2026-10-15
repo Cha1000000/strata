@@ -1051,6 +1051,8 @@ fn fat_family_copies_number_fixed_names_past_the_names_their_siblings_keep()
         fs::write(source.join("a_.txt"), b"kept")?;
         fs::write(source.join("README.txt"), b"upper")?;
         fs::write(source.join("Readme.txt"), b"mixed")?;
+        // Kept until transfers know whether it is already on the stick.
+        fs::write(source.join("CON"), b"device")?;
         for folder in ["Photos.2024", "photos.2024"] {
             fs::create_dir(source.join(folder))?;
             fs::write(source.join(folder).join("photo"), folder)?;
@@ -1071,6 +1073,7 @@ fn fat_family_copies_number_fixed_names_past_the_names_their_siblings_keep()
             ("a_ (3).txt", "question"),
             ("README.txt", "upper"),
             ("Readme (1).txt", "mixed"),
+            ("CON", "device"),
             ("Photos.2024/photo", "Photos.2024"),
             ("photos.2024 (1)/photo", "photos.2024"),
         ] {
@@ -1080,8 +1083,36 @@ fn fat_family_copies_number_fixed_names_past_the_names_their_siblings_keep()
                 "{row}: {name}"
             );
         }
-        assert_eq!(names(&target)?.len(), 138, "{row}");
+        assert_eq!(names(&target)?.len(), 139, "{row}");
     }
+    Ok(())
+}
+
+#[test]
+fn a_fat_family_copy_into_a_case_sensitive_folder_keeps_case_variants_apart()
+-> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let root = tempfile::tempdir()?;
+    let source = root.path().join("source");
+    let target = root.path().join("target");
+    fs::create_dir_all(&source)?;
+    for (name, contents) in [("A:b", "colon"), ("a_b", "kept"), ("README", "upper"), ("Readme", "mixed")] {
+        fs::write(source.join(name), contents)?;
+    }
+
+    glib::MainContext::default().block_on(copy_recursively_fat_family(
+        gio::File::for_path(&source),
+        gio::File::for_path(&target),
+        false,
+        gio::Cancellable::new(),
+    ))?;
+
+    for (name, contents) in [("A_b", "colon"), ("a_b", "kept"), ("README", "upper"), ("Readme", "mixed")] {
+        assert_eq!(fs::read(target.join(name))?, contents.as_bytes(), "{name}");
+    }
+    assert_eq!(names(&target)?.len(), 4);
     Ok(())
 }
 

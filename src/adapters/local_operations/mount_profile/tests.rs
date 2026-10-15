@@ -7,7 +7,7 @@ use super::super::{
     open_local_parent_directory,
     tests::fs_quirks::{FsQuirks, Preset, Quirks},
 };
-use super::{MountProfile, Profiles};
+use super::{MountProfile, Profiles, folder_name_limit};
 use crate::adapters::volume::{
     FAT32_MAX_FILE_SIZE, MountNames, NameEncoding, NameLimit, NameProfile, NameRules, PrivateUse,
     Reserved, Strip, gvfs_profile, learn_mount_capability,
@@ -224,4 +224,21 @@ fn an_operation_keeps_the_profile_it_read_first_when_its_mount_changes()
         remounted
     );
     Ok(())
+}
+
+#[test]
+fn a_gvfs_location_is_numbered_within_the_limit_of_its_scheme() {
+    use gtk::{gio, glib};
+    for (uri, scheme) in [
+        ("mtp://Google_Pixel_8/Internal%20storage/DCIM", "mtp"),
+        ("smb://nas.local/media/films", "smb"),
+        ("sftp://me@example.org/home/me", "sftp"),
+    ] {
+        let folder = gio::File::for_uri(uri);
+        assert_eq!(
+            glib::MainContext::new().block_on(folder_name_limit(&folder)),
+            gvfs_profile(scheme).limit,
+            "{uri}"
+        );
+    }
 }
