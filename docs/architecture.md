@@ -401,6 +401,22 @@ read the shared GTK file before applying changes and adopt them only after a
 successful save. This preserves sequential external edits, not simultaneous writes;
 other windows are refreshed on their next bookmark action, not by a live monitor.
 
+`ui/window/pinned_drop.rs` owns folder pinning through dedicated gaps between pinned
+rows, including an empty section. Row bodies retain their existing transfer and
+spring-navigation behavior; remote pins have insertion gaps even when their rows
+cannot accept transfers. Internal drags carry a provider-matched snapshot of entry
+locations and directory eligibility, without filesystem probes. External file lists
+and directory types are read asynchronously once per drag across that sidebar's
+gaps. Validation issues one metadata query at a time and has a two-second deadline,
+including payload loading. Pending pin drops wait for that result and never become
+transfers; cancellation, failure, or timeout rejects the whole selection. Cancelling
+a GIO query does not guarantee interruption of an already-blocked kernel call.
+Only confirmed directory selections show an insertion indicator. Directory symlinks
+are accepted without canonicalizing or collapsing different location spellings.
+Insertion resolves its anchor against the latest bookmarks, preserves selection
+order, skips existing pins without reordering them, and finishes the drop protocol
+only after the bookmark update succeeds or fails.
+
 ### Window keyboard routing
 
 `ui/window/keyboard.rs` owns the window's capture-phase keyboard dispatcher. Like every key

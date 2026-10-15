@@ -56,6 +56,7 @@ mod drive_dialogs;
 mod drive_ops;
 mod keyboard;
 mod open_argument;
+mod pinned_drop;
 mod sidebar;
 mod unlock_argument;
 mod volume_password;
@@ -1630,24 +1631,32 @@ impl SidebarState {
             .filter(|(_, (location, _))| !self.local_only || location.native_path().is_some())
             .map(|(index, (location, name))| (index, location.clone(), name.clone()))
             .collect::<Vec<_>>();
-        if !pinned.is_empty() {
-            if self.widget.first_child().is_some() {
-                self.append_separator();
+        if pinned.is_empty() && self.local_only {
+            return;
+        }
+        if self.widget.first_child().is_some() {
+            self.append_separator();
+        }
+        self.append_heading("PINNED");
+        let drag_cache = Rc::new(pinned_drop::FolderDragCache::default());
+        for (ordinal, (index, location, name)) in pinned.into_iter().enumerate() {
+            if !self.local_only {
+                pinned_drop::append_gap(self, Some(location.clone()), &drag_cache);
             }
-            self.append_heading("PINNED");
-            for (ordinal, (index, location, name)) in pinned.into_iter().enumerate() {
-                self.visible_pins.borrow_mut().push(location.clone());
-                let row = if self.local_only {
-                    let row = self.append_place(crate::assets::icons::FOLDER, &name, location);
-                    row.add_css_class("sidebar-pinned-row");
-                    row
-                } else {
-                    self.append_pinned_place(index, &name, location)
-                };
-                if let Some(keycap) = pin_keycap(ordinal) {
-                    self.add_keycap(&row, &keycap);
-                }
+            self.visible_pins.borrow_mut().push(location.clone());
+            let row = if self.local_only {
+                let row = self.append_place(crate::assets::icons::FOLDER, &name, location);
+                row.add_css_class("sidebar-pinned-row");
+                row
+            } else {
+                self.append_pinned_place(index, &name, location)
+            };
+            if let Some(keycap) = pin_keycap(ordinal) {
+                self.add_keycap(&row, &keycap);
             }
+        }
+        if !self.local_only {
+            pinned_drop::append_gap(self, None, &drag_cache);
         }
     }
 
@@ -1801,10 +1810,23 @@ impl SidebarState {
         self.update_pinned_places(|places| remove_pinned_place(places, location));
     }
 
+    fn pin_locations_before(
+        self: &Rc<Self>,
+        locations: &[Location],
+        before: Option<&Location>,
+    ) -> bool {
+        self.update_pinned_places(|places| {
+            let index = before
+                .and_then(|anchor| places.iter().position(|(location, _)| location == anchor))
+                .unwrap_or(places.len());
+            pin_locations_at(places, locations, index)
+        })
+    }
+
     fn update_pinned_places(
         self: &Rc<Self>,
         change: impl FnOnce(&mut Vec<(Location, String)>) -> bool,
-    ) {
+    ) -> bool {
         // Merge into the shared file, never this window's stale snapshot.
         let result = load_pinned_places().and_then(|mut places| {
             if change(&mut places) {
@@ -1816,12 +1838,16 @@ impl SidebarState {
             Ok(places) => {
                 self.pinned_places.replace(places);
                 self.rebuild();
+                true
             }
-            Err(error) => show_error_dialog(
-                &self.view.widget(),
-                &crate::i18n::tr("Unable to update pinned folders"),
-                &crate::services::io_error_message(&error),
-            ),
+            Err(error) => {
+                show_error_dialog(
+                    &self.view.widget(),
+                    &crate::i18n::tr("Unable to update pinned folders"),
+                    &crate::services::io_error_message(&error),
+                );
+                false
+            }
         }
     }
     fn event_changes_active_place(event: &BrowserEvent) -> bool {
@@ -2893,6 +2919,30 @@ fn remove_pinned_place(places: &mut Vec<(Location, String)>, location: &Location
     let original_len = places.len();
     places.retain(|(pinned, _)| pinned != location);
     places.len() != original_len
+}
+
+fn pin_locations_at(
+    places: &mut Vec<(Location, String)>,
+    sources: &[Location],
+    target_index: usize,
+) -> bool {
+    let mut seen = places
+        .iter()
+        .map(|(location, _)| location.clone())
+        .collect::<std::collections::HashSet<_>>();
+    let additions = sources
+        .iter()
+        .filter(|location| {
+            !is_standard_place_location(location) && seen.insert((*location).clone())
+        })
+        .map(|location| (location.clone(), location.display_name()))
+        .collect::<Vec<_>>();
+    if additions.is_empty() {
+        return false;
+    }
+    let index = target_index.min(places.len());
+    places.splice(index..index, additions);
+    true
 }
 
 fn is_smb_location(location: &Location) -> bool {

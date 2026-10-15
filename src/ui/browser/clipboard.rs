@@ -210,9 +210,15 @@ pub(crate) struct PreparedFileDrop {
     pub state: Rc<FileDropState>,
 }
 
+#[derive(Clone)]
+pub(crate) struct DragSnapshot {
+    pub locations: Rc<[Location]>,
+    pub all_directories: bool,
+}
+
 struct ActiveDrag {
     content: glib::WeakRef<gtk::gdk::ContentProvider>,
-    locations: Rc<[Location]>,
+    snapshot: DragSnapshot,
 }
 
 thread_local! {
@@ -222,12 +228,19 @@ thread_local! {
 /// Only trusted when the drop carries the provider this process created; foreign
 /// drops and stale entries fall back to the dropped value.
 fn active_drag_locations(target: &gtk::DropTarget) -> Option<Rc<[Location]>> {
-    let content = target.current_drop()?.drag()?.content();
+    active_drag_snapshot(&target.current_drop()?).map(|snapshot| snapshot.locations)
+}
+
+pub(crate) fn active_drag_snapshot(drop: &gtk::gdk::Drop) -> Option<DragSnapshot> {
+    drag_snapshot_for_content(&drop.drag()?.content())
+}
+
+fn drag_snapshot_for_content(content: &gtk::gdk::ContentProvider) -> Option<DragSnapshot> {
     ACTIVE_DRAG.with(|cell| {
         cell.borrow()
             .as_ref()
-            .filter(|active| active.content.upgrade().as_ref() == Some(&content))
-            .map(|active| active.locations.clone())
+            .filter(|active| active.content.upgrade().as_ref() == Some(content))
+            .map(|active| active.snapshot.clone())
     })
 }
 
@@ -768,7 +781,10 @@ pub(in crate::ui) fn file_drag_content(entries: &[FileEntry]) -> Option<gtk::gdk
     ACTIVE_DRAG.with(|cell| {
         *cell.borrow_mut() = Some(ActiveDrag {
             content: content.downgrade(),
-            locations,
+            snapshot: DragSnapshot {
+                locations,
+                all_directories: entries.iter().all(FileEntry::is_directory),
+            },
         });
     });
     Some(content)

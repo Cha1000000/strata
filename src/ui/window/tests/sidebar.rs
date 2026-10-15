@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use gtk::prelude::*;
 
-use super::super::{browser_for_window, build_sidebar};
+use super::super::{browser_for_window, build_sidebar, pin_locations_at};
 use crate::model::Location;
 use crate::test_support::gtk_test_with_env;
 use crate::ui::preferences::PreferenceManager;
@@ -101,4 +101,146 @@ fn a_rejected_place_click_returns_the_highlight_to_the_open_location() {
             window.destroy();
         },
     );
+}
+
+#[test]
+fn pin_locations_at_inserts_at_specified_indices() {
+    let mut places = vec![
+        (Location::local("/pinned/a"), "A".to_owned()),
+        (Location::local("/pinned/b"), "B".to_owned()),
+    ];
+
+    let changed = pin_locations_at(&mut places, &[Location::local("/pinned/first")], 0);
+    assert!(changed);
+    assert_eq!(
+        places,
+        vec![
+            (Location::local("/pinned/first"), "first".to_owned()),
+            (Location::local("/pinned/a"), "A".to_owned()),
+            (Location::local("/pinned/b"), "B".to_owned()),
+        ]
+    );
+
+    let changed = pin_locations_at(&mut places, &[Location::local("/pinned/middle")], 2);
+    assert!(changed);
+    assert_eq!(
+        places,
+        vec![
+            (Location::local("/pinned/first"), "first".to_owned()),
+            (Location::local("/pinned/a"), "A".to_owned()),
+            (Location::local("/pinned/middle"), "middle".to_owned()),
+            (Location::local("/pinned/b"), "B".to_owned()),
+        ]
+    );
+
+    let changed = pin_locations_at(&mut places, &[Location::local("/pinned/last")], 99);
+    assert!(changed);
+    assert_eq!(
+        places,
+        vec![
+            (Location::local("/pinned/first"), "first".to_owned()),
+            (Location::local("/pinned/a"), "A".to_owned()),
+            (Location::local("/pinned/middle"), "middle".to_owned()),
+            (Location::local("/pinned/b"), "B".to_owned()),
+            (Location::local("/pinned/last"), "last".to_owned()),
+        ]
+    );
+}
+
+#[test]
+fn pin_locations_at_already_pinned_folder_is_a_noop() {
+    let mut places = vec![
+        (Location::local("/pinned/a"), "A".to_owned()),
+        (Location::local("/pinned/b"), "B".to_owned()),
+        (Location::local("/pinned/c"), "C".to_owned()),
+    ];
+    let original = places.clone();
+
+    let changed = pin_locations_at(&mut places, &[Location::local("/pinned/b")], 0);
+    assert!(!changed);
+    assert_eq!(places, original);
+}
+
+#[test]
+fn pin_locations_at_multi_folder_drag_preserves_selection_order_and_skips_duplicates() {
+    let mut places = vec![
+        (Location::local("/pinned/a"), "A".to_owned()),
+        (Location::local("/pinned/b"), "B".to_owned()),
+    ];
+
+    let changed = pin_locations_at(
+        &mut places,
+        &[
+            Location::local("/pinned/new_1"),
+            Location::local("/pinned/a"),
+            Location::local("/pinned/new_1"),
+            Location::local("/pinned/new_2"),
+        ],
+        1,
+    );
+    assert!(changed);
+    assert_eq!(
+        places,
+        vec![
+            (Location::local("/pinned/a"), "A".to_owned()),
+            (Location::local("/pinned/new_1"), "new_1".to_owned()),
+            (Location::local("/pinned/new_2"), "new_2".to_owned()),
+            (Location::local("/pinned/b"), "B".to_owned()),
+        ]
+    );
+}
+
+#[test]
+fn pinning_merges_latest_bookmarks_and_persists_aliases_in_selection_order() {
+    crate::test_support::gtk_test(
+        "ui::window::tests::sidebar::pinning_merges_latest_bookmarks_and_persists_aliases_in_selection_order",
+        || {
+            use super::super::{load_pinned_places, save_pinned_places};
+            PreferenceManager::seed_saved_preferences_for_test();
+            let initial = vec![
+                (Location::uri("sftp://host/anchor"), "Anchor".to_owned()),
+                (Location::local("/pinned/last"), "Last".to_owned()),
+            ];
+            save_pinned_places(&initial).expect("seed bookmarks");
+            let view = browser_for_window();
+            let sidebar = build_sidebar(view.clone(), PreferenceManager::shared(), false);
+            let mut external = initial.clone();
+            external.insert(0, (Location::local("/external/pin"), "External".to_owned()));
+            save_pinned_places(&external).expect("external edit");
+            let locations = [
+                Location::local("/mount/folder"),
+                Location::local("/aliases/folder"),
+                initial[0].0.clone(),
+                Location::local("/mount/folder"),
+            ];
+            assert!(
+                sidebar
+                    .state
+                    .pin_locations_before(&locations, Some(&initial[0].0))
+            );
+            external.splice(
+                1..1,
+                [
+                    (locations[0].clone(), "folder".to_owned()),
+                    (locations[1].clone(), "folder".to_owned()),
+                ],
+            );
+            assert_eq!(load_pinned_places().expect("saved pins"), external);
+            assert_eq!(*sidebar.state.pinned_places.borrow(), external);
+            assert!(sidebar.state.pin_locations_before(&locations, None));
+            assert_eq!(load_pinned_places().expect("unchanged pins"), external);
+            view.browser().clear_observer();
+            sidebar.disconnect();
+        },
+    );
+}
+
+#[test]
+fn pin_locations_at_ignores_standard_places() {
+    let mut places = vec![(Location::local("/pinned/a"), "A".to_owned())];
+    let home = Location::local(gtk::glib::home_dir());
+
+    let changed = pin_locations_at(&mut places, &[home], 0);
+    assert!(!changed);
+    assert_eq!(places, vec![(Location::local("/pinned/a"), "A".to_owned())]);
 }
