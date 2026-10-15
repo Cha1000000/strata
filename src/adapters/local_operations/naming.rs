@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     ffi::{OsStr, OsString},
     os::unix::ffi::OsStrExt,
     path::Path,
@@ -41,6 +41,16 @@ pub(super) fn numbered_names(
     is_directory: bool,
     limit: NameLimit,
 ) -> impl Iterator<Item = OsString> + '_ {
+    numbered_names_after(name, is_directory, limit, 0)
+}
+
+/// [`numbered_names`] past the first `skipped`, which are never made.
+fn numbered_names_after(
+    name: &OsStr,
+    is_directory: bool,
+    limit: NameLimit,
+    skipped: usize,
+) -> impl Iterator<Item = OsString> + '_ {
     let path = Path::new(name);
     let stem = match path.extension() {
         Some(extension) if !is_directory && !extension.is_empty() => {
@@ -54,6 +64,7 @@ pub(super) fn numbered_names(
     (start..=u64::MAX)
         .chain(1..start)
         .take(placement::NUMBERED_NAME_ATTEMPTS as usize)
+        .skip(skipped)
         .map(move |index| numbered_name(base_stem, index, extension, limit, is_directory))
 }
 
@@ -179,12 +190,23 @@ pub(super) fn plan_names(
         }
     }
     numbered.sort_by(|(left, _), (right, _)| entries[*left].name.cmp(entries[*right].name));
+    // Every name an equal one tried is taken, so the next resumes after it.
+    let mut tried = HashMap::<(OsString, bool), usize>::new();
     for (index, name) in numbered {
-        let candidates = numbered_names(&name, entries[index].is_directory, profile.limit);
-        planned[index].target = std::iter::once(name.clone())
-            .chain(candidates)
-            .find(|candidate| taken.insert(key.of(candidate)))
-            .unwrap_or_else(|| name.clone());
+        let is_directory = entries[index].is_directory;
+        let tried = tried.entry((name.clone(), is_directory)).or_default();
+        let plain = (*tried == 0).then(|| name.clone());
+        let skipped = tried.saturating_sub(1);
+        let candidates = numbered_names_after(&name, is_directory, profile.limit, skipped);
+        let mut free = None;
+        for candidate in plain.into_iter().chain(candidates) {
+            *tried += 1;
+            if taken.insert(key.of(&candidate)) {
+                free = Some(candidate);
+                break;
+            }
+        }
+        planned[index].target = free.unwrap_or_else(|| name.clone());
     }
     planned
 }
