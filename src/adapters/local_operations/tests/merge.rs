@@ -269,62 +269,81 @@ fn a_merge_off_fat_keeps_the_names_fat_would_fix() -> Result<(), Box<dyn Error>>
 fn no_plan(_: MergePlan) {}
 
 #[test]
-fn a_merge_onto_fat_keeps_the_names_a_posix_mount_inside_it_holds() -> Result<(), Box<dyn Error>> {
+fn a_merge_onto_fat_takes_the_rules_of_a_folder_inside_it_only_from_another_device_mounted_there()
+-> Result<(), Box<dyn Error>> {
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
         .lock()
         .map_err(|error| error.to_string())?;
-    for (row, copy) in [
-        ("engine", super::super::merge_copy(None, fixing())),
-        ("GIO", gio_merge_copy(fixing())),
-    ] {
-        let root = tempfile::tempdir()?;
-        let source = root.path().join("source");
-        let stick = root.path().join("stick");
-        let disk = stick.join("disk");
-        fs::create_dir_all(source.join("disk"))?;
-        fs::create_dir_all(&disk)?;
-        fs::write(source.join("x:y"), "top")?;
-        fs::write(source.join("disk/a:b"), "colon")?;
-        fs::write(disk.join("a_b"), "original")?;
-        let _stick = FsQuirks::install(&stick, Quirks::vfat());
-        let _disk = FsQuirks::install(&disk, Quirks::ext4());
-        let (stage, staged) = rename_stage(root.path().join("staging"));
-        let (plans, on_merged) = recorded_plans();
-
-        glib::MainContext::default().block_on(merge_local_with(
-            gio::File::for_path(&source),
-            gio::File::for_path(&stick),
-            false,
-            gio::Cancellable::new(),
-            None,
-            MergeHooks {
-                names: fixing(),
-                copy_into_target: copy,
-                stage_overwrite: stage,
-                on_merged: &on_merged,
-            },
-        ))?;
-
-        for (name, contents) in [
-            ("x_y", "top"),
-            ("disk/a:b", "colon"),
-            ("disk/a_b", "original"),
+    let copies: [(&str, fn() -> CopyStep); 2] = [
+        ("engine", || super::super::merge_copy(None, fixing())),
+        ("GIO", || gio_merge_copy(fixing())),
+    ];
+    for (copy_row, copy) in copies {
+        // On the stick's device, the folder's ext4 rules are never looked up.
+        for (own_device, disk_holds, overwritten) in [
+            (true, &[("a:b", "colon"), ("a_b", "original")][..], None),
+            (false, &[("a_b", "colon")][..], Some("a_b")),
         ] {
+            let row = format!("{copy_row}, own device {own_device}");
+            let root = tempfile::tempdir()?;
+            let source = root.path().join("source");
+            let stick = root.path().join("stick");
+            let disk = stick.join("disk");
+            fs::create_dir_all(source.join("disk"))?;
+            fs::create_dir_all(&disk)?;
+            fs::write(source.join("x:y"), "top")?;
+            fs::write(source.join("disk/a:b"), "colon")?;
+            fs::write(disk.join("a_b"), "original")?;
+            let _stick = FsQuirks::install(&stick, Quirks::vfat());
+            let _disk = FsQuirks::install(
+                &disk,
+                Quirks {
+                    own_device,
+                    ..Quirks::ext4()
+                },
+            );
+            let (stage, staged) = rename_stage(root.path().join("staging"));
+            let (plans, on_merged) = recorded_plans();
+
+            glib::MainContext::default().block_on(merge_local_with(
+                gio::File::for_path(&source),
+                gio::File::for_path(&stick),
+                false,
+                gio::Cancellable::new(),
+                None,
+                MergeHooks {
+                    names: fixing(),
+                    copy_into_target: copy(),
+                    stage_overwrite: stage,
+                    on_merged: &on_merged,
+                },
+            ))?;
+
+            assert_eq!(fs::read(stick.join("x_y"))?, b"top", "{row}");
             assert_eq!(
-                fs::read(stick.join(name))?,
-                contents.as_bytes(),
-                "{row}: {name}"
+                names(&disk)?,
+                disk_holds.iter().map(|(name, _)| *name).collect::<Vec<_>>(),
+                "{row}"
+            );
+            for (name, contents) in disk_holds {
+                assert_eq!(fs::read(disk.join(name))?, contents.as_bytes(), "{row}");
+            }
+            let overwritten =
+                Vec::from_iter(overwritten.map(|name| Location::local(disk.join(name))));
+            assert_eq!(*staged.borrow(), overwritten, "{row}");
+            let plan = &plans.borrow()[0];
+            assert_eq!(plan.overwritten, overwritten, "{row}");
+            let created = [stick.join("x_y")]
+                .into_iter()
+                .chain(own_device.then(|| disk.join("a:b")))
+                .map(Location::local)
+                .collect::<HashSet<_>>();
+            assert_eq!(
+                plan.created.iter().cloned().collect::<HashSet<_>>(),
+                created,
+                "{row}"
             );
         }
-        assert!(staged.borrow().is_empty(), "{row}");
-        assert_eq!(
-            plans.borrow()[0].created.iter().collect::<HashSet<_>>(),
-            [stick.join("x_y"), disk.join("a:b")]
-                .map(Location::local)
-                .iter()
-                .collect(),
-            "{row}"
-        );
     }
     Ok(())
 }

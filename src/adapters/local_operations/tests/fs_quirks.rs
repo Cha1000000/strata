@@ -21,7 +21,7 @@ use std::{
     time::SystemTime,
 };
 
-use gtk::{gio, glib};
+use gtk::{gio, glib, prelude::FileExt};
 use rustix::{
     fs::{AtFlags, FileType, FsWord, Mode, RenameFlags},
     io::Errno,
@@ -250,6 +250,10 @@ pub(crate) struct Quirks {
     /// Lists `system.*` names, such as ACLs, before the others, as tmpfs
     /// and NFSv4 do whatever order the host's filesystem keeps.
     pub acls_listed_first: bool,
+    /// Entries report a device of their own, to the seam and to GIO, as a
+    /// filesystem mounted inside another does; scopes otherwise share the
+    /// device of the folder they are made in, as bind mounts do.
+    pub own_device: bool,
 }
 
 impl Quirks {
@@ -689,6 +693,7 @@ pub(crate) struct Call {
 struct Scope {
     id: u64,
     root: PathBuf,
+    own_device: bool,
     state: Mutex<State>,
 }
 
@@ -730,6 +735,7 @@ impl FsQuirks {
         let scope = Arc::new(Scope {
             id: NEXT_SCOPE.fetch_add(1, Ordering::Relaxed),
             root: root.canonicalize().unwrap_or_else(|_| root.to_path_buf()),
+            own_device: quirks.own_device,
             state: Mutex::new(State {
                 quirks,
                 calls: Vec::new(),
@@ -896,6 +902,9 @@ impl Scope {
     }
 
     fn reported(&self, path: Option<PathBuf>, mut stat: EntryStat) -> EntryStat {
+        if let Some(device) = path.as_deref().and_then(own_device) {
+            stat.identity.device = device;
+        }
         let mut state = self.state();
         if let Some(&(inode, reported)) = path.as_ref().and_then(|path| state.link_names.get(path))
             && inode == stat.identity.inode
@@ -1360,6 +1369,23 @@ fn scope_for(dir: BorrowedFd<'_>) -> Option<Arc<Scope>> {
         .filter(|scope| path.starts_with(&scope.root))
         .max_by_key(|scope| scope.root.as_os_str().len())
         .cloned()
+}
+
+/// The device of what is at `path`, where the innermost scope holding it
+/// that has [`Quirks::own_device`] gives it one.
+fn own_device(path: &Path) -> Option<u64> {
+    scopes()
+        .iter()
+        .filter(|scope| scope.own_device && path.starts_with(&scope.root))
+        .max_by_key(|scope| scope.root.as_os_str().len())
+        .map(|scope| u64::from(u32::MAX) - scope.id)
+}
+
+/// The device GIO reports for `file`, as the seam reports it.
+pub(crate) fn gio_device(file: &gio::File, device: Option<u64>) -> Option<u64> {
+    file.path()
+        .and_then(|path| own_device(&path.canonicalize().unwrap_or(path)))
+        .or(device)
 }
 
 fn scope_for_path(path: &Path) -> Option<Arc<Scope>> {

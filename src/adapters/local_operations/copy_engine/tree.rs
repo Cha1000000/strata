@@ -1210,9 +1210,19 @@ pub(super) struct Merged {
     pub(super) path: PathBuf,
     pub(super) recorded_in: Option<Arc<manifest::Folder>>,
     pub(super) placing: Option<Arc<Placing>>,
-    /// Where the folder merged into the parent takes its names from, which
-    /// a folder on that mount shares.
-    pub(super) site: Option<Site>,
+    /// How names are given in the folder merged into the parent; `None` at
+    /// the root.
+    pub(super) parent: Option<MergedNames>,
+}
+
+/// How names are given in a merged folder, which a folder merged into it
+/// shares unless another filesystem is mounted there, as a bind mount of the
+/// same one shares its rules.
+#[derive(Clone, Copy)]
+pub(super) struct MergedNames {
+    device: u64,
+    site: Site,
+    fixing: bool,
 }
 
 impl Merged {
@@ -1230,7 +1240,6 @@ impl Merged {
             .open_dir(Entry::new(&**source_parent, source_name))
             .map_err(|error| open_failure(source_name, error))?;
         tree.source_in(fs, source.as_fd());
-        let source_stat = fs.stat_fd(source.as_fd())?;
         let (target_parent, target_name, expected) = &self.target;
         let target = fs
             .open_dir(Entry::new(&**target_parent, target_name))
@@ -1243,27 +1252,43 @@ impl Merged {
         if copy.durable {
             tree.reach(fs, &mount, target.as_fd(), &self.path)?;
         }
-        let recorded = self
-            .recorded_in
-            .as_ref()
-            .map(|folder| folder.folder(source_name, source_stat.identity));
-        let site = match self.site {
-            Some(site) if site.mount == mount.key => site,
-            _ => copy.site(&mount, target.as_fd()),
+        let device = target_stat.identity.device;
+        let (names, source_stat) = match self.parent {
+            Some(parent) if parent.device == device => (parent, None),
+            _ => {
+                let source_stat = fs.stat_fd(source.as_fd())?;
+                let site = copy.site(&mount, target.as_fd());
+                let fixing = tree.crosses(&source_stat, &target_stat, &site);
+                let names = MergedNames {
+                    device,
+                    site,
+                    fixing,
+                };
+                (names, Some(source_stat))
+            }
+        };
+        let recorded = match &self.recorded_in {
+            Some(folder) => {
+                let source_stat = match source_stat {
+                    Some(stat) => stat,
+                    None => fs.stat_fd(source.as_fd())?,
+                };
+                Some(folder.folder(source_name, source_stat.identity))
+            }
+            None => None,
         };
         // A stage made in the live folder inherits its casefolding.
         let naming = Naming::Decide.decide(fs, mount.family, target.as_fd());
-        let fixing = tree.crosses(&source_stat, &target_stat, &site);
-        let folder = copy.names.in_folder(&site);
+        let folder = copy.names.in_folder(&names.site);
         // As the merge planner, which cannot read a folder's casefolding.
-        let children = tree.plan(source.as_fd(), &folder, fixing, Key::Folded)?;
+        let children = tree.plan(source.as_fd(), &folder, names.fixing, Key::Folded)?;
         let requested = children
             .iter()
             .map(|(_, _, planned)| planned.target.clone())
             .collect();
         let live = Live {
             names: Names::new(requested, naming, mount.family, folder),
-            site,
+            site: names.site,
             naming,
             source: Arc::new(source),
             dir: Arc::new(target),
@@ -1299,7 +1324,7 @@ impl Merged {
                             path: self.path.join(target_name),
                             recorded_in: live.recorded.clone(),
                             placing: live.placing.clone(),
-                            site: Some(live.site),
+                            parent: Some(names),
                         },
                     ));
                 }

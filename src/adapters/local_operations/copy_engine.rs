@@ -1233,7 +1233,7 @@ fn merge(
         path: PathBuf::new(),
         recorded_in: source.recorded_in.clone(),
         placing,
-        site: None,
+        parent: None,
     };
     let (
         walked,

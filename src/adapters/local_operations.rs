@@ -1522,20 +1522,62 @@ impl CopyInto {
         gio::FileCopyFlags::ALL_METADATA | overwrite
     }
 
-    async fn makes_folder(self, target: &gio::File, cancellable: &gio::Cancellable) -> bool {
-        match self {
-            Self::New => true,
-            Self::Existing => !query_exists(target, cancellable).await,
+    /// The folder already at `target`, which the copy then does not make.
+    async fn existing_folder(
+        self,
+        target: &gio::File,
+        cancellable: &gio::Cancellable,
+    ) -> Option<ExistingFolder> {
+        if self == Self::New {
+            return None;
         }
+        let info = await_cancellable(target, cancellable, |target, cancellable, result| {
+            target.query_info_async(
+                "standard::type,unix::device",
+                gio::FileQueryInfoFlags::NONE,
+                glib::Priority::DEFAULT,
+                Some(cancellable),
+                move |output| result.resolve(output),
+            );
+        })
+        .await
+        .ok()?;
+        Some(ExistingFolder {
+            device: device(target, &info),
+        })
     }
+}
+
+/// A target folder a copy found in place.
+#[derive(Clone, Copy)]
+struct ExistingFolder {
+    device: Option<u64>,
+}
+
+/// The device GIO's `info` of `file` gives, where it gives one.
+fn device(file: &gio::File, info: &gio::FileInfo) -> Option<u64> {
+    let device = info
+        .has_attribute(gio::FILE_ATTRIBUTE_UNIX_DEVICE)
+        .then(|| u64::from(info.attribute_uint32(gio::FILE_ATTRIBUTE_UNIX_DEVICE)));
+    #[cfg(test)]
+    let device = tests::fs_quirks::gio_device(file, device);
+    #[cfg(not(test))]
+    let _ = file;
+    device
+}
+
+/// The names in a target folder, and the device it is on, where known.
+#[derive(Clone, Copy)]
+struct TargetFolder {
+    names: FolderNames,
+    device: Option<u64>,
 }
 
 /// What the GIO path knows of the names in the target folder it copies into.
 #[derive(Clone, Default)]
 struct GioNames {
     policy: NamePolicy,
-    /// The names in the parent target folder.
-    parent: Option<FolderNames>,
+    parent: Option<TargetFolder>,
     left: LeftOut,
 }
 
@@ -1548,24 +1590,30 @@ impl GioNames {
         }
     }
 
-    /// The names in `target`, a folder the copy `made` or one it copies into.
+    /// The names in `target`, a folder the copy made, or the `existing` one
+    /// it copies into.
     async fn of(
         &self,
         source: &gio::File,
         target: &gio::File,
-        made: bool,
+        existing: Option<ExistingFolder>,
         cancellable: &gio::Cancellable,
-    ) -> Result<FolderNames, glib::Error> {
-        match self.parent {
-            Some(parent) if made => Ok(parent),
-            Some(parent) => {
-                existing_folder_names(&self.policy, parent, (source, target), cancellable).await
+    ) -> Result<TargetFolder, glib::Error> {
+        let device = existing.and_then(|existing| existing.device);
+        match (self.parent, existing) {
+            (Some(parent), None) => Ok(parent),
+            (Some(parent), Some(_)) => {
+                let folders = (source, target);
+                existing_folder_names(&self.policy, parent, folders, device, cancellable).await
             }
-            None => self.policy.folder(source, target, cancellable).await,
+            (None, _) => Ok(TargetFolder {
+                names: self.policy.folder(source, target, cancellable).await?,
+                device,
+            }),
         }
     }
 
-    fn within(&self, folder: FolderNames) -> Self {
+    fn within(&self, folder: TargetFolder) -> Self {
         Self {
             policy: self.policy.clone(),
             parent: Some(folder),
@@ -1636,17 +1684,21 @@ impl LeftOut {
     }
 }
 
-/// The names in `target`, a folder that existed in one whose names are
-/// `parent`: those of its own mount where it is native, since another may be
-/// mounted there.
+/// The names in `target`, a folder on `device` that existed in `parent`:
+/// those of its own mount only where another filesystem is mounted there,
+/// as a bind mount of the parent's shares its rules.
 async fn existing_folder_names(
     policy: &NamePolicy,
-    parent: FolderNames,
+    parent: TargetFolder,
     (source, target): (&gio::File, &gio::File),
+    device: Option<u64>,
     cancellable: &gio::Cancellable,
-) -> Result<FolderNames, glib::Error> {
-    if target.is_native() {
-        policy.folder(source, target, cancellable).await
+) -> Result<TargetFolder, glib::Error> {
+    if target.is_native() && (device.is_none() || device != parent.device) {
+        Ok(TargetFolder {
+            names: policy.folder(source, target, cancellable).await?,
+            device,
+        })
     } else {
         Ok(parent)
     }
@@ -2050,15 +2102,15 @@ fn copy_recursively_with_progress(
         })
         .await?;
         if info.file_type() == gio::FileType::Directory {
-            let made = into.makes_folder(&target, &cancellable).await;
-            if made {
+            let existing = into.existing_folder(&target, &cancellable).await;
+            if existing.is_none() {
                 let created_root = match &record {
                     CopyRecord::Root(root) => Some(root.clone()),
                     _ => None,
                 };
                 make_copy_folder(&target, &cancellable, &created_root).await?;
             }
-            let folder = names.of(&source, &target, made, &cancellable).await?;
+            let folder = names.of(&source, &target, existing, &cancellable).await?;
             let record = match record {
                 CopyRecord::Root(_) => CopyRecord::Nothing,
                 record => record,
@@ -2076,7 +2128,7 @@ fn copy_recursively_with_progress(
                 .await?;
             let names = names.within(folder);
             let mut renamed = Vec::new();
-            let mut listed = NamedChildren::new(&enumerator, folder);
+            let mut listed = NamedChildren::new(&enumerator, folder.names);
             let copied = async {
                 loop {
                     let children = listed.next(&cancellable).await?;
@@ -2085,7 +2137,7 @@ fn copy_recursively_with_progress(
                     }
                     for (name, kind, planned) in children {
                         let link = kind == gio::FileType::SymbolicLink;
-                        if link && (!folder.links || names.left.refused.get()) {
+                        if link && (!folder.names.links || names.left.refused.get()) {
                             names.left.add(source.child(&name), target.child(&name));
                             continue;
                         }
@@ -4127,7 +4179,7 @@ fn classify_merge<'a>(
     (source, target): (&'a gio::File, &'a gio::File),
     plan: &'a mut MergePlan,
     cancellable: &'a gio::Cancellable,
-    (policy, names): (&'a NamePolicy, FolderNames),
+    (policy, folder): (&'a NamePolicy, TargetFolder),
 ) -> Pin<Box<dyn Future<Output = Result<(), glib::Error>> + 'a>> {
     Box::pin(async move {
         let enumerator = await_cancellable(source, cancellable, |source, cancellable, result| {
@@ -4140,7 +4192,7 @@ fn classify_merge<'a>(
             );
         })
         .await?;
-        let mut listed = NamedChildren::new(&enumerator, names);
+        let mut listed = NamedChildren::new(&enumerator, folder.names);
         loop {
             let children = listed.next(cancellable).await?;
             if children.is_empty() {
@@ -4148,7 +4200,7 @@ fn classify_merge<'a>(
             }
             for (name, kind, planned) in children {
                 // Left out, so nothing at its name is replaced.
-                if kind == gio::FileType::SymbolicLink && !names.links {
+                if kind == gio::FileType::SymbolicLink && !folder.names.links {
                     continue;
                 }
                 let child = (
@@ -4156,7 +4208,7 @@ fn classify_merge<'a>(
                     kind == gio::FileType::Directory,
                     target.child(planned.target),
                 );
-                classify_merge_child(child, plan, cancellable, (policy, names)).await?;
+                classify_merge_child(child, plan, cancellable, (policy, folder)).await?;
             }
         }
     })
@@ -4167,15 +4219,15 @@ async fn classify_merge_child(
     (child_source, source_is_directory, child_target): (gio::File, bool, gio::File),
     plan: &mut MergePlan,
     cancellable: &gio::Cancellable,
-    (policy, names): (&NamePolicy, FolderNames),
+    (policy, folder): (&NamePolicy, TargetFolder),
 ) -> Result<(), glib::Error> {
     if cancellable.is_cancelled() {
         return Err(cancelled_local_operation());
     }
-    let target_type =
+    let target_info =
         match await_cancellable(&child_target, cancellable, |target, cancellable, result| {
             target.query_info_async(
-                "standard::type",
+                "standard::type,unix::device",
                 gio::FileQueryInfoFlags::NOFOLLOW_SYMLINKS,
                 glib::Priority::DEFAULT,
                 Some(cancellable),
@@ -4184,11 +4236,11 @@ async fn classify_merge_child(
         })
         .await
         {
-            Ok(info) => Some(info.file_type()),
+            Ok(info) => Some(info),
             Err(error) if error.matches(gio::IOErrorEnum::NotFound) => None,
             Err(error) => return Err(error),
         };
-    match target_type {
+    match target_info.as_ref().map(gio::FileInfo::file_type) {
         None => {
             if let Some(location) = location_for_file(&child_target) {
                 plan.created.push(location);
@@ -4196,8 +4248,10 @@ async fn classify_merge_child(
         }
         Some(gio::FileType::Directory) if source_is_directory => {
             let folders = (&child_source, &child_target);
-            let names = existing_folder_names(policy, names, folders, cancellable).await?;
-            classify_merge(folders, plan, cancellable, (policy, names)).await?;
+            let device = target_info.and_then(|info| device(&child_target, &info));
+            let folder =
+                existing_folder_names(policy, folder, folders, device, cancellable).await?;
+            classify_merge(folders, plan, cancellable, (policy, folder)).await?;
         }
         Some(gio::FileType::Directory) => {
             return Err(glib::Error::new(
@@ -4220,6 +4274,30 @@ async fn classify_merge_child(
     Ok(())
 }
 
+/// The device of `folder`, one of the two a merge combines.
+async fn merged_folder_device(
+    folder: &gio::File,
+    cancellable: &gio::Cancellable,
+) -> Result<Option<u64>, glib::Error> {
+    let info = await_cancellable(folder, cancellable, |folder, cancellable, result| {
+        folder.query_info_async(
+            "standard::type,unix::device",
+            gio::FileQueryInfoFlags::NOFOLLOW_SYMLINKS,
+            glib::Priority::DEFAULT,
+            Some(cancellable),
+            move |output| result.resolve(output),
+        );
+    })
+    .await?;
+    if info.file_type() != gio::FileType::Directory {
+        return Err(glib::Error::new(
+            gio::IOErrorEnum::NotSupported,
+            &crate::i18n::tr("Only folders can be merged"),
+        ));
+    }
+    Ok(device(folder, &info))
+}
+
 /// Combines the source folder into the existing destination folder: every
 /// child lands inside `target`, overwriting same-named entries, while
 /// destination-only contents stay. Unlike [`replace_owing`] this writes
@@ -4237,29 +4315,15 @@ async fn merge_owing(
     if let Some(locations) = affected_locations {
         locations.extend([&source, &target].into_iter().filter_map(location_for_file));
     }
-    for file in [&source, &target] {
-        let file_type = await_cancellable(file, cancellable, |file, cancellable, result| {
-            file.query_info_async(
-                "standard::type",
-                gio::FileQueryInfoFlags::NOFOLLOW_SYMLINKS,
-                glib::Priority::DEFAULT,
-                Some(cancellable),
-                move |output| result.resolve(output),
-            );
-        })
-        .await?
-        .file_type();
-        if file_type != gio::FileType::Directory {
-            return Err(glib::Error::new(
-                gio::IOErrorEnum::NotSupported,
-                &crate::i18n::tr("Only folders can be merged"),
-            ));
-        }
-    }
+    merged_folder_device(&source, cancellable).await?;
+    let device = merged_folder_device(&target, cancellable).await?;
     let mut plan = MergePlan::default();
-    let names = hooks.names.folder(&source, &target, cancellable).await?;
+    let folder = TargetFolder {
+        names: hooks.names.folder(&source, &target, cancellable).await?,
+        device,
+    };
     let folders = (&source, &target);
-    classify_merge(folders, &mut plan, cancellable, (&hooks.names, names)).await?;
+    classify_merge(folders, &mut plan, cancellable, (&hooks.names, folder)).await?;
     let target_path = target.path();
     // Stage every overwritten original in Trash before the copy so undo can
     // restore it; on failure, report what was staged so it stays recoverable.
