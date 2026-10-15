@@ -6439,13 +6439,13 @@ impl OperationProvider for LocalOperationProvider {
                 }
             };
             let rules = names.applied(pasted_into.profile.names, pasted_into.profile.strictness);
+            let crossing = pasted_into.fixing(&filesystems);
             // Replace and Merge act on the name the prompt confirmed.
-            let fixing = pasted_into
-                .fixing(&filesystems)
-                .into_iter()
+            let fixing = crossing
+                .iter()
                 .zip(&request.items)
-                .map(|(fixing, item)| {
-                    fixing
+                .map(|(crossing, item)| {
+                    *crossing
                         && !matches!(
                             item.conflict,
                             TransferConflict::ReplaceExisting | TransferConflict::Merge
@@ -6660,9 +6660,11 @@ impl OperationProvider for LocalOperationProvider {
                 let replaced_permanently = Rc::new(Cell::new(false));
                 let undone = item.conflict != TransferConflict::Merge
                     && undone_when_cancelled(&source, &target);
-                // A destination known to hold no links is not asked to.
+                // A destination known to hold no links is not asked to make
+                // one; a move within its filesystem makes none.
                 let result = if kinds[index] == Some(gio::FileType::SymbolicLink)
                     && pasted_into.profile.symlinks == Some(false)
+                    && (crossing[index] || !request.move_sources)
                 {
                     Err(glib::Error::new(Unheld::Symlink, ""))
                 } else if is_duplicate {

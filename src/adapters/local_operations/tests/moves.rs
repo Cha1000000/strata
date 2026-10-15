@@ -884,6 +884,51 @@ fn a_move_keeps_the_links_it_leaves_out_at_the_source() -> Result<(), Box<dyn Er
 }
 
 #[test]
+fn a_link_moved_within_a_share_that_refuses_new_links_is_moved() -> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let root = tempfile::tempdir()?;
+    let outside = root.path().join("outside");
+    let share = root.path().join("share");
+    for folder in [&outside, &share.join("from"), &share.join("to")] {
+        fs::create_dir_all(folder)?;
+    }
+    std::os::unix::fs::symlink("target", outside.join("refused"))?;
+    // As the server made it.
+    std::os::unix::fs::symlink("target", share.join("from/link"))?;
+    let _share = FsQuirks::install(&share, Quirks::cifs());
+    let (_operation, events) = paste_move(
+        98,
+        &share,
+        &outside.join("refused"),
+        TransferConflict::FailIfExists,
+    );
+    pump_until_transfer(&events);
+    assert_eq!(names(&share)?, ["from", "to"]);
+
+    let (_operation, events) = paste_move(
+        99,
+        &share.join("to"),
+        &share.join("from/link"),
+        TransferConflict::FailIfExists,
+    );
+    pump_until_transfer(&events);
+
+    assert!(
+        matches!(
+            terminal_transfer(&events.borrow()),
+            Some(OperationEvent::Pasted { .. })
+        ),
+        "{:?}",
+        events.borrow()
+    );
+    assert_eq!(fs::read_link(share.join("to/link"))?, Path::new("target"));
+    assert!(names(&share.join("from"))?.is_empty());
+    Ok(())
+}
+
+#[test]
 fn a_move_through_gio_keeps_the_links_it_leaves_out_at_the_source() -> Result<(), Box<dyn Error>> {
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
         .lock()
