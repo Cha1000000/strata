@@ -2154,6 +2154,49 @@ fn a_name_refused_as_missing_neither_turns_unnamed_files_off_nor_writes_twice()
     Ok(())
 }
 
+#[test]
+fn a_name_given_back_that_the_mount_refuses_outright_fails_without_a_second_write()
+-> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let root = tempfile::tempdir()?;
+    let source = root.path().join("source");
+    let disk = root.path().join("disk");
+    fs::create_dir_all(&source)?;
+    fs::create_dir(&disk)?;
+    fs::write(source.join("a:b"), b"colon")?;
+    let scope = FsQuirks::install(
+        &disk,
+        Quirks {
+            invalid_name: Some(has_colon),
+            ..Quirks::ext4()
+        },
+    );
+
+    let copied = glib::MainContext::default().block_on(copy_new_recursively_on_filesystem(
+        gio::File::for_path(source.join("a:b")),
+        gio::File::for_path(disk.join("a:b")),
+        Taken::Fail,
+        gio::Cancellable::new(),
+        None,
+        NamePolicy::default(),
+        None,
+    ));
+
+    let error = copied.err().ok_or("a refused name was copied")?;
+    assert!(
+        error
+            .message()
+            .contains(&crate::i18n::tr(crate::services::INVALID_NAME_REASON)),
+        "{error}"
+    );
+    assert_eq!(scope.count(Op::OpenTmpfile), 1, "{:?}", scope.calls());
+    assert!(!scope.used_name(".strata-copy-*"), "{:?}", scope.calls());
+    assert!(names(&disk)?.is_empty());
+    Ok(())
+}
+
 fn refused_as_invalid(name: &OsStr) -> Option<Errno> {
     (name == "refused").then_some(Errno::INVAL)
 }

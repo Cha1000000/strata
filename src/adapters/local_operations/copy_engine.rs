@@ -2316,6 +2316,15 @@ impl<'a> FileCopy<'a> {
                     _ if matches!(error, Errno::NOSPC | Errno::DQUOT) || is_fatal(error) => {
                         Err(error.into())
                     }
+                    // A stage would be refused that name too; `ENOENT` may
+                    // instead mean that unnamed files cannot be linked.
+                    _ if matches!(
+                        error,
+                        Errno::INVAL | Errno::ILSEQ | Errno::NAMETOOLONG | Errno::BADMSG
+                    ) =>
+                    {
+                        Err(Failure::NameRefused(error))
+                    }
                     // The written bytes are copied out on the same device, so
                     // the source is never read twice.
                     _ => self
