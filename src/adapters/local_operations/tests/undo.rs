@@ -1041,9 +1041,12 @@ fn undone(record: MoveRecord) -> Vec<OperationEvent> {
 }
 
 fn refuses_refused(name: &OsStr) -> Option<Errno> {
-    name.as_encoded_bytes()
-        .starts_with(b"refused:")
-        .then_some(Errno::INVAL)
+    let name = name.as_encoded_bytes();
+    if name.starts_with(b"refused:") {
+        Some(Errno::INVAL)
+    } else {
+        name.starts_with(b"illegal:").then_some(Errno::ILSEQ)
+    }
 }
 
 #[test]
@@ -1065,7 +1068,9 @@ fn undoing_a_move_gives_fixed_names_back_and_reports_those_it_cannot() -> Result
         "taken:1",
         "refused:2",
         "failed:3",
+        "illegal:4",
         "plain.txt",
+        "long",
     ] {
         fs::write(project.join(name), name)?;
     }
@@ -1083,18 +1088,27 @@ fn undoing_a_move_gives_fixed_names_back_and_reports_those_it_cannot() -> Result
         },
     );
     let _usb = FsQuirks::install(&usb, Quirks::vfat());
-    let record = moved_onto_fat(&project, &usb);
+    let mut record = moved_onto_fat(&project, &usb);
     assert_eq!(
         names(&usb.join("project"))?,
         [
             "CON_",
             "failed_3",
+            "illegal_4",
+            "long",
             "plain.txt",
             "refused_2",
             "taken_1",
             "x_y"
         ]
     );
+    // As a name too long for the original, cut on a mount that takes more.
+    let long = "l".repeat(300);
+    record.renamed.push(crate::services::RenamedItem {
+        requested: Location::local(usb.join("project").join(&long)),
+        saved_as: Location::local(usb.join("project/long")),
+        cause: RenameCause::TooLong,
+    });
 
     let report = followed_report(&undone(record));
 
@@ -1103,6 +1117,8 @@ fn undoing_a_move_gives_fixed_names_back_and_reports_those_it_cannot() -> Result
         [
             "CON",
             "failed_3",
+            "illegal_4",
+            "long",
             "plain.txt",
             "refused_2",
             "taken:1",
@@ -1116,6 +1132,8 @@ fn undoing_a_move_gives_fixed_names_back_and_reports_those_it_cannot() -> Result
     assert_eq!(
         renamed_beneath(&project, &report),
         [
+            ("illegal:4", "illegal_4", RenameCause::Invalid),
+            (long.as_str(), "long", RenameCause::TooLong),
             ("refused:2", "refused_2", RenameCause::Invalid),
             ("taken:1", "taken_1", RenameCause::Taken),
         ]
@@ -1173,6 +1191,7 @@ fn undo_says_nothing_of_fixed_entries_gone_from_the_names_they_were_saved_as()
 #[test]
 fn undoing_a_move_back_to_another_kind_of_location_gives_fixed_names_back()
 -> Result<(), Box<dyn Error>> {
+    use crate::services::{RenameCause, RenamedItem};
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
         .lock()
         .map_err(|error| error.to_string())?;
@@ -1182,18 +1201,59 @@ fn undoing_a_move_back_to_another_kind_of_location_gives_fixed_names_back()
     let project = origin.join("project");
     fs::create_dir_all(project.join("x:y"))?;
     fs::create_dir(&usb)?;
-    for name in ["x:y/a:b", "CON"] {
+    for name in ["x:y/a:b", "CON", "taken", "plain", "long", "bytes"] {
         fs::write(project.join(name), name)?;
     }
     let _usb = FsQuirks::install(&usb, Quirks::vfat());
     let mut record = moved_onto_fat(&project, &usb);
+    // Names another item took meanwhile, and names GIO cannot give back.
+    let moved = usb.join("project");
+    let entry = |requested: OsString, saved_as: &str, cause| RenamedItem {
+        requested: Location::local(moved.join(requested)),
+        saved_as: Location::local(moved.join(saved_as)),
+        cause,
+    };
+    let long = OsString::from("l".repeat(300));
+    let bytes = OsString::from_vec(b"b\xffytes".to_vec());
+    record.renamed.extend([
+        entry("taken".into(), "plain", RenameCause::Invalid),
+        entry(long.clone(), "long", RenameCause::TooLong),
+        entry(bytes.clone(), "bytes", RenameCause::Invalid),
+    ]);
     // As a share's location, which GIO renames.
     record.original = Location::uri(gio::File::for_path(&project).uri());
 
     let report = followed_report(&undone(record));
 
-    assert_eq!(names(&project)?, ["CON", "x:y"]);
+    assert_eq!(
+        names(&project)?,
+        ["CON", "bytes", "long", "plain", "taken", "x:y"]
+    );
     assert_eq!(fs::read(project.join("x:y/a:b"))?, b"x:y/a:b");
-    assert!(report.is_empty(), "{report:?}");
+    let mut renamed = report
+        .renamed
+        .iter()
+        .map(|item| {
+            (
+                item.requested.file_name(),
+                item.saved_as.file_name(),
+                item.cause,
+            )
+        })
+        .collect::<Vec<_>>();
+    renamed.sort_by(|left, right| left.1.cmp(&right.1));
+    assert_eq!(
+        renamed,
+        [
+            (Some(bytes), Some("bytes".into()), RenameCause::Invalid),
+            (Some(long), Some("long".into()), RenameCause::TooLong),
+            (
+                Some("taken".into()),
+                Some("plain".into()),
+                RenameCause::Taken
+            ),
+        ]
+    );
+    assert!(report.kept.is_empty(), "{report:?}");
     Ok(())
 }
