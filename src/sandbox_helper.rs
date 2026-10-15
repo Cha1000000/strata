@@ -449,11 +449,13 @@ pub(crate) fn browser_render(
     response
 }
 
+const RGBA_CHANNELS: u64 = 4;
+const MAX_DECODED_PIXELS: u64 = FILE_SIZE_LIMIT_BYTES / RGBA_CHANNELS;
+
 pub(crate) fn exceeds_decoded_frame_budget(width: i32, height: i32) -> bool {
     let width = u64::try_from(width).unwrap_or(0);
     let height = u64::try_from(height).unwrap_or(0);
-    const RGBA_CHANNELS: u64 = 4;
-    width.saturating_mul(height).saturating_mul(RGBA_CHANNELS) > FILE_SIZE_LIMIT_BYTES
+    width.saturating_mul(height) > MAX_DECODED_PIXELS
 }
 
 fn read_jpeg_dimensions<R: io::Read + io::Seek>(reader: &mut R) -> Option<(i32, i32)> {
@@ -600,7 +602,15 @@ fn render_camera_raw(path: &Path, size: i32) -> Result<Vec<u8>, String> {
 }
 
 fn render_oversized(path: &Path, size: i32) -> Option<Vec<u8>> {
-    read_exif_thumbnail(path, size).or_else(|| render_reduced_jpeg(path, size))
+    let thumbnail = read_exif_thumbnail(path, size);
+    let covers_size = thumbnail
+        .as_deref()
+        .and_then(|png| read_png_dimensions(&mut io::Cursor::new(png)))
+        .is_some_and(|(width, height)| width.max(height) >= size);
+    if covers_size {
+        return thumbnail;
+    }
+    render_reduced_jpeg(path, size).or(thumbnail)
 }
 
 fn render_reduced_jpeg(path: &Path, size: i32) -> Option<Vec<u8>> {
@@ -632,7 +642,9 @@ fn render_imagemagick(path: &Path, size: i32) -> Result<Vec<u8>, String> {
     for executable in ["magick", "convert"] {
         let output = bounded_output(
             Command::new(executable)
-                .arg("-define")
+                .args(["-limit", "area"])
+                .arg(MAX_DECODED_PIXELS.to_string())
+                .args(["-limit", "disk", "0", "-define"])
                 .arg(format!("jpeg:size={size}x{size}"))
                 .arg(path)
                 .args(["-auto-orient", "-thumbnail"])
