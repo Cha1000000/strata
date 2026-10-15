@@ -97,19 +97,14 @@ impl OperationCompletion {
         match self.moving {
             Some(true) => {
                 if let Some(destination) = &self.destination {
-                    let kept_back = |source: &Location| {
-                        report
-                            .kept
-                            .iter()
-                            .any(|kept| kept.location.is_within(source))
-                    };
+                    let kept_back = kept_back(moved, report);
                     // A merged move deletes its source, so it cannot be moved
                     // back, and moving an item back over what its move left
                     // behind would replace newer entries: exclude both.
                     let movable: Vec<_> = moved
                         .iter()
                         .filter(|source| !merged.sources.contains(*source))
-                        .filter(|source| !kept_back(source))
+                        .filter(|source| !kept_back.contains(*source))
                         .cloned()
                         .collect();
                     publish(UndoEntry::Move(move_records(
@@ -118,7 +113,7 @@ impl OperationCompletion {
                         moved_to,
                         &report.renamed,
                     )));
-                    return moved.iter().any(kept_back);
+                    return !kept_back.is_empty();
                 }
             }
             Some(false) => {
@@ -146,6 +141,23 @@ impl OperationCompletion {
         }
         false
     }
+}
+
+/// The moved items whose sources kept entries the report lists, each the
+/// entry itself or a folder holding it.
+fn kept_back<'a>(moved: &'a [Location], report: &TransferReport) -> HashSet<&'a Location> {
+    let moved = moved.iter().collect::<HashSet<_>>();
+    let mut kept_back = HashSet::new();
+    for kept in &report.kept {
+        let mut location = Some(kept.location.clone());
+        while let Some(current) = location {
+            if let Some(source) = moved.get(&current) {
+                kept_back.insert(*source);
+            }
+            location = current.parent();
+        }
+    }
+    kept_back
 }
 
 impl Browser {

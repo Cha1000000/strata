@@ -1291,11 +1291,28 @@ fn a_move_undo_record_keeps_the_names_the_move_changed_inside_its_item() {
 fn an_item_whose_move_left_entries_behind_is_excluded_from_the_move_undo() {
     let project = Location::local("/fixture/project");
     let moved = Location::local("/fixture/report.txt");
-    // An entry the move left in the project, and a link left out whole,
-    // which never moved.
-    for (left, moving, kept_out_of_undo) in [
-        ("/fixture/project/notes.txt", vec![project.clone()], true),
-        ("/fixture/link", Vec::new(), false),
+    use crate::services::{KeptCause, SpecialKind};
+    // An entry the move left in the project, the project itself, and a link
+    // left out whole, which never moved.
+    for (left, cause, moving, kept_out_of_undo) in [
+        (
+            "/fixture/project/notes.txt",
+            KeptCause::Changed,
+            vec![project.clone()],
+            true,
+        ),
+        (
+            "/fixture/project",
+            KeptCause::Changed,
+            vec![project.clone()],
+            true,
+        ),
+        (
+            "/fixture/link",
+            KeptCause::Skipped(SpecialKind::Symlink),
+            Vec::new(),
+            false,
+        ),
     ] {
         let browser = Browser::new(Rc::new(FakeFileSource));
         browser.set_operation_provider(Rc::new(ImmediateOperationProvider));
@@ -1318,7 +1335,7 @@ fn an_item_whose_move_left_entries_behind_is_excluded_from_the_move_undo() {
             report: crate::services::TransferReport {
                 kept: vec![crate::services::KeptItem {
                     location: Location::local(left),
-                    cause: crate::services::KeptCause::Changed,
+                    cause,
                 }],
                 ..Default::default()
             },
