@@ -72,30 +72,40 @@ The interactive installer detects the Linux architecture, glibc version, Arch
 Linux, and Omarchy 3 or 4. It installs the latest verified stable release and
 offers optional desktop-menu, default-folder-handler, "Open file location", system
 file chooser, encrypted-volume unlock, SMB, broader image/RAW, and Omarchy keybind
-integration:
+integration.
+
+Each release publishes the installer as an attested asset. Download it from the
+latest stable release and verify it before running it:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/lgse/strata/main/install.sh | bash
+curl -fsSLO https://github.com/lgse/strata/releases/latest/download/install.sh
+curl -fsSLO https://github.com/lgse/strata/releases/latest/download/install.sh.sha256
+sha256sum --check install.sh.sha256
+gh attestation verify install.sh --repo lgse/strata   # if GitHub CLI is authenticated
+bash install.sh
 ```
 
+Every verification you run must succeed. Read `install.sh` before running it if
+you want to review exactly what it will do. Do not pipe the installer from the
+`main` branch into a shell: that copy has not been released or verified.
+
 The installer shows every privileged package operation before asking to run it.
-It verifies both the published SHA-256 digest and GitHub Actions provenance before
-installing anything from the release archive. The binary is installed per-user at
-`~/.local/bin/strata`.
+It verifies the release archive's published SHA-256 digest, and its GitHub Actions
+provenance when GitHub CLI is authenticated, before installing anything from it.
+The binary is installed per-user at `~/.local/bin/strata`.
 
 For an unattended Arch or Omarchy installation, pass `--non-interactive`. This
 installs required dependencies and the binary without prompting; optional
 integrations remain disabled unless explicitly selected:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/lgse/strata/main/install.sh \
-  | bash -s -- --non-interactive \
-      --with-smb \
-      --with-raw \
-      --with-desktop-entry \
-      --with-folder-association \
-      --with-omarchy-keybinds \
-      --with-udiskie-unlock
+bash install.sh --non-interactive \
+  --with-smb \
+  --with-raw \
+  --with-desktop-entry \
+  --with-folder-association \
+  --with-omarchy-keybinds \
+  --with-udiskie-unlock
 ```
 
 Each `--with-*` flag implies `--non-interactive`, and folder association implies
@@ -111,7 +121,7 @@ never installs the `udiskie` package. Unattended installs need
 leave it declined. Restore on Arch with `strata --uninstall-udiskie-unlock`, not
 Settings.
 
-Non-interactive package installation requires passwordless sudo or cached credentials. Run `./install.sh --help` for the full option list.
+Non-interactive package installation requires passwordless sudo or cached credentials. Run `bash install.sh --help` for the full option list.
 
 Phone backends are not installed by the script. For optional iPhone/iPad or Android
 access, follow [Connecting phones](#connecting-phones) after installation.
@@ -683,7 +693,7 @@ Files shown while browsing are untrusted. Image, camera RAW, PDF, thumbnail, and
 
 Only media helpers may receive allowlisted GPU render devices, and only for accelerated decoding; image, PDF, and thumbnail helpers receive no device mounts. Images are normalized to bounded PNG images. Media arrives incrementally as validated raw RGBA frames and fixed-format PCM: GTK presents textures and GStreamer outputs raw audio, without opening the original file or decoding a compressed clip. Four media sessions per process, bounded queues, and paused-worker cleanup limit concurrent work. Cancellation or timeout kills the process group and Bubblewrap PID namespace, tearing down descendants. Missing isolation, crashes, malformed output, timeouts, and permission failures all fail closed to a normal icon or **Preview unavailable**—Strata never silently retries an untrusted native parser without the sandbox.
 
-Plain-text and source previews are different: they stay in process because they do not invoke a native format parser, and reads are capped at 1 MiB. See [Preview sandbox](docs/preview-sandbox.md) for provider ordering, exact mounts, formats, and resource budgets.
+Plain-text and source previews are different: they stay in process because they do not invoke a native format parser, and reads are capped at 1 MiB. See [Preview sandbox](docs/preview-sandbox.md) for provider ordering, exact mounts, formats, and resource budgets. For settings that further reduce exposure, such as software-only video decoding, see [Hardened configuration](docs/hardened-configuration.md).
 
 ## Technical specifications
 
@@ -741,6 +751,7 @@ Start with [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request. Dee
 - [10xer mode](docs/10xer-mode.md)
 - [Architecture principles](docs/architecture.md)
 - [Preview sandbox](docs/preview-sandbox.md)
+- [Hardened configuration](docs/hardened-configuration.md)
 - [Performance baseline](docs/performance-baseline.md)
 - [Custom actions](docs/custom-actions.md)
 - [Themes and Omarchy integration](docs/themes.md)

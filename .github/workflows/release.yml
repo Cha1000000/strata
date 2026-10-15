@@ -337,6 +337,11 @@ jobs:
           path: dist
           merge-multiple: true
 
+      - name: Stage installer
+        run: |
+          install -m 0644 install.sh dist/install.sh
+          (cd dist && sha256sum install.sh > install.sh.sha256)
+
       - name: Attest release artifacts
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
