@@ -1500,6 +1500,83 @@ fn a_fat_copy_fixes_an_invalid_name_instead_of_discarding_the_whole_tree()
 }
 
 #[test]
+fn a_gio_copy_lists_a_whole_folder_first_only_where_the_mount_takes_two_names_for_one()
+-> Result<(), Box<dyn Error>> {
+    use super::super::{NamedChildren, mount_profile::FolderNames};
+    use crate::adapters::volume::{NameEncoding, NameProfile, Reserved};
+    use crate::services::RenameCause;
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let root = tempfile::tempdir()?;
+    let folder = root.path().join("folder");
+    fs::create_dir(&folder)?;
+    for name in ["a:b", "a_b"] {
+        fs::write(folder.join(name), name)?;
+    }
+    // More than one batch of 64 children.
+    for index in 0..100 {
+        fs::write(folder.join(format!("pad {index:03}")), b"")?;
+    }
+    let ntfs3 = NameProfile::windows(Reserved::Bare, NameEncoding::Utf8);
+    let fat = NameProfile {
+        folds: true,
+        ..ntfs3
+    };
+    for (rules, listed_first) in [(ntfs3, false), (fat, true)] {
+        let batches = glib::MainContext::default().block_on(async {
+            let source = gio::File::for_path(&folder);
+            let cancellable = gio::Cancellable::new();
+            let enumerator =
+                await_cancellable(&source, &cancellable, |source, cancellable, result| {
+                    source.enumerate_children_async(
+                        "standard::name,standard::type",
+                        gio::FileQueryInfoFlags::NOFOLLOW_SYMLINKS,
+                        glib::Priority::DEFAULT,
+                        Some(cancellable),
+                        move |output| result.resolve(output),
+                    );
+                })
+                .await?;
+            let names = FolderNames {
+                rules,
+                fixing: true,
+                links: true,
+            };
+            let mut listed = NamedChildren::new(&enumerator, names);
+            let mut batches = Vec::new();
+            loop {
+                let batch = listed.next(&cancellable).await?;
+                if batch.is_empty() {
+                    return Ok::<_, glib::Error>(batches);
+                }
+                batches.push(batch);
+            }
+        })?;
+
+        let fixed = batches
+            .iter()
+            .flatten()
+            .filter(|(_, _, planned)| planned.cause.is_some())
+            .map(|(name, _, planned)| (name.clone(), planned.target.clone(), planned.cause))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            fixed,
+            [("a:b".into(), "a_b (1)".into(), Some(RenameCause::Invalid))],
+            "{rules:?}"
+        );
+        assert_eq!(batches.iter().map(Vec::len).sum::<usize>(), 102);
+        if listed_first {
+            assert_eq!(batches.len(), 1, "{rules:?}");
+        } else {
+            assert!(batches[0].len() <= 64, "{rules:?}");
+            assert_eq!(batches.last().map(Vec::len), Some(1), "{rules:?}");
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn fat_family_copies_number_fixed_names_past_the_names_their_siblings_keep()
 -> Result<(), Box<dyn Error>> {
     use crate::services::RenameCause::{Alias, Invalid};

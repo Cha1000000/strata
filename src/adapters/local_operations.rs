@@ -53,7 +53,7 @@ use gtk::{gio, glib, prelude::*};
 use copy_engine::SharedProgress;
 use fs_ops::{Entry, EntryStat, OffMain, fs};
 use mount_profile::{FolderNames, NamePolicy};
-use naming::{Key, PlanEntry, Planned, Taken, numbered_names, plan_names};
+use naming::{Key, PlanEntry, Planned, Taken, fix::fix_name, numbered_names, plan_names};
 use owed::{Deletion, Done, Owed, Settling};
 use placement::{COPY_PREFIX, Displacement, PlaceError, REPLACED_PREFIX, RenameFailure};
 use work_queue::{Group, Job, WorkQueue};
@@ -1697,42 +1697,101 @@ fn renamed_item(
     })
 }
 
-/// The next of a folder's children, as their names, their kinds, and the
-/// names they take in the target, with why those differ: batch by batch, or
-/// all at once where names are fixed, since which of two names a folder
-/// takes for one keeps it depends on both.
-async fn next_named_children(
-    enumerator: &gio::FileEnumerator,
-    cancellable: &gio::Cancellable,
-    names: &FolderNames,
-) -> Result<Vec<(OsString, gio::FileType, Planned)>, glib::Error> {
-    let mut children = Vec::new();
-    loop {
-        let batch = next_children(enumerator, cancellable).await?;
-        let listed = batch.is_empty();
-        children.extend(
-            batch
-                .iter()
-                .map(|child| (child.name().into_os_string(), child.file_type())),
-        );
-        if listed || !names.fixing {
-            break;
+/// A folder's children, as their names, their kinds, and the names they
+/// take in a target folder whose names are `names`, with why those differ.
+/// Children that keep their names come batch by batch; those whose names
+/// are fixed come once the folder is listed, numbered past every sibling.
+/// Where the mount takes two names for one, which of them keeps its name
+/// depends on both, so such a folder is listed first.
+struct NamedChildren<'a> {
+    enumerator: &'a gio::FileEnumerator,
+    names: FolderNames,
+    /// The names of the children that kept them.
+    kept: Vec<OsString>,
+    held: Vec<(OsString, gio::FileType)>,
+    listed: bool,
+}
+
+impl<'a> NamedChildren<'a> {
+    fn new(enumerator: &'a gio::FileEnumerator, names: FolderNames) -> Self {
+        Self {
+            enumerator,
+            names,
+            kept: Vec::new(),
+            held: Vec::new(),
+            listed: false,
         }
     }
-    let entries = children
-        .iter()
-        .map(|(name, kind)| PlanEntry {
-            name,
-            is_directory: *kind == gio::FileType::Directory,
-            fixing: names.fixing,
-        })
-        .collect::<Vec<_>>();
-    let planned = plan_names(&entries, &names.rules, Key::Folded).map_err(placement_error)?;
-    Ok(children
-        .into_iter()
-        .zip(planned)
-        .map(|((name, kind), planned)| (name, kind, planned))
-        .collect())
+
+    /// The next of them; none once all came.
+    async fn next(
+        &mut self,
+        cancellable: &gio::Cancellable,
+    ) -> Result<Vec<(OsString, gio::FileType, Planned)>, glib::Error> {
+        let kept = |name: OsString| Planned {
+            target: name,
+            cause: None,
+        };
+        while !self.listed {
+            let batch = next_children(self.enumerator, cancellable).await?;
+            self.listed = batch.is_empty();
+            let children = batch
+                .iter()
+                .map(|child| (child.name().into_os_string(), child.file_type()));
+            if !self.names.fixing {
+                return Ok(children
+                    .map(|(name, kind)| (name.clone(), kind, kept(name)))
+                    .collect());
+            }
+            if self.names.rules.folds {
+                self.held.extend(children);
+                continue;
+            }
+            let mut ready = Vec::new();
+            for (name, kind) in children {
+                let is_directory = kind == gio::FileType::Directory;
+                if fix_name(&name, &self.names.rules, is_directory)
+                    .cause
+                    .is_some()
+                {
+                    self.held.push((name, kind));
+                } else {
+                    self.kept.push(name.clone());
+                    ready.push((name.clone(), kind, kept(name)));
+                }
+            }
+            if !ready.is_empty() {
+                return Ok(ready);
+            }
+        }
+        let held = std::mem::take(&mut self.held);
+        if held.is_empty() {
+            return Ok(Vec::new());
+        }
+        let entries = self
+            .kept
+            .iter()
+            .map(|name| PlanEntry {
+                name,
+                is_directory: false,
+                fixing: false,
+            })
+            .chain(held.iter().map(|(name, kind)| PlanEntry {
+                name,
+                is_directory: *kind == gio::FileType::Directory,
+                fixing: true,
+            }))
+            .collect::<Vec<_>>();
+        let planned = plan_names(&entries, &self.names.rules, Key::Folded)
+            .map_err(placement_error)?
+            .into_iter()
+            .skip(self.kept.len());
+        Ok(held
+            .into_iter()
+            .zip(planned)
+            .map(|((name, kind), planned)| (name, kind, planned))
+            .collect())
+    }
 }
 
 fn was_cancelled(error: &glib::Error) -> bool {
@@ -2017,9 +2076,10 @@ fn copy_recursively_with_progress(
                 .await?;
             let names = names.within(folder);
             let mut renamed = Vec::new();
+            let mut listed = NamedChildren::new(&enumerator, folder);
             let copied = async {
                 loop {
-                    let children = next_named_children(&enumerator, &cancellable, &folder).await?;
+                    let children = listed.next(&cancellable).await?;
                     if children.is_empty() {
                         return Ok::<_, glib::Error>(());
                     }
@@ -4000,8 +4060,9 @@ fn classify_merge<'a>(
             );
         })
         .await?;
+        let mut listed = NamedChildren::new(&enumerator, names);
         loop {
-            let children = next_named_children(&enumerator, cancellable, &names).await?;
+            let children = listed.next(cancellable).await?;
             if children.is_empty() {
                 return Ok(());
             }
