@@ -23,7 +23,7 @@ def pin_gap(strata, index=0):
     )[index]
 
 
-def drag_to_pin(strata, names, index=0):
+def drag_to_pin(strata, names, index=0, *, modifiers=()):
     directory = strata.fixture.root.name
     strata.select_entry(names[0], directory)
     for name in names[1:]:
@@ -36,31 +36,34 @@ def drag_to_pin(strata, names, index=0):
         strata.pointer.drag_origin(strata.entry(names[0], directory)),
         pin_gap(strata, index).screen_bounds().center,
         release=False,
+        modifiers=modifiers,
     )
     strata.pointer.connection.button(1, False)
 
 
 @pytest.mark.parametrize("mode", ALL_MODES)
-def test_folder_pins_keep_selection_order_skip_duplicates_and_survive_restart(strata, mode):
+@pytest.mark.parametrize("move_only", [False, True], ids=["copy-or-move", "move-only"])
+def test_folder_pins_keep_selection_order_skip_duplicates_and_survive_restart(strata, mode, move_only):
+    modifiers = ["shift"] if move_only else []
     names = ["pin-a", "pin-b", "pin-c", "pin-d", "pin-e"]
     for name in names:
         strata.fixture.path(name).mkdir()
         strata.entry(name)
-    drag_to_pin(strata, [names[1]])
+    drag_to_pin(strata, [names[1]], modifiers=modifiers)
     strata.wait(lambda: len(bookmarks(strata)) == 1, "the first folder pin")
-    drag_to_pin(strata, [names[0], names[1], names[2]])
+    drag_to_pin(strata, [names[0], names[1], names[2]], modifiers=modifiers)
     expected = [
         f"{strata.fixture.path(name).as_uri()} {name}"
         for name in [names[0], names[2], names[1]]
     ]
     strata.wait(lambda: bookmarks(strata) == expected, "selection-order insertion without duplicates")
-    drag_to_pin(strata, [names[3]], index=1)
+    drag_to_pin(strata, [names[3]], index=1, modifiers=modifiers)
     expected.insert(1, f"{strata.fixture.path(names[3]).as_uri()} {names[3]}")
     strata.wait(lambda: bookmarks(strata) == expected, "insertion between pinned rows")
-    drag_to_pin(strata, [names[4]], index=-1)
+    drag_to_pin(strata, [names[4]], index=-1, modifiers=modifiers)
     expected.append(f"{strata.fixture.path(names[4]).as_uri()} {names[4]}")
     strata.wait(lambda: bookmarks(strata) == expected, "insertion after the last pin")
-    drag_to_pin(strata, [names[0]], index=-1)
+    drag_to_pin(strata, [names[0]], index=-1, modifiers=modifiers)
     for name in names:
         assert strata.fixture.path(name).is_dir(), "pinning must not move the source"
     strata.application.stop()
@@ -88,8 +91,8 @@ def test_files_and_mixed_selections_cannot_pin_or_transfer_through_a_gap(strata,
     assert file.read_text() == "unchanged"
 
 
-@pytest.mark.parametrize("mixed", [False, True])
-def test_foreign_folder_drags_validate_the_entire_selection_before_pinning(strata, mixed):
+@pytest.mark.parametrize(("mixed", "move_only"), [(False, False), (True, False), (False, True)])
+def test_foreign_folder_drags_validate_the_entire_selection_before_pinning(strata, mixed, move_only):
     folder = strata.fixture.path("foreign-folder")
     folder.mkdir()
     alias = strata.fixture.path("foreign-alias")
@@ -106,7 +109,12 @@ def test_foreign_folder_drags_validate_the_entire_selection_before_pinning(strat
     }
     source = ManagedProcess.spawn(
         "foreign-drag-source",
-        [sys.executable, str(Path(__file__).parents[1] / "fixtures/file_drag_source.py"), *map(str, paths)],
+        [
+            sys.executable,
+            str(Path(__file__).parents[1] / "fixtures/file_drag_source.py"),
+            *(["--move-only"] if move_only else []),
+            *map(str, paths),
+        ],
         log_dir=strata.environment.root,
         env=environment,
     )
@@ -120,7 +128,7 @@ def test_foreign_folder_drags_validate_the_entire_selection_before_pinning(strat
             lambda: tree.desktop().find(role="button", name="Foreign drag finished"),
             "external validation and the drop protocol to finish",
         )
-        expected = [] if mixed else [f"{path.as_uri()} {path.name}" for path in paths]
+        expected = [] if mixed or move_only else [f"{path.as_uri()} {path.name}" for path in paths]
         assert bookmarks(strata) == expected
         assert folder.is_dir() and alias.is_symlink()
     finally:
@@ -165,3 +173,21 @@ def test_pinned_folder_rows_remain_transfer_targets_and_remote_pins_have_gaps(st
         lambda: bookmarks(strata)[-1] == "sftp://host/unavailable Remote",
         "existing pinned-row reordering to remain available",
     )
+    expected = [
+        f"{source.as_uri()} {source.name}",
+        f"{destination.as_uri()} Destination",
+        "sftp://host/unavailable Remote",
+    ]
+    for gap_index, insert_index in [(0, 0), (-1, 2), (1, 1)]:
+        strata.pointer.drag(strata.sidebar_button("Remote"), pin_gap(strata, gap_index))
+        expected.remove("sftp://host/unavailable Remote")
+        expected.insert(insert_index, "sftp://host/unavailable Remote")
+        strata.wait(lambda: bookmarks(strata) == expected, "the pin to reorder through its insertion gap")
+    strata.pointer.drag(strata.sidebar_button("Destination"), pin_gap(strata, 0))
+    expected.insert(0, expected.pop())
+    strata.wait(lambda: bookmarks(strata) == expected, "the local pin to reorder without transferring its contents")
+    strata.application.stop()
+    strata.application.start()
+    assert bookmarks(strata) == expected
+    assert source.is_dir() and destination.is_dir()
+    assert (destination / file.name).read_text() == "row transfer"

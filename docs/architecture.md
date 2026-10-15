@@ -402,11 +402,19 @@ successful save. This preserves sequential external edits, not simultaneous writ
 other windows are refreshed on their next bookmark action, not by a live monitor.
 
 `ui/window/pinned_drop.rs` owns folder pinning through dedicated gaps between pinned
-rows, including an empty section. Row bodies retain their existing transfer and
+rows, including an empty section. Existing pins reorder through the same gaps and
+insertion indicator, using a provider-matched location snapshot rather than treating
+their string reorder payload as a new folder. Reordering resolves source and target
+locations against the latest bookmarks, preserves labels, and never resurrects a
+concurrently unpinned source. Row bodies retain their existing transfer, reorder and
 spring-navigation behavior; remote pins have insertion gaps even when their rows
-cannot accept transfers. Internal drags carry a provider-matched snapshot of entry
-locations and directory eligibility, without filesystem probes. External file lists
-and directory types are read asynchronously once per drag across that sidebar's
+cannot accept transfers. Internal folder drags carry a provider-matched snapshot of entry
+locations and directory eligibility, without filesystem probes. Pinning prefers the
+Copy protocol action, but accepts Move-only offers from provider-matched internal
+sources, whose drag-end handlers never delete data. Foreign sources must offer
+Copy: completing an external Move could ask the other application to delete the
+originals. Neither internal action dispatches a filesystem transfer. External file
+lists and directory types are read asynchronously once per drag across that sidebar's
 gaps. Validation issues one metadata query at a time and has a two-second deadline,
 including payload loading. Pending pin drops wait for that result and never become
 transfers; cancellation, failure, or timeout rejects the whole selection. Cancelling

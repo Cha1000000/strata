@@ -1823,6 +1823,27 @@ impl SidebarState {
         })
     }
 
+    fn reorder_pinned_before(
+        self: &Rc<Self>,
+        source: &Location,
+        before: Option<&Location>,
+    ) -> bool {
+        self.update_pinned_places(|places| {
+            let Some(source) = places.iter().position(|(location, _)| location == source) else {
+                return false;
+            };
+            let target = before
+                .and_then(|anchor| places.iter().position(|(location, _)| location == anchor));
+            match target {
+                Some(target) => reorder_pinned_places(places, source, target, false),
+                None => {
+                    let target = places.len() - 1;
+                    reorder_pinned_places(places, source, target, true)
+                }
+            }
+        })
+    }
+
     fn update_pinned_places(
         self: &Rc<Self>,
         change: impl FnOnce(&mut Vec<(Location, String)>) -> bool,
@@ -2071,8 +2092,17 @@ impl SidebarState {
         let drag = gtk::DragSource::builder()
             .actions(gtk::gdk::DragAction::MOVE)
             .build();
+        let weak_state = Rc::downgrade(self);
         drag.connect_prepare(move |_, _, _| {
-            Some(gtk::gdk::ContentProvider::for_value(&payload().to_value()))
+            let payload = payload();
+            let content = gtk::gdk::ContentProvider::for_value(&payload.to_value());
+            if let Some(index) = parse_pinned_drag_source(&payload)
+                && let Some(state) = weak_state.upgrade()
+                && let Some((location, _)) = state.pinned_places.borrow().get(index)
+            {
+                pinned_drop::start_reorder(&content, location.clone());
+            }
+            Some(content)
         });
         drag.connect_drag_begin(move |drag, _| {
             if let Some(row) = drag.widget() {
@@ -2081,6 +2111,7 @@ impl SidebarState {
             }
         });
         drag.connect_drag_end(move |drag, _, _| {
+            pinned_drop::clear_reorder();
             if let Some(row) = drag.widget() {
                 row.remove_css_class("dragging");
                 row.set_cursor_from_name(Some("pointer"));

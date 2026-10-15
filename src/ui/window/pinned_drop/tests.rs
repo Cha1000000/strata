@@ -25,7 +25,10 @@ fn pending_folder_validation_is_shared_and_delivers_the_whole_selection_once() {
                     let results = results.clone();
                     validation.on_ready(move |result| results.borrow_mut().push(result));
                 }
-                assert_eq!(validation.action(), gdk::DragAction::COPY);
+                assert_eq!(
+                    validation.action(gdk::DragAction::COPY),
+                    gdk::DragAction::COPY
+                );
                 let sources: Rc<[Location]> =
                     vec![Location::uri("sftp://host/a"), Location::local("/mount/b")].into();
                 send.send(Some(sources.clone())).expect("complete query");
@@ -60,7 +63,10 @@ fn a_stalled_query_times_out_and_drops_its_pending_io() {
                     let _ = done.send(result);
                 });
                 assert!(received.await.expect("timeout completion").is_none());
-                assert_eq!(validation.action(), gdk::DragAction::empty());
+                assert_eq!(
+                    validation.action(gdk::DragAction::COPY),
+                    gdk::DragAction::empty()
+                );
                 assert!(
                     query_send
                         .send(Some(vec![Location::local("/late")].into()))
@@ -98,5 +104,7 @@ fn abandoning_a_request_rejects_its_pending_drop_and_cancels_io() {
 fn a_rejected_selection_cannot_become_a_copy_or_partial_pin() {
     let validation = FolderValidation::ready(None);
     validation.on_ready(|result| assert!(result.is_none()));
-    assert_eq!(validation.action(), gdk::DragAction::empty());
+    for offered in [gdk::DragAction::COPY, gdk::DragAction::MOVE] {
+        assert_eq!(validation.action(offered), gdk::DragAction::empty());
+    }
 }

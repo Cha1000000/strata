@@ -229,6 +229,21 @@ fn pinning_merges_latest_bookmarks_and_persists_aliases_in_selection_order() {
             assert_eq!(*sidebar.state.pinned_places.borrow(), external);
             assert!(sidebar.state.pin_locations_before(&locations, None));
             assert_eq!(load_pinned_places().expect("unchanged pins"), external);
+            let later = (Location::local("/external/later"), "Later".to_owned());
+            external.insert(0, later);
+            save_pinned_places(&external).expect("another external edit");
+            assert!(
+                sidebar
+                    .state
+                    .reorder_pinned_before(&locations[0], Some(&initial[1].0))
+            );
+            let moved = external.remove(2);
+            external.insert(4, moved);
+            assert_eq!(load_pinned_places().expect("reordered pins"), external);
+            external.retain(|(location, _)| location != &locations[0]);
+            save_pinned_places(&external).expect("external unpin");
+            assert!(sidebar.state.reorder_pinned_before(&locations[0], None));
+            assert_eq!(load_pinned_places().expect("no resurrected pin"), external);
             view.browser().clear_observer();
             sidebar.disconnect();
         },

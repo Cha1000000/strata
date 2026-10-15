@@ -2305,7 +2305,7 @@ scrollbar.horizontal > range > trough > slider {
 
 .sidebar-pin-gap,
 .sidebar-pin-gap:drop(active) {
-  min-height: 8px;
+  min-height: 4px;
   margin: 0 8px;
   background: transparent;
   outline: none;
