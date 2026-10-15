@@ -199,6 +199,7 @@ pub(crate) fn preview(
 ) -> Option<Result<Vec<u8>, String>> {
     let operation = match operation {
         ParseOperation::PreviewImage | ParseOperation::DocumentImage => Operation::PreviewImage,
+        ParseOperation::PreviewRaw => Operation::PreviewRaw,
         ParseOperation::DocumentMermaid => Operation::DocumentMermaid,
         ParseOperation::DocumentMath { display: true } => Operation::DocumentMath,
         ParseOperation::DocumentMath { display: false } => Operation::DocumentMathInline,
@@ -216,6 +217,7 @@ pub(crate) fn preview(
 fn invalid_output_label(operation: Operation) -> &'static str {
     match operation {
         Operation::PreviewImage
+        | Operation::PreviewRaw
         | Operation::DocumentMermaid
         | Operation::DocumentMath
         | Operation::DocumentMathInline => "Invalid preview render",
@@ -233,6 +235,7 @@ fn parse_operation(operation: Operation) -> ParseOperation {
         Operation::FreeCadThumbnail => ParseOperation::ThumbnailModel(ModelFormat::FreeCad),
         Operation::ImageMetadata | Operation::MediaMetadata => ParseOperation::MediaMetadata,
         Operation::PreviewImage => ParseOperation::PreviewImage,
+        Operation::PreviewRaw => ParseOperation::PreviewRaw,
         Operation::DocumentMermaid => ParseOperation::DocumentMermaid,
         Operation::DocumentMath => ParseOperation::DocumentMath { display: true },
         Operation::DocumentMathInline => ParseOperation::DocumentMath { display: false },

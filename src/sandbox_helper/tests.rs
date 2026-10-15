@@ -20,7 +20,7 @@ use gdk_pixbuf::prelude::*;
 use super::{
     bounded_output, bounded_output_with_timeout, bounded_surface_dimensions,
     exceeds_decoded_frame_budget, is_svg_head, pdf_render_request, read_exif_thumbnail,
-    read_limited, render_pixbuf, render_raw, render_raw_thumbnail, render_simple_dcraw, run,
+    read_limited, render_camera_raw, render_pixbuf, render_raw, render_simple_dcraw, run,
     scale_embedded_thumbnail, svg_source,
 };
 
@@ -189,8 +189,8 @@ fn oversized_images_exceeding_decoded_frame_budget_are_rejected_safely() {
         render_pixbuf(&path, 256).expect_err("render_pixbuf must reject oversized image");
     assert!(pixbuf_err.contains("decoded frame budget"));
 
-    let raw_thumb_err = render_raw_thumbnail(&path, 256)
-        .expect_err("render_raw_thumbnail must reject oversized image");
+    let raw_thumb_err =
+        render_camera_raw(&path, 256).expect_err("render_camera_raw must reject oversized image");
     assert!(raw_thumb_err.contains("decoded frame budget"));
 
     let output = directory.path().join("out.png");
@@ -322,7 +322,7 @@ fn oversized_images_with_exif_thumbnail_render_thumbnail_and_preview() {
     let direct_exif = read_exif_thumbnail(&path, 256).expect("read_exif_thumbnail directly");
     assert_eq!(direct_exif, thumb_png);
 
-    let raw_thumb_png = render_raw_thumbnail(&path, 256).expect("render_raw_thumbnail with exif");
+    let raw_thumb_png = render_camera_raw(&path, 256).expect("render_camera_raw with exif");
     let raw_pixbuf = gdk_pixbuf::Pixbuf::from_read(std::io::Cursor::new(raw_thumb_png))
         .expect("decode raw thumbnail png");
     assert_eq!((raw_pixbuf.width(), raw_pixbuf.height()), (32, 24));
@@ -545,32 +545,58 @@ fn concurrent_raw_fallbacks_do_not_share_staging_files() {
 }
 
 #[test]
-fn thumbnail_raw_uses_embedded_preview_fallbacks() {
+fn raw_thumbnails_and_previews_use_embedded_preview_fallbacks() {
     let directory = tempfile::tempdir().expect("tempdir");
     let input = directory.path().join("photo.ARW");
     let output = directory.path().join("result.png");
     std::fs::write(&input, b"not a camera file").expect("write stub");
 
-    let pixbuf = render_pixbuf(&input, 256).expect_err("stub must fail pixbuf");
-    let thumbnail = render_raw_thumbnail(&input, 256);
-    let helper = run(&[
-        "thumbnail-raw".into(),
-        input.to_string_lossy().into_owned(),
-        output.to_string_lossy().into_owned(),
-        "256".into(),
-        "software".into(),
-    ]);
+    for (operation, size) in [("thumbnail-raw", 256), ("preview-raw", 800)] {
+        let pixbuf = render_pixbuf(&input, size).expect_err("stub must fail pixbuf");
+        let rendered = render_camera_raw(&input, size);
+        let helper = run(&[
+            operation.into(),
+            input.to_string_lossy().into_owned(),
+            output.to_string_lossy().into_owned(),
+            size.to_string(),
+            "software".into(),
+        ]);
 
-    match thumbnail {
-        Ok(_) => helper.expect("thumbnail-raw should use embedded preview fallbacks"),
-        Err(thumbnail) => {
-            assert_ne!(pixbuf, thumbnail);
-            assert_eq!(
-                helper.expect_err("stub should fail RAW fallbacks"),
-                thumbnail
-            );
+        match rendered {
+            Ok(_) => helper
+                .unwrap_or_else(|error| panic!("{operation} should use RAW fallbacks: {error}")),
+            Err(rendered) => {
+                assert_ne!(pixbuf, rendered);
+                assert_eq!(
+                    helper.expect_err("stub should fail RAW fallbacks"),
+                    rendered,
+                    "{operation}"
+                );
+            }
         }
     }
+}
+
+#[test]
+fn embedded_previews_follow_their_exif_orientation() {
+    let source = gdk_pixbuf::Pixbuf::new(gdk_pixbuf::Colorspace::Rgb, false, 8, 40, 20)
+        .expect("allocate source");
+    let base = source.save_to_bufferv("jpeg", &[]).expect("encode jpeg");
+    let tiff = [
+        b"MM\0\x2a\0\0\0\x08".as_slice(),
+        &[0, 1, 0x01, 0x12, 0, 3, 0, 0, 0, 1, 0, 6, 0, 0, 0, 0, 0, 0],
+    ]
+    .concat();
+    let mut jpeg = vec![0xff, 0xd8, 0xff, 0xe1];
+    jpeg.extend_from_slice(&((2 + 6 + tiff.len()) as u16).to_be_bytes());
+    jpeg.extend_from_slice(b"Exif\0\0");
+    jpeg.extend_from_slice(&tiff);
+    jpeg.extend_from_slice(&base[2..]);
+
+    let png = super::scale_embedded_thumbnail(&jpeg, 800).expect("render embedded preview");
+    let rendered =
+        gdk_pixbuf::Pixbuf::from_read(std::io::Cursor::new(png)).expect("decode rendered png");
+    assert_eq!((rendered.width(), rendered.height()), (20, 40));
 }
 
 fn archive_list_output(

@@ -141,6 +141,7 @@ pub(crate) enum ParseOperation {
     ThumbnailCover(CoverFormat),
     PreviewCover(CoverFormat),
     PreviewImage,
+    PreviewRaw,
     InspectImage,
     ConvertImage,
     DocumentImage,
@@ -180,6 +181,7 @@ impl ParseOperation {
             Self::ThumbnailCover(_) => "thumbnail-cover",
             Self::PreviewCover(_) => "preview-cover",
             Self::PreviewImage => "preview-image",
+            Self::PreviewRaw => "preview-raw",
             Self::InspectImage => "inspect-image",
             Self::ConvertImage => "convert-image",
             Self::DocumentImage => "document-image",
@@ -262,6 +264,7 @@ impl ParseOperation {
                 crate::services::image_conversion::MAX_PIXELS,
             )),
             Self::PreviewImage
+            | Self::PreviewRaw
             | Self::DocumentImage
             | Self::DocumentMermaid
             | Self::DocumentMath { .. } => Some((800, 800, 800 * 800)),
@@ -290,6 +293,7 @@ impl ParseOperation {
             | Self::ThumbnailRaw
             | Self::ThumbnailPdf
             | Self::PreviewImage
+            | Self::PreviewRaw
             | Self::RawMetadata
             | Self::PreviewPdf(_) => Some(MAX_RASTER_INPUT_BYTES),
             Self::PreviewModel(_) | Self::ThumbnailModel(_) => Some(MAX_MODEL_INPUT_BYTES),

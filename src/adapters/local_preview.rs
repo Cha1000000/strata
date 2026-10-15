@@ -547,6 +547,11 @@ impl LocalPreviewProvider {
                 PreviewContent::Pdf { .. } => Some(ParseOperation::PreviewPdf(pdf_render_size(
                     request.media_size,
                 ))),
+                PreviewContent::Image
+                    if crate::sandbox::raw_metadata::is_raw(Path::new(&entry.native_name)) =>
+                {
+                    Some(ParseOperation::PreviewRaw)
+                }
                 PreviewContent::Image => Some(ParseOperation::PreviewImage),
                 PreviewContent::Media => None,
                 PreviewContent::Text { .. }
@@ -560,7 +565,10 @@ impl LocalPreviewProvider {
             }};
             if let Some(operation) = &operation {
                 let staged = if entry.location.native_path().is_none() {
-                    if !matches!(operation, ParseOperation::PreviewImage) {
+                    if !matches!(
+                        operation,
+                        ParseOperation::PreviewImage | ParseOperation::PreviewRaw
+                    ) {
                         emit(PreviewEvent::Failed {
                             request_id,
                             entry,

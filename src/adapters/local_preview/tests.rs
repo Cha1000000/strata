@@ -879,6 +879,11 @@ fn preview_families_follow_file_bytes_not_names() {
             Resolved::Unsupported,
         ),
         ("wide.txt", &utf16[..], Resolved::Text("hi\n".into())),
+        (
+            "DSCF0001.RAF",
+            &b"FUJIFILMCCD-RAW 0201FF383501"[..],
+            Resolved::Image,
+        ),
     ] {
         let path = directory.path().join(name);
         fs::write(&path, bytes).expect("preview fixture");
@@ -913,14 +918,16 @@ fn preview_families_follow_file_bytes_not_names() {
             request,
             Rc::new(move |event| events_for_emit.borrow_mut().push(event)),
             move |_, operation, _, _, _| {
-                assert!(
+                let expected = if name.ends_with(".RAF") {
+                    matches!(operation, crate::sandbox::ParseOperation::PreviewRaw)
+                } else {
                     matches!(
                         operation,
                         crate::sandbox::ParseOperation::PreviewImage
                             | crate::sandbox::ParseOperation::PreviewPdf(_)
-                    ),
-                    "{name} reached the sandbox as {operation:?}"
-                );
+                    )
+                };
+                assert!(expected, "{name} reached the sandbox as {operation:?}");
                 Ok(crate::sandbox::ParseOutput {
                     data: Vec::new(),
                     page: 0,

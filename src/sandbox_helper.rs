@@ -155,9 +155,10 @@ pub(crate) fn run(arguments: &[String]) -> Result<(), String> {
     let (png, metadata) = match operation.as_str() {
         "thumbnail-image" => (render_raw(input, numeric_value()?.clamp(16, 256))?, None),
         "thumbnail-raw" => (
-            render_raw_thumbnail(input, numeric_value()?.clamp(16, 256))?,
+            render_camera_raw(input, numeric_value()?.clamp(16, 256))?,
             None,
         ),
+        "preview-raw" => (render_camera_raw(input, 800)?, None),
         "thumbnail-pdf" => (
             render_pdf_thumbnail(input, numeric_value()?.clamp(16, 256))?,
             None,
@@ -409,7 +410,7 @@ pub(crate) fn browser_render(
                 }
             }
         }
-        Operation::Raw => response.png = render_raw_thumbnail(input, 256).unwrap_or_default(),
+        Operation::Raw => response.png = render_camera_raw(input, 256).unwrap_or_default(),
         Operation::Pdf => response.png = render_pdf_thumbnail(input, 256).unwrap_or_default(),
         Operation::Video => response.png = render_media(input, 256).unwrap_or_default(),
         Operation::ThreeMfThumbnail | Operation::FreeCadThumbnail => {
@@ -434,6 +435,7 @@ pub(crate) fn browser_render(
         Operation::PreviewImage => {
             response.png = document_media::image(input, 800).unwrap_or_default();
         }
+        Operation::PreviewRaw => response.png = render_camera_raw(input, 800).unwrap_or_default(),
         Operation::DocumentMermaid => {
             response.png = document_media::mermaid(input).unwrap_or_default();
         }
@@ -585,7 +587,7 @@ fn render_raw(path: &Path, size: i32) -> Result<Vec<u8>, String> {
     render_imagemagick(path, size).or_else(|_| render_dcraw(path, size))
 }
 
-fn render_raw_thumbnail(path: &Path, size: i32) -> Result<Vec<u8>, String> {
+fn render_camera_raw(path: &Path, size: i32) -> Result<Vec<u8>, String> {
     if let Some((width, height)) = image_dimensions(path)
         && exceeds_decoded_frame_budget(width, height)
     {
@@ -593,7 +595,7 @@ fn render_raw_thumbnail(path: &Path, size: i32) -> Result<Vec<u8>, String> {
             .or_else(|| render_dcraw(path, size).ok())
             .ok_or_else(|| "Image dimensions exceed the decoded frame budget".to_owned());
     }
-    // Prefer the camera JPEG so ImageMagick does not demosaic the list thumbnail.
+    // Prefer the camera JPEG so ImageMagick does not demosaic.
     render_dcraw(path, size)
         .or_else(|_| render_pixbuf(path, size))
         .or_else(|_| render_imagemagick(path, size))
@@ -708,6 +710,7 @@ fn scale_embedded_thumbnail_pixbuf(data: &[u8], size: i32) -> Result<Vec<u8>, St
     let pixbuf = loader
         .pixbuf()
         .ok_or_else(|| "Unable to decode embedded thumbnail".to_owned())?;
+    let pixbuf = pixbuf.apply_embedded_orientation().unwrap_or(pixbuf);
     let width = pixbuf.width().max(1);
     let height = pixbuf.height().max(1);
     let scale = (f64::from(size) / f64::from(width))
