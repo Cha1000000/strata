@@ -1133,6 +1133,41 @@ fn undoing_a_move_gives_fixed_names_back_and_reports_those_it_cannot() -> Result
 }
 
 #[test]
+fn undo_says_nothing_of_fixed_entries_gone_from_the_names_they_were_saved_as()
+-> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    // As a share's location, which GIO renames.
+    for through_gio in [false, true] {
+        let root = tempfile::tempdir()?;
+        let origin = root.path().join("origin");
+        let usb = root.path().join("usb");
+        let project = origin.join("project");
+        fs::create_dir_all(project.join("gone:4"))?;
+        fs::create_dir(&usb)?;
+        for name in ["deleted:1", "renamed:2", "kept:3", "gone:4/a:b"] {
+            fs::write(project.join(name), name)?;
+        }
+        let _usb = FsQuirks::install(&usb, Quirks::vfat());
+        let mut record = moved_onto_fat(&project, &usb);
+        if through_gio {
+            record.original = Location::uri(gio::File::for_path(&project).uri());
+        }
+        let moved = usb.join("project");
+        fs::remove_file(moved.join("deleted_1"))?;
+        fs::rename(moved.join("renamed_2"), moved.join("mine.txt"))?;
+        fs::remove_dir_all(moved.join("gone_4"))?;
+
+        let report = followed_report(&undone(record));
+
+        assert_eq!(names(&project)?, ["kept:3", "mine.txt"], "{through_gio}");
+        assert!(report.is_empty(), "{through_gio}: {report:?}");
+    }
+    Ok(())
+}
+
+#[test]
 fn undoing_a_move_back_to_another_kind_of_location_gives_fixed_names_back()
 -> Result<(), Box<dyn Error>> {
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT

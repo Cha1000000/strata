@@ -2622,7 +2622,8 @@ fn could_not_move(name: &str, error: &str) -> String {
 
 /// Gives the entries a move renamed beneath an item their names back once
 /// undo returned the item, deepest first, so that a renamed folder still
-/// has the name its entries' paths use. What keeps another name is reported.
+/// has the name its entries' paths use. What keeps another name is reported,
+/// and what is gone from that name is not.
 async fn restore_renamed(record: &MoveRecord, progress: &TransferProgressTracker) {
     let mut renamed = record
         .renamed
@@ -2637,7 +2638,7 @@ async fn restore_renamed(record: &MoveRecord, progress: &TransferProgressTracker
     let mut report = TransferReport::default();
     for (_, saved_as, requested, cause) in renamed {
         let cause = match restore_name(&saved_as, &requested).await {
-            Ok(()) => continue,
+            Ok(()) | Err(NameKept::Gone) => continue,
             Err(NameKept::Taken) => RenameCause::Taken,
             Err(NameKept::Refused) => cause,
             Err(NameKept::Failed(error)) => {
@@ -2671,6 +2672,8 @@ fn depth(location: &Location) -> usize {
 
 enum NameKept {
     Taken,
+    /// Nothing is at the name it was saved as any more.
+    Gone,
     /// The location cannot hold the name now.
     Refused,
     /// For this reason, ready for a `…: %{error}` slot.
@@ -2683,10 +2686,27 @@ async fn restore_name(saved_as: &Location, requested: &Location) -> Result<(), N
             Ok(Ok(())) => Ok(()),
             Ok(Err(RenameFailure::Place(PlaceError::Exists))) => Err(NameKept::Taken),
             Ok(Err(RenameFailure::Place(error))) if error.refuses_name() => Err(NameKept::Refused),
+            Ok(Err(RenameFailure::Place(PlaceError::Io(rustix::io::Errno::NOENT)))) => {
+                Err(NameKept::Gone)
+            }
             Ok(Err(failure)) => Err(NameKept::Failed(crate::services::gio_error_detail(
                 &rename_failure_error(failure, from, to),
             ))),
-            Err(error) => Err(NameKept::Failed(crate::services::gio_error_detail(&error))),
+            // As where the folder holding it is gone.
+            Err(error) => {
+                let from = from.to_path_buf();
+                let gone = gio::spawn_blocking(move || {
+                    std::fs::symlink_metadata(from)
+                        .is_err_and(|error| error.kind() == io::ErrorKind::NotFound)
+                })
+                .await
+                .unwrap_or(false);
+                Err(if gone {
+                    NameKept::Gone
+                } else {
+                    NameKept::Failed(crate::services::gio_error_detail(&error))
+                })
+            }
         };
     }
     // GIO renames take a name as text.
@@ -2710,6 +2730,7 @@ async fn restore_name(saved_as: &Location, requested: &Location) -> Result<(), N
     match renamed {
         Ok(_) => Ok(()),
         Err(error) if error.matches(gio::IOErrorEnum::Exists) => Err(NameKept::Taken),
+        Err(error) if error.matches(gio::IOErrorEnum::NotFound) => Err(NameKept::Gone),
         Err(error)
             if error.matches(gio::IOErrorEnum::InvalidFilename)
                 || error.matches(gio::IOErrorEnum::FilenameTooLong) =>
