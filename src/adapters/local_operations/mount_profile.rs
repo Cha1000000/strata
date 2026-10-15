@@ -298,35 +298,37 @@ impl NamePolicy {
         sources: &[gio::File],
         cancellable: &gio::Cancellable,
     ) -> PasteDestination {
-        let folders = sources
-            .iter()
-            .map(|source| {
-                source
-                    .parent()
-                    .filter(|_| source.is_native())
-                    .and_then(|parent| parent.path())
-            })
-            .collect::<Vec<_>>();
         let Some(path) = destination.path().filter(|_| destination.is_native()) else {
             let scheme = destination.uri_scheme().unwrap_or_default();
             return PasteDestination {
                 profile: MountProfile::gvfs(&scheme),
-                crossing: folders
+                crossing: sources
                     .iter()
-                    .map(|folder| folder.as_ref().map(|_| true))
+                    .map(|source| source.is_native().then_some(true))
                     .collect(),
                 filesystem: filesystem_id(destination, cancellable).await.ok().flatten(),
             };
         };
         let profiles = self.profiles.clone();
-        let unknown = folders.len();
-        gio::spawn_blocking(move || native_destination(&profiles, &path, &folders))
-            .await
-            .unwrap_or_else(|_| PasteDestination {
-                profile: MountProfile::unknown(),
-                crossing: vec![Some(true); unknown],
-                filesystem: None,
-            })
+        let (sources, unknown) = (sources.to_vec(), sources.len());
+        gio::spawn_blocking(move || {
+            let folders = sources
+                .iter()
+                .map(|source| {
+                    source
+                        .parent()
+                        .filter(|_| source.is_native())
+                        .and_then(|parent| parent.path())
+                })
+                .collect::<Vec<_>>();
+            native_destination(&profiles, &path, &folders)
+        })
+        .await
+        .unwrap_or_else(|_| PasteDestination {
+            profile: MountProfile::unknown(),
+            crossing: vec![Some(true); unknown],
+            filesystem: None,
+        })
     }
 
     /// How names are given to what is copied from the folder `source` into
