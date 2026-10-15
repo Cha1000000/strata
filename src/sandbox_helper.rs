@@ -399,7 +399,7 @@ pub(crate) fn browser_render(
                     if !oversized {
                         response.png =
                             render_pixbuf(input, 256.min(size.0.max(size.1))).unwrap_or_default();
-                    } else if let Some(png) = read_exif_thumbnail(input, 256) {
+                    } else if let Some(png) = render_oversized(input, 256) {
                         response.png = png;
                     }
                 }
@@ -575,10 +575,8 @@ fn render_raw(path: &Path, size: i32) -> Result<Vec<u8>, String> {
         && height > 0
     {
         if exceeds_decoded_frame_budget(width, height) {
-            if let Some(png) = read_exif_thumbnail(path, size) {
-                return Ok(png);
-            }
-            return Err("Image dimensions exceed the decoded frame budget".to_owned());
+            return render_oversized(path, size)
+                .ok_or_else(|| "Image dimensions exceed the decoded frame budget".to_owned());
         }
         return render_pixbuf(path, size.min(width.max(height)))
             .or_else(|_| render_imagemagick(path, size))
@@ -599,6 +597,16 @@ fn render_camera_raw(path: &Path, size: i32) -> Result<Vec<u8>, String> {
     render_dcraw(path, size)
         .or_else(|_| render_pixbuf(path, size))
         .or_else(|_| render_imagemagick(path, size))
+}
+
+fn render_oversized(path: &Path, size: i32) -> Option<Vec<u8>> {
+    read_exif_thumbnail(path, size).or_else(|| render_reduced_jpeg(path, size))
+}
+
+fn render_reduced_jpeg(path: &Path, size: i32) -> Option<Vec<u8>> {
+    let file = fs::File::open(path).ok()?;
+    read_jpeg_dimensions(&mut io::BufReader::new(file))?;
+    render_imagemagick(path, size).ok()
 }
 
 fn read_exif_thumbnail(path: &Path, size: i32) -> Option<Vec<u8>> {
@@ -624,6 +632,8 @@ fn render_imagemagick(path: &Path, size: i32) -> Result<Vec<u8>, String> {
     for executable in ["magick", "convert"] {
         let output = bounded_output(
             Command::new(executable)
+                .arg("-define")
+                .arg(format!("jpeg:size={size}x{size}"))
                 .arg(path)
                 .args(["-auto-orient", "-thumbnail"])
                 .arg(format!("{size}x{size}>"))

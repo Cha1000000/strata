@@ -20,8 +20,8 @@ use gdk_pixbuf::prelude::*;
 use super::{
     bounded_output, bounded_output_with_timeout, bounded_surface_dimensions,
     exceeds_decoded_frame_budget, is_svg_head, pdf_render_request, read_exif_thumbnail,
-    read_limited, render_camera_raw, render_pixbuf, render_raw, render_simple_dcraw, run,
-    scale_embedded_thumbnail, svg_source,
+    read_limited, render_camera_raw, render_imagemagick, render_pixbuf, render_raw,
+    render_simple_dcraw, run, scale_embedded_thumbnail, svg_source,
 };
 
 #[test]
@@ -162,25 +162,16 @@ fn oversized_images_exceeding_decoded_frame_budget_are_rejected_safely() {
     assert!(exceeds_decoded_frame_budget(20000, 20000));
 
     let directory = tempfile::tempdir().expect("image fixture");
-    let path = directory.path().join("oversized.jpg");
+    let path = directory.path().join("oversized.png");
 
     let source = gdk_pixbuf::Pixbuf::new(gdk_pixbuf::Colorspace::Rgb, false, 8, 10, 10)
         .expect("allocate small source");
-    let mut jpeg = source
-        .save_to_bufferv("jpeg", &[])
-        .expect("encode small jpeg");
-    let sof0 = jpeg
-        .windows(2)
-        .position(|marker| marker == [0xff, 0xc0])
-        .expect("locate SOF0 marker");
-    let height: u16 = 23598;
-    let width: u16 = 18354;
-    jpeg[sof0 + 5..sof0 + 7].copy_from_slice(&height.to_be_bytes());
-    jpeg[sof0 + 7..sof0 + 9].copy_from_slice(&width.to_be_bytes());
-    std::fs::write(&path, &jpeg).expect("write oversized fixture");
-
-    let info = gdk_pixbuf::Pixbuf::file_info(&path).expect("read file info");
-    assert_eq!((info.1, info.2), (18354, 23598));
+    let mut png = source
+        .save_to_bufferv("png", &[])
+        .expect("encode small png");
+    png[16..20].copy_from_slice(&18354u32.to_be_bytes());
+    png[20..24].copy_from_slice(&23598u32.to_be_bytes());
+    std::fs::write(&path, &png).expect("write oversized fixture");
 
     let raw_err = render_raw(&path, 256).expect_err("render_raw must reject oversized image");
     assert!(raw_err.contains("decoded frame budget"));
@@ -374,9 +365,53 @@ fn oversized_embedded_jpeg_is_rejected_before_decoding() {
     std::fs::write(&path, jpeg).expect("write oversized thumbnail fixture");
 
     assert!(read_exif_thumbnail(&path, 256).is_none());
-    assert!(render_raw(&path, 256).is_err());
-    let response = super::browser_render(&path, crate::sandbox::browser::wire::Operation::Image);
-    assert!(response.png.is_empty());
+}
+
+fn flat_gray_jpeg(width: u16, height: u16) -> Vec<u8> {
+    let single_code_table = |class: u8| {
+        let mut segment = vec![0xff, 0xc4, 0, 20, class, 1];
+        segment.extend_from_slice(&[0; 15]);
+        segment.push(0);
+        segment
+    };
+    let mut jpeg = vec![0xff, 0xd8, 0xff, 0xdb, 0, 67, 0];
+    jpeg.extend_from_slice(&[1; 64]);
+    jpeg.extend_from_slice(&[0xff, 0xc0, 0, 11, 8]);
+    jpeg.extend_from_slice(&height.to_be_bytes());
+    jpeg.extend_from_slice(&width.to_be_bytes());
+    jpeg.extend_from_slice(&[1, 1, 0x11, 0]);
+    jpeg.extend(single_code_table(0x00));
+    jpeg.extend(single_code_table(0x10));
+    jpeg.extend_from_slice(&[0xff, 0xda, 0, 8, 1, 1, 0, 0, 63, 0]);
+    let blocks = usize::from(width).div_ceil(8) * usize::from(height).div_ceil(8);
+    jpeg.resize(jpeg.len() + (blocks * 2).div_ceil(8), 0);
+    jpeg.extend_from_slice(&[0xff, 0xd9]);
+    jpeg
+}
+
+#[test]
+fn oversized_jpegs_render_through_a_reduced_decode() {
+    let directory = tempfile::tempdir().expect("image fixture");
+    let path = directory.path().join("panorama.jpg");
+    std::fs::write(&path, flat_gray_jpeg(12000, 12000)).expect("write panorama fixture");
+    assert!(exceeds_decoded_frame_budget(12000, 12000));
+
+    let preview = render_raw(&path, 256);
+    let thumbnail =
+        super::browser_render(&path, crate::sandbox::browser::wire::Operation::Image).png;
+    match render_imagemagick(&path, 256) {
+        Ok(_) => {
+            let preview = preview.expect("oversized JPEG preview");
+            let preview = gdk_pixbuf::Pixbuf::from_read(std::io::Cursor::new(preview))
+                .expect("decode preview png");
+            assert_eq!((preview.width(), preview.height()), (256, 256));
+            assert!(!thumbnail.is_empty());
+        }
+        Err(_) => {
+            assert!(preview.is_err());
+            assert!(thumbnail.is_empty());
+        }
+    }
 }
 
 #[test]
