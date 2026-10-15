@@ -747,3 +747,75 @@ fn keep_both_takes_the_next_number_past_names_already_taken() -> Result<(), Box<
     }
     Ok(())
 }
+
+#[test]
+fn replace_and_merge_act_on_the_name_the_prompt_confirmed() -> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let (replace, merge) = (TransferConflict::ReplaceExisting, TransferConflict::Merge);
+    let (vfat, ntfs3, cifs): (fn() -> Quirks, fn() -> Quirks, fn() -> Quirks) =
+        (Quirks::vfat, Quirks::ntfs3, Quirks::cifs);
+    for (preset, quirks, confirmed, fixed, conflict) in [
+        ("vfat", vfat, "CON", Some("CON_"), replace),
+        ("ntfs3", ntfs3, "a:b", Some("a_b"), replace),
+        ("ntfs3", ntfs3, "a:b", None, replace),
+        ("cifs", cifs, "a:b", Some("a_b"), replace),
+        ("ntfs3", ntfs3, "x:y", Some("x_y"), merge),
+        ("ntfs3", ntfs3, "x:y", None, merge),
+    ] {
+        let context = format!("{preset} {confirmed} beside {fixed:?}, {conflict:?}");
+        let root = tempfile::tempdir()?;
+        let (source, disk) = (root.path().join("source"), root.path().join("disk"));
+        fs::create_dir_all(&source)?;
+        fs::create_dir_all(&disk)?;
+        let merging = conflict == TransferConflict::Merge;
+        let file = |item: &str| {
+            if merging {
+                format!("{item}/same.txt")
+            } else {
+                item.to_owned()
+            }
+        };
+        for item in std::iter::once(confirmed).chain(fixed) {
+            if merging {
+                fs::create_dir_all(disk.join(item))?;
+            }
+            fs::write(disk.join(file(item)), item)?;
+        }
+        if merging {
+            fs::create_dir(source.join(confirmed))?;
+        }
+        fs::write(source.join(file(confirmed)), "incoming")?;
+        let _disk = FsQuirks::install(&disk, quirks());
+
+        run_paste(PasteRequest {
+            id: OperationRequestId(1615),
+            destination: Location::local(&disk),
+            items: vec![PasteItem {
+                source: Location::local(source.join(confirmed)),
+                conflict,
+            }],
+            move_sources: false,
+        });
+
+        assert_eq!(
+            fs::read(disk.join(file(confirmed)))?,
+            b"incoming",
+            "{context}"
+        );
+        if let Some(fixed) = fixed {
+            assert_eq!(
+                fs::read(disk.join(file(fixed)))?,
+                fixed.as_bytes(),
+                "{context}"
+            );
+        }
+        assert_eq!(
+            names(&disk)?.len(),
+            1 + usize::from(fixed.is_some()),
+            "{context}"
+        );
+    }
+    Ok(())
+}

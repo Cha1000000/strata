@@ -379,7 +379,8 @@ Names an item brings from another filesystem are fixed before copying, by the ru
 that holds each target folder, found through symbolic links and nested mounts: characters the mount
 cannot store become `_`, trailing dots and spaces are dropped, device names Windows reserves get
 `_`, and names too long for the mount are shortened. Names already on the destination's filesystem,
-as in a duplicate, are kept. A name that needs no change keeps it, even where a fixed name would
+as in a duplicate, are kept, and so is the name of an item chosen to replace or merge into the item
+of that name. A name that needs no change keeps it, even where a fixed name would
 equal it, unless FAT or exFAT takes it for another such name in its folder, or among a paste's
 top-level items, that sorts first in bytes (`Readme.txt` beside `README.txt`): it is then numbered
 as an alias before copying. Fixed names that equal another name are numbered too, in the byte order

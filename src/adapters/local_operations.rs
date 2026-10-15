@@ -6437,7 +6437,19 @@ impl OperationProvider for LocalOperationProvider {
                 }
             };
             let rules = names.applied(pasted_into.profile.names);
-            let fixing = pasted_into.fixing(&filesystems);
+            // Replace and Merge act on the name the prompt confirmed.
+            let fixing = pasted_into
+                .fixing(&filesystems)
+                .into_iter()
+                .zip(&request.items)
+                .map(|(fixing, item)| {
+                    fixing
+                        && !matches!(
+                            item.conflict,
+                            TransferConflict::ReplaceExisting | TransferConflict::Merge
+                        )
+                })
+                .collect::<Vec<_>>();
             let planned = match paste_targets(&sources, &rules, &fixing, &kinds) {
                 Ok(planned) => planned,
                 Err(error) => {
