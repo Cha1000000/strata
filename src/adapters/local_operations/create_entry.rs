@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 
 use super::{
-    await_cancellable, cancellation_handle, cancelled_event, validated_child, was_cancelled,
+    await_cancellable, operation_handle, cancelled_event, validated_child, was_cancelled,
 };
 use crate::{
     adapters::{gio_file_for_location, location_for_file},
@@ -145,7 +145,7 @@ pub(super) fn start(
             break;
         }
     });
-    cancellation_handle(cancellable)
+    operation_handle(cancellable)
 }
 
 /// SMB with POSIX extensions fails an exclusive file create over a folder

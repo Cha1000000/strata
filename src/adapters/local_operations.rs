@@ -5699,7 +5699,9 @@ fn home_trash_entries_at(
         .collect()
 }
 
-fn cancellation_handle(cancellable: gio::Cancellable) -> LoadHandle {
+fn operation_handle(cancellable: gio::Cancellable) -> LoadHandle {
+    // Install invalidation before the queued operation can learn mount capabilities.
+    super::volume::watch_operation_mounts();
     LoadHandle::new(move || cancellable.cancel())
 }
 
@@ -6067,7 +6069,7 @@ impl OperationProvider for LocalOperationProvider {
                 }),
             }
         });
-        cancellation_handle(cancellable)
+        operation_handle(cancellable)
     }
 
     fn create_directory(
@@ -6553,7 +6555,7 @@ impl OperationProvider for LocalOperationProvider {
                 locations: completed,
             });
         });
-        cancellation_handle(cancellable)
+        operation_handle(cancellable)
     }
 
     fn undo_move(&self, request: UndoMoveRequest, emit: Rc<dyn Fn(OperationEvent)>) -> LoadHandle {
@@ -6806,7 +6808,7 @@ impl OperationProvider for LocalOperationProvider {
                 locations: completed,
             });
         });
-        cancellation_handle(cancellable)
+        operation_handle(cancellable)
     }
 
     fn undo_rename(
@@ -6862,7 +6864,7 @@ impl OperationProvider for LocalOperationProvider {
                 }),
             }
         });
-        cancellation_handle(cancellable)
+        operation_handle(cancellable)
     }
 
     fn delete(&self, request: DeleteRequest, emit: Rc<dyn Fn(OperationEvent)>) -> LoadHandle {
@@ -6883,7 +6885,7 @@ impl OperationProvider for LocalOperationProvider {
             )
             .await;
         });
-        cancellation_handle(cancellable)
+        operation_handle(cancellable)
     }
 
     fn undo_copy(&self, request: UndoCopyRequest, emit: Rc<dyn Fn(OperationEvent)>) -> LoadHandle {
@@ -6896,7 +6898,7 @@ impl OperationProvider for LocalOperationProvider {
             }
             run_deletion(request.id, targets, false, emit, operation_cancellable).await;
         });
-        cancellation_handle(cancellable)
+        operation_handle(cancellable)
     }
 
     fn undo_merge(
@@ -6918,7 +6920,7 @@ impl OperationProvider for LocalOperationProvider {
             )
             .await;
         });
-        cancellation_handle(cancellable)
+        operation_handle(cancellable)
     }
 
     fn restore(&self, request: RestoreRequest, emit: Rc<dyn Fn(OperationEvent)>) -> LoadHandle {
@@ -7093,14 +7095,16 @@ impl OperationProvider for LocalOperationProvider {
                 });
             }
         });
-        cancellation_handle(cancellable)
+        operation_handle(cancellable)
     }
 
     fn compress(&self, request: CompressRequest, emit: Rc<dyn Fn(OperationEvent)>) -> LoadHandle {
+        super::volume::watch_operation_mounts();
         archive::compress(request, emit)
     }
 
     fn extract(&self, request: ExtractRequest, emit: Rc<dyn Fn(OperationEvent)>) -> LoadHandle {
+        super::volume::watch_operation_mounts();
         archive::extract(request, emit)
     }
 }

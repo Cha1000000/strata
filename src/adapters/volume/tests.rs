@@ -570,16 +570,49 @@ fn unreachable_uri_resolves_to_unknown_without_hanging() {
 }
 
 #[test]
-fn mount_changes_forget_real_capabilities_only() {
-    let real = MountKey::Device(u64::MAX - 7);
-    let scoped = MountKey::Test(u64::MAX - 7);
-    for key in [real, scoped] {
-        learn_mount_capability(key, |capabilities| capabilities.hard_links = Some(false));
-    }
+fn operation_mount_changes_invalidate_capabilities_before_preferences_are_read() {
+    crate::test_support::gtk_test(
+        "adapters::volume::tests::operation_mount_changes_invalidate_capabilities_before_preferences_are_read",
+        || {
+            use crate::services::{DeleteRequest, OperationEvent, OperationProvider, OperationRequestId};
+            use gtk::prelude::*;
 
-    invalidate_mount_snapshot();
+            let root = tempfile::tempdir().expect("operation fixture");
+            let path = root.path().join("delete.txt");
+            fs::write(&path, b"fixture").expect("fixture file");
+            let finished = Rc::new(std::cell::Cell::new(false));
+            let observed = finished.clone();
+            let operation = crate::adapters::LocalOperationProvider.delete(
+                DeleteRequest {
+                    id: OperationRequestId(1615),
+                    entries: vec![crate::test_support::operations::entry(Location::local(&path))],
+                    permanent: true,
+                },
+                Rc::new(move |event| {
+                    if matches!(event, OperationEvent::Deleted { .. }) {
+                        observed.set(true);
+                    }
+                }),
+            );
+            let real = MountKey::Device(u64::MAX - 7);
+            let scoped = MountKey::Test(u64::MAX - 7);
+            for key in [real, scoped] {
+                learn_mount_capability(key, |capabilities| capabilities.hard_links = Some(false));
+            }
 
-    assert_eq!(mount_capabilities(real), MountCapabilities::default());
-    assert_eq!(mount_capabilities(scoped).hard_links, Some(false));
-    forget_test_mount_capabilities(u64::MAX - 7);
+            gio_unix::MountMonitor::get().emit_by_name::<()>("mounts-changed", &[]);
+
+            assert_eq!(mount_capabilities(real), MountCapabilities::default());
+            assert_eq!(mount_capabilities(scoped).hard_links, Some(false));
+            forget_test_mount_capabilities(u64::MAX - 7);
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !finished.get() {
+                assert!(Instant::now() < deadline, "deletion did not finish");
+                glib::MainContext::default().iteration(false);
+                std::thread::yield_now();
+            }
+            assert!(!path.exists());
+            drop(operation);
+        },
+    );
 }
