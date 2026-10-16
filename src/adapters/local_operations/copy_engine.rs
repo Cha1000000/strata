@@ -34,16 +34,7 @@ use rustix::{
     io::Errno,
 };
 
-use super::{
-    LocalFileIdentity, PinnedEntry, Reported, StageContent, StagedSibling, Taken,
-    TransferProgressTracker, blocking_join_message, bounded_local_worker_count,
-    cancelled_local_operation, copy_failure_after_cleanup,
-    fs_ops::{Entry, EntryStat, FsOps, fs},
-    io_error, local_delete_worker_count, local_device_is_rotational, open_local_parent_directory,
-    os_error_detail, os_error_text, parallel_delete_local_blocking_with_workers, placement,
-    placement::{COPY_PREFIX, ENOTSUPP, PlaceError, STAGE_PREFIX},
-    placement_error, run_blocking, run_cancellable,
-};
+use super::{Taken, blocking_join_message, cancelled_local_operation, copy_failure_after_cleanup, deletion::{PinnedEntry, bounded_local_worker_count, local_delete_worker_count, local_device_is_rotational, parallel_delete_local_blocking_with_workers}, fs_ops::{Entry, EntryStat, FsOps, fs}, io_error, native_fs::{LocalFileIdentity, open_local_parent_directory, os_error_detail, os_error_text}, placement::{self, COPY_PREFIX, ENOTSUPP, PlaceError, STAGE_PREFIX}, progress::{Reported, TransferProgressTracker}, replacement::{StageContent, StagedSibling, placement_error}, run_blocking, run_cancellable};
 use crate::{
     adapters::volume::{
         CoarseTimes, Family, FuseFormat, MountCapabilities, MountKey, MountType, family,

@@ -13,9 +13,7 @@ use crate::adapters::volume::learn_mount_capability;
 
 #[test]
 fn nested_copy_shares_one_worker_budget_across_subdirectories() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let source = root.path().join("source");
     let target = root.path().join("target");
@@ -56,9 +54,7 @@ fn nested_copy_shares_one_worker_budget_across_subdirectories() -> Result<(), Bo
 
 #[test]
 fn recursive_copy_preserves_nested_directory_contents() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let unique = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)?
         .as_nanos();
@@ -101,9 +97,7 @@ fn recursive_copy_preserves_nested_directory_contents() -> Result<(), Box<dyn Er
 #[test]
 fn copy_recursively_does_not_follow_a_symlink_nested_inside_the_tree() -> Result<(), Box<dyn Error>>
 {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let unique = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)?
         .as_nanos();
@@ -146,9 +140,7 @@ fn copy_recursively_does_not_follow_a_symlink_nested_inside_the_tree() -> Result
 #[test]
 fn copy_recursively_of_a_symlink_creates_a_symlink_not_a_recursive_copy()
 -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let unique = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)?
         .as_nanos();
@@ -182,9 +174,7 @@ fn copy_recursively_of_a_symlink_creates_a_symlink_not_a_recursive_copy()
 
 #[test]
 fn copy_accepts_a_symlink_higher_in_the_sources_parent_path() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let actual_root = root.path().join("actual");
     let linked_root = root.path().join("linked");
@@ -209,9 +199,7 @@ fn copy_accepts_a_symlink_higher_in_the_sources_parent_path() -> Result<(), Box<
 #[test]
 fn cancelling_staged_remote_file_copy_removes_only_the_incomplete_stage()
 -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let source = root.path().join("source.bin");
     let target = root.path().join("target.bin");
@@ -244,9 +232,7 @@ fn cancelling_staged_remote_file_copy_removes_only_the_incomplete_stage()
 
 #[test]
 fn staged_remote_file_copy_preserves_a_racing_destination() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let source = root.path().join("source.bin");
     let target = root.path().join("target.bin");
@@ -289,9 +275,7 @@ fn staged_remote_file_copy_preserves_a_racing_destination() -> Result<(), Box<dy
 #[test]
 fn a_remote_keep_both_copy_takes_the_next_name_when_one_is_taken_meanwhile()
 -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let source = root.path().join("source.bin");
     let target = root.path().join("target.bin");
@@ -371,9 +355,7 @@ fn failed_incomplete_copy_cleanup_is_reported_as_a_failure() {
 
 #[test]
 fn cancelling_recursive_copy_removes_only_its_staging_output() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let source = root.path().join("source");
     let target = root.path().join("target");
@@ -414,9 +396,7 @@ fn cancelling_recursive_copy_removes_only_its_staging_output() -> Result<(), Box
 
 #[test]
 fn cancelling_a_new_file_copy_removes_the_incomplete_stage() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     for (case, preset) in [
         ("unnamed file", Quirks::default as Preset),
         ("named stage", || Quirks {
@@ -464,9 +444,7 @@ fn cancelling_a_new_file_copy_removes_the_incomplete_stage() -> Result<(), Box<d
 #[test]
 fn a_stage_name_left_by_a_lost_reply_is_adopted_and_a_taken_one_is_not()
 -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let is_stage = |name: &str| name.starts_with(".strata-copy-");
     for (op, folder) in [(Op::Create, false), (Op::Mkdir, true)] {
         for taken in [false, true] {
@@ -550,9 +528,7 @@ fn a_stage_name_left_by_a_lost_reply_is_adopted_and_a_taken_one_is_not()
 
 #[test]
 fn a_stage_replaced_during_the_copy_is_kept() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let (sources, destination) = (root.path().join("sources"), root.path().join("destination"));
     fs::create_dir(&sources)?;
@@ -599,9 +575,7 @@ fn a_stage_replaced_during_the_copy_is_kept() -> Result<(), Box<dyn Error>> {
 
 #[test]
 fn a_folder_swapped_for_a_link_during_the_copy_is_not_followed() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let source = root.path().join("source");
     let outside = root.path().join("outside");
@@ -638,9 +612,7 @@ fn a_folder_swapped_for_a_link_during_the_copy_is_not_followed() -> Result<(), B
 
 #[test]
 fn copying_symlinks_accepts_an_aliased_destination() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let actual = root.path().join("actual");
     let alias = root.path().join("alias");
@@ -686,9 +658,7 @@ fn make_fifo(path: &Path, mode: u32) -> io::Result<()> {
 fn special_files_inside_a_copied_folder_are_recreated_or_left_out_and_reported()
 -> Result<(), Box<dyn Error>> {
     use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let source = root.path().join("source");
     let destination = root.path().join("destination");
@@ -751,9 +721,7 @@ fn special_files_inside_a_copied_folder_are_recreated_or_left_out_and_reported()
 fn named_pipes_are_left_out_only_where_the_destination_refuses_them() -> Result<(), Box<dyn Error>>
 {
     use rustix::io::Errno;
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     // How vfat, exfat-fuse, SMB and others refuse a pipe, and errors that
     // stop the copy instead.
     let rows = [
@@ -812,9 +780,7 @@ fn named_pipes_are_left_out_only_where_the_destination_refuses_them() -> Result<
 fn a_named_pipe_whose_copy_fails_is_not_left_behind() -> Result<(), Box<dyn Error>> {
     use crate::adapters::volume::learn_mount_capability;
     use rustix::io::Errno;
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     // A selected pipe made at its final name, and a pipe in a folder made in
     // place, where the mount cannot place a stage.
     for selected in [true, false] {
@@ -862,9 +828,7 @@ fn a_named_pipe_whose_copy_fails_is_not_left_behind() -> Result<(), Box<dyn Erro
 #[test]
 fn a_selected_named_pipe_is_recreated_where_the_destination_can() -> Result<(), Box<dyn Error>> {
     use std::os::unix::fs::FileTypeExt;
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     for (row, preset, pipes) in [
         ("tmpfs", Quirks::default as Preset, true),
         ("vfat", Quirks::vfat, false),
@@ -976,9 +940,7 @@ fn target_is_fat_family_reads_the_reported_filesystem_type() {
 #[test]
 fn fat_family_copy_sanitizes_an_invalid_name_instead_of_discarding_the_whole_tree()
 -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let source = root.path().join("source");
     let target = root.path().join("target");
@@ -1013,9 +975,7 @@ fn fat_family_copy_sanitizes_an_invalid_name_instead_of_discarding_the_whole_tre
 #[test]
 fn fat_family_copy_disambiguates_sibling_names_that_collide_after_sanitizing()
 -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let source = root.path().join("source");
     let destination = root.path().join("destination");
@@ -1050,9 +1010,7 @@ fn fat_family_copy_disambiguates_sibling_names_that_collide_after_sanitizing()
 
 #[test]
 fn non_fat_copy_leaves_invalid_characters_untouched() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let source = root.path().join("source");
     let target = root.path().join("target");
@@ -1091,9 +1049,7 @@ fn publish(staged: StagedSibling, target: &Path) -> Result<(), glib::Error> {
 #[test]
 fn staged_publication_without_rename_flags_places_the_stage_itself() -> Result<(), Box<dyn Error>> {
     use std::os::unix::fs::MetadataExt;
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let presets: [(&str, Preset); 5] = [
         ("EINVAL", Quirks::without_rename_flags),
         ("ENOSYS", || Quirks {
@@ -1138,9 +1094,7 @@ fn staged_publication_without_rename_flags_places_the_stage_itself() -> Result<(
 
 #[test]
 fn staged_publication_refuses_to_overwrite_an_existing_target() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     for quirks in [
         Quirks::default,
         Quirks::without_rename_flags,
@@ -1180,9 +1134,7 @@ fn staged_publication_refuses_to_overwrite_an_existing_target() -> Result<(), Bo
 
 #[test]
 fn staged_publication_preserves_racing_destinations() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     for source_directory in [false, true] {
         for destination_kind in ["file", "directory", "symlink"] {
             let root = tempfile::tempdir()?;
@@ -1231,9 +1183,7 @@ fn staged_publication_preserves_racing_destinations() -> Result<(), Box<dyn Erro
 
 #[test]
 fn staged_symlinks_are_recreated_where_links_are_missing() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let _scope = FsQuirks::install(root.path(), Quirks::vboxsf());
     let staged = staged(root.path(), StageContent::Symlink("missing".into()))?;
@@ -1249,9 +1199,7 @@ fn staged_symlinks_are_recreated_where_links_are_missing() -> Result<(), Box<dyn
 
 #[test]
 fn staged_fallback_removes_reserved_directory_on_copy_error() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let _scope = FsQuirks::install(root.path(), Quirks::without_placement());
     let staged = stage(root.path(), true)?;
@@ -1294,9 +1242,7 @@ fn reusing_stage_inodes(before: (Op, &'static str, usize, Racer)) -> Quirks {
 
 #[test]
 fn a_stage_left_after_the_exclusive_copy_is_reported() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let stage_root = root.path().to_path_buf();
     let racer: Racer = Box::new(move || {
@@ -1330,9 +1276,7 @@ fn a_stage_left_after_the_exclusive_copy_is_reported() -> Result<(), Box<dyn Err
 #[test]
 fn a_stage_swapped_before_publication_is_neither_published_nor_deleted()
 -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let stage_root = root.path().to_path_buf();
     let racer: Racer = Box::new(move || {
@@ -1364,9 +1308,7 @@ fn a_stage_swapped_before_publication_is_neither_published_nor_deleted()
 
 #[test]
 fn cancelling_staged_fallback_removes_its_reserved_directory() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let target = root.path().join("target");
     let cancellable = gio::Cancellable::new();
@@ -1415,9 +1357,7 @@ fn cancelling_staged_fallback_removes_its_reserved_directory() -> Result<(), Box
 
 #[test]
 fn a_symlink_child_never_overwrites_an_existing_entry() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let source = root.path().join("source");
     let target = root.path().join("target");
@@ -1444,9 +1384,7 @@ fn a_symlink_child_never_overwrites_an_existing_entry() -> Result<(), Box<dyn Er
 #[test]
 fn read_only_items_keep_their_xattrs() -> Result<(), Box<dyn Error>> {
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     for (directory, mode) in [(false, 0o444), (true, 0o555)] {
         let root = tempfile::tempdir()?;
         let source = root.path().join("source");

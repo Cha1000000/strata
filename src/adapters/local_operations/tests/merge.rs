@@ -42,9 +42,7 @@ fn rename_stage(staging: PathBuf) -> (StageOverwrite, Rc<RefCell<Vec<Location>>>
 #[test]
 fn fat_merge_backs_up_sanitized_collisions_and_records_actual_paths() -> Result<(), Box<dyn Error>>
 {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let source = root.path().join("source");
     let target = root.path().join("target");
@@ -101,9 +99,7 @@ fn recorded_plans() -> (Rc<RefCell<Vec<MergePlan>>>, impl Fn(MergePlan)) {
 
 #[test]
 fn merging_folders_unites_contents_and_overwrites_shared_names() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let source = root.path().join("source");
     let target = root.path().join("target");
@@ -170,9 +166,7 @@ fn placed_paths(placed: &HashMap<Location, PlacedSnapshot>) -> Vec<PathBuf> {
 
 #[test]
 fn merging_recurses_into_subdirectories_shared_by_both_sides() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let source = root.path().join("source");
     let target = root.path().join("target");
@@ -227,9 +221,7 @@ fn merging_recurses_into_subdirectories_shared_by_both_sides() -> Result<(), Box
 #[test]
 fn a_merge_from_a_location_without_paths_does_not_claim_provenance_for_undo()
 -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     gio::resources_register_include!("strata.gresource")?;
     let source = gio::File::for_uri("resource:///io/github/lgse/Strata/brand");
     assert!(!source.is_native());
@@ -268,9 +260,7 @@ fn a_merge_from_a_location_without_paths_does_not_claim_provenance_for_undo()
 #[test]
 fn a_merge_from_a_location_without_paths_keeps_unproven_copies_during_no_trash_undo()
 -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     gio::resources_register_include!("strata.gresource")?;
     let source = gio::File::for_uri("resource:///io/github/lgse/Strata/icons/scalable");
     let root = tempfile::tempdir()?;
@@ -307,9 +297,7 @@ fn a_merge_from_a_location_without_paths_keeps_unproven_copies_during_no_trash_u
 
 #[test]
 fn a_new_subdirectory_is_reported_as_a_single_created_entry() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let source = root.path().join("source");
     let target = root.path().join("target");
@@ -348,9 +336,7 @@ fn a_new_subdirectory_is_reported_as_a_single_created_entry() -> Result<(), Box<
 #[test]
 fn a_staging_failure_aborts_the_merge_and_reports_only_what_was_staged()
 -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     for (code, expected_message) in [
         (
             gio::IOErrorEnum::Failed,
@@ -433,9 +419,7 @@ fn a_staging_failure_aborts_the_merge_and_reports_only_what_was_staged()
 #[test]
 fn merge_places_a_read_only_incoming_folder() -> Result<(), Box<dyn Error>> {
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let source = root.path().join("source");
     let target = root.path().join("target");
@@ -478,9 +462,7 @@ fn visible_names(folder: &Path) -> io::Result<Vec<String>> {
 fn a_merge_keeps_hard_links_only_within_one_merge_stage() -> Result<(), Box<dyn Error>> {
     use super::fs_quirks::Racer;
     use std::os::unix::fs::MetadataExt;
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let source = root.path().join("source");
     let target = root.path().join("target");
@@ -537,9 +519,7 @@ fn a_merge_keeps_hard_links_only_within_one_merge_stage() -> Result<(), Box<dyn 
 #[test]
 fn a_merged_copy_replaced_before_linking_is_not_linked() -> Result<(), Box<dyn Error>> {
     use super::fs_quirks::Racer;
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let source = root.path().join("source");
     let target = root.path().join("target");
@@ -593,9 +573,7 @@ fn a_merged_copy_replaced_before_linking_is_not_linked() -> Result<(), Box<dyn E
 fn merge_never_overwrites_an_entry_created_during_the_merge() -> Result<(), Box<dyn Error>> {
     use super::fs_quirks::Racer;
     use crate::services::RenameCause;
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     type Renamed = &'static [(&'static str, &'static str, RenameCause)];
     let rows: [(&str, &str, Preset, Renamed); 2] = [
         (
@@ -668,9 +646,7 @@ fn merge_never_overwrites_an_entry_created_during_the_merge() -> Result<(), Box<
 #[test]
 fn an_item_put_at_a_placed_name_right_after_placing_stays_there() -> Result<(), Box<dyn Error>> {
     use super::fs_quirks::Racer;
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     // A program that saves by renaming over the name does so as soon as the
     // child is placed: by a rename, or by a link and the stage's unlink.
     fn unstable_inodes() -> Quirks {
@@ -771,9 +747,7 @@ fn renamed_beneath(
 fn a_stopped_merge_reports_only_what_it_placed() -> Result<(), Box<dyn Error>> {
     use super::fs_quirks::Racer;
     use crate::services::RenameCause;
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let source = root.path().join("source");
     let target = root.path().join("target");
@@ -810,9 +784,7 @@ fn a_stopped_merge_reports_only_what_it_placed() -> Result<(), Box<dyn Error>> {
 
 #[test]
 fn an_unconfirmed_placement_keeps_its_stage() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let source = root.path().join("source");
     let target = root.path().join("target");
@@ -860,9 +832,7 @@ fn an_unconfirmed_placement_keeps_its_stage() -> Result<(), Box<dyn Error>> {
 fn a_merge_copies_folders_in_place_where_the_mount_cannot_place_them() -> Result<(), Box<dyn Error>>
 {
     use crate::services::RenameCause;
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let source = root.path().join("source");
     let target = root.path().join("target");
@@ -916,9 +886,7 @@ fn a_merge_copies_folders_in_place_where_the_mount_cannot_place_them() -> Result
 #[test]
 fn a_merged_item_is_invisible_until_complete() -> Result<(), Box<dyn Error>> {
     use super::fs_quirks::Racer;
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     // Placed by rename, by the rungs that cannot replace, and copied out of
     // the stage where nothing can place it.
     let presets: [Preset; 3] = [Quirks::default, Quirks::vboxsf, Quirks::without_placement];
@@ -984,9 +952,7 @@ fn a_merged_item_is_invisible_until_complete() -> Result<(), Box<dyn Error>> {
 #[test]
 fn merge_does_not_follow_a_target_folder_swapped_for_a_link() -> Result<(), Box<dyn Error>> {
     use super::fs_quirks::Racer;
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let source = root.path().join("source");
     let target = root.path().join("target");
@@ -1025,9 +991,7 @@ fn merge_does_not_follow_a_target_folder_swapped_for_a_link() -> Result<(), Box<
 
 #[test]
 fn a_merge_move_removes_the_emptied_source() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let source = root.path().join("source");
     let target = root.path().join("target");
@@ -1053,9 +1017,7 @@ fn a_merge_move_removes_the_emptied_source() -> Result<(), Box<dyn Error>> {
 
 #[test]
 fn merging_a_file_is_rejected_without_touching_either_side() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let source = root.path().join("source.txt");
     let target = root.path().join("target.txt");
@@ -1078,9 +1040,7 @@ fn merging_a_file_is_rejected_without_touching_either_side() -> Result<(), Box<d
 
 #[test]
 fn merging_onto_a_file_is_rejected_without_touching_either_side() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let source = root.path().join("source");
     let target = root.path().join("target");
@@ -1104,9 +1064,7 @@ fn merging_onto_a_file_is_rejected_without_touching_either_side() -> Result<(), 
 
 #[test]
 fn a_failed_merge_preserves_the_destinations_existing_contents() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let source = root.path().join("source");
     let target = root.path().join("target");
@@ -1152,9 +1110,7 @@ fn a_failed_merge_preserves_the_destinations_existing_contents() -> Result<(), B
 
 #[test]
 fn a_merged_paste_reports_no_created_location() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let sources = root.path().join("sources");
     let destination = root.path().join("destination");
@@ -1230,9 +1186,7 @@ fn staged_lookup(entries: HashMap<PathBuf, RestoreEntry>) -> StagedOriginalLooku
 
 #[test]
 fn merge_undo_uses_recorded_identity_when_trash_dates_collide() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     for chosen in ["older.zip", "current.zip", "removed.zip"] {
         let root = tempfile::tempdir()?;
         let target = root.path().join("archive.zip");
@@ -1310,9 +1264,7 @@ fn merge_undo_restores_staged_originals_and_removes_created() {
 }
 
 fn check_merge_undo_restores_staged_originals_and_removes_created() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let target = root.path().join("target");
     fs::create_dir_all(&target)?;
@@ -1384,9 +1336,7 @@ fn check_merge_undo_restores_staged_originals_and_removes_created() -> Result<()
 #[test]
 fn undoing_a_merge_with_numbered_aliases_removes_only_its_items() -> Result<(), Box<dyn Error>> {
     use crate::services::{RenameCause, RenamedItem};
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let sources = root.path().join("sources");
     let destination = root.path().join("destination");
@@ -1478,9 +1428,7 @@ fn undoing_a_merge_with_numbered_aliases_removes_only_its_items() -> Result<(), 
 #[test]
 fn merge_undo_keeps_the_incoming_copy_when_no_staged_original_exists() -> Result<(), Box<dyn Error>>
 {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let target = root.path().join("target");
     fs::create_dir_all(&target)?;
@@ -1512,9 +1460,7 @@ fn merge_undo_keeps_the_incoming_copy_when_no_staged_original_exists() -> Result
 
 #[test]
 fn merge_undo_tolerates_created_paths_that_no_longer_exist() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let target = root.path().join("target");
     fs::create_dir_all(&target)?;
@@ -1539,9 +1485,7 @@ fn merge_undo_tolerates_created_paths_that_no_longer_exist() -> Result<(), Box<d
 
 #[test]
 fn a_cancelled_merge_undo_reports_everything_not_attempted() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let target = root.path().join("target");
     fs::create_dir_all(&target)?;
@@ -1583,9 +1527,7 @@ fn a_cancelled_merge_undo_reports_everything_not_attempted() -> Result<(), Box<d
 #[test]
 fn a_merge_a_cancel_cuts_off_counts_as_failed_as_it_keeps_what_it_placed()
 -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let sources = root.path().join("sources");
     let destination = root.path().join("destination");
@@ -1652,9 +1594,7 @@ fn a_merge_a_cancel_cuts_off_counts_as_failed_as_it_keeps_what_it_placed()
 #[test]
 fn a_merge_undo_cut_off_counts_an_item_as_not_attempted_only_when_it_left_it_whole()
 -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     // Without Trash, the first check is Trash's, the second the comparison's
     // and the third the delete's.
     for (row, check) in [("Trash", None), ("compare", Some(1)), ("delete", Some(2))] {
@@ -1719,9 +1659,7 @@ fn a_merge_undo_cut_off_counts_an_item_as_not_attempted_only_when_it_left_it_who
 
 #[test]
 fn a_kept_item_counts_as_failed_when_a_later_item_is_cut_off() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let [kept, cut] = ["kept.txt", "cut.txt"].map(|name| root.path().join(name));
     for item in [&kept, &cut] {
@@ -1768,9 +1706,7 @@ fn a_kept_item_counts_as_failed_when_a_later_item_is_cut_off() -> Result<(), Box
 
 #[test]
 fn a_merge_undo_never_counts_an_item_it_could_not_check_as_undone() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let [first, second] = ["first.txt", "second.txt"].map(|name| root.path().join(name));
     for item in [&first, &second] {
@@ -1826,9 +1762,7 @@ fn a_merge_undo_never_counts_an_item_it_could_not_check_as_undone() -> Result<()
 #[test]
 fn a_merge_undo_cancelled_while_it_restores_an_original_ends_as_a_cancel()
 -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     // Whether the merge's copy is still at the last path, which the undo
     // deletes before it restores the original, and whether the cut-off copy
     // of the original cannot be removed.
@@ -1916,9 +1850,7 @@ fn a_merge_undo_cancelled_while_it_restores_an_original_ends_as_a_cancel()
 
 #[test]
 fn a_merge_undo_restores_an_original_only_over_a_path_it_checked() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let unreadable = "strata-test-no-backend:///second.txt";
     // The second path's check fails, a cancel cuts it off, or the merge's
     // copy is already gone from it.
@@ -2101,9 +2033,7 @@ fn staged_trash_folder(
 
 #[test]
 fn a_merge_undo_deletes_only_what_the_merge_left_unchanged() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     for change in ["untouched", "linked", "edited", "touched", "replaced"] {
         let root = tempfile::tempdir()?;
         let source = root.path().join("source");
@@ -2205,9 +2135,7 @@ fn a_merge_undo_deletes_only_what_the_merge_left_unchanged() -> Result<(), Box<d
 #[test]
 fn undoing_a_replace_deletes_what_it_placed_only_if_all_of_it_is_unchanged()
 -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let rows = [
         (false, "untouched"),
         (false, "edited"),
@@ -2351,9 +2279,7 @@ fn undoing_a_replace_deletes_what_it_placed_only_if_all_of_it_is_unchanged()
 #[test]
 fn a_merge_undo_compares_what_it_placed_as_a_move_compares_its_sources()
 -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let epoch = SystemTime::UNIX_EPOCH;
     let seconds = SystemTime::now().duration_since(epoch)?.as_secs() / 2 * 2;
     let cifs = |options| {
@@ -2449,9 +2375,7 @@ fn a_merge_undo_compares_what_it_placed_as_a_move_compares_its_sources()
 #[test]
 fn a_merge_undo_cancelled_while_it_compares_an_item_leaves_it_whole() -> Result<(), Box<dyn Error>>
 {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let epoch = SystemTime::UNIX_EPOCH;
     let seconds = SystemTime::now().duration_since(epoch)?.as_secs() / 2 * 2;
     for after_a_kept_item in [false, true] {
@@ -2525,9 +2449,7 @@ fn a_merge_undo_cancelled_while_it_compares_an_item_leaves_it_whole() -> Result<
 #[test]
 fn what_an_operation_placed_is_read_back_only_until_its_tick_passes() -> Result<(), Box<dyn Error>>
 {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let epoch = SystemTime::UNIX_EPOCH;
     let seconds = SystemTime::now().duration_since(epoch)?.as_secs() / 2 * 2;
     for change in ["untouched", "rewritten where read"] {
@@ -2594,9 +2516,7 @@ fn what_an_operation_placed_is_read_back_only_until_its_tick_passes() -> Result<
 #[test]
 fn an_undo_keeps_what_a_cancel_stopped_the_operation_from_recording() -> Result<(), Box<dyn Error>>
 {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let epoch = SystemTime::UNIX_EPOCH;
     let seconds = SystemTime::now().duration_since(epoch)?.as_secs() / 2 * 2;
     let _clock = ClockGuard::set(epoch + Duration::from_secs(seconds) + Duration::from_millis(500));
@@ -2655,9 +2575,7 @@ fn an_undo_keeps_what_a_cancel_stopped_the_operation_from_recording() -> Result<
 
 #[test]
 fn an_undo_keeps_what_was_too_big_to_record() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     // A replaced folder of four entries; a merge's two overwritten files,
     // which share the limit.
     for (merged, limit) in [(false, 3), (true, 1)] {
@@ -2717,9 +2635,7 @@ fn an_undo_keeps_what_was_too_big_to_record() -> Result<(), Box<dyn Error>> {
 
 #[test]
 fn a_created_tree_too_big_to_record_leaves_its_entries_to_the_rest() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let _limit = PlacedEntriesGuard::set(3);
     let root = tempfile::tempdir()?;
     let source = root.path().join("source");
@@ -2751,9 +2667,7 @@ fn a_created_tree_too_big_to_record_leaves_its_entries_to_the_rest() -> Result<(
 
 #[test]
 fn a_paste_records_no_more_than_its_limit_across_its_merges() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let _limit = PlacedEntriesGuard::set(1);
     let root = tempfile::tempdir()?;
     let sources = root.path().join("sources");
@@ -2794,9 +2708,7 @@ fn a_paste_records_no_more_than_its_limit_across_its_merges() -> Result<(), Box<
 
 #[test]
 fn a_merge_records_what_it_creates_only_where_undo_cannot_trash_it() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     // A created folder of four entries sorts ahead of z.txt, with room to
     // record three.
     let _limit = PlacedEntriesGuard::set(3);
@@ -2864,9 +2776,7 @@ fn a_merge_records_what_it_creates_only_where_undo_cannot_trash_it() -> Result<(
 #[test]
 fn a_merge_undo_without_trash_deletes_only_what_the_merge_created_unchanged()
 -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     // What happened to the created new.txt and sub after the merge, whether
     // undo has Trash, and whether the mount places folders or copies them in
     // place.
@@ -3005,9 +2915,7 @@ fn a_merge_undo_without_trash_deletes_only_what_the_merge_created_unchanged()
 #[test]
 fn a_merge_undo_without_trash_deletes_what_its_paste_copied_only_if_unchanged()
 -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     for change in ["unchanged", "edited", "replaced before recording", "edited before recording"] {
         let edited = change != "unchanged";
         let root = tempfile::tempdir()?;
@@ -3107,9 +3015,7 @@ fn a_merge_undo_without_trash_deletes_what_its_paste_copied_only_if_unchanged()
 #[test]
 fn a_created_folder_changed_while_undo_deletes_it_fails_as_not_empty() -> Result<(), Box<dyn Error>>
 {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let folder = root.path().join("sub");
     write_files(&folder, &[("a.txt", "a"), ("b.txt", "b")])?;
@@ -3206,9 +3112,7 @@ fn merge_through_trash(
 #[test]
 fn merge_without_trash_sets_originals_aside_and_removes_them_after_success()
 -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     for (trash, quirks, move_source) in [
         (Trash::Unsupported, Quirks::default(), false),
         (Trash::Unsupported, Quirks::without_rename_flags(), true),
@@ -3276,9 +3180,7 @@ fn merge_without_trash_sets_originals_aside_and_removes_them_after_success()
 fn without_trash_an_original_the_merge_left_nothing_in_place_of_stays() -> Result<(), Box<dyn Error>>
 {
     use super::fs_quirks::Racer;
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let rewrite = |path: PathBuf, contents: &'static [u8]| -> Racer {
         Box::new(move || fs::write(&path, contents).expect("rewrite the source"))
     };
@@ -3332,9 +3234,7 @@ fn without_trash_an_original_the_merge_left_nothing_in_place_of_stays() -> Resul
 #[test]
 fn a_failed_merge_without_trash_puts_back_what_it_can_and_names_the_rest()
 -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     for (failure, reason) in [
         (gio::IOErrorEnum::Failed, "injected copy failure"),
         (gio::IOErrorEnum::Cancelled, "already exists"),
@@ -3380,15 +3280,13 @@ fn a_failed_merge_without_trash_puts_back_what_it_can_and_names_the_rest()
 
 #[test]
 fn a_failed_aside_puts_every_original_back_before_merging() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let target_files = [
         ("a.txt", "old a"),
         ("b.txt", "old b"),
         ("mount/c.txt", "old c"),
     ];
-    for case in ["no safe placement", "second aside fails", "nested mount"] {
+    for case in ["no safe placement", "second aside fails", "nested mount", "strict open crosses mount"] {
         let root = tempfile::tempdir()?;
         let source = root.path().join("source");
         let target = root.path().join("target");
@@ -3405,6 +3303,10 @@ fn a_failed_aside_puts_every_original_back_before_merging() -> Result<(), Box<dy
             "no safe placement" => Quirks::without_placement(),
             "second aside fails" => Quirks {
                 fail: vec![(Op::Rename, "*", 1, Errno::IO)],
+                ..Quirks::default()
+            },
+            "strict open crosses mount" => Quirks {
+                fail: vec![(Op::OpenAt, ".strata-merge-*", 0, Errno::XDEV)],
                 ..Quirks::default()
             },
             _ => Quirks::default(),
@@ -3452,7 +3354,7 @@ fn a_failed_aside_puts_every_original_back_before_merging() -> Result<(), Box<dy
 
 #[test]
 fn a_flushed_merge_move_keeps_sources_when_published_entries_disappear() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock().map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     for missing in ["", "nested", "nested/a.txt", "nested/a (1).txt"] {
         for replaced in [false, true] {
             let root = tempfile::tempdir()?;
@@ -3502,9 +3404,7 @@ fn a_flushed_merge_move_keeps_sources_when_published_entries_disappear() -> Resu
 
 #[test]
 fn merge_originals_are_deleted_only_once_the_merge_is_flushed() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     for flushed in [true, false] {
         let root = tempfile::tempdir()?;
         let source = root.path().join("source");
@@ -3616,9 +3516,7 @@ fn a_merge_undo_drops_from_view_only_what_it_removed() {
 
 fn check_a_merge_undo_drops_from_view_only_what_it_removed() -> Result<(), Box<dyn Error>> {
     use crate::app::{Browser, BrowserEvent};
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let context = glib::MainContext::default();
     let pump_until = |what: &str, done: &dyn Fn() -> bool| {
         let deadline = Instant::now() + Duration::from_secs(10);

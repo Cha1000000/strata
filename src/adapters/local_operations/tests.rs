@@ -25,6 +25,10 @@ use gtk::{gio, glib, prelude::*};
 use crate::test_support::ASYNC_MAIN_CONTEXT_DEFAULT;
 use fs_quirks::{FsQuirks, Preset, Quirks};
 
+fn serial() -> Result<std::sync::MutexGuard<'static, ()>, String> {
+    ASYNC_MAIN_CONTEXT_DEFAULT.lock().map_err(|error| error.to_string())
+}
+
 mod aliases;
 mod conflicts;
 mod copy;
@@ -630,9 +634,7 @@ fn create_delete_benchmark_tree(root: &Path, count: usize) -> io::Result<()> {
 #[test]
 #[ignore = "manual performance benchmark; run scripts/benchmark-delete.sh"]
 fn benchmark_delete_large_directory() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let unique = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)?
         .as_nanos();
@@ -750,9 +752,7 @@ fn benchmark_delete_large_directory() -> Result<(), Box<dyn Error>> {
 #[test]
 #[ignore = "manual scale benchmark; run STRATA_DELETE_BENCH_SCALE=1 scripts/benchmark-delete.sh"]
 fn benchmark_parallel_delete_scale() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let unique = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)?
         .as_nanos();

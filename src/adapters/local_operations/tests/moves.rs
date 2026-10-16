@@ -11,9 +11,7 @@ use crate::services::{KeptCause, KeptItem, SpecialKind, TransferReport};
 #[test]
 fn moving_a_directory_falls_back_to_a_safe_copy_when_the_move_needs_one()
 -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let unique = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)?
         .as_nanos();
@@ -41,9 +39,7 @@ fn moving_a_directory_falls_back_to_a_safe_copy_when_the_move_needs_one()
 
 #[test]
 fn a_failed_move_attempt_is_returned_without_falling_back() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let unique = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)?
         .as_nanos();
@@ -76,9 +72,7 @@ fn a_failed_move_attempt_is_returned_without_falling_back() -> Result<(), Box<dy
 
 #[test]
 fn a_successful_move_attempt_is_used_without_falling_back_to_copy() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let unique = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)?
         .as_nanos();
@@ -113,9 +107,7 @@ fn a_successful_move_attempt_is_used_without_falling_back_to_copy() -> Result<()
 
 #[test]
 fn a_plain_move_relocates_the_entry_via_the_hardened_rename_path() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let source = root.path().join("source.txt");
     let target = root.path().join("target.txt");
@@ -159,9 +151,7 @@ fn assert_refused_into_itself(result: Result<(), glib::Error>) {
 #[test]
 fn moving_a_directory_into_its_own_child_fails_instead_of_deleting_it() -> Result<(), Box<dyn Error>>
 {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     for quirks in [Quirks::default(), Quirks::vboxsf()] {
         let root = tempfile::tempdir()?;
         let _scope = FsQuirks::install(root.path(), quirks);
@@ -180,9 +170,7 @@ fn moving_a_directory_into_its_own_child_fails_instead_of_deleting_it() -> Resul
 
 #[test]
 fn a_move_never_copies_a_folder_into_itself_across_a_nested_mount() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let docs = root.path().join("docs");
     fs::create_dir_all(docs.join("Backup"))?;
@@ -202,9 +190,7 @@ fn a_move_never_copies_a_folder_into_itself_across_a_nested_mount() -> Result<()
 
 #[test]
 fn same_volume_move_on_a_flag_rejecting_filesystem_never_copies() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     for rejection in [Errno::INVAL, Errno::NOSYS, Errno::OPNOTSUPP] {
         let root = tempfile::tempdir()?;
         let scope = FsQuirks::install(
@@ -248,9 +234,7 @@ fn same_volume_move_on_a_flag_rejecting_filesystem_never_copies() -> Result<(), 
 #[test]
 fn items_without_noreplace_or_a_usable_link_are_renamed_without_copying()
 -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     // As protected_hardlinks refuses another user's file that a rename could move.
     let refused = || Quirks {
         fail: vec![(Op::Link, "moved", 0, Errno::PERM)],
@@ -305,9 +289,7 @@ fn items_without_noreplace_or_a_usable_link_are_renamed_without_copying()
 
 #[test]
 fn items_no_step_can_place_are_moved_by_copying() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     // As SFTP without `posix-rename` refuses to rename over the reserved file.
     let rename_over_refused = || Quirks {
         fail: vec![(Op::Rename, "moved", 1, Errno::PERM)],
@@ -352,9 +334,7 @@ fn items_no_step_can_place_are_moved_by_copying() -> Result<(), Box<dyn Error>> 
 #[test]
 fn einval_from_every_rung_reports_an_invalid_name_and_keeps_the_source()
 -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let flags_supported = || Quirks {
         invalid_name: Some(has_colon),
         ..Quirks::default()
@@ -403,9 +383,7 @@ fn einval_from_every_rung_reports_an_invalid_name_and_keeps_the_source()
 
 #[test]
 fn move_accepts_a_symlink_in_the_sources_parent_path() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let actual_parent = root.path().join("actual");
     let linked_parent = root.path().join("linked");
@@ -431,9 +409,7 @@ fn move_accepts_a_symlink_in_the_sources_parent_path() -> Result<(), Box<dyn Err
 
 #[test]
 fn move_accepts_a_symlink_in_the_destinations_parent_path() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let source = root.path().join("source.txt");
     let actual_destination = root.path().join("actual");
@@ -482,9 +458,7 @@ fn paste_move(
 
 #[test]
 fn moves_delete_their_sources_only_once_the_destination_is_flushed() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let conflicts = [
         TransferConflict::FailIfExists,
         TransferConflict::ReplaceExisting,
@@ -581,9 +555,7 @@ fn moves_delete_their_sources_only_once_the_destination_is_flushed() -> Result<(
 
 #[test]
 fn same_filesystem_rename_is_not_held_for_the_removable_flush() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let source_dir = root.path().join("source");
     let destination = root.path().join("usb");
@@ -620,9 +592,7 @@ fn same_filesystem_rename_is_not_held_for_the_removable_flush() -> Result<(), Bo
 #[test]
 fn same_filesystem_replacing_move_renames_without_waiting_for_the_flush()
 -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let source_dir = root.path().join("source");
     let destination = root.path().join("usb");
@@ -658,9 +628,7 @@ fn same_filesystem_replacing_move_renames_without_waiting_for_the_flush()
 
 #[test]
 fn keep_both_move_renumbers_when_its_name_is_taken_meanwhile() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     for across_volumes in [false, true] {
         let root = tempfile::tempdir()?;
         let sources = root.path().join("sources");
@@ -764,9 +732,7 @@ const MOVES: [TransferConflict; 3] = [
 
 #[test]
 fn a_move_leaves_special_files_it_cannot_copy_at_the_source() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     for conflict in MOVES {
         let root = tempfile::tempdir()?;
         let source_dir = root.path().join("source");
@@ -811,9 +777,7 @@ fn a_move_leaves_special_files_it_cannot_copy_at_the_source() -> Result<(), Box<
 
 #[test]
 fn a_move_keeps_source_entries_changed_or_added_after_their_copy() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     for conflict in MOVES {
         let root = tempfile::tempdir()?;
         let source_dir = root.path().join("source");
@@ -869,9 +833,7 @@ fn a_move_keeps_source_entries_changed_or_added_after_their_copy() -> Result<(),
 
 #[test]
 fn a_file_written_during_its_own_move_stays_at_the_source() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let rewrite = |path: &Path, contents: &'static [u8]| -> super::fs_quirks::Racer {
         let path = path.to_path_buf();
         Box::new(move || fs::write(&path, contents).expect("rewrite the source"))
@@ -965,9 +927,7 @@ fn a_file_written_during_its_own_move_stays_at_the_source() -> Result<(), Box<dy
 
 #[test]
 fn moving_across_volumes_deletes_every_entry_it_copied() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     for selected in ["folder", "link", "pipe"] {
         let root = tempfile::tempdir()?;
         let source_dir = root.path().join("source");
@@ -1081,9 +1041,7 @@ fn rewrite(path: &Path, contents: &'static [u8]) -> super::fs_quirks::Racer {
 
 #[test]
 fn a_rewrite_that_keeps_the_size_and_times_is_kept_at_the_source() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let unstable = || Quirks {
         mount_type: Some(("cifs", "rw,noserverino")),
         ..Quirks::default()
@@ -1149,9 +1107,7 @@ fn wait_for_a_later_change_time(probe: &Path, than: &fs::Metadata) {
 
 #[test]
 fn a_file_rewritten_as_it_is_read_is_copied_again_whole() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     // Each pass reads the data, then the end of the file.
     for row in ["same size", "shrinks"] {
         let root = tempfile::tempdir()?;
@@ -1196,9 +1152,7 @@ fn a_file_rewritten_as_it_is_read_is_copied_again_whole() -> Result<(), Box<dyn 
 
 #[test]
 fn moves_off_mounts_without_stable_inodes_keep_only_what_changed() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let folder = root.path().join("source/folder");
     fs::create_dir_all(folder.join("sub"))?;
@@ -1276,9 +1230,7 @@ fn moves_off_mounts_without_stable_inodes_keep_only_what_changed() -> Result<(),
 
 #[test]
 fn entries_swapped_or_removed_after_their_copy_are_never_deleted() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let vfat = || Quirks {
         mount_type: Some(("vfat", "rw")),
         ..Quirks::default()
@@ -1347,9 +1299,7 @@ fn entries_swapped_or_removed_after_their_copy_are_never_deleted() -> Result<(),
 
 #[test]
 fn moves_compare_inode_numbers_only_where_the_source_keeps_them() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let mounted = |fs_type, options| {
         move || Quirks {
             mount_type: Some((fs_type, options)),
@@ -1426,9 +1376,7 @@ fn moves_compare_inode_numbers_only_where_the_source_keeps_them() -> Result<(), 
 
 #[test]
 fn a_move_across_volumes_reads_the_source_mount_once() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let sources = root.path().join("sources");
     let destination = root.path().join("destination");
@@ -1461,9 +1409,7 @@ fn a_move_across_volumes_reads_the_source_mount_once() -> Result<(), Box<dyn Err
 
 #[test]
 fn a_source_entry_that_cannot_be_deleted_is_kept_with_the_reason() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let source_dir = root.path().join("source");
     let folder = source_dir.join("folder");
@@ -1507,9 +1453,7 @@ fn a_source_entry_that_cannot_be_deleted_is_kept_with_the_reason() -> Result<(),
 
 #[test]
 fn a_move_cancelled_while_deleting_its_sources_reports_what_stays() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let source_dir = root.path().join("source");
     let folder = source_dir.join("folder");
@@ -1569,9 +1513,7 @@ fn a_move_cancelled_while_deleting_its_sources_reports_what_stays() -> Result<()
 #[test]
 fn moving_to_a_remote_target_keeps_a_source_entry_changed_during_the_copy()
 -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let folder = root.path().join("folder");
     fs::create_dir_all(&folder)?;
@@ -1625,9 +1567,7 @@ fn moving_to_a_remote_target_keeps_a_source_entry_changed_during_the_copy()
 
 #[test]
 fn a_moved_source_stays_when_its_copy_is_gone_before_the_deletion() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     for (conflict, published) in [
         (TransferConflict::FailIfExists, None),
         (TransferConflict::ReplaceExisting, None),
@@ -1693,7 +1633,7 @@ fn a_moved_source_stays_when_its_copy_is_gone_before_the_deletion() -> Result<()
 
 #[test]
 fn destination_provenance_fails_closed_without_stable_inode_numbers() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock().map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     for renumbered in [false, true] {
         let root = tempfile::tempdir()?;
         let sources = root.path().join("sources");
@@ -1733,7 +1673,7 @@ fn destination_provenance_fails_closed_without_stable_inode_numbers() -> Result<
 
 #[test]
 fn a_replacing_move_keeps_the_actual_copy_out_identity() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock().map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let sources = root.path().join("sources");
     let destination = root.path().join("destination");
@@ -1759,9 +1699,7 @@ fn a_replacing_move_keeps_the_actual_copy_out_identity() -> Result<(), Box<dyn E
 
 #[test]
 fn linked_names_on_an_smb_source_are_never_open_at_once() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let folder = root.path().join("source/folder");
     fs::create_dir_all(folder.join("sub"))?;
@@ -1788,9 +1726,7 @@ fn linked_names_on_an_smb_source_are_never_open_at_once() -> Result<(), Box<dyn 
 
 #[test]
 fn a_file_put_in_a_moved_files_place_within_its_time_tick_is_kept() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let folder = root.path().join("source/folder");
     fs::create_dir_all(&folder)?;
@@ -1837,9 +1773,7 @@ fn a_file_put_in_a_moved_files_place_within_its_time_tick_is_kept() -> Result<()
 #[test]
 fn files_read_within_a_coarse_time_tick_are_compared_before_their_move_deletes_them()
 -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     // FAT, exFAT, sshfs and HFS+ keep coarse times, so a rewrite of the
     // same size within one tick shows neither in the modification time nor
     // in the change time, which they lack or keep as coarse.
@@ -2181,9 +2115,7 @@ fn files_read_within_a_coarse_time_tick_are_compared_before_their_move_deletes_t
 
 #[test]
 fn files_on_a_coarse_mount_inside_a_moved_folder_are_compared() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let source_dir = root.path().join("source");
     let folder = source_dir.join("folder");
@@ -2258,9 +2190,7 @@ fn files_on_a_coarse_mount_inside_a_moved_folder_are_compared() -> Result<(), Bo
 #[test]
 fn a_source_growing_as_it_is_compared_is_kept_without_reading_what_it_grew_by()
 -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let folder = root.path().join("source/folder");
     fs::create_dir_all(&folder)?;

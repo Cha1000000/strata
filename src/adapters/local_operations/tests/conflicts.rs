@@ -41,9 +41,7 @@ fn transfer_noops_resolve_aliased_destinations_but_not_symlink_sources()
 
 #[test]
 fn each_transfer_item_keeps_its_own_conflict_decision() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let unique = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)?
         .as_nanos();
@@ -122,9 +120,7 @@ fn each_transfer_item_keeps_its_own_conflict_decision() -> Result<(), Box<dyn Er
 
 #[test]
 fn cutting_in_the_same_folder_remains_a_noop() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let destination = root.path().to_path_buf();
     let file = destination.join("document.txt");
@@ -176,9 +172,7 @@ fn cutting_in_the_same_folder_remains_a_noop() -> Result<(), Box<dyn Error>> {
 
 #[test]
 fn keeping_both_preserves_transfer_noops() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let source = root.path().join("source");
     let nested = source.join("nested");
@@ -207,9 +201,7 @@ fn keeping_both_preserves_transfer_noops() -> Result<(), Box<dyn Error>> {
 
 #[test]
 fn keeping_both_in_a_cross_folder_paste_generates_a_unique_name() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let source_dir = root.path().join("source");
     let source = source_dir.join("report.txt");
@@ -242,9 +234,7 @@ fn keeping_both_in_a_cross_folder_paste_generates_a_unique_name() -> Result<(), 
 #[test]
 fn keeping_both_while_moving_renames_the_destination_instead_of_replacing_it()
 -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let source_dir = root.path().join("source");
     let source = source_dir.join("report.txt");
@@ -280,9 +270,7 @@ fn keeping_both_while_moving_renames_the_destination_instead_of_replacing_it()
 #[test]
 fn mixed_conflict_choices_apply_independently_across_a_multi_item_paste()
 -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let sources = root.path().join("sources");
     let destination = root.path().join("destination");
@@ -346,9 +334,7 @@ fn mixed_conflict_choices_apply_independently_across_a_multi_item_paste()
 
 #[test]
 fn pasting_onto_itself_with_replace_is_a_noop() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let destination = root.path().to_path_buf();
     let source = destination.join("todo.txt");
@@ -390,9 +376,7 @@ fn pasting_onto_itself_with_replace_is_a_noop() -> Result<(), Box<dyn Error>> {
 
 #[test]
 fn pasting_onto_itself_with_keep_both_creates_numbered_copy() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let destination = root.path().to_path_buf();
     let source = destination.join("todo.txt");
@@ -443,9 +427,7 @@ fn taking(path: &Path) -> fs_quirks::Racer {
 
 #[test]
 fn keep_both_copy_renumbers_when_its_name_is_taken_meanwhile() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let unnamed_files_refused: Preset = || Quirks {
         tmpfile: fs_quirks::Support::Rejected(rustix::io::Errno::OPNOTSUPP),
         ..Quirks::ext4()
@@ -515,9 +497,7 @@ fn keep_both_takes_the_next_number_past_names_already_taken() -> Result<(), Box<
     use crate::adapters::volume::learn_mount_capability;
     use fs_quirks::Op;
     use std::os::unix::fs::FileTypeExt;
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     #[derive(Clone, Copy, PartialEq)]
     enum Kind {
         File,

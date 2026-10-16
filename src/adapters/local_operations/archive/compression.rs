@@ -5,20 +5,7 @@
 #[cfg(test)]
 mod tests;
 
-use super::super::{
-    DisplacedOriginal, LocalFileIdentity, cannot_replace_safely, copy_engine,
-    fs_ops::{Entry, EntryStat, OffMain, fs},
-    local_directory_children, open_local_child_directory, open_local_parent_directory,
-    original_kept_aside,
-    owed::{Deletion, Owed},
-    placement::{
-        COMPRESSION_STAGE_PREFIX, Displacement, NUMBERED_NAME_ATTEMPTS, PlaceError,
-        REPLACED_PREFIX, displacement_without_trash, exchange, file_creation_error, place_staged,
-        put_back, remove_if_unchanged, reserve_hidden_name, set_aside, set_aside_if_safe,
-    },
-    placement_reason,
-    trash::trash_verified,
-};
+use super::super::{copy_engine, fs_ops::{Entry, EntryStat, OffMain, fs}, native_fs::{LocalFileIdentity, local_directory_children, open_local_child_directory, open_local_parent_directory}, owed::{Deletion, Owed}, placement::{COMPRESSION_STAGE_PREFIX, Displacement, NUMBERED_NAME_ATTEMPTS, PlaceError, REPLACED_PREFIX, displacement_without_trash, exchange, file_creation_error, place_staged, put_back, remove_if_unchanged, reserve_hidden_name, set_aside, set_aside_if_safe}, placement_reason, replacement::{DisplacedOriginal, cannot_replace_safely, original_kept_aside}, trash::trash_verified};
 use super::{
     ArchiveError, COPY_BUF, archive_failed, check_archive_cancelled, copy_with_big_buf,
     decoders::FILE_ATTRIBUTE_UNIX_EXTENSION, destination::process_umask,
@@ -28,20 +15,7 @@ use crate::services::{
 };
 use gtk::{gio, glib};
 use rustix::fs::AtFlags;
-use std::{
-    ffi::{OsStr, OsString},
-    io::{self, Read, Seek, SeekFrom, Write},
-    os::{
-        fd::{AsFd, OwnedFd},
-        unix::{ffi::OsStringExt, fs::PermissionsExt},
-    },
-    path::{Path, PathBuf},
-    sync::{
-        Arc, OnceLock,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
-    },
-    time::{Duration, SystemTime, UNIX_EPOCH},
-};
+use std::{ffi::{OsStr, OsString}, io::{self, Read, Seek, SeekFrom, Write}, os::{fd::{AsFd, OwnedFd}, unix::fs::PermissionsExt}, path::{Path, PathBuf}, sync::{Arc, OnceLock, atomic::{AtomicBool, AtomicUsize, Ordering}}, time::{Duration, SystemTime, UNIX_EPOCH}};
 
 /// Writes an archive through a private staging file, then publishes it at
 /// `archive_path` without ever replacing an entry it did not account for.
@@ -241,10 +215,10 @@ impl Publication {
         F: FnOnce(std::fs::File) -> Result<(), ArchiveError>,
     {
         let handle =
-            rustix::io::dup(&file).map_err(|error| self.creation_failed(errno_text(error)))?;
+            fs().dup(file.as_fd()).map_err(|error| self.creation_failed(errno_text(error)))?;
         write_archive(std::fs::File::from(file))?;
         check_archive_cancelled(cancelled)?;
-        rustix::fs::fchmod(&handle, rustix::fs::Mode::from_raw_mode(mode))
+        fs().chmod_fd(handle.as_fd(), mode)
             .map_err(|error| self.creation_failed(errno_text(error)))?;
         if self.sync_data {
             fs().sync_data(handle.as_fd())
@@ -585,17 +559,17 @@ fn zip_member_options<'k>(
 /// Returns an error if `name` cannot be inspected, is an unsupported file
 /// type, or changes from a regular file between `statat` and `openat2`.
 fn open_archive_source<Fd: AsFd>(parent: &Fd, name: &OsStr) -> Result<ArchiveSource, String> {
-    let stat = rustix::fs::statat(parent, name, rustix::fs::AtFlags::SYMLINK_NOFOLLOW)
+    let stat = fs().stat(Entry::new(parent, name), false)
         .map_err(errno_text)?;
-    match rustix::fs::FileType::from_raw_mode(stat.st_mode) {
+    match stat.kind {
         rustix::fs::FileType::Symlink => {
-            let target = rustix::fs::readlinkat(parent, name, Vec::new()).map_err(errno_text)?;
-            let modified = u64::try_from(stat.st_mtime)
+            let target = fs().readlink(Entry::new(parent, name)).map_err(errno_text)?;
+            let modified = u64::try_from(stat.mtime.0)
                 .ok()
-                .zip(u32::try_from(stat.st_mtime_nsec).ok())
+                .zip(Some(stat.mtime.1))
                 .and_then(|(seconds, nanos)| UNIX_EPOCH.checked_add(Duration::new(seconds, nanos)));
             Ok(ArchiveSource::Symlink {
-                target: PathBuf::from(OsString::from_vec(target.into_bytes())),
+                target: PathBuf::from(target),
                 modified,
             })
         }
@@ -603,17 +577,11 @@ fn open_archive_source<Fd: AsFd>(parent: &Fd, name: &OsStr) -> Result<ArchiveSou
             .map(std::fs::File::from)
             .map(ArchiveSource::Directory),
         rustix::fs::FileType::RegularFile => {
-            let file = rustix::fs::openat2(
-                parent,
-                name,
-                rustix::fs::OFlags::RDONLY
+            let file = fs().open_at(Entry::new(parent, name), rustix::fs::OFlags::RDONLY
                     | rustix::fs::OFlags::NONBLOCK
-                    | rustix::fs::OFlags::CLOEXEC,
-                rustix::fs::Mode::empty(),
-                rustix::fs::ResolveFlags::BENEATH
+                    | rustix::fs::OFlags::CLOEXEC, rustix::fs::Mode::empty(), Some(rustix::fs::ResolveFlags::BENEATH
                     | rustix::fs::ResolveFlags::NO_SYMLINKS
-                    | rustix::fs::ResolveFlags::NO_MAGICLINKS,
-            )
+                    | rustix::fs::ResolveFlags::NO_MAGICLINKS))
             .map(std::fs::File::from)
             .map_err(errno_text)?;
             if !file.metadata().map_err(|error| io_text(&error))?.is_file() {

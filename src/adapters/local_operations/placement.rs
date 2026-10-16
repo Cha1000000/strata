@@ -19,10 +19,7 @@ use rustix::{
     io::Errno,
 };
 
-use super::{
-    LocalFileIdentity,
-    fs_ops::{Entry, EntryStat, FsOps},
-};
+use super::{fs_ops::{Entry, EntryStat, FsOps}, native_fs::LocalFileIdentity};
 use crate::adapters::volume::{
     MountCapabilities, MountKey, learn_mount_capability, mount_capabilities,
 };
@@ -189,14 +186,15 @@ pub(super) fn place_staged(
     ladder(fs, from, to, Some(expected))
 }
 
-pub(super) fn place_after_rename(
+/// Unlike ordinary placement reconciliation, a missing private copy stage after
+/// a failed rename is unconfirmed: callers cannot infer where its bytes went.
+pub(super) fn publish_staged(
     fs: &dyn FsOps,
     from: Entry<'_>,
     to: Entry<'_>,
-    expected: Option<LocalFileIdentity>,
-    error: Errno,
+    expected: LocalFileIdentity,
 ) -> Result<Placed, PlaceError> {
-    fallback(fs, from, to, expected, error)
+    first_placement(fs, from, to, Some(expected), true)
 }
 
 fn verified(
@@ -229,10 +227,31 @@ fn ladder(
     to: Entry<'_>,
     expected: Option<LocalFileIdentity>,
 ) -> Result<Placed, PlaceError> {
-    match fs.rename(from, to, RenameFlags::NOREPLACE) {
-        Ok(()) => Ok(Placed::Renamed),
-        Err(error) => fallback(fs, from, to, expected, error),
+    first_placement(fs, from, to, expected, false)
+}
+
+fn first_placement(
+    fs: &dyn FsOps,
+    from: Entry<'_>,
+    to: Entry<'_>,
+    expected: Option<LocalFileIdentity>,
+    require_private_stage: bool,
+) -> Result<Placed, PlaceError> {
+    let error = match fs.rename(from, to, RenameFlags::NOREPLACE) {
+        Ok(()) => return Ok(Placed::Renamed),
+        Err(Errno::EXIST | Errno::NOTEMPTY) => return Err(PlaceError::Exists),
+        Err(Errno::XDEV) => return Err(PlaceError::CrossDevice),
+        Err(error) => error,
+    };
+    if require_private_stage {
+        match fs.stat(from, false) {
+            Ok(current) if Some(current.identity) == expected => {}
+            Ok(_) => return Err(PlaceError::Changed),
+            Err(Errno::NOENT) => return Err(PlaceError::Unconfirmed),
+            Err(error) => return Err(PlaceError::Io(error)),
+        }
     }
+    fallback(fs, from, to, expected, error)
 }
 
 fn fallback(

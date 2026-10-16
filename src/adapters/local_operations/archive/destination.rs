@@ -3,15 +3,7 @@
 #[cfg(test)]
 mod tests;
 
-use std::{
-    ffi::{OsStr, OsString},
-    os::{
-        fd::{AsFd, BorrowedFd, OwnedFd},
-        unix::ffi::{OsStrExt, OsStringExt},
-    },
-    path::{Component, Path, PathBuf},
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::{ffi::{OsStr, OsString}, os::{fd::{AsFd, BorrowedFd, OwnedFd}, unix::ffi::OsStrExt}, path::{Component, Path, PathBuf}, time::{SystemTime, UNIX_EPOCH}};
 
 use super::super::{
     fs_ops::{Entry, fs},
@@ -21,8 +13,8 @@ use super::super::{
     },
     placement_reason,
 };
-use super::extraction::MemberMetadata;
 use crate::services::error_detail;
+use super::extraction::MemberMetadata;
 
 /// Reading procfs avoids a process-global umask(2) race in the multithreaded GUI.
 pub(super) fn process_umask() -> u32 {
@@ -67,22 +59,12 @@ fn best_effort(result: rustix::io::Result<()>) -> rustix::io::Result<()> {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
-pub(super) struct MetadataCalls {
-    pub(super) chmod: fn(BorrowedFd<'_>, rustix::fs::Mode) -> rustix::io::Result<()>,
-    pub(super) set_times: fn(BorrowedFd<'_>, &rustix::fs::Timestamps) -> rustix::io::Result<()>,
-    pub(super) set_link_times:
-        fn(BorrowedFd<'_>, &OsStr, &rustix::fs::Timestamps) -> rustix::io::Result<()>,
+fn time_parts(time: rustix::fs::Timespec) -> (i64, u32) {
+    (time.tv_sec, time.tv_nsec as u32)
 }
 
-impl MetadataCalls {
-    pub(super) const SYSTEM: Self = Self {
-        chmod: |directory, mode| rustix::fs::fchmod(directory, mode),
-        set_times: |file, times| rustix::fs::futimens(file, times),
-        set_link_times: |parent, name, times| {
-            rustix::fs::utimensat(parent, name, times, rustix::fs::AtFlags::SYMLINK_NOFOLLOW)
-        },
-    };
+fn set_times(file: BorrowedFd<'_>, times: &rustix::fs::Timestamps) -> rustix::io::Result<()> {
+    fs().set_times_fd(file, time_parts(times.last_access), time_parts(times.last_modification))
 }
 
 /// Clamp parent traversal at the extraction root so one such member does not abort the archive.
@@ -174,13 +156,7 @@ fn suffixed_name(name: &OsStr, index: u64, is_directory: bool) -> OsString {
     let path = Path::new(name);
     let extension = path.extension().filter(|_| !is_directory);
     let stem = extension.map_or(name, |_| path.file_stem().unwrap_or(name));
-    let mut candidate = stem.as_bytes().to_vec();
-    candidate.extend_from_slice(format!(" ({index})").as_bytes());
-    if let Some(extension) = extension {
-        candidate.push(b'.');
-        candidate.extend_from_slice(extension.as_bytes());
-    }
-    OsString::from_vec(candidate)
+    super::super::names::duplicate_candidate_name(stem, extension, index)
 }
 
 pub(super) fn archive_stem(archive_name: &str) -> &str {
@@ -204,7 +180,6 @@ pub(super) fn archive_stem(archive_name: &str) -> &str {
 #[derive(Debug)]
 pub(super) struct ExtractionDestination {
     root: OwnedFd,
-    calls: MetadataCalls,
 }
 
 impl ExtractionDestination {
@@ -220,11 +195,7 @@ impl ExtractionDestination {
         let relative = path
             .strip_prefix("/")
             .map_err(|_| crate::i18n::tr("Extraction destination must use an absolute path"))?;
-        let filesystem_root = rustix::fs::open(
-            c"/",
-            rustix::fs::OFlags::PATH | rustix::fs::OFlags::DIRECTORY | rustix::fs::OFlags::CLOEXEC,
-            rustix::fs::Mode::empty(),
-        )
+        let filesystem_root = fs().open_path(OsStr::new("/"), rustix::fs::OFlags::PATH | rustix::fs::OFlags::DIRECTORY | rustix::fs::OFlags::CLOEXEC, rustix::fs::Mode::empty())
         .map_err(|error| {
             rust_i18n::t!(
                 "Could not open the filesystem root: %{error}",
@@ -237,15 +208,9 @@ impl ExtractionDestination {
         } else {
             relative
         };
-        let root = rustix::fs::openat2(
-            &filesystem_root,
-            relative,
-            rustix::fs::OFlags::RDONLY
+        let root = fs().open_at(Entry::new(&filesystem_root, relative.as_os_str()), rustix::fs::OFlags::RDONLY
                 | rustix::fs::OFlags::DIRECTORY
-                | rustix::fs::OFlags::CLOEXEC,
-            rustix::fs::Mode::empty(),
-            rustix::fs::ResolveFlags::IN_ROOT | rustix::fs::ResolveFlags::NO_MAGICLINKS,
-        )
+                | rustix::fs::OFlags::CLOEXEC, rustix::fs::Mode::empty(), Some(rustix::fs::ResolveFlags::IN_ROOT | rustix::fs::ResolveFlags::NO_MAGICLINKS))
         .map_err(|error| {
             rust_i18n::t!(
                 "Could not open extraction destination: %{error}",
@@ -253,15 +218,7 @@ impl ExtractionDestination {
             )
             .into_owned()
         })?;
-        Ok(Self {
-            root,
-            calls: MetadataCalls::SYSTEM,
-        })
-    }
-
-    #[cfg(test)]
-    pub(super) fn with_metadata_calls(self, calls: MetadataCalls) -> Self {
-        Self { calls, ..self }
+        Ok(Self { root })
     }
 
     pub(super) fn create_staging(&self) -> Result<(OsString, Self), String> {
@@ -273,29 +230,23 @@ impl ExtractionDestination {
             .map_err(creation_error)
         })
         .map_err(|error| staging_creation_failed(&error_detail(placement_reason(error))))?;
-        let root = rustix::fs::openat(
-            &self.root,
-            &name,
-            rustix::fs::OFlags::RDONLY
+        let root = fs().open_at(Entry::new(&self.root, &name), rustix::fs::OFlags::RDONLY
                 | rustix::fs::OFlags::DIRECTORY
                 | rustix::fs::OFlags::NOFOLLOW
-                | rustix::fs::OFlags::CLOEXEC,
-            rustix::fs::Mode::empty(),
-        )
+                | rustix::fs::OFlags::CLOEXEC, rustix::fs::Mode::empty(), None)
         .map_err(|error| {
-            let _ = rustix::fs::unlinkat(&self.root, &name, rustix::fs::AtFlags::REMOVEDIR);
+            let _ = fs().unlink(Entry::new(&self.root, &name), rustix::fs::AtFlags::REMOVEDIR);
             rust_i18n::t!(
                 "Could not open the extraction staging folder: %{error}",
                 error = errno_detail(error)
             )
             .into_owned()
         })?;
-        let calls = self.calls;
-        Ok((name, Self { root, calls }))
+        Ok((name, Self { root }))
     }
 
     pub(super) fn remove_empty_staging(&self, staging: &OsStr) -> Result<bool, String> {
-        match rustix::fs::unlinkat(&self.root, staging, rustix::fs::AtFlags::REMOVEDIR) {
+        match fs().unlink(Entry::new(&self.root, staging), rustix::fs::AtFlags::REMOVEDIR) {
             Ok(()) => Ok(true),
             // Some filesystems report a non-empty directory as EEXIST.
             Err(rustix::io::Errno::NOTEMPTY | rustix::io::Errno::EXIST) => Ok(false),
@@ -353,10 +304,10 @@ impl ExtractionDestination {
         root: &Path,
     ) -> Result<OsString, String> {
         let leaf = root.file_name().ok_or_else(no_file_name)?;
-        let stat = rustix::fs::statat(&staging.root, root, rustix::fs::AtFlags::SYMLINK_NOFOLLOW)
+        let stat = fs().stat(Entry::new(&staging.root, root.as_os_str()), false)
             .map_err(errno_text)?;
         let is_directory =
-            rustix::fs::FileType::from_raw_mode(stat.st_mode) == rustix::fs::FileType::Directory;
+            stat.kind == rustix::fs::FileType::Directory;
         for index in 1..=NUMBERED_NAME_ATTEMPTS {
             let candidate = if index == 1 {
                 leaf.to_owned()
@@ -385,7 +336,7 @@ impl ExtractionDestination {
     ///
     /// [`fstatvfs`]: rustix::fs::fstatvfs
     pub(super) fn available_bytes(&self) -> Result<Option<u64>, String> {
-        let stat = rustix::fs::fstatvfs(&self.root).map_err(|error| {
+        let stat = fs().stat_vfs(self.root.as_fd()).map_err(|error| {
             rust_i18n::t!(
                 "Could not inspect free space at the extraction destination: %{error}",
                 error = errno_detail(error)
@@ -410,7 +361,7 @@ impl ExtractionDestination {
             } else {
                 suffixed_name(name, index, false)
             };
-            match rustix::fs::statat(directory, &candidate, rustix::fs::AtFlags::SYMLINK_NOFOLLOW) {
+            match fs().stat(Entry::new(directory, &candidate), false) {
                 Err(rustix::io::Errno::NOENT) => return Ok(candidate),
                 Err(error) => {
                     return Err(rust_i18n::t!(
@@ -420,7 +371,7 @@ impl ExtractionDestination {
                     )
                     .into_owned());
                 }
-                Ok(stat) => match rustix::fs::FileType::from_raw_mode(stat.st_mode) {
+                Ok(stat) => match stat.kind {
                     rustix::fs::FileType::RegularFile
                     | rustix::fs::FileType::Directory
                     | rustix::fs::FileType::Symlink => {}
@@ -468,21 +419,16 @@ impl ExtractionDestination {
                 return Err(crate::i18n::tr("Invalid internal extraction path"));
             };
             if create {
-                match rustix::fs::mkdirat(&directory, name, rustix::fs::Mode::from_raw_mode(0o777))
+                match fs().mkdir(Entry::new(&directory, name), rustix::fs::Mode::from_raw_mode(0o777))
                 {
                     Ok(()) | Err(rustix::io::Errno::EXIST) => {}
                     Err(error) => return Err(errno_text(error)),
                 }
             }
-            directory = rustix::fs::openat(
-                &directory,
-                name,
-                rustix::fs::OFlags::RDONLY
+            directory = fs().open_at(Entry::new(&directory, name), rustix::fs::OFlags::RDONLY
                     | rustix::fs::OFlags::DIRECTORY
                     | rustix::fs::OFlags::NOFOLLOW
-                    | rustix::fs::OFlags::CLOEXEC,
-                rustix::fs::Mode::empty(),
-            )
+                    | rustix::fs::OFlags::CLOEXEC, rustix::fs::Mode::empty(), None)
             .map_err(errno_text)?;
         }
         Ok(directory)
@@ -502,16 +448,11 @@ impl ExtractionDestination {
         mode: Option<u32>,
     ) -> Result<(std::fs::File, PathBuf), String> {
         let (parent, name, created) = self.prepare_leaf(path)?;
-        let file = rustix::fs::openat(
-            parent,
-            name,
-            rustix::fs::OFlags::WRONLY
+        let file = fs().open_at(Entry::new(&parent, &name), rustix::fs::OFlags::WRONLY
                 | rustix::fs::OFlags::CREATE
                 | rustix::fs::OFlags::EXCL
                 | rustix::fs::OFlags::NOFOLLOW
-                | rustix::fs::OFlags::CLOEXEC,
-            rustix::fs::Mode::from_raw_mode(mode.map_or(0o666, permission_bits)),
-        )
+                | rustix::fs::OFlags::CLOEXEC, rustix::fs::Mode::from_raw_mode(mode.map_or(0o666, permission_bits)), None)
         .map(std::fs::File::from)
         .map_err(errno_text)?;
         Ok((file, created))
@@ -524,7 +465,7 @@ impl ExtractionDestination {
         modified: Option<SystemTime>,
     ) -> Result<PathBuf, String> {
         let (parent, name, created) = self.prepare_leaf(path)?;
-        rustix::fs::symlinkat(target, &parent, &name).map_err(|error| {
+        fs().symlink(target, Entry::new(&parent, &name)).map_err(|error| {
             rust_i18n::t!(
                 "Could not create symbolic link “%{path}”: %{error}",
                 path = created.display(),
@@ -536,7 +477,7 @@ impl ExtractionDestination {
         if let Some(times) = modified.and_then(timestamps)
             && fs().fs_type(parent.as_fd()) != Some(FUSE_SUPER_MAGIC)
         {
-            let _ = (self.calls.set_link_times)(parent.as_fd(), &name, &times);
+            let _ = fs().set_link_times(Entry::new(&parent, &name), time_parts(times.last_access), time_parts(times.last_modification));
         }
         Ok(created)
     }
@@ -547,7 +488,7 @@ impl ExtractionDestination {
         modified: SystemTime,
     ) -> rustix::io::Result<()> {
         match timestamps(modified) {
-            Some(times) => best_effort((self.calls.set_times)(file.as_fd(), &times)),
+            Some(times) => best_effort(set_times(file.as_fd(), &times)),
             None => Ok(()),
         }
     }
@@ -570,13 +511,7 @@ impl ExtractionDestination {
             .open_directory(target.parent().unwrap_or_else(|| Path::new("")))
             .map_err(unavailable)?;
         let (parent, name, created) = self.prepare_leaf(path)?;
-        rustix::fs::linkat(
-            &target_parent,
-            target_name,
-            &parent,
-            &name,
-            rustix::fs::AtFlags::empty(),
-        )
+        fs().link(Entry::new(&target_parent, target_name), Entry::new(&parent, &name))
         .map_err(|error| {
             rust_i18n::t!(
                 "Could not link “%{path}” to “%{target}”: %{error}",
@@ -605,7 +540,7 @@ impl ExtractionDestination {
         })?;
         if let Some(mode) = metadata.mode {
             let mode = rustix::fs::Mode::from_raw_mode(permission_bits(mode) & !umask);
-            best_effort((self.calls.chmod)(directory.as_fd(), mode)).map_err(|error| {
+            best_effort(fs().chmod_fd(directory.as_fd(), mode.as_raw_mode())).map_err(|error| {
                 rust_i18n::t!(
                     "Could not restore permissions on “%{path}”: %{error}",
                     path = path.display(),
@@ -615,7 +550,7 @@ impl ExtractionDestination {
             })?;
         }
         if let Some(times) = metadata.modified.and_then(timestamps) {
-            best_effort((self.calls.set_times)(directory.as_fd(), &times))
+            best_effort(set_times(directory.as_fd(), &times))
                 .map_err(|error| modification_time_failed(path, error))?;
         }
         Ok(())
@@ -625,7 +560,7 @@ impl ExtractionDestination {
     pub(super) fn reset_directory_mode(&self, path: &Path, umask: u32) {
         if let Ok(directory) = self.open_directory(path) {
             let mode = rustix::fs::Mode::from_raw_mode(0o777 & !umask);
-            let _ = (self.calls.chmod)(directory.as_fd(), mode);
+            let _ = fs().chmod_fd(directory.as_fd(), mode.as_raw_mode());
         }
     }
 
@@ -641,7 +576,7 @@ impl ExtractionDestination {
     pub(super) fn remove_file(&self, path: &Path) -> Result<(), String> {
         let parent = self.create_directories(path.parent().unwrap_or_else(|| Path::new("")))?;
         let name = path.file_name().ok_or_else(no_file_name)?;
-        rustix::fs::unlinkat(&parent, name, rustix::fs::AtFlags::empty()).map_err(|error| {
+        fs().unlink(Entry::new(&parent, &name), rustix::fs::AtFlags::empty()).map_err(|error| {
             rust_i18n::t!(
                 "Could not remove incomplete extraction %{path}: %{error}",
                 path = path.display(),
@@ -669,27 +604,14 @@ fn place_without_replacing(
 
 /// Never follows symlinks. With `files` disabled, any non-directory preserves its ancestors.
 fn remove_tree(parent: BorrowedFd<'_>, name: &OsStr, files: bool) -> rustix::io::Result<bool> {
-    let directory = rustix::fs::openat(
-        parent,
-        name,
-        rustix::fs::OFlags::RDONLY
+    let directory = fs().open_at(Entry { dir: parent, name }, rustix::fs::OFlags::RDONLY
             | rustix::fs::OFlags::DIRECTORY
             | rustix::fs::OFlags::NOFOLLOW
-            | rustix::fs::OFlags::CLOEXEC,
-        rustix::fs::Mode::empty(),
-    )?;
+            | rustix::fs::OFlags::CLOEXEC, rustix::fs::Mode::empty(), None)?;
     let mut children = Vec::new();
-    for entry in rustix::fs::Dir::read_from(&directory)? {
-        let entry = entry?;
-        let child = OsStr::from_bytes(entry.file_name().to_bytes());
-        if child == "." || child == ".." {
-            continue;
-        }
-        let file_type = match entry.file_type() {
-            rustix::fs::FileType::Unknown => rustix::fs::FileType::from_raw_mode(
-                rustix::fs::statat(&directory, child, rustix::fs::AtFlags::SYMLINK_NOFOLLOW)?
-                    .st_mode,
-            ),
+    for (child, file_type) in fs().list(directory.as_fd())? {
+        let file_type = match file_type {
+            rustix::fs::FileType::Unknown => fs().stat(Entry::new(&directory, &child), false)?.kind,
             file_type => file_type,
         };
         let is_directory = file_type == rustix::fs::FileType::Directory;
@@ -700,12 +622,12 @@ fn remove_tree(parent: BorrowedFd<'_>, name: &OsStr, files: bool) -> rustix::io:
     }
     for (child, is_directory) in children {
         if !is_directory {
-            rustix::fs::unlinkat(&directory, &child, rustix::fs::AtFlags::empty())?;
+            fs().unlink(Entry::new(&directory, &child), rustix::fs::AtFlags::empty())?;
         } else if !remove_tree(directory.as_fd(), &child, files)? {
             return Ok(false);
         }
     }
-    rustix::fs::unlinkat(parent, name, rustix::fs::AtFlags::REMOVEDIR)?;
+    fs().unlink(Entry { dir: parent, name }, rustix::fs::AtFlags::REMOVEDIR)?;
     Ok(true)
 }
 

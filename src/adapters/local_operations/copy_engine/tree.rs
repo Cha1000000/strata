@@ -35,20 +35,7 @@ use super::{
     restrictive::{self, Restrictive},
     same_entry, stable_inodes, stage,
 };
-use crate::{
-    adapters::{
-        local_operations::{
-            LocalFileIdentity, StageContent, StagedSibling, cancelled_local_operation,
-            fat_sanitized_name,
-            fs_ops::{Entry, EntryStat, FsOps},
-            io_error, numbered_names, os_error_detail, placement,
-            placement::{COPY_PREFIX, PlaceError},
-            work_queue::{self, Group, Job, WorkQueue},
-        },
-        volume::{Family, MountKey},
-    },
-    services::{KeptCause, RenameCause, SpecialKind},
-};
+use crate::{adapters::{local_operations::{cancelled_local_operation, fat_sanitized_name, fs_ops::{Entry, EntryStat, FsOps}, io_error, names::numbered_names, native_fs::{LocalFileIdentity, os_error_detail}, placement::{self, COPY_PREFIX, PlaceError}, replacement::{StageContent, StagedSibling}, work_queue::{self, Group, Job, WorkQueue}}, volume::{Family, MountKey}}, services::{KeptCause, RenameCause, SpecialKind}};
 
 /// `FS_CASEFOLD_FL`, which folders made inside a casefolded one inherit.
 const CASEFOLD: u32 = 0x4000_0000;

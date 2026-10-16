@@ -63,9 +63,7 @@ fn sync_filesystem_on_a_local_directory_succeeds() {
 #[test]
 fn bytes_already_written_are_flushed_before_cancellation_and_cancel_is_not_pasted()
 -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let destination = root.path().join("usb");
     fs::create_dir(&destination)?;
@@ -122,9 +120,7 @@ fn bytes_already_written_are_flushed_before_cancellation_and_cancel_is_not_paste
 
 #[test]
 fn a_cancel_after_the_flush_starts_does_not_report_success() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let destination = root.path().join("usb");
     fs::create_dir(&destination)?;
@@ -173,9 +169,7 @@ fn a_cancel_after_the_flush_starts_does_not_report_success() -> Result<(), Box<d
 
 #[test]
 fn failed_final_flush_reports_that_writes_may_still_be_pending() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let destination = root.path().join("usb");
     fs::create_dir(&destination)?;
@@ -206,9 +200,7 @@ fn failed_final_flush_reports_that_writes_may_still_be_pending() -> Result<(), B
 #[test]
 fn failed_flush_after_cancel_reports_that_writes_may_still_be_pending() -> Result<(), Box<dyn Error>>
 {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let destination = root.path().join("usb");
     fs::create_dir(&destination)?;
@@ -240,9 +232,7 @@ fn failed_flush_after_cancel_reports_that_writes_may_still_be_pending() -> Resul
 #[test]
 fn fat32_limit_failure_does_not_start_an_uncancellable_device_flush() -> Result<(), Box<dyn Error>>
 {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let destination = root.path().join("usb");
     fs::create_dir(&destination)?;
@@ -279,9 +269,7 @@ fn fat32_limit_failure_does_not_start_an_uncancellable_device_flush() -> Result<
 
 #[test]
 fn bytes_already_written_are_flushed_before_transfer_failure() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let destination = root.path().join("usb");
     fs::create_dir(&destination)?;
@@ -506,9 +494,7 @@ fn strings(names: &[&str]) -> Vec<String> {
 #[test]
 fn the_barrier_before_deleting_a_moved_source_follows_the_destination_family()
 -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     // The family, what udev records the device as holding (an error is a
     // lookup that fails on an NTFS device), the kernel, whether the device
     // is removable, whether the paste moves, whether each written file is
@@ -660,9 +646,7 @@ fn the_barrier_before_deleting_a_moved_source_follows_the_destination_family()
 #[test]
 fn owed_deletions_close_in_batches() -> Result<(), Box<dyn Error>> {
     use super::super::owed::Limits;
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let names = ["a", "b", "c", "d", "e"];
     let rows: [(&str, Limits, [usize; 5], Vec<Seen>); 3] = [
         (
@@ -779,9 +763,7 @@ fn owed_deletions_close_in_batches() -> Result<(), Box<dyn Error>> {
 fn a_failed_barrier_deletes_nothing_in_its_batch_and_stops_the_move() -> Result<(), Box<dyn Error>>
 {
     use super::super::owed::Limits;
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let _limits = LimitsGuard::set(Limits {
         items: 2,
         ..NO_LIMITS
@@ -832,9 +814,7 @@ fn a_failed_barrier_deletes_nothing_in_its_batch_and_stops_the_move() -> Result<
 
 #[test]
 fn cancelling_a_move_closes_its_pending_batch() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let _limits = LimitsGuard::set(NO_LIMITS);
     // Ten items take the parallel path.
     for (id, count, cancel_after) in [(330, 3, 2), (331, 3, 3), (332, 10, 10)] {
@@ -904,9 +884,7 @@ fn cancelling_a_move_closes_its_pending_batch() -> Result<(), Box<dyn Error>> {
 #[test]
 fn many_moved_files_are_copied_in_parallel_and_share_a_barrier() -> Result<(), Box<dyn Error>> {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     // The last item makes the batch due, which still closes as the device
     // flush shows.
     let _limits = LimitsGuard::set(super::super::owed::Limits {
@@ -1047,9 +1025,7 @@ fn many_moved_files_are_copied_in_parallel_and_share_a_barrier() -> Result<(), B
 #[test]
 fn names_of_one_file_moved_as_separate_items_are_all_deleted() -> Result<(), Box<dyn Error>> {
     use super::super::owed::Limits;
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let items: [(&str, &[&str]); 2] = [
         ("selected names", &["a", "b", "c"]),
         ("folders", &["daily.0", "daily.1", "daily.2"]),
@@ -1123,9 +1099,7 @@ fn names_of_one_file_moved_as_separate_items_are_all_deleted() -> Result<(), Box
 #[test]
 fn a_merging_move_flushes_each_filesystem_it_wrote_to_before_deleting() -> Result<(), Box<dyn Error>>
 {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let sources = root.path().join("sources");
     let destination = root.path().join("destination");
@@ -1202,9 +1176,7 @@ fn a_merging_move_flushes_each_filesystem_it_wrote_to_before_deleting() -> Resul
 fn files_gio_wrote_are_synced_one_by_one_where_the_barrier_misses_them()
 -> Result<(), Box<dyn Error>> {
     use std::os::unix::fs::PermissionsExt;
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let destination = root.path().join("destination");
     let folder = destination.join("folder");
@@ -1247,9 +1219,7 @@ fn files_gio_wrote_are_synced_one_by_one_where_the_barrier_misses_them()
 fn a_replace_on_smb_syncs_its_copy_only_where_the_original_is_deleted() -> Result<(), Box<dyn Error>>
 {
     use super::fs_quirks::Trash;
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     for (id, trash, synced) in [(380, Trash::Supported, false), (381, Trash::Refused, true)] {
         let row = format!("{trash:?}");
         let root = tempfile::tempdir()?;
@@ -1312,9 +1282,7 @@ fn a_replace_on_smb_syncs_its_copy_only_where_the_original_is_deleted() -> Resul
 
 #[test]
 fn a_barrier_needs_a_readable_folder_only_where_it_flushes_one() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     // The family, whether the unreadable destination is a folder beneath
     // the mount's root, and whether the move goes ahead.
     let rows = [
@@ -1390,9 +1358,7 @@ fn a_barrier_needs_a_readable_folder_only_where_it_flushes_one() -> Result<(), B
 
 #[test]
 fn moved_files_are_synced_on_smb_whatever_the_conflict() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let conflicts = [
         TransferConflict::FailIfExists,
         TransferConflict::ReplaceExisting,
@@ -1482,9 +1448,7 @@ fn moved_files_are_synced_on_smb_whatever_the_conflict() -> Result<(), Box<dyn E
 
 #[test]
 fn a_writeback_lost_during_a_move_keeps_every_source_it_may_hold() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let _limits = LimitsGuard::set(NO_LIMITS);
     // The first copy's writeback is lost once it is published, with one
     // item, or with a second whose barrier is opened after the loss.
@@ -1552,9 +1516,7 @@ impl Drop for ClockGuard {
 #[test]
 fn a_batch_closes_once_its_first_entry_is_five_seconds_old() -> Result<(), Box<dyn Error>> {
     use super::super::owed::{Limits, advance_batch_clock_for_test};
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let _limits = LimitsGuard::set(Limits {
         age: Duration::from_secs(5),
         ..NO_LIMITS
@@ -1626,9 +1588,7 @@ fn a_batch_closes_once_its_first_entry_is_five_seconds_old() -> Result<(), Box<d
 #[test]
 fn a_failed_barrier_stops_a_bulk_move() -> Result<(), Box<dyn Error>> {
     use super::super::owed::Limits;
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     // Enough files for the bulk path, whose first barrier fails: the last,
     // or the first of several.
     for (id, items) in (460..).zip([usize::MAX, 3]) {
@@ -1682,9 +1642,7 @@ fn a_failed_barrier_stops_a_bulk_move() -> Result<(), Box<dyn Error>> {
 
 #[test]
 fn an_original_that_cannot_be_deleted_fails_its_replacing_move() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let sources = root.path().join("sources");
     let destination = root.path().join("destination");

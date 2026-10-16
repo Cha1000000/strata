@@ -22,17 +22,7 @@ use super::{
     restrictive, stable_inodes,
     tree::{self, Names},
 };
-use crate::{
-    adapters::{
-        local_operations::{
-            LocalFileIdentity,
-            fs_ops::{Entry, FsOps},
-            placement::{self, PlaceError},
-        },
-        volume::{Family, MountKey},
-    },
-    services::{KeptCause, RenameCause},
-};
+use crate::{adapters::{local_operations::{fs_ops::{Entry, FsOps}, native_fs::LocalFileIdentity, placement::{self, PlaceError}}, volume::{Family, MountKey}}, services::{KeptCause, RenameCause}};
 
 /// A source file by device and inode, within one scope.
 pub(super) type Key = (usize, u64, u64);

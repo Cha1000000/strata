@@ -9,10 +9,9 @@ use std::{
         fd::{AsFd, AsRawFd, BorrowedFd, IntoRawFd, OwnedFd},
         unix::ffi::OsStringExt,
     },
-    path::Path,
 };
 
-use gtk::{gio, glib, prelude::*};
+use gtk::{gio, glib};
 
 use rustix::{
     fs::{
@@ -21,8 +20,8 @@ use rustix::{
     io::Errno,
 };
 
-use super::{LocalFileIdentity, retry_local_open};
-use crate::adapters::volume::{MountKey, MountTable, MountType};
+use crate::adapters::volume::MountKey;
+use super::native_fs::{LocalFileIdentity, retry_local_open};
 
 /// `STATX_MNT_ID_UNIQUE` (Linux 6.8), which rustix does not name yet.
 const STATX_MNT_ID_UNIQUE: u32 = 0x4000;
@@ -65,7 +64,13 @@ impl EntryStat {
     }
 }
 
-pub(super) trait FsOps: Send + Sync {
+pub(super) trait FsOps: super::environment::FsEnvironment {
+    // Raw opens preserve each caller's retry, resolution and thread policies.
+    // Some restore descriptor setup still runs before worker dispatch.
+    fn open_at(&self, at: Entry<'_>, flags: OFlags, mode: Mode, resolve: Option<ResolveFlags>) -> Result<OwnedFd, Errno>;
+    fn open_path(&self, path: &OsStr, flags: OFlags, mode: Mode) -> Result<OwnedFd, Errno>;
+    fn dup(&self, fd: BorrowedFd<'_>) -> Result<OwnedFd, Errno>;
+    fn stat_vfs(&self, fd: BorrowedFd<'_>) -> Result<rustix::fs::StatVfs, Errno>;
     fn rename(&self, from: Entry<'_>, to: Entry<'_>, flags: RenameFlags) -> Result<(), Errno>;
     fn link(&self, from: Entry<'_>, to: Entry<'_>) -> Result<(), Errno>;
     fn unlink(&self, at: Entry<'_>, flags: AtFlags) -> Result<(), Errno>;
@@ -81,9 +86,6 @@ pub(super) trait FsOps: Send + Sync {
     fn names(&self, dir: Entry<'_>) -> Result<Vec<OsString>, Errno>;
     fn mount_key(&self, dir: BorrowedFd<'_>) -> MountKey;
     fn fs_type(&self, dir: BorrowedFd<'_>) -> Option<FsWord>;
-    fn can_trash(&self, path: &Path) -> bool;
-    /// GLib's own result: `Ok(false)` is a failure without an error (GLib #4060).
-    fn trash(&self, path: &Path, cancellable: &gio::Cancellable) -> Result<bool, glib::Error>;
     /// The regular file at `at`, opened for reading without following it,
     /// or `None` when something else is there. `listed` skips looking at it
     /// by name first, where the caller just saw a regular file there.
@@ -130,10 +132,6 @@ pub(super) trait FsOps: Send + Sync {
     fn xattr_names(&self, fd: BorrowedFd<'_>) -> Result<Vec<OsString>, Errno>;
     fn get_xattr(&self, fd: BorrowedFd<'_>, name: &OsStr) -> Result<Vec<u8>, Errno>;
     fn set_xattr(&self, fd: BorrowedFd<'_>, name: &OsStr, value: &[u8]) -> Result<(), Errno>;
-    fn mount_type(&self, fd: BorrowedFd<'_>) -> Option<MountType>;
-    /// The format udev's database records (`ID_FS_TYPE`) for the block
-    /// device holding `fd`, where it has a record.
-    fn device_format(&self, fd: BorrowedFd<'_>) -> Result<Option<String>, Errno>;
     /// The folder at `at`, which may name several components, opened
     /// without following a symlink anywhere on the way.
     fn open_dir(&self, at: Entry<'_>) -> Result<OwnedFd, Errno>;
@@ -309,6 +307,24 @@ fn read_sized(mut read: impl FnMut(&mut [u8]) -> Result<usize, Errno>) -> Result
 }
 
 impl FsOps for System {
+    fn open_at(&self, at: Entry<'_>, flags: OFlags, mode: Mode, resolve: Option<ResolveFlags>) -> Result<OwnedFd, Errno> {
+        match resolve {
+            Some(resolve) => rustix::fs::openat2(at.dir, at.name, flags, mode, resolve),
+            None => rustix::fs::openat(at.dir, at.name, flags, mode),
+        }
+    }
+
+    fn open_path(&self, path: &OsStr, flags: OFlags, mode: Mode) -> Result<OwnedFd, Errno> {
+        rustix::fs::open(path, flags, mode)
+    }
+
+    fn dup(&self, fd: BorrowedFd<'_>) -> Result<OwnedFd, Errno> {
+        rustix::io::dup(fd)
+    }
+
+    fn stat_vfs(&self, fd: BorrowedFd<'_>) -> Result<rustix::fs::StatVfs, Errno> {
+        rustix::fs::fstatvfs(fd)
+    }
     fn rename(&self, from: Entry<'_>, to: Entry<'_>, flags: RenameFlags) -> Result<(), Errno> {
         assert_off_main_thread();
         rustix::fs::renameat_with(from.dir, from.name, to.dir, to.name, flags)
@@ -429,43 +445,6 @@ impl FsOps for System {
     fn fs_type(&self, dir: BorrowedFd<'_>) -> Option<FsWord> {
         assert_off_main_thread();
         rustix::fs::fstatfs(dir).ok().map(|stat| stat.f_type)
-    }
-
-    fn can_trash(&self, path: &Path) -> bool {
-        assert_off_main_thread();
-        gio::File::for_path(path)
-            .query_info(
-                gio::FILE_ATTRIBUTE_ACCESS_CAN_TRASH,
-                gio::FileQueryInfoFlags::NOFOLLOW_SYMLINKS,
-                gio::Cancellable::NONE,
-            )
-            .is_ok_and(|info| info.boolean(gio::FILE_ATTRIBUTE_ACCESS_CAN_TRASH))
-    }
-
-    #[expect(
-        unsafe_code,
-        reason = "gio-rs asserts that FALSE always carries an error, which GLib #4060 breaks"
-    )]
-    fn trash(&self, path: &Path, cancellable: &gio::Cancellable) -> Result<bool, glib::Error> {
-        use glib::translate::{ToGlibPtr, from_glib_full};
-
-        assert_off_main_thread();
-        let file = gio::File::for_path(path);
-        let mut error = std::ptr::null_mut();
-        // SAFETY: file and cancellable outlive the call, and error is a valid out-pointer.
-        let trashed = unsafe {
-            gio::ffi::g_file_trash(
-                file.to_glib_none().0,
-                cancellable.to_glib_none().0,
-                &mut error,
-            )
-        };
-        if error.is_null() {
-            Ok(trashed != glib::ffi::GFALSE)
-        } else {
-            // SAFETY: GLib set the error and transferred its ownership to us.
-            Err(unsafe { from_glib_full(error) })
-        }
     }
 
     fn open_source(
@@ -658,56 +637,6 @@ impl FsOps for System {
     fn set_xattr(&self, fd: BorrowedFd<'_>, name: &OsStr, value: &[u8]) -> Result<(), Errno> {
         assert_off_main_thread();
         rustix::fs::fsetxattr(fd, name, value, rustix::fs::XattrFlags::empty())
-    }
-
-    fn mount_type(&self, fd: BorrowedFd<'_>) -> Option<MountType> {
-        assert_off_main_thread();
-        let mounts = MountTable::current();
-        let mount_type = match rustix::fs::statx(
-            fd,
-            "",
-            AtFlags::EMPTY_PATH | AtFlags::STATX_DONT_SYNC,
-            StatxFlags::MNT_ID,
-        ) {
-            Ok(stat)
-                if StatxFlags::from_bits_retain(stat.stx_mask).contains(StatxFlags::MNT_ID) =>
-            {
-                mounts.mount_type_of(stat.stx_mnt_id)
-            }
-            // Before Linux 5.8.
-            _ => {
-                let path = std::fs::read_link(format!("/proc/self/fd/{}", fd.as_raw_fd())).ok()?;
-                mounts.mount_type_for(&path)
-            }
-        };
-        mount_type.cloned()
-    }
-
-    fn device_format(&self, fd: BorrowedFd<'_>) -> Result<Option<String>, Errno> {
-        assert_off_main_thread();
-        let stat = rustix::fs::statx(
-            fd,
-            "",
-            AtFlags::EMPTY_PATH | AtFlags::STATX_DONT_SYNC,
-            StatxFlags::empty(),
-        )?;
-        let record = format!(
-            "/run/udev/data/b{}:{}",
-            stat.stx_dev_major, stat.stx_dev_minor
-        );
-        let record = match std::fs::read_to_string(record) {
-            Ok(record) => record,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => {
-                return Err(error
-                    .raw_os_error()
-                    .map_or(Errno::IO, Errno::from_raw_os_error));
-            }
-        };
-        Ok(record
-            .lines()
-            .find_map(|line| line.strip_prefix("E:ID_FS_TYPE="))
-            .map(str::to_owned))
     }
 
     fn open_dir(&self, at: Entry<'_>) -> Result<OwnedFd, Errno> {

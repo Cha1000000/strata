@@ -7,19 +7,12 @@ use std::{
 };
 
 use rustix::{
-    fs::{FileType, Mode, RenameFlags},
+    fs::{FileType, Mode},
     io::Errno,
 };
 use unicode_normalization::UnicodeNormalization;
 
-use crate::adapters::{
-    local_operations::{
-        LocalFileIdentity,
-        fs_ops::{Entry, EntryStat, FsOps},
-        placement::{self, PlaceError, Placed},
-    },
-    volume::Family,
-};
+use crate::adapters::{local_operations::{fs_ops::{Entry, EntryStat, FsOps}, native_fs::LocalFileIdentity, placement::{self, PlaceError, Placed}}, volume::Family};
 
 /// Local POSIX filesystems, which link an unnamed file atomically. The SMB
 /// client fakes `O_TMPFILE` with a visible file, and FUSE daemons that
@@ -123,21 +116,5 @@ pub(in crate::adapters::local_operations) fn publish(
     recorded: LocalFileIdentity,
     name: &OsStr,
 ) -> Result<Placed, PlaceError> {
-    let stage = Entry { dir, name: stage };
-    let target = Entry { dir, name };
-    // The stage is our own hidden name, so the first rung needs no check.
-    let error = match fs.rename(stage, target, RenameFlags::NOREPLACE) {
-        Ok(()) => return Ok(Placed::Renamed),
-        Err(Errno::EXIST | Errno::NOTEMPTY) => return Err(PlaceError::Exists),
-        Err(Errno::XDEV) => return Err(PlaceError::CrossDevice),
-        Err(error) => error,
-    };
-    match fs.stat(stage, false) {
-        Ok(current) if current.identity == recorded => {}
-        Ok(_) => return Err(PlaceError::Changed),
-        // A lost reply may have published it; nothing tells where the copy is.
-        Err(Errno::NOENT) => return Err(PlaceError::Unconfirmed),
-        Err(error) => return Err(PlaceError::Io(error)),
-    }
-    placement::place_after_rename(fs, stage, target, Some(recorded), error)
+    placement::publish_staged(fs, Entry { dir, name: stage }, Entry { dir, name }, recorded)
 }
