@@ -569,18 +569,40 @@ fn unreachable_uri_resolves_to_unknown_without_hanging() {
     assert_eq!(lookup.relation, VolumeRelation::Unknown);
 }
 
+fn capabilities_follow_mount_changes_once_watched_by(
+    name: &str,
+    start: impl FnOnce(&Path) -> Box<dyn FnOnce()>,
+) {
+    crate::test_support::gtk_test(name, || {
+        use gtk::prelude::*;
+
+        let root = tempfile::tempdir().expect("fixture");
+        let finish = start(root.path());
+        let real = MountKey::Device(u64::MAX - 7);
+        let scoped = MountKey::Test(u64::MAX - 7);
+        for key in [real, scoped] {
+            learn_mount_capability(key, |capabilities| capabilities.hard_links = Some(false));
+        }
+
+        gio_unix::MountMonitor::get().emit_by_name::<()>("mounts-changed", &[]);
+
+        assert_eq!(mount_capabilities(real), MountCapabilities::default());
+        assert_eq!(mount_capabilities(scoped).hard_links, Some(false));
+        forget_test_mount_capabilities(u64::MAX - 7);
+        finish();
+    });
+}
+
 #[test]
 fn operation_mount_changes_invalidate_capabilities_before_preferences_are_read() {
-    crate::test_support::gtk_test(
+    capabilities_follow_mount_changes_once_watched_by(
         "adapters::volume::tests::operation_mount_changes_invalidate_capabilities_before_preferences_are_read",
-        || {
+        |root| {
             use crate::services::{
                 DeleteRequest, OperationEvent, OperationProvider, OperationRequestId,
             };
-            use gtk::prelude::*;
 
-            let root = tempfile::tempdir().expect("operation fixture");
-            let path = root.path().join("delete.txt");
+            let path = root.join("delete.txt");
             fs::write(&path, b"fixture").expect("fixture file");
             let finished = Rc::new(std::cell::Cell::new(false));
             let observed = finished.clone();
@@ -598,25 +620,51 @@ fn operation_mount_changes_invalidate_capabilities_before_preferences_are_read()
                     }
                 }),
             );
-            let real = MountKey::Device(u64::MAX - 7);
-            let scoped = MountKey::Test(u64::MAX - 7);
-            for key in [real, scoped] {
-                learn_mount_capability(key, |capabilities| capabilities.hard_links = Some(false));
-            }
+            Box::new(move || {
+                let deadline = Instant::now() + Duration::from_secs(10);
+                while !finished.get() {
+                    assert!(Instant::now() < deadline, "deletion did not finish");
+                    glib::MainContext::default().iteration(false);
+                    std::thread::yield_now();
+                }
+                assert!(!path.exists());
+                drop(operation);
+            })
+        },
+    );
+}
 
-            gio_unix::MountMonitor::get().emit_by_name::<()>("mounts-changed", &[]);
+#[test]
+fn typed_name_checks_invalidate_capabilities_before_preferences_are_read() {
+    capabilities_follow_mount_changes_once_watched_by(
+        "adapters::volume::tests::typed_name_checks_invalidate_capabilities_before_preferences_are_read",
+        |root| {
+            let folder = gio::File::for_path(root);
+            let refused = glib::MainContext::default()
+                .block_on(crate::adapters::typed_name_refusal(&folder, "name", false));
+            assert_eq!(refused, None);
+            Box::new(|| {})
+        },
+    );
+}
 
-            assert_eq!(mount_capabilities(real), MountCapabilities::default());
-            assert_eq!(mount_capabilities(scoped).hard_links, Some(false));
-            forget_test_mount_capabilities(u64::MAX - 7);
-            let deadline = Instant::now() + Duration::from_secs(10);
-            while !finished.get() {
-                assert!(Instant::now() < deadline, "deletion did not finish");
-                glib::MainContext::default().iteration(false);
-                std::thread::yield_now();
-            }
-            assert!(!path.exists());
-            drop(operation);
+#[test]
+fn paste_target_checks_invalidate_capabilities_before_preferences_are_read() {
+    capabilities_follow_mount_changes_once_watched_by(
+        "adapters::volume::tests::paste_target_checks_invalidate_capabilities_before_preferences_are_read",
+        |root| {
+            let source = root.join("a.txt");
+            let destination = root.join("into");
+            fs::write(&source, b"a").expect("fixture file");
+            fs::create_dir(&destination).expect("fixture folder");
+            let targets = glib::MainContext::default().block_on(crate::adapters::transfer_targets(
+                &Location::local(&destination),
+                &[Location::local(&source)],
+                false,
+                &gio::Cancellable::new(),
+            ));
+            assert_eq!(targets.expect("paste targets").len(), 1);
+            Box::new(|| {})
         },
     );
 }
