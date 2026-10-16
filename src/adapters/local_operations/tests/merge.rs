@@ -1741,8 +1741,15 @@ fn undoing_a_merge_with_numbered_aliases_removes_only_its_items() -> Result<(), 
         fs::write(sources.join("folder").join(name), name)?;
     }
     fs::write(folder.join("keep.txt"), b"keep me")?;
-    // The SMB client learns that a name is taken only when it is refused.
-    let _scope = FsQuirks::install(&destination, without_trash(Quirks::cifs()));
+    // Rules that do not fold case learn that a name is taken only when it is refused.
+    let _scope = FsQuirks::install(
+        &destination,
+        without_trash(Quirks {
+            mount_type: Some(("fuse.ciopfs", "rw")),
+            case_insensitive: true,
+            ..Quirks::default()
+        }),
+    );
 
     let events = run_paste(PasteRequest {
         id: OperationRequestId(94),

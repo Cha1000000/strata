@@ -170,7 +170,8 @@ impl NameProfile {
     }
 
     /// A share without POSIX extensions: the server's Windows rules, in the
-    /// bytes it stores and the UTF-16 units SMB carries.
+    /// bytes it stores and the UTF-16 units SMB carries, with names that
+    /// differ only in case taken for one, as Windows and Samba do by default.
     pub(crate) fn smb(bytes: Option<u16>) -> Self {
         Self {
             limit: NameLimit {
@@ -178,6 +179,7 @@ impl NameProfile {
                 units: Some(WINDOWS_UNITS),
                 folder_bytes: Some(SAMBA_FOLDER_BYTES),
             },
+            folds: true,
             ..Self::windows(Reserved::Full, NameEncoding::Utf8)
         }
     }

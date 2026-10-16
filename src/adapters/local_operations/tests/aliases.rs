@@ -203,20 +203,16 @@ fn two_names_are_never_taken_for_one_where_the_listing_changes_their_case()
     use super::fs_quirks::{Op, Racer, renumbered};
     use crate::services::{PasteItem, PasteRequest};
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock()?;
-    // Samba with `preserve case = no` lists `Makefile` as `makefile` once it
-    // is made; a racer renames it so. Where inode numbers are not kept, the
-    // entry then reports another number. FAT plans such names apart before.
-    let fuse = || Quirks {
-        mount_type: Some(("fuse.ciopfs", "rw")),
-        case_insensitive: true,
-        ..Quirks::default()
-    };
-    let rows: [(&str, Preset, Op, bool, bool); 3] = [
-        ("copy", Quirks::cifs, Op::CreateReadonly, false, false),
-        ("move", Quirks::cifs, Op::CreateReadonly, true, false),
-        ("unstable inodes", fuse, Op::CreateNode, false, true),
+    // ciopfs lists `Makefile` as `makefile` once it is made, as Samba with
+    // `preserve case = no` does; a racer renames it so. Where inode numbers
+    // are not kept, the entry then reports another number. FAT and SMB plan
+    // such names apart before.
+    let rows = [
+        ("copy", false, false),
+        ("move", true, false),
+        ("unstable inodes", false, true),
     ];
-    for (row, preset, claim, moving, renumber) in rows {
+    for (row, moving, renumber) in rows {
         let root = tempfile::tempdir()?;
         let sources = root.path().join("sources");
         let folder = sources.join("folder");
@@ -242,8 +238,10 @@ fn two_names_are_never_taken_for_one_where_the_listing_changes_their_case()
         let _destination = FsQuirks::install(
             &destination,
             Quirks {
-                before: vec![(claim, "makefile", 0, racer)],
-                ..preset()
+                mount_type: Some(("fuse.ciopfs", "rw")),
+                case_insensitive: true,
+                before: vec![(Op::CreateNode, "makefile", 0, racer)],
+                ..Quirks::default()
             },
         );
 
@@ -409,6 +407,77 @@ fn top_level_items_a_destination_takes_for_an_earlier_one_are_numbered_and_repor
                 assert_eq!(names(&destination)?.len(), items.len(), "{context}");
                 assert_eq!(names(&source)?.is_empty(), moving, "{context}");
             }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn smb_without_posix_extensions_numbers_case_pairs_without_looking_up_the_later_spelling()
+-> Result<(), Box<dyn Error>> {
+    let _serial = serial()?;
+    // The cifs client turns server inode numbers off for the whole mount once
+    // it looks a folder up under a second spelling.
+    let later = ["docs", "makefile", "project/notes"];
+    for (preset, numbered) in [(Quirks::cifs as Preset, true), (Quirks::cifs_posix, false)] {
+        let root = tempfile::tempdir()?;
+        let source = root.path().join("source");
+        let destination = root.path().join("destination");
+        fs::create_dir_all(source.join("project"))?;
+        fs::create_dir(&destination)?;
+        for folder in ["Docs", "docs"] {
+            fs::create_dir(source.join(folder))?;
+            fs::write(source.join(folder).join("inside"), folder)?;
+        }
+        for file in ["Makefile", "makefile", "project/Notes", "project/notes"] {
+            fs::write(source.join(file), file)?;
+        }
+        let scope = FsQuirks::install(&destination, preset());
+
+        let events = run_paste(PasteRequest {
+            id: OperationRequestId(1530),
+            destination: Location::local(&destination),
+            items: ["Docs", "Makefile", "docs", "makefile", "project"]
+                .map(|item| PasteItem {
+                    source: Location::local(source.join(item)),
+                    conflict: TransferConflict::FailIfExists,
+                    target_name: None,
+                })
+                .into(),
+            move_sources: false,
+        });
+
+        let context = format!("{:?}", preset().mount_type);
+        let expected = if numbered {
+            later
+                .map(|name| (name.to_owned(), format!("{name} (1)"), RenameCause::Alias))
+                .into()
+        } else {
+            Vec::new()
+        };
+        assert_eq!(
+            renamed_beneath(&destination, &followed_report(&events)),
+            expected,
+            "{context}"
+        );
+        for name in later {
+            let saved_as = destination.join(if numbered {
+                format!("{name} (1)")
+            } else {
+                name.to_owned()
+            });
+            let read = if name == "docs" {
+                fs::read_to_string(saved_as.join("inside"))?
+            } else {
+                fs::read_to_string(saved_as)?
+            };
+            assert_eq!(read, name, "{context}");
+            let spelling = Path::new(name).file_name().ok_or("no name")?;
+            assert_eq!(
+                scope.used_name(&spelling.to_string_lossy()),
+                !numbered,
+                "{context}: {name}"
+            );
         }
     }
     Ok(())

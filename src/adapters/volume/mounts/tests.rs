@@ -339,6 +339,7 @@ fn name_rules_follow_the_driver_its_options_and_its_name_length() {
             units: Some(255),
             folder_bytes: Some(213),
         },
+        folds: true,
         ..windows(Reserved::Full, encoding, false)
     };
     let smb_posix = NameProfile {

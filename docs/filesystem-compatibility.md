@@ -97,7 +97,8 @@ Residual limits:
   inode numbers off for the whole mount once a folder is looked up under a second spelling, as the
   check before a case-only folder rename does ("Autodisabling the use of server inode numbers" in
   the kernel log). Hard links then report different inode numbers, so Strata stops using them
-  there, as on sshfs; `RENAME_NOREPLACE` still places items there.
+  there, as on sshfs; `RENAME_NOREPLACE` still places items there. A paste never looks a name up
+  under a second spelling there, as it numbers names that differ only in case before copying.
 - After a lost reply while placing over a placeholder (to the placeholder's `mkdir` or exclusive
   create, or to the rename over it), an empty folder or file Strata created can remain at the
   destination name.
@@ -372,12 +373,12 @@ created exclusively, so a taken name inside a folder the copy made means one of 
 - **A case alias.** On case-insensitive destinations (vfat, exFAT, exfat-fuse, ntfs3 with `nocase`,
   SMB, and casefolded ext4, f2fs and tmpfs folders), two source names can be one destination name.
   The later name in byte order gets the next Keep Both number, so `Makefile` and `makefile` become
-  `Makefile` and `makefile (1)`, and the completion report lists it. Only on FAT and exFAT, for
-  names brought from another filesystem, are aliases numbered before copying, by their
-  case-folded names (see [When names are fixed](#when-names-are-fixed)); elsewhere only the
-  destination's "exists" counts, which also covers 8.3 short names and Unicode normalization. A
-  source sibling that already has the numbered name keeps it, and the alias moves on to
-  `makefile (2)`.
+  `Makefile` and `makefile (1)`, and the completion report lists it. Only on FAT, exFAT and SMB
+  without POSIX extensions, for names brought from another filesystem, are aliases numbered before
+  copying, by their case-folded names (see [When names are fixed](#when-names-are-fixed));
+  elsewhere only the destination's "exists" counts, which also covers 8.3 short names and Unicode
+  normalization. A source sibling that already has the numbered name keeps it, and the alias moves
+  on to `makefile (2)`.
 - **The copy's own entry after a lost reply.** NFS `CREATE`, `MKDIR`, `SYMLINK` and `LINK` are not
   idempotent. An entry listed under exactly the requested name, still as fresh as the copy would
   have made it (an empty folder, an empty file with one link, or a symlink with the same target),
@@ -864,14 +865,16 @@ rules.
 A folder's names are planned before its first entry is created, and the plan depends only on the
 folder's entries. A name that needs no change keeps it, even where a fixed name would equal it.
 Fixed names that equal another name are numbered, in the byte order of the names they replace, so
-`a:b` beside `a_b` in a folder copied to a stick becomes `a_b (1)`. FAT and exFAT also take names
-that differ only in case for one, so there a kept name that equals one sorting before it in bytes
-is numbered as an alias, among a paste's top-level items too (`Readme.txt` beside `README.txt`).
-Elsewhere, a top-level item whose name the destination reports taken by an earlier item of the
-same paste saved under another spelling, as SMB and casefolded folders do for `makefile` after
-`Makefile`, is numbered and reported as an alias too. Any other item at the name, including one
-that took the earlier item's place since, keeps it taken. In a merge, a planned name equal to an
-existing item replaces that item like any other same-named one.
+`a:b` beside `a_b` in a folder copied to a stick becomes `a_b (1)`. FAT, exFAT and SMB without
+POSIX extensions (shares the kernel mounts, and `smb://`) also take names that differ only in case
+for one, as Windows and Samba do by default, so there a kept name that equals one sorting before it
+in bytes is numbered as an alias, among a paste's top-level items too (`Readme.txt` beside
+`README.txt`); a share set to compare case still gets those numbers. Elsewhere, a top-level item
+whose name the destination reports taken by an earlier item of the same paste saved under another
+spelling, as casefolded folders do for `makefile` after `Makefile`, is numbered and reported as an
+alias too. Any other item at the name, including one that took the earlier item's place since,
+keeps it taken. In a merge, a planned name equal to an existing item replaces that item like any
+other same-named one.
 The completion report lists every fixed name with the name it was saved as, and says which were
 shortened.
 
@@ -943,11 +946,11 @@ chooses itself, such as "new folder", are not checked.
   SMB and sshfs refuse paths of about 4 KB, since every request carries the whole path from the
   share or the server's root, and Windows' 260-character `MAX_PATH`, which Linux drivers do not
   enforce, is not predicted.
-- **Case and normalization.** Strata plans case aliases only on FAT and exFAT, and elsewhere leaves
-  them to the destination's "exists" (see [Folders, names and case
-  aliases](#folders-names-and-case-aliases)). NTFS keeps `Makefile` and `makefile` apart on Linux,
-  though Windows takes them for one name. No lab mount normalizes Unicode, except that NFC and NFD
-  forms are one name in casefolded ext4 folders, and Strata never normalizes a name.
+- **Case and normalization.** Strata plans case aliases only on FAT, exFAT and SMB without POSIX
+  extensions, and elsewhere leaves them to the destination's "exists" (see [Folders, names and
+  case aliases](#folders-names-and-case-aliases)). NTFS keeps `Makefile` and `makefile` apart on
+  Linux, though Windows takes them for one name. No lab mount normalizes Unicode, except that NFC
+  and NFD forms are one name in casefolded ext4 folders, and Strata never normalizes a name.
 - **Windows 10** cannot open files such as `aux.c` or `con.txt`, which FAT, exFAT and ntfs3 keep
   under the Windows 11 rule.
 - **Legacy code pages are not supported.** vfat mounted without `utf8` and with an `iocharset`

@@ -348,7 +348,8 @@ fn files_are_claimed_by_creating_them_where_nodes_are_refused_or_on_smb()
         let mounts = mounts(quirks())?;
         let source = mounts.sources.join("source");
         fs::create_dir(&source)?;
-        let files = ["a.txt", "A.txt", "a.TXT"];
+        // A name like a FAT short name may stand for any other, so every name is claimed.
+        let files = ["a.txt", "b.txt", "PROGRA~1.TXT"];
         for file in files {
             fs::write(source.join(file), file)?;
         }
