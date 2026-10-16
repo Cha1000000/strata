@@ -160,6 +160,10 @@ pub(crate) struct Quirks {
     pub links: Support,
     pub collisions_as_eperm: bool,
     pub rename_over_empty_dir: OverEmptyDirectory,
+    /// A rename over an existing entry links it to `<name>.ntfs-3g-0000000001` first, a name
+    /// stored cut to its UTF-16 length modulo 256 that stays: a cut to nothing fails with
+    /// `EINVAL`, as ntfs-3g does.
+    pub cut_rename_over_names: bool,
     pub case_insensitive: bool,
     /// Keeps answering for a name found through a case alias until a forced
     /// revalidation, as the SMB client's lookup cache does for about a second.
@@ -402,6 +406,7 @@ impl Quirks {
             name_max: Some(255),
             invalid_name: Some(ntfs_3g_refuses),
             no_birth_time: true,
+            cut_rename_over_names: true,
             ..Self::default()
         }
     }
@@ -1229,6 +1234,7 @@ impl Scope {
                     OverEmptyDirectory::Eperm => return Err(Errno::PERM),
                 }
             }
+            self.cut_rename_over_name(to)?;
             if let Some(alias) = self.alias(to) {
                 return System.rename(
                     from,
@@ -1241,6 +1247,35 @@ impl Scope {
             }
         }
         System.rename(from, to, flags)
+    }
+
+    fn cut_rename_over_name(&self, to: Entry<'_>) -> Result<(), Errno> {
+        if !self.quirk(|quirks| quirks.cut_rename_over_names) {
+            return Ok(());
+        }
+        let Ok(existing) = System.stat(to, false) else {
+            return Ok(());
+        };
+        let temporary = format!("{}.ntfs-3g-0000000001", to.name.to_string_lossy())
+            .encode_utf16()
+            .collect::<Vec<_>>();
+        if temporary.len() <= 255 {
+            return Ok(());
+        }
+        let stored = match temporary.len() % 256 {
+            0 => return Err(Errno::INVAL),
+            kept => OsString::from(String::from_utf16_lossy(&temporary[..kept])),
+        };
+        let stray = Entry {
+            dir: to.dir,
+            name: &stored,
+        };
+        let _ = if existing.is_directory() {
+            System.mkdir(stray, Mode::from_raw_mode(0o755))
+        } else {
+            System.link(to, stray)
+        };
+        Ok(())
     }
 
     fn link(&self, from: Entry<'_>, to: Entry<'_>) -> Result<(), Errno> {

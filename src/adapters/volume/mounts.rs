@@ -95,6 +95,13 @@ impl MountType {
         (seconds > 0).then(|| Duration::from_secs(seconds))
     }
 
+    /// Whether a rename over an existing entry stores a name longer than
+    /// [`LONGEST_NAME_NTFS_3G_RENAMES_OVER`] cut. A `fuseblk` mount whose device udev cannot
+    /// tell may be ntfs-3g.
+    pub(crate) fn cuts_long_names_renamed_over(&self, device_format: Option<&str>) -> bool {
+        self.fs_type == "fuseblk" && matches!(device_format, Some("ntfs") | None)
+    }
+
     /// A `fuseblk` mount whose device udev cannot tell may be exFAT.
     pub(crate) fn coarse_times(&self, fuse_format: Option<FuseFormat>) -> Option<CoarseTimes> {
         let here = |seconds| CoarseTimes {
@@ -197,6 +204,10 @@ impl MountType {
 }
 
 pub(crate) const FAT32_MAX_FILE_SIZE: u64 = u32::MAX as u64;
+
+/// In UTF-16 units: ntfs-3g renames over an existing entry through
+/// `<name>.ntfs-3g-<ten digits>`, which it stores cut past 255 units.
+pub(crate) const LONGEST_NAME_NTFS_3G_RENAMES_OVER: usize = 236;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum FatFormat {

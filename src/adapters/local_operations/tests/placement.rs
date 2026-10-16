@@ -1350,3 +1350,56 @@ fn a_reserved_name_reported_as_a_folder_is_taken() -> Result<(), Box<dyn Error>>
     assert_eq!(names(root.path())?, ["source"]);
     Ok(())
 }
+
+#[test]
+fn names_ntfs_3g_would_cut_are_never_renamed_over() -> Result<(), Box<dyn Error>> {
+    use {
+        PlaceError::Unsupported,
+        Placed::{OverReservedFile, ReservedDirectory},
+    };
+    fn ntfs_3g() -> Quirks {
+        Quirks {
+            rename_flags: Support::Rejected(Errno::INVAL),
+            ..Quirks::ntfs_3g()
+        }
+    }
+    let unknown_fuseblk = || Quirks {
+        device_format: None,
+        ..ntfs_3g()
+    };
+    let exfat_fuseblk = || Quirks {
+        device_format: Some("exfat"),
+        cut_rename_over_names: false,
+        ..ntfs_3g()
+    };
+    let links_refused = || Quirks {
+        fail: vec![(Op::Link, "x*", 0, Errno::PERM)],
+        ..ntfs_3g()
+    };
+    let (fits, cut, accented) = ("x".repeat(236), "x".repeat(237), "é".repeat(120));
+    let rows: [(Preset, bool, &str, Result<Placed, PlaceError>); 7] = [
+        (ntfs_3g, true, &fits, Ok(ReservedDirectory)),
+        (ntfs_3g, true, &cut, Err(Unsupported)),
+        (ntfs_3g, true, &accented, Ok(ReservedDirectory)),
+        (unknown_fuseblk, true, &cut, Err(Unsupported)),
+        (exfat_fuseblk, true, &cut, Ok(ReservedDirectory)),
+        (links_refused, false, &fits, Ok(OverReservedFile)),
+        (links_refused, false, &cut, Err(Unsupported)),
+    ];
+    for (row, (preset, folder, name, expected)) in rows.into_iter().enumerate() {
+        let context = format!("row {row}, {} units", name.chars().count());
+        let root = tempfile::tempdir()?;
+        let _scope = FsQuirks::install(root.path(), preset());
+        make(&root.path().join("source"), folder)?;
+
+        assert_eq!(
+            place_in(root.path(), "source", name, None),
+            expected,
+            "{context}"
+        );
+
+        let placed = if expected.is_ok() { name } else { "source" };
+        assert_eq!(names(root.path())?, [placed], "{context}");
+    }
+    Ok(())
+}

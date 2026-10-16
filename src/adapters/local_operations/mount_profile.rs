@@ -38,7 +38,7 @@ pub(super) fn known_mount(fs: &dyn FsOps, dir: BorrowedFd<'_>) -> (MountKey, Mou
     (key, known(fs, dir, key))
 }
 
-fn known(fs: &dyn FsOps, dir: BorrowedFd<'_>, key: MountKey) -> MountCapabilities {
+pub(super) fn known(fs: &dyn FsOps, dir: BorrowedFd<'_>, key: MountKey) -> MountCapabilities {
     let capabilities = mount_capabilities(key);
     if capabilities.family.is_some() {
         return capabilities;
@@ -61,6 +61,8 @@ fn learn_mount_type(fs: &dyn FsOps, dir: BorrowedFd<'_>, key: MountKey) -> Mount
     let coarse_times = mount_type.and_then(|mount| mount.coarse_times(fuse_format));
     let deferred_close = mount_type.and_then(MountType::deferred_close);
     let attribute_cache = mount_type.and_then(MountType::attribute_cache);
+    let cuts_long_names_renamed_over =
+        mount_type.is_some_and(|mount| mount.cuts_long_names_renamed_over(format));
     let names = match &mount {
         Some((mount_type, site)) if mount_type.is_gvfs_bridge() => match folders(&site.root).next()
         {
@@ -89,6 +91,7 @@ fn learn_mount_type(fs: &dyn FsOps, dir: BorrowedFd<'_>, key: MountKey) -> Mount
             capabilities.coarse_times = coarse_times;
             capabilities.deferred_close = deferred_close;
             capabilities.attribute_cache = attribute_cache;
+            capabilities.cuts_long_names_renamed_over = cuts_long_names_renamed_over;
             capabilities.names = Some(names);
             capabilities.symlinks = symlinks;
             capabilities.max_file_size = max_file_size;

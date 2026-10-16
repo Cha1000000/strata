@@ -39,8 +39,8 @@ one is deleted.
   copy only when the kernel returns `EXDEV` (across devices, bind mounts, btrfs subvolumes or
   overlayfs lower-layer folders), or where no step below can place the item: on a mount whose
   support a probe cannot settle, for a folder on a mount without `RENAME_NOREPLACE` that has hard
-  links but cannot rename over an empty folder, or for a file on an SFTP server that refuses the
-  reserved-name step's rename.
+  links but cannot rename over an empty folder, for a folder named with 237 UTF-16 units or more
+  on ntfs-3g, or for a file on an SFTP server that refuses the reserved-name step's rename.
 
 ## Placing an item without replacing
 
@@ -67,6 +67,13 @@ possible meanings, and Strata never treats it as "copy instead":
 - an invalid name on this filesystem (for example `:` on vfat), when `RENAME_NOREPLACE` is known to
   work here or the fallback step also returns `EINVAL`;
 - `RENAME_NOREPLACE` unsupported, otherwise.
+
+ntfs-3g renames over an existing entry by first linking it to `<name>.ntfs-3g-<ten digits>`, a
+name it stores cut once it passes 255 UTF-16 units: the rename fails with `EINVAL` for a name of
+237 units, and leaves an entry named after the cut for a longer one. There, and on a `fuseblk`
+mount whose device udev cannot tell, steps 3 and 5 never rename over a name of 237 units or
+more. A file is still linked by step 2. A folder, or a file whose own link is refused, is copied
+where step 6 applies, and renaming one to such a name is refused.
 
 Residual limits:
 
@@ -1003,7 +1010,7 @@ filesystem stores are under [Names](#names).
 | vfat | yes | Linux 6.0 and later | no | case-insensitive; no symlinks; trailing dots are dropped |
 | exFAT (kernel) | yes | no | no | case-insensitive; no symlinks |
 | ntfs3, ntfs (Linux 7.1 and later) | yes | no | yes | case-sensitive unless mounted with `nocase` |
-| ntfs-3g, libfuse2 daemons | rejects flags | rejects flags | ntfs-3g: yes | the kernel refuses rename flags below FUSE protocol 7.23 |
+| ntfs-3g, libfuse2 daemons | rejects flags | rejects flags | ntfs-3g: yes | the kernel refuses rename flags below FUSE protocol 7.23; ntfs-3g never gets a rename over a name of 237 UTF-16 units or more (see [Placing an item without replacing](#placing-an-item-without-replacing)) |
 | exfat-fuse (libfuse3) | enforced by the kernel only | ignored: overwrites | no | built on libfuse2, it rejects flags, and files take the [reserved-name step](#the-reserved-name-step-and-its-risk) |
 | NFS v3 and v4 | rejects flags | rejects flags | yes | unlinking an open file leaves `.nfsXXXX` until it is closed |
 | SMB/CIFS | client-side only | no | server-dependent | usually case-insensitive; open files may block rename and delete |
@@ -1057,12 +1064,12 @@ and clock. The seam also asserts that no call runs on the main context's thread.
 For names they emulate the errno each lab mount returned for a name it refuses, names stored or
 listed as others (vfat dropping trailing dots, SMB reading private-use characters back and listing
 device names under 8.3 aliases, `?` for malformed bytes on SMB with POSIX extensions), length
-limits in bytes and for SMB folders, `f_namelen`, refused symbolic links, and a filesystem mounted
-inside another with a device of its own. Presets for the lab's mounts (`Quirks::vfat()`, `exfat()`,
-`exfat_fuse()`, `ntfs3()`, `ntfs3_windows_names()`, `ntfs_3g()`, `cifs()`, `cifs_nocase()`,
-`cifs_posix()`, `sshfs()`) carry each mount's mountinfo line and udev format, so the name rules come
-from the real derivation, and their refusals are written from the lab's results, not from Strata's
-rules. Run them with:
+limits in bytes and for SMB folders, `f_namelen`, refused symbolic links, the cut temporary name
+ntfs-3g renames over an entry through, and a filesystem mounted inside another with a device of
+its own. Presets for the lab's mounts (`Quirks::vfat()`, `exfat()`, `exfat_fuse()`, `ntfs3()`,
+`ntfs3_windows_names()`, `ntfs_3g()`, `cifs()`, `cifs_nocase()`, `cifs_posix()`, `sshfs()`) carry
+each mount's mountinfo line and udev format, so the name rules come from the real derivation, and
+their refusals are written from the lab's results, not from Strata's rules. Run them with:
 
 ```bash
 ./scripts/test-headless.py local_operations::

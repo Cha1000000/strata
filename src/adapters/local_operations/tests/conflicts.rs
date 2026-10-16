@@ -292,10 +292,15 @@ fn keeping_both_numbers_a_long_name_within_the_limit_of_its_mount() -> Result<()
         ),
     ];
     let samba_folder = vec![(repeat("d", 212), true, format!("{} (1)", repeat("d", 209)))];
-    let mounts: [(&str, Option<Preset>, _); 3] = [
+    let ntfs_3g = || Quirks {
+        rename_flags: fs_quirks::Support::Rejected(rustix::io::Errno::INVAL),
+        ..Quirks::ntfs_3g()
+    };
+    let mounts: [(&str, Option<Preset>, _); 4] = [
         ("host", None, &rows),
         ("vfat", Some(Quirks::vfat), &rows),
         ("cifs", Some(Quirks::cifs), &samba_folder),
+        ("ntfs-3g", Some(ntfs_3g), &rows),
     ];
     for (mount, preset, rows) in mounts {
         for moving in [false, true] {

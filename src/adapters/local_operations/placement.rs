@@ -21,10 +21,13 @@ use rustix::{
 
 use super::{
     fs_ops::{Entry, EntryStat, FsOps},
+    mount_profile,
+    names::fix::units,
     native_fs::LocalFileIdentity,
 };
 use crate::adapters::volume::{
-    MountCapabilities, MountKey, learn_mount_capability, mount_capabilities,
+    LONGEST_NAME_NTFS_3G_RENAMES_OVER, MountCapabilities, MountKey, learn_mount_capability,
+    mount_capabilities,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -174,6 +177,11 @@ impl<'a> Mount<'a> {
                 Some(true) => !directory,
                 None => false,
             }
+    }
+
+    fn renames_over(&self, name: &OsStr) -> bool {
+        units(name.as_encoded_bytes()) <= LONGEST_NAME_NTFS_3G_RENAMES_OVER
+            || !mount_profile::known(self.fs, self.dir, self.key()).cuts_long_names_renamed_over
     }
 }
 
@@ -329,8 +337,10 @@ fn fallback(
         Err(PlaceError::Unsupported) if mount.allows_reserved_name(directory) => {
             if directory {
                 rename_folder_after_check(fs, from, to, &source)
-            } else {
+            } else if mount.renames_over(to.name) {
                 rename_over_reserved_file(fs, from, to, &source)
+            } else {
+                Err(PlaceError::Unsupported)
             }
         }
         placed => placed,
@@ -569,7 +579,9 @@ fn place_directory(
     to: Entry<'_>,
     source: &EntryStat,
 ) -> Result<Placed, PlaceError> {
-    if mount.capabilities().rename_over_empty_directory == Some(false) {
+    if mount.capabilities().rename_over_empty_directory == Some(false)
+        || !mount.renames_over(to.name)
+    {
         return Err(PlaceError::Unsupported);
     }
     match fs.mkdir(to, Mode::from_raw_mode(0o700)) {

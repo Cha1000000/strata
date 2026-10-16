@@ -41,6 +41,7 @@ pub(crate) struct MountCapabilities {
     pub coarse_times: Option<CoarseTimes>,
     pub deferred_close: Option<Duration>,
     pub attribute_cache: Option<Duration>,
+    pub cuts_long_names_renamed_over: bool,
     pub names: Option<MountNames>,
     pub strictness: Strictness,
     pub symlinks: Option<bool>,

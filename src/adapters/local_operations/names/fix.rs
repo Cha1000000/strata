@@ -345,7 +345,7 @@ fn pieces(name: &[u8]) -> impl Iterator<Item = (usize, usize)> + '_ {
     })
 }
 
-fn units(name: &[u8]) -> usize {
+pub(in crate::adapters::local_operations) fn units(name: &[u8]) -> usize {
     pieces(name).map(|(_, units)| units).sum()
 }
 
