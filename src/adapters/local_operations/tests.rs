@@ -333,16 +333,26 @@ fn land_deferred_closes(root: &Path) -> io::Result<()> {
             last_modification: time(before.mtime(), before.mtime_nsec()),
         };
         // A kernel without fine-grained times stamps within its tick.
+        let deadline = Instant::now() + CHANGE_TIME_WAIT;
         loop {
             rustix::fs::utimensat(rustix::fs::CWD, &path, &times, rustix::fs::AtFlags::empty())?;
             let after = fs::symlink_metadata(&path)?;
             if (after.ctime(), after.ctime_nsec()) != (before.ctime(), before.ctime_nsec()) {
                 break;
             }
+            if Instant::now() >= deadline {
+                return Err(io::Error::other(format!(
+                    "the change time of {} did not move within {CHANGE_TIME_WAIT:?}; this mount \
+                     may report the modification time as the change time",
+                    path.display()
+                )));
+            }
         }
     }
     Ok(())
 }
+
+const CHANGE_TIME_WAIT: Duration = Duration::from_secs(2);
 
 fn has_colon(name: &OsStr) -> Option<rustix::io::Errno> {
     name.as_encoded_bytes()
