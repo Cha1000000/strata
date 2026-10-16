@@ -365,6 +365,7 @@ fn top_level_items_a_destination_takes_for_an_earlier_one_are_numbered_and_repor
                         fs::write(source.join(name), name)?;
                     }
                 }
+                let sources = FsQuirks::install(&source, Quirks::default());
                 let _destination = FsQuirks::install(&destination, preset());
 
                 let events = run_paste(PasteRequest {
@@ -406,6 +407,11 @@ fn top_level_items_a_destination_takes_for_an_earlier_one_are_numbered_and_repor
                 }
                 assert_eq!(names(&destination)?.len(), items.len(), "{context}");
                 assert_eq!(names(&source)?.is_empty(), moving, "{context}");
+                assert_eq!(
+                    sources.count(Op::OpenSource),
+                    items.len(),
+                    "{context}: each file is read once"
+                );
             }
         }
     }
@@ -622,7 +628,7 @@ fn an_item_already_at_a_top_level_name_is_never_taken_for_one_the_paste_saved()
         (
             "theirs at another spelling, at once",
             "MAKEFILE",
-            spellings.iter().cloned().chain(padding).collect(),
+            spellings.iter().cloned().chain(padding.clone()).collect(),
             false,
         ),
         (
@@ -635,6 +641,12 @@ fn an_item_already_at_a_top_level_name_is_never_taken_for_one_the_paste_saved()
             "theirs once the earlier spelling was saved",
             "MAKEFILE",
             spellings.to_vec(),
+            true,
+        ),
+        (
+            "theirs once the earlier spelling was saved, at once",
+            "MAKEFILE",
+            spellings.iter().cloned().chain(padding).collect(),
             true,
         ),
     ];
@@ -661,20 +673,15 @@ fn an_item_already_at_a_top_level_name_is_never_taken_for_one_the_paste_saved()
                 fs::rename(&saved, &moved_out).expect("move the saved item out");
                 fs::write(&taken, b"theirs").expect("take its name");
             });
-            before.push((Op::OpenSource, "makefile", 0, racer));
+            before.push((Op::Stat, "makefile", 0, racer));
         } else {
             fs::write(destination.join(theirs), b"theirs")?;
         }
-        let _source = FsQuirks::install(
-            &source,
-            Quirks {
-                before,
-                ..Quirks::ext4()
-            },
-        );
+        let _source = FsQuirks::install(&source, Quirks::ext4());
         let _destination = FsQuirks::install(
             &destination,
             Quirks {
+                before,
                 case_insensitive: true,
                 ..Quirks::ext4()
             },

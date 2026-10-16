@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
 
-//! Top-level items of one paste whose names differ only in case. A
-//! case-insensitive destination whose rules do not fold, such as SMB or a
-//! casefolded folder, shows that one took another's name only by "exists".
+//! Top-level items of one paste whose names differ only in case. On a
+//! case-insensitive destination whose rules do not fold, such as a casefolded
+//! folder, only looking a later name up shows that an earlier item took it.
 
 use std::{collections::HashMap, ffi::OsString};
 

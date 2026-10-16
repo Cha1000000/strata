@@ -1199,21 +1199,14 @@ async fn execute_parallel_copy_plans(
                 );
                 context.spawn_local(async move {
                     let target = gio::File::for_path(&plan.written_path);
-                    let mut taken = Taken::Fail;
-                    loop {
-                        match transfer_planned(&plan, taken, moving, &cancellable, &copying).await {
-                            Err(error)
-                                if taken == Taken::Fail
-                                    && error.matches(gio::IOErrorEnum::Exists)
-                                    && case_variants::taken_by(&target, &earlier).await =>
-                            {
-                                taken = Taken::Number;
-                            }
-                            result => {
-                                break result.map(|transferred| (transferred, taken));
-                            }
-                        }
-                    }
+                    let taken = if case_variants::taken_by(&target, &earlier).await {
+                        Taken::Number
+                    } else {
+                        Taken::Fail
+                    };
+                    transfer_planned(&plan, taken, moving, &cancellable, &copying)
+                        .await
+                        .map(|transferred| (transferred, taken))
                 })
             })
             .collect::<Vec<_>>();
@@ -3293,48 +3286,37 @@ impl OperationProvider for LocalOperationProvider {
                     .await
                     .map(|owed| (target, owed))
                 } else {
-                    loop {
-                        let result = if request.move_sources {
-                            move_owing(
-                                source.clone(),
-                                target.clone(),
-                                taken,
-                                operation_cancellable.clone(),
-                                copying.clone(),
-                            )
-                            .await
-                            .map(|moved| (moved.target, moved.owed))
-                        } else {
-                            copy_new_with_ownership(
-                                source.clone(),
-                                target.clone(),
-                                taken,
-                                operation_cancellable.clone(),
-                                Some(progress.clone()),
-                                names.clone(),
-                                None,
-                            )
-                            .await
-                            .map(|(target, ownership)| {
-                                copied_ownership = ownership;
-                                (target, Owed::default())
-                            })
-                        };
-                        match result {
-                            Err(error)
-                                if taken == Taken::Fail
-                                    && error.matches(gio::IOErrorEnum::Exists)
-                                    && case_variants::taken_by(
-                                        &target,
-                                        &variants.earlier(index),
-                                    )
-                                    .await =>
-                            {
-                                taken = Taken::Number;
-                                aliased = true;
-                            }
-                            result => break result,
-                        }
+                    if taken == Taken::Fail
+                        && case_variants::taken_by(&target, &variants.earlier(index)).await
+                    {
+                        taken = Taken::Number;
+                        aliased = true;
+                    }
+                    if request.move_sources {
+                        move_owing(
+                            source.clone(),
+                            target.clone(),
+                            taken,
+                            operation_cancellable.clone(),
+                            copying.clone(),
+                        )
+                        .await
+                        .map(|moved| (moved.target, moved.owed))
+                    } else {
+                        copy_new_with_ownership(
+                            source.clone(),
+                            target.clone(),
+                            taken,
+                            operation_cancellable.clone(),
+                            Some(progress.clone()),
+                            names.clone(),
+                            None,
+                        )
+                        .await
+                        .map(|(target, ownership)| {
+                            copied_ownership = ownership;
+                            (target, Owed::default())
+                        })
                     }
                 };
                 if let Err(error) = &result

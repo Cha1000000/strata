@@ -870,13 +870,13 @@ POSIX extensions (shares the kernel mounts, and `smb://`) also take names that d
 for one, as Windows and Samba do by default, so there a kept name that equals one sorting before it
 in bytes is numbered as an alias, among a paste's top-level items too (`Readme.txt` beside
 `README.txt`); a share set to compare case still gets those numbers. Elsewhere, a top-level item
-whose name the destination reports taken by an earlier item of the same paste saved under another
-spelling, as casefolded folders do for `makefile` after `Makefile`, is numbered and reported as an
-alias too. Any other item at the name, including one that took the earlier item's place since,
-keeps it taken. In a merge, a planned name equal to an existing item replaces that item like any
-other same-named one. A paste's top-level items from different folders that share a name are
-numbered on every destination, the later one in the paste's order, before anything is copied, and
-reported as names already taken: `notes.txt` from two folders becomes `notes.txt` and
+whose name, looked up once before it is copied, leads to an earlier item of the same paste saved
+under another spelling, as in casefolded folders for `makefile` after `Makefile`, is numbered and
+reported as an alias too. Any other item at the name, including one that took the earlier item's
+place since, keeps it taken. In a merge, a planned name equal to an existing item replaces that
+item like any other same-named one. A paste's top-level items from different folders that share a
+name are numbered on every destination, the later one in the paste's order, before anything is
+copied, and reported as names already taken: `notes.txt` from two folders becomes `notes.txt` and
 `notes (1).txt`, also in a move within one filesystem.
 The completion report lists every fixed name with the name it was saved as, and says which were
 shortened.
