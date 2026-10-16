@@ -33,8 +33,8 @@ extend-ignore-re = [
   '(?m)^\s*"(?:fr|de|es|ja|pt-BR|ko|vi|it|ru|zh-CN)": ".*"',
   # Localized desktop-entry values.
   '(?m)^\w+\[(?:fr|de|es|ja|pt_BR|ko|vi|it|ru|zh_CN)\]=.*$',
-  # "café" fixtures spelled as raw, replacement-character or percent-encoded bytes.
-  'caf(\\x[0-9a-fA-F]{2}|\\u\{FFFD\}|%[0-9A-Fa-f]{2})',
+  # "café" fixtures spelled as raw, escaped or percent-encoded bytes, and the name they fix to.
+  'caf(\\x[0-9a-fA-F]{2}|\\u\{[0-9a-fA-F]+\}|%[0-9A-Fa-f]{2}|_\.txt)',
 ]
 
 [default.extend-words]
