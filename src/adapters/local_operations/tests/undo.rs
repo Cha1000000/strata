@@ -628,6 +628,45 @@ fn a_typed_name_at_a_gvfs_address_is_refused_by_the_rules_of_its_scheme()
 }
 
 #[test]
+fn a_rename_gio_has_no_backend_for_fails_instead_of_ending_the_process()
+-> Result<(), Box<dyn Error>> {
+    use super::super::{NameKept, restore_name};
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    // Without GVfs, as here, GIO's stand-in for the share cannot rename.
+    let uri = "smb://server/share/item.txt";
+    let unsupported = crate::services::backend_unavailable_message(uri);
+    let entry = FileEntry {
+        location: Location::uri(uri),
+        ..file_entry(Path::new("/share/item.txt"))
+    };
+
+    let events = settle(|emit| {
+        LocalOperationProvider.rename(
+            RenameRequest {
+                id: OperationRequestId(49),
+                entry,
+                new_name: "renamed.txt".to_owned(),
+            },
+            emit,
+        )
+    });
+    let given_back = glib::MainContext::default().block_on(restore_name(
+        &Location::uri(uri),
+        &Location::uri("smb://server/share/item:1.txt"),
+    ));
+
+    assert_eq!(failure(&events), unsupported);
+    assert!(
+        matches!(&given_back, Err(NameKept::Failed(error))
+            if *error == crate::services::error_detail(unsupported.clone())),
+        "the name was not kept as unsupported"
+    );
+    Ok(())
+}
+
+#[test]
 fn a_rename_never_replaces_an_item_created_meanwhile() -> Result<(), Box<dyn Error>> {
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
         .lock()

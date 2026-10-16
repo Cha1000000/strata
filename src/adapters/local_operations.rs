@@ -552,6 +552,36 @@ where
     .await
 }
 
+/// Renames `file` through its GIO backend. GLib calls a backend's rename
+/// without checking it has one, and GIO's stand-in for a location no
+/// backend serves, as `smb://` is without a running GVfs, has none.
+async fn set_display_name(
+    file: &gio::File,
+    name: &str,
+    cancellable: &gio::Cancellable,
+) -> Result<gio::File, glib::Error> {
+    let renames = file.interface::<gio::File>().is_some_and(|interface| {
+        let interface: &gio::ffi::GFileIface = (*interface).as_ref();
+        interface.set_display_name.is_some()
+    });
+    if !renames {
+        return Err(glib::Error::new(
+            gio::IOErrorEnum::NotSupported,
+            &crate::services::backend_unavailable_message(&file.uri()),
+        ));
+    }
+    let name = name.to_owned();
+    await_cancellable(file, cancellable, move |file, cancellable, result| {
+        file.set_display_name_async(
+            &name,
+            glib::Priority::DEFAULT,
+            Some(cancellable),
+            move |output| result.resolve(output),
+        );
+    })
+    .await
+}
+
 async fn join_local_tasks<K, T>(
     tasks: Vec<(K, glib::JoinHandle<T>)>,
 ) -> Vec<(K, Result<T, glib::JoinError>)>
@@ -2892,20 +2922,7 @@ async fn restore_name(saved_as: &Location, requested: &Location) -> Result<(), N
         return Err(NameKept::Refused);
     };
     let file = gio_file_for_location(saved_as);
-    let renamed = await_cancellable(
-        &file,
-        &gio::Cancellable::new(),
-        move |file, cancellable, result| {
-            file.set_display_name_async(
-                &name,
-                glib::Priority::DEFAULT,
-                Some(cancellable),
-                move |output| result.resolve(output),
-            );
-        },
-    )
-    .await;
-    match renamed {
+    match set_display_name(&file, &name, &gio::Cancellable::new()).await {
         Ok(_) => Ok(()),
         Err(error) if error.matches(gio::IOErrorEnum::Exists) => Err(NameKept::Taken),
         Err(error) if error.matches(gio::IOErrorEnum::NotFound) => Err(NameKept::Gone),
@@ -6608,20 +6625,9 @@ impl OperationProvider for LocalOperationProvider {
                         &error.to_string(),
                     )),
                 },
-                None => await_cancellable(
-                    &file,
-                    &operation_cancellable,
-                    move |file, cancellable, result| {
-                        file.set_display_name_async(
-                            &request.new_name,
-                            glib::Priority::DEFAULT,
-                            Some(cancellable),
-                            move |output| result.resolve(output),
-                        );
-                    },
-                )
-                .await
-                .map(drop),
+                None => set_display_name(&file, &request.new_name, &operation_cancellable)
+                    .await
+                    .map(drop),
             };
             match result {
                 Ok(()) => emit(OperationEvent::Renamed {

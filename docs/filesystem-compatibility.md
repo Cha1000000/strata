@@ -744,6 +744,11 @@ Local renames go through the same routine instead of GIO's check-then-rename.
   renaming a folder where renaming over an empty folder is refused.
 - A rename and its undo never copy. Where no step can place the item, the rename is refused.
 
+Other locations are renamed through GIO. GLib (2.88.3, and its main branch in October 2026) calls a
+location's rename without checking that its backend has one, and the stand-in GIO uses for an
+address no backend serves, as `smb://` is without a running GVfs, has none, so that call would end
+the process. Strata checks first and reports the backend missing instead.
+
 ## Trash
 
 GIO decides where Trash is available. It reports Trash as unsupported for:
