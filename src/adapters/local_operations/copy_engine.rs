@@ -931,7 +931,6 @@ fn copy_special(
         );
     match published {
         Ok((name, (ownership, copied_out))) => {
-            attribute_cache::changed(&mount);
             if copied_out {
                 copy.discard(staged)
                     .map_err(|error| Failure::Error(stage_left(&error)))?;
@@ -2344,7 +2343,7 @@ impl<'a> FileCopy<'a> {
             Some(fd) => self.through_tmpfile(&source, fd, &parent, target),
             None => self.through_named_stage(&source, &parent, target),
         }?;
-        attribute_cache::changed(&self.target);
+        attribute_cache::wrote_file(&self.target);
         if let (Some(folder), Some(read)) = (recorded_in, self.read.take()) {
             folder.file(at.name, read);
         }
@@ -2661,7 +2660,7 @@ impl<'a> FileCopy<'a> {
         })(fd);
         match filled {
             Ok(()) => {
-                attribute_cache::changed(&self.target);
+                attribute_cache::wrote_file(&self.target);
                 Ok(created.identity)
             }
             Err(failure) => {

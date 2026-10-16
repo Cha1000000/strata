@@ -832,85 +832,122 @@ fn undoing_a_cross_volume_move_deletes_the_moved_items_once_they_are_flushed()
     Ok(())
 }
 
+/// Moves `items` onto a fresh mount, lands the deferred closes, undoes the
+/// move `undone_after` later, and counts the forced stats of each `counted`
+/// entry during the undo.
+fn forced_stats_undoing_a_move(
+    preset: Preset,
+    (items, counted): (&[&str], &[&str]),
+    (started, undone_after): (SystemTime, Duration),
+) -> Result<Vec<usize>, Box<dyn Error>> {
+    let row = format!(
+        "{:?} {items:?} after {undone_after:?}",
+        preset().mount_type.map(|(kind, _)| kind)
+    );
+    let _clock = ClockGuard::set(started);
+    let root = tempfile::tempdir()?;
+    let origin = root.path().join("origin");
+    let share = root.path().join("share");
+    fs::create_dir_all(origin.join("project/sub"))?;
+    fs::create_dir(&share)?;
+    fs::write(origin.join("notes.txt"), b"notes")?;
+    fs::write(origin.join("project/sub/b.txt"), b"b")?;
+    for folder in [origin.clone(), origin.join("project")] {
+        std::os::unix::fs::symlink("elsewhere", folder.join("link"))?;
+        rustix::fs::mknodat(
+            rustix::fs::CWD,
+            folder.join("pipe"),
+            rustix::fs::FileType::Fifo,
+            rustix::fs::Mode::from_raw_mode(0o600),
+            0,
+        )?;
+    }
+    let scope = FsQuirks::install(&share, preset());
+    run_paste(PasteRequest {
+        id: OperationRequestId(1592),
+        destination: Location::local(&share),
+        items: items
+            .iter()
+            .map(|item| PasteItem {
+                source: Location::local(origin.join(item)),
+                conflict: TransferConflict::FailIfExists,
+                target_name: None,
+            })
+            .collect(),
+        move_sources: true,
+    });
+    land_deferred_closes(&share)?;
+    super::super::copy_engine::set_clock_for_test(Some(started + undone_after));
+    scope.clear_calls();
+
+    let moved = items
+        .iter()
+        .map(|item| (origin.join(item), share.join(item)))
+        .collect::<Vec<_>>();
+    let moved: Vec<(&Path, &Path)> = moved
+        .iter()
+        .map(|(original, current)| (original.as_path(), current.as_path()))
+        .collect();
+    let (_operation, events) = undo_items(1593, &moved, TransferConflict::FailIfExists);
+    pump_until_transfer(&events);
+
+    let events = events.take();
+    assert!(
+        matches!(
+            terminal_transfer(&events),
+            Some(OperationEvent::Pasted { .. })
+        ),
+        "{row}: {events:?}"
+    );
+    assert_eq!(followed_report(&events).kept, [], "{row}");
+    assert!(names(&share)?.is_empty(), "{row}");
+    for item in items {
+        assert!(
+            origin.join(item).symlink_metadata().is_ok(),
+            "{row}: {item}"
+        );
+    }
+    let calls = scope.calls();
+    Ok(counted
+        .iter()
+        .map(|name| {
+            calls
+                .iter()
+                .filter(|call| call.op == Op::Stat && call.forced)
+                .filter(|call| call.names.iter().any(|named| named == name))
+                .count()
+        })
+        .collect())
+}
+
 #[test]
 fn undoing_a_move_onto_a_share_forces_stats_only_while_its_client_caches_older_change_times()
 -> Result<(), Box<dyn Error>> {
     let _serial = serial()?;
     let started = SystemTime::now();
-    for (preset, undone_after, forced) in [
-        (Quirks::cifs_posix as Preset, Duration::ZERO, true),
-        (Quirks::cifs_posix, Duration::from_millis(1500), false),
-        (Quirks::ext4, Duration::ZERO, false),
-    ] {
-        let row = format!(
-            "{:?} after {undone_after:?}",
-            preset().mount_type.map(|(kind, _)| kind)
-        );
-        let _clock = ClockGuard::set(started);
-        let root = tempfile::tempdir()?;
-        let origin = root.path().join("origin");
-        let share = root.path().join("share");
-        fs::create_dir_all(origin.join("project/sub"))?;
-        fs::create_dir(&share)?;
-        fs::write(origin.join("notes.txt"), b"notes")?;
-        fs::write(origin.join("project/sub/b.txt"), b"b")?;
-        std::os::unix::fs::symlink("sub/b.txt", origin.join("project/link"))?;
-        rustix::fs::mknodat(
-            rustix::fs::CWD,
-            origin.join("project/pipe"),
-            rustix::fs::FileType::Fifo,
-            rustix::fs::Mode::from_raw_mode(0o600),
-            0,
+    let (now, later) = (Duration::ZERO, Duration::from_millis(1500));
+    let in_folder = ["b.txt", "link", "pipe"];
+    // Files written there make the undo force the stats of all it moves back.
+    let rows: [(&[&str], &[&str], Duration, bool); 4] = [
+        (&["notes.txt"], &["notes.txt"], now, true),
+        (&["project"], &in_folder, now, true),
+        (&["link", "pipe"], &["link", "pipe"], now, false),
+        (&["notes.txt", "project"], &in_folder, later, false),
+    ];
+    for (items, counted, undone_after, forced) in rows {
+        let on_ext4 =
+            forced_stats_undoing_a_move(Quirks::ext4, (items, counted), (started, Duration::ZERO))?;
+        let on_share = forced_stats_undoing_a_move(
+            Quirks::cifs_posix,
+            (items, counted),
+            (started, undone_after),
         )?;
-        let scope = FsQuirks::install(&share, preset());
-        let items = ["notes.txt", "project"];
-        run_paste(PasteRequest {
-            id: OperationRequestId(1592),
-            destination: Location::local(&share),
-            items: items
-                .iter()
-                .map(|item| PasteItem {
-                    source: Location::local(origin.join(item)),
-                    conflict: TransferConflict::FailIfExists,
-                    target_name: None,
-                })
-                .collect(),
-            move_sources: true,
-        });
-        assert!(names(&origin)?.is_empty(), "{row}");
-        land_deferred_closes(&share)?;
-        super::super::copy_engine::set_clock_for_test(Some(started + undone_after));
-        scope.clear_calls();
 
-        let moved = items.map(|item| (origin.join(item), share.join(item)));
-        let moved: Vec<(&Path, &Path)> = moved
+        let expected = on_ext4
             .iter()
-            .map(|(original, current)| (original.as_path(), current.as_path()))
-            .collect();
-        let (_operation, events) = undo_items(1593, &moved, TransferConflict::FailIfExists);
-        pump_until_transfer(&events);
-
-        let events = events.take();
-        assert!(
-            matches!(
-                terminal_transfer(&events),
-                Some(OperationEvent::Pasted { .. })
-            ),
-            "{row}: {events:?}"
-        );
-        assert_eq!(followed_report(&events).kept, [], "{row}");
-        assert!(names(&share)?.is_empty(), "{row}");
-        assert_eq!(fs::read(origin.join("project/sub/b.txt"))?, b"b", "{row}");
-        let calls = scope.calls();
-        // The deletion's comparison forces one stat of each entry.
-        for name in ["notes.txt", "b.txt", "link", "pipe"] {
-            let forced_stats = calls
-                .iter()
-                .filter(|call| call.op == Op::Stat && call.forced)
-                .filter(|call| call.names.iter().any(|named| named == name))
-                .count();
-            assert_eq!(forced_stats, 1 + usize::from(forced), "{row}: {name}");
-        }
+            .map(|count| count + usize::from(forced))
+            .collect::<Vec<_>>();
+        assert_eq!(on_share, expected, "{items:?} after {undone_after:?}");
     }
     Ok(())
 }

@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: MIT
 
 //! The SMB client answers stats from attributes it cached, whose change time
-//! can predate what this machine just did on the share until they expire or a
-//! stat forces revalidation, so a move records entries on a share this process
-//! changed that recently with forced stats.
+//! can predate the one the server sets once the client's deferred close of a
+//! file it wrote reaches it, until they expire or a stat forces revalidation.
+//! So a move records entries on a share this process wrote a file to that
+//! recently with forced stats.
 
 use std::{
     os::fd::BorrowedFd,
@@ -17,7 +18,7 @@ use std::{
 use super::{Mount, lock, manifest::now};
 use crate::adapters::{local_operations::fs_ops::FsOps, volume::MountKey};
 
-/// When each SMB mount's cached attributes of what this process changed
+/// When each SMB mount's cached attributes of the files this process wrote
 /// there last expire.
 static EXPIRING: Mutex<Vec<(MountKey, SystemTime)>> = Mutex::new(Vec::new());
 
@@ -30,7 +31,7 @@ fn nanoseconds(time: SystemTime) -> u64 {
     })
 }
 
-pub(super) fn changed(mount: &Mount) {
+pub(super) fn wrote_file(mount: &Mount) {
     let Some(cached) = mount.attribute_cache else {
         return;
     };
@@ -44,7 +45,7 @@ pub(super) fn changed(mount: &Mount) {
 }
 
 /// Whether a stat of an entry in `dir` may answer from attributes cached
-/// since this process changed it.
+/// before this process's last file there was closed on the server.
 pub(super) fn stale(fs: &dyn FsOps, dir: BorrowedFd<'_>) -> bool {
     if nanoseconds(now()) >= LATEST.load(Ordering::Relaxed) {
         return false;

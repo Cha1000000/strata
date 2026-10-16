@@ -498,10 +498,10 @@ if it is still what the copy read:
 - **SMB change times.** The SMB client answers a stat from the attributes it cached for a file
   (`acregmax`, or `actimeo` in the mount's options, one second by default), which can hold a change
   time from before a change this machine made reached the server, such as the times the server sets
-  once the client's deferred close of a file it wrote reaches it. On an SMB mount Strata changed
-  within that time, a move records each source entry with a forced stat too, so moving or undoing
-  right after a paste there does not keep unchanged entries as changed. Elsewhere the record takes
-  no extra round trip.
+  once the client's deferred close of a file it wrote reaches it. On an SMB mount Strata copied or
+  moved a file to within that time, a move records each source entry with a forced stat too, so
+  moving or undoing right after a paste there does not keep unchanged entries as changed. Elsewhere
+  the record takes no extra round trip.
 - **Relaxed identity.** FUSE daemons without `use_ino`, vfat and exFAT, and cifs mounted with
   `noserverino` give an entry a new inode number once the kernel evicts it. There, the type and the
   birth time, where both stats report one, stand in for the inode, and the change time is compared

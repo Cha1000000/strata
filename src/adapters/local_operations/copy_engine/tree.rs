@@ -916,7 +916,6 @@ pub(super) fn copy_link(
         }
         return Err(error.into());
     }
-    attribute_cache::changed(mount);
     copy.add_file(stat.size);
     Ok(stat)
 }
@@ -953,7 +952,6 @@ pub(super) fn copy_fifo(
         placement::remove_if_unchanged(fs, target, identity, AtFlags::empty());
     }
     finished?;
-    attribute_cache::changed(mount);
     copy.add_file(0);
     Ok((stat, Some(identity)))
 }
@@ -1152,7 +1150,7 @@ impl File {
             }
             return Ok(role);
         };
-        attribute_cache::changed(&self.mount);
+        attribute_cache::wrote_file(&self.mount);
         if let Some(folder) = &self.recorded_in {
             folder.file(&self.name, read);
         }
