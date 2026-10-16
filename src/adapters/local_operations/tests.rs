@@ -160,7 +160,6 @@ impl Drop for ClockGuard {
     }
 }
 
-/// Limits how many entries an operation records of what it placed.
 struct PlacedEntriesGuard;
 
 impl PlacedEntriesGuard {
@@ -297,7 +296,6 @@ fn merge_reporting(
     reporting(source, destination, workers_only(workers))
 }
 
-/// Records what is at each path as an operation that just put it there would.
 fn placed_now(paths: &[&Path]) -> HashMap<Location, PlacedSnapshot> {
     paths
         .iter()

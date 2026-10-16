@@ -908,7 +908,6 @@ fn a_merged_copy_records_created_and_overwritten_paths_for_undo() {
         overwritten: vec![overwritten.clone()],
         placed: HashMap::new(),
     });
-    // What the copy placed is reported once it is in place.
     emit(OperationEvent::Merged {
         request_id,
         source: source.clone(),
@@ -983,7 +982,6 @@ fn a_merge_undo_removes_merged_items_under_the_names_they_were_saved_as() {
             ..Default::default()
         },
     });
-    // What the copy placed is recorded under the names it was saved as.
     let placed = HashMap::from([
         (saved_as.clone(), PlacedSnapshot::new(())),
         (numbered.clone(), PlacedSnapshot::new(())),
@@ -1035,7 +1033,6 @@ fn a_paste_mixing_plain_copies_and_a_merge_records_one_merge_undo() {
         total_bytes: None,
         created_location: Some(copied.clone()),
     });
-    // Where there is no Trash, the paste records its plain copies too.
     let placed = HashMap::from([(copied.clone(), PlacedSnapshot::new(()))]);
     emit(OperationEvent::Merged {
         request_id,
@@ -1319,7 +1316,6 @@ fn a_merge_undo_leaves_what_it_kept_out_of_undo_history() {
     let kept = Location::local("/fixture/archive/kept.txt");
     let cut = Location::local("/fixture/archive/cut.txt");
     let earlier = UndoEntry::Trash(vec![Location::local("/fixture/earlier.txt")]);
-    // Whether a cancel cuts off an item after the kept one.
     let rows = [
         (false, vec![kept.clone()], earlier.clone()),
         (

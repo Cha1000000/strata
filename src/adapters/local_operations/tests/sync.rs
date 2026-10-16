@@ -1571,7 +1571,6 @@ fn a_batch_closes_once_its_first_entry_is_five_seconds_old() -> Result<(), Box<d
         fs::write(sources.join(name), name)?;
         paths.push(sources.join(name));
     }
-    // Three seconds pass as b is copied, and three more as d is.
     let later = |name: &'static str| -> (Op, &'static str, usize, super::fs_quirks::Racer) {
         (
             Op::OpenSource,

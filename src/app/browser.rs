@@ -1467,7 +1467,6 @@ impl Browser {
         false
     }
 
-    /// Selects `targets` once the open `directory` has reloaded.
     pub fn reveal_reloaded_locations(
         self: &Rc<Self>,
         directory: &Location,

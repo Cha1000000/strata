@@ -13,8 +13,6 @@ mod tests;
 
 const NOTICE_DURATION: Duration = Duration::from_secs(6);
 const LISTED_ITEMS: usize = 8;
-/// The longest line a notice shows whole, in characters; more items, or a
-/// longer line, go to a dialog.
 const NOTICE_CHARS: usize = 120;
 
 #[derive(Debug, Eq, PartialEq)]
@@ -128,9 +126,7 @@ fn bullets(lines: &[String]) -> String {
     text
 }
 
-/// The renamed items, where one was saved again under another name as one:
-/// as an alias numbered inside a merge stage meets a taken name when it is
-/// placed. Each keeps the cause of the name first asked for.
+/// Collapse alias-to-taken rename chains regardless of report order.
 fn followed(renamed: &[RenamedItem]) -> Vec<RenamedItem> {
     let mut items = Vec::<RenamedItem>::new();
     for item in renamed {
@@ -197,8 +193,6 @@ fn left_sections(report: &TransferReport) -> Vec<(String, Vec<String>)> {
     left
 }
 
-/// The detail of the dialog of an operation that failed, was cancelled or
-/// completed with errors: its `outcome`, then everything it reported.
 pub(super) fn outcome_detail(outcome: String, report: &TransferReport) -> String {
     let mut reported = renamed_sections(&followed(&report.renamed));
     reported.extend(left_sections(report));

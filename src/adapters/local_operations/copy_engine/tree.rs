@@ -911,7 +911,7 @@ impl File {
             };
             tree.links.role(fs, &self.mount, name)
         } else {
-            Role::Copied
+            Role::Independent
         };
         if role == Role::Later {
             return Ok(role);

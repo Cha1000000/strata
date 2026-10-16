@@ -640,7 +640,6 @@ fn sparse_files_keep_their_holes_where_both_ends_can() -> Result<(), Box<dyn Err
                 "{case}: {allocated} of {size} bytes allocated"
             );
         }
-        // Every byte, of the source at its largest, counted once.
         let largest = size.max(fs::metadata(&source)?.len());
         assert_eq!(counted_bytes(&events), Some(largest), "{case}");
     }
@@ -767,7 +766,6 @@ fn times_survive_filesystems_that_reset_them() -> Result<(), Box<dyn Error>> {
 #[test]
 fn copies_their_owner_cannot_read_keep_their_times_on_nfs4() -> Result<(), Box<dyn Error>> {
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock()?;
-    // The owner may only write the first copy, and neither read nor write the second.
     for mode in [0o244, 0o044] {
         let mounts = mounts(
             Quirks {

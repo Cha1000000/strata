@@ -320,7 +320,6 @@ pub struct RenamedItem {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SpecialKind {
-    /// A named pipe the destination refuses.
     Pipe,
     Socket,
     Device,
@@ -355,9 +354,7 @@ pub struct KeptItem {
 pub struct TransferReport {
     pub renamed: Vec<RenamedItem>,
     pub skipped: Vec<SkippedItem>,
-    /// Left at the source by a move.
     pub kept: Vec<KeptItem>,
-    /// Left in the Trash by a restore.
     pub kept_in_trash: Vec<KeptItem>,
 }
 
@@ -516,7 +513,6 @@ pub enum OperationEvent {
         /// The finished archive, recorded so undo can trash it.
         archive: Location,
         original: Option<ReplacedOriginal>,
-        /// The archive as it replaced an original moved to Trash.
         placed: Option<PlacedSnapshot>,
     },
     Extracted {

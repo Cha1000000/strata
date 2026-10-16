@@ -107,7 +107,6 @@ pub(super) enum Destination {
     Merge(PathBuf, Option<Arc<Placing>>),
 }
 
-/// The paths a merge records what it places at, as it places it.
 pub(super) struct Placing {
     root: PathBuf,
     wanted: HashSet<PathBuf>,
@@ -182,7 +181,6 @@ impl Placing {
     }
 }
 
-/// The entries all records of what one operation placed may hold.
 pub(super) fn placed_budget() -> Arc<AtomicUsize> {
     Arc::new(manifest::placed_entries())
 }
@@ -220,7 +218,6 @@ fn placed_within(
     }
 }
 
-/// Deletes what an operation placed at `path` if all of it is unchanged.
 pub(super) async fn remove_placed(
     path: PathBuf,
     placed: PlacedSnapshot,
@@ -1297,7 +1294,6 @@ fn same_entry(current: &EntryStat, identity: LocalFileIdentity, family: Family) 
     }
 }
 
-/// Removes what a copy made at `entry`; anything else there is an error.
 fn remove_own(
     fs: &dyn FsOps,
     entry: Entry<'_>,

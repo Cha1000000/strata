@@ -1838,7 +1838,6 @@ async fn copy_new_remote_file_with(
     }
 }
 
-/// What a GIO copy records of what it writes.
 #[derive(Clone)]
 enum CopyRecord {
     Nothing,
@@ -3273,7 +3272,6 @@ fn place_source(
 struct StagedReplacement {
     original: ReplacedOriginal,
     displaced: Option<DisplacedOriginal>,
-    /// What replaced an original in Trash, for undo to delete.
     placed: Option<PlacedSnapshot>,
 }
 

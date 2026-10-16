@@ -855,7 +855,6 @@ fn placeable(capabilities: MountCapabilities, directory: bool) -> Option<bool> {
     };
     match (capabilities.no_replace, fallback, capabilities.hard_links) {
         (Some(true), _, _) | (_, Some(true), _) => Some(true),
-        // The reserved-name rung.
         (Some(false), _, Some(false)) => Some(true),
         (Some(false), Some(false), Some(true)) => Some(false),
         _ => None,

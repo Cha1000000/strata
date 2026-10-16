@@ -482,7 +482,6 @@ pub(super) fn snapshot(
     })
 }
 
-/// What an operation put at a name, as it was once there.
 pub(in crate::adapters::local_operations) struct Placed {
     name: OsString,
     node: Node,
@@ -509,7 +508,6 @@ pub(in crate::adapters::local_operations) fn set_placed_entries_for_test(limit: 
     *lock(&TEST_PLACED_ENTRIES) = limit;
 }
 
-/// How many entries an operation's record of what it placed may hold.
 pub(super) fn placed_entries() -> AtomicUsize {
     #[cfg(test)]
     if let Some(limit) = *lock(&TEST_PLACED_ENTRIES) {
@@ -565,8 +563,6 @@ pub(super) fn placed_proven(
     }
 }
 
-/// The entries the operation's records may still hold, and how many one
-/// record took of them.
 struct Budget<'a> {
     left: &'a AtomicUsize,
     taken: AtomicUsize,
@@ -723,12 +719,10 @@ pub(super) fn delete(
 
 pub(in crate::adapters::local_operations) struct Removed {
     pub kept: Vec<(PathBuf, KeptCause)>,
-    /// Whether any entry was deleted.
     pub removed: bool,
     pub result: Result<(), glib::Error>,
 }
 
-/// Deletes the recorded entries that are still as recorded.
 pub(super) fn remove(
     fs: &'static dyn FsOps,
     parent: Arc<OwnedFd>,

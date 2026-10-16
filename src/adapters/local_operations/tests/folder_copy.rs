@@ -335,7 +335,6 @@ fn only_names_that_may_collide_are_claimed() -> Result<(), Box<dyn Error>> {
 fn files_are_claimed_by_creating_them_where_nodes_are_refused_or_on_smb()
 -> Result<(), Box<dyn Error>> {
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock()?;
-    // A refused node is learned once per copy.
     let refused = || Quirks {
         mount_type: Some(("fuse.example", "rw")),
         node_create: Support::Rejected(Errno::NOSYS),
@@ -374,7 +373,6 @@ fn a_claimed_name_swapped_for_a_pipe_fails_without_waiting() -> Result<(), Box<d
     let (sources, destination) = (root.path().join("sources"), root.path().join("destination"));
     fs::create_dir_all(sources.join("source"))?;
     fs::create_dir(&destination)?;
-    // Names that may be one are claimed before their files are opened.
     for file in ["File.bin", "file.bin"] {
         fs::write(sources.join("source").join(file), b"contents")?;
     }
@@ -917,7 +915,6 @@ fn a_claimed_name_is_linked_when_the_reply_to_removing_its_claim_is_lost()
     learn_mount_capability(mounts.destination_scope.key(), |capabilities| {
         capabilities.hard_links = Some(true);
     });
-    // `X` and `Y` may be `x` and `y`, so all four names are claimed.
     let source = mounts.sources.join("source");
     fs::create_dir(&source)?;
     fs::write(source.join("x"), b"linked")?;
