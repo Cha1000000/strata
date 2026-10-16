@@ -634,8 +634,12 @@ fn a_rename_gio_has_no_backend_for_fails_instead_of_ending_the_process()
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
         .lock()
         .map_err(|error| error.to_string())?;
-    // Without GVfs, as here, GIO's stand-in for the share cannot rename.
     let uri = "smb://server/share/item.txt";
+    assert_eq!(
+        gio::File::for_uri(uri).type_().name(),
+        "GDummyFile",
+        "needs GIO without GVfs (GIO_USE_VFS=local), whose stand-in file cannot rename"
+    );
     let unsupported = crate::services::backend_unavailable_message(uri);
     let entry = FileEntry {
         location: Location::uri(uri),
