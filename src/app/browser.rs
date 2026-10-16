@@ -58,6 +58,16 @@ const REMOTE_DIRECTORY_BATCH_SIZE: usize = 128;
 const PEEK_MAX_ENTRIES: usize = 64;
 const PEEK_TIME_BUDGET: Duration = Duration::from_secs(3);
 
+/// How a progress row names the folder `location` an operation goes into:
+/// a description, and a short label.
+pub(crate) fn folder_destination_texts(location: &Location) -> (String, String) {
+    let path = location.display_path();
+    (
+        rust_i18n::t!("Destination: %{path}", path = path).into_owned(),
+        format!("→ {path}"),
+    )
+}
+
 enum OperationDestination<'a> {
     Folder(&'a Location),
     Trash,
@@ -3519,13 +3529,7 @@ impl Browser {
 
     fn set_operation_destination(&self, destination: OperationDestination<'_>) {
         let (description, label) = match destination {
-            OperationDestination::Folder(location) => {
-                let path = location.display_path();
-                (
-                    rust_i18n::t!("Destination: %{path}", path = path).into_owned(),
-                    format!("→ {path}"),
-                )
-            }
+            OperationDestination::Folder(location) => folder_destination_texts(location),
             OperationDestination::Trash => (
                 crate::i18n::tr("Destination: Trash"),
                 format!("→ {}", crate::i18n::tr("Trash")),

@@ -3385,80 +3385,132 @@ fn keeping_both_on_a_move_puts_the_item_beside_the_other_and_undo_moves_it_back(
     );
 }
 
+/// The row a transfer shows, which is docked for a copy and a modal for a
+/// move, unless it is going away.
+fn transfer_row_shown(overlay: &gtk::Overlay, moving: bool) -> bool {
+    if moving {
+        visible_widget(overlay, |layer: &gtk::Box| {
+            layer.has_css_class("app-modal-layer") && !layer.has_css_class("dismissing")
+        })
+        .is_some()
+    } else {
+        find_widget_with_class(overlay, "app-modal-layer").is_none()
+            && visible_widget(overlay, |card: &gtk::Box| {
+                card.has_css_class("file-operation-card")
+            })
+            .is_some()
+    }
+}
+
 #[test]
-fn a_destination_slow_to_answer_shows_the_transfer_preparing_and_cancel_abandons_it() {
+fn a_destination_slow_to_answer_shows_the_transfer_preparing_where_its_row_will_be() {
     crate::test_support::gtk_test(
-        "ui::browser::transfer::tests::a_destination_slow_to_answer_shows_the_transfer_preparing_and_cancel_abandons_it",
+        "ui::browser::transfer::tests::a_destination_slow_to_answer_shows_the_transfer_preparing_where_its_row_will_be",
         || {
-            let fixture = tempfile::tempdir().expect("slow fixture");
-            let source = fixture.path().join("notes.txt");
-            let disk = fixture.path().join("disk");
-            std::fs::create_dir_all(&disk).expect("disk dir");
-            std::fs::write(&source, b"notes").expect("source file");
-            let (release, held) = std::sync::mpsc::channel::<()>();
-            let answered = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-            let listed = answered.clone();
-            let _disk = crate::adapters::FsQuirks::install(
-                &disk,
-                crate::adapters::Quirks {
-                    before: vec![(
-                        crate::adapters::FsOp::Names,
-                        "*",
-                        0,
-                        Box::new(move || {
-                            let _released = held.recv();
-                            listed.store(true, std::sync::atomic::Ordering::SeqCst);
-                        }),
-                    )],
-                    ..crate::adapters::Quirks::ext4()
-                },
-            );
-            let (view, overlay, window) = conflict_view();
-            let started = Rc::new(Cell::new(0));
-            let observed = started.clone();
-            view.browser().observe(move |event| {
-                if matches!(
-                    operation_event(event),
-                    crate::app::BrowserEvent::TransferStarted { .. }
-                ) {
-                    observed.set(observed.get() + 1);
+            for (moving, cancelled) in [(false, true), (true, true), (false, false), (true, false)]
+            {
+                let row = format!("moving {moving}, cancelled {cancelled}");
+                let fixture = tempfile::tempdir().expect("slow fixture");
+                let source = fixture.path().join("source/notes.txt");
+                let disk = fixture.path().join("disk");
+                std::fs::create_dir_all(&disk).expect("disk dir");
+                std::fs::create_dir_all(fixture.path().join("source")).expect("source dir");
+                std::fs::write(&source, b"notes").expect("source file");
+                let (release, held) = std::sync::mpsc::channel::<()>();
+                let answered = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let listed = answered.clone();
+                let _disk = crate::adapters::FsQuirks::install(
+                    &disk,
+                    crate::adapters::Quirks {
+                        before: vec![(
+                            crate::adapters::FsOp::Names,
+                            "*",
+                            0,
+                            Box::new(move || {
+                                let _released = held.recv();
+                                listed.store(true, std::sync::atomic::Ordering::SeqCst);
+                            }),
+                        )],
+                        ..crate::adapters::Quirks::ext4()
+                    },
+                );
+                let (view, overlay, window) = conflict_view();
+                let started = Rc::new(RefCell::new(Vec::new()));
+                let observed = started.clone();
+                let shown_on = overlay.clone();
+                view.browser().observe(move |event| {
+                    if matches!(
+                        operation_event(event),
+                        crate::app::BrowserEvent::TransferStarted { .. }
+                    ) {
+                        observed
+                            .borrow_mut()
+                            .push(transfer_row_shown(&shown_on, moving));
+                    }
+                });
+                let paste = || {
+                    view.state.start_transfer(
+                        Location::local(&disk),
+                        vec![Location::local(&source)],
+                        moving,
+                    )
+                };
+
+                paste();
+                wait_until(
+                    || transfer_row_shown(&overlay, moving),
+                    &format!("{row}: the transfer to show it prepares its items"),
+                );
+                assert!(
+                    visible_texts(&overlay).contains(&"notes.txt".to_owned()) || moving,
+                    "{row}: the docked row names the item"
+                );
+                paste();
+                if cancelled {
+                    if moving {
+                        click_button(&overlay, "Cancel");
+                    } else {
+                        visible_widget(&overlay, |button: &gtk::Button| {
+                            button.has_css_class("progress-cancel")
+                        })
+                        .expect("the docked row's cancel")
+                        .emit_clicked();
+                    }
+                    wait_until(
+                        || !transfer_row_shown(&overlay, moving),
+                        &format!("{row}: the preparing transfer to go away"),
+                    );
+                    paste();
+                } else {
+                    release.send(()).expect("held listing");
                 }
-            });
-
-            view.state.start_transfer(
-                Location::local(&disk),
-                vec![Location::local(&source)],
-                false,
-            );
-            let preparing = crate::i18n::tr("Preparing items…");
-            wait_until(
-                || visible_texts(&overlay).contains(&preparing),
-                "the transfer to show it prepares its items",
-            );
-            assert_eq!(started.get(), 0);
-            click_button(&overlay, "Cancel");
-            wait_until(
-                || find_widget_with_class(&overlay, "app-modal-layer").is_none(),
-                "the preparing transfer to go away",
-            );
-            release.send(()).expect("held listing");
-            wait_until(
-                || answered.load(std::sync::atomic::Ordering::SeqCst),
-                "the destination to answer",
-            );
-
-            view.state.start_transfer(
-                Location::local(&disk),
-                vec![Location::local(&source)],
-                false,
-            );
-            wait_until(
-                || std::fs::read(disk.join("notes.txt")).is_ok_and(|contents| contents == b"notes"),
-                "a later paste to copy the item",
-            );
-            assert_eq!(started.get(), 1, "the cancelled paste never started");
-            view.browser().clear_observer();
-            window.destroy();
+                wait_until(
+                    || {
+                        std::fs::read(disk.join("notes.txt"))
+                            .is_ok_and(|contents| contents == b"notes")
+                            && source.exists() != moving
+                    },
+                    &format!("{row}: the transfer"),
+                );
+                if cancelled {
+                    release.send(()).expect("held listing");
+                }
+                wait_until(
+                    || answered.load(std::sync::atomic::Ordering::SeqCst),
+                    &format!("{row}: the destination to answer"),
+                );
+                for _ in 0..20 {
+                    glib::MainContext::default().iteration(false);
+                }
+                assert_eq!(
+                    *started.borrow(),
+                    [!cancelled],
+                    "{row}: one transfer started, which took the place of the row that \
+                     showed it preparing unless that was cancelled"
+                );
+                view.browser().clear_observer();
+                window.destroy();
+            }
         },
     );
 }

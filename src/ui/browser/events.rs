@@ -705,12 +705,9 @@ impl ViewState {
             }
             BrowserEvent::TransferStarted { total, moving } => {
                 let browser = self.browser.clone();
-                let (icon, title) = super::progress::transfer_heading(*moving);
-                self.show_file_operation_progress(
+                self.show_transfer_progress(
                     *total,
-                    icon,
-                    title,
-                    super::progress::TRANSFER_SUBTITLE,
+                    *moving,
                     super::progress::file_operation_cancel(browser),
                 );
                 self.update_transfer_progress(0, 0, None, 0, None);

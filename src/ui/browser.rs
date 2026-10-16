@@ -281,6 +281,12 @@ pub(super) struct ViewState {
     drag_source_depth: Cell<Option<usize>>,
     suppress_scroll_after_drop: Cell<bool>,
     transfer_replaces_cursor: Cell<bool>,
+    /// The row of a transfer that showed it preparing, until the transfer's
+    /// own row takes its place.
+    transfer_preparation: RefCell<Option<Rc<FileProgressState>>>,
+    /// Transfers still finding where their items go, by destination, items
+    /// and whether they move, with what cancels each.
+    preparing_transfers: RefCell<Vec<((Location, Vec<Location>, bool), gio::Cancellable)>>,
     drop_active_depths: Cell<Option<(usize, usize)>>,
     find: RefCell<find::FindState>,
     listing_filter: listing_filter::FilterState,
@@ -665,6 +671,8 @@ impl BrowserView {
             drag_source_depth: Cell::new(None),
             suppress_scroll_after_drop: Cell::new(false),
             transfer_replaces_cursor: Cell::new(false),
+            transfer_preparation: RefCell::new(None),
+            preparing_transfers: RefCell::new(Vec::new()),
             drop_active_depths: Cell::new(None),
             find: RefCell::new(find::FindState::default()),
             listing_filter: listing_filter::FilterState::default(),

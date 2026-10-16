@@ -383,19 +383,20 @@ as in a duplicate, are kept. The conflict prompt looks for each item under the n
 it, says so where that name is another, and Replace, Merge and Keep Both act on that name; a merge
 prompt where names inside the folder change also says they overwrite items of the new name. The
 prompt waits for that lookup off the GTK thread, showing the transfer preparing its items with
-Cancel where the destination is slow to answer, and asks nothing of a selected link the destination
-is known not to hold, which the paste leaves out. A name that needs no change keeps it, even where a
-fixed name would equal it, unless FAT or exFAT takes it for another such name in its folder, or
-among a paste's top-level items, that sorts first in bytes (`Readme.txt` beside `README.txt`): it is
-then numbered as an alias before copying. Fixed names that equal another name are numbered too, in
-the byte order of the names they replace. The completion report lists every fixed name with the name
-it was saved as. In a merge, a planned name equal to an existing item replaces that item like any
-other same-named one. A folder merged into takes the rules of its own mount, and whether names are fixed
-is decided again, only where it or the folder merged into it is on another device than its parent:
-a bind mount of the same filesystem shares its rules. Under
-`/run/user/$UID/gvfs`, where one FUSE mount serves every GVfs location, the folder of each location
-counts as a filesystem of its own, with the rules of its kind, and what its refusals teach stays
-with it.
+Cancel where the destination is slow to answer, docked for a copy as its progress will be, which
+then takes that row's place at once; the same paste repeated meanwhile is ignored. It asks nothing
+of a selected link the destination is known not to hold, which the paste leaves out. A name that
+needs no change keeps it, even where a fixed name would equal it, unless FAT or exFAT takes it for
+another such name in its folder, or among a paste's top-level items, that sorts first in bytes
+(`Readme.txt` beside `README.txt`): it is then numbered as an alias before copying. Fixed names that
+equal another name are numbered too, in the byte order of the names they replace. The completion
+report lists every fixed name with the name it was saved as. In a merge, a planned name equal to an
+existing item replaces that item like any other same-named one. A folder merged into takes the rules
+of its own mount, and whether names are fixed is decided again, only where it or the folder merged
+into it is on another device than its parent: a bind mount of the same filesystem shares its rules.
+Under `/run/user/$UID/gvfs`, where one FUSE mount serves every GVfs location, the folder of each
+location counts as a filesystem of its own, with the rules of its kind, and what its refusals teach
+stays with it.
 
 A mount may still refuse a name: a call that creates it fails with `EINVAL`, `EILSEQ`, `EBADMSG`,
 `ENAMETOOLONG`, or `ENOENT` in a folder that exists, or placing a staged copy fails with an error the

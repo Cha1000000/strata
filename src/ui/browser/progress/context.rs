@@ -125,6 +125,38 @@ impl ViewState {
         subtitle: &str,
         on_cancel: Rc<dyn Fn()>,
     ) {
+        self.operation_progress()
+            .show_file_operation_progress(total, icon, title, subtitle, on_cancel);
+    }
+
+    /// Shows the row of the transfer that just started, in place of the row
+    /// that showed it preparing: at once where that one was on screen, so
+    /// the transfer never leaves the screen in between.
+    pub(in crate::ui::browser) fn show_transfer_progress(
+        self: &Rc<Self>,
+        total: usize,
+        moving: bool,
+        on_cancel: Rc<dyn Fn()>,
+    ) {
+        let preparation = self.transfer_preparation.take();
+        let at_once = preparation
+            .as_ref()
+            .is_some_and(|preparation| preparation.is_presented());
+        let (icon, title) = super::transfer_heading(moving);
+        self.operation_progress().show_operation_progress(
+            total,
+            at_once || super::should_show_progress_immediately(total),
+            icon,
+            title,
+            super::TRANSFER_SUBTITLE,
+            on_cancel,
+        );
+        if let Some(preparation) = preparation {
+            preparation.dismiss_file_operation_progress();
+        }
+    }
+
+    fn operation_progress(self: &Rc<Self>) -> Rc<FileProgressState> {
         let progress = if self.browser.last_started_operation().is_some() {
             let progress = Rc::new(FileProgressState::new(&self.overlay));
             self.progress_state
@@ -149,7 +181,7 @@ impl ViewState {
         progress
             .task_description
             .replace(self.browser.operation_description());
-        progress.show_file_operation_progress(total, icon, title, subtitle, on_cancel);
+        progress
     }
 
     pub(in crate::ui::browser) fn dock_file_operation(

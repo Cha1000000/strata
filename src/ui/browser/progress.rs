@@ -212,23 +212,50 @@ impl FileProgressState {
         subtitle_text: &str,
         on_cancel: Rc<dyn Fn()>,
     ) {
+        let at_once = should_show_progress_immediately(total);
+        self.show_operation_progress(total, at_once, icon, title_text, subtitle_text, on_cancel);
+    }
+
+    /// Shows the row of an operation of `total` items, `at_once` or after the
+    /// usual delay.
+    pub(super) fn show_operation_progress(
+        self: &Rc<Self>,
+        total: usize,
+        at_once: bool,
+        icon: &str,
+        title_text: &str,
+        subtitle_text: &str,
+        on_cancel: Rc<dyn Fn()>,
+    ) {
         self.dismiss_file_operation_progress();
         self.file_operation_progress.set((0, total));
-        if should_show_progress_immediately(total) {
+        if at_once {
             self.present_file_operation_progress(icon, title_text, subtitle_text, on_cancel);
             return;
         }
         self.present_file_operation_progress_later(icon, title_text, subtitle_text, on_cancel);
     }
 
+    /// Whether the row is on screen.
+    pub(super) fn is_presented(&self) -> bool {
+        self.file_progress_view.borrow().is_some()
+    }
+
     /// A transfer's row while it still finds where its items go, preparing
-    /// them, which only a destination slower than the usual delay shows.
+    /// them, which only a destination slower than the usual delay shows. It
+    /// shows where the transfer's own row will, docked for a copy, with the
+    /// first item and the destination that row names.
     pub(super) fn show_transfer_preparation(
         self: &Rc<Self>,
         moving: bool,
+        (description, (destination, label)): (String, (String, String)),
         on_cancel: Rc<dyn Fn()>,
     ) {
         self.dismiss_file_operation_progress();
+        self.dock_only.set(!moving);
+        self.task_description.replace(description);
+        self.destination_description.replace(destination);
+        self.destination_label.replace(label);
         self.transfer_progress.set(Some(TransferProgressSnapshot {
             completed_items: 0,
             completed_files: 0,

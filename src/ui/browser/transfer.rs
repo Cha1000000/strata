@@ -581,19 +581,41 @@ impl ViewState {
         if sources.is_empty() {
             return;
         }
+        let request = (destination.clone(), sources.clone(), move_sources);
+        if self
+            .preparing_transfers
+            .borrow()
+            .iter()
+            .any(|(preparing, cancellable)| *preparing == request && !cancellable.is_cancelled())
+        {
+            return;
+        }
         let cancellable = gio::Cancellable::new();
-        let preparation = self.show_transfer_preparation(move_sources, &cancellable);
+        self.preparing_transfers
+            .borrow_mut()
+            .push((request, cancellable.clone()));
+        let preparation =
+            self.show_transfer_preparation(move_sources, (&destination, &sources), &cancellable);
         let weak = Rc::downgrade(self);
         glib::MainContext::default().spawn_local(async move {
             let targets =
                 transfer_targets(&destination, &sources, move_sources, &cancellable).await;
-            preparation.dismiss_file_operation_progress();
-            let Some(state) = weak.upgrade().filter(|_| !cancellable.is_cancelled()) else {
+            let Some(state) = weak.upgrade() else {
+                preparation.dismiss_file_operation_progress();
                 return;
             };
+            state
+                .preparing_transfers
+                .borrow_mut()
+                .retain(|(_, preparing)| *preparing != cancellable);
+            if cancellable.is_cancelled() {
+                preparation.dismiss_file_operation_progress();
+                return;
+            }
             let targets = match targets {
                 Ok(targets) => targets,
                 Err(error) => {
+                    preparation.dismiss_file_operation_progress();
                     show_error_dialog(
                         &state.overlay,
                         &crate::i18n::tr("Unable to transfer"),
@@ -619,6 +641,11 @@ impl ViewState {
                     }),
                 }
             }
+            if collisions.is_empty() {
+                state.transfer_preparation.replace(Some(preparation));
+            } else {
+                preparation.dismiss_file_operation_progress();
+            }
             state.resolve_transfer_collisions(
                 destination,
                 collisions,
@@ -628,21 +655,34 @@ impl ViewState {
                 send_to,
                 focus,
             );
+            if let Some(preparation) = state.transfer_preparation.take() {
+                preparation.dismiss_file_operation_progress();
+            }
         });
     }
 
-    /// Shows the transfer's progress row while it finds where its items go,
-    /// once that takes a while; its Cancel cancels `cancellable`.
+    /// Shows the transfer's progress row while it finds where `sources` go in
+    /// `destination`, once that takes a while; its Cancel cancels
+    /// `cancellable`.
     fn show_transfer_preparation(
         &self,
         moving: bool,
+        (destination, sources): (&Location, &[Location]),
         cancellable: &gio::Cancellable,
     ) -> Rc<FileProgressState> {
         let progress = Rc::new(FileProgressState::new(&self.overlay));
         let shown = Rc::downgrade(&progress);
         let cancellable = cancellable.clone();
+        let description = sources
+            .first()
+            .map(Location::display_name)
+            .unwrap_or_default();
         progress.show_transfer_preparation(
             moving,
+            (
+                description,
+                crate::app::folder_destination_texts(destination),
+            ),
             Rc::new(move || {
                 cancellable.cancel();
                 if let Some(progress) = shown.upgrade() {
