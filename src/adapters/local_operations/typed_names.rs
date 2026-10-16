@@ -18,7 +18,11 @@ pub(super) fn refused(name: &str, rules: &NameProfile, new_folder: bool) -> Opti
     Some(match refusal(name, rules, new_folder)? {
         Refusal::Characters(characters) => rust_i18n::t!(
             "Names in this location can’t contain %{characters}",
-            characters = crate::i18n::list(characters.into_iter().map(shown))
+            characters = crate::i18n::list(
+                characters
+                    .into_iter()
+                    .map(|character| crate::i18n::quoted(&shown(character)))
+            )
         )
         .into_owned(),
         Refusal::LeadingSpace => crate::i18n::tr("Names in this location can’t start with a space"),
@@ -37,10 +41,25 @@ pub(super) async fn refused_in(folder: &gio::File, name: &str, new_folder: bool)
     refused(name, &folder_name_rules(folder).await?, new_folder)
 }
 
-/// A character as a name shows it, or the code point of a control character,
-/// which shows nothing.
+/// A character as a name shows it, or its code point where it shows nothing
+/// of its own: control and format characters, spaces, marks that join the
+/// character before, and private-use or unassigned code points.
 fn shown(character: char) -> String {
-    if character.is_control() {
+    use glib::{Unichar, UnicodeType};
+    if matches!(
+        character.unicode_type(),
+        UnicodeType::Control
+            | UnicodeType::Format
+            | UnicodeType::Unassigned
+            | UnicodeType::PrivateUse
+            | UnicodeType::Surrogate
+            | UnicodeType::NonSpacingMark
+            | UnicodeType::SpacingMark
+            | UnicodeType::EnclosingMark
+            | UnicodeType::SpaceSeparator
+            | UnicodeType::LineSeparator
+            | UnicodeType::ParagraphSeparator
+    ) {
         format!("U+{:04X}", u32::from(character))
     } else {
         character.to_string()

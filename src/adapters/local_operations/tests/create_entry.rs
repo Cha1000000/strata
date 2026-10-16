@@ -175,7 +175,7 @@ fn a_typed_name_the_location_would_store_otherwise_is_refused_before_anything_is
             Some(
                 rust_i18n::t!(
                     "Names in this location can’t contain %{characters}",
-                    characters = ":"
+                    characters = crate::i18n::quoted(":")
                 )
                 .into_owned(),
             ),

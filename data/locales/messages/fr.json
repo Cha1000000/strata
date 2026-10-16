@@ -922,6 +922,7 @@
   "“%{extension}” is not a usable extension: write it without a dot, for example “png”": "« %{extension} » n’est pas une extension utilisable : écrivez-la sans point, par exemple « png »",
   "“%{id}” was imported disabled. Review its script, then enable it.": "« %{id} » a été importée désactivée. Vérifiez son script, puis activez-la.",
   "“%{mime}” is not a usable content type: write “image/png” or “image/*”": "« %{mime} » n’est pas un type de contenu utilisable : écrivez « image/png » ou « image/* »",
+  "“%{name}”": "« %{name} »",
   "“%{name}” (device file)": "« %{name} » (fichier de périphérique)",
   "“%{name}” (named pipe)": "« %{name} » (tube nommé)",
   "“%{name}” (socket)": "« %{name} » (socket)",

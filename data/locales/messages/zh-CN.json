@@ -922,6 +922,7 @@
   "“%{extension}” is not a usable extension: write it without a dot, for example “png”": "扩展名“%{extension}”无效：请去掉点号，例如“png”",
   "“%{id}” was imported disabled. Review its script, then enable it.": "“%{id}”已导入，但处于停用状态。请检查其脚本后再启用。",
   "“%{mime}” is not a usable content type: write “image/png” or “image/*”": "内容类型“%{mime}”无效：请写成“image/png”或“image/*”的形式",
+  "“%{name}”": "“%{name}”",
   "“%{name}” (device file)": "“%{name}”（设备文件）",
   "“%{name}” (named pipe)": "“%{name}”（命名管道）",
   "“%{name}” (socket)": "“%{name}”（套接字）",

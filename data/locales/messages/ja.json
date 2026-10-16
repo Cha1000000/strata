@@ -922,6 +922,7 @@
   "“%{extension}” is not a usable extension: write it without a dot, for example “png”": "「%{extension}」は拡張子として使用できません。ドットなしで記述してください（例: 「png」）",
   "“%{id}” was imported disabled. Review its script, then enable it.": "「%{id}」は無効の状態でインポートされました。スクリプトを確認してから有効にしてください。",
   "“%{mime}” is not a usable content type: write “image/png” or “image/*”": "「%{mime}」はコンテンツタイプとして使用できません。「image/png」や「image/*」のように記述してください",
+  "“%{name}”": "「%{name}」",
   "“%{name}” (device file)": "「%{name}」（デバイスファイル）",
   "“%{name}” (named pipe)": "「%{name}」（名前付きパイプ）",
   "“%{name}” (socket)": "「%{name}」（ソケット）",

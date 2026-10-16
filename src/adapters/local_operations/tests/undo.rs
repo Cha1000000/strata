@@ -492,8 +492,11 @@ fn a_typed_name_the_location_would_store_otherwise_is_refused_before_the_rename(
     let characters = |characters: &[&str]| {
         rust_i18n::t!(
             "Names in this location can’t contain %{characters}",
-            characters =
-                crate::i18n::list(characters.iter().map(|character| character.to_string()))
+            characters = crate::i18n::list(
+                characters
+                    .iter()
+                    .map(|character| crate::i18n::quoted(character))
+            )
         )
         .into_owned()
     };
@@ -608,7 +611,7 @@ fn a_typed_name_at_a_gvfs_address_is_refused_by_the_rules_of_its_scheme()
         .map_err(|error| error.to_string())?;
     let colon = rust_i18n::t!(
         "Names in this location can’t contain %{characters}",
-        characters = ":"
+        characters = crate::i18n::quoted(":")
     )
     .into_owned();
     let leading_space = crate::i18n::tr("Names in this location can’t start with a space");

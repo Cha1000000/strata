@@ -1572,6 +1572,39 @@ fn a_typed_name_is_refused_for_the_first_thing_its_mount_would_change() {
 }
 
 #[test]
+fn a_typed_name_refusal_quotes_each_character_and_gives_the_code_point_of_those_that_show_nothing()
+{
+    use super::super::typed_names::refused;
+    let bmp = NameProfile::windows(Reserved::Full, NameEncoding::Utf8Bmp);
+    let ascii = NameProfile::windows(Reserved::Bare, NameEncoding::Ascii);
+    let smb = NameProfile {
+        mapped: Some(PrivateUse::Sfm),
+        ..NameProfile::smb(Some(255))
+    };
+    for (profile, name, shown) in [
+        (fat(), "a:b?", &[":", "?"][..]),
+        (fat(), "tab\tx", &["U+0009"]),
+        (bmp, "a\u{1f600}", &["\u{1f600}"]),
+        (ascii, "caf\u{e9}", &["\u{e9}"]),
+        (ascii, "e\u{301}", &["U+0301"]),
+        (ascii, "a\u{200b}b", &["U+200B"]),
+        (ascii, "a\u{a0}b", &["U+00A0"]),
+        (smb, "x\u{f022}y", &["U+F022"]),
+    ] {
+        let message = rust_i18n::t!(
+            "Names in this location can’t contain %{characters}",
+            characters =
+                crate::i18n::list(shown.iter().map(|character| crate::i18n::quoted(character)))
+        );
+        assert_eq!(
+            refused(name, &profile, false).as_deref(),
+            Some(message.as_ref()),
+            "{name:?}"
+        );
+    }
+}
+
+#[test]
 fn a_refused_name_tries_each_rule_alone_before_rules_together() {
     use RenameCause::{Invalid, TooLong};
     use StrictRule::{Characters, DeviceNames, Length, TrailingDots, Utf8};

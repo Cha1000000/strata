@@ -424,8 +424,9 @@ passed over without a report.
 Names the user types are never fixed. Renaming an item, creating a file or folder by name, or naming
 a new archive is refused before anything changes where the folder's rules, including any a mount
 has learned from refusals, would store the name as another, and the message names what the location
-cannot hold: the characters, a leading space (MTP) or a trailing space or period, a device name
-Windows reserves, or the length. A rename is held to the length of a file, since Samba's shorter
+cannot hold: the characters, each quoted and given by code point where it shows nothing of its own
+(`U+0009`, `U+0301`), a leading space (MTP) or a trailing space or period, a device name Windows
+reserves, or the length. A rename is held to the length of a file, since Samba's shorter
 limit for folders applies only to the folders it creates. Names Strata chooses itself, such as "new
 folder", are not checked.
 
