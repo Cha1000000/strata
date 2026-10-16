@@ -119,21 +119,20 @@ pub(super) struct Unsettled {
     ahead: Option<SystemTime>,
 }
 
-pub(super) fn unsettled(
-    stat: &EntryStat,
-    coarse: Option<CoarseTimes>,
-    started: SystemTime,
-) -> Option<Unsettled> {
+pub(super) fn unsettled(stat: &EntryStat, mount: &Mount, started: SystemTime) -> Option<Unsettled> {
     let (seconds, nanoseconds) = stat.mtime;
     // A time with no fraction of a second may come from a filesystem as
     // coarse as FAT's that the mount does not show, such as one a server
     // shares.
-    let coarse = coarse.or_else(|| {
-        (nanoseconds == 0).then_some(CoarseTimes {
-            window: Duration::from_secs(2),
-            stamped_here: false,
+    let coarse = mount
+        .coarse_times
+        .or_else(|| {
+            (nanoseconds == 0).then_some(CoarseTimes {
+                window: Duration::from_secs(2),
+                stamped_here: false,
+            })
         })
-    })?;
+        .or_else(|| mount.family.coarse_clock(super::data::kernel()))?;
     let modified =
         UNIX_EPOCH.checked_add(Duration::new(u64::try_from(seconds).ok()?, nanoseconds))?;
     // Our clock stamps a time ahead of it only once it reaches that time; a
@@ -752,8 +751,7 @@ fn digested(
     stat: &EntryStat,
     cancelled: &AtomicBool,
 ) -> Result<Node, Failure> {
-    let coarse = Mount::new(fs, at.dir).coarse_times;
-    let Some(unsettled) = unsettled(stat, coarse, now()) else {
+    let Some(unsettled) = unsettled(stat, &Mount::new(fs, at.dir), now()) else {
         return Ok(Node::Entry(SourceSnapshot::of(stat, None)));
     };
     // Once the tick passes, any rewrite changes the times, so the bytes not

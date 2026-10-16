@@ -1959,16 +1959,14 @@ impl Copy {
         let mut stat = source.stat;
         let source_fd = source.fd.as_fd();
         // A folder may hold another mount, so each file asks its own.
-        let mount_times = self
-            .recording
-            .then(|| Mount::new(self.fs, source_fd).coarse_times);
+        let source_mount = self.recording.then(|| Mount::new(self.fs, source_fd));
         for attempt in 0..2 {
             if attempt > 0 {
                 self.fs.set_len(target, 0)?;
             }
             let counted = attempt == 0;
-            let unsettled =
-                mount_times.and_then(|coarse| manifest::unsettled(&stat, coarse, manifest::now()));
+            let unsettled = source_mount
+                .and_then(|mount| manifest::unsettled(&stat, &mount, manifest::now()));
             let (digest, end) = match unsettled {
                 Some(_) => {
                     let (digest, end) =

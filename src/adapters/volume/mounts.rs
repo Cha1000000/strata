@@ -279,6 +279,26 @@ pub(crate) enum Family {
     Other,
 }
 
+impl Family {
+    /// Where a stat cannot tell a rewrite within one tick of the clock that
+    /// stamps times: the kernel's coarse clock, except for the multigrain
+    /// timestamps ext4, XFS, btrfs and tmpfs get from Linux 6.13, or a
+    /// server's or a daemon's.
+    pub(crate) fn coarse_clock(self, kernel: (u32, u32, u32)) -> Option<CoarseTimes> {
+        let multigrain = matches!(self, Self::Ext | Self::Xfs | Self::Btrfs | Self::Tmpfs);
+        if multigrain && kernel >= (6, 13, 0) {
+            return None;
+        }
+        Some(CoarseTimes {
+            window: Duration::ZERO,
+            stamped_here: !matches!(
+                self,
+                Self::Nfs | Self::Nfs4 | Self::Smb | Self::Fuse | Self::Other
+            ),
+        })
+    }
+}
+
 pub(crate) fn family(fs_type: &str) -> Family {
     match fs_type {
         "ext2" | "ext3" | "ext4" => Family::Ext,

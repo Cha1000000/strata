@@ -510,8 +510,9 @@ if it is still what the copy read:
   `noserverino` give an entry a new inode number once the kernel evicts it. There, the type and the
   birth time, where both stats report one, stand in for the inode, and the change time is compared
   only for files with one link.
-- **Racily clean files.** Where timestamps are coarse, a same-size rewrite can leave a file's times
-  as they were. Such files are compared by content; see [Racily clean files](#racily-clean-files).
+- **Racily clean files.** Where timestamps are coarse, as on every filesystem before Linux 6.13, a
+  same-size rewrite can leave a file's times as they were. Such files are compared by content; see
+  [Racily clean files](#racily-clean-files).
 - **Folders** are opened and checked like entries, and removed once empty. A folder that gained
   entries, or another folder put at its name, stays.
 - **The copy itself.** The move carries the identities of the entries it created, rather than
@@ -558,11 +559,18 @@ It is deleted only if its name still holds the file it compared.
 | HFS, HFS+ | 1 s |
 | sshfs | 3 s: the 1 s tick, plus 2 s for a server clock behind ours |
 | any other file whose modification time has no fraction of a second, as on FAT-backed shares, ext2/3 with small inodes, rclone and gvfsd-fuse | 2 s |
+| any other source, except ext4, XFS, btrfs and tmpfs on Linux 6.13 and later | none, only the 100 ms below |
 
-- Each window gets 100 ms more for the coarse clock the kernel stamps times with. Files modified
-  longer ago are not read again, and other mounts keep the stat check alone.
+- Each window gets 100 ms more for the coarse clock the kernel stamps times with, which advances
+  once per tick (up to 10 ms). Files modified longer ago are not read again.
+- From Linux 6.13, ext4, XFS, btrfs and tmpfs stamp times with multigrain timestamps: a change
+  right after a stat gets a finer time than the one the stat saw, so a rewrite always shows, and
+  those mounts keep the stat check alone. Other filesystems, such as f2fs, ntfs3 and ramfs, and
+  overlayfs, which does not show which filesystem stamps its files, are compared on every kernel,
+  as are NFS, SMB and FUSE mounts, whose server or daemon stamps the times. The kernel release is
+  read once, and the family comes from the mount already looked up for each file.
 - The wait is at most the window, so moving a file just saved on a FAT stick takes up to about 2 s
-  longer.
+  longer, and one saved within the last 100 ms elsewhere up to 100 ms longer.
 - A file dated ahead of the clock, on a mount this machine stamps (FAT, `fuseblk`, HFS), cannot
   have been rewritten unnoticed until the clock reaches its time. While the clock is before it, it
   is deleted without being read again; after, it is compared like the others.
@@ -693,10 +701,10 @@ reported.
 ### Limits
 
 - **Coarse times.** vfat keeps no change time and a 2 s modification time, exFAT 10 ms, sshfs whole
-  seconds. Moves compare racily clean files by content; without that, a same-size rewrite within
-  one tick would pass. Where the kernel stamps times from a clock that advances once per tick (up
-  to 10 ms), a same-size rewrite within that tick of the previous write, after the copy read the
-  file, can still pass on any filesystem.
+  seconds, and the kernel's coarse clock advances once per tick. Moves compare racily clean files
+  by content; without that, a same-size rewrite within one tick would pass. On NFS, SMB and FUSE
+  mounts other than sshfs, a server or daemon whose clock runs more than 100 ms behind ours can
+  still hide a same-size rewrite of a file it stamped within one of its ticks.
 - **exFAT folders.** The kernel's exFAT driver changes a folder's birth time whenever an entry is
   renamed into it, so a move then keeps that whole folder instead of only the changed entry.
 - **Relaxed identity.** Where a source has no stable inode numbers and reports no birth time

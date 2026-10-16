@@ -1325,8 +1325,14 @@ fn a_file_rewritten_as_it_is_read_is_copied_again_whole() -> Result<(), Box<dyn 
     let _serial = serial()?;
     // Each pass reads the data, then the end of the file. Every write lands in
     // one tick of a coarse clock, so only a file last written in an earlier
-    // tick shows a same-size rewrite in its times.
-    for row in ["same size", "shrinks"] {
+    // tick shows a same-size rewrite in its times. Before Linux 6.13, a file
+    // modified within the tick is copied for a digest.
+    for (row, kernel) in [
+        ("same size", (6, 13, 0)),
+        ("shrinks", (6, 13, 0)),
+        ("shrinks, digested", (6, 12, 0)),
+    ] {
+        let _kernel = KernelGuard::set(Some(kernel));
         // Before the kernel's coarse clock, which may run a tick behind.
         let tick = SystemTime::now() - Duration::from_secs(1);
         let _clock = ClockGuard::set(tick);
@@ -1351,7 +1357,7 @@ fn a_file_rewritten_as_it_is_read_is_copied_again_whole() -> Result<(), Box<dyn 
         let quirks = Quirks {
             before,
             coarse_clock: Some(tick),
-            ..Quirks::default()
+            ..Quirks::ext4()
         };
 
         let (moved, report, events) = move_across_volumes(&folder, quirks)?;
@@ -2625,6 +2631,67 @@ fn files_on_a_coarse_mount_inside_a_moved_folder_are_compared() -> Result<(), Bo
     );
     assert_eq!(fs::read(&file)?, b"ORIGINAL");
     assert_eq!(report.kept, [kept(file, KeptCause::Changed)]);
+    Ok(())
+}
+
+#[test]
+fn files_modified_within_a_tick_of_the_clock_stamping_them_are_compared_before_deletion()
+-> Result<(), Box<dyn Error>> {
+    let _serial = serial()?;
+    let ramfs = || Quirks {
+        mount_type: Some(("ramfs", "rw")),
+        ..Quirks::default()
+    };
+    // Since Linux 6.13, ext4, XFS, btrfs and tmpfs stamp a change right after
+    // a stat with a finer time; elsewhere a same-size rewrite within the tick
+    // keeps the times. How many milliseconds after the tick the copy reads the
+    // file, whether it is rewritten as the deletion starts, and whether the
+    // deletion reads it again.
+    let rows: [(&str, (u32, u32, u32), Preset, u64, bool, bool); 6] = [
+        ("ext4 before 6.13", (6, 12, 0), Quirks::ext4, 5, true, true),
+        ("ext4 before 6.13, untouched", (6, 12, 0), Quirks::ext4, 5, false, true),
+        ("ext4 before 6.13, a tick later", (6, 12, 0), Quirks::ext4, 150, false, false),
+        ("ext4 since 6.13", (6, 13, 0), Quirks::ext4, 5, false, false),
+        ("ramfs since 6.13", (6, 13, 0), ramfs, 5, true, true),
+        ("NFS since 6.13", (6, 13, 0), Quirks::nfs42, 5, true, true),
+    ];
+    for (row, kernel, preset, read_after, rewritten, read_again) in rows {
+        let _kernel = KernelGuard::set(Some(kernel));
+        // Before the kernel's coarse clock, which may run a tick behind.
+        let tick = SystemTime::now() - Duration::from_secs(1);
+        let _clock = ClockGuard::set(tick + Duration::from_millis(read_after));
+        let root = tempfile::tempdir()?;
+        let folder = root.path().join("source/folder");
+        fs::create_dir_all(&folder)?;
+        let file = folder.join("a.txt");
+        fs::write(&file, b"original")?;
+        let before = if rewritten {
+            vec![(Op::OpenDir, "folder", 1, rewrite(&file, b"ORIGINAL"))]
+        } else {
+            Vec::new()
+        };
+        let quirks = Quirks {
+            before,
+            coarse_clock: Some(tick),
+            ..preset()
+        };
+
+        let (moved, report, _, calls) = move_across_volumes_logged(&folder, quirks)?;
+
+        assert_eq!(fs::read(moved.join("a.txt"))?, b"original", "{row}");
+        if rewritten {
+            assert_eq!(fs::read(&file).ok(), Some(b"ORIGINAL".to_vec()), "{row}");
+            assert_eq!(report.kept, [kept(file, KeptCause::Changed)], "{row}");
+        } else {
+            assert!(!folder.exists(), "{row}");
+            assert_eq!(report.kept, [], "{row}");
+        }
+        let opened = calls
+            .iter()
+            .filter(|call| call.op == Op::OpenSource && call.names == ["a.txt"])
+            .count();
+        assert_eq!(opened > 1, read_again, "{row}");
+    }
     Ok(())
 }
 

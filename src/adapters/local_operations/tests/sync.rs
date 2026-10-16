@@ -457,21 +457,6 @@ fn moved_count(events: &[OperationEvent]) -> usize {
         .count()
 }
 
-struct KernelGuard;
-
-impl KernelGuard {
-    fn set(release: Option<(u32, u32, u32)>) -> Self {
-        super::super::copy_engine::set_kernel_for_test(release);
-        Self
-    }
-}
-
-impl Drop for KernelGuard {
-    fn drop(&mut self) {
-        super::super::copy_engine::set_kernel_for_test(None);
-    }
-}
-
 struct LimitsGuard;
 
 impl LimitsGuard {
