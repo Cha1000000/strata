@@ -2,7 +2,7 @@
 
 use rustix::io::Errno;
 
-use super::fs_quirks::{Op, Preset, Support};
+use super::fs_quirks::{Op, Preset, Support, skips_malformed_name_on_fuse};
 use super::*;
 use crate::services::RenameRequest;
 
@@ -202,6 +202,12 @@ fn an_undone_move_gives_names_back_as_they_were_and_a_redone_one_fixes_them()
     ];
     for (row, preset, mode, moved_names, expected) in rows {
         let root = tempfile::tempdir()?;
+        if moved_names
+            .iter()
+            .any(|name| skips_malformed_name_on_fuse(root.path(), name))
+        {
+            continue;
+        }
         let disk = root.path().join("disk");
         let moved = root.path().join("moved").join("project");
         fs::create_dir(&disk)?;

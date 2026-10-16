@@ -1506,6 +1506,18 @@ pub(crate) fn recreated(path: &Path) {
     }
 }
 
+/// Whether a row that sends the malformed `name` as it is to the filesystem holding `root` is
+/// skipped there: a FUSE daemon gets what a preset over it passes on, and exfat-fuse writes an
+/// overlong `/` into its volume as a real one.
+pub(crate) fn skips_malformed_name_on_fuse(root: &Path, name: &OsStr) -> bool {
+    let skipped = name.to_str().is_none()
+        && rustix::fs::statfs(root).is_ok_and(|stat| stat.f_type == FUSE_SUPER_MAGIC);
+    if skipped {
+        eprintln!("skipped on a FUSE base, which a malformed name can corrupt: {name:?}");
+    }
+    skipped
+}
+
 /// Makes whatever is at `path` report another inode number until it is
 /// unlinked, as libfuse without `use_ino` and cifs without server inode
 /// numbers do once the kernel evicts an entry.

@@ -20,7 +20,7 @@ use super::{ArchiveError, ArchiveOutcome, ExtractionSession, MemberContent, Memb
 use crate::{
     adapters::local_operations::{
         archive::fixtures::{EXTRACTION_STAGE, expected_mode, stages},
-        tests::fs_quirks::{FsQuirks, Op, Preset, Quirks},
+        tests::fs_quirks::{FsQuirks, Op, Preset, Quirks, skips_malformed_name_on_fuse},
     },
     model::Location,
     services::{RenameCause, RenamedItem, SkippedItem, SpecialKind, TransferReport},
@@ -1443,6 +1443,13 @@ fn members_take_the_names_the_destination_stores_and_distinct_folders_stay_apart
     ] {
         let utf8_only = !reported.is_empty();
         let root = tempfile::tempdir()?;
+        if !utf8_only
+            && members
+                .iter()
+                .any(|(name, _)| skips_malformed_name_on_fuse(root.path(), OsStr::from_bytes(name)))
+        {
+            continue;
+        }
         let quirks = FsQuirks::install(root.path(), preset());
         let mut report = TransferReport::default();
 

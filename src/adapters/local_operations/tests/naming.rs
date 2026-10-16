@@ -11,6 +11,7 @@ use super::super::{
         plan_names, stricter_names,
     },
 };
+use super::fs_quirks::skips_malformed_name_on_fuse;
 use super::*;
 use crate::{
     adapters::volume::{
@@ -800,7 +801,7 @@ fn each_mount_gets_a_name_it_stores_as_is_for_every_lab_name() -> Result<(), Box
                 "{context}"
             );
             // The root's own filesystem stops at 255 bytes, which UTF-16 mounts pass.
-            if fixed.name.len() > 255 {
+            if fixed.name.len() > 255 || skips_malformed_name_on_fuse(&quirk_root, &fixed.name) {
                 continue;
             }
             let folder = quirk_root.join(case.to_string());
@@ -1063,6 +1064,9 @@ fn each_preset_does_with_a_raw_name_what_its_lab_mount_did() -> Result<(), Box<d
         let _quirks = FsQuirks::install(&quirk_root, preset());
         for (case, (name, kind, cells)) in rows.iter().enumerate() {
             let name = std::os::unix::ffi::OsStrExt::from_bytes(name.as_slice());
+            if skips_malformed_name_on_fuse(&quirk_root, name) {
+                continue;
+            }
             let context = format!("{mount}: {name:?}");
             let folder = quirk_root.join(case.to_string());
             fs::create_dir(&folder)?;

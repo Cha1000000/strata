@@ -1125,10 +1125,13 @@ exfat-fuse and ntfs-3g are not recognised there: they keep their per-file syncs,
 rules of a `fuseblk` device udev cannot tell, which learn from refusals (ntfs-3g refuses device
 names). Read failures against a run of the same filter on `origin/main`.
 
-Tests that layer a preset storing any bytes over the lab's exfat-fuse send it names that are not
-valid UTF-8, and the daemon writes an overlong `/` into the volume as a real `/`, so after a run of
-`local_operations::` there, `fsck.exfat` finds the volume corrupt. Run `down` and `up`, which
-format fresh images, before checking names or the volume on exfat-fuse.
+A FUSE daemon gets every name a preset over it passes on, and exfat-fuse stores overlong forms
+and encoded surrogates, writing an overlong `/` into its volume as a real `/`, which `fsck.exfat`
+then finds corrupt. The tests that send such names, through a preset that stores any bytes or as
+fixtures, skip each row with a name that is not valid UTF-8 on a FUSE base and say so on stderr
+("skipped on a FUSE base"); a new test that sends one must call `skips_malformed_name_on_fuse` the
+same way. Fixtures with other malformed names, which the daemons refuse, fail there instead. Run
+`down` and `up`, which format fresh images, before checking names or the volume on exfat-fuse.
 
 Requirements and safety:
 
