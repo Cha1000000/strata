@@ -989,6 +989,28 @@ fn ntfs_3g_refusing_targets_as_illegal() -> Quirks {
     }
 }
 
+fn ext4_refusing_link_names_as_invalid() -> Quirks {
+    Quirks {
+        invalid_name: Some(|name| {
+            name.as_encoded_bytes()
+                .ends_with(b"link")
+                .then_some(Errno::INVAL)
+        }),
+        ..Quirks::ext4()
+    }
+}
+
+fn ext4_refusing_link_names_as_illegal() -> Quirks {
+    Quirks {
+        invalid_name: Some(|name| {
+            name.as_encoded_bytes()
+                .ends_with(b"link")
+                .then_some(Errno::ILSEQ)
+        }),
+        ..Quirks::ext4()
+    }
+}
+
 fn exfat_fuse_without_udev() -> Quirks {
     Quirks {
         device_format: None,
@@ -1171,9 +1193,13 @@ fn selected_links_the_destination_cannot_hold_are_left_out_and_the_paste_goes_on
         replacing,
         asked,
     };
-    // vfat has no links, cifs refuses the first one it is asked for, and
-    // ntfs3 refuses each link's target.
+    // vfat has no links, cifs refuses the first one it is asked for, ntfs3
+    // refuses each link's target, and the last mounts every name for a link.
     let targets = ntfs3_refusing_targets_as_invalid;
+    let (invalid, illegal) = (
+        ext4_refusing_link_names_as_invalid,
+        ext4_refusing_link_names_as_illegal,
+    );
     let rows = [
         row("vfat", Quirks::vfat, false, false, 0),
         row("vfat, moved", Quirks::vfat, true, false, 0),
@@ -1189,6 +1215,8 @@ fn selected_links_the_destination_cannot_hold_are_left_out_and_the_paste_goes_on
             true,
             2,
         ),
+        row("names invalid", invalid, false, false, 2),
+        row("names illegal, moved", illegal, true, false, 2),
     ];
     for row in rows {
         let label = row.label;

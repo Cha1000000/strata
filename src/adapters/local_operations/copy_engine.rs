@@ -1768,8 +1768,10 @@ impl Copy {
     /// links at all learns.
     fn refused_link(&self, site: &Site, failure: &Failure) -> Option<Errno> {
         let error = match failure {
-            Failure::LinkRefused(error) => *error,
-            Failure::NameRefused(error @ (Errno::INVAL | Errno::ILSEQ)) => *error,
+            Failure::LinkRefused(error)
+            | Failure::NameRefused(error @ (Errno::INVAL | Errno::ILSEQ))
+            | Failure::Place(PlaceError::Io(error @ Errno::ILSEQ)) => *error,
+            Failure::Place(PlaceError::InvalidName) => Errno::INVAL,
             _ => return None,
         };
         if holds_no_links(error) {
