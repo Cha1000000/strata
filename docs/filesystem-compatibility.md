@@ -557,7 +557,9 @@ the source again, up to one byte past the size it copied, and keeps it as change
 It is deleted only if its name still holds the file it compared. Its copy is read back too, without
 waiting, and must hold the same bytes: a file put in the copy's place within the tick can match
 the copy's identity, size and times. Otherwise the source stays, reported as an item whose copy was
-moved away.
+moved away. As the copy takes the source's modification time, a file modified within the window of
+the destination, by the same table, is digested too, and only its copy read back, even where the
+source's own times need no comparison.
 
 | Source | Window after the modification time |
 | --- | --- |

@@ -1873,6 +1873,9 @@ fn a_moved_source_stays_when_its_copy_is_gone_before_the_deletion() -> Result<()
         InPlace,
         /// So within the tick of a coarse clock that stamped the source too.
         InPlaceWithinTheTick,
+        /// So within a tick of ntfs3's clock, which stays coarse after Linux
+        /// 6.13, from a source with multigrain times.
+        InPlaceWithinTheTickOnNtfs3,
     }
     let rows = [
         (TransferConflict::FailIfExists, None),
@@ -1886,16 +1889,22 @@ fn a_moved_source_stays_when_its_copy_is_gone_before_the_deletion() -> Result<()
         [Replaced::No, Replaced::Yes].map(|replaced| (conflict, published, replaced))
     })
     .chain(
-        [Replaced::InPlace, Replaced::InPlaceWithinTheTick]
-            .map(|replaced| (TransferConflict::FailIfExists, None, replaced)),
+        [
+            Replaced::InPlace,
+            Replaced::InPlaceWithinTheTick,
+            Replaced::InPlaceWithinTheTickOnNtfs3,
+        ]
+        .map(|replaced| (TransferConflict::FailIfExists, None, replaced)),
     );
     for (conflict, published, replaced) in rows {
         let row = format!("{conflict:?}, published: {published:?}, replaced: {replaced:?}");
-        let within_the_tick = replaced == Replaced::InPlaceWithinTheTick;
+        let on_ntfs3 = replaced == Replaced::InPlaceWithinTheTickOnNtfs3;
+        let within_the_tick = on_ntfs3 || replaced == Replaced::InPlaceWithinTheTick;
         // Before the kernel's coarse clock, which may run a tick behind.
         let tick = SystemTime::now() - Duration::from_secs(1);
         let _clock = within_the_tick.then(|| ClockGuard::set(tick));
-        let _kernel = within_the_tick.then(|| KernelGuard::set(Some((6, 12, 0))));
+        let kernel = if on_ntfs3 { (6, 13, 0) } else { (6, 12, 0) };
+        let _kernel = within_the_tick.then(|| KernelGuard::set(Some(kernel)));
         let coarse_clock = within_the_tick.then_some(tick);
         let root = tempfile::tempdir()?;
         let sources = root.path().join("sources");
@@ -1920,13 +1929,17 @@ fn a_moved_source_stays_when_its_copy_is_gone_before_the_deletion() -> Result<()
             &sources,
             Quirks {
                 coarse_clock,
-                ..Quirks::default()
+                ..Quirks::ext4()
             },
         );
         let mut quirks = Quirks {
             trash: super::fs_quirks::Trash::Unsupported,
             coarse_clock,
-            ..Quirks::ext4()
+            ..if on_ntfs3 {
+                Quirks::ntfs3()
+            } else {
+                Quirks::ext4()
+            }
         };
         if let Some(op) = published {
             quirks.after.push((op, "notes.txt", 0, racer));

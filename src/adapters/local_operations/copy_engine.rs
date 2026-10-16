@@ -1947,7 +1947,8 @@ impl Copy {
 
     /// When recording, a source that changed while it was read is read once
     /// more (`None` if it changed again), and one read within a tick of its
-    /// mount's coarse times is digested for the move to compare.
+    /// mount's coarse times, or of the destination's, is digested for the
+    /// move to compare.
     fn copy_file(
         &self,
         data: &mut Data,
@@ -1965,31 +1966,33 @@ impl Copy {
                 self.fs.set_len(target, 0)?;
             }
             let counted = attempt == 0;
-            let unsettled =
-                source_mount.and_then(|mount| manifest::unsettled(&stat, &mount, manifest::now()));
-            let (digest, end) = match unsettled {
-                Some(_) => {
-                    let (digest, end) =
-                        self.copy_digested(data, (source_fd, &stat), target, counted)?;
-                    (Some(digest), Some(end))
-                }
-                None => {
-                    let end = self.copy_data(
-                        data,
-                        target_mount,
-                        (source_fd, &stat),
-                        target,
-                        parent,
-                        counted,
-                    )?;
-                    (None, end)
-                }
+            let now = manifest::now();
+            let unsettled = source_mount.and_then(|mount| manifest::unsettled(&stat, &mount, now));
+            // The copy takes the source's modification time, which a file put
+            // in its place within a tick of the destination's clock can share.
+            let copy_unsettled =
+                self.recording && manifest::unsettled(&stat, target_mount, now).is_some();
+            let (digest, end) = if unsettled.is_some() || copy_unsettled {
+                let (digest, end) =
+                    self.copy_digested(data, (source_fd, &stat), target, counted)?;
+                (Some(digest), Some(end))
+            } else {
+                let end = self.copy_data(
+                    data,
+                    target_mount,
+                    (source_fd, &stat),
+                    target,
+                    parent,
+                    counted,
+                )?;
+                (None, end)
             };
             let snapshot = Snapshot::read(self.fs, source_fd, &stat)?;
             if !self.recording {
                 let read = manifest::Read {
                     stat,
                     contents: None,
+                    copied: None,
                 };
                 return Ok(Some((snapshot, read)));
             }
@@ -2002,6 +2005,7 @@ impl Copy {
                     contents: digest
                         .zip(unsettled)
                         .map(|(digest, unsettled)| manifest::Contents::new(digest, unsettled)),
+                    copied: digest,
                 };
                 return Ok(Some((snapshot, read)));
             }
@@ -2034,14 +2038,14 @@ impl Copy {
     /// A copy whose source a move compares by content is compared too, as
     /// another file can take its place within the same tick.
     fn wrote(&self, identity: LocalFileIdentity, read: &manifest::Read) {
-        let Some(contents) = &read.contents else {
+        let Some(copied) = read.copied else {
             return;
         };
         if let Some((known, state)) =
             lock(&self.written).get_mut(&(identity.device, identity.inode))
             && *known == identity
         {
-            *state = state.holding(contents.digest());
+            *state = state.holding(copied);
         }
     }
 

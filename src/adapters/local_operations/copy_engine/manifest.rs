@@ -166,15 +166,14 @@ impl Contents {
             prefix: None,
         }
     }
-
-    pub(super) fn digest(&self) -> digest::Digest {
-        self.digest
-    }
 }
 
 pub(super) struct Read {
     pub stat: EntryStat,
     pub contents: Option<Contents>,
+    /// What the copy holds, where its times cannot tell another file put in
+    /// its place.
+    pub copied: Option<digest::Digest>,
 }
 
 const MIB: usize = 1 << 20;
