@@ -4,7 +4,7 @@ use std::{os::unix::fs::MetadataExt, sync::atomic::Ordering};
 
 use rustix::io::Errno;
 
-use super::fs_quirks::{Op, Racer, Trash};
+use super::fs_quirks::{Op, Racer, Support, Trash};
 use super::*;
 use crate::{
     adapters::volume::learn_mount_capability,
@@ -3336,12 +3336,26 @@ fn a_merge_undo_without_trash_deletes_only_what_the_merge_created_unchanged()
 fn a_merge_undo_without_trash_deletes_what_its_paste_copied_only_if_unchanged()
 -> Result<(), Box<dyn Error>> {
     let _serial = serial()?;
-    for change in [
+    // A file is published by linking its unnamed copy, or by renaming its named stage.
+    let stages = [
+        ("unnamed file", Op::LinkFd, Support::Supported),
+        (
+            "named stage",
+            Op::Rename,
+            Support::Rejected(Errno::OPNOTSUPP),
+        ),
+    ];
+    let changes = [
         "unchanged",
         "edited",
         "replaced before recording",
         "edited before recording",
-    ] {
+    ];
+    for ((stage, published, tmpfile), change) in stages
+        .into_iter()
+        .flat_map(|stage| changes.map(|change| (stage, change)))
+    {
+        let context = format!("{change}, {stage}");
         let edited = change != "unchanged";
         let root = tempfile::tempdir()?;
         let sources = root.path().join("sources");
@@ -3359,10 +3373,11 @@ fn a_merge_undo_without_trash_deletes_what_its_paste_copied_only_if_unchanged()
             &destination,
             &[("docs/stays.txt", "keep me"), ("keep.txt", "original keep")],
         )?;
+        let racing = change.ends_with("before recording");
         let mut after = Vec::new();
-        if change.ends_with("before recording") {
+        if racing {
             for (op, name, relative) in [
-                (Op::LinkFd, "notes.txt", "notes.txt"),
+                (published, "notes.txt", "notes.txt"),
                 (Op::Rename, "plain", "plain/a.txt"),
             ] {
                 let saved = root.path().join(format!("saved-{name}"));
@@ -3383,6 +3398,7 @@ fn a_merge_undo_without_trash_deletes_what_its_paste_copied_only_if_unchanged()
             root.path(),
             without_trash(Quirks {
                 after,
+                tmpfile,
                 ..Quirks::default()
             }),
         );
@@ -3433,14 +3449,14 @@ fn a_merge_undo_without_trash_deletes_what_its_paste_copied_only_if_unchanged()
             left.extend(["notes.txt", "plain"]);
             kept.extend([Location::local(&notes), Location::local(&plain)]);
         }
-        assert_eq!(names(&destination)?, left, "edited: {edited}: {undone:?}");
+        assert_eq!(names(&destination)?, left, "{context}: {undone:?}");
         assert_eq!(names(&destination.join("docs"))?, ["stays.txt"]);
         assert_eq!(fs::read(destination.join("keep.txt"))?, b"original keep");
         let mut kept_items = kept_items(&undone);
         kept_items.sort_by_key(Location::display_name);
-        assert_eq!(kept_items, kept, "{change}");
-        if change.ends_with("before recording") {
-            assert_eq!(fs::read(&notes)?, b"concurrent arrival");
+        assert_eq!(kept_items, kept, "{context}");
+        if racing {
+            assert_eq!(fs::read(&notes)?, b"concurrent arrival", "{context}");
             assert_eq!(fs::read(plain.join("a.txt"))?, b"concurrent arrival");
         }
     }

@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use rustix::io::Errno;
 
 use super::super::{MountFlushHint, SyncDestination, removable_sync_roots, sync_filesystem};
-use super::fs_quirks::Op;
+use super::fs_quirks::{Op, Support};
 use super::*;
 
 fn hint(root: &str, removable: bool) -> MountFlushHint {
@@ -1461,8 +1461,17 @@ fn a_writeback_lost_during_a_move_keeps_every_source_it_may_hold() -> Result<(),
     let _serial = serial()?;
     let _limits = LimitsGuard::set(NO_LIMITS);
     // The first copy's writeback is lost once it is published, with one
-    // item, or with a second whose barrier is opened after the loss.
-    for (id, names) in (440..).zip([&["a"][..], &["a", "b"][..]]) {
+    // item, or with a second whose barrier is opened after the loss. A file
+    // is published by linking its unnamed copy, or by renaming its named stage.
+    let stages = [
+        (Op::LinkFd, Support::Supported),
+        (Op::Rename, Support::Rejected(Errno::OPNOTSUPP)),
+    ];
+    let cases = stages
+        .into_iter()
+        .flat_map(|stage| [&["a"][..], &["a", "b"][..]].map(|names| (stage, names)));
+    for (id, ((published, tmpfile), names)) in (440..).zip(cases) {
+        let context = format!("{names:?}, published by {published:?}");
         let root = tempfile::tempdir()?;
         let sources = root.path().join("sources");
         let destination = root.path().join("destination");
@@ -1480,8 +1489,9 @@ fn a_writeback_lost_during_a_move_keeps_every_source_it_may_hold() -> Result<(),
         let scope = FsQuirks::install(
             &destination,
             Quirks {
+                tmpfile,
                 after: vec![(
-                    Op::LinkFd,
+                    published,
                     "*",
                     0,
                     Box::new(move || {
@@ -1505,12 +1515,12 @@ fn a_writeback_lost_during_a_move_keeps_every_source_it_may_hold() -> Result<(),
             matches!(terminal_transfer(&events.borrow()),
                 Some(OperationEvent::TransferFailed { message, .. })
                 if message.contains("writes may still be pending")),
-            "{names:?}: {:?}",
+            "{context}: {:?}",
             events.borrow()
         );
-        assert!(paths.iter().all(|path| path.exists()), "{names:?}");
-        assert_eq!(moved_count(&events.borrow()), 0, "{names:?}");
-        assert!(early.borrow().is_empty(), "{names:?}");
+        assert!(paths.iter().all(|path| path.exists()), "{context}");
+        assert_eq!(moved_count(&events.borrow()), 0, "{context}");
+        assert!(early.borrow().is_empty(), "{context}");
     }
     Ok(())
 }
