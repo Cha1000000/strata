@@ -520,6 +520,7 @@ fn target_children(
             name,
             is_directory: *kind == FileType::Directory,
             fixing,
+            repeatable: false,
         })
         .collect::<Vec<_>>();
     let planned = plan_names(&entries, rules, key)?;

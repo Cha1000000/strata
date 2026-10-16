@@ -171,6 +171,9 @@ pub(super) struct PlanEntry<'a> {
     pub name: &'a OsStr,
     pub is_directory: bool,
     pub fixing: bool,
+    /// Whether the entry is numbered where an earlier one has its name, as
+    /// one of a paste's items from different folders may.
+    pub repeatable: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -179,9 +182,9 @@ pub(super) struct Planned {
     pub cause: Option<RenameCause>,
 }
 
-/// Fixed names, and kept names a folding mount takes for an earlier kept one, are numbered past
-/// the kept names in the byte order of the names they come from, so the plan depends only on
-/// the entries.
+/// Fixed names, kept names a folding mount takes for an earlier kept one, and repeated names are
+/// numbered past the kept names in the byte order of the names they come from, so the plan
+/// depends only on the entries.
 pub(super) fn plan_names(
     entries: &[PlanEntry<'_>],
     profile: &NameProfile,
@@ -196,7 +199,15 @@ pub(super) fn plan_names(
         .collect::<Vec<_>>();
     let mut numbered = Vec::new();
     let mut kept = Vec::new();
-    for (index, entry) in entries.iter().enumerate().filter(|(_, entry)| entry.fixing) {
+    let mut repeatable = false;
+    for (index, entry) in entries.iter().enumerate() {
+        repeatable |= entry.repeatable;
+        if !entry.fixing {
+            if entry.repeatable {
+                kept.push(index);
+            }
+            continue;
+        }
         let fixed = fix::fix_name(entry.name, profile, entry.is_directory);
         match fixed.cause {
             Some(cause) => {
@@ -207,21 +218,30 @@ pub(super) fn plan_names(
         }
     }
     // Distinct names never meet under exact keys, and kept names meet only
-    // where the mount is known to fold them; elsewhere it decides.
+    // where they repeat or the mount is known to fold them; elsewhere it decides.
     let folds = key == Key::Folded && profile.folds;
-    if numbered.is_empty() && (!folds || kept.is_empty()) {
+    if numbered.is_empty() && !repeatable && (!folds || kept.is_empty()) {
         return Ok(planned);
     }
-    let mut taken = entries
+    let held = entries
         .iter()
-        .filter(|entry| !entry.fixing)
+        .filter(|entry| !entry.fixing && !entry.repeatable);
+    let mut taken = held
+        .clone()
         .map(|entry| key.of(entry.name))
         .collect::<HashSet<_>>();
+    let mut named = held.map(|entry| entry.name).collect::<HashSet<_>>();
     kept.sort_by_key(|index| entries[*index].name);
     for index in kept {
-        if !taken.insert(key.of(entries[index].name)) && folds {
-            planned[index].cause = Some(RenameCause::Alias);
-            numbered.push((index, entries[index].name.to_os_string()));
+        let name = entries[index].name;
+        let repeated = !named.insert(name);
+        if !taken.insert(key.of(name)) && (repeated || folds) {
+            planned[index].cause = Some(if repeated {
+                RenameCause::Taken
+            } else {
+                RenameCause::Alias
+            });
+            numbered.push((index, name.to_os_string()));
         }
     }
     numbered.sort_by(|(left, _), (right, _)| entries[*left].name.cmp(entries[*right].name));

@@ -66,9 +66,10 @@ pub(crate) async fn transfer_targets(
         let rules = names.applied(profile.names, profile.strictness);
         let crossing = pasted_into.fixing(&filesystems);
         let own_names = sources.iter().map(transfer_source_name).collect::<Vec<_>>();
-        let planned = paste_targets(&own_names, &rules, &crossing, &kinds).map_err(|error| {
-            glib::Error::new(gio::IOErrorEnum::Exists, &placement_reason(error))
-        })?;
+        let renamable = vec![true; own_names.len()];
+        let planned = paste_targets(&own_names, &rules, (&crossing, &renamable), &kinds).map_err(
+            |error| glib::Error::new(gio::IOErrorEnum::Exists, &placement_reason(error)),
+        )?;
         let left_out = |index: usize| {
             kinds[index] == Some(gio::FileType::SymbolicLink)
                 && profile.symlinks == Some(false)

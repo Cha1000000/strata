@@ -484,6 +484,125 @@ fn smb_without_posix_extensions_numbers_case_pairs_without_looking_up_the_later_
 }
 
 #[test]
+fn identical_top_level_names_from_different_folders_are_numbered_and_reported()
+-> Result<(), Box<dyn Error>> {
+    use super::super::transfer_targets::transfer_targets;
+    let _serial = serial()?;
+    // Past eight files a paste copies several at once.
+    let padding = (0..8)
+        .map(|index| format!("one/pad {index}"))
+        .collect::<Vec<_>>();
+    let rows: [(&str, Preset, bool); 3] = [
+        ("one filesystem", Quirks::ext4, true),
+        ("another filesystem", Quirks::ext4, false),
+        ("vfat", Quirks::vfat, false),
+    ];
+    // A prompt's names reach the paste as the names it showed.
+    let cases = [false, true]
+        .into_iter()
+        .flat_map(|moving| [false, true].map(|parallel| (moving, parallel)))
+        .flat_map(|case| [false, true].map(|prompted| (case, prompted)));
+    for (mount, preset, one_filesystem) in rows {
+        for ((moving, parallel), prompted) in cases.clone() {
+            let context =
+                format!("{mount}, moving: {moving}, parallel: {parallel}, prompted: {prompted}");
+            let root = tempfile::tempdir()?;
+            let source = root.path().join("source");
+            let destination = root.path().join("destination");
+            fs::create_dir_all(source.join("one"))?;
+            fs::create_dir_all(source.join("two"))?;
+            fs::create_dir(&destination)?;
+            let mut items = vec!["one/notes.txt", "two/notes.txt"];
+            if parallel {
+                items.extend(padding.iter().map(String::as_str));
+            } else {
+                items.extend(["one/docs", "two/docs"]);
+            }
+            for item in &items {
+                if item.ends_with("docs") {
+                    fs::create_dir(source.join(item))?;
+                    fs::write(source.join(item).join("inside"), item)?;
+                } else {
+                    fs::write(source.join(item), item)?;
+                }
+            }
+            let mount_root = if one_filesystem {
+                root.path()
+            } else {
+                destination.as_path()
+            };
+            let _scope = FsQuirks::install(mount_root, preset());
+            let sources = items
+                .iter()
+                .map(|item| Location::local(source.join(item)))
+                .collect::<Vec<_>>();
+            let shown = if prompted {
+                glib::MainContext::default()
+                    .block_on(transfer_targets(
+                        &Location::local(&destination),
+                        &sources,
+                        moving,
+                        &gio::Cancellable::new(),
+                    ))?
+                    .into_iter()
+                    .map(|target| target.name)
+                    .collect()
+            } else {
+                vec![None; sources.len()]
+            };
+
+            let events = run_paste(PasteRequest {
+                id: OperationRequestId(1530),
+                destination: Location::local(&destination),
+                items: sources
+                    .into_iter()
+                    .zip(shown)
+                    .map(|(source, target_name)| PasteItem {
+                        source,
+                        conflict: TransferConflict::FailIfExists,
+                        target_name,
+                    })
+                    .collect(),
+                move_sources: moving,
+            });
+
+            let mut numbered = vec![("notes.txt", "notes (1).txt")];
+            if !parallel {
+                numbered.insert(0, ("docs", "docs (1)"));
+            }
+            let expected = numbered
+                .iter()
+                .map(|(name, saved_as)| {
+                    (name.to_string(), saved_as.to_string(), RenameCause::Taken)
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                renamed_beneath(&destination, &followed_report(&events)),
+                expected,
+                "{context}"
+            );
+            for (name, saved_as) in numbered {
+                let (first, second) = (destination.join(name), destination.join(saved_as));
+                let read = |path: PathBuf| {
+                    fs::read_to_string(if name == "docs" {
+                        path.join("inside")
+                    } else {
+                        path
+                    })
+                };
+                assert_eq!(read(first)?, format!("one/{name}"), "{context}");
+                assert_eq!(read(second)?, format!("two/{name}"), "{context}");
+            }
+            assert_eq!(names(&destination)?.len(), items.len(), "{context}");
+            for folder in ["one", "two"] {
+                assert_eq!(names(&source.join(folder))?.is_empty(), moving, "{context}");
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn an_item_already_at_a_top_level_name_is_never_taken_for_one_the_paste_saved()
 -> Result<(), Box<dyn Error>> {
     let _serial = serial()?;
@@ -493,7 +612,7 @@ fn an_item_already_at_a_top_level_name_is_never_taken_for_one_the_paste_saved()
     let rows = [
         (
             "theirs at the same spelling",
-            Some("item 3"),
+            "item 3",
             padding
                 .clone()
                 .chain(["item 8", "item 9"].map(String::from))
@@ -502,27 +621,21 @@ fn an_item_already_at_a_top_level_name_is_never_taken_for_one_the_paste_saved()
         ),
         (
             "theirs at another spelling, at once",
-            Some("MAKEFILE"),
+            "MAKEFILE",
             spellings.iter().cloned().chain(padding).collect(),
             false,
         ),
         (
             "theirs at another spelling, one at a time",
-            Some("MAKEFILE"),
+            "MAKEFILE",
             spellings.to_vec(),
             false,
         ),
         (
             "theirs once the earlier spelling was saved",
-            Some("MAKEFILE"),
+            "MAKEFILE",
             spellings.to_vec(),
             true,
-        ),
-        (
-            "one name from two folders",
-            None,
-            vec!["one/notes.txt".to_string(), "two/notes.txt".to_string()],
-            false,
         ),
     ];
     for (row, theirs, items, after_saved) in rows {
@@ -538,21 +651,19 @@ fn an_item_already_at_a_top_level_name_is_never_taken_for_one_the_paste_saved()
         }
         let moved_out = root.path().join("moved out");
         let mut before = Vec::new();
-        match theirs {
-            Some(theirs) if after_saved => {
-                let (saved, taken, moved_out) = (
-                    destination.join("Makefile"),
-                    destination.join(theirs),
-                    moved_out.clone(),
-                );
-                let racer: Racer = Box::new(move || {
-                    fs::rename(&saved, &moved_out).expect("move the saved item out");
-                    fs::write(&taken, b"theirs").expect("take its name");
-                });
-                before.push((Op::OpenSource, "makefile", 0, racer));
-            }
-            Some(theirs) => fs::write(destination.join(theirs), b"theirs")?,
-            None => {}
+        if after_saved {
+            let (saved, taken, moved_out) = (
+                destination.join("Makefile"),
+                destination.join(theirs),
+                moved_out.clone(),
+            );
+            let racer: Racer = Box::new(move || {
+                fs::rename(&saved, &moved_out).expect("move the saved item out");
+                fs::write(&taken, b"theirs").expect("take its name");
+            });
+            before.push((Op::OpenSource, "makefile", 0, racer));
+        } else {
+            fs::write(destination.join(theirs), b"theirs")?;
         }
         let _source = FsQuirks::install(
             &source,
@@ -598,9 +709,7 @@ fn an_item_already_at_a_top_level_name_is_never_taken_for_one_the_paste_saved()
             ),
             "{row}: {events:?}"
         );
-        if let Some(theirs) = theirs {
-            assert_eq!(fs::read(destination.join(theirs))?, b"theirs", "{row}");
-        }
+        assert_eq!(fs::read(destination.join(theirs))?, b"theirs", "{row}");
         let saved = names(&destination)?;
         assert!(
             saved.iter().all(|name| !name.ends_with(" (1)")),

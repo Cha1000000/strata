@@ -206,6 +206,7 @@ fn fixed_names_are_numbered_past_the_names_their_siblings_keep() {
                     name: OsStr::new(name),
                     is_directory: *is_directory,
                     fixing: *fixing,
+                    repeatable: false,
                 })
                 .collect::<Vec<_>>();
             let planned = row
@@ -237,11 +238,13 @@ fn planning_fails_where_a_fixed_name_has_no_free_number() {
             name,
             is_directory: false,
             fixing: false,
+            repeatable: false,
         })
         .chain([PlanEntry {
             name: OsStr::new("a:b"),
             is_directory: false,
             fixing: true,
+            repeatable: false,
         }])
         .collect::<Vec<_>>();
     assert_eq!(
@@ -508,35 +511,52 @@ fn pasted_names_fixed_for_fat_are_planned_after_the_names_kept() {
     .map(|source| super::super::transfer_source_name(&gio::File::for_path(source)));
     let mut kinds = [Some(Regular); 9];
     kinds[3] = Some(Directory);
+    let (invalid, alias, taken) = (
+        Some(RenameCause::Invalid),
+        Some(RenameCause::Alias),
+        Some(RenameCause::Taken),
+    );
+    // Names repeated from another folder are numbered on any filesystem.
     for (fat_family, expected) in [
         (
             false,
-            ["a:b", "a_b", "v1.2:", "v1.2:", "A:c", "a_c", "x", "X", "x"],
+            [
+                ("a:b", None),
+                ("a_b", None),
+                ("v1.2:", None),
+                ("v1.2: (1)", taken),
+                ("A:c", None),
+                ("a_c", None),
+                ("x (1)", alias),
+                ("X", None),
+                ("x (2)", taken),
+            ],
         ),
         (
             true,
             [
-                "a_b (1)",
-                "a_b",
-                "v1.2_",
-                "v1.2_ (1)",
-                "A_c (1)",
-                "a_c",
-                "x (1)",
-                "X",
-                "x (2)",
+                ("a_b (1)", invalid),
+                ("a_b", None),
+                ("v1.2_", invalid),
+                ("v1.2_ (1)", invalid),
+                ("A_c (1)", invalid),
+                ("a_c", None),
+                ("x (1)", alias),
+                ("X", None),
+                ("x (2)", taken),
             ],
         ),
     ] {
-        let fixing = [fat_family; 9];
+        let crossing = [fat_family; 9];
         let targets =
-            super::super::paste_targets(&sources, &fat(), &fixing, &kinds).expect("free names");
+            super::super::paste_targets(&sources, &fat(), (&crossing, &[true; 9]), &kinds)
+                .expect("free names");
         assert_eq!(
-            targets
-                .into_iter()
-                .map(|target| target.map(|target| target.target))
-                .collect::<Vec<_>>(),
-            expected.map(|name| Some(OsString::from(name))),
+            targets,
+            expected.map(|(name, cause)| Some(Planned {
+                target: OsString::from(name),
+                cause,
+            })),
             "{fat_family}"
         );
     }
@@ -548,7 +568,7 @@ fn transfer_targets_resolve_trash_leaf_names() {
         let planned = super::super::paste_targets(
             &[super::super::transfer_source_name(source)],
             &NameProfile::posix(Some(255)),
-            &[false],
+            (&[false], &[true]),
             &[None],
         )
         .ok()?

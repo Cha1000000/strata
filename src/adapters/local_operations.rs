@@ -976,21 +976,24 @@ pub(crate) fn transfer_source_name(source: &gio::File) -> Option<OsString> {
     crate::model::transfer_file_name(source)
 }
 
+/// A `renamable` item is numbered where an earlier item has its name, and gets the destination's
+/// rules where it is `crossing` too.
 fn paste_targets(
     names: &[Option<OsString>],
     rules: &NameProfile,
-    fixing: &[bool],
+    (crossing, renamable): (&[bool], &[bool]),
     kinds: &[Option<gio::FileType>],
 ) -> Result<Vec<Option<Planned>>, PlaceError> {
     let entries = names
         .iter()
         .zip(kinds)
-        .zip(fixing)
-        .filter_map(|((name, kind), fixing)| {
+        .zip(crossing.iter().zip(renamable))
+        .filter_map(|((name, kind), (crossing, renamable))| {
             Some(PlanEntry {
                 name: name.as_deref()?,
                 is_directory: *kind == Some(gio::FileType::Directory),
-                fixing: *fixing,
+                fixing: *crossing && *renamable,
+                repeatable: *renamable,
             })
         })
         .collect::<Vec<_>>();
@@ -1008,41 +1011,49 @@ fn planned_paste(
     crossing: &[bool],
     kinds: &[Option<gio::FileType>],
 ) -> Result<Vec<Option<Planned>>, PlaceError> {
+    let own = sources.iter().map(transfer_source_name).collect::<Vec<_>>();
     let names = items
         .iter()
-        .zip(sources)
-        .map(|(item, source)| match &item.target_name {
+        .zip(&own)
+        .map(|(item, own)| match &item.target_name {
             Some(shown) => plain_name(shown).then(|| shown.clone()),
-            None => transfer_source_name(source),
+            None => own.clone(),
         })
         .collect::<Vec<_>>();
     // Replace and Merge act on the name the user saw, which is the item's
     // own where no prompt showed another.
-    let fixing = items
+    let renamable = items
         .iter()
-        .zip(crossing)
-        .map(|(item, crossing)| {
-            *crossing
-                && item.target_name.is_none()
+        .map(|item| {
+            item.target_name.is_none()
                 && !matches!(
                     item.conflict,
                     TransferConflict::ReplaceExisting | TransferConflict::Merge
                 )
         })
         .collect::<Vec<_>>();
-    let mut planned = paste_targets(&names, rules, &fixing, kinds)?;
+    let mut planned = paste_targets(&names, rules, (crossing, &renamable), kinds)?;
+    // The prompt planned the names it showed from the items' own.
+    let prompted = items
+        .iter()
+        .zip(&own)
+        .any(|(item, own)| item.target_name.is_some() && item.target_name != *own)
+        .then(|| paste_targets(&own, rules, (crossing, &vec![true; own.len()]), kinds).ok())
+        .flatten();
     for (index, item) in items.iter().enumerate() {
-        let (Some(shown), Some(planned), Some(name)) = (
-            &item.target_name,
-            &mut planned[index],
-            transfer_source_name(&sources[index]),
-        ) else {
+        let (Some(shown), Some(planned), Some(name)) =
+            (&item.target_name, &mut planned[index], &own[index])
+        else {
             continue;
         };
         let is_directory = kinds[index] == Some(gio::FileType::Directory);
-        planned.cause = (name != *shown).then(|| {
-            fix_name(&name, rules, is_directory)
-                .cause
+        planned.cause = (name != shown).then(|| {
+            prompted
+                .as_ref()
+                .and_then(|prompted| prompted[index].as_ref())
+                .filter(|prompted| prompted.target == *shown)
+                .and_then(|prompted| prompted.cause)
+                .or_else(|| fix_name(name, rules, is_directory).cause)
                 .unwrap_or(RenameCause::Alias)
         });
     }
@@ -1621,11 +1632,13 @@ impl<'a> NamedChildren<'a> {
                 name,
                 is_directory: false,
                 fixing: false,
+                repeatable: false,
             })
             .chain(held.iter().map(|(name, kind)| PlanEntry {
                 name,
                 is_directory: *kind == gio::FileType::Directory,
                 fixing: true,
+                repeatable: false,
             }))
             .collect::<Vec<_>>();
         let planned = plan_names(&entries, &self.names.rules, Key::Folded)

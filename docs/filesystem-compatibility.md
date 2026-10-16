@@ -874,7 +874,10 @@ whose name the destination reports taken by an earlier item of the same paste sa
 spelling, as casefolded folders do for `makefile` after `Makefile`, is numbered and reported as an
 alias too. Any other item at the name, including one that took the earlier item's place since,
 keeps it taken. In a merge, a planned name equal to an existing item replaces that item like any
-other same-named one.
+other same-named one. A paste's top-level items from different folders that share a name are
+numbered on every destination, the later one in the paste's order, before anything is copied, and
+reported as names already taken: `notes.txt` from two folders becomes `notes.txt` and
+`notes (1).txt`, also in a move within one filesystem.
 The completion report lists every fixed name with the name it was saved as, and says which were
 shortened.
 
