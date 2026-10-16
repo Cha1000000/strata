@@ -2315,7 +2315,7 @@ fn a_mount_that_learns_keeps_only_the_rules_its_refused_names_needed() -> Result
         if typed_colon_refused {
             let refusal = rust_i18n::t!(
                 "Names in this location can’t contain %{characters}",
-                characters = ":"
+                characters = crate::i18n::quoted(":")
             );
             assert!(
                 matches!(typed.as_slice(), [OperationEvent::Failed { message, .. }] if *message == refusal),
