@@ -3461,6 +3461,12 @@ fn a_destination_slow_to_answer_shows_the_transfer_preparing_where_its_row_will_
                     visible_texts(&overlay).contains(&"notes.txt".to_owned()) || moving,
                     "{row}: the docked row names the item"
                 );
+                let shown = visible_texts(&overlay);
+                assert!(
+                    shown.iter().any(|text| text == "Preparing items…")
+                        && !shown.iter().any(|text| text == "0/0"),
+                    "{row}: the transfer says it prepares its items, with no count: {shown:?}"
+                );
                 paste();
                 if cancelled {
                     if moving {

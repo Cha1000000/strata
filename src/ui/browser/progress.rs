@@ -89,6 +89,20 @@ pub(super) struct FileProgressView {
     last_transfer_render: Cell<Option<Instant>>,
 }
 
+/// Completed and total files, else items, with their count kind; `None` while the transfer
+/// is still preparing its items.
+fn transfer_count(
+    completed_items: usize,
+    total_items: usize,
+    completed_files: usize,
+    total_files: Option<usize>,
+) -> Option<(usize, usize, &'static str)> {
+    match total_files.filter(|total| *total > 0) {
+        Some(total_files) => Some((completed_files, total_files, "files")),
+        None => (total_items > 0).then_some((completed_items, total_items, "items")),
+    }
+}
+
 fn transfer_progress_status(
     completed_items: usize,
     total_items: usize,
@@ -98,22 +112,14 @@ fn transfer_progress_status(
     total_bytes: Option<u64>,
     current_file: Option<&str>,
 ) -> (String, String, String, Option<f64>) {
-    let items = if let Some(total_files) = total_files.filter(|total| *total > 0) {
-        rust_i18n::t!(
+    let items = match transfer_count(completed_items, total_items, completed_files, total_files) {
+        Some((completed, total, kind)) => rust_i18n::t!(
             "%{completed} of %{items}",
-            completed = crate::i18n::integer(completed_files as u64),
-            items = crate::i18n::count("files", total_files)
+            completed = crate::i18n::integer(completed as u64),
+            items = crate::i18n::count(kind, total)
         )
-        .into_owned()
-    } else if total_items > 0 {
-        rust_i18n::t!(
-            "%{completed} of %{items}",
-            completed = crate::i18n::integer(completed_items as u64),
-            items = crate::i18n::count("items", total_items)
-        )
-        .into_owned()
-    } else {
-        crate::i18n::tr("Preparing items…")
+        .into_owned(),
+        None => crate::i18n::tr("Preparing items…"),
     };
     let items = match current_file.filter(|name| !name.is_empty()) {
         Some(name) => format!("{items} · {name}"),

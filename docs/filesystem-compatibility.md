@@ -907,9 +907,9 @@ another, the prompt says so first ("“a:b” will be saved as “a_b” in this
 exists". Replace, Merge and Keep Both act on that name, and Keep Both is offered for moves too.
 Where a folder from another filesystem would be merged into a destination whose rules change
 characters, the prompt also says that items whose names change overwrite items with the new names.
-Where the destination is slow to answer, the transfer shows itself preparing its items, with
-Cancel, docked for a copy as its progress will be, and its progress then takes that row's place at
-once; the same paste repeated meanwhile is ignored. The prompt asks nothing of a selected link the
+Where the destination is slow to answer, the transfer shows "Preparing items…" with Cancel and no
+item count yet, docked for a copy as its progress will be, and its progress then takes that row's
+place at once; the same paste repeated meanwhile is ignored. The prompt asks nothing of a selected link the
 destination is known not to hold, which the paste leaves out.
 
 ### Names a mount refuses anyway
