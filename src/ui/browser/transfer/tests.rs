@@ -3418,17 +3418,17 @@ fn a_destination_slow_to_answer_shows_the_transfer_preparing_where_its_row_will_
                 std::fs::write(&source, b"notes").expect("source file");
                 let (release, held) = std::sync::mpsc::channel::<()>();
                 let answered = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-                let listed = answered.clone();
+                let looked_up = answered.clone();
                 let _disk = crate::adapters::FsQuirks::install(
                     &disk,
                     crate::adapters::Quirks {
                         before: vec![(
-                            crate::adapters::FsOp::Names,
-                            "*",
+                            crate::adapters::FsOp::Stat,
+                            "notes.txt",
                             0,
                             Box::new(move || {
                                 let _released = held.recv();
-                                listed.store(true, std::sync::atomic::Ordering::SeqCst);
+                                looked_up.store(true, std::sync::atomic::Ordering::SeqCst);
                             }),
                         )],
                         ..crate::adapters::Quirks::ext4()

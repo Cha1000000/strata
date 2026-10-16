@@ -839,7 +839,9 @@ fn replace_and_merge_act_on_the_name_the_prompt_confirmed() -> Result<(), Box<dy
 #[test]
 fn the_prompt_sees_the_name_a_paste_gives_each_item_and_what_has_it() -> Result<(), Box<dyn Error>>
 {
-    use super::super::transfer_targets::{Collision, TransferTarget, transfer_targets};
+    use super::super::transfer_targets::{
+        Collision, LOOKUPS_WITHOUT_LISTING, TransferTarget, transfer_targets,
+    };
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
         .lock()
         .map_err(|error| error.to_string())?;
@@ -861,13 +863,23 @@ fn the_prompt_sees_the_name_a_paste_gives_each_item_and_what_has_it() -> Result<
         ("own.txt", ("own.txt", None), ("own.txt", None), false),
         ("old.txt", ("old.txt", file), ("old.txt", file), false),
     ];
-    for (preset, on_vfat) in [(vfat, true), (ext4, false)] {
+    // Enough more items make the lookup read the destination's listing.
+    for ((preset, on_vfat), padding) in [(vfat, true), (ext4, false)]
+        .into_iter()
+        .flat_map(|mount| [(mount, 0), (mount, LOOKUPS_WITHOUT_LISTING)])
+    {
+        let pads = (0..padding)
+            .map(|index| format!("pad-{index:02}"))
+            .collect::<Vec<_>>();
         let root = tempfile::tempdir()?;
         let (source, disk) = (root.path().join("source"), root.path().join("disk"));
         for name in ["x:y", "folder"] {
             fs::create_dir_all(source.join(name))?;
         }
-        for name in ["a:b", "Photo.jpg", "data", "new.txt"] {
+        for name in ["a:b", "Photo.jpg", "data", "new.txt"]
+            .into_iter()
+            .chain(pads.iter().map(String::as_str))
+        {
             fs::write(source.join(name), name)?;
         }
         std::os::unix::fs::symlink("a:b", source.join("link"))?;
@@ -877,7 +889,7 @@ fn the_prompt_sees_the_name_a_paste_gives_each_item_and_what_has_it() -> Result<
         for name in ["a_b", "photo.JPG", "link", "own.txt", "old.txt"] {
             fs::write(disk.join(name), name)?;
         }
-        let _disk = FsQuirks::install(&disk, preset());
+        let disk_quirks = FsQuirks::install(&disk, preset());
         let sources = rows
             .iter()
             .map(|(name, ..)| match *name {
@@ -888,6 +900,7 @@ fn the_prompt_sees_the_name_a_paste_gives_each_item_and_what_has_it() -> Result<
                 )),
                 _ => Location::local(source.join(name)),
             })
+            .chain(pads.iter().map(|pad| Location::local(source.join(pad))))
             .collect::<Vec<_>>();
 
         let targets = glib::MainContext::default().block_on(transfer_targets(
@@ -907,8 +920,18 @@ fn the_prompt_sees_the_name_a_paste_gives_each_item_and_what_has_it() -> Result<
                     fixes_inside: on_vfat && *fixes_inside,
                 }
             })
+            .chain(pads.iter().map(|pad| TransferTarget {
+                name: Some(OsString::from(pad)),
+                collision: None,
+                fixes_inside: false,
+            }))
             .collect::<Vec<_>>();
-        assert_eq!(targets, expected, "vfat {on_vfat}");
+        assert_eq!(targets, expected, "vfat {on_vfat}, {padding} more items");
+        assert_eq!(
+            disk_quirks.count(super::fs_quirks::Op::Names),
+            usize::from(padding > 0),
+            "vfat {on_vfat}, {padding} more items"
+        );
     }
     Ok(())
 }
