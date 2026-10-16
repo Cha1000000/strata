@@ -410,9 +410,11 @@ the item's own name to the numbered one. A mount whose type does not show its ru
 types) remembers the rules that worked until it changes, so later names brought onto it are fixed by
 them before they are copied; names undo gives back are not. Any other mount tries each refused name
 again on its own, so one odd folder never puts a whole disk under Windows rules. Undo tries entries
-inside an item again, but gives the item itself back under its own name or fails; an extraction tries
-every member again, links and hard links included; copies through GIO do not try again. Where no rule helps, the item fails with "The name isn’t valid at this location",
-or "The name is too long".
+inside an item again, but gives the item itself back under its own name or fails. An extraction
+tries each refused member name again, links and hard links included, and also a name whose lookup
+fails with `EINVAL`, `EILSEQ`, `EBADMSG` or `ENAMETOOLONG`, as sshfs fails some. Copies through GIO
+do not try again. Where no rule helps, the item fails with "The name isn’t valid at this location",
+or "The name is too long"; an extraction names the member.
 
 Undoing a move fixes only names the original mount cannot hold at all, such as malformed UTF-8, and
 then gives the entries inside the item the names they had, deepest first, also where the item came
