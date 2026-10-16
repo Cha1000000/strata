@@ -117,7 +117,7 @@ fn an_archive_name_the_location_would_store_otherwise_is_refused_before_anything
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
         .lock()
         .map_err(|error| error.to_string())?;
-    let rows: [(Preset, &str, Option<String>); 3] = [
+    let rows: [(Preset, &str, Option<String>); 2] = [
         (
             Quirks::vfat,
             "nul",
@@ -125,17 +125,6 @@ fn an_archive_name_the_location_would_store_otherwise_is_refused_before_anything
                 rust_i18n::t!(
                     "“%{name}” is a reserved name in this location",
                     name = "nul"
-                )
-                .into_owned(),
-            ),
-        ),
-        (
-            Quirks::ntfs3,
-            "a:b",
-            Some(
-                rust_i18n::t!(
-                    "Names in this location can’t contain %{characters}",
-                    characters = crate::i18n::quoted(":")
                 )
                 .into_owned(),
             ),

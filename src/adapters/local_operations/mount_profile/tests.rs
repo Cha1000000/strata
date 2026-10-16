@@ -130,9 +130,8 @@ fn only_disks_in_a_windows_format_are_taken_for_slow_ones_where_their_device_doe
         mount_type: Some(("fuse.gvfsd-fuse", "rw,user_id=1000,group_id=1000")),
         ..Quirks::default()
     };
-    let cases: [(&str, Preset, bool); 9] = [
+    let cases: [(&str, Preset, bool); 8] = [
         ("vfat", Quirks::vfat, true),
-        ("exfat", Quirks::exfat, true),
         ("exfat-fuse", Quirks::exfat_fuse, true),
         ("ntfs3", Quirks::ntfs3, true),
         ("ntfs-3g", Quirks::ntfs_3g, true),

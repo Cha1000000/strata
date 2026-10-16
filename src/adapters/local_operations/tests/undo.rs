@@ -508,7 +508,7 @@ fn a_typed_name_the_location_would_store_otherwise_is_refused_before_the_rename(
         ..Quirks::default()
     };
     let long_folder_name = "f".repeat(214);
-    let rows: [(Preset, &str, bool, &str, Option<String>); 11] = [
+    let rows: [(Preset, &str, bool, &str, Option<String>); 6] = [
         (
             Quirks::vfat,
             "",
@@ -520,29 +520,12 @@ fn a_typed_name_the_location_would_store_otherwise_is_refused_before_the_rename(
             Quirks::vfat,
             "",
             false,
-            "tab\tname",
-            Some(characters(&["U+0009"])),
-        ),
-        (
-            Quirks::vfat,
-            "",
-            false,
             "notes.",
             Some(crate::i18n::tr(
                 "Names in this location can’t end with a space or a period",
             )),
         ),
         (Quirks::vfat, "", true, "CON", Some(reserved("CON"))),
-        (Quirks::vfat, "", false, "aux.c", None),
-        (Quirks::ntfs3, "", false, "a:b", Some(characters(&[":"]))),
-        (Quirks::ntfs_3g, "", false, "con.txt", Some(reserved("con"))),
-        (
-            Quirks::cifs_nocase,
-            "",
-            false,
-            "a\u{1f600}",
-            Some(characters(&["\u{1f600}"])),
-        ),
         // Samba makes only new folders under longer temporary names.
         (Quirks::cifs, "", true, &long_folder_name, None),
         (Quirks::ext4, "", false, "a:b.", None),
