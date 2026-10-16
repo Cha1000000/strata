@@ -337,7 +337,7 @@ fn top_level_items_a_destination_takes_for_an_earlier_one_are_numbered_and_repor
         case_insensitive: true,
         ..Quirks::ext4()
     };
-    // Past eight files a paste copies several at once, so either spelling may land first.
+    // Past eight files a paste copies several at once.
     let padding = (0..8)
         .map(|index| format!("pad {index}"))
         .collect::<Vec<_>>();
@@ -383,10 +383,10 @@ fn top_level_items_a_destination_takes_for_an_earlier_one_are_numbered_and_repor
                     move_sources: moving,
                 });
 
-                let numbered = match (parallel, destination.join("Makefile (1)").exists()) {
-                    (false, _) => vec!["docs", "makefile"],
-                    (true, true) => vec!["Makefile"],
-                    (true, false) => vec!["makefile"],
+                let numbered = if parallel {
+                    vec!["makefile"]
+                } else {
+                    vec!["docs", "makefile"]
                 };
                 let expected = numbered
                     .iter()
