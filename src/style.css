@@ -2249,15 +2249,11 @@ scrollbar.horizontal > range > trough > slider {
   outline: 1px solid transparent;
   outline-offset: -1px;
   padding: 0;
-  transition: background 220ms ease-out, outline-color 220ms ease-out;
+  transition: background-color 220ms ease-out;
 }
 
 .sidebar > .sidebar-row,
 .sidebar > .sidebar-device {
-  margin: 1px 0;
-}
-
-.sidebar > .sidebar-pinned-row {
   margin: 0;
 }
 
@@ -2292,32 +2288,47 @@ scrollbar.horizontal > range > trough > slider {
   opacity: 0.52;
 }
 
-.sidebar-row:drop(active),
-.sidebar-row.drop-destination {
+.sidebar.sidebar-drag-active .sidebar-row {
+  transition: none;
+}
+
+.sidebar.sidebar-inserting .sidebar-row,
+.sidebar.sidebar-inserting .sidebar-row:hover,
+.sidebar.sidebar-inserting .sidebar-device,
+.sidebar.sidebar-inserting .sidebar-device:hover {
+  background-color: transparent;
+}
+
+.sidebar.sidebar-drag-active .sidebar-row:focus:not(.drop-destination),
+.sidebar.sidebar-drag-active .sidebar-device.focused {
+  outline-color: transparent;
+}
+
+.sidebar-row.drop-destination,
+.sidebar-row.drop-destination:hover {
   background: alpha(@strata_highlight, 0.46);
   outline-color: alpha(@strata_accent, 0.72);
-  transform: scale(1.02);
-}
-
-.sidebar-row.reorder-before,
-.sidebar-row.reorder-after {
-  background: transparent;
-  outline-color: transparent;
   transform: none;
+  transition: none;
+}
+
+.sidebar-row.file-drop-zone:drop(active) {
+  box-shadow: none;
 }
 
 .sidebar-row.reorder-before,
-.sidebar-row.reorder-before:drop(active) {
-  box-shadow: inset 0 2px @strata_accent;
-}
-
+.sidebar-row.reorder-before:drop(active),
 .sidebar-row.reorder-after,
 .sidebar-row.reorder-after:drop(active) {
-  box-shadow: inset 0 -2px @strata_accent;
+  background: transparent;
+  box-shadow: none;
+  outline-color: transparent;
+  transform: none;
+  transition: none;
 }
 
-.sidebar-pin-gap,
-.sidebar-pin-gap:drop(active) {
+.sidebar-row-gap,
+.sidebar-row-gap:drop(active) {
   min-height: 2px;
   margin: 0;
   background: transparent;
@@ -2329,10 +2340,10 @@ scrollbar.horizontal > range > trough > slider {
   min-height: 8px;
 }
 
-.sidebar-pin-gap.eligible,
-.sidebar-pin-gap.eligible:drop(active) {
+.sidebar-row-gap.eligible,
+.sidebar-row-gap.eligible:drop(active) {
   background-image: linear-gradient(@strata_accent, @strata_accent);
-  background-size: 100% 2px;
+  background-size: calc(100% - 8px) 2px;
   background-position: center;
   background-repeat: no-repeat;
 }
