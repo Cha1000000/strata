@@ -18,7 +18,7 @@ use std::{
         Arc, Mutex, MutexGuard,
         atomic::{AtomicU64, Ordering},
     },
-    time::SystemTime,
+    time::{Duration, SystemTime},
 };
 
 use gtk::{gio, glib, prelude::FileExt};
@@ -259,6 +259,10 @@ pub(crate) struct Quirks {
     /// filesystem mounted inside another does; scopes otherwise share the
     /// device of the folder they are made in, as bind mounts do.
     pub own_device: bool,
+    /// A stat that does not force revalidation reports the change time the
+    /// last stat of the entry saw, until this long after by the test clock,
+    /// as the SMB client answers from its attribute cache (`actimeo`).
+    pub cached_change_times: Option<Duration>,
 }
 
 impl Quirks {
@@ -414,6 +418,7 @@ impl Quirks {
             folder_name_limit: Some((217, Errno::NOENT)),
             symlinks: Support::Rejected(Errno::OPNOTSUPP),
             case_insensitive: true,
+            cached_change_times: Some(Duration::from_secs(1)),
             ..Self::default()
         }
     }
@@ -692,6 +697,8 @@ fn question_marks(name: &OsStr) -> Option<OsString> {
 pub(crate) struct Call {
     pub op: Op,
     pub names: Vec<OsString>,
+    /// A stat that forced revalidation.
+    pub forced: bool,
 }
 
 struct Scope {
@@ -721,6 +728,8 @@ struct State {
     opened_names: Vec<((u64, u64), PathBuf, RawFd)>,
     /// Folders made read-only that no revalidating stat has seen since.
     read_only_unseen: HashSet<PathBuf>,
+    /// The change time each entry's last stat saw, and when, by device and inode.
+    seen_change_times: HashMap<(u64, u64), ((i64, u32), SystemTime)>,
 }
 
 static SCOPES: Mutex<Vec<Arc<Scope>>> = Mutex::new(Vec::new());
@@ -754,6 +763,7 @@ impl FsQuirks {
                 reported_losses: HashMap::new(),
                 opened_names: Vec::new(),
                 read_only_unseen: HashSet::new(),
+                seen_change_times: HashMap::new(),
             }),
         });
         scopes().push(scope.clone());
@@ -860,11 +870,22 @@ impl Scope {
         names: &[&OsStr],
         perform: impl FnOnce(&Self) -> Result<T, Errno>,
     ) -> Result<T, Errno> {
+        self.run_logged(op, names, false, perform)
+    }
+
+    fn run_logged<T>(
+        &self,
+        op: Op,
+        names: &[&OsStr],
+        forced: bool,
+        perform: impl FnOnce(&Self) -> Result<T, Errno>,
+    ) -> Result<T, Errno> {
         let racer = {
             let mut state = self.state();
             state.calls.push(Call {
                 op,
                 names: names.iter().map(|name| name.to_os_string()).collect(),
+                forced,
             });
             take_racer(&mut state.quirks.before, op, names)
         };
@@ -910,6 +931,27 @@ impl Scope {
             }
         }
         result
+    }
+
+    fn cached(&self, mut stat: EntryStat, forced: bool) -> EntryStat {
+        let mut state = self.state();
+        let Some(kept_for) = state.quirks.cached_change_times else {
+            return stat;
+        };
+        let now = clock_for_test();
+        let seen = state
+            .seen_change_times
+            .entry((stat.identity.device, stat.identity.inode))
+            .or_insert((stat.ctime, now));
+        if forced
+            || now
+                .duration_since(seen.1)
+                .map_or(true, |age| age >= kept_for)
+        {
+            *seen = (stat.ctime, now);
+        }
+        stat.ctime = seen.0;
+        stat
     }
 
     fn reported(&self, path: Option<PathBuf>, mut stat: EntryStat) -> EntryStat {
@@ -1696,10 +1738,10 @@ impl FsOps for Scoped {
                     scope.state().read_only_unseen.remove(&path);
                 }
                 scope
-                    .run(Op::Stat, &[at.name], |scope| {
+                    .run_logged(Op::Stat, &[at.name], force_sync, |scope| {
                         scope.stat(at, path.as_deref(), force_sync)
                     })
-                    .map(|stat| scope.reported(path, stat))
+                    .map(|stat| scope.reported(path, scope.cached(stat, force_sync)))
             }
             None => System.stat(at, force_sync),
         }
@@ -1710,7 +1752,7 @@ impl FsOps for Scoped {
         match scope_for(fd) {
             Some(scope) => scope
                 .run(Op::StatFd, &[&fd_name(fd)], |_| System.stat_fd(fd))
-                .map(|stat| scope.reported(path_of(fd), stat)),
+                .map(|stat| scope.reported(path_of(fd), scope.cached(stat, false))),
             None => System.stat_fd(fd),
         }
     }
@@ -1809,7 +1851,7 @@ impl FsOps for Scoped {
             }
             Ok(opened)
         })?;
-        Ok(opened.map(|(fd, stat)| (fd, scope.reported(path, stat))))
+        Ok(opened.map(|(fd, stat)| (fd, scope.reported(path, scope.cached(stat, false)))))
     }
 
     fn open_tmpfile(&self, dir: BorrowedFd<'_>, mode: Mode) -> Result<OwnedFd, Errno> {

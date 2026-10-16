@@ -1784,6 +1784,70 @@ fn moving_to_a_remote_target_keeps_a_source_entry_changed_during_the_copy()
 }
 
 #[test]
+fn moving_from_a_share_to_a_remote_target_right_after_a_paste_there_deletes_its_sources()
+-> Result<(), Box<dyn Error>> {
+    let _serial = serial()?;
+    let _clock = ClockGuard::set(SystemTime::now());
+    let root = tempfile::tempdir()?;
+    let origin = root.path().join("origin");
+    let share = root.path().join("share");
+    fs::create_dir_all(origin.join("folder"))?;
+    fs::write(origin.join("folder/a.txt"), b"a")?;
+    fs::create_dir(&share)?;
+    let _share = FsQuirks::install(&share, Quirks::cifs_posix());
+    run_paste(PasteRequest {
+        id: OperationRequestId(1594),
+        destination: Location::local(&share),
+        items: vec![PasteItem {
+            source: Location::local(origin.join("folder")),
+            conflict: TransferConflict::FailIfExists,
+            target_name: None,
+        }],
+        move_sources: false,
+    });
+    land_deferred_closes(&share)?;
+    let folder = share.join("folder");
+    let stand_in = root.path().join("remote");
+    let target = gio::File::for_uri("strata-test-remote:///folder");
+    let copied_to = stand_in.clone();
+    let remote_copy: super::super::RemoteCopy =
+        Rc::new(move |source, target, _, cancellable, _| {
+            let copied_to = copied_to.clone();
+            Box::pin(async move {
+                copy_recursively(source, gio::File::for_path(copied_to), false, cancellable)
+                    .await?;
+                Ok(target)
+            })
+        });
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let emitted = events.clone();
+    let progress = TransferProgressTracker::new(
+        OperationRequestId(1),
+        None,
+        None,
+        Rc::new(move |event| emitted.borrow_mut().push(event)),
+    );
+
+    glib::MainContext::default().block_on(super::super::move_local_with_progress(
+        gio::File::for_path(&folder),
+        target,
+        Taken::Fail,
+        gio::Cancellable::new(),
+        super::super::Copying {
+            progress: Some(progress),
+            ..Default::default()
+        },
+        super::super::attempt_move(None),
+        remote_copy,
+    ))?;
+
+    assert_eq!(fs::read(stand_in.join("a.txt"))?, b"a");
+    assert_eq!(reported(&events).kept, []);
+    assert!(names(&share)?.is_empty());
+    Ok(())
+}
+
+#[test]
 fn a_moved_source_stays_when_its_copy_is_gone_before_the_deletion() -> Result<(), Box<dyn Error>> {
     let _serial = serial()?;
     for (conflict, published) in [

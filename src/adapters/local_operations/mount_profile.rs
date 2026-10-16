@@ -60,6 +60,7 @@ fn learn_mount_type(fs: &dyn FsOps, dir: BorrowedFd<'_>, key: MountKey) -> Mount
     let fuse_format = format.and_then(FuseFormat::of);
     let coarse_times = mount_type.and_then(|mount| mount.coarse_times(fuse_format));
     let deferred_close = mount_type.and_then(MountType::deferred_close);
+    let attribute_cache = mount_type.and_then(MountType::attribute_cache);
     let names = match &mount {
         Some((mount_type, site)) if mount_type.is_gvfs_bridge() => match folders(&site.root).next()
         {
@@ -87,6 +88,7 @@ fn learn_mount_type(fs: &dyn FsOps, dir: BorrowedFd<'_>, key: MountKey) -> Mount
             capabilities.fuse_format = fuse_format;
             capabilities.coarse_times = coarse_times;
             capabilities.deferred_close = deferred_close;
+            capabilities.attribute_cache = attribute_cache;
             capabilities.names = Some(names);
             capabilities.symlinks = symlinks;
             capabilities.max_file_size = max_file_size;

@@ -486,6 +486,13 @@ if it is still what the copy read:
   time and link count. Removing one name of a hard-linked file changes the other names' change time
   and link count, so Strata counts the names it removed itself, across every item of a paste, a
   restore or an undo, and accepts only those changes.
+- **SMB change times.** The SMB client answers a stat from the attributes it cached for a file
+  (`acregmax`, or `actimeo` in the mount's options, one second by default), which can hold a change
+  time from before a change this machine made reached the server, such as the times the server sets
+  once the client's deferred close of a file it wrote reaches it. On an SMB mount Strata changed
+  within that time, a move records each source entry with a forced stat too, so moving or undoing
+  right after a paste there does not keep unchanged entries as changed. Elsewhere the record takes
+  no extra round trip.
 - **Relaxed identity.** FUSE daemons without `use_ino`, vfat and exFAT, and cifs mounted with
   `noserverino` give an entry a new inode number once the kernel evicts it. There, the type and the
   birth time, where both stats report one, stand in for the inode, and the change time is compared
@@ -609,27 +616,27 @@ filesystems is refused.
 
 Undoing a merge, or a copy or an archive that replaced its original through the Trash, deletes what
 the operation put at the original's path, then restores the original. As it places an item there,
-the operation records it as a [move](#moves-across-filesystems) records its sources, with the
-contents of files within a tick of coarse times. Eligibility for that record comes from known
-created identities for the whole tree and, for regular files, size and modification-time baselines
-captured before publication. A concurrent arrival, replaced descendant, or detectable in-place
-edit between publication and recording therefore cannot become deletion evidence. Placement and
-hard-link creation change change times and link counts, so those fields are captured after
-placement rather than compared to the pre-publication baseline. The size/time baseline is not a
-full content reread: a same-size edit hidden by timestamp resolution, or a writer restoring the
-old modification time before recording, can escape it. The later coarse-time digest cannot
-retroactively prove which bytes were published. It reads such a file back only until the tick
-passes, as any later rewrite changes its times. An item has no record if a cancel stops its
+the operation records it as a [move](#moves-across-filesystems) records its sources, with forced
+stats on every mount and the contents of files within a tick of coarse times. Eligibility for that
+record comes from known created identities for the whole tree and, for regular files, size and
+modification-time baselines captured before publication. A concurrent arrival, replaced descendant,
+or detectable in-place edit between publication and recording therefore cannot become deletion
+evidence. Placement and hard-link creation change change times and link counts, so those fields are
+captured after placement rather than compared to the pre-publication baseline. The size/time
+baseline is not a full content reread: a same-size edit hidden by timestamp resolution, or a writer
+restoring the old modification time before recording, can escape it. The later coarse-time digest
+cannot retroactively prove which bytes were published. It reads such a file back only until the
+tick passes, as any later rewrite changes its times. An item has no record if a cancel stops its
 recording, or if it would take the records of its paste or archive past 100,000 entries (some 20 MB
 kept in the undo history); one that does takes none of them. The undo first compares all of it by
-the same rules, and deletes it only if every entry is still as recorded and no folder holds an entry
-added since. Otherwise all of it stays, and the original stays in the Trash with its `.trashinfo`,
-reported as left there because what replaced it may have changed. An entry that changes between the
-comparison and its deletion still stays, though entries deleted before it are gone. Without a
-record, an original is restored only to an empty path. A merge undo deletes its copy before it
-restores the original, so an item cut off after it deleted anything counts as failed; one cut off
-while it compares counts as not attempted. A path it cannot check fails with that error and the
-original stays in the Trash.
+the same rules, and deletes it only if every entry is still as recorded and no folder holds an
+entry added since. Otherwise all of it stays, and the original stays in the Trash with its
+`.trashinfo`, reported as left there because what replaced it may have changed. An entry that
+changes between the comparison and its deletion still stays, though entries deleted before it are
+gone. Without a record, an original is restored only to an empty path. A merge undo deletes its
+copy before it restores the original, so an item cut off after it deleted anything counts as
+failed; one cut off while it compares counts as not attempted. A path it cannot check fails with
+that error and the original stays in the Trash.
 
 A merge undo moves what the merge created to the Trash, and so does undoing the items copied
 beside it in the same paste. Where there is no Trash, it deletes them by the same rules instead. A
@@ -714,6 +721,9 @@ reported.
   attribute from cached attributes, so write access given back right after it was taken does
   nothing until the folder is revalidated. Strata revalidates before giving it back; other programs
   may not. Folder access times come back as the modification time.
+- **SMB change times.** A file this machine keeps reading can keep its cached change time for
+  longer than the attribute cache time, as can one another program on this machine just changed. A
+  move then keeps such a source as changed, and nothing is deleted.
 - **ntfs-3g and exfat-fuse** are recognised only from the host's udev records. Without them, as in
   containers, they keep per-file syncs and the 2 s comparison window, and get Windows name rules
   that leave `aux.c` and `con.txt` alone until a refusal teaches more. Their batched flush relies on
@@ -1031,18 +1041,18 @@ lookups, invalid names, unsupported or lying Trash, reused inode numbers, hard l
 inode numbers, missing birth times, lost replies (on sshfs, a lost rename reply leaves the target
 name reporting its old inode number) and racing processes, before or after a call.
 
-For copies they also emulate a mount's family and superblock options as mountinfo reports them,
-the device format udev records, refused `O_TMPFILE` and its links, refused clones, a
-`copy_file_range` that ends early, short reads and writes, times reset at close (NFSv4.2
-delegations, FUSE writeback caches), refused `chown`, foreign groups, extended attributes refused
-by prefix, injected or listed with ACLs first, refused `mknodat` of files and pipes, NFS silly
-renames, files that report no size, reported modes, change times that equal the modification time
-(FAT), single link counts (sshfs), entries renumbered after eviction, SMB's refusal to open two
-names of one file at once or, during its deferred close, another name of a file just written, its
-stale read-only folders, and writeback errors that `syncfs` reports. Tests can also pretend to run
-on another kernel release, freeze the clock that the racily clean check and the wait for SMB's
-deferred close read, and set a paste's batch limits and clock. The seam also asserts that no call
-runs on the main context's thread.
+For copies they also emulate a mount's family and superblock options as mountinfo reports them, the
+device format udev records, refused `O_TMPFILE` and its links, refused clones, a `copy_file_range`
+that ends early, short reads and writes, times reset at close (NFSv4.2 delegations, FUSE writeback
+caches), refused `chown`, foreign groups, extended attributes refused by prefix, injected or listed
+with ACLs first, refused `mknodat` of files and pipes, NFS silly renames, files that report no
+size, reported modes, change times that equal the modification time (FAT), single link counts
+(sshfs), entries renumbered after eviction, SMB's refusal to open two names of one file at once or,
+during its deferred close, another name of a file just written, its stale read-only folders and
+change times answered from its attribute cache, and writeback errors that `syncfs` reports. Tests
+can also pretend to run on another kernel release, freeze the clock that the racily clean check,
+the wait for SMB's deferred close and SMB's attribute cache read, and set a paste's batch limits
+and clock. The seam also asserts that no call runs on the main context's thread.
 
 For names they emulate the errno each lab mount returned for a name it refuses, names stored or
 listed as others (vfat dropping trailing dots, SMB reading private-use characters back and listing

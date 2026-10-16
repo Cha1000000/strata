@@ -2431,8 +2431,17 @@ fn staged_trash_folder(
 #[test]
 fn a_merge_undo_deletes_only_what_the_merge_left_unchanged() -> Result<(), Box<dyn Error>> {
     let _serial = serial()?;
-    for change in ["untouched", "linked", "edited", "touched", "replaced"] {
+    for change in [
+        "untouched",
+        "on a share",
+        "linked",
+        "edited",
+        "touched",
+        "replaced",
+    ] {
         let root = tempfile::tempdir()?;
+        let _share =
+            (change == "on a share").then(|| FsQuirks::install(root.path(), Quirks::cifs_posix()));
         let source = root.path().join("source");
         let target = root.path().join("target");
         write_files(
@@ -2500,7 +2509,7 @@ fn a_merge_undo_deletes_only_what_the_merge_left_unchanged() -> Result<(), Box<d
 
         assert_eq!(fs::read(&b)?, b"old b", "{change}");
         assert_eq!(fs::read(target.join("docs/stays.txt"))?, b"keep me");
-        if matches!(change, "untouched" | "linked") {
+        if matches!(change, "untouched" | "on a share" | "linked") {
             assert_eq!(fs::read(&a)?, b"old a", "{change}");
             let mut undone = restored(&events).ok_or("not restored")?;
             undone.sort_by_key(Location::display_name);
@@ -2536,6 +2545,8 @@ fn undoing_a_replace_deletes_what_it_placed_only_if_all_of_it_is_unchanged()
     let rows = [
         (false, "untouched"),
         (false, "edited"),
+        (false, "untouched on a share"),
+        (false, "untouched under cached change times"),
         (true, "untouched"),
         (true, "edited"),
         (true, "added to"),
@@ -2554,6 +2565,17 @@ fn undoing_a_replace_deletes_what_it_placed_only_if_all_of_it_is_unchanged()
             fs::write(&source, b"new")?;
             fs::write(&target, b"old")?;
         }
+        // Placed items are recorded with a forced stat on any mount, not only
+        // on a share this process just wrote to.
+        let _cached = match change {
+            "untouched on a share" => Some(Quirks::cifs_posix()),
+            "untouched under cached change times" => Some(Quirks {
+                cached_change_times: Some(Duration::from_secs(1)),
+                ..Quirks::default()
+            }),
+            _ => None,
+        }
+        .map(|quirks| FsQuirks::install(root.path(), quirks));
         let replaced = RefCell::new(None);
         glib::MainContext::default().block_on(replace_local_with(
             gio::File::for_path(&source),
@@ -2633,7 +2655,7 @@ fn undoing_a_replace_deletes_what_it_placed_only_if_all_of_it_is_unchanged()
             assert_eq!(names(&target)?, ["old.txt"]);
             continue;
         }
-        if change == "untouched" {
+        if change.starts_with("untouched") {
             assert_eq!(restored(&events), Some(vec![location]), "{row}");
             let restored = if directory {
                 assert_eq!(names(&target)?, ["old.txt"], "{row}");

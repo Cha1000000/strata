@@ -297,6 +297,38 @@ fn set_times(path: &Path, seconds: u64, nanoseconds: u32) -> io::Result<()> {
     Ok(())
 }
 
+/// Sets the times of each file beneath `root` again from outside the seam,
+/// as Samba does once the SMB client's deferred close of a file it wrote
+/// reaches it: only the change time moves.
+fn land_deferred_closes(root: &Path) -> io::Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    for entry in fs::read_dir(root)? {
+        let path = entry?.path();
+        let before = fs::symlink_metadata(&path)?;
+        if before.is_dir() {
+            land_deferred_closes(&path)?;
+            continue;
+        }
+        if !before.is_file() {
+            continue;
+        }
+        let time = |tv_sec, tv_nsec| rustix::fs::Timespec { tv_sec, tv_nsec };
+        let times = rustix::fs::Timestamps {
+            last_access: time(before.atime(), before.atime_nsec()),
+            last_modification: time(before.mtime(), before.mtime_nsec()),
+        };
+        // A kernel without fine-grained times stamps within its tick.
+        loop {
+            rustix::fs::utimensat(rustix::fs::CWD, &path, &times, rustix::fs::AtFlags::empty())?;
+            let after = fs::symlink_metadata(&path)?;
+            if (after.ctime(), after.ctime_nsec()) != (before.ctime(), before.ctime_nsec()) {
+                break;
+            }
+        }
+    }
+    Ok(())
+}
+
 fn has_colon(name: &OsStr) -> Option<rustix::io::Errno> {
     name.as_encoded_bytes()
         .contains(&b':')

@@ -87,6 +87,29 @@ fn smb_mounts_keep_closed_handles_for_their_close_timeout() {
 }
 
 #[test]
+fn smb_mounts_cache_file_attributes_for_their_regular_file_timeout() {
+    let table = MountTable::parse(
+        "\
+80 22 0:70 / /mnt/a rw - cifs //server/a rw,vers=3.1.1,actimeo=1
+81 22 0:71 / /mnt/b rw - cifs //server/b rw,vers=3.1.1,acdirmax=30,acregmax=5
+82 22 0:72 / /mnt/c rw - smb3 //server/c rw,vers=3.1.1,actimeo=0
+83 22 0:73 / /mnt/d rw - cifs //server/d rw,vers=3.1.1
+84 22 0:74 / /mnt/e rw - nfs4 server:/e rw,vers=4.2,acregmax=60
+",
+    );
+    let cached = |id| {
+        table
+            .mount_of(id)
+            .and_then(|(mount, _)| mount.attribute_cache())
+    };
+    assert_eq!(cached(80), Some(Duration::from_secs(1)));
+    assert_eq!(cached(81), Some(Duration::from_secs(5)));
+    assert_eq!(cached(82), None);
+    assert_eq!(cached(83), Some(Duration::from_secs(1)));
+    assert_eq!(cached(84), None);
+}
+
+#[test]
 fn mount_keys_identify_one_mount_instance() {
     let table = MountTable::parse(SAMPLE);
     let share = table

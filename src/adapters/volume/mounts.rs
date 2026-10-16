@@ -76,6 +76,25 @@ impl MountType {
         Some(Duration::from_secs(seconds))
     }
 
+    /// How long the SMB client answers stats from the attributes it cached
+    /// for a file (`acregmax`, shown as `actimeo` when folders share it, one
+    /// second by default); `None` where nothing is cached.
+    pub(crate) fn attribute_cache(&self) -> Option<Duration> {
+        if family(&self.fs_type) != Family::Smb {
+            return None;
+        }
+        let option = |name: &str| {
+            self.super_options
+                .split(',')
+                .find_map(|option| option.strip_prefix(name)?.strip_prefix('='))
+                .and_then(|seconds| seconds.parse().ok())
+        };
+        let seconds = option("acregmax")
+            .or_else(|| option("actimeo"))
+            .unwrap_or(1);
+        (seconds > 0).then(|| Duration::from_secs(seconds))
+    }
+
     /// A `fuseblk` mount whose device udev cannot tell may be exFAT.
     pub(crate) fn coarse_times(&self, fuse_format: Option<FuseFormat>) -> Option<CoarseTimes> {
         let here = |seconds| CoarseTimes {

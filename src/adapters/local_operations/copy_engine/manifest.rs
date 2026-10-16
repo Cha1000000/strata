@@ -26,7 +26,7 @@ use rustix::{
     io::Errno,
 };
 
-use super::{Failure, Mount, lock};
+use super::{Failure, Mount, attribute_cache, lock};
 use crate::{
     adapters::{
         local_operations::{
@@ -711,7 +711,7 @@ fn record(
         budget.taken.fetch_add(1, Ordering::Relaxed);
     }
     let at = Entry { dir, name };
-    let stat = fs.stat(at, placed.is_some())?;
+    let stat = fs.stat(at, placed.is_some() || attribute_cache::stale(fs, dir))?;
     if ownership.is_some_and(|(owned, path)| !owned.unchanged(path, &stat)) {
         return Err(Failure::Changed);
     }

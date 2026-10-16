@@ -4,6 +4,7 @@
 //! replaces an entry, and shows a partial item under its final name only
 //! where the destination cannot place a stage.
 
+mod attribute_cache;
 mod barrier;
 mod data;
 mod links;
@@ -799,7 +800,7 @@ fn copy_new(
     new: NewItem,
     workers: Option<usize>,
 ) -> Result<(OsString, Ownership), Failure> {
-    let stat = copy.fs.stat(source.entry(), false)?;
+    let stat = copy.source_stat(source.entry())?;
     let taken = match new {
         NewItem::Published(taken) => taken,
         NewItem::InPlace(expected) if expected == stat.identity => Taken::Fail,
@@ -926,6 +927,7 @@ fn copy_special(
         );
     match published {
         Ok((name, (ownership, copied_out))) => {
+            attribute_cache::changed(&mount);
             if copied_out {
                 copy.discard(staged)
                     .map_err(|error| Failure::Error(stage_left(&error)))?;
@@ -960,7 +962,7 @@ fn copy_stage(
     workers: Option<usize>,
 ) -> Result<StagedSibling, Failure> {
     let (parent, _) = split(target).map_err(Failure::Error)?;
-    let stat = copy.fs.stat(source.entry(), false)?;
+    let stat = copy.source_stat(source.entry())?;
     let recorded_in = source.recorded_in.as_deref();
     match stat.kind {
         FileType::RegularFile => {
@@ -1555,6 +1557,7 @@ struct Mount {
     fuse_format: Option<FuseFormat>,
     coarse_times: Option<CoarseTimes>,
     deferred_close: Option<Duration>,
+    attribute_cache: Option<Duration>,
     names: Option<MountNames>,
 }
 
@@ -1571,6 +1574,7 @@ impl Mount {
             fuse_format: capabilities.fuse_format,
             coarse_times: capabilities.coarse_times,
             deferred_close: capabilities.deferred_close,
+            attribute_cache: capabilities.attribute_cache,
             names: capabilities.names,
         }
     }
@@ -1601,6 +1605,7 @@ static TMPFILE_LINK: AtomicU8 = AtomicU8::new(TMPFILE_LINK_UNKNOWN);
 pub(super) fn forget_learned_copy_support() {
     TMPFILE_LINK.store(TMPFILE_LINK_UNKNOWN, Ordering::Relaxed);
     data::forget_learned();
+    attribute_cache::forget();
 }
 
 fn link_tmpfile(fs: &dyn FsOps, fd: BorrowedFd<'_>, to: Entry<'_>) -> Result<(), Errno> {
@@ -1715,6 +1720,12 @@ impl Copy {
                 ..Options::default()
             },
         )
+    }
+
+    /// A move records an entry from this stat, or from descriptors opened after it.
+    fn source_stat(&self, at: Entry<'_>) -> Result<EntryStat, Errno> {
+        let forced = self.recording && attribute_cache::stale(self.fs, at.dir);
+        self.fs.stat(at, forced)
     }
 
     fn mount(&self, dir: BorrowedFd<'_>) -> Mount {
@@ -2326,6 +2337,7 @@ impl<'a> FileCopy<'a> {
             Some(fd) => self.through_tmpfile(&source, fd, &parent, target),
             None => self.through_named_stage(&source, &parent, target),
         }?;
+        attribute_cache::changed(&self.target);
         if let (Some(folder), Some(read)) = (recorded_in, self.read.take()) {
             folder.file(at.name, read);
         }
@@ -2641,7 +2653,10 @@ impl<'a> FileCopy<'a> {
                 .settle_times(target, created.identity, snapshot, self.target.family)
         })(fd);
         match filled {
-            Ok(()) => Ok(created.identity),
+            Ok(()) => {
+                attribute_cache::changed(&self.target);
+                Ok(created.identity)
+            }
             Err(failure) => {
                 let removed = self.remove_made(name, created.identity);
                 Err(self.copy.after_cleanup(failure, removed))

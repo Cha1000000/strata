@@ -24,7 +24,8 @@ use rustix::{
 };
 
 use super::{
-    Barrier, Copy, Created, Failure, Mount, Placing, Source, best_effort, creation_failure,
+    Barrier, Copy, Created, Failure, Mount, Placing, Source, attribute_cache, best_effort,
+    creation_failure,
     data::Data,
     direct_folder, from_stage, is_fatal, is_unsupported,
     links::{self, Links, Role},
@@ -879,7 +880,7 @@ pub(super) fn copy_link(
     names: Option<&Names>,
 ) -> Result<EntryStat, Failure> {
     let fs = copy.fs;
-    let stat = fs.stat(source, false)?;
+    let stat = copy.source_stat(source)?;
     if stat.kind != FileType::Symlink {
         return Err(Failure::Changed);
     }
@@ -910,6 +911,7 @@ pub(super) fn copy_link(
         }
         return Err(error.into());
     }
+    attribute_cache::changed(mount);
     copy.add_file(stat.size);
     Ok(stat)
 }
@@ -925,7 +927,7 @@ pub(super) fn copy_fifo(
     names: Option<&Names>,
 ) -> Result<(EntryStat, Option<LocalFileIdentity>), Failure> {
     let fs = copy.fs;
-    let stat = fs.stat(source, false)?;
+    let stat = copy.source_stat(source)?;
     if stat.kind != FileType::Fifo {
         return Err(Failure::Changed);
     }
@@ -946,6 +948,7 @@ pub(super) fn copy_fifo(
         placement::remove_if_unchanged(fs, target, identity, AtFlags::empty());
     }
     finished?;
+    attribute_cache::changed(mount);
     copy.add_file(0);
     Ok((stat, Some(identity)))
 }
@@ -1031,8 +1034,8 @@ impl File {
         // An SMB client opens one name of a file at a time, so a later name
         // of a linked file is never opened there, and the others take turns.
         let (opened, stat) = if tree.opens_one_name_per_file() {
-            let stat = fs
-                .stat(at, false)
+            let stat = copy
+                .source_stat(at)
                 .map_err(|error| open_failure(&self.name, error))?;
             (None, stat)
         } else {
@@ -1144,6 +1147,7 @@ impl File {
             }
             return Ok(role);
         };
+        attribute_cache::changed(&self.mount);
         if let Some(folder) = &self.recorded_in {
             folder.file(&self.name, read);
         }
