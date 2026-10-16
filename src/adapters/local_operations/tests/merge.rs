@@ -191,10 +191,11 @@ fn fat_merge_overwrites_the_names_it_plans_and_keeps_the_names_that_need_no_fix(
         );
         assert_eq!(plans[0].overwritten, *staged.borrow(), "{row}");
         // A GIO copy proves no creation, so it records nothing for undo to delete.
-        let proven = match row {
-            "engine" => plans[0].overwritten.iter().collect(),
-            _ => HashSet::new(),
+        let (count, proven) = match row {
+            "engine" => (2, plans[0].overwritten.iter().collect()),
+            _ => (1, HashSet::new()),
         };
+        assert_eq!(plans.len(), count, "{row}");
         assert_eq!(
             plans[1..]
                 .iter()
