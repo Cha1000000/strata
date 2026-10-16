@@ -554,7 +554,10 @@ no stat can show the rewrite. On those mounts, a file whose modification time fa
 tick of when the copy read it is copied with reads and writes while a SHA-256 digest of the bytes
 is taken. Before the move deletes it, Strata waits until a rewrite would have moved its time, reads
 the source again, up to one byte past the size it copied, and keeps it as changed if it differs.
-It is deleted only if its name still holds the file it compared.
+It is deleted only if its name still holds the file it compared. Its copy is read back too, without
+waiting, and must hold the same bytes: a file put in the copy's place within the tick can match
+the copy's identity, size and times. Otherwise the source stays, reported as an item whose copy was
+moved away.
 
 | Source | Window after the modification time |
 | --- | --- |

@@ -166,6 +166,10 @@ impl Contents {
             prefix: None,
         }
     }
+
+    pub(super) fn digest(&self) -> digest::Digest {
+        self.digest
+    }
 }
 
 pub(super) struct Read {
@@ -359,6 +363,8 @@ impl Manifest {
 pub(super) struct State {
     size: u64,
     mtime: (i64, u32),
+    /// What the copy wrote, where its source is compared by content.
+    contents: Option<digest::Digest>,
 }
 
 impl State {
@@ -366,6 +372,14 @@ impl State {
         Self {
             size: stat.size,
             mtime: stat.mtime,
+            contents: None,
+        }
+    }
+
+    pub(super) fn holding(self, contents: digest::Digest) -> Self {
+        Self {
+            contents: Some(contents),
+            ..self
         }
     }
 
@@ -503,16 +517,25 @@ impl Ownership {
     }
 
     /// A file rewritten in place, or another one given its inode number and
-    /// birth time, shows only in its size or modification time.
-    fn holds(&self, path: &Path, stat: &EntryStat) -> bool {
-        self.matches(path, stat) && self.states.get(path).is_none_or(|state| state.holds(stat))
+    /// birth time, shows only in its size or modification time, and within
+    /// one tick of a coarse clock only in its contents.
+    fn holds(&self, fs: &dyn FsOps, at: Entry<'_>, path: &Path, stat: &EntryStat) -> bool {
+        if !self.matches(path, stat) {
+            return false;
+        }
+        self.states.get(path).is_none_or(|state| {
+            state.holds(stat)
+                && state
+                    .contents
+                    .is_none_or(|contents| holds_contents(fs, at, stat, contents))
+        })
     }
 
     pub(super) fn stays(&self, fs: &dyn FsOps, at: Entry<'_>) -> bool {
         let Ok(stat) = fs.stat(at, true) else {
             return false;
         };
-        if !self.holds(Path::new(""), &stat) {
+        if !self.holds(fs, at, Path::new(""), &stat) {
             return false;
         }
         if self.descendants.is_empty() {
@@ -537,9 +560,25 @@ impl Ownership {
             };
             let at = Entry::new(&dir, name);
             fs.stat(at, true)
-                .is_ok_and(|stat| self.holds(path, &stat))
+                .is_ok_and(|stat| self.holds(fs, at, path, &stat))
         })
     }
+}
+
+/// Whether the file `stat` saw at `at` holds exactly the bytes digested, up to
+/// one byte past its size.
+fn holds_contents(
+    fs: &dyn FsOps,
+    at: Entry<'_>,
+    stat: &EntryStat,
+    contents: digest::Digest,
+) -> bool {
+    let Ok(Some((file, opened))) = fs.open_source(at, false) else {
+        return false;
+    };
+    opened.identity == stat.identity
+        && digest_of(fs, file.as_fd(), stat.size.saturating_add(1), &|| false)
+            .is_ok_and(|(digest, prefix)| prefix.is_none() && digest.as_ref() == contents.as_ref())
 }
 
 pub(in crate::adapters::local_operations) struct Published {

@@ -1871,6 +1871,8 @@ fn a_moved_source_stays_when_its_copy_is_gone_before_the_deletion() -> Result<()
         /// Rewritten with as many bytes, as a file that takes the copy's freed
         /// inode number within its birth time's tick also looks, on ntfs3.
         InPlace,
+        /// So within the tick of a coarse clock that stamped the source too.
+        InPlaceWithinTheTick,
     }
     let rows = [
         (TransferConflict::FailIfExists, None),
@@ -1883,9 +1885,18 @@ fn a_moved_source_stays_when_its_copy_is_gone_before_the_deletion() -> Result<()
     .flat_map(|(conflict, published)| {
         [Replaced::No, Replaced::Yes].map(|replaced| (conflict, published, replaced))
     })
-    .chain([(TransferConflict::FailIfExists, None, Replaced::InPlace)]);
+    .chain(
+        [Replaced::InPlace, Replaced::InPlaceWithinTheTick]
+            .map(|replaced| (TransferConflict::FailIfExists, None, replaced)),
+    );
     for (conflict, published, replaced) in rows {
         let row = format!("{conflict:?}, published: {published:?}, replaced: {replaced:?}");
+        let within_the_tick = replaced == Replaced::InPlaceWithinTheTick;
+        // Before the kernel's coarse clock, which may run a tick behind.
+        let tick = SystemTime::now() - Duration::from_secs(1);
+        let _clock = within_the_tick.then(|| ClockGuard::set(tick));
+        let _kernel = within_the_tick.then(|| KernelGuard::set(Some((6, 12, 0))));
+        let coarse_clock = within_the_tick.then_some(tick);
         let root = tempfile::tempdir()?;
         let sources = root.path().join("sources");
         let destination = root.path().join("destination");
@@ -1898,16 +1909,23 @@ fn a_moved_source_stays_when_its_copy_is_gone_before_the_deletion() -> Result<()
         }
         let copy = destination.join("notes.txt");
         let racer: super::fs_quirks::Racer = Box::new(move || {
-            if replaced != Replaced::InPlace {
+            if matches!(replaced, Replaced::No | Replaced::Yes) {
                 fs::remove_file(&copy).expect("remove the copy");
             }
             if replaced != Replaced::No {
                 fs::write(&copy, b"other").expect("put another file there");
             }
         });
-        let _sources = FsQuirks::install(&sources, Quirks::default());
+        let _sources = FsQuirks::install(
+            &sources,
+            Quirks {
+                coarse_clock,
+                ..Quirks::default()
+            },
+        );
         let mut quirks = Quirks {
             trash: super::fs_quirks::Trash::Unsupported,
+            coarse_clock,
             ..Quirks::ext4()
         };
         if let Some(op) = published {

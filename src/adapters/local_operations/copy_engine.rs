@@ -1965,8 +1965,8 @@ impl Copy {
                 self.fs.set_len(target, 0)?;
             }
             let counted = attempt == 0;
-            let unsettled = source_mount
-                .and_then(|mount| manifest::unsettled(&stat, &mount, manifest::now()));
+            let unsettled =
+                source_mount.and_then(|mount| manifest::unsettled(&stat, &mount, manifest::now()));
             let (digest, end) = match unsettled {
                 Some(_) => {
                     let (digest, end) =
@@ -2029,6 +2029,20 @@ impl Copy {
             (identity.device, identity.inode),
             (identity, manifest::State::of(stat)),
         );
+    }
+
+    /// A copy whose source a move compares by content is compared too, as
+    /// another file can take its place within the same tick.
+    fn wrote(&self, identity: LocalFileIdentity, read: &manifest::Read) {
+        let Some(contents) = &read.contents else {
+            return;
+        };
+        if let Some((known, state)) =
+            lock(&self.written).get_mut(&(identity.device, identity.inode))
+            && *known == identity
+        {
+            *state = state.holding(contents.digest());
+        }
     }
 
     /// NFSv4 write delegations set the times at close, and FUSE daemons with
@@ -2361,6 +2375,7 @@ impl<'a> FileCopy<'a> {
         }?;
         attribute_cache::wrote_file(&self.target);
         if let (Some(folder), Some(read)) = (recorded_in, self.read.take()) {
+            self.copy.wrote(copied.1, &read);
             folder.file(at.name, read);
         }
         Ok(copied)
@@ -2384,6 +2399,7 @@ impl<'a> FileCopy<'a> {
             file.read_into(&source, fd, &parent)
         })?;
         if let (Some(folder), Some(read)) = (recorded_in, self.read.take()) {
+            self.copy.wrote(identity, &read);
             folder.file(at.name, read);
         }
         self.copy.add_file(0);

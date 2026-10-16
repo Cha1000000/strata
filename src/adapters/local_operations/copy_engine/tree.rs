@@ -1151,6 +1151,7 @@ impl File {
             return Ok(role);
         };
         attribute_cache::wrote_file(&self.mount);
+        copy.wrote(created.identity, &read);
         if let Some(folder) = &self.recorded_in {
             folder.file(&self.name, read);
         }
