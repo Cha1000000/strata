@@ -327,3 +327,141 @@ fn names_a_fat_target_takes_for_one_are_numbered_and_reported() -> Result<(), Bo
     assert_eq!(fs::read(target.join("makefile (1)"))?, b"makefile");
     Ok(())
 }
+
+#[test]
+fn top_level_items_a_destination_takes_for_an_earlier_one_are_numbered_and_reported()
+-> Result<(), Box<dyn Error>> {
+    let _serial = serial()?;
+    let casefolded = || Quirks {
+        case_insensitive: true,
+        ..Quirks::ext4()
+    };
+    // Past eight files a paste copies several at once, so either spelling may land first.
+    let padding = (0..8)
+        .map(|index| format!("pad {index}"))
+        .collect::<Vec<_>>();
+    for (mount, preset) in [
+        ("casefolded ext4", casefolded as Preset),
+        ("cifs", Quirks::cifs),
+    ] {
+        for moving in [false, true] {
+            for parallel in [false, true] {
+                let context = format!("{mount}, moving: {moving}, parallel: {parallel}");
+                let root = tempfile::tempdir()?;
+                let source = root.path().join("source");
+                let destination = root.path().join("destination");
+                fs::create_dir_all(&source)?;
+                fs::create_dir(&destination)?;
+                let mut items = vec!["Makefile", "makefile"];
+                if parallel {
+                    items.extend(padding.iter().map(String::as_str));
+                } else {
+                    items.extend(["Docs", "docs"]);
+                }
+                for name in &items {
+                    if name.ends_with("ocs") {
+                        fs::create_dir(source.join(name))?;
+                        fs::write(source.join(name).join("inside"), name)?;
+                    } else {
+                        fs::write(source.join(name), name)?;
+                    }
+                }
+                let _destination = FsQuirks::install(&destination, preset());
+
+                let events = run_paste(PasteRequest {
+                    id: OperationRequestId(1530),
+                    destination: Location::local(&destination),
+                    items: items
+                        .iter()
+                        .map(|name| PasteItem {
+                            source: Location::local(source.join(name)),
+                            conflict: TransferConflict::FailIfExists,
+                            target_name: None,
+                        })
+                        .collect(),
+                    move_sources: moving,
+                });
+
+                let numbered = match (parallel, destination.join("Makefile (1)").exists()) {
+                    (false, _) => vec!["docs", "makefile"],
+                    (true, true) => vec!["Makefile"],
+                    (true, false) => vec!["makefile"],
+                };
+                let expected = numbered
+                    .iter()
+                    .map(|name| (name.to_string(), format!("{name} (1)"), RenameCause::Alias))
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    renamed_beneath(&destination, &followed_report(&events)),
+                    expected,
+                    "{context}"
+                );
+                for name in numbered {
+                    let saved_as = destination.join(format!("{name} (1)"));
+                    let read = if name.ends_with("ocs") {
+                        fs::read_to_string(saved_as.join("inside"))?
+                    } else {
+                        fs::read_to_string(saved_as)?
+                    };
+                    assert_eq!(read, name, "{context}");
+                }
+                assert_eq!(names(&destination)?.len(), items.len(), "{context}");
+                assert_eq!(names(&source)?.is_empty(), moving, "{context}");
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn an_item_already_at_a_top_level_name_is_never_taken_for_one_the_paste_saved()
+-> Result<(), Box<dyn Error>> {
+    let _serial = serial()?;
+    let root = tempfile::tempdir()?;
+    let source = root.path().join("source");
+    let destination = root.path().join("destination");
+    fs::create_dir_all(&source)?;
+    fs::create_dir(&destination)?;
+    let items = (0..10)
+        .map(|index| format!("item {index}"))
+        .collect::<Vec<_>>();
+    for name in &items {
+        fs::write(source.join(name), name)?;
+    }
+    fs::write(destination.join("item 3"), b"theirs")?;
+    let _destination = FsQuirks::install(
+        &destination,
+        Quirks {
+            case_insensitive: true,
+            ..Quirks::ext4()
+        },
+    );
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let emitted = events.clone();
+
+    let _operation = LocalOperationProvider.paste(
+        PasteRequest {
+            id: OperationRequestId(1530),
+            destination: Location::local(&destination),
+            items: items
+                .iter()
+                .map(|name| PasteItem {
+                    source: Location::local(source.join(name)),
+                    conflict: TransferConflict::FailIfExists,
+                    target_name: None,
+                })
+                .collect(),
+            move_sources: false,
+        },
+        Rc::new(move |event| emitted.borrow_mut().push(event)),
+    );
+    drive_until_transfer_settles(&events);
+
+    assert!(matches!(
+        terminal_transfer(&events.borrow()),
+        Some(OperationEvent::TransferFailed { .. })
+    ));
+    assert_eq!(fs::read(destination.join("item 3"))?, b"theirs");
+    assert!(!destination.join("item 3 (1)").exists());
+    Ok(())
+}

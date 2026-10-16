@@ -1159,6 +1159,10 @@ async fn execute_parallel_copy_plans(
         written_paths: Vec::new(),
     };
     let last = plans.last().map(|plan| plan.index);
+    let saved = plans
+        .iter()
+        .map(|plan| plan.written_path.clone())
+        .collect::<Rc<[_]>>();
     while outcome.next < plans.len() && !cancellable.is_cancelled() {
         let end = (outcome.next + worker_count).min(plans.len());
         let chunk = &plans[outcome.next..end];
@@ -1170,42 +1174,42 @@ async fn execute_parallel_copy_plans(
             .iter()
             .cloned()
             .map(|plan| {
-                let (cancellable, copying) = (cancellable.clone(), copying.clone());
+                let (cancellable, copying, saved) =
+                    (cancellable.clone(), copying.clone(), saved.clone());
                 context.spawn_local(async move {
-                    if moving {
-                        let source = gio::File::for_path(&plan.source_path);
-                        let target = gio::File::for_path(&plan.written_path);
-                        return move_owing(source, target, Taken::Fail, cancellable, copying).await;
+                    let target = gio::File::for_path(&plan.written_path);
+                    let mut taken = Taken::Fail;
+                    loop {
+                        match transfer_planned(&plan, taken, moving, &cancellable, &copying).await {
+                            Err(error)
+                                if taken == Taken::Fail
+                                    && error.matches(gio::IOErrorEnum::Exists)
+                                    && taken_by_paste(&target, &saved).await =>
+                            {
+                                taken = Taken::Number;
+                            }
+                            result => {
+                                break result.map(|transferred| (transferred, taken));
+                            }
+                        }
                     }
-                    let options = copy_engine::Options {
-                        names: copying.names,
-                        ..copy_engine::Options::default()
-                    };
-                    let copied = copy_engine::copy_local(
-                        plan.source_path,
-                        copy_engine::Destination::New(plan.written_path.clone(), Taken::Fail),
-                        options,
-                        copying.progress,
-                        &cancellable,
-                    )
-                    .await?;
-                    Ok(Transferred {
-                        target: gio::File::for_path(plan.written_path.with_file_name(copied.name)),
-                        reported: copied.reported,
-                        owed: Owed::default(),
-                    })
                 })
             })
             .collect::<Vec<_>>();
         let mut renamed = Vec::new();
         for (plan, task) in chunk.iter().zip(tasks) {
             match task.await {
-                Ok(Ok(transferred)) => {
-                    if let (Some(cause), Some(name)) = (plan.renamed, plan.source_path.file_name())
-                    {
+                Ok(Ok((transferred, taken))) => {
+                    let aliased = taken == Taken::Number;
+                    let cause = plan.renamed.or(aliased.then_some(RenameCause::Alias));
+                    if let (Some(cause), Some(name)) = (cause, plan.source_path.file_name()) {
                         let requested = gio::File::for_path(plan.written_path.with_file_name(name));
-                        let planned = gio::File::for_path(&plan.written_path);
-                        renamed.extend(renamed_item(&requested, &planned, cause));
+                        let saved_as = if aliased {
+                            transferred.target.clone()
+                        } else {
+                            gio::File::for_path(&plan.written_path)
+                        };
+                        renamed.extend(renamed_item(&requested, &saved_as, cause));
                     }
                     if let Some(progress) = &copying.progress {
                         progress.finish_item(
@@ -1243,6 +1247,70 @@ async fn execute_parallel_copy_plans(
         }
     }
     outcome
+}
+
+async fn transfer_planned(
+    plan: &ParallelCopyPlan,
+    taken: Taken,
+    moving: bool,
+    cancellable: &gio::Cancellable,
+    copying: &Copying,
+) -> Result<Transferred, glib::Error> {
+    if moving {
+        let source = gio::File::for_path(&plan.source_path);
+        let target = gio::File::for_path(&plan.written_path);
+        return move_owing(source, target, taken, cancellable.clone(), copying.clone()).await;
+    }
+    let options = copy_engine::Options {
+        names: copying.names.clone(),
+        ..copy_engine::Options::default()
+    };
+    let copied = copy_engine::copy_local(
+        plan.source_path.clone(),
+        copy_engine::Destination::New(plan.written_path.clone(), taken),
+        options,
+        copying.progress.clone(),
+        cancellable,
+    )
+    .await?;
+    Ok(Transferred {
+        target: gio::File::for_path(plan.written_path.with_file_name(copied.name)),
+        reported: copied.reported,
+        owed: Owed::default(),
+    })
+}
+
+/// Whether `target` holds an item that an earlier one of the paste was saved as under another
+/// spelling, as a case-insensitive destination whose rules do not fold shows only by "exists".
+async fn taken_by_paste(target: &gio::File, saved: &[PathBuf]) -> bool {
+    let Some(path) = target.path() else {
+        return false;
+    };
+    let earlier = saved
+        .iter()
+        .filter(|earlier| {
+            earlier.parent() == path.parent() && earlier.file_name() != path.file_name()
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    if earlier.is_empty() {
+        return false;
+    }
+    gio::spawn_blocking(move || {
+        let identity = |path: &Path| {
+            let dir = open_local_parent_directory(path.parent()?).ok()?;
+            fs().stat(Entry::new(&dir, path.file_name()?), false)
+                .ok()
+                .map(|stat| stat.identity)
+        };
+        identity(&path).is_some_and(|found| {
+            earlier
+                .iter()
+                .any(|earlier| identity(earlier) == Some(found))
+        })
+    })
+    .await
+    .unwrap_or(false)
 }
 
 async fn first_free_target<T, F: Future<Output = Result<T, glib::Error>>>(
@@ -3051,6 +3119,7 @@ impl OperationProvider for LocalOperationProvider {
                     None => false,
                 };
             let mut written_paths = Vec::new();
+            let mut saved = Vec::new();
             for (index, item) in request.items.iter().enumerate() {
                 if operation_cancellable.is_cancelled() || settling.failure().is_some() {
                     settling.finish().await;
@@ -3122,11 +3191,12 @@ impl OperationProvider for LocalOperationProvider {
                     );
                     continue;
                 }
-                let taken = if needs_unique_target {
+                let mut taken = if needs_unique_target {
                     Taken::Number
                 } else {
                     Taken::Fail
                 };
+                let mut aliased = false;
                 affected_locations.insert(item.source.clone());
                 let default_location = location_for_file(&target);
                 if let Some(target) = default_location.clone() {
@@ -3228,31 +3298,46 @@ impl OperationProvider for LocalOperationProvider {
                     )
                     .await
                     .map(|owed| (target, owed))
-                } else if request.move_sources {
-                    move_owing(
-                        source,
-                        target,
-                        taken,
-                        operation_cancellable.clone(),
-                        copying.clone(),
-                    )
-                    .await
-                    .map(|moved| (moved.target, moved.owed))
                 } else {
-                    copy_new_with_ownership(
-                        source,
-                        target,
-                        taken,
-                        operation_cancellable.clone(),
-                        Some(progress.clone()),
-                        names.clone(),
-                        None,
-                    )
-                    .await
-                    .map(|(target, ownership)| {
-                        copied_ownership = ownership;
-                        (target, Owed::default())
-                    })
+                    loop {
+                        let result = if request.move_sources {
+                            move_owing(
+                                source.clone(),
+                                target.clone(),
+                                taken,
+                                operation_cancellable.clone(),
+                                copying.clone(),
+                            )
+                            .await
+                            .map(|moved| (moved.target, moved.owed))
+                        } else {
+                            copy_new_with_ownership(
+                                source.clone(),
+                                target.clone(),
+                                taken,
+                                operation_cancellable.clone(),
+                                Some(progress.clone()),
+                                names.clone(),
+                                None,
+                            )
+                            .await
+                            .map(|(target, ownership)| {
+                                copied_ownership = ownership;
+                                (target, Owed::default())
+                            })
+                        };
+                        match result {
+                            Err(error)
+                                if taken == Taken::Fail
+                                    && error.matches(gio::IOErrorEnum::Exists)
+                                    && taken_by_paste(&target, &saved).await =>
+                            {
+                                taken = Taken::Number;
+                                aliased = true;
+                            }
+                            result => break result,
+                        }
+                    }
                 };
                 if let Err(error) = &result
                     && let Some(kind) = unheld(error)
@@ -3306,24 +3391,20 @@ impl OperationProvider for LocalOperationProvider {
                 if let Some(target) = target_location.clone() {
                     affected_locations.insert(target);
                 }
-                if let (Some(planned), Some(name)) = (
-                    planned[index]
-                        .as_ref()
-                        .filter(|planned| planned.cause.is_some()),
-                    transfer_source_name(&sources[index]),
-                ) {
+                saved.extend(target.path());
+                let cause = planned[index]
+                    .as_ref()
+                    .and_then(|planned| planned.cause)
+                    .or(aliased.then_some(RenameCause::Alias));
+                if let (Some(cause), Some(name)) = (cause, transfer_source_name(&sources[index])) {
                     // Keep Both's numbers go unreported; the engine reports a
                     // name the mount refused from the planned one.
-                    let saved_as = match taken {
-                        Taken::Fail => destination.child(&planned.target),
-                        Taken::Number => target.clone(),
+                    let saved_as = match (taken, &planned[index]) {
+                        (Taken::Fail, Some(planned)) => destination.child(&planned.target),
+                        _ => target.clone(),
                     };
                     progress.report(TransferReport {
-                        renamed: planned
-                            .cause
-                            .and_then(|cause| {
-                                renamed_item(&destination.child(name), &saved_as, cause)
-                            })
+                        renamed: renamed_item(&destination.child(name), &saved_as, cause)
                             .into_iter()
                             .collect(),
                         ..TransferReport::default()

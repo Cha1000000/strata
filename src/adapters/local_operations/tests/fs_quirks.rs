@@ -711,6 +711,9 @@ struct Scope {
     root: PathBuf,
     own_device: bool,
     state: Mutex<State>,
+    /// Makes looking a name up and creating it one step, as a filesystem that
+    /// compares names itself does.
+    naming: Mutex<()>,
 }
 
 struct State {
@@ -754,6 +757,7 @@ impl FsQuirks {
             id: NEXT_SCOPE.fetch_add(1, Ordering::Relaxed),
             root: root.canonicalize().unwrap_or_else(|_| root.to_path_buf()),
             own_device: quirks.own_device,
+            naming: Mutex::new(()),
             state: Mutex::new(State {
                 quirks,
                 calls: Vec::new(),
@@ -867,6 +871,15 @@ impl Scope {
 
     fn state(&self) -> MutexGuard<'_, State> {
         self.state.lock().unwrap_or_else(|error| error.into_inner())
+    }
+
+    fn naming(&self) -> Option<MutexGuard<'_, ()>> {
+        let compares = self.quirk(|quirks| quirks.case_insensitive || quirks.stored_as.is_some());
+        compares.then(|| {
+            self.naming
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+        })
     }
 
     fn run<T>(
@@ -1167,6 +1180,7 @@ impl Scope {
         at: Entry<'_>,
         create: impl FnOnce(Entry<'_>) -> Result<T, Errno>,
     ) -> Result<T, Errno> {
+        let _naming = self.naming();
         if let Some(errno) = self.refusal(at.name) {
             return Err(errno);
         }
@@ -1188,6 +1202,7 @@ impl Scope {
     }
 
     fn rename(&self, from: Entry<'_>, to: Entry<'_>, flags: RenameFlags) -> Result<(), Errno> {
+        let _naming = self.naming();
         let (rename_flags, exchange, over_empty) = self.quirk(|quirks| {
             (
                 quirks.rename_flags,
@@ -1279,6 +1294,7 @@ impl Scope {
     }
 
     fn link(&self, from: Entry<'_>, to: Entry<'_>) -> Result<(), Errno> {
+        let _naming = self.naming();
         if self.invalid(to.name).is_some() {
             return Err(Errno::PERM);
         }
