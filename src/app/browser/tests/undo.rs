@@ -993,7 +993,6 @@ fn a_merge_undo_removes_merged_items_under_the_names_they_were_saved_as() {
             ..Default::default()
         },
     });
-    // What the copy placed is recorded under the names it was saved as.
     let placed = HashMap::from([
         (saved_as.clone(), PlacedSnapshot::new(())),
         (numbered.clone(), PlacedSnapshot::new(())),

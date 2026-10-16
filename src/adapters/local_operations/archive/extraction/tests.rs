@@ -1324,8 +1324,6 @@ enum Member<'a> {
     Hard(&'a str),
 }
 
-/// Extracts `members` of the archive `archive` into `destination`, as the
-/// TAR decoder feeds them, and finishes as `ending` says.
 fn extract_members(
     destination: &Path,
     archive: &str,
@@ -1351,7 +1349,6 @@ fn extract_members(
     })
 }
 
-/// Every entry beneath `folder`, folders ending in `/`.
 fn entries(folder: &Path) -> Result<Vec<String>, Box<dyn Error>> {
     let mut entries = Vec::new();
     let mut pending = vec![folder.to_path_buf()];

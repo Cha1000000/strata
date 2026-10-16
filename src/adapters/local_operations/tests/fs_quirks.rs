@@ -182,7 +182,6 @@ pub(crate) struct Quirks {
     pub folder_name_limit: Option<(usize, Errno)>,
     pub symlinks: Support,
     pub fs_type: Option<FsWord>,
-    /// `f_namelen`.
     pub name_max: Option<u32>,
     pub trash: Trash,
     /// Reports the first inode number seen at each matching name for whatever
@@ -203,7 +202,6 @@ pub(crate) struct Quirks {
     /// Runs once, after the matching call after skipping the given number of matches.
     pub after: Vec<(Op, &'static str, usize, Racer)>,
     pub mount_type: Option<(&'static str, &'static str)>,
-    /// The folder of its filesystem a bind mount shows; `/` otherwise.
     pub mount_root: Option<&'static str>,
     pub device_format: Option<&'static str>,
     pub tmpfile: Support,
@@ -342,7 +340,6 @@ impl Quirks {
         }
     }
 
-    /// The kernel's exFAT, which lacks what vfat lacks.
     pub(crate) fn exfat() -> Self {
         Self {
             mount_type: Some(("exfat", EXFAT_OPTIONS)),
@@ -1003,7 +1000,6 @@ impl Scope {
             .map(|(_, errno)| errno)
     }
 
-    /// Why creating `name` fails, before anything is created.
     fn refusal(&self, name: &OsStr) -> Option<Errno> {
         self.invalid(name)
             .or_else(|| self.too_long(name, |quirks| quirks.name_limit))
@@ -1371,8 +1367,6 @@ fn scope_for(dir: BorrowedFd<'_>) -> Option<Arc<Scope>> {
         .cloned()
 }
 
-/// The device of what is at `path`, where the innermost scope holding it
-/// that has [`Quirks::own_device`] gives it one.
 fn own_device(path: &Path) -> Option<u64> {
     scopes()
         .iter()
@@ -1381,7 +1375,6 @@ fn own_device(path: &Path) -> Option<u64> {
         .map(|scope| u64::from(u32::MAX) - scope.id)
 }
 
-/// The device GIO reports for `file`, as the seam reports it.
 pub(crate) fn gio_device(file: &gio::File, device: Option<u64>) -> Option<u64> {
     file.path()
         .and_then(|path| own_device(&path.canonicalize().unwrap_or(path)))

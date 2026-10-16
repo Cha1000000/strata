@@ -1880,7 +1880,6 @@ fn cancelling_an_operation_keeps_the_live_local_listing_visible() {
 
 type Notify = Rc<dyn Fn(crate::services::DirectoryChange)>;
 
-/// Local listings with every folder but `unwatched` reported as watched.
 struct Folders {
     unwatched: Location,
     loads: RefCell<Vec<Location>>,
@@ -3385,8 +3384,6 @@ fn keeping_both_on_a_move_puts_the_item_beside_the_other_and_undo_moves_it_back(
     );
 }
 
-/// The row a transfer shows, which is docked for a copy and a modal for a
-/// move, unless it is going away.
 fn transfer_row_shown(overlay: &gtk::Overlay, moving: bool) -> bool {
     if moving {
         visible_widget(overlay, |layer: &gtk::Box| {

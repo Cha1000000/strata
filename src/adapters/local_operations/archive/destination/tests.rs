@@ -19,7 +19,6 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-/// Makes the file member `path` as an extraction does, with names of its own.
 fn put_file(
     destination: &ExtractionDestination,
     path: impl AsRef<Path>,

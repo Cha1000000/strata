@@ -2341,7 +2341,6 @@ type UndoParts = (
     HashMap<Location, PlacedSnapshot>,
 );
 
-/// What undo is given of a merge, from what it reported.
 fn undo_parts(plans: Vec<MergePlan>) -> UndoParts {
     let mut parts = UndoParts::default();
     for plan in plans {
@@ -2422,7 +2421,6 @@ fn a_merge_undo_deletes_only_what_the_merge_left_unchanged() -> Result<(), Box<d
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
         .lock()
         .map_err(|error| error.to_string())?;
-    // What happened to the merged a.txt after the merge.
     for change in ["untouched", "linked", "edited", "touched", "replaced"] {
         let root = tempfile::tempdir()?;
         let source = root.path().join("source");
@@ -2773,7 +2771,6 @@ fn a_merge_undo_cancelled_while_it_compares_an_item_leaves_it_whole() -> Result<
         .map_err(|error| error.to_string())?;
     let epoch = SystemTime::UNIX_EPOCH;
     let seconds = SystemTime::now().duration_since(epoch)?.as_secs() / 2 * 2;
-    // Whether an item it kept as edited came first.
     for after_a_kept_item in [false, true] {
         let _clock =
             ClockGuard::set(epoch + Duration::from_secs(seconds) + Duration::from_millis(500));
@@ -2920,7 +2917,6 @@ fn an_undo_keeps_what_a_cancel_stopped_the_operation_from_recording() -> Result<
     let epoch = SystemTime::UNIX_EPOCH;
     let seconds = SystemTime::now().duration_since(epoch)?.as_secs() / 2 * 2;
     let _clock = ClockGuard::set(epoch + Duration::from_secs(seconds) + Duration::from_millis(500));
-    // While the record reads a file back, or walks a folder.
     for (folder, op, name) in [(false, Op::Read, "placed"), (true, Op::Stat, "sub")] {
         let root = tempfile::tempdir()?;
         let placed = root.path().join("placed");

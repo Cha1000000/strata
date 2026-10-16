@@ -993,7 +993,6 @@ fn a_selected_named_pipe_is_recreated_where_the_destination_can() -> Result<(), 
     Ok(())
 }
 
-/// A made-up mount that refuses each link with `EPERM`.
 fn links_refused_as_not_permitted() -> Quirks {
     Quirks {
         symlinks: Support::Rejected(Errno::PERM),
@@ -1001,7 +1000,6 @@ fn links_refused_as_not_permitted() -> Quirks {
     }
 }
 
-/// As ntfs3 refuses a malformed target.
 fn ntfs3_refusing_targets_as_invalid() -> Quirks {
     Quirks {
         symlinks: Support::Rejected(Errno::INVAL),
@@ -1009,7 +1007,6 @@ fn ntfs3_refusing_targets_as_invalid() -> Quirks {
     }
 }
 
-/// As ntfs3 refuses a 4095-byte target.
 fn ntfs3_refusing_targets_as_too_large() -> Quirks {
     Quirks {
         symlinks: Support::Rejected(Errno::FBIG),
@@ -1017,7 +1014,6 @@ fn ntfs3_refusing_targets_as_too_large() -> Quirks {
     }
 }
 
-/// As ntfs-3g refuses a malformed target.
 fn ntfs_3g_refusing_targets_as_illegal() -> Quirks {
     Quirks {
         symlinks: Support::Rejected(Errno::ILSEQ),
@@ -1025,7 +1021,6 @@ fn ntfs_3g_refusing_targets_as_illegal() -> Quirks {
     }
 }
 
-/// As exfat-fuse is where udev cannot name its device.
 fn exfat_fuse_without_udev() -> Quirks {
     Quirks {
         device_format: None,
@@ -1042,7 +1037,6 @@ fn cifs_posix_refusing_links_for_space() -> Quirks {
     }
 }
 
-/// How a destination takes the symbolic links of a copied folder.
 struct Links {
     label: &'static str,
     quirks: Preset,
@@ -1191,15 +1185,11 @@ fn links_inside_a_copied_folder_are_left_out_where_the_destination_cannot_hold_t
     Ok(())
 }
 
-/// Two selected symbolic links pasted, before a file, onto a destination
-/// that cannot hold them.
 struct SelectedLinks {
     label: &'static str,
     quirks: Preset,
     moving: bool,
-    /// Whether a file at the second link's name is to be replaced.
     replacing: bool,
-    /// How many links the paste asks the mount for.
     asked: usize,
 }
 
@@ -1982,7 +1972,6 @@ fn refuses_colons_as_missing(name: &OsStr) -> Option<Errno> {
         .then_some(Errno::NOENT)
 }
 
-/// Pastes `items` into `destination`, which they are not on.
 fn paste_into(destination: &Path, items: &[PathBuf]) -> Vec<OperationEvent> {
     run_paste(PasteRequest {
         id: OperationRequestId(1590),
@@ -1999,7 +1988,6 @@ fn paste_into(destination: &Path, items: &[PathBuf]) -> Vec<OperationEvent> {
     })
 }
 
-/// What a paste brings onto a mount that refuses some names.
 struct Refusing {
     label: &'static str,
     quirks: Preset,

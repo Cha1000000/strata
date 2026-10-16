@@ -477,7 +477,6 @@ fn a_transfer_reports_its_items_once_after_it_ends() {
                 assert!(browser.background_file_operation(id));
             }
             operations.emit(id, report("README"));
-            // The same item then saved under yet another name.
             let mut again = renamed("README (1)");
             again.renamed[0].saved_as = Location::local("/fixture/destination/folder/README (2)");
             again.renamed[0].cause = crate::services::RenameCause::Taken;

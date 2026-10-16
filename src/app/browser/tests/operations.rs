@@ -509,7 +509,6 @@ fn a_stopped_transfer_reloads_its_destination_once() {
         let loaded = source.loads.get();
 
         operations.emit(id, ending(id));
-        // What the view does once the progress closes.
         for event in events.take() {
             match crate::test_support::operations::operation_event(&event) {
                 BrowserEvent::OperationCancelled {

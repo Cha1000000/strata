@@ -1147,9 +1147,6 @@ fn undoing_a_move_gives_back_names_numbered_as_aliases() -> Result<(), Box<dyn E
     Ok(())
 }
 
-/// Moves `project` out of `origin` onto a vfat stick at `usb`, which fixes
-/// the names it cannot store, and returns the move's undo record as the
-/// browser keeps it.
 fn moved_onto_fat(project: &Path, usb: &Path) -> MoveRecord {
     let moved = run_paste(PasteRequest {
         id: OperationRequestId(1590),
@@ -1363,7 +1360,6 @@ fn undoing_a_move_back_to_another_kind_of_location_gives_fixed_names_back()
     }
     let _usb = FsQuirks::install(&usb, Quirks::vfat());
     let mut record = moved_onto_fat(&project, &usb);
-    // Names another item took meanwhile, and names GIO cannot give back.
     let moved = usb.join("project");
     let entry = |requested: OsString, saved_as: &str, cause| RenamedItem {
         requested: Location::local(moved.join(requested)),

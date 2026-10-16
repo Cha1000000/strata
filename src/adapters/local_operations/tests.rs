@@ -72,12 +72,10 @@ impl Drop for CopyActivity {
     }
 }
 
-/// Names fixed, as forward transfers fix them.
 fn fixing() -> NamePolicy {
     NamePolicy::new(NameMode::Fix)
 }
 
-/// A copy that fixes names, as forward transfers do.
 fn copy_recursively_fixing(
     source: gio::File,
     target: gio::File,
@@ -105,7 +103,6 @@ fn copy_recursively_fixing(
     })
 }
 
-/// A progress tracker that keeps what it emits.
 fn recording_progress() -> (
     Rc<TransferProgressTracker>,
     Rc<RefCell<Vec<OperationEvent>>>,
@@ -121,7 +118,6 @@ fn recording_progress() -> (
     (progress, events)
 }
 
-/// Everything `events` report, with renames followed as the browser does.
 fn followed_report(events: &[OperationEvent]) -> crate::services::TransferReport {
     let mut reported = crate::services::TransferReport::default();
     for event in events {
@@ -133,8 +129,6 @@ fn followed_report(events: &[OperationEvent]) -> crate::services::TransferReport
     reported
 }
 
-/// The renames of `report` beneath `target`, relative to it, in the order
-/// of the names asked for.
 pub(super) fn renamed_beneath(
     target: &Path,
     report: &crate::services::TransferReport,
@@ -214,7 +208,6 @@ use crate::{
     },
 };
 
-/// Sets the time the copy engine's waits pretend it is, until dropped.
 struct ClockGuard;
 
 impl ClockGuard {
@@ -230,7 +223,6 @@ impl Drop for ClockGuard {
     }
 }
 
-/// Limits how many entries an operation records of what it placed.
 struct PlacedEntriesGuard;
 
 impl PlacedEntriesGuard {
@@ -377,7 +369,6 @@ fn merge_reporting(
     reporting(source, destination, workers_only(workers))
 }
 
-/// Records what is at each path as an operation that just put it there would.
 fn placed_now(paths: &[&Path]) -> HashMap<Location, PlacedSnapshot> {
     paths
         .iter()
@@ -545,10 +536,8 @@ fn rename(path: &Path, new_name: &str) -> Vec<OperationEvent> {
     })
 }
 
-/// Has the main thread cancel the operation the first time a racer runs, and
-/// holds that racer's worker until it did, as a user's cancel lands while the
-/// worker is inside an item. `None` until a racer runs, then whether the
-/// cancel was made.
+/// Cancels from the main thread the first time a racer runs, holding that racer's worker
+/// until then, as a user's cancel lands while the worker is inside an item.
 #[derive(Clone, Default)]
 struct CancelFromMain(Arc<(std::sync::Mutex<Option<bool>>, std::sync::Condvar)>);
 
@@ -567,7 +556,6 @@ impl CancelFromMain {
         })
     }
 
-    /// Holds its worker until the cancel was made.
     fn waiter(&self) -> fs_quirks::Racer {
         let this = self.clone();
         Box::new(move || {

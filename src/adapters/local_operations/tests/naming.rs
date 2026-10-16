@@ -20,7 +20,6 @@ use crate::{
     services::RenameCause,
 };
 
-/// The rules of vfat as udisks mounts it.
 fn fat() -> NameProfile {
     MountType {
         fs_type: "vfat".to_owned(),
@@ -710,7 +709,6 @@ fn transfer_targets_resolve_trash_leaf_names() {
     );
 }
 
-/// The rules a destination's profile gives its names.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Rules {
     Posix,
@@ -724,7 +722,6 @@ enum Rules {
     Mtp,
     /// GVfs, through libsmbclient, which maps nothing.
     GvfsSmb,
-    /// A GVfs bridge folder whose backend is unknown.
     AnyGvfs,
 }
 
@@ -751,7 +748,6 @@ const LAB_MOUNTS: [(&str, Preset, Rules); 13] = [
 struct Row {
     name: OsString,
     folder: bool,
-    /// The name each kind of mount gets instead, where it gets another.
     fixed: Vec<(&'static [Rules], String, RenameCause)>,
 }
 
@@ -971,7 +967,6 @@ fn each_mount_gets_a_name_it_stores_as_is_for_every_lab_name() -> Result<(), Box
     Ok(())
 }
 
-/// What a lab mount did with a name it was given as is.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Lab {
     Stored,

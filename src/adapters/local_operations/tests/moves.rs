@@ -811,7 +811,6 @@ fn a_move_leaves_special_files_it_cannot_copy_at_the_source() -> Result<(), Box<
     Ok(())
 }
 
-/// A folder holding `notes.txt`, `sub/b.txt` and a link beside each.
 fn folder_with_links(folder: &Path) -> io::Result<()> {
     fs::create_dir_all(folder.join("sub"))?;
     fs::write(folder.join("notes.txt"), b"notes")?;
