@@ -16,6 +16,7 @@ use gtk::prelude::*;
 use gtk::{glib, graphene};
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
+use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 use std::rc::{Rc, Weak};
 use std::time::Duration;
@@ -209,9 +210,16 @@ pub(crate) struct PreparedFileDrop {
     pub state: Rc<FileDropState>,
 }
 
+#[derive(Clone)]
+pub(crate) struct DragSnapshot {
+    pub locations: Rc<[Location]>,
+    /// Locations with display names, present only when every entry is a directory.
+    pub folders: Option<Rc<[(Location, String)]>>,
+}
+
 struct ActiveDrag {
     content: glib::WeakRef<gtk::gdk::ContentProvider>,
-    locations: Rc<[Location]>,
+    snapshot: DragSnapshot,
 }
 
 thread_local! {
@@ -221,12 +229,19 @@ thread_local! {
 /// Only trusted when the drop carries the provider this process created; foreign
 /// drops and stale entries fall back to the dropped value.
 fn active_drag_locations(target: &gtk::DropTarget) -> Option<Rc<[Location]>> {
-    let content = target.current_drop()?.drag()?.content();
+    active_drag_snapshot(&target.current_drop()?).map(|snapshot| snapshot.locations)
+}
+
+pub(crate) fn active_drag_snapshot(drop: &gtk::gdk::Drop) -> Option<DragSnapshot> {
+    drag_snapshot_for_content(&drop.drag()?.content())
+}
+
+fn drag_snapshot_for_content(content: &gtk::gdk::ContentProvider) -> Option<DragSnapshot> {
     ACTIVE_DRAG.with(|cell| {
         cell.borrow()
             .as_ref()
-            .filter(|active| active.content.upgrade().as_ref() == Some(&content))
-            .map(|active| active.locations.clone())
+            .filter(|active| active.content.upgrade().as_ref() == Some(content))
+            .map(|active| active.snapshot.clone())
     })
 }
 
@@ -767,7 +782,15 @@ pub(in crate::ui) fn file_drag_content(entries: &[FileEntry]) -> Option<gtk::gdk
     ACTIVE_DRAG.with(|cell| {
         *cell.borrow_mut() = Some(ActiveDrag {
             content: content.downgrade(),
-            locations,
+            snapshot: DragSnapshot {
+                locations,
+                folders: entries.iter().all(FileEntry::is_directory).then(|| {
+                    entries
+                        .iter()
+                        .map(|entry| (entry.location.clone(), entry.display_name.clone()))
+                        .collect()
+                }),
+            },
         });
     });
     Some(content)
@@ -809,21 +832,61 @@ pub(super) fn copy_path_text(location: &Location, is_directory: bool) -> String 
 }
 
 fn shell_escape_path(path: &Path) -> String {
-    let path = path.to_string_lossy();
+    let bytes = path.as_os_str().as_bytes();
+    let Ok(path) = std::str::from_utf8(bytes) else {
+        return bytes
+            .split(|&byte| byte == b'/')
+            .map(|segment| match std::str::from_utf8(segment) {
+                Ok(segment) if !segment.contains('\n') => backslash_escape(segment),
+                _ => ansi_c_quote(segment),
+            })
+            .collect::<Vec<_>>()
+            .join("/");
+    };
     if path.contains('\n') {
         return format!("'{}'", path.replace('\'', "'\\''"));
     }
+    backslash_escape(path)
+}
 
-    let mut escaped = String::new();
-    for c in path.chars() {
+fn backslash_escape(text: &str) -> String {
+    let mut escaped = String::with_capacity(text.len());
+    for c in text.chars() {
         if needs_shell_escape(c) {
             escaped.push('\\');
-            escaped.push(c);
-        } else {
-            escaped.push(c);
         }
+        escaped.push(c);
     }
     escaped
+}
+
+fn ansi_c_quote(bytes: &[u8]) -> String {
+    let mut quoted = String::from("$'");
+    for chunk in bytes.utf8_chunks() {
+        for c in chunk.valid().chars() {
+            match c {
+                '\'' | '\\' => {
+                    quoted.push('\\');
+                    quoted.push(c);
+                }
+                c if c.is_control() => {
+                    push_hex_escapes(&mut quoted, c.encode_utf8(&mut [0; 4]).as_bytes())
+                }
+                c => quoted.push(c),
+            }
+        }
+        push_hex_escapes(&mut quoted, chunk.invalid());
+    }
+    quoted.push('\'');
+    quoted
+}
+
+fn push_hex_escapes(text: &mut String, bytes: &[u8]) {
+    use std::fmt::Write;
+
+    for byte in bytes {
+        let _ = write!(text, "\\x{byte:02x}");
+    }
 }
 
 fn needs_shell_escape(c: char) -> bool {
@@ -874,6 +937,7 @@ pub(crate) fn mark_in(marks: &ClipboardMarks, location: &Location) -> ClipboardM
 thread_local! {
     static SHARED_CUT_LOCATIONS: RefCell<Vec<Location>> = const { RefCell::new(Vec::new()) };
     static SHARED_COPY_LOCATIONS: RefCell<Vec<Location>> = const { RefCell::new(Vec::new()) };
+    static SHARED_MARK_INDEX: RefCell<ClipboardMarks> = RefCell::new(ClipboardMarks::new());
     static OWNED_FILE_PROVIDER: RefCell<Option<gtk::gdk::ContentProvider>> = const { RefCell::new(None) };
     static CUT_VIEWS: RefCell<Vec<Weak<ViewState>>> = const { RefCell::new(Vec::new()) };
     static WATCHING_OWNERSHIP: Cell<bool> = const { Cell::new(false) };
@@ -914,6 +978,7 @@ fn owns_clipboard(clipboard: &gtk::gdk::Clipboard) -> bool {
 }
 
 fn refresh_cut_views() {
+    index_shared_marks();
     let views = CUT_VIEWS.with(|views| {
         let mut views = views.borrow_mut();
         let live = views.iter().filter_map(Weak::upgrade).collect::<Vec<_>>();
@@ -930,18 +995,35 @@ pub(crate) fn set_mark_result_style(row: &gtk::Box, location: &Location) {
 }
 
 pub(crate) fn clipboard_mark(location: &Location) -> ClipboardMark {
-    let listed = |locations: Vec<Location>| {
-        locations
-            .iter()
-            .any(|marked| locations_equal(marked, location))
-    };
-    if listed(shared_cut_locations()) {
-        ClipboardMark::Cut
-    } else if listed(shared_copy_locations()) {
-        ClipboardMark::Copy
-    } else {
-        ClipboardMark::None
+    SHARED_MARK_INDEX.with_borrow(|index| {
+        if index.is_empty() {
+            return ClipboardMark::None;
+        }
+        match file_uri_as_native(location) {
+            Some(native) => mark_in(index, &native),
+            None => mark_in(index, location),
+        }
+    })
+}
+
+fn file_uri_as_native(location: &Location) -> Option<Location> {
+    let uri = location
+        .uri_value()
+        .filter(|uri| uri.starts_with("file:"))?;
+    gtk::gio::File::for_uri(uri).path().map(Location::local)
+}
+
+fn index_shared_marks() {
+    let mut index = ClipboardMarks::new();
+    for (locations, mark) in [
+        (shared_copy_locations(), ClipboardMark::Copy),
+        (shared_cut_locations(), ClipboardMark::Cut),
+    ] {
+        for location in locations {
+            index.insert(file_uri_as_native(&location).unwrap_or(location), mark);
+        }
     }
+    SHARED_MARK_INDEX.with(|shared| shared.replace(index));
 }
 
 fn shared_marks() -> ClipboardMarks {

@@ -28,6 +28,12 @@ thread_local! {
     static MOUNTS: RefCell<Option<MountCache>> = const { RefCell::new(None) };
 }
 
+pub(crate) fn watch_operation_mounts() {
+    MOUNTS.with(|cache| {
+        cache.borrow_mut().get_or_insert_with(watch_mounts);
+    });
+}
+
 pub(crate) fn with_mount_snapshot<T>(read: impl FnOnce(&MountSnapshot) -> T) -> T {
     MOUNTS.with(|cache| {
         let mut cache = cache.borrow_mut();

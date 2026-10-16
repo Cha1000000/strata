@@ -152,8 +152,12 @@ fn sections(
                 for entry in &entries {
                     append_row_model(&entries_model, entry, None, &mut row_context);
                 }
+                // Alone in a nested section, which adds no separator, the header is
+                // shown and hidden by adding and removing it.
+                let holder = gio::Menu::new();
                 let section = sections.last().expect("initial section");
-                append_row_model(section, &header, Some(&entries_model), &mut row_context);
+                section.append_section(None, &holder);
+                append_row_model(&holder, &header, Some(&entries_model), &mut row_context);
             }
         }
     }
@@ -180,11 +184,15 @@ fn append_row_model(
         dispatch.defer(move || activated.emit_clicked());
     });
     let item = gio::MenuItem::new(None, Some(&format!("builtin.{name}")));
-    item.set_attribute_value("hidden-when", Some(&"action-missing".to_variant()));
-    update_item(&item, button);
+    // GTK hides these items when unparenting the menu reports their actions
+    // removed. A hidden submenu item frees its entries' trackers while GTK is
+    // still iterating them, so the submenu item is removed from the model instead.
     if let Some(submenu) = submenu {
         item.set_submenu(Some(submenu));
+    } else {
+        item.set_attribute_value("hidden-when", Some(&"action-missing".to_variant()));
     }
+    update_item(&item, button);
     let index = model.n_items();
     model.append_item(&item);
     if let Some(transfer_index) = context
@@ -194,6 +202,7 @@ fn append_row_model(
         context.transfer_sections[transfer_index] = Some(model.clone());
     }
 
+    let shown_item = submenu.is_some().then(|| item.clone());
     let weak_button = button.downgrade();
     let weak_section = model.downgrade();
     let weak_popover = context.popover.downgrade();
@@ -208,8 +217,11 @@ fn append_row_model(
         }
         if let (Some(button), Some(section)) = (weak_button.upgrade(), weak_section.upgrade()) {
             update_item(&item, &button);
-            section.remove(index);
-            section.insert_item(index, &item);
+            // A hidden submenu item is out of its model until it is shown again.
+            if section.n_items() > index {
+                section.remove(index);
+                section.insert_item(index, &item);
+            }
             if let Some(popover) = weak_popover.upgrade() {
                 super::actions::refresh_presentation(&popover, &navigation_for_refresh);
                 navigation_for_refresh.model_changed();
@@ -238,6 +250,7 @@ fn append_row_model(
     let weak_button = button.downgrade();
     let weak_group = context.group.downgrade();
     let weak_action = action.downgrade();
+    let weak_section = model.downgrade();
     let weak_popover = context.popover.downgrade();
     let navigation = context.navigation.clone();
     context.updates.push(refresh);
@@ -264,6 +277,14 @@ fn append_row_model(
                 group.add_action(&action);
             } else if !visible && group.has_action(action.name().as_str()) {
                 group.remove_action(action.name().as_str());
+            }
+            if let (Some(item), Some(section)) = (&shown_item, weak_section.upgrade()) {
+                let shown = section.n_items() > index;
+                if visible && !shown {
+                    section.insert_item(index, item);
+                } else if !visible && shown {
+                    section.remove(index);
+                }
             }
             if let Some(popover) = weak_popover.upgrade() {
                 super::actions::refresh_presentation(&popover, &navigation);

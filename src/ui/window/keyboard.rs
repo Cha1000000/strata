@@ -630,9 +630,11 @@ impl Dispatcher {
             open_with_on_destroy.invalidate();
         });
         let rename_target = dispatcher.rename_target.clone();
+        let typed_name_revision = dispatcher.typed_name_revision.clone();
         let destination_targets = dispatcher.destination_targets.clone();
         let destinations = dispatcher.destinations.clone();
         dispatcher.shortcuts.connect_prompt_reset(move || {
+            typed_name_revision.set(typed_name_revision.get().wrapping_add(1));
             drop(rename_target.take());
             drop(destination_targets.take());
             destinations.cancel();

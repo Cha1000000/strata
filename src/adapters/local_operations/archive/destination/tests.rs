@@ -2,8 +2,8 @@
 
 use super::super::fixtures::names;
 use super::{
-    ExtractNameResolver, ExtractionDestination, FUSE_SUPER_MAGIC, MemberMetadata, MetadataCalls,
-    Placed, archive_stem, sanitized_archive_path,
+    ExtractNameResolver, ExtractionDestination, FUSE_SUPER_MAGIC, MemberMetadata, Placed,
+    archive_stem, sanitized_archive_path,
 };
 use crate::adapters::local_operations::tests::fs_quirks::{FsQuirks, Op, Quirks};
 use std::{
@@ -742,14 +742,6 @@ fn directory_only_staging_is_removed_but_files_keep_it() -> Result<(), Box<dyn E
     Ok(())
 }
 
-fn refusing<const ERRNO: i32>() -> MetadataCalls {
-    MetadataCalls {
-        chmod: |_, _| Err(rustix::io::Errno::from_raw_os_error(ERRNO)),
-        set_times: |_, _| Err(rustix::io::Errno::from_raw_os_error(ERRNO)),
-        set_link_times: |_, _, _| Err(rustix::io::Errno::from_raw_os_error(ERRNO)),
-    }
-}
-
 #[test]
 fn metadata_the_filesystem_cannot_store_is_skipped() -> Result<(), Box<dyn Error>> {
     use rustix::io::Errno;
@@ -758,26 +750,26 @@ fn metadata_the_filesystem_cannot_store_is_skipped() -> Result<(), Box<dyn Error
         mode: Some(0o555),
         modified: Some(modified),
     };
-    for (errno, calls, skipped) in [
-        (
-            Errno::PERM,
-            refusing::<{ Errno::PERM.raw_os_error() }>(),
-            true,
-        ),
-        (
-            Errno::OPNOTSUPP,
-            refusing::<{ Errno::OPNOTSUPP.raw_os_error() }>(),
-            true,
-        ),
-        (
-            Errno::INVAL,
-            refusing::<{ Errno::INVAL.raw_os_error() }>(),
-            true,
-        ),
-        (Errno::IO, refusing::<{ Errno::IO.raw_os_error() }>(), false),
+    for (errno, skipped) in [
+        (Errno::PERM, true),
+        (Errno::OPNOTSUPP, true),
+        (Errno::INVAL, true),
+        (Errno::IO, false),
     ] {
         let root = tempfile::tempdir()?;
-        let destination = ExtractionDestination::open(root.path())?.with_metadata_calls(calls);
+        let _quirks = FsQuirks::install(
+            root.path(),
+            Quirks {
+                fail: vec![
+                    (Op::ChmodFd, "*", 0, errno),
+                    (Op::SetTimes, "*", 0, errno),
+                    (Op::SetTimes, "*", 0, errno),
+                    (Op::SetLinkTimes, "*", 0, errno),
+                ],
+                ..Quirks::default()
+            },
+        );
+        let destination = ExtractionDestination::open(root.path())?;
         put_folder(&destination, Path::new("folder"))?;
         let (file, _) = put_file(&destination, Path::new("file.txt"))?;
 

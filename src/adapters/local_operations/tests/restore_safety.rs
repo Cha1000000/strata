@@ -916,9 +916,7 @@ fn home_trash_fallback_finds_broken_symlinks_the_virtual_backend_has_not_refresh
 
 #[test]
 fn cancelling_restore_before_io_reports_every_item_as_unattempted() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let location = Location::local("/fixture/trashed.txt");
     for (source, expected) in [
         (
@@ -1160,9 +1158,7 @@ fn a_restore_cancelled_while_it_copies_an_item_ends_as_a_cancel() -> Result<(), 
 
 #[test]
 fn restore_rejects_a_volume_orig_path_on_another_device() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let Some((home, stick)) = crate::test_support::distinct_device_dirs(
         "restore_rejects_a_volume_orig_path_on_another_device",
     ) else {
@@ -1207,9 +1203,7 @@ fn restore_rejects_a_volume_orig_path_on_another_device() -> Result<(), Box<dyn 
 
 #[test]
 fn restore_returns_a_volume_item_to_a_path_on_the_same_volume() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let fixture = tempfile::tempdir()?;
     fs::create_dir_all(fixture.path().join("Documents"))?;
     let (source, entry) = volume_trash_entry(
@@ -1249,9 +1243,7 @@ fn restore_returns_a_volume_item_to_a_path_on_the_same_volume() -> Result<(), Bo
 
 #[test]
 fn restore_fails_when_the_confirmed_destination_no_longer_matches() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let fixture = tempfile::tempdir()?;
     fs::create_dir_all(fixture.path().join("Documents"))?;
     let (source, entry) = volume_trash_entry(
@@ -1293,9 +1285,7 @@ fn restore_fails_when_the_confirmed_destination_no_longer_matches() -> Result<()
 
 #[test]
 fn restore_uses_the_trash_entry_target_path_as_the_physical_source() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let fixture = tempfile::tempdir()?;
     fs::create_dir_all(fixture.path().join("Documents"))?;
     let (source, mut entry) = volume_trash_entry(

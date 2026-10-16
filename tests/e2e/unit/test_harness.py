@@ -145,19 +145,21 @@ def test_entries_walk_each_pane_once_and_sort_visually(monkeypatch):
     assert decoy.get_role_name.call_count == 1
 
 
-def test_entries_ignore_a_recycled_row_until_its_label_matches(monkeypatch):
-    stale = _accessible(
-        role="list item",
-        name="blocked",
-        extents=(0, 30, 10, 10),
-        children=[_accessible(role="label", name="archive")],
-    )
-    ready = _accessible(
-        role="list item",
-        name="documents",
-        extents=(0, 50, 10, 10),
-        children=[_accessible(role="label", name="documents")],
-    )
+@pytest.mark.parametrize("name_column", ["plain", "first", "reordered"])
+def test_entries_ignore_a_recycled_row_until_its_label_matches(monkeypatch, name_column):
+    def row(name, label, y):
+        filename = _accessible(role="label", name=label)
+        children = [filename]
+        if name_column != "plain":
+            icon = _accessible(role="image")
+            name_cell = _accessible(children=[icon, filename])
+            icon.get_parent.return_value = name_cell
+            metadata = _accessible(role="label", name="blocked")
+            children = [metadata, name_cell] if name_column == "reordered" else [name_cell, metadata]
+        return _accessible(role="list item", name=name, extents=(0, y, 10, 10), children=children)
+
+    stale = row("blocked", "archive", 30)
+    ready = row("documents", "documents", 50)
     files = _accessible(
         role="list",
         name="root",

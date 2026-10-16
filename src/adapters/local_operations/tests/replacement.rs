@@ -62,9 +62,7 @@ fn read_item(path: &Path, directory: bool) -> Result<Vec<u8>, io::Error> {
 
 #[test]
 fn replacement_publication_preserves_concurrent_arrivals() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     for directory in [false, true] {
         let root = tempfile::tempdir()?;
         let target = root.path().join("target");
@@ -105,9 +103,7 @@ fn replacement_publication_preserves_concurrent_arrivals() -> Result<(), Box<dyn
 #[test]
 fn a_replacement_reports_what_it_left_out_only_once_it_is_published() -> Result<(), Box<dyn Error>>
 {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     for published in [true, false] {
         let root = tempfile::tempdir()?;
         let source = root.path().join("source");
@@ -172,9 +168,7 @@ fn a_replacement_reports_what_it_left_out_only_once_it_is_published() -> Result<
 
 #[test]
 fn replacement_publication_reports_a_stage_it_cannot_remove() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let target = root.path().join("target");
     fs::write(&target, b"existing")?;
@@ -206,9 +200,7 @@ fn replacement_publication_reports_a_stage_it_cannot_remove() -> Result<(), Box<
 
 #[test]
 fn staged_file_replacement_preserves_the_destination_on_disk_full() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let source = root.path().join("source.txt");
     let target = root.path().join("target.txt");
@@ -248,9 +240,7 @@ fn staged_file_replacement_preserves_the_destination_on_disk_full() -> Result<()
 #[test]
 fn cancelling_staging_preserves_the_destination_and_cleans_the_partial_copy()
 -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     for directory in [false, true] {
         let root = tempfile::tempdir()?;
         let source = root.path().join("source");
@@ -294,9 +284,7 @@ fn cancelling_staging_preserves_the_destination_and_cleans_the_partial_copy()
 
 #[test]
 fn cancelling_as_the_replacement_is_staged_keeps_the_destination() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let source = root.path().join("source.txt");
     let target = root.path().join("target.txt");
@@ -348,9 +336,7 @@ fn cancelling_as_the_replacement_is_staged_keeps_the_destination() -> Result<(),
 
 #[test]
 fn staged_file_replacement_commits_then_removes_a_moved_source() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let unique = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)?
         .as_nanos();
@@ -379,9 +365,7 @@ fn staged_file_replacement_commits_then_removes_a_moved_source() -> Result<(), B
 
 #[test]
 fn replacing_a_symlink_preserves_link_semantics() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let source = root.path().join("source-link");
     let target = root.path().join("target-link");
@@ -412,9 +396,7 @@ fn substitute(path: &Path, kept: &Path) -> Racer {
 
 #[test]
 fn replacement_move_does_not_delete_a_substituted_source() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let sources = root.path().join("sources");
     let destination = root.path().join("destination");
@@ -476,9 +458,7 @@ fn replacement_move_does_not_delete_a_substituted_source() -> Result<(), Box<dyn
 
 #[test]
 fn replace_accepts_a_symlink_in_the_sources_parent_path() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let actual_parent = root.path().join("actual");
     let linked_parent = root.path().join("linked");
@@ -505,9 +485,7 @@ fn replace_accepts_a_symlink_in_the_sources_parent_path() -> Result<(), Box<dyn 
 
 #[test]
 fn replacement_stops_before_exchanging_a_substituted_target() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let source = root.path().join("source.txt");
     let target = root.path().join("target.txt");
@@ -544,9 +522,7 @@ fn replacement_stops_before_exchanging_a_substituted_target() -> Result<(), Box<
 #[test]
 fn cancelled_replacement_move_tracks_the_modified_source_and_target_roots()
 -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let unique = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)?
         .as_nanos();
@@ -594,9 +570,7 @@ fn cancelled_replacement_move_tracks_the_modified_source_and_target_roots()
 
 #[test]
 fn staged_directory_replacement_does_not_merge_old_contents() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let unique = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)?
         .as_nanos();
@@ -627,9 +601,7 @@ fn staged_directory_replacement_does_not_merge_old_contents() -> Result<(), Box<
 #[test]
 fn replacing_a_directory_cleans_up_a_symlink_in_the_old_contents_without_following_it()
 -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let unique = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)?
         .as_nanos();
@@ -675,9 +647,7 @@ fn replacing_a_directory_cleans_up_a_symlink_in_the_old_contents_without_followi
 
 #[test]
 fn replace_without_trash_or_exchange_sets_the_original_aside() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let mounts: [(FsWord, Preset); 3] = [
         (NFS_SUPER_MAGIC, Quirks::without_rename_flags),
         (FUSE_SUPER_MAGIC, Quirks::sshfs),
@@ -708,9 +678,7 @@ fn replace_without_trash_or_exchange_sets_the_original_aside() -> Result<(), Box
 
 #[test]
 fn replace_falls_back_to_aside_when_trash_lies() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     for (trash, move_source) in [
         (Trash::FalseWithoutError, false),
         (Trash::SucceedsWithoutMoving, true),
@@ -750,9 +718,7 @@ fn replace_falls_back_to_aside_when_trash_lies() -> Result<(), Box<dyn Error>> {
 
 #[test]
 fn replace_never_uses_exchange_on_fuse() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let source = root.path().join("source");
     let target = root.path().join("target");
@@ -780,9 +746,7 @@ fn replace_never_uses_exchange_on_fuse() -> Result<(), Box<dyn Error>> {
 
 #[test]
 fn rejected_exchange_falls_back_to_aside_and_is_remembered() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let source = root.path().join("source");
     let target = root.path().join("target");
@@ -816,9 +780,7 @@ fn rejected_exchange_falls_back_to_aside_and_is_remembered() -> Result<(), Box<d
 
 #[test]
 fn a_failed_publication_puts_the_original_back() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     for (directory, quirks, op) in [
         (false, Quirks::default(), Op::Rename),
         (true, Quirks::default(), Op::Rename),
@@ -856,9 +818,7 @@ fn a_failed_publication_puts_the_original_back() -> Result<(), Box<dyn Error>> {
 
 #[test]
 fn a_taken_name_keeps_the_original_aside_and_names_it() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     // The racer writes just before the new item is published at `target`.
     let cases: [(Preset, Op, usize); 2] = [
         (Quirks::default, Op::Rename, 1),
@@ -906,9 +866,7 @@ fn a_taken_name_keeps_the_original_aside_and_names_it() -> Result<(), Box<dyn Er
 
 #[test]
 fn replace_fails_before_staging_when_no_strategy_is_safe() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let source = root.path().join("source");
     let target = root.path().join("target");
@@ -937,9 +895,7 @@ fn replace_fails_before_staging_when_no_strategy_is_safe() -> Result<(), Box<dyn
 
 #[test]
 fn the_original_is_deleted_only_once_its_replacement_is_flushed() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     for flushed in [true, false] {
         let root = tempfile::tempdir()?;
         let source = root.path().join("source");
@@ -1008,9 +964,7 @@ fn the_original_is_deleted_only_once_its_replacement_is_flushed() -> Result<(), 
 #[test]
 fn same_filesystem_replacing_move_places_the_source_without_a_stage() -> Result<(), Box<dyn Error>>
 {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let mounts: [(FsWord, Preset); 3] = [
         (NFS_SUPER_MAGIC, Quirks::default),
         (FUSE_SUPER_MAGIC, Quirks::sshfs),
@@ -1046,9 +1000,7 @@ fn same_filesystem_replacing_move_places_the_source_without_a_stage() -> Result<
 
 #[test]
 fn same_filesystem_replacing_move_refuses_a_substituted_source() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     for quirks in [Quirks::default, Quirks::without_rename_flags] {
         let root = tempfile::tempdir()?;
         let source = root.path().join("source");
@@ -1090,9 +1042,7 @@ fn same_filesystem_replacing_move_refuses_a_substituted_source() -> Result<(), B
 #[test]
 fn same_filesystem_replacing_move_restores_the_original_when_placement_fails()
 -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let source = root.path().join("source");
     let target = root.path().join("target");
@@ -1124,9 +1074,7 @@ fn same_filesystem_replacing_move_restores_the_original_when_placement_fails()
 
 #[test]
 fn a_true_alias_is_a_no_op_but_a_hard_link_elsewhere_is_replaced() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let photo = root.path().join("Photo.txt");
     let link = root.path().join("link.txt");

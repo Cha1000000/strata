@@ -40,7 +40,7 @@ fn candidate_continuation_returns_lower_ranked_hits_without_changing_default_que
     }
     let last = root.join("needle-picture-with-long-name.png");
     fs::write(&last, "body").expect("file");
-    let (handle, events) = index_filter(root.to_path_buf(), false, true);
+    let (handle, events) = index_filter(root.to_path_buf(), false, true, SearchLimits::default());
     handle.query("needle");
     let completed = || {
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -75,8 +75,10 @@ fn rename_refresh_rescores_every_session_sharing_the_index() {
     let fixture = tempfile::tempdir().expect("fixture");
     let root = fixture.path();
     fs::write(root.join("needle.txt"), "body").expect("file");
-    let (first, first_events) = index_filter(root.to_path_buf(), false, true);
-    let (second, second_events) = index_filter(root.to_path_buf(), false, true);
+    let (first, first_events) =
+        index_filter(root.to_path_buf(), false, true, SearchLimits::default());
+    let (second, second_events) =
+        index_filter(root.to_path_buf(), false, true, SearchLimits::default());
     first.query("needle");
     second.query("txt");
     await_paths(&first_events, root, &["needle.txt"]);
@@ -96,7 +98,12 @@ fn directory_rename_refresh_preserves_hidden_and_recursive_scope() {
     fs::create_dir(root.join(".needle-dir")).expect("directory");
     fs::write(root.join(".needle-dir/needle.txt"), "body").expect("file");
     let sessions = [(false, false), (false, true), (true, true)].map(|(hidden, recursive)| {
-        let (handle, events) = index_filter(root.to_path_buf(), hidden, recursive);
+        let (handle, events) = index_filter(
+            root.to_path_buf(),
+            hidden,
+            recursive,
+            SearchLimits::default(),
+        );
         handle.query("needle");
         await_paths(
             &events,
@@ -157,6 +164,7 @@ fn relocated_multi_root_indexes_follow_later_child_renames_and_new_sessions() {
             recursive,
             SearchScorer::Name(fuzzy_score_normalized),
             Vec::new(),
+            SearchLimits::default(),
         );
         handle.query("needle");
         let expected = if recursive {
@@ -186,6 +194,7 @@ fn relocated_multi_root_indexes_follow_later_child_renames_and_new_sessions() {
             recursive,
             SearchScorer::Name(fuzzy_score_normalized),
             Vec::new(),
+            SearchLimits::default(),
         );
         assert!(
             Arc::ptr_eq(&handle.index, &second.index),
@@ -227,8 +236,10 @@ fn global_exclusions_survive_rename_refresh_without_leaking_into_folder_search()
         vec![root.to_path_buf()],
         false,
         vec!["private-build".into()],
+        SearchLimits::default(),
     );
-    let (folder, folder_events) = index_filter(root.to_path_buf(), false, true);
+    let (folder, folder_events) =
+        index_filter(root.to_path_buf(), false, true, SearchLimits::default());
     global.query("needle");
     folder.query("needle");
     await_paths(&global_events, root, &["needle.txt"]);
@@ -245,8 +256,12 @@ fn global_exclusions_survive_rename_refresh_without_leaking_into_folder_search()
         root,
         &["needle-renamed.txt", "private-build/needle-hidden.txt"],
     );
-    let (unexcluded, events) =
-        index_trees_with_exclusions(vec![root.to_path_buf()], false, Vec::new());
+    let (unexcluded, events) = index_trees_with_exclusions(
+        vec![root.to_path_buf()],
+        false,
+        Vec::new(),
+        SearchLimits::default(),
+    );
     unexcluded.query("needle");
     await_paths(
         &events,
@@ -260,7 +275,7 @@ fn queued_refreshes_coalesce_to_the_latest_filesystem_state() {
     let fixture = tempfile::tempdir().expect("fixture");
     let root = fixture.path();
     fs::write(root.join("needle.txt"), "body").expect("file");
-    let (handle, events) = index_filter(root.to_path_buf(), false, true);
+    let (handle, events) = index_filter(root.to_path_buf(), false, true, SearchLimits::default());
     handle.query("needle");
     await_paths(&events, root, &["needle.txt"]);
     let traversal = REFRESH_TRAVERSAL
@@ -335,7 +350,7 @@ fn external_directory_changes_refresh_only_indexes_covering_the_directory() {
     fs::create_dir(root.join("sub")).expect("sub");
     fs::create_dir(root.join("other")).expect("other");
     let filter = |root: PathBuf, recursive: bool| {
-        let (handle, events) = index_filter(root, false, recursive);
+        let (handle, events) = index_filter(root, false, recursive, SearchLimits::default());
         handle.query("needle");
         await_paths(&events, fixture.path(), &[]);
         (handle, events)
@@ -390,11 +405,61 @@ fn external_directory_changes_refresh_only_indexes_covering_the_directory() {
 }
 
 #[test]
+fn external_changes_rescan_with_the_index_limits() {
+    let fixture = tempfile::tempdir().expect("fixture");
+    let root = fixture.path();
+    for name in ["needle-1.txt", "needle-2.txt", "needle-3.txt"] {
+        fs::write(root.join(name), "body").expect("file");
+    }
+    let (handle, events) = index_trees_with_exclusions(
+        vec![root.to_path_buf()],
+        false,
+        Vec::new(),
+        SearchLimits {
+            max_entries: Some(2),
+            ..SearchLimits::default()
+        },
+    );
+    handle.query("needle");
+    let capped_hits = |events: &Receiver<SearchEvent>| {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            assert!(Instant::now() < deadline, "query did not finish");
+            if let Ok(SearchEvent::Results {
+                items,
+                indexing: false,
+                coverage,
+                ..
+            }) = events.recv_timeout(Duration::from_millis(100))
+            {
+                assert!(coverage.entry_limit, "the walk should stop at two entries");
+                return items.len();
+            }
+        }
+    };
+    assert_eq!(capped_hits(&events), 2);
+    let before = revision(&handle);
+    fs::write(root.join("needle-4.txt"), "body").expect("file");
+    refresh_search_indexes_for_directory(root);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while revision(&handle) == before {
+        assert!(Instant::now() < deadline, "the rescan did not publish");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    handle.query("needle");
+    assert_eq!(
+        capped_hits(&events),
+        2,
+        "a rescan must keep the limits the index was opened with"
+    );
+}
+
+#[test]
 fn rescan_requests_during_a_refresh_join_it_without_cancelling_it() {
     let fixture = tempfile::tempdir().expect("fixture");
     let root = fixture.path();
     fs::write(root.join("needle.txt"), "body").expect("file");
-    let (handle, events) = index_filter(root.to_path_buf(), false, true);
+    let (handle, events) = index_filter(root.to_path_buf(), false, true, SearchLimits::default());
     handle.query("needle");
     await_paths(&events, root, &["needle.txt"]);
     let traversal = REFRESH_TRAVERSAL
@@ -426,8 +491,10 @@ fn external_moves_restart_only_indexes_whose_root_moved() {
     fs::create_dir(root.join("old")).expect("folder");
     fs::write(root.join("old/needle.txt"), "body").expect("file");
     fs::write(root.join("needle.part"), "body").expect("file");
-    let (parent, parent_events) = index_filter(root.to_path_buf(), false, true);
-    let (moved, moved_events) = index_filter(root.join("old"), false, true);
+    let (parent, parent_events) =
+        index_filter(root.to_path_buf(), false, true, SearchLimits::default());
+    let (moved, moved_events) =
+        index_filter(root.join("old"), false, true, SearchLimits::default());
     parent.query("needle");
     moved.query("needle");
     await_paths(&parent_events, root, &["needle.part", "old/needle.txt"]);
@@ -477,8 +544,12 @@ fn external_changes_skip_folders_the_walk_prunes() {
         let fixture = tempfile::tempdir().expect("fixture");
         let root = fixture.path();
         let exclusions = exclusion.map(str::to_owned).into_iter().collect();
-        let (handle, events) =
-            index_trees_with_exclusions(vec![root.to_path_buf()], false, exclusions);
+        let (handle, events) = index_trees_with_exclusions(
+            vec![root.to_path_buf()],
+            false,
+            exclusions,
+            SearchLimits::default(),
+        );
         handle.query("needle");
         await_paths(&events, root, &[]);
         let requested = rescans_requested(&handle);
@@ -495,8 +566,10 @@ fn external_changes_skip_folders_the_walk_prunes() {
 fn external_changes_rescore_every_session_sharing_the_index() {
     let fixture = tempfile::tempdir().expect("fixture");
     let root = fixture.path();
-    let (first, first_events) = index_filter(root.to_path_buf(), false, true);
-    let (second, second_events) = index_filter(root.to_path_buf(), false, true);
+    let (first, first_events) =
+        index_filter(root.to_path_buf(), false, true, SearchLimits::default());
+    let (second, second_events) =
+        index_filter(root.to_path_buf(), false, true, SearchLimits::default());
     assert!(Arc::ptr_eq(&first.index, &second.index));
     first.query("needle");
     second.query("txt");

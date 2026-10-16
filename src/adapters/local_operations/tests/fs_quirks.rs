@@ -23,16 +23,21 @@ use std::{
 
 use gtk::{gio, glib, prelude::FileExt};
 use rustix::{
-    fs::{AtFlags, FileType, FsWord, Mode, RenameFlags},
+    fs::{AtFlags, FileType, FsWord, Mode, OFlags, RenameFlags, ResolveFlags},
     io::Errno,
 };
 
 use super::super::copy_engine::{clock_for_test, forget_learned_copy_support};
+use super::super::environment::FsEnvironment;
 use super::super::fs_ops::{Entry, EntryStat, FsOps, FsStat, System, assert_off_main_thread};
 use crate::adapters::volume::{MountKey, MountSite, MountType, forget_test_mount_capabilities};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Op {
+    OpenAt,
+    OpenPath,
+    Dup,
+    StatVfs,
     Rename,
     Exchange,
     Link,
@@ -114,6 +119,8 @@ pub(crate) enum Trash {
     FalseWithoutError,
     /// TRUE, but nothing moved.
     SucceedsWithoutMoving,
+    /// A FUSE backend refuses a step of the trash protocol.
+    ProtocolRefused,
     /// Offered, but moving an item there is not supported.
     Refused,
 }
@@ -836,6 +843,13 @@ fn matches(pattern: &str, names: &[&OsStr]) -> bool {
 }
 
 impl Scope {
+    fn record_open(&self, opened: OwnedFd) -> OwnedFd {
+        let mut state = self.state();
+        let lost = state.writebacks_lost;
+        state.reported_losses.insert(opened.as_raw_fd(), lost);
+        opened
+    }
+
     fn state(&self) -> MutexGuard<'_, State> {
         self.state.lock().unwrap_or_else(|error| error.into_inner())
     }
@@ -1423,7 +1437,145 @@ pub(crate) struct Scoped;
 
 pub(crate) static SCOPED: Scoped = Scoped;
 
+impl FsEnvironment for Scoped {
+    fn can_trash(&self, path: &Path) -> bool {
+        assert_off_main_thread();
+        match scope_for_path(path) {
+            Some(scope) => scope
+                .run(Op::CanTrash, &[], |scope| {
+                    Ok(match scope.quirk(|quirks| quirks.trash) {
+                        Trash::Supported => System.can_trash(path),
+                        Trash::Unsupported => false,
+                        Trash::FalseWithoutError
+                        | Trash::SucceedsWithoutMoving
+                        | Trash::Refused
+                        | Trash::ProtocolRefused => true,
+                    })
+                })
+                .unwrap_or(false),
+            None => System.can_trash(path),
+        }
+    }
+
+    fn trash(&self, path: &Path, cancellable: &gio::Cancellable) -> Result<bool, glib::Error> {
+        assert_off_main_thread();
+        let Some(scope) = scope_for_path(path) else {
+            return System.trash(path, cancellable);
+        };
+        let name = path.file_name().unwrap_or_default();
+        let mut outcome = Ok(true);
+        let _ = scope.run(Op::Trash, &[name], |scope| {
+            outcome = match scope.quirk(|quirks| quirks.trash) {
+                Trash::Supported => System.trash(path, cancellable),
+                Trash::Unsupported | Trash::Refused => Err(glib::Error::new(
+                    gio::IOErrorEnum::NotSupported,
+                    "Trash is not supported here",
+                )),
+                Trash::ProtocolRefused => Err(glib::Error::new(
+                    gio::IOErrorEnum::Failed,
+                    "The backend refused the Trash protocol",
+                )),
+                Trash::FalseWithoutError => Ok(false),
+                Trash::SucceedsWithoutMoving => Ok(true),
+            };
+            Ok(())
+        });
+        outcome
+    }
+
+    fn mount_type(&self, fd: BorrowedFd<'_>) -> Option<(MountType, MountSite)> {
+        assert_off_main_thread();
+        match scope_for(fd) {
+            Some(scope) => scope
+                .run(Op::MountType, &[], |scope| {
+                    let root = scope.quirk(|quirks| quirks.mount_root).unwrap_or("/");
+                    Ok(scope
+                        .quirk(|quirks| quirks.mount_type)
+                        .map(|(fs_type, super_options)| {
+                            let mount_type = MountType {
+                                fs_type: fs_type.to_owned(),
+                                super_options: super_options.to_owned(),
+                            };
+                            let site = MountSite {
+                                point: scope.root.clone(),
+                                root: PathBuf::from(root),
+                            };
+                            (mount_type, site)
+                        })
+                        .or_else(|| System.mount_type(fd)))
+                })
+                .ok()
+                .flatten(),
+            None => System.mount_type(fd),
+        }
+    }
+
+    fn device_format(&self, fd: BorrowedFd<'_>) -> Result<Option<String>, Errno> {
+        assert_off_main_thread();
+        match scope_for(fd) {
+            Some(scope) => scope.run(Op::DeviceFormat, &[], |scope| {
+                Ok(scope
+                    .quirk(|quirks| quirks.device_format)
+                    .map(str::to_owned))
+            }),
+            None => System.device_format(fd),
+        }
+    }
+}
+
 impl FsOps for Scoped {
+    fn open_at(
+        &self,
+        at: Entry<'_>,
+        flags: OFlags,
+        mode: Mode,
+        resolve: Option<ResolveFlags>,
+    ) -> Result<OwnedFd, Errno> {
+        match scope_for(at.dir) {
+            Some(scope) => scope.run(Op::OpenAt, &[at.name], |scope| {
+                scope
+                    .resolved(at, |at| System.open_at(at, flags, mode, resolve))
+                    .map(|opened| scope.record_open(opened))
+            }),
+            None => System.open_at(at, flags, mode, resolve),
+        }
+    }
+
+    fn open_path(&self, path: &OsStr, flags: OFlags, mode: Mode) -> Result<OwnedFd, Errno> {
+        let file = std::path::Path::new(path);
+        let scope = std::fs::File::open(file)
+            .or_else(|error| file.parent().map_or(Err(error), std::fs::File::open))
+            .ok()
+            .and_then(|opened| scope_for(opened.as_fd()));
+        match scope {
+            Some(scope) => scope.run(Op::OpenPath, &[path], |scope| {
+                System
+                    .open_path(path, flags, mode)
+                    .map(|opened| scope.record_open(opened))
+            }),
+            None => System.open_path(path, flags, mode),
+        }
+    }
+
+    fn dup(&self, fd: BorrowedFd<'_>) -> Result<OwnedFd, Errno> {
+        on_fd(fd, Op::Dup, None, |scope| {
+            let opened = System.dup(fd)?;
+            if let Some(scope) = scope {
+                let mut state = scope.state();
+                let reported = state
+                    .reported_losses
+                    .get(&fd.as_raw_fd())
+                    .copied()
+                    .unwrap_or_default();
+                state.reported_losses.insert(opened.as_raw_fd(), reported);
+            }
+            Ok(opened)
+        })
+    }
+
+    fn stat_vfs(&self, fd: BorrowedFd<'_>) -> Result<rustix::fs::StatVfs, Errno> {
+        on_fd(fd, Op::StatVfs, None, |_| System.stat_vfs(fd))
+    }
     fn rename(&self, from: Entry<'_>, to: Entry<'_>, flags: RenameFlags) -> Result<(), Errno> {
         assert_off_main_thread();
         let source = scope_for(from.dir);
@@ -1615,46 +1767,6 @@ impl FsOps for Scoped {
                 .flatten(),
             None => System.statfs(dir),
         }
-    }
-
-    fn can_trash(&self, path: &Path) -> bool {
-        assert_off_main_thread();
-        match scope_for_path(path) {
-            Some(scope) => scope
-                .run(Op::CanTrash, &[], |scope| {
-                    Ok(match scope.quirk(|quirks| quirks.trash) {
-                        Trash::Supported => System.can_trash(path),
-                        Trash::Unsupported => false,
-                        Trash::FalseWithoutError
-                        | Trash::SucceedsWithoutMoving
-                        | Trash::Refused => true,
-                    })
-                })
-                .unwrap_or(false),
-            None => System.can_trash(path),
-        }
-    }
-
-    fn trash(&self, path: &Path, cancellable: &gio::Cancellable) -> Result<bool, glib::Error> {
-        assert_off_main_thread();
-        let Some(scope) = scope_for_path(path) else {
-            return System.trash(path, cancellable);
-        };
-        let name = path.file_name().unwrap_or_default();
-        let mut outcome = Ok(true);
-        let _ = scope.run(Op::Trash, &[name], |scope| {
-            outcome = match scope.quirk(|quirks| quirks.trash) {
-                Trash::Supported => System.trash(path, cancellable),
-                Trash::Unsupported | Trash::Refused => Err(glib::Error::new(
-                    gio::IOErrorEnum::NotSupported,
-                    "Trash is not supported here",
-                )),
-                Trash::FalseWithoutError => Ok(false),
-                Trash::SucceedsWithoutMoving => Ok(true),
-            };
-            Ok(())
-        });
-        outcome
     }
 
     fn open_source(
@@ -1957,54 +2069,12 @@ impl FsOps for Scoped {
         })
     }
 
-    fn mount_type(&self, fd: BorrowedFd<'_>) -> Option<(MountType, MountSite)> {
-        assert_off_main_thread();
-        match scope_for(fd) {
-            Some(scope) => scope
-                .run(Op::MountType, &[], |scope| {
-                    let root = scope.quirk(|quirks| quirks.mount_root).unwrap_or("/");
-                    Ok(scope
-                        .quirk(|quirks| quirks.mount_type)
-                        .map(|(fs_type, super_options)| {
-                            let mount_type = MountType {
-                                fs_type: fs_type.to_owned(),
-                                super_options: super_options.to_owned(),
-                            };
-                            let site = MountSite {
-                                point: scope.root.clone(),
-                                root: PathBuf::from(root),
-                            };
-                            (mount_type, site)
-                        })
-                        .or_else(|| System.mount_type(fd)))
-                })
-                .ok()
-                .flatten(),
-            None => System.mount_type(fd),
-        }
-    }
-
-    fn device_format(&self, fd: BorrowedFd<'_>) -> Result<Option<String>, Errno> {
-        assert_off_main_thread();
-        match scope_for(fd) {
-            Some(scope) => scope.run(Op::DeviceFormat, &[], |scope| {
-                Ok(scope
-                    .quirk(|quirks| quirks.device_format)
-                    .map(str::to_owned))
-            }),
-            None => System.device_format(fd),
-        }
-    }
-
     fn open_dir(&self, at: Entry<'_>) -> Result<OwnedFd, Errno> {
         assert_off_main_thread();
         match scope_for(at.dir) {
             Some(scope) => scope.run(Op::OpenDir, &[at.name], |scope| {
                 let opened = scope.resolved(at, |at| System.open_dir(at))?;
-                let mut state = scope.state();
-                let lost = state.writebacks_lost;
-                state.reported_losses.insert(opened.as_raw_fd(), lost);
-                Ok(opened)
+                Ok(scope.record_open(opened))
             }),
             None => System.open_dir(at),
         }

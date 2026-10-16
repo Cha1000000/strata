@@ -189,7 +189,6 @@ class TestEnvironment:
             "GDK_DPI_SCALE": "1",
             "GTK_A11Y": "atspi",
             "NO_AT_BRIDGE": "0",
-            "GTK_THEME": "Adwaita",
             "GTK_USE_PORTAL": "0",
             "GTK_OVERLAY_SCROLLING": "0",
             "LIBGL_ALWAYS_SOFTWARE": "1",

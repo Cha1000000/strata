@@ -10,6 +10,7 @@ mod close_guard;
 mod collection_edit;
 mod collection_interaction;
 mod controls;
+mod decoration;
 mod desktop_integration;
 mod document_media;
 mod document_view;
@@ -68,5 +69,4 @@ pub use window::{UnlockTarget, present, present_open, present_reveal, present_un
 
 pub(crate) fn prepare_portal_ui() {
     let _theme = theme::ThemeManager::shared();
-    window::load_styles();
 }

@@ -6,7 +6,7 @@ rust = { version = "1.98.1", components = ["clippy", "rustfmt", "rust-analyzer"]
 python = { version = "3.14", postinstall = "python -m pip install --upgrade pycairo PyGObject" }
 "aqua:EmbarkStudios/cargo-deny" = "0.20.2"
 "aqua:crate-ci/typos" = "1.50.1"
-"aqua:watchexec/cargo-watch" = "8.5.3"
+"github:watchexec/cargo-watch" = "8.5.3"
 
 [env]
 CARGO_TERM_COLOR = "always"

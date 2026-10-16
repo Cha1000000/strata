@@ -16,8 +16,8 @@ use rustix::io::Errno;
 use super::{best_effort, is_fatal, stable_inodes};
 use crate::adapters::{
     local_operations::{
-        LocalFileIdentity,
         fs_ops::{Entry, FsOps},
+        native_fs::LocalFileIdentity,
     },
     volume::Family,
 };

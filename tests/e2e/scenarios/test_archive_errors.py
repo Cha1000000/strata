@@ -207,16 +207,13 @@ def test_wrong_extract_password_reopens_dialog_until_password_is_correct(strata,
     assert extracted.read_text() == contents
 
 
-def test_cancelled_extract_to_does_not_hijack_later_extract_here(strata):
-    fixture = strata.fixture
+def _cancel_extract_to_password_prompt(strata):
+    destination = strata.fixture.path("documents")
     archive_name = "content-encrypted.7z"
-    shutil.copyfile(ARCHIVE_FIXTURES / archive_name, fixture.path(archive_name))
-    with zipfile.ZipFile(fixture.path("later.zip"), "w") as archive:
-        archive.writestr("later.txt", "later extraction\n")
+    shutil.copyfile(ARCHIVE_FIXTURES / archive_name, strata.fixture.path(archive_name))
     strata.keyboard.press("ctrl+r")
     strata.open_context_menu(archive_name)
     strata.choose_menu_item("Extract to…")
-    destination = fixture.path("documents")
     chooser = strata.destination_chooser("Extract to")
     strata.navigate_destination(chooser, destination)
     strata.confirm_destination(chooser, "Extract here")
@@ -226,17 +223,66 @@ def test_cancelled_extract_to_does_not_hijack_later_extract_here(strata):
     )
     strata.keyboard.press("Escape")
     strata.wait(lambda: strata.dialog() is None, "password prompt cancellation")
-    assert not (destination / "later.txt").exists()
-    strata.open_context_menu("later.zip")
-    strata.choose_menu_item("Extract here")
-    strata.wait(lambda: fixture.path("later.txt").exists(), "later extraction")
-    strata.wait(lambda: strata.dialog() is None, "extraction progress dismissal")
-    assert strata.current_directory() == fixture.root.name
-    assert fixture.path("later.txt").read_text() == "later extraction\n"
-    assert not (destination / "later.txt").exists()
-    strata.entry("later.txt")
-    collector = ArtifactCollector(test_name="cancelled-extract-to")
-    strata.screenshot(collector.directory / "after.png")
+    return destination
+
+
+def _fail_extract_to_read_only_folder(strata):
+    destination = strata.fixture.path("locked")
+    archive_name = "first.zip"
+    with zipfile.ZipFile(strata.fixture.path(archive_name), "w") as archive:
+        archive.writestr("first.txt", "first extraction\n")
+    destination.mkdir()
+    destination.chmod(0o555)
+    strata.keyboard.press("ctrl+r")
+    # Folders sort first, so wait for the refresh to list `destination` before
+    # locating the archive row it pushes down.
+    strata.entry(destination.name)
+    strata.open_context_menu(archive_name)
+    strata.choose_menu_item("Extract to…")
+    chooser = strata.destination_chooser("Extract to")
+    strata.navigate_destination(chooser, destination)
+    strata.confirm_destination(chooser, "Extract here")
+    strata.wait(
+        lambda: (dialog := strata.dialog()) is not None
+        and dialog.name == "Unable to complete operation",
+        "the permission error",
+    )
+    strata.pointer.click(strata.dialog_button("Close"))
+    strata.wait(lambda: strata.dialog() is None, "error dismissal")
+    return destination
+
+
+@pytest.mark.parametrize("abandon", [
+    pytest.param(_cancel_extract_to_password_prompt, id="cancelled-password"),
+    pytest.param(_fail_extract_to_read_only_folder, id="read-only-destination"),
+])
+def test_abandoned_extract_to_does_not_hijack_later_extract_here(strata, abandon):
+    fixture = strata.fixture
+    with zipfile.ZipFile(fixture.path("later.zip"), "w") as archive:
+        archive.writestr("later.txt", "later extraction\n")
+    destination = None
+    try:
+        destination = abandon(strata)
+        assert strata.current_directory() == fixture.root.name
+        assert not (destination / "later.txt").exists()
+        strata.open_context_menu("later.zip")
+        strata.choose_menu_item("Extract here")
+        strata.wait(lambda: fixture.path("later.txt").exists(), "later extraction")
+        strata.wait(lambda: strata.dialog() is None, "extraction progress dismissal")
+        assert strata.current_directory() == fixture.root.name
+        assert fixture.path("later.txt").read_text() == "later extraction\n"
+        assert not (destination / "later.txt").exists()
+        # Extract here selects its result only if nothing navigated away.
+        strata.wait(
+            lambda: strata.selected_names(fixture.root.name) == ["later.txt"],
+            "the extracted file to be selected in place",
+        )
+        assert strata.current_directory() == fixture.root.name
+        collector = ArtifactCollector(test_name=f"abandoned-extract-to-{destination.name}")
+        strata.screenshot(collector.directory / "after.png")
+    finally:
+        if destination is not None and destination.is_dir():
+            destination.chmod(0o755)
 
 
 _CRCTABLE = None

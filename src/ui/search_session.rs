@@ -6,7 +6,7 @@
 
 use crate::services::{
     NavigationHistory, RefusedFolders, SearchCoverage, SearchEvent, SearchHandle, SearchItem,
-    index_filter, index_folder_paths, index_paths,
+    SearchLimits, index_filter, index_folder_paths, index_paths,
 };
 use gtk::glib;
 use std::{
@@ -55,6 +55,7 @@ pub(super) struct SearchBatch {
 type Deliver = Rc<dyn Fn(SearchBatch)>;
 struct Worker {
     input: SearchInput,
+    limits: SearchLimits,
     handle: SearchHandle,
     receiver: Receiver<SearchEvent>,
 }
@@ -155,13 +156,14 @@ impl SearchSession {
             self.cancel();
             return;
         }
+        let limits = crate::ui::preferences::PreferenceManager::shared().search_limits();
         let replace = restart
             || self
                 .0
                 .worker
                 .borrow()
                 .as_ref()
-                .is_none_or(|worker| worker.input != input);
+                .is_none_or(|worker| worker.input != input || worker.limits != limits);
         if !replace {
             self.0.deliver.replace(Some(deliver));
             self.query(query);
@@ -174,17 +176,25 @@ impl SearchSession {
                 input.show_hidden,
                 NavigationHistory::shared().frecency_within(&input.root),
                 input.refused.clone(),
+                limits,
             ),
             scope if scope.fuzzy() => index_paths(
                 input.root.clone(),
                 input.show_hidden,
                 scope.recursive(),
                 NavigationHistory::shared().frecency_within(&input.root),
+                limits,
             ),
-            scope => index_filter(input.root.clone(), input.show_hidden, scope.recursive()),
+            scope => index_filter(
+                input.root.clone(),
+                input.show_hidden,
+                scope.recursive(),
+                limits,
+            ),
         };
         self.0.worker.replace(Some(Worker {
             input,
+            limits,
             handle,
             receiver,
         }));

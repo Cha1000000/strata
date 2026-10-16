@@ -744,6 +744,18 @@ impl ViewState {
         // destination contents the source actually owned.
         let allow_merge = collision.mergeable && !move_sources;
         let explanation = conflict_explanation(&collision, &destination, allow_merge);
+        let without_trash = destination
+            .native_path()
+            .and_then(crate::adapters::trash_support::unsupported_reason_for)
+            .is_some();
+        let explanation = if without_trash {
+            format!(
+                "{explanation}\n\n{}",
+                crate::i18n::tr("Replaced items can't be moved to Trash here and will be deleted.")
+            )
+        } else {
+            explanation
+        };
         let state = self.clone();
         let send_to_conflict = send_to.clone();
         let apply_to_all_visible = !collisions.is_empty();

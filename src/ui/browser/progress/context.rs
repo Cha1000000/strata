@@ -338,6 +338,7 @@ impl ViewState {
                     crate::ui::modal::show_delete_error_dialog(
                         &self.overlay,
                         message,
+                        &super::super::trash::delete_retry_label(&entries),
                         Rc::new(move || {
                             if let Some(state) = weak.upgrade() {
                                 state.retry_background_deletion(entries.clone());

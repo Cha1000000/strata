@@ -509,6 +509,7 @@ pub(in crate::ui) fn install_folder_context_menu(
             popover.popdown();
         }
         if let Some(state) = weak.upgrade() {
+            crate::adapters::trash_support::forget_all();
             state.browser.retry_column(depth);
         }
     });
@@ -944,6 +945,12 @@ pub(in crate::ui) fn install_resolved_item_context_menu(
         ContextHint::PermanentDelete,
     );
     permanent_delete.add_css_class("danger");
+    let delete_without_trash = item_context_danger_option(
+        crate::assets::icons::CIRCLE_X,
+        "Delete without Trash",
+        ContextHint::PermanentDelete,
+    );
+    delete_without_trash.add_css_class("danger");
     let properties = item_context_option(
         crate::assets::icons::INFO,
         "Properties",
@@ -1003,6 +1010,7 @@ pub(in crate::ui) fn install_resolved_item_context_menu(
     single.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
     single.append(&move_to_trash);
     single.append(&permanent_delete);
+    single.append(&delete_without_trash);
     remaining.append(&single);
 
     let multiple = gtk::Box::new(gtk::Orientation::Vertical, 0);
@@ -1105,6 +1113,12 @@ pub(in crate::ui) fn install_resolved_item_context_menu(
         ContextHint::PermanentDelete,
     );
     permanent_delete_multiple.add_css_class("danger");
+    let delete_without_trash_multiple = item_context_danger_option(
+        crate::assets::icons::CIRCLE_X,
+        "Delete without Trash",
+        ContextHint::PermanentDelete,
+    );
+    delete_without_trash_multiple.add_css_class("danger");
     let compress_multiple = item_context_option(
         crate::assets::icons::PACKAGE_PLUS,
         "Compress…",
@@ -1139,6 +1153,7 @@ pub(in crate::ui) fn install_resolved_item_context_menu(
     multiple.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
     multiple.append(&trash_multiple);
     multiple.append(&permanent_delete_multiple);
+    multiple.append(&delete_without_trash_multiple);
     multiple.set_visible(false);
     remaining.append(&multiple);
 
@@ -1244,6 +1259,10 @@ pub(in crate::ui) fn install_resolved_item_context_menu(
             return;
         };
         if !selection.entries_match_target(&context_entries(&state, &open_multiple_target)) {
+            return;
+        }
+        if crate::ui::open_with::uses_portal() {
+            crate::ui::open_with::launch_with_portal(&state.overlay, selection.files, false);
             return;
         }
         let Some(app) = selection.default else {
@@ -1489,6 +1508,8 @@ pub(in crate::ui) fn install_resolved_item_context_menu(
         (&trash_multiple, in_trash),
         (&permanent_delete, true),
         (&permanent_delete_multiple, true),
+        (&delete_without_trash, true),
+        (&delete_without_trash_multiple, true),
     ] {
         connect_selection_action(button, &popover, state, &target, move |state, entries| {
             state.request_delete(entries, permanent);
@@ -1687,8 +1708,12 @@ pub(in crate::ui) fn install_resolved_item_context_menu(
             trash_multiple.set_visible(trash_visible);
             let permanent_delete_visible =
                 permanently_delete_is_visible(in_trash, state.browser.can_delete_at(depth));
-            permanent_delete.set_visible(permanent_delete_visible);
-            permanent_delete_multiple.set_visible(permanent_delete_visible);
+            let remote = permanent_delete_visible
+                && super::trash::deletion_reach(&entries) == super::trash::DeletionReach::Remote;
+            permanent_delete.set_visible(permanent_delete_visible && !remote);
+            permanent_delete_multiple.set_visible(permanent_delete_visible && !remote);
+            delete_without_trash.set_visible(remote);
+            delete_without_trash_multiple.set_visible(remote);
             pin.set_visible(entry.is_directory() && !is_trash_location(&entry.location));
             pin.set_sensitive(
                 state
@@ -2202,7 +2227,8 @@ fn prepare_open_with(
             }
         };
         let explanation = applications.unavailable_reason();
-        open_button.set_visible(applications.default.is_some());
+        open_button
+            .set_visible(applications.default.is_some() || crate::ui::open_with::uses_portal());
         result.replace(Some(OpenWithSelection {
             locations,
             files,

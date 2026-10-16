@@ -169,26 +169,6 @@ impl<'a> ExtractionSession<'a> {
         }
     }
 
-    #[cfg(test)]
-    pub(super) fn open_with_metadata_calls(
-        destination: &'a Path,
-        archive_name: &'a str,
-        progress: &'a AtomicUsize,
-        cancelled: &'a AtomicBool,
-        calls: super::destination::MetadataCalls,
-        report: &'a mut TransferReport,
-    ) -> Result<Self, ArchiveError> {
-        Ok(Self::from_open(
-            destination,
-            archive_name,
-            ExtractionDestination::open(destination)?.with_metadata_calls(calls),
-            progress,
-            cancelled,
-            None,
-            report,
-        ))
-    }
-
     /// Avoid retaining every member name in formats without hard links.
     pub(super) fn record_hard_link_targets(&mut self) {
         self.records_hard_link_targets = true;

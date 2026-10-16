@@ -68,6 +68,11 @@ fn mime_description_for_name_uses_shared_database() {
 
     let unknown_desc = mime_description_for_name("archive.xyzunknown");
     assert_eq!(unknown_desc, "Other");
+
+    assert_eq!(
+        mime_description_for_name("GOPR0001.GPR"),
+        gio::content_type_get_description("image/x-dcraw").as_str()
+    );
 }
 
 #[test]

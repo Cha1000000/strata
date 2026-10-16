@@ -155,43 +155,17 @@ impl Library {
 }
 
 fn is_photo_media(name: &std::ffi::OsStr) -> bool {
-    Path::new(name)
-        .extension()
-        .and_then(std::ffi::OsStr::to_str)
-        .is_some_and(|extension| {
-            matches!(
-                extension.to_ascii_lowercase().as_str(),
-                "jpg"
-                    | "jpeg"
-                    | "heic"
-                    | "heif"
-                    | "mov"
-                    | "mp4"
-                    | "3fr"
-                    | "arw"
-                    | "cr2"
-                    | "cr3"
-                    | "dcr"
-                    | "dng"
-                    | "erf"
-                    | "kdc"
-                    | "mef"
-                    | "mos"
-                    | "mrw"
-                    | "nef"
-                    | "nrw"
-                    | "orf"
-                    | "pef"
-                    | "raf"
-                    | "raw"
-                    | "rw2"
-                    | "rwl"
-                    | "sr2"
-                    | "srf"
-                    | "srw"
-                    | "x3f"
-            )
-        })
+    let path = Path::new(name);
+    crate::sandbox::raw_metadata::is_raw(path)
+        || path
+            .extension()
+            .and_then(std::ffi::OsStr::to_str)
+            .is_some_and(|extension| {
+                matches!(
+                    extension.to_ascii_lowercase().as_str(),
+                    "jpg" | "jpeg" | "heic" | "heif" | "mov" | "mp4"
+                )
+            })
 }
 
 #[cfg(test)]

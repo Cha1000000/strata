@@ -28,13 +28,17 @@ use rustix::{
 
 use super::{Failure, Mount, lock};
 use crate::{
-    adapters::local_operations::{
-        LocalFileIdentity, bounded_local_worker_count, cancelled_local_operation,
-        fs_ops::{Entry, EntryStat, FsOps, OffMain},
-        io_error, local_device_is_rotational,
-        work_queue::{self, Group, Job, WorkQueue},
+    adapters::{
+        local_operations::{
+            cancelled_local_operation,
+            deletion::{bounded_local_worker_count, local_device_is_rotational},
+            fs_ops::{Entry, EntryStat, FsOps, OffMain},
+            io_error,
+            native_fs::LocalFileIdentity,
+            work_queue::{self, Group, Job, WorkQueue},
+        },
+        volume::CoarseTimes,
     },
-    adapters::volume::CoarseTimes,
     services::KeptCause,
 };
 
@@ -315,12 +319,12 @@ impl Pending {
 pub(in crate::adapters::local_operations) struct Manifest {
     pub(super) parent: OffMain<Arc<OwnedFd>>,
     pub(super) root: Arc<Folder>,
-    copy: Option<Published>,
+    copies: Vec<Published>,
 }
 
 impl Manifest {
     pub(in crate::adapters::local_operations) fn copied_to(&mut self, copy: Published) {
-        self.copy = Some(copy);
+        self.copies.push(copy);
     }
 
     pub(in crate::adapters::local_operations) fn keep(&self, path: &Path, cause: KeptCause) {
@@ -345,33 +349,200 @@ impl Manifest {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(super) struct State {
+    size: u64,
+    mtime: (i64, u32),
+}
+
+impl State {
+    pub(super) fn of(stat: &EntryStat) -> Self {
+        Self {
+            size: stat.size,
+            mtime: stat.mtime,
+        }
+    }
+
+    fn holds(&self, stat: &EntryStat) -> bool {
+        self.size == stat.size && self.mtime == stat.mtime
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(in crate::adapters::local_operations) struct Ownership {
+    identity: Option<LocalFileIdentity>,
+    descendants: HashMap<PathBuf, LocalFileIdentity>,
+    states: HashMap<PathBuf, State>,
+}
+
+impl Ownership {
+    pub(super) fn new(identity: LocalFileIdentity) -> Self {
+        Self {
+            identity: Some(identity),
+            descendants: HashMap::new(),
+            states: HashMap::new(),
+        }
+    }
+
+    pub(super) fn unproven() -> Self {
+        Self {
+            identity: None,
+            descendants: HashMap::new(),
+            states: HashMap::new(),
+        }
+    }
+
+    pub(super) fn created(
+        identity: LocalFileIdentity,
+        descendants: impl IntoIterator<Item = (PathBuf, LocalFileIdentity)>,
+    ) -> Self {
+        Self {
+            identity: Some(identity),
+            descendants: descendants.into_iter().collect(),
+            states: HashMap::new(),
+        }
+    }
+
+    pub(super) fn with_states(
+        mut self,
+        states: impl IntoIterator<Item = (PathBuf, State)>,
+    ) -> Self {
+        self.states.extend(states);
+        self
+    }
+
+    pub(super) fn of(stat: &EntryStat) -> Self {
+        let mut owned = Self::new(stat.identity);
+        if stat.kind == FileType::RegularFile {
+            owned.states.insert(PathBuf::new(), State::of(stat));
+        }
+        owned
+    }
+
+    pub(super) fn capture(
+        fs: &dyn FsOps,
+        at: Entry<'_>,
+        identity: LocalFileIdentity,
+    ) -> Result<Self, Failure> {
+        let stat = fs.stat(at, false)?;
+        if stat.identity != identity {
+            return Err(Failure::Changed);
+        }
+        let mut ownership = Self::of(&stat);
+        if identity.kind == FileType::Directory {
+            let dir = fs.open_dir(at)?;
+            if fs.stat_fd(dir.as_fd())?.identity != identity {
+                return Err(Failure::Changed);
+            }
+            ownership.read_children(fs, dir.as_fd(), Path::new(""))?;
+        }
+        Ok(ownership)
+    }
+
+    fn read_children(
+        &mut self,
+        fs: &dyn FsOps,
+        dir: BorrowedFd<'_>,
+        path: &Path,
+    ) -> Result<(), Failure> {
+        for (name, _) in fs.list(dir)? {
+            let at = Entry { dir, name: &name };
+            let stat = fs.stat(at, false)?;
+            let path = path.join(&name);
+            self.descendants.insert(path.clone(), stat.identity);
+            if stat.kind == FileType::RegularFile {
+                self.states.insert(path.clone(), State::of(&stat));
+            }
+            if stat.is_directory() {
+                let child = fs.open_dir(at)?;
+                if fs.stat_fd(child.as_fd())?.identity != stat.identity {
+                    return Err(Failure::Changed);
+                }
+                self.read_children(fs, child.as_fd(), &path)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn identity_at(&self, path: &Path) -> Option<LocalFileIdentity> {
+        if path.as_os_str().is_empty() {
+            self.identity
+        } else {
+            self.descendants.get(path).copied()
+        }
+    }
+
+    fn matches(&self, path: &Path, stat: &EntryStat) -> bool {
+        self.identity_at(path)
+            .is_some_and(|identity| stat.identity == identity)
+    }
+
+    fn unchanged(&self, path: &Path, stat: &EntryStat) -> bool {
+        self.matches(path, stat)
+            && (stat.kind != FileType::RegularFile
+                || self.states.get(path).is_some_and(|state| state.holds(stat)))
+    }
+
+    pub(super) fn stays(&self, fs: &dyn FsOps, at: Entry<'_>) -> bool {
+        let Ok(stat) = fs.stat(at, true) else {
+            return false;
+        };
+        if !self.matches(Path::new(""), &stat) {
+            return false;
+        }
+        if self.descendants.is_empty() {
+            return true;
+        }
+        let Ok(root) = fs.open_dir(at) else {
+            return false;
+        };
+        if !fs
+            .stat_fd(root.as_fd())
+            .is_ok_and(|opened| opened.identity == stat.identity)
+        {
+            return false;
+        }
+        self.descendants.iter().all(|(path, _)| {
+            let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
+                return false;
+            };
+            let Ok(dir) = fs.open_dir(Entry::new(&root, super::restrictive::beneath(parent)))
+            else {
+                return false;
+            };
+            let at = Entry::new(&dir, name);
+            fs.stat(at, true)
+                .is_ok_and(|stat| self.matches(path, &stat))
+        })
+    }
+}
+
 pub(in crate::adapters::local_operations) struct Published {
     parent: OffMain<Arc<OwnedFd>>,
     name: OsString,
-    identity: LocalFileIdentity,
+    ownership: Ownership,
 }
 
 impl Published {
-    pub(super) fn at(fs: &dyn FsOps, parent: Arc<OwnedFd>, name: OsString) -> Result<Self, Errno> {
-        let identity = fs.stat(Entry::new(&*parent, &name), false)?.identity;
-        Ok(Self {
+    pub(super) fn new(parent: Arc<OwnedFd>, name: OsString, identity: LocalFileIdentity) -> Self {
+        Self::proven(parent, name, Ownership::new(identity))
+    }
+
+    pub(super) fn proven(parent: Arc<OwnedFd>, name: OsString, ownership: Ownership) -> Self {
+        Self {
             parent: OffMain::new(parent),
             name,
-            identity,
-        })
+            ownership,
+        }
+    }
+
+    pub(super) fn ownership(&self) -> &Ownership {
+        &self.ownership
     }
 
     fn stays(&self, fs: &dyn FsOps) -> bool {
-        let parent = &**self.parent;
-        let stable = Mount::keeps_inode_numbers(fs, parent.as_fd());
-        fs.stat(Entry::new(parent, &self.name), false)
-            .is_ok_and(|current| {
-                if stable {
-                    current.identity == self.identity
-                } else {
-                    current.identity.may_be(&self.identity)
-                }
-            })
+        self.ownership
+            .stays(fs, Entry::new(&**self.parent, &self.name))
     }
 }
 
@@ -382,11 +553,11 @@ pub(super) fn snapshot(
     cancelled: &AtomicBool,
 ) -> Result<Manifest, Failure> {
     let root = Folder::root();
-    record(fs, parent.as_fd(), name, &root, cancelled, None)?;
+    record(fs, parent.as_fd(), name, &root, cancelled, None, None)?;
     Ok(Manifest {
         parent: OffMain::new(parent),
         root,
-        copy: None,
+        copies: Vec::new(),
     })
 }
 
@@ -426,6 +597,7 @@ pub(super) fn placed_entries() -> AtomicUsize {
 
 /// Run right after placing. Fails once the operation's records would hold more than `left`
 /// entries, and gives back what it took.
+#[cfg(test)]
 pub(super) fn placed(
     fs: &dyn FsOps,
     (dir, name): (BorrowedFd<'_>, &OsStr),
@@ -437,8 +609,39 @@ pub(super) fn placed(
         left,
         taken: AtomicUsize::new(0),
     };
-    let recorded = record(fs, dir, name, &root, cancelled, Some(&budget))
+    let recorded = record(fs, dir, name, &root, cancelled, Some(&budget), None)
         .and_then(|()| root.take().pop().ok_or(Failure::Changed));
+    match recorded {
+        Ok((name, node)) => Ok(Placed { name, node }),
+        Err(failure) => {
+            left.fetch_add(budget.taken.into_inner(), Ordering::AcqRel);
+            Err(failure)
+        }
+    }
+}
+
+pub(super) fn placed_proven(
+    fs: &dyn FsOps,
+    (dir, name): (BorrowedFd<'_>, &OsStr),
+    cancelled: &AtomicBool,
+    left: &AtomicUsize,
+    ownership: &Ownership,
+) -> Result<Placed, Failure> {
+    let root = Folder::root();
+    let budget = Budget {
+        left,
+        taken: AtomicUsize::new(0),
+    };
+    let recorded = record(
+        fs,
+        dir,
+        name,
+        &root,
+        cancelled,
+        Some(&budget),
+        Some((ownership, Path::new(""))),
+    )
+    .and_then(|()| root.take().pop().ok_or(Failure::Changed));
     match recorded {
         Ok((name, node)) => Ok(Placed { name, node }),
         Err(failure) => {
@@ -457,7 +660,7 @@ pub(super) fn of(parent: Arc<OwnedFd>, root: Arc<Folder>) -> Manifest {
     Manifest {
         parent: OffMain::new(parent),
         root,
-        copy: None,
+        copies: Vec::new(),
     }
 }
 
@@ -470,6 +673,7 @@ fn record(
     folder: &Folder,
     cancelled: &AtomicBool,
     placed: Option<&Budget<'_>>,
+    ownership: Option<(&Ownership, &Path)>,
 ) -> Result<(), Failure> {
     if cancelled.load(Ordering::Acquire) {
         return Err(Failure::Cancelled);
@@ -487,7 +691,10 @@ fn record(
         budget.taken.fetch_add(1, Ordering::Relaxed);
     }
     let at = Entry { dir, name };
-    let stat = fs.stat(at, false)?;
+    let stat = fs.stat(at, placed.is_some())?;
+    if ownership.is_some_and(|(owned, path)| !owned.unchanged(path, &stat)) {
+        return Err(Failure::Changed);
+    }
     if placed.is_some() && stat.kind == FileType::RegularFile {
         folder.add(name, digested(fs, at, &stat, cancelled)?);
         return Ok(());
@@ -502,8 +709,19 @@ fn record(
     }
     let recorded = folder.folder(name, stat.identity);
     for (child, _) in fs.list(opened.as_fd())? {
-        record(fs, opened.as_fd(), &child, &recorded, cancelled, placed)
-            .map_err(|failure| failure.named(&child))?;
+        let child_path = ownership.map(|(_, path)| path.join(&child));
+        record(
+            fs,
+            opened.as_fd(),
+            &child,
+            &recorded,
+            cancelled,
+            placed,
+            ownership
+                .zip(child_path.as_deref())
+                .map(|((owned, _), path)| (owned, path)),
+        )
+        .map_err(|failure| failure.named(&child))?;
     }
     Ok(())
 }
@@ -580,9 +798,13 @@ pub(super) fn delete(
     unlinks: Arc<Unlinks>,
     cancelled: Arc<AtomicBool>,
 ) -> (Vec<(PathBuf, KeptCause)>, Result<(), glib::Error>) {
-    let Manifest { parent, root, copy } = manifest;
+    let Manifest {
+        parent,
+        root,
+        copies,
+    } = manifest;
     // Deleting what only a copy that is gone held would lose it.
-    if copy.is_some_and(|copy| !copy.stays(fs)) {
+    if copies.iter().any(|copy| !copy.stays(fs)) {
         let kept = root
             .take()
             .into_iter()

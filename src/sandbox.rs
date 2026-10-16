@@ -141,6 +141,7 @@ pub(crate) enum ParseOperation {
     ThumbnailCover(CoverFormat),
     PreviewCover(CoverFormat),
     PreviewImage,
+    PreviewRaw,
     InspectImage,
     ConvertImage,
     DocumentImage,
@@ -180,6 +181,7 @@ impl ParseOperation {
             Self::ThumbnailCover(_) => "thumbnail-cover",
             Self::PreviewCover(_) => "preview-cover",
             Self::PreviewImage => "preview-image",
+            Self::PreviewRaw => "preview-raw",
             Self::InspectImage => "inspect-image",
             Self::ConvertImage => "convert-image",
             Self::DocumentImage => "document-image",
@@ -262,6 +264,7 @@ impl ParseOperation {
                 crate::services::image_conversion::MAX_PIXELS,
             )),
             Self::PreviewImage
+            | Self::PreviewRaw
             | Self::DocumentImage
             | Self::DocumentMermaid
             | Self::DocumentMath { .. } => Some((800, 800, 800 * 800)),
@@ -290,6 +293,7 @@ impl ParseOperation {
             | Self::ThumbnailRaw
             | Self::ThumbnailPdf
             | Self::PreviewImage
+            | Self::PreviewRaw
             | Self::RawMetadata
             | Self::PreviewPdf(_) => Some(MAX_RASTER_INPUT_BYTES),
             Self::PreviewModel(_) | Self::ThumbnailModel(_) => Some(MAX_MODEL_INPUT_BYTES),
@@ -751,6 +755,27 @@ fn runtime_command(bwrap: &Path, needs_media_libraries: bool) -> Command {
                 let path = format!("/etc/alternatives/{library}-{architecture}");
                 command.arg("--ro-bind-try").arg(&path).arg(&path);
             }
+        }
+    }
+    // Debian-family ImageMagick commands resolve through these links.
+    for tool in ["magick", "convert"] {
+        let path = format!("/etc/alternatives/{tool}");
+        command.arg("--ro-bind-try").arg(&path).arg(&path);
+    }
+    for architecture in ["x86_64-linux-gnu", "aarch64-linux-gnu"] {
+        for library in [
+            "libGL.so.1",
+            "libEGL.so.1",
+            "libGLESv2.so.2",
+            "libGLESv1_CM.so.1",
+            "libGL.so",
+            "libEGL.so",
+            "libGLESv2.so",
+            "libGLESv1_CM.so",
+            "libGLX_indirect.so.0",
+        ] {
+            let path = format!("/etc/alternatives/glx--{library}-{architecture}");
+            command.arg("--ro-bind-try").arg(&path).arg(&path);
         }
     }
     command

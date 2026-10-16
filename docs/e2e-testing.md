@@ -344,7 +344,7 @@ Each scenario gets:
   systemd activation.
 
 Rendering is pinned: Xvfb at 1440x900x24 and 96 DPI, `GSK_RENDERER=cairo`,
-software GL, `GDK_SCALE=1`, the Adwaita theme and icon theme, Cantarell 11,
+software GL, `GDK_SCALE=1`, the Adwaita icon theme, Cantarell 11,
 `C.UTF-8`, `UTC`, animations off, and `reduce_motion` on.
 
 Application preferences and file operations use only the scenario's temporary

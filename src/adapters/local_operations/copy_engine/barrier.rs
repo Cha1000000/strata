@@ -17,7 +17,8 @@ use super::{Mount, data::kernel};
 use crate::adapters::{
     local_operations::{
         fs_ops::{Entry, FsOps, OffMain},
-        io_error, open_local_parent_directory, os_error_detail,
+        io_error,
+        native_fs::{open_local_parent_directory, os_error_detail},
     },
     volume::{Family, MountKey},
 };

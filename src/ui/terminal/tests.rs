@@ -2,6 +2,7 @@
 
 use super::*;
 use std::time::{Duration, Instant};
+use std::{fs, os::unix::fs::PermissionsExt};
 
 #[test]
 fn reap_in_background_collects_an_exited_child() -> std::io::Result<()> {
@@ -34,4 +35,22 @@ fn reap_in_background_collects_an_exited_child() -> std::io::Result<()> {
         }
         std::thread::sleep(Duration::from_millis(10));
     }
+}
+
+#[test]
+fn omarchy_presentation_command_runs_the_launcher_only_when_installed() {
+    let directory = tempfile::tempdir().expect("PATH fixture");
+    let path = Some(directory.path().as_os_str());
+    assert!(omarchy_presentation_command(path, "omarchy-update").is_none());
+
+    let launcher = directory.path().join(OMARCHY_PRESENTATION_LAUNCHER);
+    fs::write(&launcher, "#!/bin/sh\n").expect("launcher");
+    fs::set_permissions(&launcher, fs::Permissions::from_mode(0o755)).expect("executable");
+
+    let command = omarchy_presentation_command(path, "omarchy-update").expect("installed launcher");
+    assert_eq!(command.get_program(), launcher.as_os_str());
+    assert_eq!(
+        command.get_args().collect::<Vec<_>>(),
+        [OsStr::new("omarchy-update")]
+    );
 }

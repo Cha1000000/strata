@@ -67,6 +67,11 @@ impl BrowserView {
         );
         self.bind_view_preference(
             manager,
+            PreferenceManager::list_visible_columns,
+            |view, _| view.set_list_columns(),
+        );
+        self.bind_view_preference(
+            manager,
             PreferenceManager::auto_refresh_interval,
             Self::set_auto_refresh_interval,
         );

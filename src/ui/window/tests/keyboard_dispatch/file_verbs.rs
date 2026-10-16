@@ -223,11 +223,15 @@ fn typed_rename_passes_a_same_item_name_to_the_operation() {
 
             submit_rename(&fixture, "later.txt");
             plain(&fixture, Key::Escape);
+            open_rename(&fixture, Key::r);
+            fixture.shortcuts.prompt().set_text("later.txt");
             pump(200);
             assert!(
                 !directory.join("later.txt").exists(),
-                "a dismissed prompt renames nothing"
+                "a dismissed request must not submit the reopened prompt"
             );
+            assert_eq!(fixture.shortcuts.open_prompt_kind(), Some(Prompt::Rename));
+            plain(&fixture, Key::Escape);
 
             // The same item under another name is not refused by the prompt;
             // the operation itself refuses a separate hard link.
@@ -1257,7 +1261,9 @@ fn open_with_hides_recently_used_for_uninstalled_applications() {
         "ui::window::tests::keyboard_dispatch::file_verbs::open_with_hides_recently_used_for_uninstalled_applications",
         || {
             let output = gtk::glib::user_data_dir().join("received");
+            let kept_output = gtk::glib::user_data_dir().join("received-kept");
             recorder_app("strata-gone", "Gone Editor", "text/plain;", &output);
+            recorder_app("strata-kept", "Kept Editor", "text/plain;", &kept_output);
             let fixture = KeyboardFixture::new();
             let directory = fixture._directory.path().to_path_buf();
             let browser = fixture.view.browser();

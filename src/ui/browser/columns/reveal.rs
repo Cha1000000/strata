@@ -66,9 +66,9 @@ impl ViewState {
 
     pub(in crate::ui::browser) fn install_column_peek_targets(self: &Rc<Self>) {
         let weak = Rc::downgrade(self);
-        self.scroller.add_tick_callback(move |scroller, _| {
+        crate::ui::frame::after_layout(&self.scroller, move |scroller| {
             let Some(state) = weak.upgrade() else {
-                return glib::ControlFlow::Break;
+                return;
             };
             let page = scroller.width() as f32;
             for column in state.columns.borrow().iter() {
@@ -91,7 +91,6 @@ impl ViewState {
                         .set_width_request(visible.floor() as i32);
                 }
             }
-            glib::ControlFlow::Continue
         });
         let click = gtk::GestureClick::new();
         click.set_button(1);

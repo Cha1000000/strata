@@ -13,8 +13,6 @@ mod tests;
 
 const NOTICE_DURATION: Duration = Duration::from_secs(6);
 const LISTED_ITEMS: usize = 8;
-/// The longest line a notice shows whole, in characters; more items, or a
-/// longer line, go to a dialog.
 const NOTICE_CHARS: usize = 120;
 
 #[derive(Debug, Eq, PartialEq)]

@@ -16,12 +16,14 @@ use std::{
 use gtk::{gio, glib};
 
 use super::{
-    DisplacedOriginal, TransferProgressTracker,
     copy_engine::{self, Barrier, Manifest, Unlinks},
-    delete_moved_sources, device_flush_failure, io_error,
+    delete_moved_sources,
+    deletion::{permanently_delete_keeping, permanently_delete_maybe_local},
+    device_flush_failure, io_error,
     merge_aside::MergeAside,
-    original_not_removed, permanently_delete_keeping, permanently_delete_maybe_local,
-    removable_roots_for_paths, remove_displaced_original,
+    progress::TransferProgressTracker,
+    removable_roots_for_paths,
+    replacement::{DisplacedOriginal, original_not_removed, remove_displaced_original},
 };
 use crate::{
     adapters::{location_for_file, volume::MountKey},

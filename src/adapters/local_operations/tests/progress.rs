@@ -24,9 +24,7 @@ fn completed_gio_result_wins_a_cancellation_race() {
 #[test]
 fn local_task_batches_wait_for_every_started_task_after_an_operation_error()
 -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let context = glib::MainContext::default();
     let finished = Rc::new(Cell::new(false));
     let finished_by_task = finished.clone();
@@ -51,9 +49,7 @@ fn local_task_batches_wait_for_every_started_task_after_an_operation_error()
 #[test]
 fn transfer_progress_aggregates_file_bytes_without_emitting_per_file() -> Result<(), Box<dyn Error>>
 {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let events = Rc::new(RefCell::new(Vec::new()));
     let emitted = events.clone();
     let tracker = TransferProgressTracker::new(
@@ -89,9 +85,7 @@ fn transfer_progress_aggregates_file_bytes_without_emitting_per_file() -> Result
 
 #[test]
 fn copy_byte_progress_crosses_worker_threads() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let events = Rc::new(RefCell::new(Vec::new()));
     let emitted = events.clone();
     let tracker = TransferProgressTracker::new(
@@ -144,9 +138,7 @@ fn fat32_copy_errors_without_english_size_text_skip_an_uncancellable_flush() {
 
 #[test]
 fn fat32_size_check_rejects_oversized_nested_file_before_copy() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let nested = root.path().join("sources").join("folder");
     fs::create_dir_all(&nested)?;
@@ -175,9 +167,7 @@ fn fat32_size_check_rejects_oversized_nested_file_before_copy() -> Result<(), Bo
 
 #[test]
 fn copying_a_file_emits_bytes_before_item_completion() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let source = root.path().join("source.bin");
     let destination = root.path().join("destination");
@@ -233,9 +223,7 @@ fn copying_a_file_emits_bytes_before_item_completion() -> Result<(), Box<dyn Err
 
 #[test]
 fn nested_copy_reports_files_before_the_selected_folder_finishes() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let source = root.path().join("source");
     let destination = root.path().join("destination");
@@ -294,9 +282,7 @@ fn nested_copy_reports_files_before_the_selected_folder_finishes() -> Result<(),
 
 #[test]
 fn copying_many_selected_files_completes_the_bounded_bulk_path() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let source = root.path().join("source");
     let destination = root.path().join("destination");
@@ -368,9 +354,7 @@ fn bulk_copy_reports_bytes_before_each_file_completes() -> Result<(), Box<dyn Er
 
     use super::fs_quirks::{Op, Racer};
 
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let source = root.path().join("source");
     let destination = root.path().join("destination");
@@ -482,9 +466,7 @@ fn linked_names_count_as_copied_before_their_folder_is_published() -> Result<(),
 
     use super::fs_quirks::{Op, Racer};
 
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let tree = root.path().join("source/tree");
     let destination = root.path().join("destination");
@@ -569,9 +551,7 @@ fn copied_links_count_their_bytes_as_they_are_made() -> Result<(), Box<dyn Error
 
     use super::fs_quirks::{Op, Racer};
 
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let tree = root.path().join("source/tree");
     let destination = root.path().join("destination");
@@ -640,9 +620,7 @@ fn copied_links_count_their_bytes_as_they_are_made() -> Result<(), Box<dyn Error
 
 #[test]
 fn a_folder_copied_out_of_its_stage_counts_each_file_once() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let tree = root.path().join("source/tree");
     let destination = root.path().join("destination");
@@ -701,9 +679,7 @@ fn a_folder_copied_out_of_its_stage_counts_each_file_once() -> Result<(), Box<dy
 
 #[test]
 fn bulk_copy_preserves_symlinks_and_one_file_directories() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let source = root.path().join("source");
     let destination = root.path().join("destination");
@@ -775,9 +751,7 @@ fn bulk_copy_preserves_symlinks_and_one_file_directories() -> Result<(), Box<dyn
 #[test]
 fn cancelling_between_moves_reports_completed_and_unattempted_sources() -> Result<(), Box<dyn Error>>
 {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let unique = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)?
         .as_nanos();

@@ -754,6 +754,53 @@ fn ctrl_alt_n_groups_selected_items_into_a_named_folder() {
 }
 
 #[test]
+fn ctrl_alt_n_with_no_selection_creates_plain_new_folder() {
+    crate::test_support::gtk_test(
+        "ui::window::tests::keyboard_dispatch::file_commands::ctrl_alt_n_with_no_selection_creates_plain_new_folder",
+        || {
+            let fixture = KeyboardFixture::new();
+            let directory = fixture._directory.path().to_path_buf();
+            let browser = fixture.view.browser();
+
+            browser.clear_active_selection();
+            assert_eq!(browser.selected_count(), 0);
+            focus_files(&fixture);
+            assert!(fixture.press(Key::n, ModifierType::CONTROL_MASK | ModifierType::ALT_MASK));
+            wait_until(|| directory.join("new folder").is_dir());
+            wait_until(|| fixture.view.rename_is_active());
+            assert_eq!(
+                directory_names(&directory.join("new folder")),
+                Vec::<String>::new()
+            );
+            assert!(directory.join("a.txt").is_file());
+            assert!(directory.join("b.txt").is_file());
+            assert!(directory.join("c.txt").is_file());
+            plain(&fixture, Key::Escape);
+
+            let sub = directory.join("sub");
+            std::fs::create_dir(&sub).expect("sub directory");
+            std::fs::write(sub.join("x.txt"), b"x").expect("file");
+            std::fs::write(sub.join("y.txt"), b"y").expect("file");
+            browser.navigate(Location::local(&sub));
+            wait_until(|| browser.active_location() == Some(Location::local(&sub)));
+            wait_loaded(&browser, 0);
+            focus_files(&fixture);
+            wait_until(|| browser.selection_is_load_cursor());
+            assert!(fixture.press(Key::n, ModifierType::CONTROL_MASK | ModifierType::ALT_MASK));
+            wait_until(|| sub.join("new folder").is_dir());
+            wait_until(|| fixture.view.rename_is_active());
+            assert_eq!(
+                directory_names(&sub.join("new folder")),
+                Vec::<String>::new()
+            );
+            assert!(sub.join("x.txt").is_file());
+            assert!(sub.join("y.txt").is_file());
+            plain(&fixture, Key::Escape);
+        },
+    );
+}
+
+#[test]
 fn undo_and_redo_run_only_on_their_exact_chords() {
     crate::test_support::gtk_test(
         "ui::window::tests::keyboard_dispatch::file_commands::undo_and_redo_run_only_on_their_exact_chords",
@@ -1444,6 +1491,119 @@ fn delete_without_trash_support_confirms_permanently_with_cancel_focused() {
                 );
                 wait_until(|| !modal_visible(&fixture.overlay));
             }
+        },
+    );
+}
+
+/// GIO reports Trash on most FUSE roots; a refusal the adapter recorded
+/// overrides that until the user reloads.
+#[test]
+fn a_mount_that_refused_trash_confirms_up_front_until_reload() {
+    crate::test_support::gtk_test(
+        "ui::window::tests::keyboard_dispatch::file_commands::a_mount_that_refused_trash_confirms_up_front_until_reload",
+        || {
+            let held = Rc::new(crate::test_support::operations::HeldOperations::default());
+            let provider = held.clone();
+            let fixture = KeyboardFixture::with_parts(Rc::new(TextPreview), move || {
+                let view = BrowserView::new(
+                    Rc::new(crate::adapters::LocalFileSource),
+                    crate::ui::browser::PeekBehavior::default(),
+                );
+                view.set_operation_provider(provider);
+                view
+            });
+            let directory = fixture._directory.path().to_path_buf();
+            let browser = fixture.view.browser();
+            assert_eq!(
+                browser.can_trash_at(0),
+                Some(true),
+                "precondition: home Trash"
+            );
+
+            // The folder probe resolves symlinks before looking up the mount.
+            let mount_point = std::fs::canonicalize(&directory).expect("fixture");
+            let mount_point = mount_point.to_str().expect("UTF-8 fixture path");
+            crate::adapters::set_mountinfo_for_isolated_test(Some(format!(
+                "1 0 8:1 / / rw - ext4 /dev/root rw\n\
+                 900 1 0:90 / {mount_point} rw - fuse.sshfs remote:/share rw\n"
+            )));
+            let explains_this_mount = |fixture: &KeyboardFixture| {
+                (
+                    modal_text_contains(fixture, "Delete 1 item without Trash?"),
+                    modal_text_contains(fixture, "This location doesn't support Trash."),
+                    modal_text_contains(
+                        fixture,
+                        &format!("Trash isn't available on {mount_point} (fuse.sshfs)."),
+                    ),
+                    modal_text_contains(fixture, "depends on the storage provider"),
+                )
+            };
+
+            focus_files(&fixture);
+            move_to_named(&fixture, &browser, "a.txt");
+            plain(&fixture, Key::Delete);
+            wait_until(|| !held.delete_requests.borrow().is_empty());
+            let (id, permanent, _) = held.delete_requests.borrow()[0];
+            assert!(!permanent, "the first Delete tries Trash");
+            // The adapter records the refusal before it reports the failure.
+            crate::adapters::trash_support::record_unsupported(
+                crate::adapters::MountTable::current()
+                    .mount_for(&directory)
+                    .expect("fixture mount"),
+                crate::adapters::trash_support::UnsupportedReason::FuseRefused,
+            );
+            held.emit(
+                id,
+                crate::services::OperationEvent::CompletedWithErrors {
+                    request_id: id,
+                    deleted_locations: Vec::new(),
+                    retryable_locations: vec![Location::local(directory.join("a.txt"))],
+                    has_non_retryable_failures: false,
+                    message: "a.txt: This location doesn't support Trash.".into(),
+                },
+            );
+            wait_focused_button(&fixture, "Cancel");
+            assert_eq!(
+                explains_this_mount(&fixture),
+                (true, true, true, true),
+                "after the failed attempt: (no-Trash title, explanation, mount reason, provider reach)"
+            );
+            assert!(modal_key(&fixture, Key::Return));
+            wait_until(|| !modal_visible(&fixture.overlay));
+            wait_until(|| browser.can_trash_at(0) == Some(false));
+
+            focus_files(&fixture);
+            move_to_named(&fixture, &browser, "a.txt");
+            plain(&fixture, Key::Delete);
+            wait_focused_button(&fixture, "Cancel");
+            assert_eq!(
+                (
+                    held.delete_requests.borrow().len(),
+                    explains_this_mount(&fixture)
+                ),
+                (1, (true, true, true, true)),
+                "the next Delete confirms up front: (delete requests, explanation)"
+            );
+            assert!(modal_key(&fixture, Key::Return));
+            wait_until(|| !modal_visible(&fixture.overlay));
+            assert!(directory.join("a.txt").exists(), "Enter cancels");
+
+            focus_files(&fixture);
+            plain(&fixture, Key::F5);
+            wait_until(|| browser.can_trash_at(0) == Some(true));
+            assert!(
+                crate::adapters::trash_support::unsupported_reason_for(&directory).is_none(),
+                "Reload forgets the refusal"
+            );
+            move_to_named(&fixture, &browser, "a.txt");
+            plain(&fixture, Key::Delete);
+            wait_until(|| held.delete_requests.borrow().len() == 2);
+            let (_, permanent, count) = held.delete_requests.borrow()[1];
+            assert_eq!(
+                (permanent, count, modal_visible(&fixture.overlay)),
+                (false, 1, false),
+                "Delete tries Trash again after Reload"
+            );
         },
     );
 }

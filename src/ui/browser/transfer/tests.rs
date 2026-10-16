@@ -3106,7 +3106,6 @@ fn conflict_dialog_verifies_theme_following() {
         || {
             let themes = crate::ui::theme::ThemeManager::shared();
             themes.select_theme("tokyo-night");
-            crate::ui::window::load_styles();
 
             let fixture = tempfile::tempdir().expect("conflict fixture");
             let source_dir = fixture.path().join("source");

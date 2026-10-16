@@ -208,3 +208,102 @@ fn catppuccin_associations_prefer_longest_suffix_and_exact_names() {
         assert_eq!(icon_for_name(name), icon, "file: {name}");
     }
 }
+
+#[test]
+fn entry_kind_summary_distinguishes_folders_files_and_symlinks() {
+    let make_entry = |name: &str, kind: crate::model::EntryKind| {
+        let mut entry = crate::test_support::operations::entry(crate::model::Location::local(name));
+        entry.kind = kind;
+        entry
+    };
+
+    let dir = make_entry("realdir", crate::model::EntryKind::Directory);
+    let dir2 = make_entry("realdir2", crate::model::EntryKind::Directory);
+    let file = make_entry("file.txt", crate::model::EntryKind::File);
+    let file2 = make_entry("file2.txt", crate::model::EntryKind::File);
+    let dir_link = make_entry("0dirlink", crate::model::EntryKind::DirectorySymbolicLink);
+    let file_link = make_entry("filelink", crate::model::EntryKind::FileSymbolicLink);
+
+    assert_eq!(
+        super::entry_kind_summary(std::slice::from_ref(&dir)),
+        "1 folder"
+    );
+    assert_eq!(super::entry_kind_summary(&[dir.clone(), dir2]), "2 folders");
+    assert_eq!(
+        super::entry_kind_summary(std::slice::from_ref(&file)),
+        "1 file"
+    );
+    assert_eq!(super::entry_kind_summary(&[file.clone(), file2]), "2 files");
+    assert_eq!(
+        super::entry_kind_summary(std::slice::from_ref(&dir_link)),
+        "1 item"
+    );
+    assert_eq!(
+        super::entry_kind_summary(std::slice::from_ref(&file_link)),
+        "1 file"
+    );
+    assert_eq!(super::entry_kind_summary(&[dir, file.clone()]), "2 items");
+    assert_eq!(
+        super::entry_kind_summary(&[dir_link.clone(), file]),
+        "2 items"
+    );
+    assert_eq!(super::entry_kind_summary(&[dir_link, file_link]), "2 items");
+}
+
+#[test]
+fn aggregate_directory_summary_does_not_recurse_into_directory_symlinks() {
+    let fixture = tempfile::tempdir().expect("fixture");
+    let real_dir = fixture.path().join("realdir");
+    std::fs::create_dir(&real_dir).expect("realdir");
+    for i in 1..=5 {
+        std::fs::write(real_dir.join(format!("file{i}")), b"x").expect("file");
+    }
+    let symlink = fixture.path().join("0dirlink");
+    std::os::unix::fs::symlink(&real_dir, &symlink).expect("symlink");
+
+    let context = glib::MainContext::new();
+    let dir_link_entry = context
+        .block_on(crate::adapters::query_file_entry(
+            crate::model::Location::local(&symlink),
+        ))
+        .expect("query symlink entry");
+    assert_eq!(
+        dir_link_entry.kind,
+        crate::model::EntryKind::DirectorySymbolicLink
+    );
+
+    let real_dir_entry = context
+        .block_on(crate::adapters::query_file_entry(
+            crate::model::Location::local(&real_dir),
+        ))
+        .expect("query realdir entry");
+    assert_eq!(real_dir_entry.kind, crate::model::EntryKind::Directory);
+
+    let link_summary = context.block_on(super::aggregate_directory_summary(std::slice::from_ref(
+        &dir_link_entry,
+    )));
+    assert_eq!(link_summary.item_count, 1);
+    assert_eq!(link_summary.total_size, 0);
+    assert_eq!(link_summary.visible_file_count, 1);
+    assert_eq!(link_summary.visible_folder_count, 0);
+    assert!(!link_summary.truncated());
+
+    let dir_summary = context.block_on(super::aggregate_directory_summary(std::slice::from_ref(
+        &real_dir_entry,
+    )));
+    assert_eq!(dir_summary.item_count, 5);
+    assert_eq!(dir_summary.total_size, 5);
+    assert_eq!(dir_summary.visible_file_count, 5);
+    assert_eq!(dir_summary.visible_folder_count, 0);
+    assert!(!dir_summary.truncated());
+
+    let combined_summary = context.block_on(super::aggregate_directory_summary(&[
+        dir_link_entry,
+        crate::test_support::operations::entry(crate::model::Location::local(
+            fixture.path().join("other.txt"),
+        )),
+    ]));
+    assert_eq!(combined_summary.item_count, 2);
+    assert_eq!(combined_summary.total_size, 100);
+    assert!(!combined_summary.truncated());
+}

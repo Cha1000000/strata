@@ -809,6 +809,7 @@ fn show_message_dialog(
 pub(super) fn show_delete_error_dialog(
     parent: &impl IsA<gtk::Widget>,
     detail: &str,
+    retry_label: &str,
     on_retry: Rc<dyn Fn()>,
 ) {
     let Some(ModalHost {
@@ -823,7 +824,7 @@ pub(super) fn show_delete_error_dialog(
         crate::assets::icons::X,
         &crate::i18n::tr("Completed with errors"),
         &crate::i18n::tr("Some items could not be processed"),
-        &crate::i18n::tr("Delete Permanently"),
+        retry_label,
         ModalTone::Danger,
     );
     layout.cancel.set_label(&crate::i18n::tr("Done"));

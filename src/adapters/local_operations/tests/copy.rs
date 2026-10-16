@@ -13,9 +13,7 @@ use crate::adapters::volume::learn_mount_capability;
 
 #[test]
 fn nested_copy_shares_one_worker_budget_across_subdirectories() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let source = root.path().join("source");
     let target = root.path().join("target");
@@ -56,9 +54,7 @@ fn nested_copy_shares_one_worker_budget_across_subdirectories() -> Result<(), Bo
 
 #[test]
 fn recursive_copy_preserves_nested_directory_contents() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let unique = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)?
         .as_nanos();
@@ -101,9 +97,7 @@ fn recursive_copy_preserves_nested_directory_contents() -> Result<(), Box<dyn Er
 #[test]
 fn copy_recursively_does_not_follow_a_symlink_nested_inside_the_tree() -> Result<(), Box<dyn Error>>
 {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let unique = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)?
         .as_nanos();
@@ -146,9 +140,7 @@ fn copy_recursively_does_not_follow_a_symlink_nested_inside_the_tree() -> Result
 #[test]
 fn copy_recursively_of_a_symlink_creates_a_symlink_not_a_recursive_copy()
 -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let unique = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)?
         .as_nanos();
@@ -182,9 +174,7 @@ fn copy_recursively_of_a_symlink_creates_a_symlink_not_a_recursive_copy()
 
 #[test]
 fn copy_accepts_a_symlink_higher_in_the_sources_parent_path() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let actual_root = root.path().join("actual");
     let linked_root = root.path().join("linked");
@@ -209,9 +199,7 @@ fn copy_accepts_a_symlink_higher_in_the_sources_parent_path() -> Result<(), Box<
 #[test]
 fn cancelling_staged_remote_file_copy_removes_only_the_incomplete_stage()
 -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let source = root.path().join("source.bin");
     let target = root.path().join("target.bin");
@@ -244,9 +232,7 @@ fn cancelling_staged_remote_file_copy_removes_only_the_incomplete_stage()
 
 #[test]
 fn staged_remote_file_copy_preserves_a_racing_destination() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let source = root.path().join("source.bin");
     let target = root.path().join("target.bin");
@@ -289,9 +275,7 @@ fn staged_remote_file_copy_preserves_a_racing_destination() -> Result<(), Box<dy
 #[test]
 fn a_remote_keep_both_copy_takes_the_next_name_when_one_is_taken_meanwhile()
 -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let source = root.path().join("source.bin");
     let target = root.path().join("target.bin");
@@ -352,9 +336,7 @@ fn a_remote_keep_both_copy_takes_the_next_name_when_one_is_taken_meanwhile()
 
 #[test]
 fn a_remote_keep_both_copy_numbers_a_long_name_within_the_limit() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let source = root.path().join("source.bin");
     let target = root.path().join(format!("{}.bin", "t".repeat(251)));
@@ -415,9 +397,7 @@ fn failed_incomplete_copy_cleanup_is_reported_as_a_failure() {
 
 #[test]
 fn cancelling_recursive_copy_removes_only_its_staging_output() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let source = root.path().join("source");
     let target = root.path().join("target");
@@ -458,9 +438,7 @@ fn cancelling_recursive_copy_removes_only_its_staging_output() -> Result<(), Box
 
 #[test]
 fn cancelling_a_new_file_copy_removes_the_incomplete_stage() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     for (case, preset) in [
         ("unnamed file", Quirks::default as Preset),
         ("named stage", || Quirks {
@@ -508,9 +486,7 @@ fn cancelling_a_new_file_copy_removes_the_incomplete_stage() -> Result<(), Box<d
 #[test]
 fn a_stage_name_left_by_a_lost_reply_is_adopted_and_a_taken_one_is_not()
 -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let is_stage = |name: &str| name.starts_with(".strata-copy-");
     for (op, folder) in [(Op::Create, false), (Op::Mkdir, true)] {
         for taken in [false, true] {
@@ -594,9 +570,7 @@ fn a_stage_name_left_by_a_lost_reply_is_adopted_and_a_taken_one_is_not()
 
 #[test]
 fn a_stage_replaced_during_the_copy_is_kept() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let (sources, destination) = (root.path().join("sources"), root.path().join("destination"));
     fs::create_dir(&sources)?;
@@ -643,9 +617,7 @@ fn a_stage_replaced_during_the_copy_is_kept() -> Result<(), Box<dyn Error>> {
 
 #[test]
 fn a_folder_swapped_for_a_link_during_the_copy_is_not_followed() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let source = root.path().join("source");
     let outside = root.path().join("outside");
@@ -682,9 +654,7 @@ fn a_folder_swapped_for_a_link_during_the_copy_is_not_followed() -> Result<(), B
 
 #[test]
 fn copying_symlinks_accepts_an_aliased_destination() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let actual = root.path().join("actual");
     let alias = root.path().join("alias");
@@ -730,9 +700,7 @@ fn make_fifo(path: &Path, mode: u32) -> io::Result<()> {
 fn special_files_inside_a_copied_folder_are_recreated_or_left_out_and_reported()
 -> Result<(), Box<dyn Error>> {
     use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let source = root.path().join("source");
     let destination = root.path().join("destination");
@@ -794,9 +762,7 @@ fn special_files_inside_a_copied_folder_are_recreated_or_left_out_and_reported()
 #[test]
 fn a_special_file_left_out_of_fat_is_reported_under_its_own_name() -> Result<(), Box<dyn Error>> {
     use crate::services::SpecialKind;
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let source = root.path().join("source");
     let stick = root.path().join("stick");
@@ -839,9 +805,7 @@ fn a_special_file_left_out_of_fat_is_reported_under_its_own_name() -> Result<(),
 fn named_pipes_are_left_out_only_where_the_destination_refuses_them() -> Result<(), Box<dyn Error>>
 {
     use rustix::io::Errno;
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     // How vfat, exfat-fuse, SMB and others refuse a pipe, and errors that
     // stop the copy instead.
     let rows = [
@@ -900,11 +864,7 @@ fn named_pipes_are_left_out_only_where_the_destination_refuses_them() -> Result<
 fn a_named_pipe_whose_copy_fails_is_not_left_behind() -> Result<(), Box<dyn Error>> {
     use crate::adapters::volume::learn_mount_capability;
     use rustix::io::Errno;
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
-    // A selected pipe made at its final name, and a pipe in a folder made in
-    // place, where the mount cannot place a stage.
+    let _serial = serial()?;
     for selected in [true, false] {
         let root = tempfile::tempdir()?;
         let source = root.path().join("source");
@@ -916,7 +876,12 @@ fn a_named_pipe_whose_copy_fails_is_not_left_behind() -> Result<(), Box<dyn Erro
         let scope = FsQuirks::install(
             &destination,
             Quirks {
-                fail: vec![(Op::SetTimes, "pipe", 0, Errno::IO)],
+                fail: vec![(
+                    Op::SetTimes,
+                    if selected { ".strata-copy-*" } else { "pipe" },
+                    0,
+                    Errno::IO,
+                )],
                 ..Quirks::without_folder_placement()
             },
         );
@@ -950,11 +915,14 @@ fn a_named_pipe_whose_copy_fails_is_not_left_behind() -> Result<(), Box<dyn Erro
 #[test]
 fn a_selected_named_pipe_is_recreated_where_the_destination_can() -> Result<(), Box<dyn Error>> {
     use std::os::unix::fs::FileTypeExt;
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     for (row, preset, pipes) in [
         ("tmpfs", Quirks::default as Preset, true),
+        (
+            "recreated without placement",
+            Quirks::without_placement,
+            true,
+        ),
         ("vfat", Quirks::vfat, false),
     ] {
         let root = tempfile::tempdir()?;
@@ -1050,9 +1018,7 @@ struct Links {
 fn links_inside_a_copied_folder_are_left_out_where_the_destination_cannot_hold_them()
 -> Result<(), Box<dyn Error>> {
     use crate::services::SpecialKind;
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let rows = [
         Links {
             label: "ext4",
@@ -1197,9 +1163,7 @@ struct SelectedLinks {
 fn selected_links_the_destination_cannot_hold_are_left_out_and_the_paste_goes_on()
 -> Result<(), Box<dyn Error>> {
     use crate::services::{KeptCause, KeptItem, SkippedItem, SpecialKind};
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let row = |label, quirks: Preset, moving, replacing, asked| SelectedLinks {
         label,
         quirks,
@@ -1327,9 +1291,7 @@ fn selected_links_the_destination_cannot_hold_are_left_out_and_the_paste_goes_on
 #[test]
 fn a_selected_link_whose_name_sshfs_answers_as_not_permitted_is_numbered_not_left_out()
 -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let source = root.path().join("source");
     let disk = root.path().join("disk");
@@ -1362,9 +1324,7 @@ fn a_selected_link_whose_name_sshfs_answers_as_not_permitted_is_numbered_not_lef
 #[test]
 fn a_paste_through_a_symbolic_link_takes_the_rules_of_the_mount_behind_it()
 -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let source = root.path().join("source");
     let stick = root.path().join("stick");
@@ -1422,9 +1382,7 @@ fn a_paste_through_a_symbolic_link_takes_the_rules_of_the_mount_behind_it()
 #[test]
 fn a_paste_fixes_the_names_it_brings_onto_fat_and_keeps_those_already_there()
 -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let (one, two, stick) = (
         root.path().join("one"),
@@ -1516,9 +1474,7 @@ fn a_paste_fixes_the_names_it_brings_onto_fat_and_keeps_those_already_there()
 #[test]
 fn a_fat_copy_fixes_an_invalid_name_instead_of_discarding_the_whole_tree()
 -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let source = root.path().join("source");
     let stick = root.path().join("stick");
@@ -1555,9 +1511,7 @@ fn a_gio_copy_lists_a_whole_folder_first_only_where_the_mount_takes_two_names_fo
     use super::super::{NamedChildren, mount_profile::FolderNames};
     use crate::adapters::volume::{NameEncoding, NameProfile, Reserved};
     use crate::services::RenameCause;
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let folder = root.path().join("folder");
     fs::create_dir(&folder)?;
@@ -1629,9 +1583,7 @@ fn a_gio_copy_lists_a_whole_folder_first_only_where_the_mount_takes_two_names_fo
 #[test]
 fn a_gio_copy_that_fails_reports_the_fixed_name_of_a_folder_it_made() -> Result<(), Box<dyn Error>>
 {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let source = root.path().join("source");
     let destination = root.path().join("destination");
@@ -1671,9 +1623,7 @@ fn a_gio_copy_that_fails_reports_the_fixed_name_of_a_folder_it_made() -> Result<
 fn fat_family_copies_number_fixed_names_past_the_names_their_siblings_keep()
 -> Result<(), Box<dyn Error>> {
     use crate::services::RenameCause::{Alias, Invalid};
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     type CopyTree = fn(
         gio::File,
         gio::File,
@@ -1783,9 +1733,7 @@ fn fat_family_copies_number_fixed_names_past_the_names_their_siblings_keep()
 #[test]
 fn a_copy_into_a_case_sensitive_folder_keeps_a_cut_name_apart_by_case_only()
 -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let source = root.path().join("source");
     let disk = root.path().join("disk");
@@ -1846,9 +1794,7 @@ fn a_copy_into_a_case_sensitive_folder_keeps_a_cut_name_apart_by_case_only()
 #[test]
 fn copies_onto_mounts_with_windows_rules_fix_names_and_report_them() -> Result<(), Box<dyn Error>> {
     use crate::services::RenameCause::{Invalid, TooLong};
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     type CopyTree = fn(
         gio::File,
         gio::File,
@@ -2010,9 +1956,7 @@ struct Refusing {
 #[test]
 fn a_refused_name_takes_the_first_stricter_rules_it_passes_and_teaches_only_a_mount_that_learns()
 -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let unknown_daemon = || Quirks {
         mount_type: Some(("fuse.strictfs", "rw,user_id=0,group_id=0")),
         invalid_name: Some(refuses_colons_as_bad_messages),
@@ -2198,9 +2142,7 @@ fn refuses_trailing_dots(name: &OsStr) -> Option<Errno> {
 #[test]
 fn a_name_refused_for_its_trailing_dot_takes_the_name_without_it_unless_a_sibling_has_it()
 -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     for (siblings, saved) in [(&["x."][..], &["x"][..]), (&["x.", "x"], &["x", "x (1)"])] {
         let root = tempfile::tempdir()?;
         let source = root.path().join("dots");
@@ -2232,9 +2174,7 @@ fn a_name_refused_for_its_trailing_dot_takes_the_name_without_it_unless_a_siblin
 #[test]
 fn a_mount_that_learns_keeps_only_the_rules_its_refused_names_needed() -> Result<(), Box<dyn Error>>
 {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     type Refusal = fn(&OsStr) -> Option<Errno>;
     let rows: [(Refusal, &str, &str, &[&str], [&str; 3], [&str; 3], bool); 2] = [
         // Neither rule alone gives a name the mount takes.
@@ -2321,9 +2261,7 @@ fn a_mount_that_learns_keeps_only_the_rules_its_refused_names_needed() -> Result
 
 #[test]
 fn a_kept_copy_the_mount_refused_is_reported_with_the_name_it_took() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let source = root.path().join("source");
     let disk = root.path().join("disk");
@@ -2366,9 +2304,7 @@ fn a_kept_copy_the_mount_refused_is_reported_with_the_name_it_took() -> Result<(
 
 #[test]
 fn a_bulk_copy_records_for_undo_where_a_refused_name_was_saved() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let source = root.path().join("source");
     let disk = root.path().join("disk");
@@ -2422,9 +2358,7 @@ fn a_bulk_copy_records_for_undo_where_a_refused_name_was_saved() -> Result<(), B
 #[test]
 fn a_name_refused_as_missing_neither_turns_unnamed_files_off_nor_writes_twice()
 -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     // Names given back are refused as they are.
     for (names, saved) in [(fixing(), Some("a_b")), (NamePolicy::default(), None)] {
         let root = tempfile::tempdir()?;
@@ -2481,9 +2415,7 @@ fn a_name_refused_as_missing_neither_turns_unnamed_files_off_nor_writes_twice()
 #[test]
 fn a_name_given_back_that_the_mount_refuses_outright_fails_without_a_second_write()
 -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let source = root.path().join("source");
     let disk = root.path().join("disk");
@@ -2544,9 +2476,7 @@ fn refused_as_too_long(name: &OsStr) -> Option<Errno> {
 #[test]
 fn a_name_no_stricter_rules_change_fails_naming_the_item_and_the_reason()
 -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     type Refusal = fn(&OsStr) -> Option<Errno>;
     let invalid = crate::services::INVALID_NAME_REASON;
     let too_long = "The name is too long";
@@ -2614,20 +2544,20 @@ fn stage(root: &Path, directory: bool) -> Result<StagedSibling, Box<dyn Error>> 
 }
 
 fn publish(staged: StagedSibling, target: &Path) -> Result<(), glib::Error> {
-    glib::MainContext::default().block_on(publish_staged_without_replace(
-        staged,
-        target.to_path_buf(),
-        false,
-        gio::Cancellable::new(),
-    ))
+    glib::MainContext::default()
+        .block_on(publish_staged_without_replace(
+            staged,
+            target.to_path_buf(),
+            false,
+            gio::Cancellable::new(),
+        ))
+        .map(drop)
 }
 
 #[test]
 fn staged_publication_without_rename_flags_places_the_stage_itself() -> Result<(), Box<dyn Error>> {
     use std::os::unix::fs::MetadataExt;
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let presets: [(&str, Preset); 5] = [
         ("EINVAL", Quirks::without_rename_flags),
         ("ENOSYS", || Quirks {
@@ -2672,9 +2602,7 @@ fn staged_publication_without_rename_flags_places_the_stage_itself() -> Result<(
 
 #[test]
 fn staged_publication_refuses_to_overwrite_an_existing_target() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     for quirks in [
         Quirks::default,
         Quirks::without_rename_flags,
@@ -2714,9 +2642,7 @@ fn staged_publication_refuses_to_overwrite_an_existing_target() -> Result<(), Bo
 
 #[test]
 fn staged_publication_preserves_racing_destinations() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     for source_directory in [false, true] {
         for destination_kind in ["file", "directory", "symlink"] {
             let root = tempfile::tempdir()?;
@@ -2765,9 +2691,7 @@ fn staged_publication_preserves_racing_destinations() -> Result<(), Box<dyn Erro
 
 #[test]
 fn staged_symlinks_are_recreated_where_links_are_missing() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let _scope = FsQuirks::install(root.path(), Quirks::vboxsf());
     let staged = staged(root.path(), StageContent::Symlink("missing".into()))?;
@@ -2783,9 +2707,7 @@ fn staged_symlinks_are_recreated_where_links_are_missing() -> Result<(), Box<dyn
 
 #[test]
 fn staged_fallback_removes_reserved_directory_on_copy_error() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let _scope = FsQuirks::install(root.path(), Quirks::without_placement());
     let staged = stage(root.path(), true)?;
@@ -2828,9 +2750,7 @@ fn reusing_stage_inodes(before: (Op, &'static str, usize, Racer)) -> Quirks {
 
 #[test]
 fn a_stage_left_after_the_exclusive_copy_is_reported() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let stage_root = root.path().to_path_buf();
     let racer: Racer = Box::new(move || {
@@ -2864,9 +2784,7 @@ fn a_stage_left_after_the_exclusive_copy_is_reported() -> Result<(), Box<dyn Err
 #[test]
 fn a_stage_swapped_before_publication_is_neither_published_nor_deleted()
 -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let stage_root = root.path().to_path_buf();
     let racer: Racer = Box::new(move || {
@@ -2898,9 +2816,7 @@ fn a_stage_swapped_before_publication_is_neither_published_nor_deleted()
 
 #[test]
 fn cancelling_staged_fallback_removes_its_reserved_directory() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let target = root.path().join("target");
     let cancellable = gio::Cancellable::new();
@@ -2949,9 +2865,7 @@ fn cancelling_staged_fallback_removes_its_reserved_directory() -> Result<(), Box
 
 #[test]
 fn a_symlink_child_never_overwrites_an_existing_entry() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let source = root.path().join("source");
     let target = root.path().join("target");
@@ -2978,9 +2892,7 @@ fn a_symlink_child_never_overwrites_an_existing_entry() -> Result<(), Box<dyn Er
 #[test]
 fn read_only_items_keep_their_xattrs() -> Result<(), Box<dyn Error>> {
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     for (directory, mode) in [(false, 0o444), (true, 0o555)] {
         let root = tempfile::tempdir()?;
         let source = root.path().join("source");
@@ -3030,9 +2942,7 @@ fn gvfs_bridge() -> Quirks {
 #[test]
 fn names_moved_within_one_gvfs_bridge_backend_are_kept_and_fixed_between_two()
 -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let bridge = root.path().join("bridge");
     let server = bridge.join("sftp:host=example.org");
@@ -3074,9 +2984,7 @@ fn refuses_only_a_colon_b(name: &OsStr) -> Option<Errno> {
 
 #[test]
 fn each_gvfs_bridge_backend_learns_only_from_its_own_refusals() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let source = root.path().join("source");
     let bridge = root.path().join("bridge");

@@ -8,9 +8,7 @@ use crate::services::RenameRequest;
 
 #[test]
 fn undoing_a_move_returns_each_item_to_its_original_directory() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     for quirks in [Quirks::default, Quirks::sshfs, Quirks::vboxsf] {
         let root = tempfile::tempdir()?;
         let _scope = FsQuirks::install(root.path(), quirks());
@@ -57,9 +55,7 @@ fn undoing_a_move_returns_each_item_to_its_original_directory() -> Result<(), Bo
 
 #[test]
 fn undoing_a_move_stops_at_an_unconfirmed_conflict() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let origin = root.path().join("origin");
     let archive = root.path().join("archive");
@@ -126,9 +122,7 @@ fn undoing_a_move_stops_at_an_unconfirmed_conflict() -> Result<(), Box<dyn Error
 
 #[test]
 fn a_confirmed_undo_conflict_replaces_the_newer_item() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let origin = root.path().join("origin");
     let archive = root.path().join("archive");
@@ -172,9 +166,7 @@ fn a_confirmed_undo_conflict_replaces_the_newer_item() -> Result<(), Box<dyn Err
 #[test]
 fn an_undone_move_gives_names_back_as_they_were_and_a_redone_one_fixes_them()
 -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let malformed = || OsString::from_vec(b"x\xc0\xafy".to_vec());
     let rows: [(&str, Preset, NameMode, Vec<OsString>, [&str; 2]); 4] = [
         (
@@ -256,9 +248,7 @@ fn refuses_a_colon_b(name: &OsStr) -> Option<Errno> {
 #[test]
 fn rules_a_mount_learned_fix_names_a_redo_brings_but_not_those_an_undo_gives_back()
 -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     for (mode, expected) in [(NameMode::Keep, "c:d"), (NameMode::Fix, "c_d")] {
         let root = tempfile::tempdir()?;
         let disk = root.path().join("disk");
@@ -321,9 +311,7 @@ fn rules_a_mount_learned_fix_names_a_redo_brings_but_not_those_an_undo_gives_bac
 
 #[test]
 fn rename_undo_restores_a_native_name_byte_for_byte() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let original_parent = root.path().join("original");
     let current_parent = root.path().join("current");
@@ -364,9 +352,7 @@ fn rename_undo_restores_a_native_name_byte_for_byte() -> Result<(), Box<dyn Erro
 
 #[test]
 fn rename_undo_refuses_an_occupied_destination_and_can_retry() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let original_parent = root.path().join("original");
     let current_parent = root.path().join("current");
@@ -438,9 +424,7 @@ fn failure(events: &[OperationEvent]) -> String {
 #[test]
 fn renames_and_their_undo_keep_the_item_where_rename_flags_or_links_are_missing()
 -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let linked_before_a_probe = || Quirks {
         rename_flags: Support::Rejected(Errno::NOSYS),
         ..Quirks::sshfs()
@@ -486,9 +470,7 @@ fn renames_and_their_undo_keep_the_item_where_rename_flags_or_links_are_missing(
 #[test]
 fn a_typed_name_the_location_would_store_otherwise_is_refused_before_the_rename()
 -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let characters = |characters: &[&str]| {
         rust_i18n::t!(
             "Names in this location can’t contain %{characters}",
@@ -589,9 +571,7 @@ fn a_typed_name_the_location_would_store_otherwise_is_refused_before_the_rename(
 fn a_typed_name_at_a_gvfs_address_is_refused_by_the_rules_of_its_scheme()
 -> Result<(), Box<dyn Error>> {
     use super::super::typed_names::refused_in;
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let colon = rust_i18n::t!(
         "Names in this location can’t contain %{characters}",
         characters = crate::i18n::quoted(":")
@@ -614,9 +594,7 @@ fn a_typed_name_at_a_gvfs_address_is_refused_by_the_rules_of_its_scheme()
 fn a_rename_gio_has_no_backend_for_fails_instead_of_ending_the_process()
 -> Result<(), Box<dyn Error>> {
     use super::super::{NameKept, restore_name};
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let uri = "smb://server/share/item.txt";
     assert_eq!(
         gio::File::for_uri(uri).type_().name(),
@@ -655,9 +633,7 @@ fn a_rename_gio_has_no_backend_for_fails_instead_of_ending_the_process()
 
 #[test]
 fn a_rename_never_replaces_an_item_created_meanwhile() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     for quirks in [Quirks::default, Quirks::vboxsf] {
         let root = tempfile::tempdir()?;
         let source = root.path().join("item.txt");
@@ -690,9 +666,7 @@ fn a_rename_never_replaces_an_item_created_meanwhile() -> Result<(), Box<dyn Err
 #[test]
 fn a_case_only_rename_and_its_undo_keep_the_item_or_say_where_it_was_left()
 -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let source = root.path().join("report.txt");
     let renamed = root.path().join("Report.txt");
@@ -779,9 +753,7 @@ fn undo_items(
 #[test]
 fn undoing_a_cross_volume_move_deletes_the_moved_items_once_they_are_flushed()
 -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let names = ["notes.txt", "photo.jpg", "report.txt"];
     for (id, flushed) in [(97, true), (98, false)] {
         let root = tempfile::tempdir()?;
@@ -855,9 +827,7 @@ fn undoing_a_cross_volume_move_deletes_the_moved_items_once_they_are_flushed()
 
 #[test]
 fn a_cancel_that_cuts_off_a_move_back_counts_it_as_not_attempted() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let originals = root.path().join("originals");
     let moved = root.path().join("moved");
@@ -940,9 +910,7 @@ fn a_cancel_that_cuts_off_a_move_back_counts_it_as_not_attempted() -> Result<(),
 #[test]
 fn cancelled_rename_undo_reports_cancellation_without_moving_the_item() -> Result<(), Box<dyn Error>>
 {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let original_parent = root.path().join("original");
     let current_parent = root.path().join("current");
@@ -1016,10 +984,63 @@ fn undoing_a_grouping_reports_the_trashed_group_folder() {
 }
 
 #[test]
+fn undoing_a_grouping_without_trash_removes_only_an_empty_group_folder()
+-> Result<(), Box<dyn Error>> {
+    const NAME: &str = "adapters::local_operations::tests::undo::undoing_a_grouping_without_trash_removes_only_an_empty_group_folder";
+    let _serial = serial()?;
+    let Some((_home_side, volume)) = crate::test_support::distinct_device_dirs(NAME) else {
+        return Ok(());
+    };
+    for arrived_meanwhile in [false, true] {
+        let root = tempfile::TempDir::new_in(volume.path())?;
+        let group = root.path().join("group");
+        fs::create_dir(&group)?;
+        fs::write(group.join("report.txt"), b"contents")?;
+        if arrived_meanwhile {
+            fs::write(group.join("arrived.txt"), b"new")?;
+        }
+        let can_trash = gio::File::for_path(&group)
+            .query_info(
+                "access::can-trash",
+                gio::FileQueryInfoFlags::NONE,
+                gio::Cancellable::NONE,
+            )?
+            .boolean("access::can-trash");
+        assert!(!can_trash, "precondition: GIO refuses Trash on tmpfs");
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let emitted = events.clone();
+        let _operation = LocalOperationProvider.undo_move(
+            UndoMoveRequest {
+                cleanup_locations: vec![Location::local(&group)],
+                id: OperationRequestId(43),
+                items: vec![UndoMoveItem {
+                    record: MoveRecord {
+                        original: Location::local(root.path().join("report.txt")),
+                        current: Location::local(group.join("report.txt")),
+                        renamed: Vec::new(),
+                    },
+                    conflict: TransferConflict::FailIfExists,
+                }],
+                names: NameMode::Keep,
+            },
+            Rc::new(move |event| emitted.borrow_mut().push(event)),
+        );
+        drive_until_transfer_settles(&events);
+        let events = events.borrow();
+        assert!(
+            matches!(events.last(), Some(OperationEvent::Pasted { .. })),
+            "{events:?}"
+        );
+        assert!(trashed_items(&events).is_empty());
+        assert_eq!(fs::read(root.path().join("report.txt"))?, b"contents");
+        assert_eq!(group.exists(), arrived_meanwhile);
+    }
+    Ok(())
+}
+
+#[test]
 fn undoing_a_move_gives_back_names_numbered_as_aliases() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     for taken in [false, true] {
         let root = tempfile::tempdir()?;
         let origin = root.path().join("origin");
@@ -1190,9 +1211,7 @@ fn refuses_refused(name: &OsStr) -> Option<Errno> {
 fn undoing_a_move_gives_fixed_names_back_and_reports_those_it_cannot() -> Result<(), Box<dyn Error>>
 {
     use crate::services::{KeptCause, RenameCause};
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let origin = root.path().join("origin");
     let usb = root.path().join("usb");
@@ -1293,9 +1312,7 @@ fn undoing_a_move_gives_fixed_names_back_and_reports_those_it_cannot() -> Result
 #[test]
 fn undo_says_nothing_of_fixed_entries_gone_from_the_names_they_were_saved_as()
 -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     // As a share's location, which GIO renames.
     for through_gio in [false, true] {
         let root = tempfile::tempdir()?;
@@ -1329,9 +1346,7 @@ fn undo_says_nothing_of_fixed_entries_gone_from_the_names_they_were_saved_as()
 fn undoing_a_move_back_to_another_kind_of_location_gives_fixed_names_back()
 -> Result<(), Box<dyn Error>> {
     use crate::services::{RenameCause, RenamedItem};
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let origin = root.path().join("origin");
     let usb = root.path().join("usb");

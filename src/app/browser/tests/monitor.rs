@@ -265,7 +265,12 @@ fn watched_directory_changes_refresh_the_filter_index_for_that_directory() {
         let observed = events.clone();
         browser.observe(move |event| observed.borrow_mut().push(event.clone()));
         browser.navigate(Location::local(&dir));
-        let (handle, results) = crate::services::index_filter(dir.clone(), false, false);
+        let (handle, results) = crate::services::index_filter(
+            dir.clone(),
+            false,
+            false,
+            crate::services::SearchLimits::default(),
+        );
         handle.query("needle");
         let initial = if matches!(change, ExternalChange::Remove) {
             vec![needle.clone()]
@@ -499,7 +504,12 @@ fn external_renames_rebase_filter_indexes_rooted_at_the_renamed_folder() {
             RenameReport::OwnMonitor => &old,
         };
         browser.navigate(Location::local(open));
-        let (handle, results) = crate::services::index_filter(old.clone(), false, true);
+        let (handle, results) = crate::services::index_filter(
+            old.clone(),
+            false,
+            true,
+            crate::services::SearchLimits::default(),
+        );
         handle.query("needle");
         await_result_paths(&results, &[old.join("needle.txt")])
             .expect("the initial filter results");

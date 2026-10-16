@@ -68,7 +68,7 @@ The last navigation input determines the destination of Ctrl+V:
 3. Ctrl+V itself does **not** change ownership. A parked pointer cannot override subsequent keyboard navigation. Layout/scroll changes underneath an unmoving pointer do not count as pointer motion.
 4. Outside the columns, pointer mode falls back to the focused/active directory. Stale depths are discarded. Icons and List continue to use their single active directory.
 
-The terminal shortcut uses the same directory fallback, but still prefers an explicitly selected directory. New Folder remains keyboard-focus scoped. Context-menu paste and drag-and-drop retain their explicit destinations.
+The terminal shortcut uses the same directory fallback, but still prefers an explicitly selected directory: the one selected in the active column, or in Columns the folder selected in the pointer's column when it is open as the active column, such as a folder just clicked open. New Folder remains keyboard-focus scoped. Context-menu paste and drag-and-drop retain their explicit destinations.
 
 Keyboard navigation suppresses stale row-hover effects and pending folder peeks until deliberate pointer input resumes. It does not erase selection or the open folder path.
 
@@ -78,7 +78,7 @@ Pressing blank column content focuses that directory, including empty directorie
 
 **Shift+Up/Down** extends the selection from the range anchor by one item, **Shift+Page Up/Page Down** by one page. After Escape clears the selection, the range starts at the cursor.
 
-Copy/cut use the selection in the focused column, never a hovered row. In Columns, Delete/Shift+Delete with no selected items does nothing: an open parent-path marker is not an implicit deletion target. In List and Icons, Delete acts on the selection only. Delete in a location without Trash support, or after a Trash attempt fails because Trash is unsupported, opens the permanent-deletion confirmation with Cancel focused and the reason stated; Shift+Delete is unchanged.
+Copy/cut use the selection in the focused column, never a hovered row. In Columns, Delete/Shift+Delete with no selected items does nothing: an open parent-path marker is not an implicit deletion target. In List and Icons, Delete acts on the selection only. Delete in a location without Trash support, or after a Trash attempt fails because Trash is unsupported, opens the permanent-deletion confirmation with Cancel focused and the reason stated; Shift+Delete is unchanged. GIO reports Trash on most writable FUSE mounts (sshfs, rclone, cloud drives), so a refusal there is confirmed by a quick, read-only check of the mount and then remembered for that mount until Reload or a remount: later Deletes confirm up front and Move to Trash is hidden. Empty trash folders left by the failed attempt are removed. On network and cloud locations the confirmation says the items are deleted without Trash and that recovery depends on the storage provider, instead of promising permanent deletion; local disks, including `fuseblk` drives, keep the permanent wording, and a mixed selection uses it too.
 
 Background selection updates from directory loading must not move keyboard focus to an inactive column.
 
@@ -208,8 +208,12 @@ first member. Enter opens the preview even when automatic previews are disabled;
 double-click and the archive's context menu still offer extraction. In Icons
 and List, Enter retains its archive extraction behavior.
 
-Other archive previews start at the archive root with the first member
-highlighted. In List and Columns modes, arrow keys act on the focused pane,
+In every view, moving the cursor onto an archive while the preview is open
+updates the preview without taking keyboard focus: a plain archive shows its
+members with none highlighted, and a password-protected archive shows its
+password prompt unfocused. Opening the preview on an archive with **Space**
+enters it directly, highlighting the first member or focusing the password
+field. In List and Columns modes, arrow keys act on the focused pane,
 not merely on an open preview. From the listing, **Right** enters the open
 preview. While the preview owns focus, its header shows the accent top border
 instead of the Miller column. Returning to the listing restores its cursor

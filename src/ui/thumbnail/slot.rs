@@ -18,6 +18,7 @@ mod imp {
         pub limit_fallback_height: Cell<bool>,
         pub fallback_scale: Cell<f64>,
         pub texture: RefCell<Option<gdk::Texture>>,
+        pub(super) thumbnail_source: RefCell<Option<super::super::ThumbnailSource>>,
         pub decoration: RefCell<Option<gdk::Texture>>,
         pub provider_path: RefCell<Option<String>>,
         pub provider_retry: Cell<bool>,
@@ -150,6 +151,28 @@ fn folder_height_scale(texture: &gdk::Texture) -> f64 {
     (19.0 / 24.0 * height as f64 / (last - first + 1) as f64).min(1.0)
 }
 
+thread_local! {
+    static FOLDER_HEIGHT_SCALES: RefCell<std::collections::HashMap<usize, (glib::WeakRef<gdk::Texture>, f64)>> =
+        RefCell::new(std::collections::HashMap::new());
+}
+
+fn cached_folder_height_scale(texture: &gdk::Texture) -> f64 {
+    let key = texture.as_ptr() as usize;
+    FOLDER_HEIGHT_SCALES.with_borrow_mut(|scales| {
+        if let Some((owner, scale)) = scales.get(&key)
+            && owner.upgrade().as_ref() == Some(texture)
+        {
+            return *scale;
+        }
+        if scales.len() >= 512 {
+            scales.retain(|_, (owner, _)| owner.upgrade().is_some());
+        }
+        let scale = folder_height_scale(texture);
+        scales.insert(key, (texture.downgrade(), scale));
+        scale
+    })
+}
+
 fn same_texture(left: Option<&gdk::Texture>, right: Option<&gdk::Texture>) -> bool {
     match (left, right) {
         (None, None) => true,
@@ -181,7 +204,25 @@ impl ThumbnailSlot {
         widget.imp().fallback_scale.set(1.0);
         widget.imp().base_opacity.set(1.0);
         widget.set_slot(slot);
+        crate::ui::preferences::PreferenceManager::shared().bind_preference(
+            &widget,
+            crate::ui::preferences::PreferenceManager::show_thumbnails,
+            |widget, _| {
+                let slot = widget
+                    .downcast_ref::<ThumbnailSlot>()
+                    .expect("thumbnail slot");
+                super::refresh_slot_thumbnail(slot);
+            },
+        );
         widget
+    }
+
+    pub(super) fn thumbnail_source(&self) -> Option<super::ThumbnailSource> {
+        self.imp().thumbnail_source.borrow().clone()
+    }
+
+    pub(super) fn set_thumbnail_source(&self, source: Option<super::ThumbnailSource>) {
+        self.imp().thumbnail_source.replace(source);
     }
 
     #[cfg(test)]
@@ -278,7 +319,7 @@ impl ThumbnailSlot {
         self.imp().texture.replace(None);
         let scale =
             if self.imp().limit_fallback_height.get() && icon != crate::assets::icons::FOLDER {
-                texture.map_or(1.0, folder_height_scale)
+                texture.map_or(1.0, cached_folder_height_scale)
             } else {
                 1.0
             };

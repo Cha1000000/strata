@@ -100,6 +100,9 @@ async fn resolve_default_application(
                 &crate::i18n::tr("Unable to determine the selected file type"),
             )
         })?;
+    if crate::ui::open_with::uses_portal() {
+        return Ok((content_type, None));
+    }
     let requires_uris = crate::ui::open_with::requires_uri_handlers(std::slice::from_ref(file));
     let default = gio::AppInfo::default_for_type(&content_type, requires_uris);
     Ok((content_type, default))

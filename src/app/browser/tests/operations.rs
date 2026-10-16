@@ -845,7 +845,6 @@ fn successful_transfers_reveal_actual_destination_names_only_without_navigation(
                 browser.navigate(root);
             }
             if moving {
-                // Keep Both moved it under the next free number.
                 emit(OperationEvent::ItemMoved {
                     request_id,
                     from: Location::local("/fixture/report.txt"),

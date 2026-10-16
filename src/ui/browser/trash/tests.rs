@@ -106,6 +106,50 @@ fn trashed_entry(root: &Path, name: &str, original: &Path) -> (FileEntry, PathBu
 }
 
 #[test]
+fn deletion_reach_keeps_the_local_warning_unless_every_item_is_remote() {
+    use DeletionReach::{Local, Remote};
+    let mounts = || {
+        crate::adapters::MountTable::parse(
+            "1 0 8:1 / / rw - ext4 /dev/root rw\n\
+             2 1 0:2 / /mnt/cloud rw - fuse.rclone drive: rw\n\
+             3 1 8:33 / /media/usb rw - fuseblk /dev/sdc1 rw\n\
+             4 1 0:4 / /mnt/nas rw - nfs4 nas:/export rw\n\
+             5 1 0:5 / /mnt/pool rw - fuse.mergerfs disks rw\n",
+        )
+    };
+    let entries = |locations: &[&str]| -> Vec<FileEntry> {
+        locations
+            .iter()
+            .map(|location| {
+                crate::test_support::operations::entry(if location.starts_with('/') {
+                    Location::local(location)
+                } else {
+                    Location::uri(*location)
+                })
+            })
+            .collect()
+    };
+    for (locations, expected) in [
+        (&["/mnt/cloud/a"][..], Remote),
+        (&["/mnt/nas/a", "/mnt/cloud/b"], Remote),
+        (&["sftp://host/a"], Remote),
+        (&["/home/user/a"], Local),
+        (&["/media/usb/a"], Local),
+        (&["/mnt/pool/a"], Local),
+        (&["TRASH:///a"], Local),
+        (&["trash:///a"], Local),
+        (&["/mnt/cloud/a", "/home/user/b"], Local),
+        (&[], Local),
+    ] {
+        assert_eq!(
+            deletion_reach_with(&entries(locations), mounts),
+            expected,
+            "{locations:?}"
+        );
+    }
+}
+
+#[test]
 fn permanent_delete_confirmation_is_actionable_while_summary_loads() {
     crate::test_support::gtk_test(
         "ui::browser::trash::tests::permanent_delete_confirmation_is_actionable_while_summary_loads",
@@ -230,9 +274,18 @@ fn focused_button_label(window: &gtk::Window) -> Option<String> {
 fn delete_summary_loaded(window: &gtk::Window) -> bool {
     find_widget(window.upcast_ref(), &|label: &gtk::Label| {
         let text = normalized(label);
-        text.contains(" · ") && text.ends_with("will be permanently deleted")
+        text.contains(" · ") && text.ends_with(" deleted")
     })
     .is_some()
+}
+
+/// Treats `root` as an sshfs mount, as Strata sees cloud and network mounts.
+fn mount_as_network_share(root: &Path) {
+    crate::adapters::set_mountinfo_for_isolated_test(Some(format!(
+        "1 0 8:1 / / rw - ext4 /dev/root rw\n\
+         900 1 0:90 / {} rw - fuse.sshfs remote:/share rw\n",
+        root.to_str().expect("UTF-8 fixture path")
+    )));
 }
 
 /// Window dispatch cannot reach the modal's own key controller.
@@ -280,15 +333,34 @@ fn unsupported_trash_fallback_explains_and_focuses_cancel() {
             let window = window(&view);
 
             // `mixed`: another item failed for a different reason, so the
-            // "Completed with errors" dialog's Delete Permanently comes first.
-            for mixed in [false, true] {
+            // "Completed with errors" dialog's retry button comes first.
+            // `remote`: a provider may keep a copy, so nothing promises permanence.
+            for (remote, mixed) in [(false, false), (false, true), (true, false), (true, true)] {
+                if remote {
+                    mount_as_network_share(fixture.path());
+                } else {
+                    crate::adapters::set_mountinfo_for_isolated_test(None);
+                }
+                let (retry, confirm, explanation) = if remote {
+                    (
+                        "Delete without Trash",
+                        "Delete 2 items",
+                        "These items will be deleted without using Trash. Strata can't undo this; whether they can be recovered depends on the storage provider.",
+                    )
+                } else {
+                    (
+                        "Delete Permanently",
+                        "Permanently delete 2 items",
+                        "These items will be permanently deleted. This action cannot be undone.",
+                    )
+                };
                 let unsupported = |id| {
                     crate::services::OperationEvent::CompletedWithErrors {
                     request_id: id,
                     deleted_locations: Vec::new(),
                     retryable_locations: entries.iter().map(|entry| entry.location.clone()).collect(),
                     has_non_retryable_failures: mixed,
-                    message: "a.txt: This location doesn't support Trash. Delete permanently instead.\n\n• b.txt: This location doesn't support Trash. Delete permanently instead.".into(),
+                    message: "a.txt: This location doesn't support Trash.\n\n• b.txt: This location doesn't support Trash.".into(),
                 }
                 };
                 let fail_trash_attempt = || {
@@ -304,44 +376,37 @@ fn unsupported_trash_fallback_explains_and_focuses_cancel() {
                     );
                     held.emit(id, unsupported(id));
                     if mixed {
-                        wait_until(|| button(window.upcast_ref(), "Delete Permanently").is_some());
-                        wait_until(|| {
-                            focused_button_label(&window).as_deref() == Some("Delete Permanently")
-                        });
-                        button(window.upcast_ref(), "Delete Permanently")
+                        wait_until(|| button(window.upcast_ref(), retry).is_some());
+                        wait_until(|| focused_button_label(&window).as_deref() == Some(retry));
+                        button(window.upcast_ref(), retry)
                             .expect("retry")
                             .emit_clicked();
                     }
-                    wait_until(|| {
-                        button(window.upcast_ref(), "Permanently delete 2 items").is_some()
-                    });
+                    wait_until(|| button(window.upcast_ref(), confirm).is_some());
                 };
 
                 fail_trash_attempt();
                 wait_until(|| {
-                    focused_button_label(&window).is_some_and(|label| {
-                        label == "Cancel" || label == "Permanently delete 2 items"
-                    })
+                    focused_button_label(&window)
+                        .is_some_and(|label| label == "Cancel" || label == confirm)
                 });
                 let initial_focus = focused_button_label(&window);
                 wait_until(|| delete_summary_loaded(&window));
                 pump(300);
                 assert_eq!(
                     (
-                        has_label(
-                            &window,
-                            "doesn't support Trash. These items will be permanently deleted."
-                        ),
+                        has_label(&window, "This location doesn't support Trash."),
+                        has_label(&window, explanation),
                         initial_focus.as_deref(),
                         focused_button_label(&window).as_deref(),
                     ),
-                    (true, Some("Cancel"), Some("Cancel")),
-                    "mixed: {mixed}: (explains missing Trash, initial focus, focus after the size summary)"
+                    (true, true, Some("Cancel"), Some("Cancel")),
+                    "remote: {remote}, mixed: {mixed}: (explains missing Trash, describes the reach, initial focus, focus after the size summary)"
                 );
 
                 let requests = held.delete_requests.borrow().len();
                 assert!(modal_key(&window, gtk::gdk::Key::Return));
-                wait_until(|| button(window.upcast_ref(), "Permanently delete 2 items").is_none());
+                wait_until(|| button(window.upcast_ref(), confirm).is_none());
                 assert_eq!(
                     held.delete_requests.borrow().len(),
                     requests,
@@ -350,7 +415,7 @@ fn unsupported_trash_fallback_explains_and_focuses_cancel() {
                 assert!(paths.iter().all(|path| path.exists()));
 
                 fail_trash_attempt();
-                button(window.upcast_ref(), "Permanently delete 2 items")
+                button(window.upcast_ref(), confirm)
                     .expect("confirm")
                     .emit_clicked();
                 wait_until(|| held.delete_requests.borrow().len() == requests + 2);
@@ -363,7 +428,7 @@ fn unsupported_trash_fallback_explains_and_focuses_cancel() {
                 assert_eq!(
                     (permanent, count),
                     (true, 2),
-                    "mixed: {mixed}: confirm is permanent"
+                    "remote: {remote}, mixed: {mixed}: confirm bypasses Trash"
                 );
                 held.emit(
                     id,
@@ -374,6 +439,65 @@ fn unsupported_trash_fallback_explains_and_focuses_cancel() {
                 );
                 wait_until(|| !view.browser().is_current_operation(id));
             }
+            window.destroy();
+            view.browser().clear_observer();
+        },
+    );
+}
+
+#[test]
+fn permanent_delete_symlink_to_folder_counts_only_link_and_labels_folder_link() {
+    crate::test_support::gtk_test(
+        "ui::browser::trash::tests::permanent_delete_symlink_to_folder_counts_only_link_and_labels_folder_link",
+        || {
+            let fixture = tempfile::tempdir().expect("fixture");
+            let real_dir = fixture.path().join("realdir");
+            fs::create_dir(&real_dir).expect("realdir");
+            for i in 1..=5 {
+                fs::write(real_dir.join(format!("file{i}")), b"x").expect("file");
+            }
+            let link = fixture.path().join("0dirlink");
+            std::os::unix::fs::symlink(&real_dir, &link).expect("symlink");
+
+            let context = glib::MainContext::new();
+            let entry = context
+                .block_on(crate::adapters::query_file_entry(Location::local(&link)))
+                .expect("entry");
+            assert_eq!(entry.kind, EntryKind::DirectorySymbolicLink);
+
+            let view = view();
+            let window = window(&view);
+            view.state.show_delete_confirmation(vec![entry]);
+
+            assert!(
+                has_label(&window, "Folder link"),
+                "dialog row must label directory symlink as Folder link"
+            );
+
+            wait_until(|| delete_summary_loaded(&window));
+            let summary_label = find_widget(window.upcast_ref(), &|label: &gtk::Label| {
+                let text = normalized(label);
+                text.contains(" · ") && text.ends_with("will be permanently deleted")
+            })
+            .expect("summary label");
+            assert_eq!(
+                normalized(&summary_label),
+                "1 item · 0 B will be permanently deleted"
+            );
+
+            let confirm =
+                button(window.upcast_ref(), "Permanently delete 1 item").expect("confirm button");
+            confirm.emit_clicked();
+            wait_until(|| button(window.upcast_ref(), "Permanently delete 1 item").is_none());
+            wait_until(|| link.symlink_metadata().is_err());
+            assert!(real_dir.is_dir(), "target folder must still exist");
+            for i in 1..=5 {
+                assert!(
+                    real_dir.join(format!("file{i}")).exists(),
+                    "target file{i} must be preserved"
+                );
+            }
+
             window.destroy();
             view.browser().clear_observer();
         },

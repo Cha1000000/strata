@@ -5,6 +5,7 @@ use std::{
     collections::HashMap,
     path::{Path, PathBuf},
     rc::Rc,
+    time::Duration,
 };
 
 use sourceview5::prelude::BufferExt as _;
@@ -15,6 +16,7 @@ use crate::{
         EntryKind, FileEntry, FolderSort, Location, MetadataValue, SortDirection, SortKey,
         ViewPreferences,
     },
+    services::SearchLimits,
     test_support::gtk_test,
     ui::{
         browser_modes::{BrowserDensity, BrowserMode, ClickCount},
@@ -88,6 +90,8 @@ fn recent_sort_is_not_stored_as_an_ordinary_folder_default() {
 fn older_preferences_keep_backward_compatible_behavior_defaults() {
     let mut saved = toml::Table::try_from(non_default_preferences()).expect("saved preferences");
     saved.remove("filter_include_subfolders");
+    saved.remove("search_time_limit");
+    saved.remove("search_entry_limit");
     saved.remove("open_folder_after_drop");
     saved.remove("date_format");
     saved.remove("send_to_recent_destinations");
@@ -103,6 +107,8 @@ fn older_preferences_keep_backward_compatible_behavior_defaults() {
         Preferences {
             language: crate::i18n::Language::Auto,
             filter_include_subfolders: true,
+            search_time_limit: 10,
+            search_entry_limit: 200_000,
             open_folder_after_drop: false,
             date_format: "relative".into(),
             send_to_recent_destinations: HashMap::new(),
@@ -617,6 +623,75 @@ fn unlisted_auto_refresh_intervals_round_up_on_load_and_set() {
 }
 
 #[test]
+fn unlisted_search_limits_round_up_on_load_and_set() {
+    gtk_test(
+        "ui::preferences::tests::preferences::unlisted_search_limits_round_up_on_load_and_set",
+        || {
+            for (stored_secs, expected_secs, stored_entries, expected_entries) in [
+                (0, 0, 0, 0),
+                (1, 10, 1, 200_000),
+                (11, 30, 200_001, 500_000),
+                (61, 300, 500_001, 1_000_000),
+                (301, 900, 1_000_001, 5_000_000),
+                (901, 0, 5_000_001, 0),
+            ] {
+                assert_recovered_preferences_survive_save(
+                    |saved| {
+                        saved.insert("search_time_limit".into(), i64::from(stored_secs).into());
+                        saved.insert(
+                            "search_entry_limit".into(),
+                            i64::from(stored_entries).into(),
+                        );
+                    },
+                    Preferences {
+                        search_time_limit: expected_secs,
+                        search_entry_limit: expected_entries,
+                        ..non_default_preferences()
+                    },
+                );
+            }
+
+            seed_saved_preferences_for_test();
+            let manager = PreferenceManager::shared();
+            for (requested, expected) in [(45, 60), (u32::MAX, 0), (300, 300), (10, 10)] {
+                manager.set_search_time_limit(requested);
+                assert_eq!(manager.search_time_limit(), expected);
+                assert_eq!(
+                    read_preferences()
+                        .expect("saved preferences")
+                        .search_time_limit,
+                    expected
+                );
+            }
+            for (requested, expected) in [
+                (300_000, 500_000),
+                (u32::MAX, 0),
+                (200_000, 200_000),
+                (1, 200_000),
+            ] {
+                manager.set_search_entry_limit(requested);
+                assert_eq!(manager.search_entry_limit(), expected);
+                assert_eq!(
+                    read_preferences()
+                        .expect("saved preferences")
+                        .search_entry_limit,
+                    expected
+                );
+            }
+            manager.set_search_time_limit(0);
+            manager.set_search_entry_limit(0);
+            assert_eq!(
+                manager.search_limits(),
+                SearchLimits {
+                    time_budget: None,
+                    max_entries: None,
+                }
+            );
+        },
+    );
+}
+
+#[test]
 fn fresh_preferences_select_tokyo_night_before_settings_opens() {
     gtk_test(
         "ui::preferences::tests::preferences::fresh_preferences_select_tokyo_night_before_settings_opens",
@@ -679,6 +754,15 @@ fn every_saved_preference_loads_before_any_settings_page_exists() {
             assert_eq!(
                 manager.search_exclusions(),
                 vec![".venv", "/fixture/custom_excluded"]
+            );
+            assert_eq!(manager.search_time_limit(), 300);
+            assert_eq!(manager.search_entry_limit(), 1_000_000);
+            assert_eq!(
+                manager.search_limits(),
+                SearchLimits {
+                    time_budget: Some(Duration::from_secs(300)),
+                    max_entries: Some(1_000_000),
+                }
             );
             assert!(!manager.type_to_search());
             assert!(manager.arrow_navigation_scoped());
@@ -813,6 +897,18 @@ fn every_saved_preference_loads_before_any_settings_page_exists() {
             assert!(manager.preview_autoplay());
             assert_eq!(manager.auto_refresh_interval(), 600);
             assert_eq!(manager.thumbnail_workers(), 6);
+            assert!(!manager.show_thumbnails());
+            assert_eq!(
+                manager.list_column_order(),
+                vec![
+                    ListColumnId::Name,
+                    ListColumnId::Size,
+                    ListColumnId::Type,
+                    ListColumnId::Modified,
+                    ListColumnId::Mode,
+                ]
+            );
+            assert_eq!(manager.list_hidden_columns(), vec![ListColumnId::Mode]);
             assert_eq!(
                 manager.cross_volume_drop_strategy(),
                 CrossVolumeDropStrategy::Move
@@ -1116,6 +1212,8 @@ fn all_preference_setters_publish_and_persist_without_duplicate_notifications() 
                 |m| m.set_video_preview_backend(MediaPreviewBackend::VaApi),
                 |m| m.set_search_open_files_directly(false),
                 |m| m.set_search_exclusions(vec!["changed_exclusion".to_owned()]),
+                |m| m.set_search_time_limit(0),
+                |m| m.set_search_entry_limit(0),
                 |m| m.set_type_to_search(true),
                 |m| m.set_arrow_navigation_scoped(false),
                 |m| m.set_tenxer_mode(false),
@@ -1166,6 +1264,8 @@ fn all_preference_setters_publish_and_persist_without_duplicate_notifications() 
                 |m| m.set_sidebar_compact(false),
                 |m| m.set_sort_preferences(ViewPreferences::default()),
                 |m| m.set_text_size(TextSize::new(11)),
+                |m| m.set_corner_roundness(CornerRoundness::new(150)),
+                |m| m.set_interface_font(None),
                 |m| m.set_interface_renderer(InterfaceRenderer::System),
                 |m| m.set_language(crate::i18n::Language::Auto),
                 |m| m.set_checks_for_updates(true),
@@ -1176,11 +1276,14 @@ fn all_preference_setters_publish_and_persist_without_duplicate_notifications() 
                 |m| m.set_preview_autoplay(false),
                 |m| m.set_auto_refresh_interval(60),
                 |m| m.set_thumbnail_workers(3),
+                |m| m.set_show_thumbnails(true),
                 |m| m.set_icons_thumbnail_size(96),
                 |m| m.set_chooser_column_width(Some(360)),
                 |m| m.set_chooser_list_columns(None),
                 |m| m.set_browser_column_width(Some(400)),
                 |m| m.set_browser_list_columns(None),
+                |m| m.set_list_column_order(default_list_column_order()),
+                |m| m.set_list_hidden_columns(Vec::new()),
                 |m| m.set_cross_volume_drop_strategy(CrossVolumeDropStrategy::Copy),
                 |m| m.set_date_format(crate::util::DateFormat::Long),
                 |m| m.set_default_directory(None),
@@ -1614,6 +1717,139 @@ fn item_customizations_follow_relocations_and_removals() {
                     );
                 }
             }
+        },
+    );
+}
+
+#[test]
+fn list_column_visibility_preserves_default_sort_and_publishes_once() {
+    gtk_test(
+        "ui::preferences::tests::preferences::list_column_visibility_preserves_default_sort_and_publishes_once",
+        || {
+            let manager = PreferenceManager::shared();
+            let snapshots = Rc::new(RefCell::new(Vec::new()));
+            let observed = snapshots.clone();
+            manager.observe(Rc::new(move || {
+                let manager = PreferenceManager::shared();
+                observed
+                    .borrow_mut()
+                    .push((manager.default_sort(), manager.list_hidden_columns()));
+            }));
+
+            for (sort_key, column, direction) in [
+                (SortKey::Size, ListColumnId::Size, SortDirection::Ascending),
+                (SortKey::Type, ListColumnId::Type, SortDirection::Descending),
+                (
+                    SortKey::Modified,
+                    ListColumnId::Modified,
+                    SortDirection::Descending,
+                ),
+            ] {
+                manager.reset_list_columns();
+                manager.set_default_sort(sort_key, direction);
+                for (visible, hidden) in
+                    [(false, vec![column]), (true, vec![]), (false, vec![column])]
+                {
+                    snapshots.borrow_mut().clear();
+                    manager.set_list_column_visible(column, visible);
+
+                    assert_eq!(manager.is_list_column_visible(column), visible);
+                    assert_eq!(manager.default_sort(), (sort_key, direction));
+                    assert_eq!(
+                        snapshots.borrow().as_slice(),
+                        &[((sort_key, direction), hidden.clone())],
+                        "visibility must publish once without changing the sort"
+                    );
+                    let saved = read_preferences().expect("saved preferences");
+                    assert_eq!(saved.list_hidden_columns, hidden);
+                    assert_eq!(SortKey::from_stored(&saved.sort_key), Some(sort_key));
+                    assert_eq!(
+                        SortDirection::from_stored(&saved.sort_direction),
+                        Some(direction)
+                    );
+                }
+                snapshots.borrow_mut().clear();
+                manager.reset_list_columns();
+                assert_eq!(manager.default_sort(), (sort_key, direction));
+                assert_eq!(
+                    snapshots.borrow().as_slice(),
+                    &[((sort_key, direction), vec![])],
+                    "resetting columns must preserve sorting too"
+                );
+            }
+        },
+    );
+}
+
+#[test]
+fn list_columns_order_and_visibility_persist_and_update() {
+    gtk_test(
+        "ui::preferences::tests::preferences::list_columns_order_and_visibility_persist_and_update",
+        || {
+            let manager = PreferenceManager::shared();
+
+            assert_eq!(
+                manager.list_column_order(),
+                vec![
+                    ListColumnId::Name,
+                    ListColumnId::Mode,
+                    ListColumnId::Size,
+                    ListColumnId::Type,
+                    ListColumnId::Modified,
+                ]
+            );
+            assert!(manager.list_hidden_columns().is_empty());
+            assert!(manager.is_list_column_visible(ListColumnId::Mode));
+
+            manager.set_list_column_visible(ListColumnId::Mode, false);
+            manager.set_list_column_visible(ListColumnId::Type, false);
+            assert!(!manager.is_list_column_visible(ListColumnId::Mode));
+            assert!(!manager.is_list_column_visible(ListColumnId::Type));
+            assert!(manager.is_list_column_visible(ListColumnId::Name));
+            assert!(manager.is_list_column_visible(ListColumnId::Size));
+            assert_eq!(
+                manager.list_visible_columns(),
+                vec![
+                    ListColumnId::Name,
+                    ListColumnId::Size,
+                    ListColumnId::Modified,
+                ]
+            );
+
+            manager.set_list_column_visible(ListColumnId::Name, false);
+            assert!(manager.is_list_column_visible(ListColumnId::Name));
+
+            manager.swap_list_columns(ListColumnId::Modified, ListColumnId::Type);
+            assert_eq!(
+                manager.list_column_order(),
+                vec![
+                    ListColumnId::Name,
+                    ListColumnId::Mode,
+                    ListColumnId::Size,
+                    ListColumnId::Modified,
+                    ListColumnId::Type,
+                ]
+            );
+
+            let saved = read_preferences().expect("saved preferences");
+            assert_eq!(saved.list_column_order, manager.list_column_order());
+            assert_eq!(saved.list_hidden_columns, manager.list_hidden_columns());
+
+            manager.reset_list_columns();
+            assert_eq!(
+                manager.list_column_order(),
+                vec![
+                    ListColumnId::Name,
+                    ListColumnId::Mode,
+                    ListColumnId::Size,
+                    ListColumnId::Type,
+                    ListColumnId::Modified,
+                ]
+            );
+            assert!(manager.list_hidden_columns().is_empty());
+            let saved_reset = read_preferences().expect("saved preferences");
+            assert_eq!(saved_reset.list_column_order, manager.list_column_order());
+            assert!(saved_reset.list_hidden_columns.is_empty());
         },
     );
 }

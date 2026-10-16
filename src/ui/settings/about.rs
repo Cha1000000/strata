@@ -10,8 +10,7 @@ pub(super) fn about_page() -> gtk::Widget {
     let identity = gtk::Box::new(gtk::Orientation::Horizontal, 20);
     identity.add_css_class("about-identity");
     super::search::tag(&identity, "Version information");
-    let icon = gtk::Image::from_resource("/io/github/lgse/Strata/brand/strata-logo-white.svg");
-    icon.set_pixel_size(36);
+    let icon = crate::assets::text_icon(icons::STRATA_LOGO, 36);
     let logo = gtk::Box::new(gtk::Orientation::Horizontal, 0);
     logo.add_css_class("about-logo");
     icon.set_halign(gtk::Align::Center);
@@ -37,9 +36,7 @@ pub(super) fn about_page() -> gtk::Widget {
         heading.append(&badge);
     }
     copy.append(&heading);
-    let description = gtk::Label::new(Some(&crate::i18n::tr(
-        "A keyboard-first file manager for Linux.",
-    )));
+    let description = gtk::Label::new(Some(&crate::i18n::tr("Navigate every layer.")));
     description.set_xalign(0.0);
     description.set_wrap(true);
     description.add_css_class("about-description");
@@ -54,11 +51,7 @@ pub(super) fn about_page() -> gtk::Widget {
 
     let build = settings_group(&content, "BUILD");
     super::search::tag(&build, "Version information");
-    append_about_detail(
-        &build,
-        "Version",
-        &crate::build_info::installed_version().to_string(),
-    );
+    append_about_detail(&build, "Version", &crate::build_info::displayed_version());
     append_about_detail(&build, "Commit", crate::build_info::COMMIT);
     append_about_detail(&build, "Toolkit", &toolkit_version());
     let links = settings_group(&content, "LINKS");
@@ -125,7 +118,7 @@ fn toolkit_version() -> String {
 }
 
 fn version_info() -> String {
-    rust_i18n::t!("Strata %{value1}\n%{value2}\nCommit: %{value3}\nToolkit: %{value4}\nAuthor: %{value5}\nLicense: MIT", value1 = crate::build_info::installed_version(), value2 = crate::i18n::tr("A keyboard-first file manager for Linux."), value3 = crate::build_info::COMMIT, value4 = toolkit_version(), value5 = crate::build_info::AUTHOR).into_owned()
+    rust_i18n::t!("Strata %{value1}\n%{value2}\nCommit: %{value3}\nToolkit: %{value4}\nAuthor: %{value5}\nLicense: MIT", value1 = crate::build_info::displayed_version(), value2 = crate::i18n::tr("Navigate every layer."), value3 = crate::build_info::COMMIT, value4 = toolkit_version(), value5 = crate::build_info::AUTHOR).into_owned()
 }
 
 fn append_about_detail(container: &gtk::Box, label: &str, value: &str) {

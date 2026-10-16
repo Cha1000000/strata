@@ -3,7 +3,9 @@
 mod syntax;
 mod text_size;
 
-use std::collections::HashSet;
+use std::{cell::Cell, collections::HashSet, rc::Rc};
+
+use crate::ui::preferences::{CornerRoundness, PreferenceManager};
 
 use super::{
     Theme, ThemeManager, ThemeTokens, azure_tokens, blend, builtins, canonical_color, color_to_hex,
@@ -11,7 +13,8 @@ use super::{
     slugify, source_palette_from_quattro, source_style_scheme_xml, themes_directory,
     title_case_slug, tokens_from_quattro, validate_tokens,
 };
-use crate::test_support::{gtk_test, texture_has_visible_pixels};
+use crate::test_support::{gtk_test, gtk_test_with_env, texture_has_visible_pixels};
+use gtk::prelude::*;
 
 #[test]
 fn bundled_catalog_is_valid_unique_and_alphabetical() {
@@ -159,6 +162,74 @@ fn saving_a_custom_theme_never_overwrites_an_existing_theme_file() {
             );
         },
     );
+}
+
+#[test]
+fn rewriting_the_selected_custom_theme_applies_without_a_restart() {
+    gtk_test(
+        "ui::theme::tests::rewriting_the_selected_custom_theme_applies_without_a_restart",
+        || {
+            let directory = themes_directory();
+            std::fs::create_dir_all(&directory).expect("themes directory");
+            let mut tokens = azure_tokens();
+            tokens.name = "Live Reload".to_owned();
+            tokens.accent = "#112233".to_owned();
+            let path = directory.join("live-reload.toml");
+            let write_theme = |tokens: &ThemeTokens| {
+                std::fs::write(&path, toml::to_string_pretty(tokens).expect("theme file"))
+                    .expect("written theme");
+            };
+            write_theme(&tokens);
+
+            let manager = ThemeManager::shared();
+            manager.select_theme("live-reload");
+            assert_eq!(manager.active_model_palette().accent, 0x11_22_33);
+
+            tokens.accent = "#445566".to_owned();
+            write_theme(&tokens);
+            wait_for_live_theme(|| manager.active_model_palette().accent == 0x44_55_66);
+            assert_eq!(
+                manager.current_tokens().expect("selected theme").accent,
+                "#445566"
+            );
+
+            std::fs::write(&path, "not a theme").expect("broken theme");
+            settle_live_theme();
+            assert_eq!(manager.active_model_palette().accent, 0x44_55_66);
+            assert!(
+                manager
+                    .themes()
+                    .iter()
+                    .any(|theme| theme.id == "live-reload"),
+                "a broken file keeps the selected theme listed"
+            );
+
+            tokens.accent = "#778899".to_owned();
+            write_theme(&tokens);
+            wait_for_live_theme(|| manager.active_model_palette().accent == 0x77_88_99);
+        },
+    );
+}
+
+fn wait_for_live_theme(mut ready: impl FnMut() -> bool) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !ready() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "live theme refresh timed out"
+        );
+        gtk::glib::MainContext::default().iteration(false);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
+/// Runs the main loop past the refresh debounce so a missing change is a real absence.
+fn settle_live_theme() {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(400);
+    while std::time::Instant::now() < deadline {
+        gtk::glib::MainContext::default().iteration(false);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
 }
 
 #[test]
@@ -665,6 +736,178 @@ fn file_icon_colors_repaint_catppuccin_icons_live_across_images() {
             for image in images.iter().chain([&later]) {
                 assert_eq!(image.paintable().as_ref(), Some(&brand));
             }
+        },
+    );
+}
+
+#[test]
+fn desktop_gtk_theme_and_user_stylesheet_do_not_restyle_widgets() {
+    let desktop = tempfile::tempdir().expect("desktop config");
+    let config = desktop.path().join("config");
+    let data = desktop.path().join("data");
+    let gtk_config = config.join("gtk-4.0");
+    let theme = data.join("themes/Scratch/gtk-4.0");
+    std::fs::create_dir_all(&gtk_config).expect("gtk config");
+    std::fs::create_dir_all(&theme).expect("theme directory");
+    std::fs::write(
+        gtk_config.join("settings.ini"),
+        "[Settings]\ngtk-theme-name=Scratch\ngtk-application-prefer-dark-theme=0\n",
+    )
+    .expect("settings.ini");
+    std::fs::write(
+        theme.join("gtk.css"),
+        "@import url(\"resource:///org/gtk/libgtk/theme/Default/gtk.css\");\nlabel { color: rgb(0, 255, 0); }\n",
+    )
+    .expect("desktop theme");
+    std::fs::write(
+        gtk_config.join("gtk.css"),
+        "window, label { color: rgb(255, 0, 0); }\n",
+    )
+    .expect("user stylesheet");
+    gtk_test_with_env(
+        "ui::theme::tests::desktop_gtk_theme_and_user_stylesheet_do_not_restyle_widgets",
+        [
+            ("GTK_THEME", String::new()),
+            ("XDG_CONFIG_HOME", config.display().to_string()),
+            ("XDG_DATA_HOME", data.display().to_string()),
+        ],
+        || {
+            let settings = gtk::Settings::default().expect("settings");
+            assert_eq!(settings.gtk_theme_name().as_deref(), Some("Scratch"));
+
+            let manager = ThemeManager::shared();
+            let window = gtk::Window::new();
+            let label = gtk::Label::new(Some("isolated"));
+            window.set_child(Some(&label));
+            window.present();
+            for _ in 0..20 {
+                gtk::glib::MainContext::default().iteration(false);
+            }
+
+            assert_eq!(settings.gtk_theme_name().as_deref(), Some("Default"));
+            let expected =
+                gtk::gdk::RGBA::parse(&manager.starter_tokens().text).expect("text color");
+            let actual = label.color();
+            assert!(
+                (actual.red() - expected.red()).abs() < 0.01
+                    && (actual.green() - expected.green()).abs() < 0.01
+                    && (actual.blue() - expected.blue()).abs() < 0.01,
+                "label color {actual} should be Strata's text color {expected}"
+            );
+            window.close();
+        },
+    );
+}
+
+#[test]
+fn corner_roundness_scales_the_stylesheet_before_settings_open_and_live() {
+    gtk_test(
+        "ui::theme::tests::corner_roundness_scales_the_stylesheet_before_settings_open_and_live",
+        || {
+            let settings = crate::ui::preferences::config_directory().join("settings.toml");
+            std::fs::create_dir_all(settings.parent().expect("config directory"))
+                .expect("config directory");
+            std::fs::write(&settings, "corner_roundness = 0\n").expect("seed settings");
+            let preferences = PreferenceManager::shared();
+            let manager = ThemeManager::shared();
+            let parse_errors = Rc::new(Cell::new(0));
+            let errors = parse_errors.clone();
+            manager
+                .base_provider
+                .connect_parsing_error(move |_, _, _| errors.set(errors.get() + 1));
+
+            // GTK serializes the parsed sheet as one longhand per corner.
+            let radii = |css: &str| -> Vec<String> {
+                css.lines()
+                    .filter_map(|line| line.trim().split_once("-radius: "))
+                    .map(|(_, value)| value.trim_end_matches(';').to_owned())
+                    .collect()
+            };
+            let squared = radii(&manager.base_stylesheet());
+            assert!(
+                !squared.is_empty(),
+                "stylesheet keeps its radius declarations"
+            );
+            assert!(
+                squared
+                    .iter()
+                    .all(|value| value == "0px" || value == "0" || value.ends_with('%')),
+                "saved roundness 0 squares every pixel radius: {squared:?}"
+            );
+
+            preferences.set_corner_roundness(CornerRoundness::new(200));
+            let doubled = radii(&manager.base_stylesheet());
+            assert!(doubled.contains(&"10px".to_owned()));
+            assert!(!doubled.contains(&"5px".to_owned()));
+            assert_eq!(parse_errors.get(), 0, "scaled stylesheet parses cleanly");
+        },
+    );
+}
+
+#[test]
+fn interface_font_applies_before_settings_open_and_live_while_previews_stay_monospace() {
+    gtk_test(
+        "ui::theme::tests::interface_font_applies_before_settings_open_and_live_while_previews_stay_monospace",
+        || {
+            let settings = crate::ui::preferences::config_directory().join("settings.toml");
+            std::fs::create_dir_all(settings.parent().expect("config directory"))
+                .expect("config directory");
+            std::fs::write(&settings, "interface_font = \"Fixture Sans\"\n")
+                .expect("seed settings");
+            let preferences = PreferenceManager::shared();
+            let manager = ThemeManager::shared();
+            let parse_errors = Rc::new(Cell::new(0));
+            let errors = parse_errors.clone();
+            manager
+                .font_provider
+                .connect_parsing_error(move |_, _, _| errors.set(errors.get() + 1));
+
+            let interface = gtk::Label::new(Some("Interface"));
+            let preview = gtk::Label::new(Some("Preview"));
+            preview.add_css_class("preview-text");
+            let menu = gtk::Label::new(Some("Menu item"));
+            let popover = gtk::Popover::builder().child(&menu).build();
+            let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
+            content.append(&interface);
+            content.append(&preview);
+            popover.set_parent(&content);
+            let window = gtk::Window::builder().child(&content).build();
+            window.present();
+            let family = |label: &gtk::Label| {
+                label.measure(gtk::Orientation::Horizontal, -1);
+                label
+                    .pango_context()
+                    .font_description()
+                    .and_then(|description| description.family())
+                    .map(|family| family.to_string())
+                    .unwrap_or_default()
+            };
+            let font_name = || {
+                gtk::Settings::default()
+                    .and_then(|settings| settings.gtk_font_name())
+                    .map(|name| name.to_string())
+                    .unwrap_or_default()
+            };
+
+            assert!(family(&interface).starts_with("Fixture Sans,JetBrains Mono"));
+            assert!(
+                family(&menu).starts_with("Fixture Sans"),
+                "popovers follow the font"
+            );
+            assert!(font_name().starts_with("Fixture Sans,JetBrains Mono"));
+            assert!(family(&preview).starts_with("JetBrains Mono"));
+
+            preferences.set_interface_font(Some("Other \"Quoted\" Sans".into()));
+            assert!(family(&interface).starts_with("Other \"Quoted\" Sans,JetBrains Mono"));
+            assert!(family(&menu).starts_with("Other \"Quoted\" Sans"));
+
+            preferences.set_interface_font(None);
+            assert!(family(&interface).starts_with("JetBrains Mono"));
+            assert!(font_name().starts_with("JetBrains Mono"));
+            assert!(family(&preview).starts_with("JetBrains Mono"));
+            assert_eq!(parse_errors.get(), 0, "font stylesheet parses cleanly");
+            popover.unparent();
+            window.destroy();
         },
     );
 }

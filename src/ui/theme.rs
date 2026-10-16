@@ -13,11 +13,24 @@ use serde::{Deserialize, Serialize};
 use sourceview5::prelude::BufferExt as _;
 
 use super::preferences::{
-    FileIconColors, OmarchyVariant, PreferenceManager, TextSize, desktop_text_scale_factor,
-    notify_live, snapped_root_font_px,
+    CornerRoundness, FileIconColors, OmarchyVariant, PreferenceManager, TextSize,
+    desktop_text_scale_factor, notify_live, snapped_root_font_px,
 };
 
+mod font;
 mod omarchy;
+mod roundness;
+
+/// Above GTK's user priority, every property is unset and the built-in theme
+/// restated, so `~/.config/gtk-4.0/gtk.css` cannot decide any of them.
+const RESET_STYLE_PRIORITY: u32 = gtk::STYLE_PROVIDER_PRIORITY_USER + 1;
+const BASE_THEME_STYLE_PRIORITY: u32 = RESET_STYLE_PRIORITY + 1;
+/// Below Strata's stylesheet, so its intentional monospace rules still win.
+const FONT_STYLE_PRIORITY: u32 = BASE_THEME_STYLE_PRIORITY + 1;
+const STYLE_PRIORITY: u32 = FONT_STYLE_PRIORITY + 1;
+const RESET_CSS: &str = "* { all: unset; }";
+const TOKEN_STYLE_PRIORITY: u32 = STYLE_PRIORITY + 1;
+const STYLE_CSS: &str = include_str!("../style.css");
 
 thread_local! {
     static SHARED_MANAGER: RefCell<Option<Rc<ThemeManager>>> = const { RefCell::new(None) };
@@ -92,6 +105,8 @@ struct AppearancePreferences {
     theme: String,
     omarchy_variant: OmarchyVariant,
     text_size: TextSize,
+    corner_roundness: CornerRoundness,
+    interface_font: Option<String>,
     element_glow: bool,
     file_icon_colors: FileIconColors,
 }
@@ -168,16 +183,24 @@ impl ThemeListeners {
 
 pub struct ThemeManager {
     provider: gtk::CssProvider,
+    reset_provider: gtk::CssProvider,
+    base_theme_provider: gtk::CssProvider,
+    font_provider: gtk::CssProvider,
+    base_provider: gtk::CssProvider,
+    base_roundness: Cell<Option<CornerRoundness>>,
     themes: RefCell<Vec<Theme>>,
     preferences: Rc<PreferenceManager>,
     omarchy_available: Cell<bool>,
     omarchy_monitors: RefCell<Vec<gio::FileMonitor>>,
     pending_omarchy_refresh: RefCell<Option<glib::SourceId>>,
+    themes_monitors: RefCell<Vec<gio::FileMonitor>>,
+    pending_themes_refresh: RefCell<Option<glib::SourceId>>,
     preview: RefCell<Option<ThemeTokens>>,
     preview_generation: Cell<u64>,
     /// Omarchy state can be unreadable mid-switch while the window keeps these colors.
     applied_omarchy_tokens: RefCell<Option<ThemeTokens>>,
     appearance: RefCell<AppearancePreferences>,
+    base_variant_dark: Cell<Option<bool>>,
     theme_listeners: ThemeListeners,
     active_model_palette: Cell<crate::services::ModelPalette>,
 }
@@ -206,21 +229,31 @@ impl ThemeManager {
             theme: preferences.selected_theme_id(),
             omarchy_variant: preferences.omarchy_variant(),
             text_size: preferences.text_size(),
+            corner_roundness: preferences.corner_roundness(),
+            interface_font: preferences.interface_font(),
             element_glow: preferences.element_glow(),
             file_icon_colors: preferences.file_icon_colors(),
         };
 
         let manager = Rc::new(Self {
             provider: gtk::CssProvider::new(),
+            reset_provider: gtk::CssProvider::new(),
+            base_theme_provider: gtk::CssProvider::new(),
+            font_provider: gtk::CssProvider::new(),
+            base_provider: gtk::CssProvider::new(),
+            base_roundness: Cell::new(None),
             themes: RefCell::new(themes),
             preferences: preferences.clone(),
             omarchy_available: Cell::new(omarchy_available),
             omarchy_monitors: RefCell::new(Vec::new()),
             pending_omarchy_refresh: RefCell::new(None),
+            themes_monitors: RefCell::new(Vec::new()),
+            pending_themes_refresh: RefCell::new(None),
             preview: RefCell::new(None),
             preview_generation: Cell::new(0),
             applied_omarchy_tokens: RefCell::new(None),
             appearance: RefCell::new(appearance),
+            base_variant_dark: Cell::new(None),
             theme_listeners: ThemeListeners::default(),
             active_model_palette: Cell::new(crate::services::ModelPalette {
                 accent: 0,
@@ -234,10 +267,13 @@ impl ThemeManager {
             }
         }));
         pin_manual_font_rendering();
+        pin_base_theme();
         manager.install_provider();
+        manager.apply_base_stylesheet();
         manager.apply_selected();
         manager.monitor_text_scaling();
         manager.monitor_omarchy();
+        manager.monitor_custom_themes();
         manager
     }
 
@@ -328,11 +364,13 @@ impl ThemeManager {
         self.preview.borrow().is_some()
     }
 
-    pub fn save_custom_theme(&self, tokens: ThemeTokens) -> io::Result<String> {
+    pub fn save_custom_theme(self: &Rc<Self>, tokens: ThemeTokens) -> io::Result<String> {
         validate_tokens(&tokens)
             .map_err(|message| io::Error::new(io::ErrorKind::InvalidInput, message))?;
         let directory = themes_directory();
         fs::create_dir_all(&directory)?;
+        // The directory may not have existed when the watch was last armed.
+        self.monitor_custom_themes();
         // Never replace a file already there, even one that did not load: it may be
         // a broken or newly linked dotfile the user still wants.
         let id = custom_theme_id(&tokens.name, |candidate| {
@@ -370,13 +408,50 @@ impl ThemeManager {
     }
 
     fn install_provider(&self) {
+        self.reset_provider.load_from_string(RESET_CSS);
         if let Some(display) = gdk::Display::default() {
             gtk::style_context_add_provider_for_display(
                 &display,
+                &self.reset_provider,
+                RESET_STYLE_PRIORITY,
+            );
+            gtk::style_context_add_provider_for_display(
+                &display,
+                &self.base_theme_provider,
+                BASE_THEME_STYLE_PRIORITY,
+            );
+            gtk::style_context_add_provider_for_display(
+                &display,
+                &self.font_provider,
+                FONT_STYLE_PRIORITY,
+            );
+            gtk::style_context_add_provider_for_display(
+                &display,
+                &self.base_provider,
+                STYLE_PRIORITY,
+            );
+            gtk::style_context_add_provider_for_display(
+                &display,
                 &self.provider,
-                gtk::STYLE_PROVIDER_PRIORITY_APPLICATION + 1,
+                TOKEN_STYLE_PRIORITY,
             );
         }
+    }
+
+    /// Reparses the stylesheet only when the roundness changed; the other
+    /// appearance preferences are applied through the token provider.
+    fn apply_base_stylesheet(&self) {
+        let roundness = self.preferences.corner_roundness();
+        if self.base_roundness.replace(Some(roundness)) == Some(roundness) {
+            return;
+        }
+        self.base_provider
+            .load_from_string(&roundness::scale_radii(STYLE_CSS, roundness.scale()));
+    }
+
+    #[cfg(test)]
+    pub(crate) fn base_stylesheet(&self) -> String {
+        self.base_provider.to_str().into()
     }
 
     fn apply_selected(&self) {
@@ -434,12 +509,20 @@ impl ThemeManager {
             "{}\n@define-color strata_glow {glow};\n",
             tokens_css(tokens, root_font_px)
         ));
-        apply_interface_font(root_font_px);
+        let family = self.preferences.interface_font();
+        self.font_provider
+            .load_from_string(&font::stylesheet(family.as_deref()));
+        apply_interface_font(family.as_deref(), root_font_px);
         crate::assets::set_interface_icon_scale(root_font_px / 13.0);
         let dark_background =
             parse_rgb_channels(&tokens.background).is_none_or(|[red, green, blue]| {
                 u32::from(red) * 299 + u32::from(green) * 587 + u32::from(blue) * 114 < 128_000
             });
+        if self.base_variant_dark.replace(Some(dark_background)) != Some(dark_background) {
+            apply_base_variant(dark_background);
+            self.base_theme_provider
+                .load_from_string(&base_theme_import(dark_background));
+        }
         crate::assets::set_catppuccin_flavor(crate::assets::CatppuccinFlavor::for_dark_background(
             dark_background,
         ));
@@ -463,11 +546,14 @@ impl ThemeManager {
             theme: self.preferences.selected_theme_id(),
             omarchy_variant: self.preferences.omarchy_variant(),
             text_size: self.preferences.text_size(),
+            corner_roundness: self.preferences.corner_roundness(),
+            interface_font: self.preferences.interface_font(),
             element_glow: self.preferences.element_glow(),
             file_icon_colors: self.preferences.file_icon_colors(),
         };
         if *self.appearance.borrow() != appearance {
             self.appearance.replace(appearance);
+            self.apply_base_stylesheet();
             self.apply_selected();
         }
         self.theme_listeners.notify(self);
@@ -554,6 +640,81 @@ impl ThemeManager {
             self.preferences.notify_changes();
         }
     }
+
+    fn monitor_custom_themes(self: &Rc<Self>) {
+        for monitor in self.themes_monitors.take() {
+            monitor.cancel();
+        }
+        let directory = themes_directory();
+        if !directory.is_dir() {
+            return;
+        }
+        let Ok(monitor) = gio::File::for_path(&directory)
+            .monitor_directory(gio::FileMonitorFlags::NONE, gio::Cancellable::NONE)
+        else {
+            return;
+        };
+        let weak = Rc::downgrade(self);
+        monitor.connect_changed(move |_, file, other_file, _| {
+            if !is_custom_theme_event(file)
+                && !other_file
+                    .as_ref()
+                    .is_some_and(|file| is_custom_theme_event(file))
+            {
+                return;
+            }
+            let Some(manager) = weak.upgrade() else {
+                return;
+            };
+            if let Some(pending) = manager.pending_themes_refresh.borrow_mut().take() {
+                pending.remove();
+            }
+            let weak = weak.clone();
+            let refresh = glib::timeout_add_local_once(Duration::from_millis(75), move || {
+                let Some(manager) = weak.upgrade() else {
+                    return;
+                };
+                manager.pending_themes_refresh.borrow_mut().take();
+                manager.refresh_custom_themes();
+            });
+            manager.pending_themes_refresh.replace(Some(refresh));
+        });
+        self.themes_monitors.borrow_mut().push(monitor);
+    }
+
+    /// A selected file caught mid-write, invalid, or removed keeps its last
+    /// valid colors until a read succeeds again.
+    pub(in crate::ui) fn refresh_custom_themes(&self) {
+        let selected = self.preferences.selected_theme_id();
+        let before = self.current_tokens();
+        let mut themes = merge_builtin_and_custom_themes(builtins(), load_custom_themes());
+        if !themes.iter().any(|theme| theme.id == selected)
+            && let Some(previous) = self
+                .themes
+                .borrow()
+                .iter()
+                .find(|theme| theme.id == selected)
+                .cloned()
+        {
+            themes.push(previous);
+        }
+        self.themes.replace(themes);
+        let after = self.current_tokens();
+        if self.follows_omarchy() || after.is_none() || after == before {
+            return;
+        }
+        self.apply_selected();
+        self.preferences.notify_changes();
+    }
+}
+
+fn is_custom_theme_event(file: &gio::File) -> bool {
+    file.path().is_some_and(|path| {
+        path.parent() == Some(themes_directory().as_path())
+            && path
+                .extension()
+                .is_some_and(|extension| extension == "toml")
+    })
 }
 
 fn is_omarchy_theme_event(file: &gio::File) -> bool {
@@ -1047,35 +1208,71 @@ fn source_style_scheme_xml(tokens: &ThemeTokens, palette: Option<&SourcePalette>
     )
 }
 
-const INTERFACE_FONT_FAMILY: &str = "JetBrains Mono";
-
-fn interface_font_name(root_font_px: f64) -> String {
-    format!("{INTERFACE_FONT_FAMILY} {root_font_px:.6}px")
-}
-
 /// GTK's automatic font rendering hints glyph outlines but not their metrics,
 /// so GPU glyph atlas slots are sized from unhinted extents and lose the top
 /// pixel row at some sizes (GNOME/gtk#8395). Manual rendering hints metrics
 /// too and follows the desktop's hinting settings. Application values outrank
 /// the settings portal, so this holds for the whole process.
 fn pin_manual_font_rendering() {
+    if let Some(settings) = gtk::Settings::default() {
+        set_enum_setting(&settings, "gtk-font-rendering", "manual");
+    }
+}
+
+/// GTK's built-in theme. Desktop selections arrive through the settings portal
+/// or `settings.ini`, which application values outrank for the whole process.
+const BASE_THEME: &str = "Default";
+
+/// Keeps GTK's built-in theme and regular-contrast variant whatever the desktop
+/// configures, so only Strata's stylesheets shape its widgets. Values are set
+/// even when they already match: only application-sourced values survive later
+/// portal updates. `GTK_THEME` is cleared before GTK starts because it bypasses
+/// the setting.
+fn pin_base_theme() {
     let Some(settings) = gtk::Settings::default() else {
         return;
     };
-    let Some(property) = settings.find_property("gtk-font-rendering") else {
-        return;
-    };
-    let Some(manual) = glib::EnumClass::with_type(property.value_type())
-        .and_then(|class| class.to_value_by_nick("manual"))
-    else {
-        return;
-    };
-    settings.set_property("gtk-font-rendering", manual);
+    settings.set_gtk_theme_name(Some(BASE_THEME));
+    set_enum_setting(&settings, "gtk-interface-contrast", "no-preference");
 }
 
-fn apply_interface_font(root_font_px: f64) {
+/// The built-in theme's light or dark variant follows the active Strata theme
+/// rather than the desktop color scheme.
+fn apply_base_variant(dark: bool) {
+    let Some(settings) = gtk::Settings::default() else {
+        return;
+    };
+    let scheme = if dark { "dark" } else { "light" };
+    if settings
+        .find_property("gtk-interface-color-scheme")
+        .is_some()
+    {
+        set_enum_setting(&settings, "gtk-interface-color-scheme", scheme);
+    } else {
+        settings.set_gtk_application_prefer_dark_theme(dark);
+    }
+}
+
+fn base_theme_import(dark: bool) -> String {
+    let variant = if dark { "gtk-dark.css" } else { "gtk.css" };
+    format!("@import url(\"resource:///org/gtk/libgtk/theme/{BASE_THEME}/{variant}\");")
+}
+
+/// Skips properties this GTK lacks.
+fn set_enum_setting(settings: &gtk::Settings, property: &str, nick: &str) {
+    let Some(spec) = settings.find_property(property) else {
+        return;
+    };
+    if let Some(value) =
+        glib::EnumClass::with_type(spec.value_type()).and_then(|class| class.to_value_by_nick(nick))
+    {
+        settings.set_property(property, value);
+    }
+}
+
+fn apply_interface_font(family: Option<&str>, root_font_px: f64) {
     if let Some(settings) = gtk::Settings::default() {
-        settings.set_gtk_font_name(Some(&interface_font_name(root_font_px)));
+        settings.set_gtk_font_name(Some(&font::font_name(family, root_font_px)));
     }
 }
 
@@ -1085,11 +1282,13 @@ fn tokens_css(tokens: &ThemeTokens, root_font_px: f64) -> String {
     // Column headers add six pixels of padding and three extra border pixels.
     let column_header = header - 9.0;
     let control = (24.0 * scale).round();
+    // Sidebar icons are centred in control-sized boxes; headings start where the icons do.
+    let sidebar_heading_inset = (control - (17.0 * scale).round()) / 2.0;
     let browser_header = (control + 8.0).max(36.0);
     // Miller headers keep their three-pixel indicator, bottom border and balancing inset.
     let browser_column_header = browser_header - 6.0;
     let sizing = format!(
-        "headerbar, headerbar > windowhandle > box, .mode-pane-header, .preview-header {{ min-height: {header}px; }}\n.column-header {{ min-height: {column_header}px; }}\nheaderbar .sidebar-toggle, button.header-action, headerbar menubutton.header-action > button, .preview-header-action, button.column-header-action, menubutton.column-header-action > button {{ min-width: {control}px; min-height: {control}px; }}\n.file-operation-card button.progress-card-action {{ min-width: 0; min-height: 0; }}\n.tab-strip, headerbar.browser-header, headerbar.browser-header > windowhandle > box, .mode-pane-header, .preview-header {{ min-height: {browser_header}px; }}\n.directory-column .column-header {{ min-height: {browser_column_header}px; }}\n.mode-pane-header .list-navigation-button, .sidebar-row > box > image, .sidebar-device-action {{ min-width: {control}px; min-height: {control}px; }}\n"
+        "headerbar, headerbar > windowhandle > box, .mode-pane-header, .preview-header {{ min-height: {header}px; }}\n.column-header {{ min-height: {column_header}px; }}\nheaderbar .sidebar-toggle, button.header-action, headerbar menubutton.header-action > button, .preview-header-action, button.column-header-action, menubutton.column-header-action > button {{ min-width: {control}px; min-height: {control}px; }}\n.file-operation-card button.progress-card-action {{ min-width: 0; min-height: 0; }}\n.tab-strip, headerbar.browser-header, headerbar.browser-header > windowhandle > box, .mode-pane-header, .preview-header {{ min-height: {browser_header}px; }}\n.directory-column .column-header {{ min-height: {browser_column_header}px; }}\n.mode-pane-header .list-navigation-button, .sidebar-row > box > image, .sidebar-device-action {{ min-width: {control}px; min-height: {control}px; }}\n.sidebar-heading {{ padding-left: {sidebar_heading_inset}px; }}\n"
     );
     let colors = format!(
         "@define-color strata_bg {};\n@define-color strata_surface {};\n@define-color strata_text {};\n@define-color strata_accent {};\n@define-color strata_danger {};\n@define-color strata_muted {};\n@define-color strata_highlight {};\n@define-color strata_border {};\n@define-color strata_dim_text {};\nwindow, popover, popover.background {{ font-size: {root_font_px:.6}px; }}\n",

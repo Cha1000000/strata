@@ -1,7 +1,11 @@
 // SPDX-License-Identifier: MIT
 
 use super::*;
-use crate::ui::{browser::PeekBehavior, browser_modes::BrowserMode, preferences::ListColumns};
+use crate::ui::{
+    browser::PeekBehavior,
+    browser_modes::BrowserMode,
+    preferences::{ListColumnId, ListColumns},
+};
 use acceptance::{request, wait_until};
 use std::{
     rc::Rc,
@@ -476,6 +480,74 @@ fn failed_chooser_saves_are_only_logged() {
                 crate::ui::window::visible_modal_layer(&window).is_none(),
                 "the chooser shows no save notice"
             );
+        },
+    );
+}
+
+#[test]
+fn list_column_customizations_update_live_across_windows() {
+    crate::test_support::gtk_test(
+        "ui::chooser::tests::column_widths::list_column_customizations_update_live_across_windows",
+        || {
+            seed_settings("list", 16);
+            crate::ui::prepare_portal_ui();
+            let root = fixture_root();
+            let first = open_browser(root.path(), false);
+            let second = open_browser(root.path(), false);
+
+            let first_headings = resizable_list_headings(&first);
+            let second_headings = resizable_list_headings(&second);
+            assert_eq!(first_headings.len(), 5);
+            assert_eq!(second_headings.len(), 5);
+            assert!(first_headings[1].is_visible());
+            assert!(second_headings[1].is_visible());
+
+            let preferences = PreferenceManager::shared();
+            preferences.set_list_column_visible(ListColumnId::Mode, false);
+            settle();
+
+            assert!(!first_headings[1].is_visible());
+            assert!(!second_headings[1].is_visible());
+
+            preferences.set_list_column_visible(ListColumnId::Mode, true);
+            settle();
+
+            assert!(first_headings[1].is_visible());
+            assert!(second_headings[1].is_visible());
+
+            let headings_box = first_headings[0]
+                .parent()
+                .and_downcast::<gtk::Box>()
+                .expect("headings box");
+            let controllers = headings_box.observe_controllers();
+            let drag_gesture = (0..controllers.n_items())
+                .find_map(|index| {
+                    controllers
+                        .item(index)
+                        .and_then(|c| c.downcast::<gtk::GestureDrag>().ok())
+                        .filter(|g| g.name().as_deref() == Some("column-drag"))
+                })
+                .expect("column drag gesture");
+            let mode_bounds = first_headings[1]
+                .compute_bounds(&headings_box)
+                .expect("mode heading bounds");
+            let start_x = f64::from(mode_bounds.x() + 10.0);
+            drag(&drag_gesture, (start_x, 0.0), 180.0);
+            settle();
+
+            assert_eq!(
+                preferences.list_column_order(),
+                vec![
+                    ListColumnId::Name,
+                    ListColumnId::Size,
+                    ListColumnId::Mode,
+                    ListColumnId::Type,
+                    ListColumnId::Modified,
+                ]
+            );
+
+            first.close();
+            second.close();
         },
     );
 }

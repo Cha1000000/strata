@@ -146,7 +146,7 @@ impl ListFactory {
         let pending_name = state
             .as_ref()
             .and_then(|state| state.pending_rename_name(&binding.entry));
-        let edit = super::bound_edit(&self.bound_items, item);
+        let edit = super::bound_edit(item);
         if let Some(edit) = &edit {
             edit.bind(&binding.entry.location);
         }
@@ -176,22 +176,22 @@ impl ListFactory {
     }
 }
 
-struct ListRow {
-    widget: gtk::Box,
-    name_cell: gtk::Widget,
-    icon: thumbnail::ThumbnailSlot,
-    name: gtk::Label,
-    field: gtk::Entry,
-    mode: gtk::Label,
-    size: gtk::Label,
-    kind: gtk::Label,
-    modified: gtk::Label,
+pub(super) struct ListRow {
+    pub(super) widget: gtk::Box,
+    pub(super) name_cell: gtk::Widget,
+    pub(super) icon: thumbnail::ThumbnailSlot,
+    pub(super) name: gtk::Label,
+    pub(super) field: gtk::Entry,
+    pub(super) mode: gtk::Label,
+    pub(super) size: gtk::Label,
+    pub(super) kind: gtk::Label,
+    pub(super) modified: gtk::Label,
 }
 
 impl ListRow {
-    fn from_widget(widget: gtk::Box) -> Option<Self> {
+    pub(super) fn from_widget(widget: gtk::Box) -> Option<Self> {
         let (icon, name, field, mode, size, kind, modified) = list_row_parts(&widget)?;
-        let name_cell = widget.first_child()?;
+        let name_cell = name.parent()?.upcast();
         Some(Self {
             widget,
             name_cell,

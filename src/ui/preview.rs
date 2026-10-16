@@ -1438,6 +1438,10 @@ impl PreviewState {
     }
 
     fn render_archive_password_prompt(self: &Rc<Self>, entry: FileEntry, error: Option<&str>) {
+        let focus_prompt = self
+            .focus_archive_request
+            .take()
+            .is_some_and(|request| self.current_request.get() == Some(request));
         self.clear_content();
         self.content_type.set_text(file_extension(&entry));
         let box_ = gtk::Box::new(gtk::Orientation::Vertical, 8);
@@ -1512,7 +1516,11 @@ impl PreviewState {
 
         self.password_entry.replace(Some(password.clone()));
         self.content.append(&box_);
-        password.grab_focus();
+        if focus_prompt {
+            password.grab_focus();
+        } else {
+            self.hand_keys_to(&password);
+        }
         self.reassert_keyboard_owner();
     }
 
@@ -1760,15 +1768,7 @@ impl PreviewState {
             }
         });
         let browser = archive::ArchiveBrowser::new(tree, navigate, open);
-        if !focus_tree
-            && !self.content.has_focus()
-            && self
-                .keyboard_view
-                .borrow()
-                .as_ref()
-                .and_then(|view| view.upgrade())
-                .is_some_and(|view| view.view_mode() == super::browser_modes::BrowserMode::Columns)
-        {
+        if !focus_tree && !self.content.has_focus() {
             browser.clear_selection();
         }
         let list = browser.list().clone();

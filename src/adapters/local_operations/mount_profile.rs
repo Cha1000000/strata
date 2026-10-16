@@ -19,8 +19,10 @@ use gtk::{gio, glib, prelude::*};
 
 use super::{
     await_cancellable,
-    fs_ops::{FsOps, fs, opened_path},
-    io_error, open_local_parent_directory, os_error_detail, run_blocking,
+    fs_ops::{FsOps, fs},
+    io_error,
+    native_fs::{open_local_parent_directory, opened_path, os_error_detail},
+    run_blocking,
 };
 use crate::{
     adapters::volume::{

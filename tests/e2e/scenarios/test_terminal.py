@@ -110,3 +110,22 @@ def test_terminal_launchers_are_reaped_after_they_exit(strata, test_environment)
         lambda: not _launcher_children(pid), "the terminal launchers to be reaped"
     )
     assert strata.dialog() is None
+
+
+@pytest.mark.parametrize(
+    "terminal_launcher", [STUB_LAUNCHER], ids=["stub-launcher"], indirect=True
+)
+def test_columns_terminal_opens_in_the_folder_clicked_in_the_parent_pane(
+    strata, test_environment
+):
+    log = test_environment.root / LAUNCH_LOG
+    strata.pointer.click(strata.entry("documents", strata.fixture.root.name))
+    strata.pane("documents")
+
+    # The pointer stays over the parent pane, which owns the fallback directory.
+    strata.keyboard.press("ctrl+alt+t")
+    strata.wait(lambda: log.exists() and log.read_text(), "the terminal launch")
+
+    _, arguments = log.read_text().splitlines()[0].split("\t", 1)
+    folder = Path(arguments.removeprefix("--dir=")).resolve()
+    assert folder == strata.fixture.path("documents").resolve(), arguments

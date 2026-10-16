@@ -25,8 +25,8 @@ use super::{
 use crate::{
     adapters::{
         local_operations::{
-            LocalFileIdentity,
             fs_ops::{Entry, FsOps},
+            native_fs::LocalFileIdentity,
             placement::{self, PlaceError},
         },
         volume::{Family, MountKey},
@@ -39,9 +39,7 @@ pub(super) type Key = (usize, u64, u64);
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub(super) enum Role {
-    /// Copied on its own, as the destination keeps no links.
-    Copied,
-    /// Copied, and the later names are linked to the copy.
+    Independent,
     First,
     Later,
 }
@@ -62,7 +60,7 @@ struct First {
     torn: bool,
 }
 
-/// A made folder that gains a later name after it got its times.
+/// Linking another name changes its parent's modification time.
 struct Retimed {
     scope: usize,
     path: PathBuf,
@@ -113,7 +111,7 @@ impl Links {
 
     pub(super) fn role(&self, fs: &dyn FsOps, mount: &Mount, name: Name) -> Role {
         if !self.kept(fs, mount) {
-            return Role::Copied;
+            return Role::Independent;
         }
         let mut state = lock(&self.state);
         match state.firsts.entry(name.key) {
@@ -214,6 +212,9 @@ impl Links {
                         .map_err(|failure| failure.named(&name.source))?;
                     if let Some(recorded) = name.recorded.take() {
                         recorded.keep(KeptCause::Changed);
+                    }
+                    if let Some(created) = created {
+                        lock(&created.0).retain(|(path, _)| path != &name.path);
                     }
                     continue;
                 }

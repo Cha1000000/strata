@@ -244,6 +244,12 @@ impl Browser {
                     } => {
                         self.refresh_unmonitored_operation_locations(context, None);
                         self.remove_deleted_locations(&deleted_locations, &[]);
+                        let parents: std::collections::HashSet<_> = retryable_locations
+                            .iter()
+                            .filter_map(crate::model::Location::parent)
+                            .filter(|parent| parent.native_path().is_some())
+                            .collect();
+                        self.refresh_columns_at_many(&parents);
                         emit(BrowserEvent::OperationCompletedWithErrors {
                             retryable_locations,
                             has_non_retryable_failures,

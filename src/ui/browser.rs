@@ -76,9 +76,9 @@ pub(super) use crate::ui::browser::clipboard::{
     ClipboardMark, ClipboardMarks, file_drag_content, mark_in, set_mark_result_style,
 };
 pub(crate) use crate::ui::browser::clipboard::{
-    PreparedFileDrop, arm_spring_load_navigation, clear_active_drag, drag_actions_for_modifiers,
-    file_drag_hover_target, file_drop_action, file_drop_commit, locations_from_file_list_value,
-    prepare_file_drop_target,
+    PreparedFileDrop, active_drag_snapshot, arm_spring_load_navigation, clear_active_drag,
+    drag_actions_for_modifiers, file_drag_hover_target, file_drop_action, file_drop_commit,
+    locations_from_file_list_value, prepare_file_drop_target,
 };
 pub(crate) use crate::ui::browser::collection::{
     ActivePaneFilter, bind_listing_filter, detach_collection_view, filter_placeholder,
@@ -1201,6 +1201,14 @@ impl BrowserView {
             .set_group_by_type(enabled);
     }
 
+    pub fn set_list_columns(&self) {
+        self.state.mode_views.borrow().set_list_columns();
+    }
+
+    pub fn open_list_columns_popover(&self) {
+        self.state.mode_views.borrow().open_list_columns_popover();
+    }
+
     pub fn apply_resolved_icons_size(&self, size: i32) {
         self.state
             .mode_views
@@ -1909,13 +1917,31 @@ impl BrowserView {
         self.state.sync_mode_selection();
         let selected = self.state.browser.selected_entries();
         let location = selected_terminal_location(&selected).or_else(|| {
-            let mode = self.view_mode();
-            let depth = if mode == BrowserMode::Columns {
-                self.state.destination_depth()
-            } else {
-                self.state.browser.active_depth()
-            };
-            depth.and_then(|depth| self.state.browser.location_at(depth))
+            if self.view_mode() != BrowserMode::Columns {
+                let depth = self.state.browser.active_depth()?;
+                return self.state.browser.location_at(depth);
+            }
+            let depth = self.state.destination_depth()?;
+            let directory = self.state.browser.location_at(depth);
+            // A click opens the folder as the active column while the pointer can
+            // leave its parent as the destination; prefer the folder it opened.
+            let opened = self.state.browser.location_at(depth + 1);
+            let selected_in_destination: Vec<_> = self
+                .state
+                .browser
+                .selected_positions(depth)
+                .into_iter()
+                .filter_map(|position| self.state.browser.entry_at(depth, position))
+                .collect();
+            match selected_terminal_location(&selected_in_destination) {
+                Some(selected)
+                    if self.state.browser.active_depth() == Some(depth + 1)
+                        && opened.as_ref() == Some(&selected) =>
+                {
+                    Some(selected)
+                }
+                _ => directory,
+            }
         });
         let Some(location) = location else {
             return;
@@ -1923,7 +1949,9 @@ impl BrowserView {
         launch_terminal(&location, &self.state.overlay);
     }
 
+    /// A user Reload also retries Trash on mounts that refused it earlier.
     pub fn refresh(&self) {
+        crate::adapters::trash_support::forget_all();
         self.state.refresh_browser();
     }
 
@@ -2513,6 +2541,9 @@ impl ViewState {
     pub(super) fn restore_listing_focus(&self) {
         if self.mode.get() == BrowserMode::Columns {
             self.focus_rebuilt_active_column();
+            return;
+        }
+        if self.mode_views.borrow().focus_search_results() {
             return;
         }
         self.browser.focus_active();

@@ -52,3 +52,50 @@ fn view_positions_map_to_the_source_items_they_show() {
         },
     );
 }
+
+#[test]
+fn scroll_refresh_waits_for_scrolling_to_stop() {
+    crate::test_support::gtk_test(
+        "ui::browser_modes::tests::scroll_refresh_waits_for_scrolling_to_stop",
+        || {
+            let context = glib::MainContext::default();
+            let scroll = gtk::ScrolledWindow::new();
+            let adjustment = gtk::Adjustment::new(0.0, 0.0, 10_000.0, 1.0, 10.0, 100.0);
+            scroll.set_vadjustment(Some(&adjustment));
+            let scrolling = Rc::new(Cell::new(false));
+            let last_scroll = Rc::new(Cell::new(std::time::Instant::now()));
+            let refreshes = Rc::new(RefCell::new(Vec::new()));
+            install_scroll_refresh(&scroll, scrolling.clone(), {
+                let last_scroll = last_scroll.clone();
+                let refreshes = refreshes.clone();
+                move || refreshes.borrow_mut().push(last_scroll.get().elapsed())
+            });
+
+            for step in 1..=20 {
+                last_scroll.set(std::time::Instant::now());
+                adjustment.set_value(f64::from(step) * 10.0);
+                assert!(scrolling.get());
+                while context.pending() {
+                    context.iteration(false);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while scrolling.get() {
+                assert!(std::time::Instant::now() < deadline, "scroll never settled");
+                context.iteration(false);
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+
+            assert!(!refreshes.borrow().is_empty());
+            assert!(
+                refreshes
+                    .borrow()
+                    .iter()
+                    .all(|still| *still >= ScrollSettle::DELAY),
+                "refreshed before scrolling was still: {:?}",
+                refreshes.borrow()
+            );
+        },
+    );
+}

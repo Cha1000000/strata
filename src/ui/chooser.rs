@@ -253,8 +253,7 @@ fn file_filter_matches(filter: &gtk::FileFilter, entry: &FileEntry) -> bool {
     info.set_name(Path::new(&entry.native_name));
     info.set_display_name(&entry.display_name);
     info.set_file_type(gio::FileType::Regular);
-    let (content_type, _) =
-        gio::content_type_guess(Some(Path::new(&entry.native_name)), None::<&[u8]>);
+    let (content_type, _) = crate::services::guess_content_type(Path::new(&entry.native_name));
     info.set_content_type(&content_type);
     filter.match_(&info)
 }
@@ -1506,6 +1505,7 @@ fn build_chooser_hosted(
         .default_height(initial_height)
         .modal(request.modal)
         .build();
+    crate::ui::decoration::claim_titlebar(&window);
     if let Some(host) = &host {
         window.set_transient_for(Some(&host.parent));
         window.set_destroy_with_parent(true);
@@ -1527,6 +1527,7 @@ fn build_chooser_hosted(
         });
     }
     let header = gtk::HeaderBar::new();
+    header.add_css_class("browser-header");
     header.set_show_title_buttons(false);
     let sidebar_toggle = super::sidebar_toggle::SidebarToggle::new();
     let location = view.location_widget();
@@ -2582,6 +2583,7 @@ fn install_shortcuts(
         }
         if press.is(REFRESH.ignoring(SHORTCUT_MODIFIERS)) {
             if let Some(depth) = browser.active_depth() {
+                crate::adapters::trash_support::forget_all();
                 browser.retry_column(depth);
             }
             return glib::Propagation::Stop;

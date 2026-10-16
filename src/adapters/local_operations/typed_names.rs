@@ -7,7 +7,7 @@ use gtk::gio;
 
 use super::{
     mount_profile::folder_name_rules,
-    naming::fix::{Refusal, refusal},
+    names::fix::{Refusal, refusal},
 };
 use crate::adapters::volume::NameProfile;
 

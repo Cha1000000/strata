@@ -17,7 +17,6 @@ use std::{
 use rustix::io::Errno;
 
 use super::{ArchiveError, ArchiveOutcome, ExtractionSession, MemberContent, MemberMetadata};
-use crate::adapters::local_operations::archive::destination::MetadataCalls;
 use crate::{
     adapters::local_operations::{
         archive::fixtures::{EXTRACTION_STAGE, expected_mode, stages},
@@ -1162,22 +1161,19 @@ fn directory_metadata_is_restored_deepest_first_only_on_completion() -> Result<(
 
 #[test]
 fn a_failed_directory_restore_leaves_restored_directories_writable() -> Result<(), Box<dyn Error>> {
-    let calls = MetadataCalls {
-        set_times: |_, _| Err(rustix::io::Errno::IO),
-        ..MetadataCalls::SYSTEM
-    };
     let root = tempfile::tempdir()?;
+    let _quirks = FsQuirks::install(
+        root.path(),
+        Quirks {
+            fail: vec![(Op::SetTimes, "*", 0, rustix::io::Errno::IO)],
+            ..Quirks::default()
+        },
+    );
     let progress = AtomicUsize::new(0);
     let cancelled = AtomicBool::new(false);
     let mut report = TransferReport::default();
-    let mut session = ExtractionSession::open_with_metadata_calls(
-        root.path(),
-        ARCHIVE,
-        &progress,
-        &cancelled,
-        calls,
-        &mut report,
-    )?;
+    let mut session =
+        ExtractionSession::open(root.path(), ARCHIVE, &progress, &cancelled, &mut report)?;
     let read_only = MemberMetadata {
         mode: Some(0o555),
         modified: Some(UNIX_EPOCH + Duration::from_secs(1_000_000_000)),

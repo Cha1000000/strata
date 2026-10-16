@@ -28,7 +28,7 @@ use crate::{
         LocationIdentity, LocationValidationError, MetadataOutcome, MetadataRequest,
         MetadataUpdate, RequestId, backend_unavailable_message, bytes_support_named_family,
         is_hidden_name, is_image_path, is_media_path, native_hidden_names, native_kind,
-        sanitize_failure_message,
+        sanitize_failure_message, symlink_kind,
     },
 };
 
@@ -291,11 +291,11 @@ fn remote_directory_failure(request_id: RequestId, error: &glib::Error) -> Direc
     }
 }
 
-fn info_is_hidden(info: &gio::FileInfo) -> bool {
+pub(super) fn info_is_hidden(info: &gio::FileInfo) -> bool {
     info.has_attribute(gio::FILE_ATTRIBUTE_STANDARD_IS_HIDDEN) && info.is_hidden()
 }
 
-fn info_is_symlink(info: &gio::FileInfo) -> bool {
+pub(super) fn info_is_symlink(info: &gio::FileInfo) -> bool {
     info.has_attribute(gio::FILE_ATTRIBUTE_STANDARD_IS_SYMLINK) && info.is_symlink()
 }
 
@@ -376,7 +376,9 @@ fn entry_from_info(location: Location, info: gio::FileInfo) -> FileEntry {
             EntryKind::Directory
         }
         (gio::FileType::Regular, false) => EntryKind::File,
-        (gio::FileType::SymbolicLink, _) => EntryKind::SymbolicLink,
+        (gio::FileType::SymbolicLink, _) => location
+            .native_path()
+            .map_or(EntryKind::SymbolicLink, symlink_kind),
         _ => EntryKind::Other,
     };
     let size = if matches!(
@@ -643,7 +645,12 @@ fn scan_native_directory(
             )
             .ok()
     });
-    let can_trash = probed_capabilities.as_ref().and_then(info_can_trash);
+    let can_trash = match probed_capabilities.as_ref().and_then(info_can_trash) {
+        Some(true) if super::trash_support::unsupported_reason_for_directory(path).is_some() => {
+            Some(false)
+        }
+        other => other,
+    };
     let can_delete = probed_capabilities.as_ref().and_then(info_can_delete);
 
     let mut metadata_complete = true;
@@ -2312,10 +2319,22 @@ fn flush_monitor_changes(
         .drain()
         .map(|(_, change)| change)
         .collect();
-    if changes
-        .iter()
-        .any(|change| matches!(change, PendingMonitorChange::Rescan))
-    {
+    let needs_rescan = {
+        let moved_sources: HashSet<_> = changes
+            .iter()
+            .filter_map(|change| match change {
+                PendingMonitorChange::Move { from, .. } => Some(from),
+                _ => None,
+            })
+            .collect();
+        // A move's query can finish after the recreated source's query and remove its new row.
+        changes.iter().any(|change| match change {
+            PendingMonitorChange::Rescan => true,
+            PendingMonitorChange::Upsert(location) => moved_sources.contains(location),
+            _ => false,
+        })
+    };
+    if needs_rescan {
         notify(DirectoryChange::Rescan);
         return;
     }

@@ -62,7 +62,7 @@ pub use mime_type::{
 };
 pub(crate) use model_preview::ModelRender;
 pub use model_preview::{ModelFormat, ModelPalette};
-pub(crate) use native_fs::{is_hidden_name, native_hidden_names, native_kind};
+pub(crate) use native_fs::{is_hidden_name, native_hidden_names, native_kind, symlink_kind};
 pub(crate) use navigation_history::NavigationHistory;
 pub use operations::{
     ArchiveFormat, CancelledOperation, CompressRequest, CreateDirectoryRequest, CreateFileRequest,
@@ -81,9 +81,10 @@ pub use preview::{
 };
 pub(crate) use preview::{
     INCORRECT_ARCHIVE_PASSWORD, archive_preview_format, bytes_support_named_family, content_family,
-    has_plain_text_extension, is_extensionless_dotfile, is_image_path, is_media_path, is_model,
-    is_non_executable_extensionless_dotfile, looks_like_text, normalize_preview_text,
-    read_head_sample, reconcile_with_sample, split_archive_name, supports_remote_video,
+    guess_content_type, has_plain_text_extension, is_extensionless_dotfile, is_image_path,
+    is_media_path, is_model, is_non_executable_extensionless_dotfile, looks_like_text,
+    normalize_preview_text, read_head_sample, reconcile_with_sample, split_archive_name,
+    supports_remote_video,
 };
 pub(crate) use transfer_action::{
     CrossVolumeDropStrategy, DropActionInput, DropCommit, DropOverride, TransferKind,
@@ -104,7 +105,7 @@ pub(crate) use search::{
 };
 pub(crate) use search::{
     RefusedFolders, SearchCoverage, SearchEvent, SearchExclusions, SearchHandle, SearchItem,
-    filter_name_matches, filter_query_allows_typos, fold_for_search, index_filter,
+    SearchLimits, filter_name_matches, filter_query_allows_typos, fold_for_search, index_filter,
     index_folder_paths, index_paths, index_trees_with_exclusions,
 };
 pub(crate) use update_check::{

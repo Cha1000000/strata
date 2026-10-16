@@ -64,5 +64,14 @@ pub fn installed_version() -> Version {
         })
 }
 
+pub fn displayed_version() -> String {
+    let version = installed_version().to_string();
+    if cfg!(debug_assertions) {
+        format!("{version}+debug")
+    } else {
+        version
+    }
+}
+
 #[cfg(test)]
 mod tests;

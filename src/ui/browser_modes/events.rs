@@ -368,7 +368,17 @@ impl ModeViews {
                     && !self.outside_change_keeps_focus()
                     && self.background_load_may_take_focus(*depth)
                 {
-                    self.focus_visible_pane(*depth);
+                    // A result rename keeps focus, as `focus_visible_pane` keeps a listing's.
+                    let results = !self.rename_is_active()
+                        && self
+                            .visible_panes()
+                            .into_iter()
+                            .any(|pane| pane.depth == *depth && pane.search.hits().is_some());
+                    if results {
+                        self.results_take_focus.set(Some(*depth));
+                    } else {
+                        self.focus_visible_pane(*depth);
+                    }
                 }
             }
             _ => {}

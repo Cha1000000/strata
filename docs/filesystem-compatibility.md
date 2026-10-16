@@ -30,8 +30,10 @@ one is deleted.
   [Moves across filesystems](#moves-across-filesystems).
 - **Show only complete copies.** A copy appears under its final name once it is complete, except
   on mounts where nothing can be placed; see [Publishing a copy](#publishing-a-copy).
-- **Never block the interface.** No filesystem call runs on the GTK main thread, including probes,
-  mount lookups and waits. A hung NFS or FUSE server stalls the operation, not the window.
+- **Keep transfer work off the interface thread.** Native copying, placement, and paste/restore/delete
+  planning run on workers. Some existing conflict, archive-name, create-entry and bookmark checks
+  remain synchronous; removing those calls is tracked in [#1590](https://github.com/lgse/strata/issues/1590).
+  An unresponsive mount can still block the window through those remaining checks.
 - **Move metadata, not data.** Renames never copy file contents. Moves within one filesystem
   rename too, including on mounts with neither `RENAME_NOREPLACE` nor usable hard links. Moves
   copy only when the kernel returns `EXDEV` (across devices, bind mounts, btrfs subvolumes or
@@ -409,9 +411,13 @@ Named pipes inside a copied folder are recreated with their owner, mode and time
 attributes are not copied, since reading them would open the pipe. Where the destination refuses
 pipes (vfat, exFAT and sshfs with `EPERM`, exfat-fuse with `EIO`, SMB without POSIX extensions
 with `EOPNOTSUPP`), they are left out and reported, as sockets and device files always are. A
-selected pipe is recreated where the destination allows it. A selected pipe it refuses, a selected
-socket or device file, and a pipe that Replace would stage fail with "it is not a regular file,
-directory, or symbolic link".
+selected pipe is recreated where the destination allows it. Selected pipes and symlinks are first
+built in private stages so a concurrent arrival at the final name cannot be mistaken for the copy.
+Where publication recreates a symlink, or no placement primitive can publish a pipe, the item is
+created exclusively but has no proven destination identity: a move keeps its source and destructive
+undo retains the copy. A failed unprovable creation may also remain rather than risk removing an
+arrival. A selected pipe the destination refuses, a selected socket or device file, and a pipe that
+Replace would stage fail with "it is not a regular file, directory, or symbolic link".
 
 ### Symbolic links the destination cannot hold
 
@@ -488,8 +494,20 @@ if it is still what the copy read:
   as they were. Such files are compared by content; see [Racily clean files](#racily-clean-files).
 - **Folders** are opened and checked like entries, and removed once empty. A folder that gained
   entries, or another folder put at its name, stays.
-- **The copy itself.** If the copy is no longer where the move published it, nothing of that item
-  is deleted.
+- **The copy itself.** The move carries the identities of the entries it created, rather than
+  adopting whatever is at a destination name afterwards. Before deleting sources it checks the
+  published root and copied descendants; a merge also checks every merged ancestor and the actual
+  numbered placement names. If any of these entries is missing or has another identity, nothing
+  of that item is deleted. A fallback that copies out of a stage records the newly created copy's
+  identities, not the discarded stage's.
+
+Destination provenance requires the exact known device, inode, type and available birth time,
+including on mounts with unstable inode numbers. The relaxed source-identity rule above does not
+apply to this guard. If a FUSE daemon or CIFS client renumbers a published entry after a rename or
+cache eviction, the move keeps its source and reports that its copy is gone even if the bytes are
+still present. This is safe retention, not a successful source deletion. Exact comparison does not
+solve inode reuse where the mount supplies no birth time; the residual identity limits above
+still apply.
 
 What stays is reported by cause: changed during the move, could not be deleted (with the error, as
 in a read-only folder), a special file or symbolic link the destination cannot store, or an item
@@ -592,7 +610,15 @@ filesystems is refused.
 Undoing a merge, or a copy or an archive that replaced its original through the Trash, deletes what
 the operation put at the original's path, then restores the original. As it places an item there,
 the operation records it as a [move](#moves-across-filesystems) records its sources, with the
-contents of files within a tick of coarse times. It reads such a file back only until the tick
+contents of files within a tick of coarse times. Eligibility for that record comes from known
+created identities for the whole tree and, for regular files, size and modification-time baselines
+captured before publication. A concurrent arrival, replaced descendant, or detectable in-place
+edit between publication and recording therefore cannot become deletion evidence. Placement and
+hard-link creation change change times and link counts, so those fields are captured after
+placement rather than compared to the pre-publication baseline. The size/time baseline is not a
+full content reread: a same-size edit hidden by timestamp resolution, or a writer restoring the
+old modification time before recording, can escape it. The later coarse-time digest cannot
+retroactively prove which bytes were published. It reads such a file back only until the tick
 passes, as any later rewrite changes its times. An item has no record if a cancel stops its
 recording, or if it would take the records of its paste or archive past 100,000 entries (some 20 MB
 kept in the undo history); one that does takes none of them. The undo first compares all of it by
@@ -611,8 +637,9 @@ copy merge records what it creates, under the name it was saved as and within th
 entries, only where an original could not go to the Trash, or where it overwrote nothing and the
 location offers no Trash; a paste with a merge records each item it copies beside it where the
 destination offers no Trash. The undo deletes an item only if all of it is unchanged. An item that
-changed, or has no record (one on a GVfs location, or one created where the Trash worked during the
-paste), stays whole and fails with "It was kept, as it may have changed since it was copied";
+changed, or has no record (one on a GVfs location, a GIO copy without native creation provenance,
+an entry whose client-reported identity changed during publication, or one created where the Trash
+worked during the paste), stays whole and fails with "It was kept, as it may have changed since it was copied";
 another undo does not try it again. One that changes after part of it was deleted fails with "The
 folder is not empty", and stays to undo. An item cut off after it deleted anything counts as
 failed, and one cut off while it compares as not attempted.
@@ -693,7 +720,7 @@ reported.
   the daemon's `FUSE_FSYNCDIR` syncing the whole device, as both daemons do; the kernel reports
   success for a daemon that does not implement it.
 - **vfat with `flush`** waits 100 ms at every close of a written file, which bounds copies of many
-  small files: 2,000 files take about 26 s with eight workers.
+  small files.
 
 ## Names
 
@@ -702,8 +729,7 @@ error: vfat drops a trailing dot, SMB stores `:` as a private-use character that
 show, and exfat-fuse can corrupt its volume on a malformed name. Strata takes each mount's rules
 from what the mount shows, fixes the names an item brings from another filesystem before anything
 is created, reports every fix, and refuses a name the user types that the location would store as
-another. What the lab's mounts do with names sent unchanged is under [Lab
-measurements](#lab-measurements).
+another.
 
 ### The rules each destination gets
 
@@ -1077,10 +1103,9 @@ rules of a `fuseblk` device udev cannot tell, which learn from refusals (ntfs-3g
 names). Read failures against a run of the same filter on `origin/main`.
 
 Tests that layer a preset storing any bytes over the lab's exfat-fuse send it names that are not
-valid UTF-8, and the daemon writes an overlong `/` into the volume as a real `/` (see
-[Lab measurements](#lab-measurements)), so after a run of `local_operations::` there, `fsck.exfat`
-finds the volume corrupt. Run `down` and `up`, which format fresh images, before checking names or
-the volume on exfat-fuse.
+valid UTF-8, and the daemon writes an overlong `/` into the volume as a real `/`, so after a run of
+`local_operations::` there, `fsck.exfat` finds the volume corrupt. Run `down` and `up`, which
+format fresh images, before checking names or the volume on exfat-fuse.
 
 Requirements and safety:
 
@@ -1112,76 +1137,6 @@ Requirements and safety:
 
 Never point tests at real user shares or removable drives.
 
-### Lab measurements
-
-Flushes counted on the backing loop device for one call after writing 16 KiB, over three rounds.
-NFS and sshfs serve tmpfs in the lab, so they have no device to count.
-
-| Mount | Close | `syncfs` | `fsync` of the folder | `fdatasync` of the file |
-| --- | --- | --- | --- | --- |
-| ext4 | 0 | 2–4 | 2 | 2 |
-| vfat with `flush`, exFAT | 0 | 0 | 1 | 1 |
-| ntfs3 | 0 | 1 | 1 | 1 |
-| exfat-fuse, ntfs-3g | 0 | 0 | 1 | 1 |
-| SMB, on the server's device | 0 | 0 | 0 | 2 |
-
-On vfat, exFAT and both FUSE daemons `syncfs` writes the data back without flushing, and a folder's
-`fsync` alone writes no file data on vfat and exFAT. Both FUSE daemons sync and flush their whole
-device for a folder's `fsync`: after ten unsynced files it costs one flush, and ntfs-3g skips the
-flush of a clean device, so ten `fdatasync` calls also cost one. Moving 300 files to exfat-fuse in
-two batches took 302 flushes with a sync per file and 2 with one folder `fsync` per batch; on
-ntfs-3g about 290 and 2.
-
-Moving 1,000 files of 4 KiB with one flush per item cost 1,000 flushes and 16.6 s on vfat, against
-13.2 s with the default batches, and 3.7–3.9 s on ntfs3 and exfat-fuse, against 0.13–0.15 s.
-Batch limits from 64 items up differ by at most 0.1 s per 1,000 files, and large files show no
-difference. The loop devices sit in memory, so the flush latency of real USB media is not measured.
-
-Copying a folder of 2,000 files of 1 KiB with eight workers, in seconds:
-
-| Mount | No name claimed | Every name claimed | GIO, one file at a time | `cp -r` |
-| --- | --- | --- | --- | --- |
-| tmpfs, ext4 | 0.01 | 0.01–0.02 | 0.02–0.03 | 0.01–0.02 |
-| vfat with `flush` | 26.0 | 26.2 | 208 | 208 |
-| exFAT | 0.16 | 0.15 | 0.16 | 0.15 |
-| NFSv3 | 0.09 | 0.12 | 0.12 | 0.09 |
-| NFSv4.2 | 0.12 | 0.13–0.19 | 0.16 | 0.12 |
-| SMB, case-insensitive | 0.57–0.63 | 0.61–0.67 | 0.69–0.80 | 0.68 |
-| sshfs | 10.4–13.2 | 1.9–3.7 | 97–106 | 113–129 |
-
-vfat waits 100 ms at each close of a written file, which bounds every copier there. The lab's SFTP
-round trip takes about 46 ms, so the sshfs row compares copiers only.
-
-Names sent unchanged, as each lab mount stored or refused them (Linux 7.2, Samba 4.24.7, sshfs
-3.7.6, exfat-fuse 1.4.0, ntfs-3g 2026.7.7); ok means stored and listed as sent:
-
-| Mount | `x:y` | Trailing dot / space | `CON` | `x\xffy` | Longest name | Symbolic link |
-| --- | --- | --- | --- | --- | --- | --- |
-| tmpfs, ext4, NFS | ok | ok | ok | ok | 255 bytes | ok |
-| vfat | `EINVAL` | stored as `x` / `EINVAL` | ok | `EINVAL` | 255 UTF-16 units | `EPERM` |
-| exFAT | `EINVAL` | stored as `x` / ok | ok | `EILSEQ` | 255 units | `EPERM` |
-| exfat-fuse | `ENOENT` | ok, beside `x` | ok | `EILSEQ` | 255 units | `ENOSYS` |
-| ntfs3 | ok | ok | ok | `EINVAL` | 255 units | ok |
-| ntfs3 with `windows_names`, ntfs-3g | `EINVAL` | `EINVAL` | `EINVAL` | `EINVAL`; `EILSEQ` on ntfs-3g | 255 units | ok |
-| SMB with `mapposix` | stored as U+F022 | stored as U+F029 / U+F028 | listed as `CSHOFG~F` | `ENOENT`; `EINVAL` with `nocase` | 255 bytes; folders 217 | `ENOTSUP` |
-| SMB with POSIX extensions | ok | ok | ok | stored as `x?y` | 255 bytes; folders 217 | ok |
-| sshfs | ok | ok | ok | ok | 255 bytes, then `EBADMSG` | ok |
-
-- exfat-fuse writes an overlong `/` (`\xc0\xaf`) into the volume as a real `/`, after which that
-  folder cannot be listed (`EIO`), and stores an encoded surrogate that aborts the daemon at the
-  folder's next listing, leaving the mount answering `ENOTCONN`.
-- `f_namelen` is 1530 on vfat and exFAT and 255 on ntfs3 and both FUSE daemons, which all count
-  UTF-16 units; SMB reports 255 whatever the server counts.
-- With `nocase`, SMB refuses every character above U+FFFF with `EINVAL`.
-- ntfs3 with `windows_names` and ntfs-3g accept `CONIN$` and `COM¹`, which Windows 11 reserves.
-- Through cifs without POSIX extensions, server names that Windows refuses are listed as Samba's
-  8.3 aliases, which a copy from the share then takes, and a server name that is not valid UTF-8
-  is not listed at all.
-- No mount normalizes Unicode: NFC and NFD forms of a name coexist everywhere except in casefolded
-  ext4 folders, where they are one name.
-
-With the rules above, copies and extractions of these names, and of names up to 768 bytes, stored
-the planned name on every lab mount. The NFS, SMB and SFTP servers listed the same names as their
-clients, with no private-use characters and no 8.3 aliases, and a trace of the exfat-fuse daemon
-showed no name reaching it that was malformed, held a character Windows refuses, ended in a dot or
-a space, or passed 255 units.
+The historical [lab measurements](https://github.com/lgse/strata/pull/1615#issuecomment-6208891751)
+are retained with the pull request. They use memory-backed loop devices and loopback servers, not
+real USB latency or independent network clients.

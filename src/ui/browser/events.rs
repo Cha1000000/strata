@@ -14,6 +14,7 @@ use crate::ui::browser::columns::{
     stop_column_spinner, touch_source_model, update_empty_trash_sensitivity,
 };
 use crate::ui::browser::customization;
+use crate::ui::browser::listing_filter::Target;
 use crate::ui::browser::location::MountStrategy;
 use crate::ui::browser::peek::append_peek_entries;
 use crate::ui::browser::transfer::FinishedSendToCompletion;
@@ -636,7 +637,13 @@ impl ViewState {
                         && (!self.browser.focus_follows_background_load()
                             || self.column_may_take_focus())
                     {
-                        column.focus_surface();
+                        let hits = column
+                            .recursive_search_active
+                            .get()
+                            .then(|| Target::Column(Box::new(column.clone())));
+                        if !hits.is_some_and(|hits| self.focus_results_on_cursor(&hits)) {
+                            column.focus_surface();
+                        }
                     }
                     if !editing
                         && self.mode_views.borrow().mode() == BrowserMode::Columns
@@ -890,6 +897,7 @@ impl ViewState {
                 self.finished_send_to_completion.take();
                 self.pending_archive_destination.take();
                 let retry = self.pending_extract_retry.take();
+                let navigate_after_extract = self.pending_navigate.take();
                 let message = super::transfer_report::outcome_detail(message.clone(), report);
                 let password_failure = *password_failure;
                 let weak = Rc::downgrade(self);
@@ -901,7 +909,6 @@ impl ViewState {
                     if let Some((entry, destination)) = retry
                         && let Some(invalid_password) = extract_password_retry(password_failure)
                     {
-                        let navigate_after_extract = state.pending_navigate.take();
                         state.show_extract_password_dialog(
                             entry,
                             destination,
@@ -946,6 +953,7 @@ impl ViewState {
                         show_delete_error_dialog(
                             &state.overlay,
                             &message,
+                            &super::trash::delete_retry_label(&retryable_entries),
                             Rc::new(move || {
                                 if let Some(state) = weak_state.upgrade() {
                                     state.show_trash_unavailable_confirmation(
@@ -969,6 +977,7 @@ impl ViewState {
                 self.suppress_scroll_after_drop.set(false);
                 self.drop_active_depths.set(None);
                 self.pending_archive_destination.take();
+                self.pending_navigate.take();
                 self.pending_send_to_completion.take();
                 self.finished_send_to_completion.take();
                 let affected_locations = affected_locations.clone();
@@ -1172,6 +1181,10 @@ impl ViewState {
         self.mode_views
             .borrow_mut()
             .handle_with_deferred_empty(event, defer_empty);
+        let results_focus = self.mode_views.borrow().take_results_focus();
+        if let Some(depth) = results_focus {
+            self.focus_pane_results(depth);
+        }
         self.reconcile_pending_rename();
         match event {
             BrowserEvent::ColumnAdded { depth, .. } | BrowserEvent::ColumnReloaded { depth } => {

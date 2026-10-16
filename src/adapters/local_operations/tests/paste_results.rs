@@ -5,9 +5,7 @@ use super::*;
 
 #[test]
 fn a_copy_reports_the_destination_it_created_and_no_moved_item() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let source = root.path().join("photo.jpg");
     let destination = root.path().join("album");
@@ -45,9 +43,7 @@ fn a_copy_reports_the_destination_it_created_and_no_moved_item() -> Result<(), B
 #[test]
 fn duplicating_a_file_preserves_contents_and_reports_the_generated_name()
 -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let destination = root.path().to_path_buf();
     let source = destination.join("photo.jpg");
@@ -78,9 +74,7 @@ fn duplicating_a_file_preserves_contents_and_reports_the_generated_name()
 
 #[test]
 fn a_copy_that_replaces_an_existing_item_reports_its_destination() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let source = root.path().join("photo.jpg");
     let destination = root.path().join("album");
@@ -109,9 +103,7 @@ fn a_copy_that_replaces_an_existing_item_reports_its_destination() -> Result<(),
 #[test]
 fn a_move_reports_where_each_item_landed_instead_of_a_created_destination()
 -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let photo = root.path().join("photo.jpg");
     let notes = root.path().join("notes");
@@ -158,9 +150,7 @@ fn a_move_reports_where_each_item_landed_instead_of_a_created_destination()
 
 #[test]
 fn an_item_replaced_without_trash_is_left_out_of_the_paste_undo() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     for move_sources in [false, true] {
         let root = tempfile::tempdir()?;
         let sources = root.path().join("sources");
@@ -236,9 +226,7 @@ fn an_item_replaced_without_trash_is_left_out_of_the_paste_undo() -> Result<(), 
 
 #[test]
 fn a_cancel_that_cuts_off_an_item_counts_it_as_not_attempted() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let bulk = super::super::MAX_LOCAL_IO_WORKERS + 1;
     // A move runs in the foreground and a copy in the background; enough
     // files take the bulk path, which copies several at once.

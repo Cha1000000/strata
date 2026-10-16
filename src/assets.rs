@@ -57,6 +57,7 @@ pub mod icons {
     pub const GLOBE: &str = "strata-globe";
     pub const CODE_XML: &str = "strata-code-xml";
     pub const BUG: &str = "strata-bug";
+    pub const STRATA_LOGO: &str = "strata-logo";
     pub const BOX: &str = "strata-box";
     pub const SCALE: &str = "strata-scale";
     pub const CORNER_DOWN_RIGHT: &str = "strata-corner-down-right";
@@ -538,23 +539,39 @@ fn primary_icon_texture_at(
     if name.starts_with(CATPPUCCIN_ICON_PREFIX) {
         return catppuccin_icon_texture_at(name, color, texture_px, logical_px, context);
     }
-    let path = format!("/io/github/lgse/Strata/icons/scalable/actions/{name}.svg");
-    let data = gio::resources_lookup_data(&path, gio::ResourceLookupFlags::NONE).ok()?;
-    let source = std::str::from_utf8(data.as_ref()).ok()?;
-    let mut source = recolor_icon_source(source, color);
-    if name == icons::FOLDER {
-        source = source.replacen(
-            "fill=\"none\"",
-            &format!("fill=\"{color}\" fill-opacity=\"0.15\""),
-            1,
-        );
+    if name == icons::STRATA_LOGO {
+        return texture_from_svg(name, color, texture_px, || {
+            let data = gio::resources_lookup_data(
+                "/io/github/lgse/Strata/brand/strata-logo-white.svg",
+                gio::ResourceLookupFlags::NONE,
+            )
+            .ok()?;
+            Some(
+                std::str::from_utf8(data.as_ref())
+                    .ok()?
+                    .replace("#ffffff", color),
+            )
+        });
     }
-    let source = compensate_icon_strokes(source, logical_px, context);
     texture_from_svg(
         &stroke_cache_name(name, logical_px, context),
         color,
         texture_px,
-        svg_at_texture_size(source, texture_px),
+        || {
+            let path = format!("/io/github/lgse/Strata/icons/scalable/actions/{name}.svg");
+            let data = gio::resources_lookup_data(&path, gio::ResourceLookupFlags::NONE).ok()?;
+            let source = std::str::from_utf8(data.as_ref()).ok()?;
+            let mut source = recolor_icon_source(source, color);
+            if name == icons::FOLDER {
+                source = source.replacen(
+                    "fill=\"none\"",
+                    &format!("fill=\"{color}\" fill-opacity=\"0.15\""),
+                    1,
+                );
+            }
+            let source = compensate_icon_strokes(source, logical_px, context);
+            Some(svg_at_texture_size(source, texture_px))
+        },
     )
 }
 
@@ -565,26 +582,8 @@ fn catppuccin_icon_texture_at(
     logical_px: i32,
     context: IconContext,
 ) -> Option<gdk::Texture> {
-    let path = format!("/io/github/lgse/Strata/icons/catppuccin/{name}.svg");
-    let data = gio::resources_lookup_data(&path, gio::ResourceLookupFlags::NONE).ok()?;
     let flavor = CATPPUCCIN_FLAVOR.get();
     let themed = CATPPUCCIN_THEME_COLORS.get();
-    let mut source = std::str::from_utf8(data.as_ref()).ok()?.to_owned();
-    for (variable, hex) in flavor.palette() {
-        let replacement = if themed { color } else { hex };
-        source = source.replace(&format!("var(--vscode-ctp-{variable})"), replacement);
-    }
-    if themed {
-        // Tint the outlines the same way the folder icon is tinted.
-        source = source.replace(
-            "fill=\"none\"",
-            &format!("fill=\"{color}\" fill-opacity=\"0.15\""),
-        );
-    }
-    let source = scale_catppuccin_strokes(
-        source,
-        icon_stroke_factor(logical_px, context) * catppuccin_stroke_weight(context),
-    );
     let palette = if themed {
         format!("accent:{color}")
     } else {
@@ -594,7 +593,26 @@ fn catppuccin_icon_texture_at(
         &stroke_cache_name(name, logical_px, context),
         &palette,
         texture_px,
-        source,
+        || {
+            let path = format!("/io/github/lgse/Strata/icons/catppuccin/{name}.svg");
+            let data = gio::resources_lookup_data(&path, gio::ResourceLookupFlags::NONE).ok()?;
+            let mut source = std::str::from_utf8(data.as_ref()).ok()?.to_owned();
+            for (variable, hex) in flavor.palette() {
+                let replacement = if themed { color } else { hex };
+                source = source.replace(&format!("var(--vscode-ctp-{variable})"), replacement);
+            }
+            if themed {
+                // Tint the outlines the same way the folder icon is tinted.
+                source = source.replace(
+                    "fill=\"none\"",
+                    &format!("fill=\"{color}\" fill-opacity=\"0.15\""),
+                );
+            }
+            Some(scale_catppuccin_strokes(
+                source,
+                icon_stroke_factor(logical_px, context) * catppuccin_stroke_weight(context),
+            ))
+        },
     )
 }
 
@@ -712,7 +730,7 @@ pub(crate) fn sized_folder_decoration_paintable(
         ),
         color,
         texture_px,
-        compensate_icon_strokes(source, logical_px, context),
+        || Some(compensate_icon_strokes(source, logical_px, context)),
     )
 }
 
@@ -838,13 +856,13 @@ fn texture_from_svg(
     cache_name: &str,
     color: &str,
     texture_px: i32,
-    source: String,
+    source: impl FnOnce() -> Option<String>,
 ) -> Option<gdk::Texture> {
     let key = (cache_name.to_owned(), color.to_owned(), texture_px);
     if let Some(texture) = cached_icon_texture(&key) {
         return Some(texture);
     }
-    let surface = vector::surface(&source, texture_px)?;
+    let surface = vector::surface(&source()?, texture_px)?;
     Some(cache_icon_texture(key, texture_from_surface(&surface)?))
 }
 

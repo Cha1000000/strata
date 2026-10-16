@@ -169,8 +169,8 @@ archive hands the keys to its member tree. **Ctrl+A** / **Ctrl+C** select all
 and copy the document's text, never listing items; with **l** the keys go to the
 document itself (text, source, or PDF) once it has rendered.
 
-A password prompt takes focus as soon as it appears, including when **i** or
-cursor movement shows a locked archive. It then owns the keys like any other
+A password prompt shown by **i** or cursor movement leaves focus in the
+listing; **l** hands it the keys. A focused prompt owns the keys like any other
 surface: the header shows the owner bar, the Miller column drops its bar, and
 **i**, **h**, **j**, **k**, and **l** are typed into the password until **Esc**,
 **Shift+Tab**, or unlocking moves focus. If the drawer is hidden for lack of room
@@ -379,7 +379,7 @@ button does not choose it: nothing changes until you accept, and Cancel or
 focused; pressing **d** again confirms it, so **d d** trashes. **D** / **Shift+Delete**, and **d** inside Trash, show the permanent
 deletion confirmation with its confirm button focused, so **Enter** confirms, and **d**
 there does nothing. In a folder whose listing reports no Trash support (such as
-a tmpfs), **d** / **Delete** open a permanent confirmation instead, stating
+a tmpfs, or a FUSE mount that already refused Trash), **d** / **Delete** open a permanent confirmation instead, stating
 that the location doesn't support Trash, with Cancel focused, so **d d** does
 not delete there. Errors appear in
 the usual operation dialogs, and **Ctrl+Z** undoes what the default map can undo.

@@ -15,8 +15,6 @@ pub(super) fn show_notice(
     show(overlay, heading, text, duration, true);
 }
 
-/// [`show_notice`] beside any notice still visible, as one about the same
-/// operation.
 pub(super) fn add_notice(
     overlay: &gtk::Overlay,
     heading: Option<&str>,

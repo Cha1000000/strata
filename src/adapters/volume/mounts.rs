@@ -23,6 +23,7 @@ pub(crate) struct MountTable {
 
 struct MountEntry {
     id: u64,
+    device: (u32, u32),
     site: MountSite,
     mount_type: MountType,
 }
@@ -269,8 +270,42 @@ pub(crate) fn family(fs_type: &str) -> Family {
     }
 }
 
+/// One mount instance. A remount gets a new kernel mount ID; the device and
+/// mount point guard against a reused ID matching a stale key.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub(crate) struct MountKey {
+    pub(crate) mount_id: u64,
+    pub(crate) device: (u32, u32),
+    pub(crate) mount_point: PathBuf,
+    pub(crate) fs_type: String,
+}
+
+#[cfg(test)]
+static MOUNTINFO_FOR_TEST: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// Replaces `/proc/self/mountinfo` for the whole process, so only a test that
+/// runs in its own process may use it.
+#[cfg(test)]
+pub(crate) fn set_mountinfo_for_isolated_test(mountinfo: Option<String>) {
+    assert!(
+        std::env::var_os("STRATA_ISOLATED_GTK_TEST").is_some(),
+        "the mount table override needs an isolated test process"
+    );
+    *MOUNTINFO_FOR_TEST
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = mountinfo;
+}
+
 impl MountTable {
     pub(crate) fn current() -> Self {
+        #[cfg(test)]
+        if let Some(mountinfo) = MOUNTINFO_FOR_TEST
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+        {
+            return Self::parse(mountinfo);
+        }
         std::fs::read("/proc/self/mountinfo")
             .map(Self::parse)
             .unwrap_or_else(|_| Self::parse(b""))
@@ -291,7 +326,9 @@ impl MountTable {
                 let (front, back) = (&line[..separator], &line[separator + 3..]);
                 let mut fields = front.split(|byte| *byte == b' ');
                 let id = std::str::from_utf8(fields.next()?).ok()?.parse().ok()?;
-                let root = fields.nth(2)?;
+                let (major, minor) = std::str::from_utf8(fields.nth(1)?).ok()?.split_once(':')?;
+                let device = (major.parse().ok()?, minor.parse().ok()?);
+                let root = fields.next()?;
                 let mount_point = fields.next()?;
                 let mut back = back.split(|byte| *byte == b' ');
                 let fs_type = std::str::from_utf8(back.next()?).ok()?;
@@ -301,6 +338,7 @@ impl MountTable {
                     .unwrap_or_default();
                 Some(MountEntry {
                     id,
+                    device,
                     site: MountSite {
                         point: PathBuf::from(unescape(mount_point)),
                         root: PathBuf::from(unescape(root)),
@@ -329,8 +367,17 @@ impl MountTable {
             .map(MountEntry::parts)
     }
 
-    pub(crate) fn mount_for(&self, path: &Path) -> Option<(&MountType, &MountSite)> {
+    pub(crate) fn mount_at(&self, path: &Path) -> Option<(&MountType, &MountSite)> {
         self.innermost(path).map(MountEntry::parts)
+    }
+
+    pub(crate) fn mount_for(&self, path: &Path) -> Option<MountKey> {
+        self.innermost(path).map(|entry| MountKey {
+            mount_id: entry.id,
+            device: entry.device,
+            mount_point: entry.site.point.clone(),
+            fs_type: entry.mount_type.fs_type.clone(),
+        })
     }
 
     pub(super) fn is_remote_path(&self, path: &Path) -> bool {
@@ -379,6 +426,35 @@ impl MountTable {
             .filter(|entry| path.starts_with(&entry.site.point))
             .max_by_key(|entry| entry.site.point.as_os_str().len())
     }
+}
+
+/// Includes `fuseblk`, the FUSE drivers for local block devices.
+pub(crate) fn is_fuse_fs_type(fs_type: &str) -> bool {
+    fs_type.starts_with("fuse")
+}
+
+/// FUSE filesystems that layer or encrypt local storage rather than reach a
+/// remote provider.
+pub(crate) fn is_local_fuse_overlay(fs_type: &str) -> bool {
+    matches!(
+        fs_type.strip_prefix("fuse."),
+        Some(
+            "mergerfs"
+                | "gocryptfs"
+                | "encfs"
+                | "cryfs"
+                | "securefs"
+                | "bindfs"
+                | "fuse-overlayfs"
+                | "unionfs"
+                | "unionfs-fuse"
+                | "mhddfs"
+                | "squashfuse"
+                | "archivemount"
+                | "fuse-zip"
+                | "ciopfs"
+        )
+    )
 }
 
 fn is_trash_scan_fs_type(fs_type: &str) -> bool {
@@ -440,7 +516,7 @@ pub(super) fn is_remote_fs_type(fs_type: &str) -> bool {
             | "webdav"
             | "vboxsf"
             | "virtiofs"
-    ) || fs_type.starts_with("fuse")
+    ) || is_fuse_fs_type(fs_type)
 }
 
 /// Decodes mountinfo's octal escapes without assuming pathname bytes are UTF-8.

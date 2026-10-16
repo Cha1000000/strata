@@ -346,11 +346,16 @@ pub(super) fn item_count_label(count: usize) -> String {
 }
 
 pub(super) fn entry_kind_summary(entries: &[FileEntry]) -> String {
-    let directories = entries.iter().filter(|entry| entry.is_directory()).count();
-    let files = entries.len().saturating_sub(directories);
+    let directories = entries
+        .iter()
+        .filter(|entry| entry.kind == EntryKind::Directory)
+        .count();
+    let files = entries.iter().filter(|entry| entry.is_file()).count();
     match (files, directories) {
-        (files, 0) => crate::i18n::count("files", files),
-        (0, directories) => crate::i18n::count("folders", directories),
+        (files, 0) if files == entries.len() => crate::i18n::count("files", files),
+        (0, directories) if directories == entries.len() => {
+            crate::i18n::count("folders", directories)
+        }
         _ => item_count_label(entries.len()),
     }
 }
@@ -361,7 +366,7 @@ pub(super) async fn aggregate_directory_summary(entries: &[FileEntry]) -> Direct
         if index > 0 && index % 256 == 0 {
             glib::timeout_future(std::time::Duration::ZERO).await;
         }
-        if entry.is_directory() {
+        if entry.kind == EntryKind::Directory {
             let directory = gio_file_for_location(&entry.location);
             match summarize_directory(&directory).await {
                 Ok(summary) => {
@@ -387,7 +392,9 @@ pub(super) async fn aggregate_directory_summary(entries: &[FileEntry]) -> Direct
                     total.total_size = total.total_size.saturating_add(size);
                 }
                 MetadataValue::Unknown | MetadataValue::Unavailable => {
-                    total.issues.unreadable = true;
+                    if !entry.is_symbolic_link() {
+                        total.issues.unreadable = true;
+                    }
                 }
             }
         }

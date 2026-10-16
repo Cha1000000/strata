@@ -101,7 +101,8 @@ admission pass after a frame, outside layout, so a final scroll cannot strand wo
 classified against old allocations. Icons reserves a font-sized details line even when
 empty; metadata truncates within the caption width instead of resizing the grid.
 Cut styling, tooltips and date
-bindings refresh once per GTK frame, outside layout, for visible/overscan items.
+bindings refresh outside layout, for visible/overscan items, once scrolling has been still for
+25 ms and at least two frames.
 These presentation refreshes never resubmit file work or reset a name label or active
 rename editor. Identical active thumbnail/metadata requests are reused. Missing
 bindings retain the existing fallback path. Pane assembly, headers, grouping/filtering, and Icons factories
@@ -250,17 +251,20 @@ cached in `adapters/volume/mount_capabilities.rs`. See
 The names a mount stores are derived from mountinfo, udev and `statfs` in
 `adapters/volume/names.rs` and `mounts.rs`, and cached with its capabilities;
 `adapters/local_operations/mount_profile.rs` reads them once per operation, so its planner and
-workers agree. `naming.rs` fixes, plans and numbers names by those rules for copies, moves, merges
-and extraction; `transfer_targets.rs` works out, off the main thread, the name each pasted item
-will get and whether something has it, for the conflict prompt; and `typed_names.rs` refuses a
-typed name the location would store as another.
+workers agree. Its sibling `names.rs` fixes, plans and numbers names by those rules for copies,
+moves, merges and extraction; `transfer_targets.rs` works out, off the main thread, the name each
+pasted item will get and whether something has it, for the conflict prompt; and `typed_names.rs`
+refuses a typed name the location would store as another.
 
 Copies between native paths, including moves across filesystems, merges, Replace stages and
 restore copies, go through `adapters/local_operations/copy_engine.rs`. It copies through
 descriptors on worker threads, on the queue `work_queue.rs` shares with deletions, and records
 what a move read so that only unchanged sources are deleted. `owed.rs` batches the deletions a
 paste owes behind one durability barrier per destination filesystem, and the completion report
-reaches the UI as `OperationEvent::ItemsReported`.
+reaches the UI as `OperationEvent::ItemsReported`. Replacement/merge, deletion, restore/undo and
+progress orchestration live in their adjacent `replacement`, `deletion`, `restore` and `progress`
+modules. `native_fs` owns shared descriptor and identity primitives; the syscall seam composes
+`FsEnvironment` for Trash, mount-table and udev queries without a second injection registry.
 
 Filesystem work for Trash lives in `adapters/trash.rs`. Measurement shares one entry/time budget
 across root and descendant batches; depth truncation and unreadable descendants remain branch-local.
@@ -423,6 +427,35 @@ remain in `window.rs` rather than changing alongside assembly. Bookmark mutation
 read the shared GTK file before applying changes and adopt them only after a
 successful save. This preserves sequential external edits, not simultaneous writes;
 other windows are refreshed on their next bookmark action, not by a live monitor.
+
+`ui/window/pinned_drop.rs` owns folder pinning through dedicated gaps between pinned
+rows, including an empty section. Existing pins reorder through the same gaps and
+insertion indicator, using a provider-matched location snapshot rather than treating
+their string reorder payload as a new folder. Reordering resolves source and target
+locations against the latest bookmarks, preserves labels, and never resurrects a
+concurrently unpinned source. Row bodies retain their existing transfer, reorder and
+spring-navigation behavior; remote pins have insertion gaps even when their rows
+cannot accept transfers. Internal folder drags carry a provider-matched snapshot of entry
+locations, display names and directory eligibility, without filesystem probes. External
+folders take their label from the same metadata query that confirms their type, so drag
+pins are labelled like menu pins. Trash locations and web links are rejected before any
+probe; GVfs would otherwise fetch a hovered link. Pinning prefers the
+Copy protocol action, but accepts Move-only offers from provider-matched internal
+sources, whose drag-end handlers never delete data. Foreign sources must offer
+Copy: completing an external Move could ask the other application to delete the
+originals. Neither internal action dispatches a filesystem transfer. External file
+lists and directory types are read asynchronously once per drag across that sidebar's
+gaps. Validation issues one metadata query at a time and has a two-second deadline,
+including payload loading. Pending pin drops wait for that result and never become
+transfers; cancellation, failure, or timeout rejects the whole selection. Cancelling
+a GIO query does not guarantee interruption of an already-blocked kernel call.
+Only confirmed directory selections show an insertion indicator. Directory symlinks
+are accepted without canonicalizing or collapsing different location spellings.
+Each gap remembers the pins on both sides; insertion resolves the following pin against
+the latest bookmarks, falls back to the preceding one, and rejects the drop when both
+were unpinned elsewhere. Insertion preserves selection order, skips existing pins
+without reordering them, and finishes the drop protocol only after the bookmark update
+completes; a drop that changes nothing finishes as rejected.
 
 ### Window keyboard routing
 
