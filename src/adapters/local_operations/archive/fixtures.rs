@@ -135,6 +135,15 @@ pub(crate) fn write_compression_fixture(
     format: ArchiveFormat,
     password: Option<&str>,
 ) -> Result<usize, String> {
+    // GTK fixtures share encoders whose filesystem operations require a worker.
+    if gtk::glib::MainContext::default().is_owner() {
+        return std::thread::scope(|scope| {
+            scope
+                .spawn(|| write_compression_fixture(path, entries, format, password))
+                .join()
+                .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+        });
+    }
     let file = fs::File::create(path).map_err(|error| error.to_string())?;
     let progress = Arc::new(AtomicUsize::new(0));
     let cancelled = never_cancelled();
