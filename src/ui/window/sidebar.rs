@@ -89,7 +89,7 @@ struct SidebarShell {
 
 impl SidebarShell {
     fn new() -> Self {
-        let places = gtk::Box::new(gtk::Orientation::Vertical, 2);
+        let places = gtk::Box::new(gtk::Orientation::Vertical, 0);
         places.add_css_class("sidebar");
         let scroller = gtk::ScrolledWindow::builder()
             .child(&places)

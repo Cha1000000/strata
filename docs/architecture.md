@@ -406,10 +406,13 @@ rows, including an empty section. Existing pins reorder through the same gaps an
 insertion indicator, using a provider-matched location snapshot rather than treating
 their string reorder payload as a new folder. Reordering resolves source and target
 locations against the latest bookmarks, preserves labels, and never resurrects a
-concurrently unpinned source. Row bodies retain their existing transfer, reorder and
-spring-navigation behavior; remote pins have insertion gaps even when their rows
-cannot accept transfers. Internal folder drags carry a provider-matched snapshot of entry
-locations, display names and directory eligibility, without filesystem probes. External
+concurrently unpinned source. Built-in places and pinned rows show before/after
+insertion lines during compatible reorders within their own section. Pin gaps
+supply the inter-row spacing without adding a second spacer around each target.
+Row bodies retain their existing transfer and spring-navigation behavior; remote
+pins have insertion gaps even when their rows cannot accept transfers. Internal folder
+drags carry a provider-matched snapshot of entry locations, display names and directory
+eligibility, without filesystem probes. External
 folders take their label from the same metadata query that confirms their type, so drag
 pins are labelled like menu pins. Trash locations and web links are rejected before any
 probe; GVfs would otherwise fetch a hovered link. Pinning prefers the

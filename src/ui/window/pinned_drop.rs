@@ -250,6 +250,9 @@ pub(super) fn append_gap(
         .accessible_role(gtk::AccessibleRole::Group)
         .build();
     gap.add_css_class("sidebar-pin-gap");
+    if after.is_none() && before.is_none() {
+        gap.add_css_class("empty");
+    }
     crate::ui::accessibility::set_label(&gap, &crate::i18n::tr("PINNED"));
     let target = gtk::DropTargetAsync::new(
         Some(

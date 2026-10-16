@@ -2091,7 +2091,7 @@ impl SidebarState {
     fn make_reorderable(
         self: &Rc<Self>,
         row: &gtk::Button,
-        payload: impl Fn() -> String + 'static,
+        payload: String,
         on_drop: impl Fn(&Rc<Self>, &str, bool) -> bool + 'static,
     ) {
         row.add_css_class("reorderable");
@@ -2101,10 +2101,11 @@ impl SidebarState {
             .actions(gtk::gdk::DragAction::MOVE)
             .build();
         let weak_state = Rc::downgrade(self);
+        let source_payload = payload.clone();
         drag.connect_prepare(move |_, _, _| {
-            let payload = payload();
+            let payload = &source_payload;
             let content = gtk::gdk::ContentProvider::for_value(&payload.to_value());
-            if let Some(index) = parse_pinned_drag_source(&payload)
+            if let Some(index) = parse_pinned_drag_source(payload)
                 && let Some(state) = weak_state.upgrade()
                 && let Some(place) = state.pinned_places.borrow().get(index)
             {
@@ -2128,6 +2129,7 @@ impl SidebarState {
         row.add_controller(drag);
 
         let drop = gtk::DropTarget::new(String::static_type(), gtk::gdk::DragAction::MOVE);
+        drop.set_preload(true);
         drop.connect_accept(|_, offered| {
             accepts_sidebar_reorder_payload(
                 offered.formats().contains_type(String::static_type()),
@@ -2136,14 +2138,43 @@ impl SidebarState {
                     .contains_type(gtk::gdk::FileList::static_type()),
             )
         });
+        let hover_y = Rc::new(Cell::new(0.0));
+        let enter_y = hover_y.clone();
+        let enter_payload = payload.clone();
+        drop.connect_enter(move |target, _, y| {
+            enter_y.set(y);
+            sidebar_reorder_feedback(target, &enter_payload, y)
+        });
+        let motion_y = hover_y.clone();
+        let motion_payload = payload.clone();
+        drop.connect_motion(move |target, _, y| {
+            motion_y.set(y);
+            sidebar_reorder_feedback(target, &motion_payload, y)
+        });
+        let value_payload = payload.clone();
+        drop.connect_value_notify(move |target| {
+            if let Some(offered) = target.current_drop() {
+                let action = sidebar_reorder_feedback(target, &value_payload, hover_y.get());
+                offered.status(action, action);
+            }
+        });
+        drop.connect_leave(|target| {
+            if let Some(row) = target.widget() {
+                clear_sidebar_reorder_feedback(&row);
+            }
+        });
         let weak_state = Rc::downgrade(self);
         drop.connect_drop(move |target, value, _, y| {
-            let Ok(source) = value.get::<String>() else {
-                return false;
-            };
             let Some(row) = target.widget() else {
                 return false;
             };
+            clear_sidebar_reorder_feedback(&row);
+            let Ok(source) = value.get::<String>() else {
+                return false;
+            };
+            if !sidebar_reorder_matches(&source, &payload) {
+                return false;
+            }
             let after = y >= f64::from(row.height()) / 2.0;
             if let Some(state) = weak_state.upgrade() {
                 return on_drop(&state, &source, after);
@@ -2186,17 +2217,13 @@ impl SidebarState {
         if self.local_only {
             return;
         }
-        self.make_reorderable(
-            row,
-            move || id.to_string(),
-            move |state, source, after| {
-                if source.starts_with(PINNED_DRAG_PREFIX) {
-                    return false;
-                }
-                state.reorder_place(source, id, after);
-                true
-            },
-        );
+        self.make_reorderable(row, id.to_owned(), move |state, source, after| {
+            if source.starts_with(PINNED_DRAG_PREFIX) {
+                return false;
+            }
+            state.reorder_place(source, id, after);
+            true
+        });
     }
 
     fn reorder_place(self: &Rc<Self>, source: &str, target: &str, after: bool) {
@@ -2619,7 +2646,7 @@ impl SidebarState {
     fn make_pinned_row_reorderable(self: &Rc<Self>, row: &gtk::Button, index: usize) {
         self.make_reorderable(
             row,
-            move || format!("{PINNED_DRAG_PREFIX}{index}"),
+            format!("{PINNED_DRAG_PREFIX}{index}"),
             move |state, source, after| {
                 let Some(source) = parse_pinned_drag_source(source) else {
                     return false;
@@ -2705,6 +2732,46 @@ impl SidebarState {
 
 fn accepts_sidebar_reorder_payload(has_string: bool, has_file_list: bool) -> bool {
     has_string && !has_file_list
+}
+
+fn sidebar_reorder_matches(source: &str, target: &str) -> bool {
+    source != target
+        && if parse_pinned_drag_source(target).is_some() {
+            parse_pinned_drag_source(source).is_some()
+        } else {
+            STANDARD_PLACE_IDS.contains(&source) && STANDARD_PLACE_IDS.contains(&target)
+        }
+}
+
+fn clear_sidebar_reorder_feedback(row: &gtk::Widget) {
+    row.remove_css_class("reorder-before");
+    row.remove_css_class("reorder-after");
+}
+
+fn sidebar_reorder_feedback(
+    target: &gtk::DropTarget,
+    payload: &str,
+    y: f64,
+) -> gtk::gdk::DragAction {
+    let Some(row) = target.widget() else {
+        return gtk::gdk::DragAction::empty();
+    };
+    clear_sidebar_reorder_feedback(&row);
+    let Some(value) = target.value() else {
+        return gtk::gdk::DragAction::MOVE;
+    };
+    if !value
+        .get::<String>()
+        .is_ok_and(|source| sidebar_reorder_matches(&source, payload))
+    {
+        return gtk::gdk::DragAction::empty();
+    }
+    row.add_css_class(if y >= f64::from(row.height()) / 2.0 {
+        "reorder-after"
+    } else {
+        "reorder-before"
+    });
+    gtk::gdk::DragAction::MOVE
 }
 
 fn sidebar_accepts_file_drop(location: &Location) -> bool {
