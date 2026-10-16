@@ -2649,8 +2649,22 @@ fn files_modified_within_a_tick_of_the_clock_stamping_them_are_compared_before_d
     // deletion reads it again.
     let rows: [(&str, (u32, u32, u32), Preset, u64, bool, bool); 6] = [
         ("ext4 before 6.13", (6, 12, 0), Quirks::ext4, 5, true, true),
-        ("ext4 before 6.13, untouched", (6, 12, 0), Quirks::ext4, 5, false, true),
-        ("ext4 before 6.13, a tick later", (6, 12, 0), Quirks::ext4, 150, false, false),
+        (
+            "ext4 before 6.13, untouched",
+            (6, 12, 0),
+            Quirks::ext4,
+            5,
+            false,
+            true,
+        ),
+        (
+            "ext4 before 6.13, a tick later",
+            (6, 12, 0),
+            Quirks::ext4,
+            150,
+            false,
+            false,
+        ),
         ("ext4 since 6.13", (6, 13, 0), Quirks::ext4, 5, false, false),
         ("ramfs since 6.13", (6, 13, 0), ramfs, 5, true, true),
         ("NFS since 6.13", (6, 13, 0), Quirks::nfs42, 5, true, true),
