@@ -451,7 +451,6 @@
   "Invalid built-in release keys: %{error}": "Khóa phát hành tích hợp không hợp lệ: %{error}",
   "Invalid delete target": "Mục cần xóa không hợp lệ",
   "Invalid extraction folder name “%{name}”": "Tên thư mục giải nén “%{name}” không hợp lệ",
-  "Invalid internal extraction path": "Đường dẫn giải nén nội bộ không hợp lệ",
   "Invalid interpreter — cannot run": "Trình thông dịch không hợp lệ — không thể chạy",
   "Invalid label: %{reason}": "Nhãn không hợp lệ: %{reason}",
   "Invalid local filesystem target": "Mục tiêu hệ thống tệp cục bộ không hợp lệ",

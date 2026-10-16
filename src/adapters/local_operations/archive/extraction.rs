@@ -19,13 +19,18 @@ use std::{
     time::SystemTime,
 };
 
-use crate::model::Location;
+use crate::{
+    model::Location,
+    services::{RenameCause, RenamedItem, SkippedItem, SpecialKind, TransferReport},
+};
 
+use super::super::copy_engine::holds_no_links;
 use super::{
     ArchiveError, COPY_BUF, archive_failed, archive_io_failed, archive_read_failed,
     check_archive_cancelled,
     destination::{
-        ExtractNameResolver, ExtractionDestination, process_umask, sanitized_archive_path,
+        ExtractNameResolver, ExtractionDestination, archive_stem, process_umask,
+        sanitized_archive_path,
     },
 };
 
@@ -67,6 +72,13 @@ pub(super) enum ArchiveOutcome<T> {
     },
 }
 
+/// Where a member went in the staging folder.
+enum Placement {
+    Made(PathBuf),
+    /// Left out, from where it would have gone.
+    LeftOut(PathBuf),
+}
+
 /// Member paths are relative to the staging folder.
 enum InterruptedMember {
     NotAttempted(PathBuf),
@@ -97,7 +109,14 @@ pub(super) struct ExtractionSession<'a> {
     records_hard_link_targets: bool,
     /// Native archive identity must survive conflict renames for later hard links.
     created_names: HashMap<PathBuf, PathBuf>,
+    /// Links left out, by member path, so hard links to them are left out too.
+    skipped_links: HashSet<PathBuf>,
+    /// Links left out, by where each would have been in the staging folder.
+    skipped: Vec<PathBuf>,
     directories: Vec<(PathBuf, MemberMetadata)>,
+    /// Where what the extraction renamed and left out is reported, once
+    /// it is published.
+    report: &'a mut TransferReport,
 }
 
 impl<'a> ExtractionSession<'a> {
@@ -106,6 +125,7 @@ impl<'a> ExtractionSession<'a> {
         archive_name: &'a str,
         progress: &'a AtomicUsize,
         cancelled: &'a AtomicBool,
+        report: &'a mut TransferReport,
     ) -> Result<Self, ArchiveError> {
         let directory = ExtractionDestination::open(destination)?;
         let available_bytes = directory.available_bytes()?;
@@ -116,6 +136,7 @@ impl<'a> ExtractionSession<'a> {
             progress,
             cancelled,
             available_bytes,
+            report,
         ))
     }
 
@@ -126,13 +147,14 @@ impl<'a> ExtractionSession<'a> {
         progress: &'a AtomicUsize,
         cancelled: &'a AtomicBool,
         available_bytes: Option<u64>,
+        report: &'a mut TransferReport,
     ) -> Self {
         Self {
             destination,
             archive_name,
+            resolver: ExtractNameResolver::new(&directory),
             directory,
             staging: None,
-            resolver: ExtractNameResolver::new(),
             progress,
             cancelled,
             roots: Vec::new(),
@@ -144,7 +166,10 @@ impl<'a> ExtractionSession<'a> {
             available_bytes,
             records_hard_link_targets: false,
             created_names: HashMap::new(),
+            skipped_links: HashSet::new(),
+            skipped: Vec::new(),
             directories: Vec::new(),
+            report,
         }
     }
 
@@ -155,6 +180,7 @@ impl<'a> ExtractionSession<'a> {
         progress: &'a AtomicUsize,
         cancelled: &'a AtomicBool,
         calls: super::destination::MetadataCalls,
+        report: &'a mut TransferReport,
     ) -> Result<Self, ArchiveError> {
         Ok(Self::from_open(
             destination,
@@ -163,6 +189,7 @@ impl<'a> ExtractionSession<'a> {
             progress,
             cancelled,
             None,
+            report,
         ))
     }
 
@@ -178,6 +205,7 @@ impl<'a> ExtractionSession<'a> {
         progress: &'a AtomicUsize,
         cancelled: &'a AtomicBool,
         available_bytes: Option<u64>,
+        report: &'a mut TransferReport,
     ) -> Result<Self, ArchiveError> {
         Ok(Self::from_open(
             destination,
@@ -186,6 +214,7 @@ impl<'a> ExtractionSession<'a> {
             progress,
             cancelled,
             available_bytes,
+            report,
         ))
     }
 
@@ -233,18 +262,24 @@ impl<'a> ExtractionSession<'a> {
         Ok(())
     }
 
-    fn hard_link_target(&self, name: &str, target: &Path) -> Result<PathBuf, ArchiveError> {
-        sanitized_archive_path(target)
-            .ok()
-            .and_then(|path| self.created_names.get(&path))
-            .cloned()
-            .ok_or_else(|| {
-                archive_failed(rust_i18n::t!(
-                    "Archive member “%{name}” is a hard link to “%{target}”, which was not extracted",
-                    name = name,
-                    target = target.display()
-                ))
-            })
+    /// Where the member a hard link `name` points to was extracted, or
+    /// `None` where it is a link the destination could not hold.
+    fn hard_link_target(&self, name: &str, target: &Path) -> Result<Option<PathBuf>, ArchiveError> {
+        let target_path = sanitized_archive_path(target).ok();
+        if let Some(created) = target_path
+            .as_ref()
+            .and_then(|path| self.created_names.get(path))
+        {
+            return Ok(Some(created.clone()));
+        }
+        if target_path.is_some_and(|path| self.skipped_links.contains(&path)) {
+            return Ok(None);
+        }
+        Err(archive_failed(rust_i18n::t!(
+            "Archive member “%{name}” is a hard link to “%{target}”, which was not extracted",
+            name = name,
+            target = target.display()
+        )))
     }
 
     /// On error the decoder must stop and call `finish`.
@@ -257,9 +292,7 @@ impl<'a> ExtractionSession<'a> {
         let path = sanitized_archive_path(&name)?;
         let name = name.as_ref().to_string_lossy();
         if let Err(error) = self.check_cancelled() {
-            self.interrupted = Some(InterruptedMember::NotAttempted(
-                self.resolver.apply_known_rename(&path),
-            ));
+            self.interrupted = Some(InterruptedMember::NotAttempted(self.resolver.known(&path)));
             return Err(error);
         }
         if let MemberContent::File(_, Some(declared)) = &content {
@@ -280,30 +313,50 @@ impl<'a> ExtractionSession<'a> {
             .as_ref()
             .expect("staging exists after ensure_staging")
             .directory;
-        let outpath = self.resolver.resolve(staging, &path)?;
+        let resolver = &mut self.resolver;
         let is_directory = matches!(content, MemberContent::Directory);
-        let created = match content {
+        let placement = match content {
             MemberContent::Directory => {
-                staging.create_directories(&outpath)?;
-                self.directories.push((outpath.clone(), metadata));
-                outpath
+                let created = resolver.folder(staging, &path)?;
+                self.directories.push((created.clone(), metadata));
+                Placement::Made(created)
             }
-            MemberContent::Symlink(target) => {
-                staging.create_symlink(&outpath, OsStr::from_bytes(target), metadata.modified)?
+            MemberContent::Symlink(target) if staging.names().holds_links() => {
+                let placed = resolver.leaf(staging, &path)?;
+                match staging.create_symlink(
+                    &placed,
+                    OsStr::from_bytes(target),
+                    metadata.modified,
+                )? {
+                    None => Placement::Made(resolver.made(placed)),
+                    Some(refusal) => {
+                        if holds_no_links(refusal) {
+                            staging.names().refuse_links();
+                        }
+                        Placement::LeftOut(placed.requested)
+                    }
+                }
             }
-            MemberContent::HardLink(_) => staging.create_hard_link(
-                &outpath,
-                &hard_link_target.expect("hard links are resolved before staging"),
-            )?,
+            MemberContent::Symlink(_) => Placement::LeftOut(resolver.requested(staging, &path)?),
+            MemberContent::HardLink(_) => match hard_link_target.flatten() {
+                Some(target) => {
+                    let placed = resolver.leaf(staging, &path)?;
+                    staging.create_hard_link(&placed, &target)?;
+                    Placement::Made(resolver.made(placed))
+                }
+                None => Placement::LeftOut(resolver.requested(staging, &path)?),
+            },
             MemberContent::File(reader, declared_size) => {
-                let (mut file, created) = staging.create_file(&outpath, metadata.mode)?;
+                let placed = resolver.leaf(staging, &path)?;
+                let mut file = staging.create_file(&placed, metadata.mode)?;
                 let result = copy_member(
                     &name,
                     reader,
                     &mut file,
                     self.cancelled,
                     declared_size,
-                    self.remaining(),
+                    self.available_bytes
+                        .map(|available| available.saturating_sub(self.written)),
                 )
                 .and_then(|copied| match metadata.modified {
                     Some(modified) => staging
@@ -321,10 +374,11 @@ impl<'a> ExtractionSession<'a> {
                 match result {
                     Ok(copied) => {
                         self.written = self.written.saturating_add(copied);
-                        created
+                        Placement::Made(resolver.made(placed))
                     }
                     Err(error) => {
                         drop(file);
+                        let created = placed.path;
                         let removed = staging.remove_file(&created);
                         if removed.is_err() {
                             self.has_content = true;
@@ -341,21 +395,41 @@ impl<'a> ExtractionSession<'a> {
                 }
             }
         };
+        let created = match placement {
+            Placement::Made(created) => created,
+            Placement::LeftOut(requested) => {
+                // A hard link to a link left out is left out with it.
+                if self.records_hard_link_targets {
+                    self.skipped_links.insert(path);
+                }
+                if let Some(folder) = requested.parent() {
+                    self.note_root(folder);
+                }
+                self.skipped.push(requested);
+                self.progress.fetch_add(1, Ordering::Relaxed);
+                return Ok(());
+            }
+        };
         if !is_directory {
             self.has_content = true;
             if self.records_hard_link_targets {
                 self.created_names.insert(path, created.clone());
             }
         }
-        if let Some(root) = created.components().next() {
+        self.note_root(&created);
+        self.completed.push(created);
+        self.progress.fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// Publication moves the top-level entry of `path` out of the staging folder.
+    fn note_root(&mut self, path: &Path) {
+        if let Some(root) = path.components().next() {
             let root = PathBuf::from(root.as_os_str());
             if self.seen_roots.insert(root.clone()) {
                 self.roots.push(root);
             }
         }
-        self.completed.push(created);
-        self.progress.fetch_add(1, Ordering::Relaxed);
-        Ok(())
     }
 
     /// Pending names exclude members already passed to `extract_member`.
@@ -371,6 +445,17 @@ impl<'a> ExtractionSession<'a> {
         let directory = &self.directory;
         let destination = self.destination;
         let archive_name = self.archive_name;
+        let reported = Reported {
+            renamed: self.resolver.take_renamed(),
+            skipped: std::mem::take(&mut self.skipped),
+        };
+        let report = &mut *self.report;
+        // Reported only where the output it names was kept.
+        let mut kept_in = |folder: &Result<Option<String>, String>, reported: Reported| {
+            if let Ok(Some(folder)) = folder {
+                reported.in_folder(report, directory, destination, archive_name, folder);
+            }
+        };
         match result {
             Ok(()) => {
                 let Some(staging) = staging else {
@@ -384,11 +469,13 @@ impl<'a> ExtractionSession<'a> {
                 if let Err(error) = restore_directory_metadata(&staging.directory, nested) {
                     let kept =
                         keep_or_remove(directory, Some(&staging), archive_name, self.has_content);
+                    kept_in(&kept, reported);
                     return Err(ArchiveError::Failed(failure_message(error, kept)));
                 }
                 let (name, is_folder) = match self.roots.as_slice() {
                     [] => {
                         remove_empty(directory, &staging)?;
+                        reported.add_to(report, |path| destination.join(path));
                         return Ok(ArchiveOutcome::Completed(None));
                     }
                     [root] => {
@@ -396,12 +483,22 @@ impl<'a> ExtractionSession<'a> {
                             .publish_single_root(&staging.directory, root)
                             .map_err(|error| staging_kept(&error, &staging))?;
                         remove_empty(directory, &staging)?;
+                        reported.add_to(report, |path| {
+                            let mut names = path.iter();
+                            match names.next() {
+                                Some(top) if top == root.as_os_str() => {
+                                    destination.join(&leaf).join(names.as_path())
+                                }
+                                _ => destination.join(path),
+                            }
+                        });
                         (leaf, false)
                     }
                     _ => {
                         let folder = directory
                             .publish_staging_as_folder(&staging.name, archive_name)
                             .map_err(|error| staging_kept(&error, &staging))?;
+                        reported.in_folder(report, directory, destination, archive_name, &folder);
                         (OsString::from(folder), true)
                     }
                 };
@@ -428,8 +525,9 @@ impl<'a> ExtractionSession<'a> {
             }
             Err(ArchiveError::Cancelled) => {
                 let kept =
-                    keep_or_remove(directory, staging.as_ref(), archive_name, self.has_content)
-                        .map_err(ArchiveError::Failed)?;
+                    keep_or_remove(directory, staging.as_ref(), archive_name, self.has_content);
+                kept_in(&kept, reported);
+                let kept = kept.map_err(ArchiveError::Failed)?;
                 let base = |relative: &Path| match &kept {
                     Some(folder) => Location::local(destination.join(folder).join(relative)),
                     None => Location::local(destination.join(relative)),
@@ -449,7 +547,7 @@ impl<'a> ExtractionSession<'a> {
                 }
                 not_attempted.extend(remaining().into_iter().filter_map(|name| {
                     let path = sanitized_archive_path(&name).ok()?;
-                    Some(base(&self.resolver.apply_known_rename(&path)))
+                    Some(base(&self.resolver.known(&path)))
                 }));
                 Ok(ArchiveOutcome::Cancelled {
                     completed,
@@ -467,17 +565,77 @@ impl<'a> ExtractionSession<'a> {
                 // numbered name, so report an ordinary failure instead.
                 match discarded {
                     Ok(()) => Err(error),
-                    Err(removal) => Err(ArchiveError::Failed(failure_message(
-                        crate::i18n::join_sentences(&error.to_string(), &removal),
-                        keep_or_remove(directory, staging.as_ref(), archive_name, self.has_content),
-                    ))),
+                    Err(removal) => {
+                        let kept = keep_or_remove(
+                            directory,
+                            staging.as_ref(),
+                            archive_name,
+                            self.has_content,
+                        );
+                        kept_in(&kept, reported);
+                        Err(ArchiveError::Failed(failure_message(
+                            crate::i18n::join_sentences(&error.to_string(), &removal),
+                            kept,
+                        )))
+                    }
                 }
             }
-            Err(ArchiveError::Failed(message)) => Err(ArchiveError::Failed(failure_message(
-                message,
-                keep_or_remove(directory, staging.as_ref(), archive_name, self.has_content),
-            ))),
+            Err(ArchiveError::Failed(message)) => {
+                let kept =
+                    keep_or_remove(directory, staging.as_ref(), archive_name, self.has_content);
+                kept_in(&kept, reported);
+                Err(ArchiveError::Failed(failure_message(message, kept)))
+            }
         }
+    }
+}
+
+/// What an extraction saved under another name, and why, and the links it
+/// left out, by staging path.
+struct Reported {
+    renamed: Vec<(PathBuf, PathBuf, RenameCause)>,
+    skipped: Vec<PathBuf>,
+}
+
+impl Reported {
+    /// Adds it to `report`, each staging path put where `place` says its
+    /// entry was published.
+    fn add_to(self, report: &mut TransferReport, place: impl Fn(&Path) -> PathBuf) {
+        report.renamed.extend(
+            self.renamed
+                .into_iter()
+                .map(|(requested, saved_as, cause)| RenamedItem {
+                    requested: Location::local(place(&requested)),
+                    saved_as: Location::local(place(&saved_as)),
+                    cause,
+                }),
+        );
+        report
+            .skipped
+            .extend(self.skipped.iter().map(|path| SkippedItem {
+                location: Location::local(place(path)),
+                kind: SpecialKind::Symlink,
+            }));
+    }
+
+    /// [`Self::add_to`] for entries published in `folder`, the folder named
+    /// after the archive, with that folder's own name where it changed.
+    fn in_folder(
+        self,
+        report: &mut TransferReport,
+        directory: &ExtractionDestination,
+        destination: &Path,
+        archive_name: &str,
+        folder: &str,
+    ) {
+        if let Some(cause) = directory.folder_name(archive_name).cause {
+            report.renamed.push(RenamedItem {
+                requested: Location::local(destination.join(archive_stem(archive_name))),
+                saved_as: Location::local(destination.join(folder)),
+                cause,
+            });
+        }
+        self.add_to(report, |path| destination.join(folder).join(path));
     }
 }
 

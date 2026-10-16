@@ -451,7 +451,6 @@
   "Invalid built-in release keys: %{error}": "Invalid built-in release keys: %{error}",
   "Invalid delete target": "Invalid delete target",
   "Invalid extraction folder name “%{name}”": "Invalid extraction folder name “%{name}”",
-  "Invalid internal extraction path": "Invalid internal extraction path",
   "Invalid interpreter — cannot run": "Invalid interpreter — cannot run",
   "Invalid label: %{reason}": "Invalid label: %{reason}",
   "Invalid local filesystem target": "Invalid local filesystem target",

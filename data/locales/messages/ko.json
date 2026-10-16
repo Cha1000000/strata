@@ -451,7 +451,6 @@
   "Invalid built-in release keys: %{error}": "내장 릴리스 키가 잘못되었습니다: %{error}",
   "Invalid delete target": "삭제 대상이 잘못되었습니다",
   "Invalid extraction folder name “%{name}”": "압축 풀기 폴더 이름 “%{name}”이(가) 잘못되었습니다",
-  "Invalid internal extraction path": "내부 압축 풀기 경로가 잘못되었습니다",
   "Invalid interpreter — cannot run": "잘못된 인터프리터 — 실행할 수 없음",
   "Invalid label: %{reason}": "잘못된 레이블: %{reason}",
   "Invalid local filesystem target": "로컬 파일 시스템 대상이 잘못되었습니다",

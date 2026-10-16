@@ -5,7 +5,7 @@ use super::{
     ExtractNameResolver, ExtractionDestination, FUSE_SUPER_MAGIC, MemberMetadata, MetadataCalls,
     archive_stem, sanitized_archive_path,
 };
-use crate::adapters::local_operations::tests::fs_quirks::{FsQuirks, Quirks};
+use crate::adapters::local_operations::tests::fs_quirks::{FsQuirks, Op, Quirks};
 use std::{
     error::Error,
     ffi::{OsStr, OsString},
@@ -16,8 +16,51 @@ use std::{
         fs::{MetadataExt, PermissionsExt, symlink},
     },
     path::{Path, PathBuf},
-    time::{Duration, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
+
+/// Makes the file member `path` as an extraction does, with names of its own.
+fn put_file(
+    destination: &ExtractionDestination,
+    path: impl AsRef<Path>,
+) -> Result<(fs::File, PathBuf), String> {
+    let mut resolver = ExtractNameResolver::new(destination);
+    let placed = resolver.leaf(destination, path.as_ref())?;
+    let file = destination.create_file(&placed, None)?;
+    Ok((file, resolver.made(placed)))
+}
+
+fn put_link(
+    destination: &ExtractionDestination,
+    path: impl AsRef<Path>,
+    target: &OsStr,
+    modified: Option<SystemTime>,
+) -> Result<PathBuf, String> {
+    let mut resolver = ExtractNameResolver::new(destination);
+    let placed = resolver.leaf(destination, path.as_ref())?;
+    match destination.create_symlink(&placed, target, modified)? {
+        None => Ok(resolver.made(placed)),
+        Some(refusal) => Err(refusal.to_string()),
+    }
+}
+
+fn put_hard_link(
+    destination: &ExtractionDestination,
+    path: impl AsRef<Path>,
+    target: &Path,
+) -> Result<PathBuf, String> {
+    let mut resolver = ExtractNameResolver::new(destination);
+    let placed = resolver.leaf(destination, path.as_ref())?;
+    destination.create_hard_link(&placed, target)?;
+    Ok(resolver.made(placed))
+}
+
+fn put_folder(
+    destination: &ExtractionDestination,
+    path: impl AsRef<Path>,
+) -> Result<PathBuf, String> {
+    ExtractNameResolver::new(destination).folder(destination, path.as_ref())
+}
 
 #[test]
 fn archive_paths_are_sanitized_to_confined_relative_paths() -> Result<(), Box<dyn Error>> {
@@ -60,9 +103,13 @@ fn stage(
     files: &[&str],
 ) -> Result<(OsString, ExtractionDestination), Box<dyn Error>> {
     let (name, staging) = destination.create_staging()?;
+    let mut resolver = ExtractNameResolver::new(&staging);
     for file in files {
-        let (mut created, _) = staging.create_file(Path::new(file), None)?;
-        created.write_all(file.as_bytes())?;
+        let placed = resolver.leaf(&staging, Path::new(file))?;
+        staging
+            .create_file(&placed, None)?
+            .write_all(file.as_bytes())?;
+        resolver.made(placed);
     }
     Ok((name, staging))
 }
@@ -70,13 +117,20 @@ fn stage(
 #[test]
 fn publishing_reports_failures_without_discarding_staged_files() -> Result<(), Box<dyn Error>> {
     let root = tempfile::tempdir()?;
+    let _quirks = FsQuirks::install(
+        root.path(),
+        Quirks {
+            fail: vec![(Op::Rename, "bundle", 0, rustix::io::Errno::ACCESS)],
+            ..Quirks::default()
+        },
+    );
     let destination = ExtractionDestination::open(root.path())?;
     let (staging, _) = stage(&destination, &["first.txt"])?;
     assert!(staging.to_string_lossy().starts_with(".strata-extraction-"));
 
     let error = destination
-        .publish_staging_as_folder(&staging, &format!("{}.zip", "a".repeat(256)))
-        .expect_err("overlong folder name must fail");
+        .publish_staging_as_folder(&staging, "bundle.zip")
+        .expect_err("a refused publication must fail");
 
     assert!(error.contains("Could not publish"), "{error}");
     assert_eq!(
@@ -108,14 +162,14 @@ fn pinned_destination_survives_path_replacement() -> Result<(), Box<dyn Error>> 
     symlink(&external, &target)?;
 
     let (name, staging) = destination.create_staging()?;
-    let (mut file, created) = staging.create_file(Path::new("nested/file.txt"), None)?;
+    let (mut file, created) = put_file(&staging, Path::new("nested/file.txt"))?;
     file.write_all(b"contents")?;
     drop(file);
     assert_eq!(fs::read(moved.join(&name).join(&created))?, b"contents");
     assert!(external.read_dir()?.next().is_none());
     staging.remove_file(&created)?;
     assert!(!moved.join(&name).join(&created).exists());
-    let (mut second, _) = staging.create_file(Path::new("second.txt"), None)?;
+    let (mut second, _) = put_file(&staging, Path::new("second.txt"))?;
     second.write_all(b"second")?;
     drop(second);
     assert_eq!(
@@ -142,7 +196,7 @@ fn destination_resolves_a_symlinked_directory_and_pins_it() -> Result<(), Box<dy
     fs::remove_file(&alias)?;
     symlink(&other, &alias)?;
 
-    let (mut file, created) = destination.create_file(Path::new("file.txt"), None)?;
+    let (mut file, created) = put_file(&destination, Path::new("file.txt"))?;
     file.write_all(b"contents")?;
     drop(file);
     assert_eq!(fs::read(real.join(&created))?, b"contents");
@@ -163,24 +217,30 @@ fn destination_never_writes_through_symlinks() -> Result<(), Box<dyn Error>> {
         external.path().join("missing"),
         root.path().join("dangling"),
     )?;
-    destination.create_file(Path::new("file.txt"), None)?;
+    put_file(&destination, Path::new("file.txt"))?;
 
+    // A folder the extraction did not make is a taken name.
     let nested = Path::new("redirect/new.txt");
-    assert!(destination.create_file(nested, None).is_err());
-    assert!(
-        destination
-            .create_symlink(nested, OsStr::new("file.txt"), None)
-            .is_err()
+    let mut resolver = ExtractNameResolver::new(&destination);
+    let placed = resolver.leaf(&destination, nested)?;
+    destination.create_file(&placed, None)?;
+    assert_eq!(resolver.made(placed), Path::new("redirect (2)/new.txt"));
+    let placed = resolver.leaf(&destination, nested)?;
+    assert_eq!(
+        destination.create_symlink(&placed, OsStr::new("file.txt"), None)?,
+        None
     );
+    assert_eq!(resolver.made(placed), Path::new("redirect (2)/new (2).txt"));
+    let placed = resolver.leaf(&destination, nested)?;
+    destination.create_hard_link(&placed, Path::new("file.txt"))?;
+    assert_eq!(resolver.made(placed), Path::new("redirect (2)/new (3).txt"));
     assert!(
-        destination
-            .create_hard_link(nested, Path::new("file.txt"))
-            .is_err()
-    );
-    assert!(
-        destination
-            .create_hard_link(Path::new("linked"), Path::new("redirect/keep.txt"))
-            .is_err()
+        put_hard_link(
+            &destination,
+            Path::new("linked"),
+            Path::new("redirect/keep.txt")
+        )
+        .is_err()
     );
     let metadata = MemberMetadata {
         mode: Some(0o700),
@@ -192,7 +252,7 @@ fn destination_never_writes_through_symlinks() -> Result<(), Box<dyn Error>> {
             .is_err()
     );
     for name in ["leaf", "dangling"] {
-        let (_, created) = destination.create_file(Path::new(name), None)?;
+        let (_, created) = put_file(&destination, Path::new(name))?;
         assert_eq!(created, PathBuf::from(format!("{name} (2)")));
     }
     assert_eq!(fs::read(external.path().join("keep.txt"))?, b"original");
@@ -204,16 +264,28 @@ fn destination_never_writes_through_symlinks() -> Result<(), Box<dyn Error>> {
 fn links_are_created_as_stored_and_renamed_on_conflict() -> Result<(), Box<dyn Error>> {
     let root = tempfile::tempdir()?;
     let destination = ExtractionDestination::open(root.path())?;
-    destination
-        .create_file(Path::new("file.txt"), None)?
+    put_file(&destination, Path::new("file.txt"))?
         .0
         .write_all(b"data")?;
     let modified = UNIX_EPOCH + Duration::from_secs(1_000_000_000);
 
-    let first = destination.create_symlink(Path::new("lnk"), OsStr::new("/etc/passwd"), None)?;
-    let second =
-        destination.create_symlink(Path::new("lnk"), OsStr::new("file.txt"), Some(modified))?;
-    let hard = destination.create_hard_link(Path::new("nested/hard"), Path::new("file.txt"))?;
+    let first = put_link(
+        &destination,
+        Path::new("lnk"),
+        OsStr::new("/etc/passwd"),
+        None,
+    )?;
+    let second = put_link(
+        &destination,
+        Path::new("lnk"),
+        OsStr::new("file.txt"),
+        Some(modified),
+    )?;
+    let hard = put_hard_link(
+        &destination,
+        Path::new("nested/hard"),
+        Path::new("file.txt"),
+    )?;
 
     assert_eq!(
         [first, second, hard],
@@ -231,9 +303,12 @@ fn links_are_created_as_stored_and_renamed_on_conflict() -> Result<(), Box<dyn E
         fs::metadata(path("file.txt"))?.ino()
     );
     assert!(
-        destination
-            .create_hard_link(Path::new("missing-link"), Path::new("missing"))
-            .is_err()
+        put_hard_link(
+            &destination,
+            Path::new("missing-link"),
+            Path::new("missing")
+        )
+        .is_err()
     );
     assert!(fs::symlink_metadata(path("missing-link")).is_err());
     Ok(())
@@ -245,12 +320,15 @@ fn resolver_keeps_nested_members_under_the_same_renamed_root() -> Result<(), Box
     fs::create_dir(root.path().join("folder"))?;
     fs::create_dir(root.path().join("folder (2)"))?;
     let destination = ExtractionDestination::open(root.path())?;
-    let mut resolver = ExtractNameResolver::new();
-    let first = resolver.resolve(&destination, Path::new("folder/one.txt"))?;
-    assert_eq!(first, Path::new("folder (3)/one.txt"));
+    let mut resolver = ExtractNameResolver::new(&destination);
+    let first = resolver.leaf(&destination, Path::new("folder/one.txt"))?;
+    assert_eq!(first.path, Path::new("folder (3)/one.txt"));
     destination.create_file(&first, None)?;
+    resolver.made(first);
     assert_eq!(
-        resolver.resolve(&destination, Path::new("folder/nested/two.txt"))?,
+        resolver
+            .leaf(&destination, Path::new("folder/nested/two.txt"))?
+            .path,
         Path::new("folder (3)/nested/two.txt")
     );
     assert_eq!(root.path().join("folder").read_dir()?.count(), 0);
@@ -264,7 +342,7 @@ fn leaf_conflicts_preserve_native_filename_bytes() -> Result<(), Box<dyn Error>>
     let renamed = PathBuf::from(OsString::from_vec(b"report-\xff (2).txt".to_vec()));
     fs::write(root.path().join(&name), b"original")?;
     let destination = ExtractionDestination::open(root.path())?;
-    let (mut file, created) = destination.create_file(&name, None)?;
+    let (mut file, created) = put_file(&destination, &name)?;
     file.write_all(b"new")?;
     drop(file);
     assert_eq!(created, renamed);
@@ -385,7 +463,7 @@ fn numbered_names_fit_the_destination() -> Result<(), Box<dyn Error>> {
     destination.remove_directory_only_staging(&name)?;
 
     fs::remove_file(root.path().join(&numbered_file))?;
-    let (_, created) = destination.create_file(Path::new(&file), None)?;
+    let (_, created) = put_file(&destination, Path::new(&file))?;
     assert_eq!(created, Path::new(&numbered_file));
     Ok(())
 }
@@ -519,7 +597,7 @@ fn publication_without_rename_flags_moves_unreadable_subtrees_whole() -> Result<
     let _quirks = FsQuirks::install(root.path(), Quirks::without_rename_flags());
     let destination = ExtractionDestination::open(root.path())?;
     let (name, staging) = stage(&destination, &["ro/sub/child.txt"])?;
-    staging.create_directories(Path::new("ro/unreadable"))?;
+    fs::create_dir(root.path().join(&name).join("ro/unreadable"))?;
     let read_only = MemberMetadata {
         mode: Some(0o555),
         modified: Some(UNIX_EPOCH + Duration::from_secs(1_000_000_000)),
@@ -622,8 +700,8 @@ fn removing_staging_never_follows_a_symlink_out_of_it() -> Result<(), Box<dyn Er
     let outside = tempfile::tempdir()?;
     fs::write(outside.path().join("keep.txt"), b"keep")?;
     let destination = ExtractionDestination::open(root.path())?;
-    let (name, staging) = stage(&destination, &["a/b/deep.txt", "top.txt"])?;
-    staging.create_symlink(Path::new("a/link"), outside.path().as_os_str(), None)?;
+    let (name, _) = stage(&destination, &["a/b/deep.txt", "top.txt"])?;
+    symlink(outside.path(), root.path().join(&name).join("a/link"))?;
 
     destination.remove_staging(&name)?;
 
@@ -638,8 +716,8 @@ fn directory_only_staging_is_removed_but_files_keep_it() -> Result<(), Box<dyn E
     let root = tempfile::tempdir()?;
     let destination = ExtractionDestination::open(root.path())?;
     let (directories, staged_directories) = destination.create_staging()?;
-    staged_directories.create_directories(Path::new("a/b/c"))?;
-    staged_directories.create_directories(Path::new("d"))?;
+    put_folder(&staged_directories, Path::new("a/b/c"))?;
+    put_folder(&staged_directories, Path::new("d"))?;
     let (with_file, _) = stage(&destination, &["a/b/deep.txt"])?;
 
     assert!(destination.remove_directory_only_staging(&directories)?);
@@ -689,8 +767,8 @@ fn metadata_the_filesystem_cannot_store_is_skipped() -> Result<(), Box<dyn Error
     ] {
         let root = tempfile::tempdir()?;
         let destination = ExtractionDestination::open(root.path())?.with_metadata_calls(calls);
-        destination.create_directories(Path::new("folder"))?;
-        let (file, _) = destination.create_file(Path::new("file.txt"), None)?;
+        put_folder(&destination, Path::new("folder"))?;
+        let (file, _) = put_file(&destination, Path::new("file.txt"))?;
 
         let applied = [
             destination
@@ -698,8 +776,12 @@ fn metadata_the_filesystem_cannot_store_is_skipped() -> Result<(), Box<dyn Error
                 .is_ok(),
             destination.set_file_times(&file, modified).is_ok(),
         ];
-        let link =
-            destination.create_symlink(Path::new("lnk"), OsStr::new("file.txt"), Some(modified));
+        let link = put_link(
+            &destination,
+            Path::new("lnk"),
+            OsStr::new("file.txt"),
+            Some(modified),
+        );
 
         assert_eq!(applied, [skipped; 2], "{errno:?}");
         assert_eq!(link?, Path::new("lnk"), "{errno:?}");
@@ -724,7 +806,12 @@ fn a_link_time_is_never_set_on_fuse() -> Result<(), Box<dyn Error>> {
     let destination = ExtractionDestination::open(root.path())?;
     let modified = UNIX_EPOCH + Duration::from_secs(1_000_000_000);
 
-    destination.create_symlink(Path::new("lnk"), OsStr::new("target"), Some(modified))?;
+    put_link(
+        &destination,
+        Path::new("lnk"),
+        OsStr::new("target"),
+        Some(modified),
+    )?;
 
     assert_ne!(
         fs::symlink_metadata(root.path().join("lnk"))?.mtime(),

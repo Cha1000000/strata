@@ -451,7 +451,6 @@
   "Invalid built-in release keys: %{error}": "Ungültige integrierte Release-Schlüssel: %{error}",
   "Invalid delete target": "Ungültiges Löschziel",
   "Invalid extraction folder name “%{name}”": "Ungültiger Name für den Entpackordner „%{name}“",
-  "Invalid internal extraction path": "Ungültiger interner Entpackpfad",
   "Invalid interpreter — cannot run": "Ungültiger Interpreter — Ausführung nicht möglich",
   "Invalid label: %{reason}": "Ungültige Bezeichnung: %{reason}",
   "Invalid local filesystem target": "Ungültiges Ziel im lokalen Dateisystem",

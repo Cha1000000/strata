@@ -453,13 +453,14 @@ taken name. Every link left out is reported, and the rest of the copy goes on. A
 item at a link's name where the destination is known to hold no links; where it learns so only
 when it copies the link, that item was already moved out of the way, as any item a merge replaces.
 
-A selected link is left out the same way, and the paste goes on with the next item. A Replace by a
+A selected link is left out the same way, and the paste goes on with the next item. An extraction
+leaves out link members the same way, with any hard link to one. A Replace by a
 link leaves the original as it is. A move keeps the source of each link it left out, with the
 folders that hold it, also where GIO copies the item, and lists them as left behind. Undo leaves
 those items out, and the report says so and names them.
 
-Link targets are copied byte for byte, so a link pointing at an entry whose name was fixed no longer
-finds it at the destination.
+Link targets are copied and extracted byte for byte, so a link pointing at an entry whose name was
+fixed no longer finds it at the destination.
 
 ### Merges
 
@@ -642,12 +643,12 @@ the second puts the first back by a rename.
 
 ### The completion report
 
-After a transfer, Strata reports what it could not do as asked:
+After a transfer or an archive extraction, Strata reports what it could not do as asked:
 
 - names the destination doesn't allow or that are too long for it, names it took for another (case
-  aliases), and names taken during a merge or an undo, each with the name the item was saved as, and
-  an item saved under several names in turn once, from its first name to its last;
-- special files and symbolic links left out of a copy;
+  aliases), and names taken during a merge, an extraction or an undo, each with the name the item was
+  saved as, and an item saved under several names in turn once, from its first name to its last;
+- special files and symbolic links left out of a copy, and symbolic links left out of an extraction;
 - source entries a move left behind, entries a restore left in the Trash, originals an undo left
   there because what replaced them may have changed, and names an undo could not give back, with
   the reason.

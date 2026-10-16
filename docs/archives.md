@@ -50,6 +50,21 @@ Strata publishes the folder:
   other, with the reason and the folder that keeps the output, and no password
   prompt opens.
 
+Member names follow the rules of the destination's mount, as the names a copy
+brings there do (see [Folders, names and case
+aliases](filesystem-compatibility.md#folders-names-and-case-aliases)):
+characters it cannot store become `_`, trailing dots and spaces are dropped,
+device names Windows reserves get `_`, and names too long for it are shortened.
+So does the name of the folder named after the archive. A member gets the next
+number where an earlier member with another name took its name, or where the
+destination takes its name for another's, so `10_00/` after `10:00/` on a USB
+stick becomes `10_00 (2)/`, and different folders of the archive never merge.
+Numbers follow archive order, and each member lands in the folder its own folder
+became. The completion report lists every name that changed, with the name it
+was saved as, and every symbolic link left out, where the extraction left them;
+after a failure or cancellation, it lists those inside the folder that keeps the
+output.
+
 Publication never replaces an existing entry. Where the filesystem lacks
 atomic no-replace renames, a file is published through a hard link and a
 folder is moved whole over an empty placeholder Strata has just created. Where
@@ -80,13 +95,13 @@ kept as described above, but their contents are unverified.
 Symbolic links are recreated with their stored targets, including absolute
 targets and targets outside the archive, and are never followed by later
 members: a member under a link name fails instead of writing through the link.
-TAR names and hard-link targets retain their native bytes. Hard links become
-links to the member of that name extracted earlier from the same archive,
-following any conflict rename. A hard link to a member that
-was not extracted, or that appears later, fails the extraction. FIFOs and
-device nodes are refused. An existing symlink at a member's name, such as an
-earlier link member with the same name, is skipped like a file: the member is
-renamed to `name (2)`.
+TAR names and hard-link targets retain their native bytes where the destination
+stores them. Hard links become links to the member of that name extracted
+earlier from the same archive, following any conflict rename or fixed name. A
+hard link to a member that was not extracted, or that appears later, fails the
+extraction. FIFOs and device nodes are refused. An existing symlink at a
+member's name, such as an earlier link member with the same name, is skipped
+like a file: the member is renamed to `name (2)`.
 
 Each member gets its stored permission bits, masked by the umask, with setuid,
 setgid and sticky bits removed, and its stored modification time. ZIP times
@@ -102,10 +117,13 @@ restored. RAR archives restore permissions and times, but their link members
 still extract as regular files.
 
 On filesystems that cannot store Unix permissions or times, such as FAT and
-exFAT, those are skipped without an error, as `tar` and `unzip` do. Links
-cannot be skipped: an archive with links fails there, naming the member, and
-keeps the output written so far. A symbolic link's own time is best effort, and
-is never set on FUSE mounts, where daemons such as sshfs apply it to the target.
+exFAT, those are skipped without an error, as `tar` and `unzip` do. Symbolic
+links the destination cannot hold are left out and reported, as a copy leaves
+them out (see [Symbolic links the destination cannot
+hold](filesystem-compatibility.md#symbolic-links-the-destination-cannot-hold)),
+and so is a hard link to one; the extraction goes on. A symbolic link's own time
+is best effort, and is never set on FUSE mounts, where daemons such as sshfs
+apply it to the target.
 
 ## Extraction targets
 

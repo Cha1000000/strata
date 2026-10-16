@@ -4,19 +4,29 @@
 mod tests;
 
 use std::{
+    collections::HashMap,
     ffi::{OsStr, OsString},
     os::{
         fd::{AsFd, BorrowedFd, OwnedFd},
         unix::ffi::OsStrExt,
     },
-    path::{Component, Path, PathBuf},
+    path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use rustix::{
+    fs::{FileType, Mode},
+    io::Errno,
+};
+
 use super::super::{
+    copy_engine::{refuses_node, taken},
     fs_ops::{Entry, fs},
-    mount_profile::name_limit,
-    naming::numbered_name,
+    mount_profile::{FolderRules, NamePolicy, Profiles},
+    naming::{
+        fix::{Fixed, fix_name},
+        numbered_name,
+    },
     placement::{
         EXTRACTION_STAGE_PREFIX, NUMBERED_NAME_ATTEMPTS, PlaceError, creation_error, place,
         reserve_hidden_name,
@@ -24,7 +34,10 @@ use super::super::{
     placement_reason,
 };
 use super::extraction::MemberMetadata;
-use crate::{adapters::volume::NameLimit, services::error_detail};
+use crate::{
+    adapters::volume::NameLimit,
+    services::{NameMode, RenameCause, error_detail},
+};
 
 /// Reading procfs avoids a process-global umask(2) race in the multithreaded GUI.
 pub(super) fn process_umask() -> u32 {
@@ -200,10 +213,10 @@ pub(super) fn archive_stem(archive_name: &str) -> &str {
 }
 
 /// Pinned roots and NOFOLLOW traversal prevent symlink swaps from redirecting writes.
-#[derive(Debug)]
 pub(super) struct ExtractionDestination {
     root: OwnedFd,
     calls: MetadataCalls,
+    names: MemberNames,
 }
 
 impl ExtractionDestination {
@@ -252,9 +265,11 @@ impl ExtractionDestination {
             )
             .into_owned()
         })?;
+        let names = MemberNames::of(root.as_fd());
         Ok(Self {
             root,
             calls: MetadataCalls::SYSTEM,
+            names,
         })
     }
 
@@ -289,8 +304,16 @@ impl ExtractionDestination {
             )
             .into_owned()
         })?;
-        let calls = self.calls;
-        Ok((name, Self { root, calls }))
+        let staging = Self {
+            root,
+            calls: self.calls,
+            names: self.names.clone(),
+        };
+        Ok((name, staging))
+    }
+
+    pub(super) fn names(&self) -> &MemberNames {
+        &self.names
     }
 
     pub(super) fn remove_empty_staging(&self, staging: &OsStr) -> Result<bool, String> {
@@ -313,6 +336,14 @@ impl ExtractionDestination {
             .map_err(staging_removal_failed)
     }
 
+    /// The name of the folder an archive's entries are published in, before
+    /// it is numbered: the archive's name without its extension, as the
+    /// destination stores it.
+    pub(super) fn folder_name<'a>(&self, archive_name: &'a str) -> Fixed<'a> {
+        self.names
+            .fixed(OsStr::new(archive_stem(archive_name)), true)
+    }
+
     pub(super) fn publish_staging_as_folder(
         &self,
         staging: &OsStr,
@@ -324,23 +355,20 @@ impl ExtractionDestination {
                 rust_i18n::t!("Invalid extraction folder name “%{name}”", name = stem).into_owned(),
             );
         }
-        let mut limit = None;
+        let stem = self.folder_name(archive_name).name;
         for suffix in 0..NUMBERED_NAME_ATTEMPTS {
             let name = if suffix == 0 {
-                stem.to_owned()
+                stem.to_os_string()
             } else {
-                let limit = *limit.get_or_insert_with(|| self.name_limit());
-                numbered_name(OsStr::new(stem), suffix, OsStr::new(""), limit, true)
-                    .to_string_lossy()
-                    .into_owned()
+                numbered_name(&stem, suffix, OsStr::new(""), self.name_limit(), true)
             };
-            match place_without_replacing(&self.root, staging, &self.root, OsStr::new(&name)) {
-                Ok(()) => return Ok(name),
+            match place_without_replacing(&self.root, staging, &self.root, &name) {
+                Ok(()) => return Ok(name.to_string_lossy().into_owned()),
                 Err(PlaceError::Exists) => {}
                 Err(error) => {
                     return Err(rust_i18n::t!(
                         "Could not publish the extracted entries as “%{name}”: %{error}",
-                        name = name,
+                        name = name.to_string_lossy(),
                         error = error_detail(placement_reason(error))
                     )
                     .into_owned());
@@ -356,17 +384,15 @@ impl ExtractionDestination {
         root: &Path,
     ) -> Result<OsString, String> {
         let leaf = root.file_name().ok_or_else(no_file_name)?;
-        let stat = rustix::fs::statat(&staging.root, root, rustix::fs::AtFlags::SYMLINK_NOFOLLOW)
-            .map_err(errno_text)?;
-        let is_directory =
-            rustix::fs::FileType::from_raw_mode(stat.st_mode) == rustix::fs::FileType::Directory;
-        let mut limit = None;
+        let is_directory = fs()
+            .stat(Entry::new(&staging.root, root.as_os_str()), false)
+            .map_err(errno_text)?
+            .is_directory();
         for index in 1..=NUMBERED_NAME_ATTEMPTS {
             let candidate = if index == 1 {
                 leaf.to_owned()
             } else {
-                let limit = *limit.get_or_insert_with(|| self.name_limit());
-                suffixed_name(leaf, index, is_directory, limit)
+                suffixed_name(leaf, index, is_directory, self.name_limit())
             };
             match place_without_replacing(&staging.root, root.as_os_str(), &self.root, &candidate) {
                 Ok(()) => return Ok(candidate),
@@ -408,149 +434,110 @@ impl ExtractionDestination {
         Ok(Some(stat.f_bavail.saturating_mul(block)))
     }
 
-    /// How long a name may be on the destination, read only to number one.
     fn name_limit(&self) -> NameLimit {
-        name_limit(fs(), self.root.as_fd())
+        self.names.rules.limit
     }
 
-    fn available_name<Fd: AsFd>(&self, directory: &Fd, name: &OsStr) -> Result<OsString, String> {
-        let mut limit = None;
-        for index in 1..=NUMBERED_NAME_ATTEMPTS {
-            let candidate = if index == 1 {
-                name.to_owned()
-            } else {
-                let limit = *limit.get_or_insert_with(|| self.name_limit());
-                suffixed_name(name, index, false, limit)
-            };
-            match rustix::fs::statat(directory, &candidate, rustix::fs::AtFlags::SYMLINK_NOFOLLOW) {
-                Err(rustix::io::Errno::NOENT) => return Ok(candidate),
-                Err(error) => {
-                    return Err(rust_i18n::t!(
-                        "Could not inspect extraction path %{name}: %{error}",
-                        name = candidate.to_string_lossy(),
-                        error = errno_detail(error)
-                    )
-                    .into_owned());
-                }
-                Ok(stat) => match rustix::fs::FileType::from_raw_mode(stat.st_mode) {
-                    rustix::fs::FileType::RegularFile
-                    | rustix::fs::FileType::Directory
-                    | rustix::fs::FileType::Symlink => {}
-                    _ => {
-                        return Err(rust_i18n::t!(
-                            "Refusing to extract over special filesystem object: %{name}",
-                            name = candidate.to_string_lossy()
-                        )
-                        .into_owned());
-                    }
-                },
-            }
-        }
-        Err(no_available_name(name))
-    }
-
-    /// Creates each component of `path` under the destination root and returns the leaf directory.
-    ///
-    /// Existing directories are reused. Each component is opened with
-    /// [`DIRECTORY`] and [`NOFOLLOW`], so a symlink cannot be followed as a
-    /// directory.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if `path` contains a non-normal component, a component
-    /// cannot be created, or a component exists but is not a directory.
-    ///
-    /// [`DIRECTORY`]: rustix::fs::OFlags::DIRECTORY
-    /// [`NOFOLLOW`]: rustix::fs::OFlags::NOFOLLOW
-    pub(super) fn create_directories(&self, path: &Path) -> Result<OwnedFd, String> {
-        self.descend(path, true)
-    }
-
-    pub(super) fn open_directory(&self, path: &Path) -> Result<OwnedFd, String> {
-        self.descend(path, false)
-    }
-
-    fn descend(&self, path: &Path, create: bool) -> Result<OwnedFd, String> {
-        let mut directory = self
-            .root
-            .try_clone()
-            .map_err(|error| crate::services::io_error_message(&error))?;
-        for component in path.components() {
-            let Component::Normal(name) = component else {
-                return Err(crate::i18n::tr("Invalid internal extraction path"));
-            };
-            if create {
-                match rustix::fs::mkdirat(&directory, name, rustix::fs::Mode::from_raw_mode(0o777))
-                {
-                    Ok(()) | Err(rustix::io::Errno::EXIST) => {}
-                    Err(error) => return Err(errno_text(error)),
-                }
-            }
-            directory = rustix::fs::openat(
-                &directory,
+    /// Whether nothing is at `name` in `directory`, never following a link there.
+    fn is_free(&self, directory: BorrowedFd<'_>, name: &OsStr) -> Result<bool, String> {
+        match fs().stat(
+            Entry {
+                dir: directory,
                 name,
-                rustix::fs::OFlags::RDONLY
-                    | rustix::fs::OFlags::DIRECTORY
-                    | rustix::fs::OFlags::NOFOLLOW
-                    | rustix::fs::OFlags::CLOEXEC,
-                rustix::fs::Mode::empty(),
+            },
+            false,
+        ) {
+            Err(Errno::NOENT) => Ok(true),
+            Err(error) => Err(rust_i18n::t!(
+                "Could not inspect extraction path %{name}: %{error}",
+                name = name.to_string_lossy(),
+                error = errno_detail(error)
             )
-            .map_err(errno_text)?;
+            .into_owned()),
+            Ok(stat) => match stat.kind {
+                FileType::RegularFile | FileType::Directory | FileType::Symlink => Ok(false),
+                _ => Err(rust_i18n::t!(
+                    "Refusing to extract over special filesystem object: %{name}",
+                    name = name.to_string_lossy()
+                )
+                .into_owned()),
+            },
         }
-        Ok(directory)
     }
 
-    fn prepare_leaf(&self, path: &Path) -> Result<(OwnedFd, OsString, PathBuf), String> {
-        let parent = self.create_directories(path.parent().unwrap_or_else(|| Path::new("")))?;
-        let name = path.file_name().ok_or_else(no_file_name)?;
-        let name = self.available_name(&parent, name)?;
-        let created = path.with_file_name(&name);
-        Ok((parent, name, created))
+    /// Makes the folder `name` in `directory`, or finds the name taken.
+    fn make_folder(&self, directory: BorrowedFd<'_>, name: &OsStr) -> Result<bool, String> {
+        let entry = Entry {
+            dir: directory,
+            name,
+        };
+        match fs().mkdir(entry, Mode::from_raw_mode(0o777)) {
+            Ok(()) => Ok(true),
+            Err(error) if taken(fs(), entry, error) => Ok(false),
+            Err(error) => Err(errno_text(error)),
+        }
+    }
+
+    /// The folder at `path`, opened without following a symlink anywhere on the way.
+    pub(super) fn open_directory(&self, path: &Path) -> Result<OwnedFd, String> {
+        if path.as_os_str().is_empty() {
+            return self
+                .root
+                .try_clone()
+                .map_err(|error| crate::services::io_error_message(&error));
+        }
+        fs().open_dir(Entry::new(&self.root, path.as_os_str()))
+            .map_err(errno_text)
     }
 
     pub(super) fn create_file(
         &self,
-        path: &Path,
+        placed: &Placed,
         mode: Option<u32>,
-    ) -> Result<(std::fs::File, PathBuf), String> {
-        let (parent, name, created) = self.prepare_leaf(path)?;
-        let file = rustix::fs::openat(
-            parent,
-            name,
-            rustix::fs::OFlags::WRONLY
-                | rustix::fs::OFlags::CREATE
-                | rustix::fs::OFlags::EXCL
-                | rustix::fs::OFlags::NOFOLLOW
-                | rustix::fs::OFlags::CLOEXEC,
-            rustix::fs::Mode::from_raw_mode(mode.map_or(0o666, permission_bits)),
+    ) -> Result<std::fs::File, String> {
+        fs().create_exclusive(
+            placed.entry(),
+            Mode::from_raw_mode(mode.map_or(0o666, permission_bits)),
         )
         .map(std::fs::File::from)
-        .map_err(errno_text)?;
-        Ok((file, created))
+        .map_err(errno_text)
     }
 
+    /// Makes a symbolic link at `placed`, unless the destination refuses to
+    /// hold it, as `Ok(Some(error))` tells.
     pub(super) fn create_symlink(
         &self,
-        path: &Path,
+        placed: &Placed,
         target: &OsStr,
         modified: Option<SystemTime>,
-    ) -> Result<PathBuf, String> {
-        let (parent, name, created) = self.prepare_leaf(path)?;
-        rustix::fs::symlinkat(target, &parent, &name).map_err(|error| {
-            rust_i18n::t!(
-                "Could not create symbolic link “%{path}”: %{error}",
-                path = created.display(),
-                error = errno_detail(error)
-            )
-            .into_owned()
-        })?;
+    ) -> Result<Option<Errno>, String> {
+        let entry = placed.entry();
+        match fs().symlink(target, entry) {
+            Ok(()) => {}
+            // A target the mount cannot store is refused like the link.
+            Err(error)
+                if !taken(fs(), entry, error)
+                    && (refuses_node(FileType::Symlink, error)
+                        || matches!(error, Errno::INVAL | Errno::ILSEQ)) =>
+            {
+                return Ok(Some(error));
+            }
+            Err(error) => {
+                return Err(rust_i18n::t!(
+                    "Could not create symbolic link “%{path}”: %{error}",
+                    path = placed.path.display(),
+                    error = errno_detail(error)
+                )
+                .into_owned());
+            }
+        }
         // A link's time is cosmetic, and FUSE daemons such as sshfs apply it to the target.
         if let Some(times) = modified.and_then(timestamps)
-            && fs().statfs(parent.as_fd()).map(|stat| stat.kind) != Some(FUSE_SUPER_MAGIC)
+            && fs().statfs(placed.parent.as_fd()).map(|stat| stat.kind) != Some(FUSE_SUPER_MAGIC)
         {
-            let _ = (self.calls.set_link_times)(parent.as_fd(), &name, &times);
+            let _ = (self.calls.set_link_times)(placed.parent.as_fd(), &placed.name, &times);
         }
-        Ok(created)
+        Ok(None)
     }
 
     pub(super) fn set_file_times(
@@ -565,11 +552,11 @@ impl ExtractionDestination {
     }
 
     /// Link symlinks themselves rather than following their targets outside staging.
-    pub(super) fn create_hard_link(&self, path: &Path, target: &Path) -> Result<PathBuf, String> {
+    pub(super) fn create_hard_link(&self, placed: &Placed, target: &Path) -> Result<(), String> {
         let unavailable = |error: String| {
             rust_i18n::t!(
                 "Hard link “%{path}” refers to “%{target}”, which is not available in this extraction: %{error}",
-                path = path.display(),
+                path = placed.path.display(),
                 target = target.display(),
                 error = error
             )
@@ -581,24 +568,16 @@ impl ExtractionDestination {
         let target_parent = self
             .open_directory(target.parent().unwrap_or_else(|| Path::new("")))
             .map_err(unavailable)?;
-        let (parent, name, created) = self.prepare_leaf(path)?;
-        rustix::fs::linkat(
-            &target_parent,
-            target_name,
-            &parent,
-            &name,
-            rustix::fs::AtFlags::empty(),
-        )
-        .map_err(|error| {
-            rust_i18n::t!(
-                "Could not link “%{path}” to “%{target}”: %{error}",
-                path = created.display(),
-                target = target.display(),
-                error = errno_detail(error)
-            )
-            .into_owned()
-        })?;
-        Ok(created)
+        fs().link(Entry::new(&target_parent, target_name), placed.entry())
+            .map_err(|error| {
+                rust_i18n::t!(
+                    "Could not link “%{path}” to “%{target}”: %{error}",
+                    path = placed.path.display(),
+                    target = target.display(),
+                    error = errno_detail(error)
+                )
+                .into_owned()
+            })
     }
 
     pub(super) fn apply_directory_metadata(
@@ -651,16 +630,52 @@ impl ExtractionDestination {
     /// Returns an error if `path` has no file name, a parent cannot be opened,
     /// or the unlink fails.
     pub(super) fn remove_file(&self, path: &Path) -> Result<(), String> {
-        let parent = self.create_directories(path.parent().unwrap_or_else(|| Path::new("")))?;
+        let parent = self.open_directory(path.parent().unwrap_or_else(|| Path::new("")))?;
         let name = path.file_name().ok_or_else(no_file_name)?;
-        rustix::fs::unlinkat(&parent, name, rustix::fs::AtFlags::empty()).map_err(|error| {
-            rust_i18n::t!(
-                "Could not remove incomplete extraction %{path}: %{error}",
-                path = path.display(),
-                error = errno_detail(error)
-            )
-            .into_owned()
-        })
+        fs().unlink(Entry::new(&parent, name), rustix::fs::AtFlags::empty())
+            .map_err(|error| {
+                rust_i18n::t!(
+                    "Could not remove incomplete extraction %{path}: %{error}",
+                    path = path.display(),
+                    error = errno_detail(error)
+                )
+                .into_owned()
+            })
+    }
+}
+
+/// How members are named at a destination: by the rules of its mount, as
+/// the extraction first saw it.
+#[derive(Clone)]
+pub(super) struct MemberNames {
+    profiles: Profiles,
+    rules: FolderRules,
+}
+
+impl MemberNames {
+    fn of(destination: BorrowedFd<'_>) -> Self {
+        let policy = NamePolicy::new(NameMode::Fix);
+        let (key, seen) = policy.profiles.mount(fs(), destination);
+        let site = policy.profiles.site(key, seen.names, destination);
+        Self {
+            rules: policy.in_folder(&site),
+            profiles: policy.profiles,
+        }
+    }
+
+    fn fixed<'a>(&self, name: &'a OsStr, is_directory: bool) -> Fixed<'a> {
+        fix_name(name, &self.rules.fixed, is_directory)
+    }
+
+    /// Whether the destination may hold symbolic links, as far as the
+    /// extraction knows.
+    pub(super) fn holds_links(&self) -> bool {
+        self.profiles.holds_links(&self.rules.site)
+    }
+
+    /// Teaches the destination that it holds no symbolic links.
+    pub(super) fn refuse_links(&self) {
+        self.profiles.refuse_links(&self.rules.site);
     }
 }
 
@@ -721,60 +736,241 @@ fn remove_tree(parent: BorrowedFd<'_>, name: &OsStr, files: bool) -> rustix::io:
     Ok(true)
 }
 
-/// Nested members must share their root's conflict rename.
+/// Where members go in the staging folder. Each name is fixed by the
+/// destination's rules, each folder is made once for the member path that
+/// names it, and a name another member took, or that the destination finds
+/// taken, is numbered past, so distinct folders are never merged.
 pub(super) struct ExtractNameResolver {
-    renames: std::collections::HashMap<OsString, OsString>,
+    names: MemberNames,
+    /// Per member path of a folder, where the folder is in the staging
+    /// folder, and its index.
+    folders: HashMap<PathBuf, (PathBuf, usize)>,
+    /// Per folder index and name, the member name that took it. Names the
+    /// destination takes for one another are found taken there.
+    taken: HashMap<(usize, OsString), OsString>,
+    /// Members saved under another name, and why, by staging path.
+    renamed: Vec<(PathBuf, PathBuf, RenameCause)>,
+}
+
+/// The name a member takes in a folder of the staging folder.
+pub(super) struct Placed {
+    pub(super) parent: OwnedFd,
+    pub(super) name: OsString,
+    /// Where the member is in the staging folder.
+    pub(super) path: PathBuf,
+    /// Where it would be under its own name.
+    pub(super) requested: PathBuf,
+    folder: usize,
+    member: OsString,
+    cause: Option<RenameCause>,
+}
+
+impl Placed {
+    fn entry(&self) -> Entry<'_> {
+        Entry::new(&self.parent, &self.name)
+    }
+}
+
+/// A name claimed for a member in a folder.
+struct Claim {
+    name: OsString,
+    cause: Option<RenameCause>,
+    /// Whether the member path named something else the extraction made.
+    own: bool,
 }
 
 impl ExtractNameResolver {
-    pub(super) fn new() -> Self {
+    pub(super) fn new(destination: &ExtractionDestination) -> Self {
         Self {
-            renames: std::collections::HashMap::new(),
+            names: destination.names.clone(),
+            folders: HashMap::from([(PathBuf::new(), (PathBuf::new(), 0))]),
+            taken: HashMap::new(),
+            renamed: Vec::new(),
         }
     }
 
-    /// Maps a validated relative member path onto a conflict-free destination path.
-    ///
-    /// The top-level component is passed through [`ExtractionDestination::available_name`]
-    /// once and remembered for later members that share that prefix.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if `path` has no normal first component or
-    /// [`ExtractionDestination::available_name`] fails.
-    pub(super) fn resolve(
+    /// The folder at the member path `path`, and the folders holding it,
+    /// made in `staging` where the extraction has not made them yet;
+    /// returns where it is in the staging folder.
+    pub(super) fn folder(
         &mut self,
-        destination: &ExtractionDestination,
+        staging: &ExtractionDestination,
         path: &Path,
     ) -> Result<PathBuf, String> {
-        let top = path
-            .components()
-            .next()
-            .and_then(|component| match component {
-                Component::Normal(name) => Some(name),
-                _ => None,
-            })
-            .ok_or_else(no_file_name)?;
-        if !self.renames.contains_key(top) {
-            let name = destination.available_name(&destination.root, top)?;
-            self.renames.insert(top.to_owned(), name);
-        }
-        Ok(self.apply_known_rename(path))
+        self.made_folder(staging, path).map(|(made, _)| made)
     }
 
-    /// Maps a validated path without filesystem probes or reserving a new name.
-    pub(super) fn apply_known_rename(&self, path: &Path) -> PathBuf {
-        let mut components = path.iter();
-        let Some(top) = components.next() else {
-            return path.to_path_buf();
-        };
-        let top = self
-            .renames
-            .get(top)
-            .map(OsString::as_os_str)
-            .unwrap_or(top);
-        let mut resolved = PathBuf::from(top);
-        resolved.extend(components);
-        resolved
+    fn made_folder(
+        &mut self,
+        staging: &ExtractionDestination,
+        path: &Path,
+    ) -> Result<(PathBuf, usize), String> {
+        let mut known = path;
+        let mut missing = Vec::new();
+        while !self.folders.contains_key(known) {
+            missing.push(known);
+            known = known.parent().unwrap_or_else(|| Path::new(""));
+        }
+        let (mut parent, mut index) = self.folders[known].clone();
+        for member in missing.into_iter().rev() {
+            let name = member.file_name().ok_or_else(no_file_name)?;
+            let directory = staging.open_directory(&parent)?;
+            let claim = self.claim(index, name, true, |candidate| {
+                staging.make_folder(directory.as_fd(), candidate)
+            })?;
+            let made = parent.join(&claim.name);
+            if claim.own {
+                // A member under a link's or a file's name fails there.
+                staging.open_directory(&made)?;
+            } else {
+                self.taken
+                    .insert((index, claim.name.clone()), name.to_os_string());
+                if let Some(cause) = claim.cause {
+                    self.renamed.push((parent.join(name), made.clone(), cause));
+                }
+            }
+            index = self.folders.len();
+            self.folders
+                .insert(member.to_path_buf(), (made.clone(), index));
+            parent = made;
+        }
+        Ok((parent, index))
+    }
+
+    /// Where the member `path`, which is not a folder, goes: a free name in
+    /// its folder, which is made where it is new. The name is the member's
+    /// once [`Self::made`] says it was made there.
+    pub(super) fn leaf(
+        &mut self,
+        staging: &ExtractionDestination,
+        path: &Path,
+    ) -> Result<Placed, String> {
+        let member = path.file_name().ok_or_else(no_file_name)?;
+        let (folder_path, folder) =
+            self.made_folder(staging, path.parent().unwrap_or_else(|| Path::new("")))?;
+        let parent = staging.open_directory(&folder_path)?;
+        let claim = self.claim(folder, member, false, |candidate| {
+            staging.is_free(parent.as_fd(), candidate)
+        })?;
+        Ok(Placed {
+            parent,
+            path: folder_path.join(&claim.name),
+            requested: folder_path.join(member),
+            name: claim.name,
+            folder,
+            member: member.to_os_string(),
+            cause: claim.cause,
+        })
+    }
+
+    /// The member `placed` was made there; returns where it is in the
+    /// staging folder.
+    pub(super) fn made(&mut self, placed: Placed) -> PathBuf {
+        if let Some(cause) = placed.cause {
+            self.renamed
+                .push((placed.requested, placed.path.clone(), cause));
+        }
+        self.taken
+            .insert((placed.folder, placed.name), placed.member);
+        placed.path
+    }
+
+    /// Where the member `path` would be under its own name, in its folder,
+    /// which is made where it is new.
+    pub(super) fn requested(
+        &mut self,
+        staging: &ExtractionDestination,
+        path: &Path,
+    ) -> Result<PathBuf, String> {
+        let member = path.file_name().ok_or_else(no_file_name)?;
+        let folder = self.folder(staging, path.parent().unwrap_or_else(|| Path::new("")))?;
+        Ok(folder.join(member))
+    }
+
+    /// Where the member `path` would go, as far as the folders made so far
+    /// tell, without making anything or numbering a name.
+    pub(super) fn known(&self, path: &Path) -> PathBuf {
+        let mut member = PathBuf::new();
+        let mut known = PathBuf::new();
+        let mut names = path.iter().peekable();
+        while let Some(name) = names.next() {
+            member.push(name);
+            match self.folders.get(&member) {
+                Some((made, _)) => known.clone_from(made),
+                None => known.push(self.names.fixed(name, names.peek().is_some()).name),
+            }
+        }
+        known
+    }
+
+    /// What was saved under another name, and why, by staging path.
+    pub(super) fn take_renamed(&mut self) -> Vec<(PathBuf, PathBuf, RenameCause)> {
+        std::mem::take(&mut self.renamed)
+    }
+
+    /// The first name for the member `name` in the folder `folder`, fixed
+    /// and then numbered, that no other member took there and that `free`
+    /// finds or makes free, with why it is not `name`.
+    fn claim(
+        &self,
+        folder: usize,
+        name: &OsStr,
+        is_directory: bool,
+        mut free: impl FnMut(&OsStr) -> Result<bool, String>,
+    ) -> Result<Claim, String> {
+        let fixed = self.names.fixed(name, is_directory);
+        let mut taken_by = None;
+        for index in 1..=NUMBERED_NAME_ATTEMPTS {
+            let candidate = if index == 1 {
+                fixed.name.to_os_string()
+            } else {
+                suffixed_name(&fixed.name, index, is_directory, self.names.rules.limit)
+            };
+            match self.taken.get(&(folder, candidate.clone())) {
+                Some(owner) if is_directory && owner == name => {
+                    return Ok(Claim {
+                        name: candidate,
+                        cause: None,
+                        own: true,
+                    });
+                }
+                Some(owner) => {
+                    taken_by.get_or_insert(owner.as_os_str());
+                    continue;
+                }
+                None => {}
+            }
+            if free(&candidate)? {
+                let cause = rename_cause(name, &fixed, &candidate, taken_by);
+                return Ok(Claim {
+                    name: candidate,
+                    cause,
+                    own: false,
+                });
+            }
+        }
+        Err(no_available_name(name))
+    }
+}
+
+/// Why a member named `name` was saved as `saved`: its fix, that another
+/// member, `taken_by`, took the name first, unless that member had the
+/// same name, or that the destination took it for another.
+fn rename_cause(
+    name: &OsStr,
+    fixed: &Fixed<'_>,
+    saved: &OsStr,
+    taken_by: Option<&OsStr>,
+) -> Option<RenameCause> {
+    if saved == name {
+        return None;
+    }
+    if fixed.cause.is_some() {
+        return fixed.cause;
+    }
+    match taken_by {
+        Some(owner) if owner == name => None,
+        Some(_) => Some(RenameCause::Taken),
+        None => Some(RenameCause::Alias),
     }
 }

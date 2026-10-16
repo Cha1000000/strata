@@ -451,7 +451,6 @@
   "Invalid built-in release keys: %{error}": "組み込みのリリースキーが無効です: %{error}",
   "Invalid delete target": "削除対象が無効です",
   "Invalid extraction folder name “%{name}”": "展開先フォルダーの名前「%{name}」が無効です",
-  "Invalid internal extraction path": "内部の展開パスが無効です",
   "Invalid interpreter — cannot run": "無効なインタープリター — 実行できません",
   "Invalid label: %{reason}": "無効なラベル: %{reason}",
   "Invalid local filesystem target": "ローカルファイルシステムの対象が無効です",

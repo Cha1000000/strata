@@ -451,7 +451,6 @@
   "Invalid built-in release keys: %{error}": "Недопустимые встроенные ключи выпуска: %{error}",
   "Invalid delete target": "Недопустимый объект удаления",
   "Invalid extraction folder name “%{name}”": "Недопустимое имя папки для извлечения «%{name}»",
-  "Invalid internal extraction path": "Недопустимый внутренний путь извлечения",
   "Invalid interpreter — cannot run": "Недопустимый интерпретатор — запуск невозможен",
   "Invalid label: %{reason}": "Недопустимая метка: %{reason}",
   "Invalid local filesystem target": "Недопустимая цель в локальной файловой системе",

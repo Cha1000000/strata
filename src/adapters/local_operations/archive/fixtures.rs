@@ -7,7 +7,7 @@ use super::{
 };
 use crate::{
     model::{EntryKind, FileEntry, Location, MetadataValue},
-    services::ArchiveFormat,
+    services::{ArchiveFormat, TransferReport},
 };
 use std::{
     error::Error,
@@ -347,6 +347,7 @@ pub(super) fn extract_zip(path: &Path, destination: &Path) -> Result<Option<Stri
             None,
             &Arc::new(AtomicUsize::new(0)),
             &never_cancelled(),
+            &mut TransferReport::default(),
         )
         .map_err(|error| error.to_string())?,
     )

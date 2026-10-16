@@ -451,7 +451,6 @@
   "Invalid built-in release keys: %{error}": "Chaves de lançamento integradas inválidas: %{error}",
   "Invalid delete target": "Item a excluir inválido",
   "Invalid extraction folder name “%{name}”": "Nome de pasta de extração inválido “%{name}”",
-  "Invalid internal extraction path": "Caminho interno de extração inválido",
   "Invalid interpreter — cannot run": "Interpretador inválido — não é possível executar",
   "Invalid label: %{reason}": "Rótulo inválido: %{reason}",
   "Invalid local filesystem target": "Alvo do sistema de arquivos local inválido",

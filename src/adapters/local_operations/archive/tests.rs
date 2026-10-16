@@ -4,18 +4,23 @@ use super::{
     ArchiveError, copy_with_big_buf,
     decoders::{extract_7z_from_reader, extract_tar},
     fixtures::{
-        COMPRESSION_STAGE, EXTRACTION_STAGE, HomeTrashGuard, corrupt_gzip_trailer, expected_mode,
-        extract_zip, never_cancelled, set_times_without_following, stages, tempdir_on_home_device,
-        test_file_entry, write_7z_entries, write_tar_entries, write_zip_stored,
+        COMPRESSION_STAGE, EXTRACTION_STAGE, FixtureMember, HomeTrashGuard, corrupt_gzip_trailer,
+        expected_mode, extract_zip, never_cancelled, set_times_without_following, stages,
+        tempdir_on_home_device, test_file_entry, write_7z_entries, write_members,
+        write_tar_entries, write_zip_stored,
     },
     listing::INVALID_ARCHIVE,
 };
 use crate::{
-    adapters::local_operations::LocalOperationProvider,
+    adapters::local_operations::{
+        LocalOperationProvider,
+        tests::fs_quirks::{FsQuirks, Quirks},
+    },
     model::Location,
     services::{
         ArchiveFormat, CompressRequest, ExtractRequest, LoadHandle, OperationEvent,
-        OperationProvider, OperationRequestId, PasswordFailure, TransferConflict,
+        OperationProvider, OperationRequestId, PasswordFailure, RenameCause, RenamedItem,
+        SkippedItem, SpecialKind, TransferConflict, TransferReport,
     },
     test_support::ASYNC_MAIN_CONTEXT_DEFAULT,
 };
@@ -257,6 +262,7 @@ fn every_compression_format_commits_a_readable_archive() -> Result<(), Box<dyn E
                     sevenz_rust2::Password::empty(),
                     &Arc::new(AtomicUsize::new(0)),
                     &never_cancelled(),
+                    &mut TransferReport::default(),
                 )?;
             }
             ArchiveFormat::TarGz => {
@@ -267,6 +273,7 @@ fn every_compression_format_commits_a_readable_archive() -> Result<(), Box<dyn E
                     true,
                     &Arc::new(AtomicUsize::new(0)),
                     &never_cancelled(),
+                    &mut TransferReport::default(),
                 )?;
             }
             ArchiveFormat::Tar => {
@@ -277,6 +284,7 @@ fn every_compression_format_commits_a_readable_archive() -> Result<(), Box<dyn E
                     false,
                     &Arc::new(AtomicUsize::new(0)),
                     &never_cancelled(),
+                    &mut TransferReport::default(),
                 )?;
             }
             ArchiveFormat::Rar => unreachable!("RAR compression is not supported"),
@@ -1213,6 +1221,80 @@ fn password_failures_reach_the_event_as_their_kind_and_leave_nothing_behind()
                 "{format:?} {password:?}"
             );
         }
+    }
+    Ok(())
+}
+
+#[test]
+fn an_extraction_reports_what_it_renamed_and_left_out_before_it_ends() -> Result<(), Box<dyn Error>>
+{
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    for (damaged, output) in [(false, ""), (true, "venv")] {
+        let root = tempfile::tempdir()?;
+        let archive = root.path().join("venv.tar.gz");
+        write_members(
+            &archive,
+            ArchiveFormat::TarGz,
+            &[
+                FixtureMember::Directory {
+                    name: "10:00",
+                    mode: None,
+                    modified: None,
+                },
+                FixtureMember::File {
+                    name: "10:00/a.txt",
+                    contents: b"a",
+                    mode: None,
+                    modified: None,
+                },
+                FixtureMember::Symlink {
+                    name: "10:00/lnk",
+                    target: b"a.txt",
+                },
+            ],
+        )?;
+        if damaged {
+            corrupt_gzip_trailer(&archive, 8)?;
+        }
+        let stick = root.path().join("stick");
+        fs::create_dir(&stick)?;
+        let _quirks = FsQuirks::install(&stick, Quirks::vfat());
+
+        let events = run_extraction(ExtractRequest {
+            id: OperationRequestId(9),
+            entry: test_file_entry(&archive),
+            destination: Location::local(&stick),
+            created_destination: false,
+            password: None,
+        });
+
+        let [.., OperationEvent::ItemsReported { report, .. }, ending] = events.as_slice() else {
+            panic!("no report came before the end: {events:?}");
+        };
+        assert_eq!(
+            matches!(ending, OperationEvent::Failed { .. }),
+            damaged,
+            "{ending:?}"
+        );
+        let output = stick.join(output);
+        assert_eq!(
+            report.renamed,
+            [RenamedItem {
+                requested: Location::local(output.join("10:00")),
+                saved_as: Location::local(output.join("10_00")),
+                cause: RenameCause::Invalid,
+            }]
+        );
+        assert_eq!(
+            report.skipped,
+            [SkippedItem {
+                location: Location::local(output.join("10_00/lnk")),
+                kind: SpecialKind::Symlink,
+            }]
+        );
+        assert_eq!(fs::read(output.join("10_00/a.txt"))?, b"a");
     }
     Ok(())
 }

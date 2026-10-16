@@ -68,6 +68,7 @@ use manifest::{Placed, Removed};
 pub(super) use manifest::{now as clock_for_test, set_clock_for_test, set_placed_entries_for_test};
 use metadata::Snapshot;
 pub(super) use restrictive::Restrictive;
+pub(super) use tree::{refuses_node, taken};
 
 #[derive(Default)]
 pub(super) struct SharedProgress {
@@ -1422,6 +1423,11 @@ fn is_unsupported(error: Errno) -> bool {
     matches!(error, Errno::OPNOTSUPP | Errno::NOTTY | ENOTSUPP)
 }
 
+/// Whether a symbolic link refused with `error` says the mount holds none.
+pub(super) fn holds_no_links(error: Errno) -> bool {
+    error == Errno::NOSYS || is_unsupported(error)
+}
+
 /// FUSE daemons without `use_ino` number a node afresh once the kernel has
 /// evicted it.
 fn stable_inodes(family: Family) -> bool {
@@ -1661,7 +1667,7 @@ impl Copy {
             Failure::NameRefused(error @ (Errno::INVAL | Errno::ILSEQ)) => *error,
             _ => return None,
         };
-        if error == Errno::NOSYS || is_unsupported(error) {
+        if holds_no_links(error) {
             self.names.profiles.refuse_links(site);
         }
         Some(error)

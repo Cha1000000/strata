@@ -30,7 +30,7 @@ use crate::{
     model::Location,
     services::{
         ArchiveFormat, CancelledOperation, CompressRequest, ExtractRequest, LoadHandle,
-        OperationEvent, OperationRequestId, PasswordFailure, validate_basename,
+        OperationEvent, OperationRequestId, PasswordFailure, TransferReport, validate_basename,
     },
 };
 use compression::{
@@ -262,73 +262,91 @@ pub(super) fn extract(request: ExtractRequest, emit: Rc<dyn Fn(OperationEvent)>)
             archive_progress_timer(request.id, &progress, &total, &task_cancelled, &emit);
         let work_progress = progress.clone();
         let work_total = total.clone();
-        let result = gio::spawn_blocking(move || match format {
-            Some(ArchiveFormat::Zip) => {
-                let file = std::fs::File::open(&archive_path)
-                    .map_err(|e| crate::services::io_error_message(&e))?;
-                let mut archive = zip::ZipArchive::new(file).map_err(decoders::zip_error)?;
-                work_total.store(archive.len(), Ordering::Relaxed);
-                extract_zip_from_archive(
-                    &mut archive,
+        let result = gio::spawn_blocking(move || {
+            let mut report = TransferReport::default();
+            let extracted = (|| match format {
+                Some(ArchiveFormat::Zip) => {
+                    let file = std::fs::File::open(&archive_path)
+                        .map_err(|e| crate::services::io_error_message(&e))?;
+                    let mut archive = zip::ZipArchive::new(file).map_err(decoders::zip_error)?;
+                    work_total.store(archive.len(), Ordering::Relaxed);
+                    extract_zip_from_archive(
+                        &mut archive,
+                        &dest_dir,
+                        &display_name,
+                        password.as_deref(),
+                        &work_progress,
+                        &work_cancelled,
+                        &mut report,
+                    )
+                }
+                Some(ArchiveFormat::SevenZ) => {
+                    let pw = password
+                        .as_deref()
+                        .map(sevenz_rust2::Password::from)
+                        .unwrap_or_default();
+                    let file = std::fs::File::open(&archive_path)
+                        .map_err(|e| crate::services::io_error_message(&e))?;
+                    extract_7z_from_reader(
+                        file,
+                        &dest_dir,
+                        &display_name,
+                        pw,
+                        &work_progress,
+                        &work_cancelled,
+                        &mut report,
+                    )
+                }
+                Some(ArchiveFormat::TarGz) => extract_tar(
+                    &archive_path,
+                    &dest_dir,
+                    &display_name,
+                    true,
+                    &work_progress,
+                    &work_cancelled,
+                    &mut report,
+                ),
+                Some(ArchiveFormat::Tar) => extract_tar(
+                    &archive_path,
+                    &dest_dir,
+                    &display_name,
+                    false,
+                    &work_progress,
+                    &work_cancelled,
+                    &mut report,
+                ),
+                #[cfg(not(feature = "rar"))]
+                Some(ArchiveFormat::Rar) => Err(archive_failed(crate::i18n::tr(
+                    "RAR support is disabled in this build.",
+                ))),
+                #[cfg(feature = "rar")]
+                Some(ArchiveFormat::Rar) => extract_rar(
+                    &archive_path,
                     &dest_dir,
                     &display_name,
                     password.as_deref(),
                     &work_progress,
                     &work_cancelled,
-                )
-            }
-            Some(ArchiveFormat::SevenZ) => {
-                let pw = password
-                    .as_deref()
-                    .map(sevenz_rust2::Password::from)
-                    .unwrap_or_default();
-                let file = std::fs::File::open(&archive_path)
-                    .map_err(|e| crate::services::io_error_message(&e))?;
-                extract_7z_from_reader(
-                    file,
-                    &dest_dir,
-                    &display_name,
-                    pw,
-                    &work_progress,
-                    &work_cancelled,
-                )
-            }
-            Some(ArchiveFormat::TarGz) => extract_tar(
-                &archive_path,
-                &dest_dir,
-                &display_name,
-                true,
-                &work_progress,
-                &work_cancelled,
-            ),
-            Some(ArchiveFormat::Tar) => extract_tar(
-                &archive_path,
-                &dest_dir,
-                &display_name,
-                false,
-                &work_progress,
-                &work_cancelled,
-            ),
-            #[cfg(not(feature = "rar"))]
-            Some(ArchiveFormat::Rar) => Err(archive_failed(crate::i18n::tr(
-                "RAR support is disabled in this build.",
-            ))),
-            #[cfg(feature = "rar")]
-            Some(ArchiveFormat::Rar) => extract_rar(
-                &archive_path,
-                &dest_dir,
-                &display_name,
-                password.as_deref(),
-                &work_progress,
-                &work_cancelled,
-            ),
-            None => Err(archive_failed(rust_i18n::t!(
-                "Unsupported archive format: %{name}",
-                name = display_name
-            ))),
+                    &mut report,
+                ),
+                None => Err(archive_failed(rust_i18n::t!(
+                    "Unsupported archive format: %{name}",
+                    name = display_name
+                ))),
+            })();
+            (extracted, report)
         })
         .await;
         timer_id.remove();
+        let result = result.map(|(extracted, report)| {
+            if !report.is_empty() {
+                emit(OperationEvent::ItemsReported {
+                    request_id: request.id,
+                    report,
+                });
+            }
+            extracted
+        });
         if created_dest
             && !matches!(result, Ok(Ok(ArchiveOutcome::Completed(_))))
             && std::fs::read_dir(&dest_dir_for_cleanup)

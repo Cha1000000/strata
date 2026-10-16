@@ -768,7 +768,11 @@ fn children(fs: &dyn FsOps, folder: BorrowedFd<'_>) -> Result<Vec<(OsString, Fil
 
 /// sshfs reports a taken name as `EPERM`, and SMB a folder in a file's way
 /// as `EISDIR`.
-pub(super) fn taken(fs: &dyn FsOps, entry: Entry<'_>, error: Errno) -> bool {
+pub(in crate::adapters::local_operations) fn taken(
+    fs: &dyn FsOps,
+    entry: Entry<'_>,
+    error: Errno,
+) -> bool {
     match error {
         Errno::EXIST | Errno::ISDIR => true,
         Errno::PERM => fs.stat(entry, false).is_ok(),
@@ -982,7 +986,7 @@ fn finish_pipe(
 /// pipes, vfat answers `EPERM`, exfat-fuse `EIO` and SMB `EOPNOTSUPP`;
 /// without symbolic links, vfat answers `EPERM`, exfat-fuse `ENOSYS` and
 /// SMB `EOPNOTSUPP`, and ntfs3 refuses a target too long with `EFBIG`.
-pub(super) fn refuses_node(kind: FileType, error: Errno) -> bool {
+pub(in crate::adapters::local_operations) fn refuses_node(kind: FileType, error: Errno) -> bool {
     let refused = match kind {
         FileType::Fifo => &[Errno::PERM, Errno::IO, Errno::NOSYS, Errno::INVAL][..],
         FileType::Symlink => &[Errno::PERM, Errno::NOSYS, Errno::FBIG],

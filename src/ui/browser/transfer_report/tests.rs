@@ -457,6 +457,7 @@ enum Started {
     Copy,
     Restore,
     MergeUndo,
+    Extract,
 }
 
 fn start(view: &BrowserView, operations: &HeldOperations, started: Started) -> OperationRequestId {
@@ -499,6 +500,22 @@ fn start(view: &BrowserView, operations: &HeldOperations, started: Started) -> O
                 .expect("the merged copy's undo");
             assert!(browser.undo_merge(generation, created, overwritten));
         }
+        Started::Extract => {
+            browser.extract(
+                crate::test_support::operations::entry(Location::local("/source/run.tar")),
+                Location::local("/destination"),
+                false,
+                None,
+            );
+            let id = browser.last_started_operation().expect("the extraction");
+            operations.emit(
+                id,
+                OperationEvent::ArchiveStarted {
+                    request_id: id,
+                    total: 0,
+                },
+            );
+        }
     }
     browser.last_started_operation().expect("an operation")
 }
@@ -539,6 +556,35 @@ fn an_outcome_shows_one_dialog_with_the_report_of_its_operation() {
             };
             let summary = super::super::progress::cancelled_operation_summary(1, 0, 1);
             type Terminal = Box<dyn Fn(OperationRequestId) -> OperationEvent>;
+            let cancellation = cancelled.clone();
+            let extraction_endings: [(Terminal, &str, Option<&str>); 3] = [
+                (
+                    Box::new(|request_id| OperationEvent::Failed {
+                        request_id,
+                        message: failure.into(),
+                        password_failure: None,
+                    }),
+                    "Unable to complete operation",
+                    Some(failure),
+                ),
+                (
+                    Box::new(move |request_id| OperationEvent::Cancelled {
+                        request_id,
+                        result: cancellation.clone(),
+                    }),
+                    "Operation cancelled",
+                    Some(&summary),
+                ),
+                (
+                    Box::new(|request_id| OperationEvent::Extracted {
+                        request_id,
+                        first_name: None,
+                        created: Vec::new(),
+                    }),
+                    "Completed with errors",
+                    None,
+                ),
+            ];
             let transfer_endings: [(Terminal, &str, Option<&str>); 3] = [
                 (
                     Box::new(|request_id| OperationEvent::TransferFailed {
@@ -581,13 +627,16 @@ fn an_outcome_shows_one_dialog_with_the_report_of_its_operation() {
                     has_non_retryable_failures: true,
                     message: errors.into(),
                 });
-            // A move, a restore and a merge undo run in the foreground and a
-            // copy in the background.
+            // A move, a restore, a merge undo and an extraction run in the
+            // foreground and a copy in the background.
             let mut rows = Vec::new();
             for started in [Started::Move, Started::Copy] {
                 for (terminal, title, outcome) in &transfer_endings {
                     rows.push((started, terminal, *title, *outcome));
                 }
+            }
+            for (terminal, title, outcome) in &extraction_endings {
+                rows.push((Started::Extract, terminal, *title, *outcome));
             }
             rows.extend([
                 (

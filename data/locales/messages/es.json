@@ -451,7 +451,6 @@
   "Invalid built-in release keys: %{error}": "Claves de publicación integradas no válidas: %{error}",
   "Invalid delete target": "Elemento que eliminar no válido",
   "Invalid extraction folder name “%{name}”": "Nombre de carpeta de extracción no válido «%{name}»",
-  "Invalid internal extraction path": "Ruta de extracción interna no válida",
   "Invalid interpreter — cannot run": "Intérprete no válido — no se puede ejecutar",
   "Invalid label: %{reason}": "Etiqueta no válida: %{reason}",
   "Invalid local filesystem target": "Destino del sistema de archivos local no válido",
