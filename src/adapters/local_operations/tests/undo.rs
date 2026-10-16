@@ -937,7 +937,7 @@ fn undoing_a_move_onto_a_share_forces_each_stat_it_records_there_and_nowhere_els
     let in_folder = ["b.txt", "link", "pipe"];
     // The last row reads the items once the cache from the move expired, and
     // their deferred closes reach the server only after that.
-    let rows: [(&[&str], &[&str], Option<Duration>, Duration); 5] = [
+    let rows: [(&[&str], &[&str], _, _); 5] = [
         (&["notes.txt"], &["notes.txt"], None, now),
         (&["project"], &in_folder, None, now),
         (&["link", "pipe"], &["link", "pipe"], None, now),
