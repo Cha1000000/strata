@@ -144,12 +144,14 @@ fn tenxer_footer_rename_changes_only_the_focused_item_on_enter() {
             assert!(directory.join("c.txt").is_file(), "the fill is not renamed");
             wait_until(|| focused_name(&browser) == "renamed.txt");
 
+            let too_long = "x".repeat(300);
             for (text, hint) in [
                 ("", "Enter a name"),
                 ("  ", "Enter a name"),
                 ("..", "That name is reserved"),
                 ("nested/name", "Names cannot contain /"),
                 ("b.txt", "\u{201c}b.txt\u{201d} already exists"),
+                (&too_long, "The name is too long"),
             ] {
                 submit_rename(&fixture, text);
                 wait_until(|| fixture.shortcuts.prompt_hint().as_deref() == Some(hint));
@@ -185,12 +187,6 @@ fn tenxer_footer_rename_changes_only_the_focused_item_on_enter() {
             assert_eq!(contents(&directory.join("folder.d/inside.txt")), "kept");
 
             move_to_named(&fixture, &browser, "b.txt");
-            submit_rename(&fixture, &"x".repeat(300));
-            wait_until(|| modal_visible(&fixture.overlay));
-            assert!(click_class(&fixture.overlay, "action-dialog-close"));
-            wait_until(|| !modal_visible(&fixture.overlay));
-            assert_eq!(contents(&directory.join("b.txt")), "preview");
-
             let writable = std::fs::metadata(&directory)
                 .expect("fixture")
                 .permissions();

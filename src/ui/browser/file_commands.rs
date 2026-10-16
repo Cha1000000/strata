@@ -61,6 +61,34 @@ pub(crate) enum CreateRefusal {
     Unsupported,
     Invalid(&'static str),
     Exists(String),
+    /// A name the location would store as another, with why.
+    Unstorable(String),
+}
+
+/// A file or folder the user typed the name of, before it is made.
+pub(crate) struct TypedEntry {
+    parent: Location,
+    name: String,
+    directory: bool,
+}
+
+impl TypedEntry {
+    /// Why the entry cannot be made as typed, read off the main thread. The
+    /// operation still checks collisions atomically; this keeps the name
+    /// editable.
+    pub(crate) async fn refusal(&self) -> Option<CreateRefusal> {
+        let folder = gio_file_for_location(&self.parent);
+        if let Some(message) =
+            crate::adapters::typed_name_refusal(&folder, &self.name, self.directory).await
+        {
+            return Some(CreateRefusal::Unstorable(message));
+        }
+        let path = self.parent.native_path()?.join(&self.name);
+        let exists = gtk::gio::spawn_blocking(move || std::fs::symlink_metadata(path).is_ok())
+            .await
+            .unwrap_or(false);
+        exists.then(|| CreateRefusal::Exists(self.name.clone()))
+    }
 }
 
 impl BrowserView {
@@ -168,7 +196,7 @@ impl BrowserView {
             .is_some_and(|(_, parent)| !is_trash_location(&parent) && !parent.is_recent_location())
     }
 
-    pub fn create_typed_entry(&self, text: &str) -> Result<(), CreateRefusal> {
+    pub fn prepare_typed_entry(&self, text: &str) -> Result<TypedEntry, CreateRefusal> {
         let (name, directory) = match text.strip_suffix('/') {
             Some(name) => (name, true),
             None => (text, false),
@@ -180,16 +208,17 @@ impl BrowserView {
         else {
             return Err(CreateRefusal::Unsupported);
         };
-        // The operation still checks collisions atomically; this provides editable feedback.
-        if let Some(path) = parent.native_path()
-            && std::fs::symlink_metadata(path.join(name)).is_ok()
-        {
-            return Err(CreateRefusal::Exists(name.to_owned()));
-        }
+        Ok(TypedEntry {
+            parent,
+            name: name.to_owned(),
+            directory,
+        })
+    }
+
+    pub fn create_typed_entry(&self, entry: TypedEntry) {
         self.state
             .browser
-            .create_exact_entry(parent, name.to_owned(), directory);
-        Ok(())
+            .create_exact_entry(entry.parent, entry.name, entry.directory);
     }
 }
 

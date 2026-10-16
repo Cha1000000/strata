@@ -31,6 +31,7 @@ pub(crate) use archive::write_compression_fixture;
 #[cfg(test)]
 pub(crate) use tests::fs_quirks::{FsQuirks, Op as FsOp, Quirks};
 pub(crate) use transfer_targets::transfer_targets;
+pub(crate) use typed_names::refused_in as typed_name_refusal;
 
 use std::{
     cell::{Cell, RefCell},

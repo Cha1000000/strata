@@ -427,9 +427,10 @@ a new archive is refused before anything changes where the folder's rules, inclu
 has learned from refusals, would store the name as another, and the message names what the location
 cannot hold: the characters, each quoted and given by code point where it shows nothing of its own
 (`U+0009`, `U+0301`), a leading space (MTP) or a trailing space or period, a device name Windows
-reserves, or the length. A rename is held to the length of a file, since Samba's shorter
-limit for folders applies only to the folders it creates. Names Strata chooses itself, such as "new
-folder", are not checked.
+reserves, or the length. The 10xer create and rename prompts check the name off the GTK thread
+before they close and stay open with that message. A rename is held to the length of a file, since
+Samba's shorter limit for folders applies only to the folders it creates. Names Strata chooses
+itself, such as "new folder", are not checked.
 
 ### Hard links
 

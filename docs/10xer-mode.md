@@ -388,8 +388,10 @@ the usual operation dialogs, and **Ctrl+Z** undoes what the default map can undo
 the typed name in the keyboard-focused folder; spaces and Unicode are kept. A
 trailing `/` makes a folder instead and is removed before the name is checked. An
 empty name, `.`, `..`, or a name containing `/` keeps the prompt open with the
-reason, and so does a name already taken (including by a broken link), so you
-can fix it. Nothing is renumbered, replaced, or followed. **Esc**, focus leaving
+reason, and so does a name already taken (including by a broken link) or one the
+location would store as another (see [Folders, names and case
+aliases](filesystem-compatibility.md#folders-names-and-case-aliases)), so you can
+fix it. Nothing is renumbered, replaced, or followed. **Esc**, focus leaving
 the prompt, a clicked row, another prompt, leaving the mode, or closing the
 window discard the name. **Ctrl+Shift+N** still adds a numbered **new folder**
 and renames it in place. Trash and Recent flash `Can’t create items here`.
@@ -400,9 +402,10 @@ open-path marker. The current name is filled in with a file's stem (or a
 folder's whole name) selected, as inline rename selects it. The item is fixed
 when the prompt opens; **Up** / **Down** do not move the cursor while it is open.
 **Enter** renames the item to exactly the typed name and keeps its contents; an
-unchanged name does nothing. An invalid name or one already taken keeps the
-prompt open with the reason, and nothing is replaced. Permission errors and
-filesystem limits leave the original name and show the usual rename error.
+unchanged name does nothing. An invalid name, one already taken, or one the
+location would store as another keeps the prompt open with the reason, and
+nothing is replaced. Permission errors leave the original name and show the
+usual rename error.
 **Esc**, focus leaving the prompt, a clicked row (which keeps its selection),
 another prompt, leaving the mode, or closing the window discard the typed name.
 Trash items flash `Can’t rename items here`. The context menu's **Rename** and a

@@ -37,7 +37,7 @@ pub(super) fn refused(name: &str, rules: &NameProfile, new_folder: bool) -> Opti
 }
 
 /// [`refused`] by the rules of names in `folder`, read off the main thread.
-pub(super) async fn refused_in(folder: &gio::File, name: &str, new_folder: bool) -> Option<String> {
+pub(crate) async fn refused_in(folder: &gio::File, name: &str, new_folder: bool) -> Option<String> {
     refused(name, &folder_name_rules(folder).await?, new_folder)
 }
 
