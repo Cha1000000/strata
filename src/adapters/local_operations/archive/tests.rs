@@ -1300,12 +1300,17 @@ fn an_extraction_reports_what_it_renamed_and_left_out_before_it_ends() -> Result
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
         .lock()
         .map_err(|error| error.to_string())?;
-    for (damaged, output) in [(false, ""), (true, "venv")] {
+    for (format, name, damaged, output) in [
+        (ArchiveFormat::TarGz, "venv.tar.gz", false, ""),
+        (ArchiveFormat::TarGz, "venv.tar.gz", true, "venv"),
+        (ArchiveFormat::Zip, "venv.zip", false, ""),
+        (ArchiveFormat::SevenZ, "venv.7z", false, ""),
+    ] {
         let root = tempfile::tempdir()?;
-        let archive = root.path().join("venv.tar.gz");
+        let archive = root.path().join(name);
         write_members(
             &archive,
-            ArchiveFormat::TarGz,
+            format,
             &[
                 FixtureMember::Directory {
                     name: "10:00",
@@ -1345,7 +1350,7 @@ fn an_extraction_reports_what_it_renamed_and_left_out_before_it_ends() -> Result
         assert_eq!(
             matches!(ending, OperationEvent::Failed { .. }),
             damaged,
-            "{ending:?}"
+            "{name}: {ending:?}"
         );
         let output = stick.join(output);
         assert_eq!(
@@ -1354,16 +1359,18 @@ fn an_extraction_reports_what_it_renamed_and_left_out_before_it_ends() -> Result
                 requested: Location::local(output.join("10:00")),
                 saved_as: Location::local(output.join("10_00")),
                 cause: RenameCause::Invalid,
-            }]
+            }],
+            "{name}"
         );
         assert_eq!(
             report.skipped,
             [SkippedItem {
                 location: Location::local(output.join("10_00/lnk")),
                 kind: SpecialKind::Symlink,
-            }]
+            }],
+            "{name}"
         );
-        assert_eq!(fs::read(output.join("10_00/a.txt"))?, b"a");
+        assert_eq!(fs::read(output.join("10_00/a.txt"))?, b"a", "{name}");
     }
     Ok(())
 }

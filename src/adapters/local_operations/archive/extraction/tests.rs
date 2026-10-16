@@ -1345,7 +1345,7 @@ fn extract_members(
         session.extract_member(OsStr::from_bytes(name), content, MemberMetadata::NONE)
     });
     session.finish(result.and(ending), || {
-        vec!["10:00/later:x/next.txt".to_owned()]
+        vec![format!("10:00/later:x{}.d/next.txt", "a".repeat(300))]
     })
 }
 
@@ -1500,13 +1500,14 @@ fn links_the_destination_cannot_hold_are_left_out_with_hard_links_to_them()
         (b"bin/10:00", File),
         (b"bin/now", Hard("bin/10:00")),
     ];
-    let refusing_one_target = || Quirks {
-        fail: vec![(Op::Symlink, "bad", 0, rustix::io::Errno::INVAL)],
+    let refusing_one_target = |errno| Quirks {
+        fail: vec![(Op::Symlink, "bad", 0, errno)],
         ..Quirks::ntfs3()
     };
-    for (preset, members, listed, skipped, calls) in [
+    let per_link_listed = &["bin/", "bin/10_00", "bin/now", "bin/python", "bin/python3"][..];
+    for (quirks, members, listed, skipped, calls) in [
         (
-            Quirks::ext4 as Preset,
+            Quirks::ext4(),
             venv,
             &[
                 "bin/",
@@ -1520,29 +1521,36 @@ fn links_the_destination_cannot_hold_are_left_out_with_hard_links_to_them()
             2,
         ),
         (
-            Quirks::vfat,
+            Quirks::vfat(),
             venv,
             &["bin/", "bin/python"],
             &["python3", "py", "p2", "py:3"],
             0,
         ),
         (
-            Quirks::cifs,
+            Quirks::cifs(),
             learned,
             &["bin/", "bin/python"],
             &["python3", "pip"],
             1,
         ),
         (
-            refusing_one_target,
+            refusing_one_target(rustix::io::Errno::INVAL),
             per_link,
-            &["bin/", "bin/10_00", "bin/now", "bin/python", "bin/python3"],
+            per_link_listed,
+            &["bad"],
+            2,
+        ),
+        (
+            refusing_one_target(rustix::io::Errno::ILSEQ),
+            per_link,
+            per_link_listed,
             &["bad"],
             2,
         ),
     ] {
         let root = tempfile::tempdir()?;
-        let quirks = FsQuirks::install(root.path(), preset());
+        let quirks = FsQuirks::install(root.path(), quirks);
         let mut report = TransferReport::default();
 
         let outcome = extract_members(root.path(), ARCHIVE, members, Ok(()), &mut report)?;
@@ -1629,7 +1637,7 @@ fn the_report_names_entries_where_the_extraction_left_them() -> Result<(), Box<d
         fn(&Outcome) -> bool,
         Renamed<'_>,
         &[&str],
-    ); 8] = [
+    ); 9] = [
         (
             Quirks::vfat,
             ARCHIVE,
@@ -1653,6 +1661,19 @@ fn the_report_names_entries_where_the_extraction_left_them() -> Result<(), Box<d
             &[
                 (b"10:00".as_slice(), "10_00", Invalid),
                 (b"10_00/b?.txt", "10_00/b_.txt", Invalid),
+            ],
+            &[],
+        ),
+        (
+            Quirks::vfat,
+            "10:00.zip",
+            Some("10_00"),
+            &[(b"a.txt", File), (b"b?.txt", File)],
+            Ok(()),
+            |outcome| matches!(outcome, Ok(ArchiveOutcome::Completed(Some(name))) if name == "10_00 (1)"),
+            &[
+                (b"10:00".as_slice(), "10_00 (1)", Invalid),
+                (b"10_00 (1)/b?.txt", "10_00 (1)/b_.txt", Invalid),
             ],
             &[],
         ),
@@ -1744,12 +1765,8 @@ fn the_report_names_entries_where_the_extraction_left_them() -> Result<(), Box<d
                 .collect::<Vec<_>>()
         );
         if let Ok(ArchiveOutcome::Cancelled { not_attempted, .. }) = &outcome {
-            assert_eq!(
-                *not_attempted,
-                [Location::local(
-                    root.path().join("archive/10_00/later_x/next.txt")
-                )]
-            );
+            let pending = format!("archive/10_00/later_x{}/next.txt", "a".repeat(248));
+            assert_eq!(*not_attempted, [Location::local(root.path().join(pending))]);
         }
     }
     Ok(())

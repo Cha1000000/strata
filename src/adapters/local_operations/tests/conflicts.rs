@@ -847,13 +847,14 @@ fn the_prompt_sees_the_name_a_paste_gives_each_item_and_what_has_it() -> Result<
     let folder = Some(Collision { mergeable: true });
     let (vfat, ext4): (Preset, Preset) = (Quirks::vfat, Quirks::ext4);
     // Per source: its name and what it meets on vfat, then on ext4, and
-    // whether names inside it change on vfat. `own.txt` is pasted from the
-    // destination itself and `old.txt` from a Trash on another disk.
+    // whether names inside it change on vfat. `own.txt` and `same` are pasted
+    // from the destination itself and `old.txt` from a Trash on another disk.
     let rows = [
         ("a:b", ("a_b", file), ("a:b", None), false),
         ("Photo.jpg", ("Photo.jpg", file), ("Photo.jpg", None), false),
         ("x:y", ("x_y", folder), ("x:y", None), true),
         ("folder", ("folder", folder), ("folder", folder), true),
+        ("same", ("same", folder), ("same", folder), false),
         ("data", ("data", file), ("data", file), false),
         ("link", ("link", None), ("link", file), false),
         ("new.txt", ("new.txt", None), ("new.txt", None), false),
@@ -870,7 +871,7 @@ fn the_prompt_sees_the_name_a_paste_gives_each_item_and_what_has_it() -> Result<
             fs::write(source.join(name), name)?;
         }
         std::os::unix::fs::symlink("a:b", source.join("link"))?;
-        for name in ["x_y", "folder", "data"] {
+        for name in ["x_y", "folder", "data", "same", "inner/same"] {
             fs::create_dir_all(disk.join(name))?;
         }
         for name in ["a_b", "photo.JPG", "link", "own.txt", "old.txt"] {
@@ -881,6 +882,7 @@ fn the_prompt_sees_the_name_a_paste_gives_each_item_and_what_has_it() -> Result<
             .iter()
             .map(|(name, ..)| match *name {
                 "own.txt" => Location::local(disk.join(name)),
+                "same" => Location::local(disk.join("inner").join(name)),
                 "old.txt" => Location::uri(format!(
                     "trash:///%5Cmnt%5CData%5C.Trash-1000%5Cfiles%5C{name}"
                 )),
@@ -913,7 +915,7 @@ fn the_prompt_sees_the_name_a_paste_gives_each_item_and_what_has_it() -> Result<
 
 #[test]
 fn a_paste_gives_an_item_the_name_its_prompt_showed() -> Result<(), Box<dyn Error>> {
-    use crate::services::RenameCause::Invalid;
+    use crate::services::RenameCause::{Alias, Invalid};
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
         .lock()
         .map_err(|error| error.to_string())?;
@@ -924,13 +926,14 @@ fn a_paste_gives_an_item_the_name_its_prompt_showed() -> Result<(), Box<dyn Erro
         TransferConflict::FailIfExists,
     );
     // The item, how it collided, the name the prompt showed, whether it is
-    // moved, and where it lands.
-    for (item, conflict, shown, moving, landed) in [
-        ("a:b", replace, "a_b", false, "a_b"),
-        ("a:b", keep_both, "a_b", false, "a_b (1)"),
-        ("a:b", keep_both, "a_b", true, "a_b (1)"),
-        ("a:b", fail, "a_b (1)", false, "a_b (1)"),
-        ("x:y", merge, "x_y", false, "x_y"),
+    // moved, where it lands and why.
+    for (item, conflict, shown, moving, landed, cause) in [
+        ("a:b", replace, "a_b", false, "a_b", Invalid),
+        ("a:b", keep_both, "a_b", false, "a_b (1)", Invalid),
+        ("a:b", keep_both, "a_b", true, "a_b (1)", Invalid),
+        ("a:b", fail, "a_b (1)", false, "a_b (1)", Invalid),
+        ("b.jpg", fail, "b (1).jpg", false, "b (1).jpg", Alias),
+        ("x:y", merge, "x_y", false, "x_y", Invalid),
     ] {
         let context = format!("{item} as {shown}, {conflict:?}, moving {moving}");
         let root = tempfile::tempdir()?;
@@ -973,7 +976,7 @@ fn a_paste_gives_an_item_the_name_its_prompt_showed() -> Result<(), Box<dyn Erro
         assert_eq!(source.join(item).exists(), !moving, "{context}");
         assert_eq!(
             renamed_beneath(&disk, &followed_report(&events)),
-            vec![(item.to_owned(), landed.to_owned(), Invalid)],
+            vec![(item.to_owned(), landed.to_owned(), cause)],
             "{context}"
         );
     }

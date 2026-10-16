@@ -600,6 +600,31 @@ fn a_typed_name_the_location_would_store_otherwise_is_refused_before_the_rename(
 }
 
 #[test]
+fn a_typed_name_at_a_gvfs_address_is_refused_by_the_rules_of_its_scheme()
+-> Result<(), Box<dyn Error>> {
+    use super::super::typed_names::refused_in;
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let colon = rust_i18n::t!(
+        "Names in this location can’t contain %{characters}",
+        characters = ":"
+    )
+    .into_owned();
+    let leading_space = crate::i18n::tr("Names in this location can’t start with a space");
+    for (uri, typed, refusal) in [
+        ("smb://server/share", "a:b", Some(colon)),
+        ("mtp://Phone/Internal", " x", Some(leading_space)),
+        ("sftp://host/home", "a:b", None),
+    ] {
+        let folder = gio::File::for_uri(uri);
+        let refused = glib::MainContext::default().block_on(refused_in(&folder, typed, false));
+        assert_eq!(refused, refusal, "{uri}");
+    }
+    Ok(())
+}
+
+#[test]
 fn a_rename_never_replaces_an_item_created_meanwhile() -> Result<(), Box<dyn Error>> {
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
         .lock()
