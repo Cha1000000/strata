@@ -789,13 +789,13 @@ archives, cuts the stem the same way to fit ` (n)`, and `.tar` stays before ` (1
 
 Names are fixed where an item brings them onto another filesystem: in a copy or a move across
 filesystems, a merge, drag and drop, Send to, and the redo of such a move. Inside a copied tree,
-each folder decides by its own device. A duplicate, Keep Both, a move within one filesystem and a
-restore from Trash keep every name, so `CON` duplicated on a stick stays `CON`. Under the GVfs
-bridge, the folder of each location counts as a filesystem of its own, and what its refusals teach
-stays with it, so a song moved between two folders of one phone keeps its name. A folder merged
-into takes the rules of its own mount, and whether names are fixed is decided again, only where it
-or the folder merged into it is on another device than its parent: a bind mount of the same
-filesystem shares its rules.
+each folder decides by its own device. A duplicate, a move within one filesystem and a restore from
+Trash keep every name, so `CON` duplicated on a stick stays `CON`. Under the GVfs bridge, the
+folder of each location counts as a filesystem of its own, and what its refusals teach stays with
+it, so a song moved between two folders of one phone keeps its name. A folder merged into takes the
+rules of its own mount, and whether names are fixed is decided again, only where it or the folder
+merged into it is on another device than its parent: a bind mount of the same filesystem shares its
+rules.
 
 A folder's names are planned before its first entry is created, and the plan depends only on the
 folder's entries. A name that needs no change keeps it, even where a fixed name would equal it.
