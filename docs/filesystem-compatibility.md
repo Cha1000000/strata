@@ -1147,7 +1147,9 @@ Unit tests layer quirks on a fully featured filesystem, so on a limited mount so
 design: a test expecting a plain rename sees the ladder link instead on NFS, fixtures with
 symlinks, FIFOs or Unix permissions cannot exist on vfat, a racer keyed to a step the mount never
 takes (an `O_TMPFILE` link, a hole, a `syncfs`, an exchange) never runs, and a time with a fraction
-of a second is rounded away on vfat, exfat-fuse and sshfs. A fixture's name can be one the mount
+of a second is rounded away on vfat, exfat-fuse and sshfs. Those three report the modification
+time as the change time, so tests that land the SMB client's deferred closes fail there after two
+seconds. A fixture's name can be one the mount
 refuses (`a:b` on vfat), and a preset can expect a name stored that the real mount refuses, folds
 or lists as another (Samba's 8.3 aliases, long SMB folder names). On NFS a file renamed over while
 open reads as `.nfsXXXX`, and on casefolded folders `/proc` shows files the test process created as
