@@ -14,6 +14,8 @@ use std::{
     time::{Duration, UNIX_EPOCH},
 };
 
+use rustix::io::Errno;
+
 use super::{ArchiveError, ArchiveOutcome, ExtractionSession, MemberContent, MemberMetadata};
 use crate::adapters::local_operations::archive::destination::MetadataCalls;
 use crate::{
@@ -1581,37 +1583,191 @@ fn links_the_destination_cannot_hold_are_left_out_with_hard_links_to_them()
     Ok(())
 }
 
+fn refuses_colons(name: &OsStr) -> Option<Errno> {
+    name.as_bytes().contains(&b':').then_some(Errno::INVAL)
+}
+
+fn refuses_colons_as_bad_messages(name: &OsStr) -> Option<Errno> {
+    name.as_bytes().contains(&b':').then_some(Errno::BADMSG)
+}
+
+#[test]
+fn a_refused_member_name_takes_the_first_stricter_rules_it_passes_and_teaches_only_a_mount_that_learns()
+-> Result<(), Box<dyn Error>> {
+    use Member::{File, Folder, Hard, Link};
+    use RenameCause::Invalid;
+    let first: &[(&[u8], Member<'_>)] = &[
+        (b"10:00", Folder),
+        (b"10:00/note:1.txt", File),
+        (b"10:00/py:3", Link(b"note:1.txt")),
+        (b"10:00/hard:1", Hard("10:00/note:1.txt")),
+        (b"day_1.txt", File),
+        (b"day:1.txt", File),
+    ];
+    let later: &[(&[u8], Member<'_>)] = &[
+        (b"dir:1", Folder),
+        (b"dir:1/t", File),
+        (b"file:1", File),
+        (b"dot.", File),
+    ];
+    let unknown_daemon = || Quirks {
+        mount_type: Some(("fuse.strictfs", "rw,user_id=0,group_id=0")),
+        invalid_name: Some(refuses_colons_as_bad_messages),
+        ..Quirks::default()
+    };
+    // Known rules never learn. This one also refuses a hard link's name,
+    // and the lookup of a name, as sshfs does.
+    let strict_ext4 = || Quirks {
+        invalid_name: Some(refuses_colons),
+        fail: vec![
+            (Op::Link, "hard:1", 0, Errno::INVAL),
+            (Op::Stat, "day:1.txt", 0, Errno::BADMSG),
+        ],
+        ..Quirks::ext4()
+    };
+    type Refused<'a> = &'a [(Op, &'a str)];
+    let rows: [(fn() -> Quirks, Refused<'_>, Refused<'_>); 2] = [
+        (unknown_daemon, &[(Op::Mkdir, "10:00")], &[]),
+        (
+            strict_ext4,
+            &[
+                (Op::Mkdir, "10:00"),
+                (Op::Stat, "note:1.txt"),
+                (Op::Create, "note:1.txt"),
+                (Op::Stat, "py:3"),
+                (Op::Symlink, "py:3"),
+                (Op::Stat, "hard:1"),
+                (Op::Link, "hard:1"),
+                (Op::Stat, "day:1.txt"),
+            ],
+            &[
+                (Op::Mkdir, "dir:1"),
+                (Op::Stat, "file:1"),
+                (Op::Create, "file:1"),
+            ],
+        ),
+    ];
+    for (quirks, refused_first, refused_later) in rows {
+        let root = tempfile::tempdir()?;
+        let quirks = FsQuirks::install(root.path(), quirks());
+        let refused_calls = || {
+            quirks
+                .calls()
+                .into_iter()
+                .filter_map(|call| {
+                    let name = call
+                        .names
+                        .iter()
+                        .find(|name| name.as_bytes().contains(&b':'))?;
+                    Some((call.op, name.to_string_lossy().into_owned()))
+                })
+                .collect::<Vec<_>>()
+        };
+        let owned = |calls: Refused<'_>| {
+            calls
+                .iter()
+                .map(|(op, name)| (*op, (*name).to_owned()))
+                .collect::<Vec<_>>()
+        };
+        let mut report = TransferReport::default();
+
+        let outcome = extract_members(root.path(), ARCHIVE, first, Ok(()), &mut report)?;
+
+        assert!(
+            matches!(&outcome, ArchiveOutcome::Completed(Some(name)) if name == "archive"),
+            "{outcome:?}"
+        );
+        let archive = root.path().join("archive");
+        assert_eq!(
+            entries(&archive)?,
+            [
+                "10_00/",
+                "10_00/hard_1",
+                "10_00/note_1.txt",
+                "10_00/py_3",
+                "day_1 (2).txt",
+                "day_1.txt"
+            ]
+        );
+        assert_eq!(
+            report.renamed,
+            renamed(
+                &archive,
+                &[
+                    (b"10:00", "10_00", Invalid),
+                    (b"10_00/note:1.txt", "10_00/note_1.txt", Invalid),
+                    (b"10_00/py:3", "10_00/py_3", Invalid),
+                    (b"10_00/hard:1", "10_00/hard_1", Invalid),
+                    (b"day:1.txt", "day_1 (2).txt", Invalid),
+                ]
+            )
+        );
+        assert_eq!(
+            fs::read_link(archive.join("10_00/py_3"))?,
+            Path::new("note:1.txt")
+        );
+        assert_eq!(
+            fs::metadata(archive.join("10_00/hard_1"))?.ino(),
+            fs::metadata(archive.join("10_00/note_1.txt"))?.ino()
+        );
+        assert_eq!(refused_calls(), owned(refused_first));
+        quirks.clear_calls();
+        let mut report = TransferReport::default();
+
+        let outcome = extract_members(root.path(), "later.zip", later, Ok(()), &mut report)?;
+
+        assert!(
+            matches!(&outcome, ArchiveOutcome::Completed(Some(name)) if name == "later"),
+            "{outcome:?}"
+        );
+        let archive = root.path().join("later");
+        assert_eq!(entries(&archive)?, ["dir_1/", "dir_1/t", "dot.", "file_1"]);
+        assert_eq!(
+            report.renamed,
+            renamed(
+                &archive,
+                &[(b"dir:1", "dir_1", Invalid), (b"file:1", "file_1", Invalid)]
+            )
+        );
+        assert_eq!(refused_calls(), owned(refused_later));
+    }
+    Ok(())
+}
+
 #[test]
 fn a_link_refused_for_another_reason_fails_the_extraction() -> Result<(), Box<dyn Error>> {
-    let root = tempfile::tempdir()?;
-    let _quirks = FsQuirks::install(
-        root.path(),
-        Quirks {
-            fail: vec![(Op::Symlink, "python3", 0, rustix::io::Errno::NOSPC)],
-            ..Quirks::ext4()
-        },
-    );
-    let mut report = TransferReport::default();
+    // No stricter rules change `python3`, so a name refusal stays one.
+    for errno in [Errno::NOSPC, Errno::BADMSG] {
+        let root = tempfile::tempdir()?;
+        let _quirks = FsQuirks::install(
+            root.path(),
+            Quirks {
+                fail: vec![(Op::Symlink, "python3", 0, errno)],
+                ..Quirks::ext4()
+            },
+        );
+        let mut report = TransferReport::default();
 
-    let outcome = extract_members(
-        root.path(),
-        ARCHIVE,
-        &[
-            (b"bin/python", Member::File),
-            (b"bin/python3", Member::Link(b"python")),
-        ],
-        Ok(()),
-        &mut report,
-    );
+        let outcome = extract_members(
+            root.path(),
+            ARCHIVE,
+            &[
+                (b"bin/python", Member::File),
+                (b"bin/python3", Member::Link(b"python")),
+            ],
+            Ok(()),
+            &mut report,
+        );
 
-    let Err(ArchiveError::Failed(message)) = outcome else {
-        panic!("a full disk was taken for a refused link: {outcome:?}");
-    };
-    assert!(
-        message.starts_with("Could not create symbolic link “bin/python3”"),
-        "{message}"
-    );
-    assert!(report.skipped.is_empty());
+        let Err(ArchiveError::Failed(message)) = outcome else {
+            panic!("{errno:?} was taken for a refused link: {outcome:?}");
+        };
+        assert!(
+            message.starts_with("Could not create symbolic link “bin/python3”"),
+            "{message}"
+        );
+        assert!(report.skipped.is_empty());
+    }
     Ok(())
 }
 

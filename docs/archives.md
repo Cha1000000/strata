@@ -55,7 +55,9 @@ brings there do (see [Folders, names and case
 aliases](filesystem-compatibility.md#folders-names-and-case-aliases)):
 characters it cannot store become `_`, trailing dots and spaces are dropped,
 device names Windows reserves get `_`, and names too long for it are shortened.
-So does the name of the folder named after the archive. A member gets the next
+So does the name of the folder named after the archive. A member whose name the
+destination still refuses, a symbolic link included, is made under stricter
+rules, as a copy is, and reported with the name it took. A member gets the next
 number where an earlier member with another name took its name, or where the
 destination takes its name for another's, so `10_00/` after `10:00/` on a USB
 stick becomes `10_00 (2)/`, and different folders of the archive never merge.

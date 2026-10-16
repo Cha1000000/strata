@@ -6,11 +6,13 @@ mod tests;
 use std::{
     collections::HashMap,
     ffi::{OsStr, OsString},
+    iter,
     os::{
         fd::{AsFd, BorrowedFd, OwnedFd},
         unix::ffi::OsStrExt,
     },
     path::{Path, PathBuf},
+    rc::Rc,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -20,12 +22,12 @@ use rustix::{
 };
 
 use super::super::{
-    copy_engine::{refuses_node, taken},
+    copy_engine::{refuses_name, refuses_node, taken},
     fs_ops::{Entry, fs},
-    mount_profile::{FolderRules, NamePolicy, Profiles},
+    mount_profile::{FolderRules, NamePolicy, Site},
     naming::{
         fix::{Fixed, fix_name},
-        numbered_name,
+        numbered_name, stricter_names,
     },
     placement::{
         EXTRACTION_STAGE_PREFIX, NUMBERED_NAME_ATTEMPTS, PlaceError, creation_error, place,
@@ -33,9 +35,9 @@ use super::super::{
     },
     placement_reason,
 };
-use super::extraction::MemberMetadata;
+use super::{ArchiveError, extraction::MemberMetadata};
 use crate::{
-    adapters::volume::NameLimit,
+    adapters::volume::{NameLimit, Strictness},
     services::{NameMode, RenameCause, error_detail},
 };
 
@@ -435,11 +437,11 @@ impl ExtractionDestination {
     }
 
     fn name_limit(&self) -> NameLimit {
-        self.names.rules.limit
+        self.names.rules().limit
     }
 
     /// Whether nothing is at `name` in `directory`, never following a link there.
-    fn is_free(&self, directory: BorrowedFd<'_>, name: &OsStr) -> Result<bool, String> {
+    fn is_free(&self, directory: BorrowedFd<'_>, name: &OsStr) -> Result<bool, Unmade> {
         match fs().stat(
             Entry {
                 dir: directory,
@@ -448,25 +450,31 @@ impl ExtractionDestination {
             false,
         ) {
             Err(Errno::NOENT) => Ok(true),
-            Err(error) => Err(rust_i18n::t!(
-                "Could not inspect extraction path %{name}: %{error}",
-                name = name.to_string_lossy(),
-                error = errno_detail(error)
-            )
-            .into_owned()),
+            Err(error) => Err(Unmade::of(
+                directory,
+                error,
+                rust_i18n::t!(
+                    "Could not inspect extraction path %{name}: %{error}",
+                    name = name.to_string_lossy(),
+                    error = errno_detail(error)
+                )
+                .into_owned(),
+            )),
             Ok(stat) => match stat.kind {
                 FileType::RegularFile | FileType::Directory | FileType::Symlink => Ok(false),
-                _ => Err(rust_i18n::t!(
-                    "Refusing to extract over special filesystem object: %{name}",
-                    name = name.to_string_lossy()
-                )
-                .into_owned()),
+                _ => Err(Unmade::Failed(
+                    rust_i18n::t!(
+                        "Refusing to extract over special filesystem object: %{name}",
+                        name = name.to_string_lossy()
+                    )
+                    .into_owned(),
+                )),
             },
         }
     }
 
     /// Makes the folder `name` in `directory`, or finds the name taken.
-    fn make_folder(&self, directory: BorrowedFd<'_>, name: &OsStr) -> Result<bool, String> {
+    fn make_folder(&self, directory: BorrowedFd<'_>, name: &OsStr) -> Result<bool, Unmade> {
         let entry = Entry {
             dir: directory,
             name,
@@ -474,7 +482,7 @@ impl ExtractionDestination {
         match fs().mkdir(entry, Mode::from_raw_mode(0o777)) {
             Ok(()) => Ok(true),
             Err(error) if taken(fs(), entry, error) => Ok(false),
-            Err(error) => Err(errno_text(error)),
+            Err(error) => Err(Unmade::of(directory, error, errno_text(error))),
         }
     }
 
@@ -494,42 +502,37 @@ impl ExtractionDestination {
         &self,
         placed: &Placed,
         mode: Option<u32>,
-    ) -> Result<std::fs::File, String> {
+    ) -> Result<std::fs::File, Unmade> {
         fs().create_exclusive(
             placed.entry(),
             Mode::from_raw_mode(mode.map_or(0o666, permission_bits)),
         )
         .map(std::fs::File::from)
-        .map_err(errno_text)
+        .map_err(|error| Unmade::of(placed.parent.as_fd(), error, errno_text(error)))
     }
 
-    /// Makes a symbolic link at `placed`, unless the destination refuses to
-    /// hold it, as `Ok(Some(error))` tells.
+    /// Makes a symbolic link at `placed`.
     pub(super) fn create_symlink(
         &self,
         placed: &Placed,
         target: &OsStr,
         modified: Option<SystemTime>,
-    ) -> Result<Option<Errno>, String> {
+    ) -> Result<(), Unmade> {
         let entry = placed.entry();
-        match fs().symlink(target, entry) {
-            Ok(()) => {}
-            // A target the mount cannot store is refused like the link.
-            Err(error)
-                if !taken(fs(), entry, error)
-                    && (refuses_node(FileType::Symlink, error)
-                        || matches!(error, Errno::INVAL | Errno::ILSEQ)) =>
-            {
-                return Ok(Some(error));
+        if let Err(error) = fs().symlink(target, entry) {
+            if !taken(fs(), entry, error) && refuses_node(FileType::Symlink, error) {
+                return Err(Unmade::Unheld(error));
             }
-            Err(error) => {
-                return Err(rust_i18n::t!(
+            return Err(Unmade::of(
+                placed.parent.as_fd(),
+                error,
+                rust_i18n::t!(
                     "Could not create symbolic link “%{path}”: %{error}",
                     path = placed.path.display(),
                     error = errno_detail(error)
                 )
-                .into_owned());
-            }
+                .into_owned(),
+            ));
         }
         // A link's time is cosmetic, and FUSE daemons such as sshfs apply it to the target.
         if let Some(times) = modified.and_then(timestamps)
@@ -537,7 +540,7 @@ impl ExtractionDestination {
         {
             let _ = (self.calls.set_link_times)(placed.parent.as_fd(), &placed.name, &times);
         }
-        Ok(None)
+        Ok(())
     }
 
     pub(super) fn set_file_times(
@@ -552,7 +555,7 @@ impl ExtractionDestination {
     }
 
     /// Link symlinks themselves rather than following their targets outside staging.
-    pub(super) fn create_hard_link(&self, placed: &Placed, target: &Path) -> Result<(), String> {
+    pub(super) fn create_hard_link(&self, placed: &Placed, target: &Path) -> Result<(), Unmade> {
         let unavailable = |error: String| {
             rust_i18n::t!(
                 "Hard link “%{path}” refers to “%{target}”, which is not available in this extraction: %{error}",
@@ -570,13 +573,17 @@ impl ExtractionDestination {
             .map_err(unavailable)?;
         fs().link(Entry::new(&target_parent, target_name), placed.entry())
             .map_err(|error| {
-                rust_i18n::t!(
-                    "Could not link “%{path}” to “%{target}”: %{error}",
-                    path = placed.path.display(),
-                    target = target.display(),
-                    error = errno_detail(error)
+                Unmade::of(
+                    placed.parent.as_fd(),
+                    error,
+                    rust_i18n::t!(
+                        "Could not link “%{path}” to “%{target}”: %{error}",
+                        path = placed.path.display(),
+                        target = target.display(),
+                        error = errno_detail(error)
+                    )
+                    .into_owned(),
                 )
-                .into_owned()
             })
     }
 
@@ -645,11 +652,11 @@ impl ExtractionDestination {
 }
 
 /// How members are named at a destination: by the rules of its mount, as
-/// the extraction first saw it.
+/// the extraction first saw it, with what its refusals taught it since.
 #[derive(Clone)]
 pub(super) struct MemberNames {
-    profiles: Profiles,
-    rules: FolderRules,
+    policy: NamePolicy,
+    site: Site,
 }
 
 impl MemberNames {
@@ -657,25 +664,75 @@ impl MemberNames {
         let policy = NamePolicy::new(NameMode::Fix);
         let (key, seen) = policy.profiles.mount(fs(), destination);
         let site = policy.profiles.site(key, seen.names, destination);
-        Self {
-            rules: policy.in_folder(&site),
-            profiles: policy.profiles,
-        }
+        Self { policy, site }
+    }
+
+    fn rules(&self) -> FolderRules {
+        self.policy.in_folder(&self.site)
     }
 
     fn fixed<'a>(&self, name: &'a OsStr, is_directory: bool) -> Fixed<'a> {
-        fix_name(name, &self.rules.fixed, is_directory)
+        fix_name(name, &self.rules().fixed, is_directory)
     }
 
     /// Whether the destination may hold symbolic links, as far as the
     /// extraction knows.
     pub(super) fn holds_links(&self) -> bool {
-        self.profiles.holds_links(&self.rules.site)
+        self.policy.profiles.holds_links(&self.site)
     }
 
     /// Teaches the destination that it holds no symbolic links.
     pub(super) fn refuse_links(&self) {
-        self.profiles.refuse_links(&self.rules.site);
+        self.policy.profiles.refuse_links(&self.site);
+    }
+
+    /// Teaches a destination that learns that names also follow the
+    /// Windows rules in `strictness`.
+    fn learn(&self, strictness: Strictness) {
+        if self.site.rules.learns {
+            self.policy.profiles.learn(&self.site, strictness);
+        }
+    }
+}
+
+/// Why a member was not made.
+pub(super) enum Unmade {
+    /// The destination refused its name with the error.
+    Refused(Errno, String),
+    /// The destination cannot hold a symbolic link, as the error says.
+    Unheld(Errno),
+    Failed(String),
+}
+
+impl Unmade {
+    /// A call that makes something in `directory` failed with `error`.
+    fn of(directory: BorrowedFd<'_>, error: Errno, message: String) -> Self {
+        if refuses_name(fs(), directory, error) {
+            Self::Refused(error, message)
+        } else {
+            Self::Failed(message)
+        }
+    }
+}
+
+impl From<String> for Unmade {
+    fn from(message: String) -> Self {
+        Self::Failed(message)
+    }
+}
+
+impl From<Unmade> for String {
+    fn from(unmade: Unmade) -> Self {
+        match unmade {
+            Unmade::Refused(_, message) | Unmade::Failed(message) => message,
+            Unmade::Unheld(error) => errno_text(error),
+        }
+    }
+}
+
+impl From<Unmade> for ArchiveError {
+    fn from(unmade: Unmade) -> Self {
+        Self::Failed(unmade.into())
     }
 }
 
@@ -739,7 +796,8 @@ fn remove_tree(parent: BorrowedFd<'_>, name: &OsStr, files: bool) -> rustix::io:
 /// Where members go in the staging folder. Each name is fixed by the
 /// destination's rules, each folder is made once for the member path that
 /// names it, and a name another member took, or that the destination finds
-/// taken, is numbered past, so distinct folders are never merged.
+/// taken, is numbered past, so distinct folders are never merged. A name the
+/// destination refuses is fixed by stricter rules, as copies do.
 pub(super) struct ExtractNameResolver {
     names: MemberNames,
     /// Per member path of a folder, where the folder is in the staging
@@ -754,7 +812,7 @@ pub(super) struct ExtractNameResolver {
 
 /// The name a member takes in a folder of the staging folder.
 pub(super) struct Placed {
-    pub(super) parent: OwnedFd,
+    pub(super) parent: Rc<OwnedFd>,
     pub(super) name: OsString,
     /// Where the member is in the staging folder.
     pub(super) path: PathBuf,
@@ -767,16 +825,17 @@ pub(super) struct Placed {
 
 impl Placed {
     fn entry(&self) -> Entry<'_> {
-        Entry::new(&self.parent, &self.name)
+        Entry::new(&*self.parent, &self.name)
     }
 }
 
 /// A name claimed for a member in a folder.
-struct Claim {
+struct Claim<T> {
     name: OsString,
     cause: Option<RenameCause>,
-    /// Whether the member path named something else the extraction made.
-    own: bool,
+    /// What was made there; `None` where the member path named something
+    /// else the extraction made.
+    made: Option<T>,
 }
 
 impl ExtractNameResolver {
@@ -796,7 +855,7 @@ impl ExtractNameResolver {
         &mut self,
         staging: &ExtractionDestination,
         path: &Path,
-    ) -> Result<PathBuf, String> {
+    ) -> Result<PathBuf, Unmade> {
         self.made_folder(staging, path).map(|(made, _)| made)
     }
 
@@ -804,7 +863,7 @@ impl ExtractNameResolver {
         &mut self,
         staging: &ExtractionDestination,
         path: &Path,
-    ) -> Result<(PathBuf, usize), String> {
+    ) -> Result<(PathBuf, usize), Unmade> {
         let mut known = path;
         let mut missing = Vec::new();
         while !self.folders.contains_key(known) {
@@ -815,11 +874,13 @@ impl ExtractNameResolver {
         for member in missing.into_iter().rev() {
             let name = member.file_name().ok_or_else(no_file_name)?;
             let directory = staging.open_directory(&parent)?;
-            let claim = self.claim(index, name, true, |candidate| {
-                staging.make_folder(directory.as_fd(), candidate)
+            let claim = self.claim(index, name, true, |candidate, _| {
+                Ok(staging
+                    .make_folder(directory.as_fd(), candidate)?
+                    .then_some(()))
             })?;
             let made = parent.join(&claim.name);
-            if claim.own {
+            if claim.made.is_none() {
                 // A member under a link's or a file's name fails there.
                 staging.open_directory(&made)?;
             } else {
@@ -837,30 +898,35 @@ impl ExtractNameResolver {
         Ok((parent, index))
     }
 
-    /// Where the member `path`, which is not a folder, goes: a free name in
-    /// its folder, which is made where it is new. The name is the member's
-    /// once [`Self::made`] says it was made there.
-    pub(super) fn leaf(
+    /// Makes the member `path`, which is not a folder, with `make` under a
+    /// free name in its folder, which is made where it is new. The name is
+    /// the member's once [`Self::made`] says it was made there.
+    pub(super) fn leaf<T>(
         &mut self,
         staging: &ExtractionDestination,
         path: &Path,
-    ) -> Result<Placed, String> {
+        mut make: impl FnMut(&Placed) -> Result<T, Unmade>,
+    ) -> Result<(Placed, T), Unmade> {
         let member = path.file_name().ok_or_else(no_file_name)?;
         let (folder_path, folder) =
             self.made_folder(staging, path.parent().unwrap_or_else(|| Path::new("")))?;
-        let parent = staging.open_directory(&folder_path)?;
-        let claim = self.claim(folder, member, false, |candidate| {
-            staging.is_free(parent.as_fd(), candidate)
+        let parent = Rc::new(staging.open_directory(&folder_path)?);
+        let claim = self.claim(folder, member, false, |candidate, cause| {
+            if !staging.is_free(parent.as_fd(), candidate)? {
+                return Ok(None);
+            }
+            let placed = Placed {
+                parent: Rc::clone(&parent),
+                name: candidate.to_os_string(),
+                path: folder_path.join(candidate),
+                requested: folder_path.join(member),
+                folder,
+                member: member.to_os_string(),
+                cause,
+            };
+            make(&placed).map(|made| Some((placed, made)))
         })?;
-        Ok(Placed {
-            parent,
-            path: folder_path.join(&claim.name),
-            requested: folder_path.join(member),
-            name: claim.name,
-            folder,
-            member: member.to_os_string(),
-            cause: claim.cause,
-        })
+        claim.made.ok_or_else(|| no_available_name(member).into())
     }
 
     /// The member `placed` was made there; returns where it is in the
@@ -881,7 +947,7 @@ impl ExtractNameResolver {
         &mut self,
         staging: &ExtractionDestination,
         path: &Path,
-    ) -> Result<PathBuf, String> {
+    ) -> Result<PathBuf, Unmade> {
         let member = path.file_name().ok_or_else(no_file_name)?;
         let folder = self.folder(staging, path.parent().unwrap_or_else(|| Path::new("")))?;
         Ok(folder.join(member))
@@ -908,30 +974,78 @@ impl ExtractNameResolver {
         std::mem::take(&mut self.renamed)
     }
 
-    /// The first name for the member `name` in the folder `folder`, fixed
-    /// and then numbered, that no other member took there and that `free`
-    /// finds or makes free, with why it is not `name`.
-    fn claim(
+    /// The first name for the member `name` in the folder `folder` that
+    /// `make`, told why it is not `name`, makes: the name the destination's
+    /// rules give, then where the destination refuses it, those stricter
+    /// rules give in turn, which a destination that learns keeps.
+    fn claim<T>(
         &self,
         folder: usize,
         name: &OsStr,
         is_directory: bool,
-        mut free: impl FnMut(&OsStr) -> Result<bool, String>,
-    ) -> Result<Claim, String> {
-        let fixed = self.names.fixed(name, is_directory);
+        mut make: impl FnMut(&OsStr, Option<RenameCause>) -> Result<Option<T>, Unmade>,
+    ) -> Result<Claim<T>, Unmade> {
+        let rules = self.names.rules();
+        let fixed = fix_name(name, &rules.fixed, is_directory);
+        let stricter = || {
+            stricter_names(&fixed.name, &rules.fixed, is_directory)
+                .into_iter()
+                .map(|(strictness, stricter, cause)| {
+                    (Some(strictness), stricter, fixed.cause.or(Some(cause)))
+                })
+        };
+        let names = iter::once((None, fixed.name.to_os_string(), fixed.cause))
+            .chain(iter::once_with(stricter).flatten());
+        let mut refused = None;
+        for (strictness, base, cause) in names {
+            match self.numbered(
+                folder,
+                name,
+                (&base, cause),
+                is_directory,
+                rules.limit,
+                &mut make,
+            ) {
+                Ok(claim) => {
+                    if let Some(strictness) = strictness.filter(|_| claim.made.is_some()) {
+                        self.names.learn(strictness);
+                    }
+                    return Ok(claim);
+                }
+                Err(refusal @ Unmade::Refused(..)) => {
+                    refused.get_or_insert(refusal);
+                }
+                Err(unmade) => return Err(unmade),
+            }
+        }
+        Err(refused.unwrap_or_else(|| no_available_name(name).into()))
+    }
+
+    /// The first of `base`, a name for the member `name` that is not `name`
+    /// for `cause`, and its numbered names, that no other member took in the
+    /// folder `folder` and that `make` makes.
+    fn numbered<T>(
+        &self,
+        folder: usize,
+        name: &OsStr,
+        (base, cause): (&OsStr, Option<RenameCause>),
+        is_directory: bool,
+        limit: NameLimit,
+        make: &mut impl FnMut(&OsStr, Option<RenameCause>) -> Result<Option<T>, Unmade>,
+    ) -> Result<Claim<T>, Unmade> {
         let mut taken_by = None;
         for index in 1..=NUMBERED_NAME_ATTEMPTS {
             let candidate = if index == 1 {
-                fixed.name.to_os_string()
+                base.to_os_string()
             } else {
-                suffixed_name(&fixed.name, index, is_directory, self.names.rules.limit)
+                suffixed_name(base, index, is_directory, limit)
             };
             match self.taken.get(&(folder, candidate.clone())) {
                 Some(owner) if is_directory && owner == name => {
                     return Ok(Claim {
                         name: candidate,
                         cause: None,
-                        own: true,
+                        made: None,
                     });
                 }
                 Some(owner) => {
@@ -940,33 +1054,34 @@ impl ExtractNameResolver {
                 }
                 None => {}
             }
-            if free(&candidate)? {
-                let cause = rename_cause(name, &fixed, &candidate, taken_by);
+            let cause = rename_cause(name, cause, &candidate, taken_by);
+            if let Some(made) = make(&candidate, cause)? {
                 return Ok(Claim {
                     name: candidate,
                     cause,
-                    own: false,
+                    made: Some(made),
                 });
             }
         }
-        Err(no_available_name(name))
+        Err(no_available_name(name).into())
     }
 }
 
-/// Why a member named `name` was saved as `saved`: its fix, that another
-/// member, `taken_by`, took the name first, unless that member had the
-/// same name, or that the destination took it for another.
+/// Why a member named `name` was saved as `saved`: the fix `fixed` gave
+/// its name, that another member, `taken_by`, took the name first, unless
+/// that member had the same name, or that the destination took it for
+/// another.
 fn rename_cause(
     name: &OsStr,
-    fixed: &Fixed<'_>,
+    fixed: Option<RenameCause>,
     saved: &OsStr,
     taken_by: Option<&OsStr>,
 ) -> Option<RenameCause> {
     if saved == name {
         return None;
     }
-    if fixed.cause.is_some() {
-        return fixed.cause;
+    if fixed.is_some() {
+        return fixed;
     }
     match taken_by {
         Some(owner) if owner == name => None,

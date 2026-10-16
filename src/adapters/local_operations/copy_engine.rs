@@ -1388,7 +1388,9 @@ fn creation_failure(fs: &dyn FsOps, at: Entry<'_>, error: Errno) -> Failure {
     }
 }
 
-fn refuses_name(fs: &dyn FsOps, dir: BorrowedFd<'_>, error: Errno) -> bool {
+/// Whether a call that creates something in `dir` failed with `error`
+/// because the mount refuses the name.
+pub(super) fn refuses_name(fs: &dyn FsOps, dir: BorrowedFd<'_>, error: Errno) -> bool {
     match error {
         Errno::INVAL | Errno::ILSEQ | Errno::NAMETOOLONG | Errno::BADMSG => true,
         Errno::NOENT => fs.stat_fd(dir).is_ok_and(|folder| folder.nlink > 0),

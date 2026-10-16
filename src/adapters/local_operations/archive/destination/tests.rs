@@ -3,7 +3,7 @@
 use super::super::fixtures::names;
 use super::{
     ExtractNameResolver, ExtractionDestination, FUSE_SUPER_MAGIC, MemberMetadata, MetadataCalls,
-    archive_stem, sanitized_archive_path,
+    Placed, archive_stem, sanitized_archive_path,
 };
 use crate::adapters::local_operations::tests::fs_quirks::{FsQuirks, Op, Quirks};
 use std::{
@@ -25,9 +25,18 @@ fn put_file(
     path: impl AsRef<Path>,
 ) -> Result<(fs::File, PathBuf), String> {
     let mut resolver = ExtractNameResolver::new(destination);
-    let placed = resolver.leaf(destination, path.as_ref())?;
-    let file = destination.create_file(&placed, None)?;
+    let (placed, file) = new_file(&mut resolver, destination, path.as_ref())?;
     Ok((file, resolver.made(placed)))
+}
+
+fn new_file(
+    resolver: &mut ExtractNameResolver,
+    destination: &ExtractionDestination,
+    path: &Path,
+) -> Result<(Placed, fs::File), String> {
+    Ok(resolver.leaf(destination, path, |placed| {
+        destination.create_file(placed, None)
+    })?)
 }
 
 fn put_link(
@@ -37,11 +46,10 @@ fn put_link(
     modified: Option<SystemTime>,
 ) -> Result<PathBuf, String> {
     let mut resolver = ExtractNameResolver::new(destination);
-    let placed = resolver.leaf(destination, path.as_ref())?;
-    match destination.create_symlink(&placed, target, modified)? {
-        None => Ok(resolver.made(placed)),
-        Some(refusal) => Err(refusal.to_string()),
-    }
+    let (placed, ()) = resolver.leaf(destination, path.as_ref(), |placed| {
+        destination.create_symlink(placed, target, modified)
+    })?;
+    Ok(resolver.made(placed))
 }
 
 fn put_hard_link(
@@ -50,8 +58,9 @@ fn put_hard_link(
     target: &Path,
 ) -> Result<PathBuf, String> {
     let mut resolver = ExtractNameResolver::new(destination);
-    let placed = resolver.leaf(destination, path.as_ref())?;
-    destination.create_hard_link(&placed, target)?;
+    let (placed, ()) = resolver.leaf(destination, path.as_ref(), |placed| {
+        destination.create_hard_link(placed, target)
+    })?;
     Ok(resolver.made(placed))
 }
 
@@ -59,7 +68,7 @@ fn put_folder(
     destination: &ExtractionDestination,
     path: impl AsRef<Path>,
 ) -> Result<PathBuf, String> {
-    ExtractNameResolver::new(destination).folder(destination, path.as_ref())
+    Ok(ExtractNameResolver::new(destination).folder(destination, path.as_ref())?)
 }
 
 #[test]
@@ -105,10 +114,8 @@ fn stage(
     let (name, staging) = destination.create_staging()?;
     let mut resolver = ExtractNameResolver::new(&staging);
     for file in files {
-        let placed = resolver.leaf(&staging, Path::new(file))?;
-        staging
-            .create_file(&placed, None)?
-            .write_all(file.as_bytes())?;
+        let (placed, mut created) = new_file(&mut resolver, &staging, Path::new(file))?;
+        created.write_all(file.as_bytes())?;
         resolver.made(placed);
     }
     Ok((name, staging))
@@ -222,17 +229,19 @@ fn destination_never_writes_through_symlinks() -> Result<(), Box<dyn Error>> {
     // A folder the extraction did not make is a taken name.
     let nested = Path::new("redirect/new.txt");
     let mut resolver = ExtractNameResolver::new(&destination);
-    let placed = resolver.leaf(&destination, nested)?;
-    destination.create_file(&placed, None)?;
+    let (placed, _) = new_file(&mut resolver, &destination, nested)?;
     assert_eq!(resolver.made(placed), Path::new("redirect (2)/new.txt"));
-    let placed = resolver.leaf(&destination, nested)?;
-    assert_eq!(
-        destination.create_symlink(&placed, OsStr::new("file.txt"), None)?,
-        None
-    );
+    let (placed, ()) = resolver
+        .leaf(&destination, nested, |placed| {
+            destination.create_symlink(placed, OsStr::new("file.txt"), None)
+        })
+        .map_err(String::from)?;
     assert_eq!(resolver.made(placed), Path::new("redirect (2)/new (2).txt"));
-    let placed = resolver.leaf(&destination, nested)?;
-    destination.create_hard_link(&placed, Path::new("file.txt"))?;
+    let (placed, ()) = resolver
+        .leaf(&destination, nested, |placed| {
+            destination.create_hard_link(placed, Path::new("file.txt"))
+        })
+        .map_err(String::from)?;
     assert_eq!(resolver.made(placed), Path::new("redirect (2)/new (3).txt"));
     assert!(
         put_hard_link(
@@ -321,14 +330,17 @@ fn resolver_keeps_nested_members_under_the_same_renamed_root() -> Result<(), Box
     fs::create_dir(root.path().join("folder (2)"))?;
     let destination = ExtractionDestination::open(root.path())?;
     let mut resolver = ExtractNameResolver::new(&destination);
-    let first = resolver.leaf(&destination, Path::new("folder/one.txt"))?;
+    let (first, _) = new_file(&mut resolver, &destination, Path::new("folder/one.txt"))?;
     assert_eq!(first.path, Path::new("folder (3)/one.txt"));
-    destination.create_file(&first, None)?;
     resolver.made(first);
     assert_eq!(
-        resolver
-            .leaf(&destination, Path::new("folder/nested/two.txt"))?
-            .path,
+        new_file(
+            &mut resolver,
+            &destination,
+            Path::new("folder/nested/two.txt")
+        )?
+        .0
+        .path,
         Path::new("folder (3)/nested/two.txt")
     );
     assert_eq!(root.path().join("folder").read_dir()?.count(), 0);

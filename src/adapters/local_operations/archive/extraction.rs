@@ -19,6 +19,8 @@ use std::{
     time::SystemTime,
 };
 
+use rustix::io::Errno;
+
 use crate::{
     model::Location,
     services::{RenameCause, RenamedItem, SkippedItem, SpecialKind, TransferReport},
@@ -29,7 +31,7 @@ use super::{
     ArchiveError, COPY_BUF, archive_failed, archive_io_failed, archive_read_failed,
     check_archive_cancelled,
     destination::{
-        ExtractNameResolver, ExtractionDestination, archive_stem, process_umask,
+        ExtractNameResolver, ExtractionDestination, Unmade, archive_stem, process_umask,
         sanitized_archive_path,
     },
 };
@@ -322,33 +324,38 @@ impl<'a> ExtractionSession<'a> {
                 Placement::Made(created)
             }
             MemberContent::Symlink(target) if staging.names().holds_links() => {
-                let placed = resolver.leaf(staging, &path)?;
-                match staging.create_symlink(
-                    &placed,
-                    OsStr::from_bytes(target),
-                    metadata.modified,
-                )? {
-                    None => Placement::Made(resolver.made(placed)),
-                    Some(refusal) => {
+                let link = |placed: &_| {
+                    staging.create_symlink(placed, OsStr::from_bytes(target), metadata.modified)
+                };
+                match resolver.leaf(staging, &path, link) {
+                    Ok((placed, ())) => Placement::Made(resolver.made(placed)),
+                    Err(Unmade::Unheld(refusal)) => {
                         if holds_no_links(refusal) {
                             staging.names().refuse_links();
                         }
-                        Placement::LeftOut(placed.requested)
+                        Placement::LeftOut(resolver.requested(staging, &path)?)
                     }
+                    // A target the mount cannot store is refused like the link.
+                    Err(Unmade::Refused(Errno::INVAL | Errno::ILSEQ, _)) => {
+                        Placement::LeftOut(resolver.requested(staging, &path)?)
+                    }
+                    Err(unmade) => return Err(unmade.into()),
                 }
             }
             MemberContent::Symlink(_) => Placement::LeftOut(resolver.requested(staging, &path)?),
             MemberContent::HardLink(_) => match hard_link_target.flatten() {
                 Some(target) => {
-                    let placed = resolver.leaf(staging, &path)?;
-                    staging.create_hard_link(&placed, &target)?;
+                    let (placed, ()) = resolver.leaf(staging, &path, |placed| {
+                        staging.create_hard_link(placed, &target)
+                    })?;
                     Placement::Made(resolver.made(placed))
                 }
                 None => Placement::LeftOut(resolver.requested(staging, &path)?),
             },
             MemberContent::File(reader, declared_size) => {
-                let placed = resolver.leaf(staging, &path)?;
-                let mut file = staging.create_file(&placed, metadata.mode)?;
+                let (placed, mut file) = resolver.leaf(staging, &path, |placed| {
+                    staging.create_file(placed, metadata.mode)
+                })?;
                 let result = copy_member(
                     &name,
                     reader,
