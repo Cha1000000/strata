@@ -2032,30 +2032,35 @@ menubutton.form-control:disabled > button {
 
 switch {
   background: @strata_muted;
-  border: 1px solid alpha(@strata_border, 0.72);
-  /* Track and thumb share one radius so they keep the same corner shape at
-     every roundness; GTK caps each at half its size. */
-  border-radius: 14px;
+  border: 1px solid alpha(@strata_border, 0.8);
+  /* GTK gives the thumb half the track width; a 2:1 content box keeps it
+     square. Track and thumb share a radius for live roundness scaling. */
+  border-radius: 20px;
   box-shadow: none;
   min-height: 22px;
-  min-width: 40px;
+  min-width: 44px;
+  padding: 0;
   transition: background 160ms ease-out, border-color 160ms ease-out;
 }
 
 switch:checked {
-  background: @strata_accent;
-  border-color: @strata_accent;
+  background: alpha(@strata_accent, 0.25);
+  border-color: alpha(@strata_accent, 0.65);
 }
 
-switch slider,
-switch:checked slider {
-  background: @strata_text;
+switch slider {
+  background: @strata_dim_text;
   border: none;
-  border-radius: 14px;
-  box-shadow: 0 1px 3px alpha(#000000, 0.4);
+  border-radius: 20px;
+  box-shadow: none;
   min-height: 18px;
   min-width: 18px;
+  margin: 2px;
   transition: background 160ms ease-out;
+}
+
+switch:checked slider {
+  background: @strata_accent;
 }
 
 .sidebar-shell,
@@ -3479,16 +3484,21 @@ entry.form-control.shortcut-footer-prompt:focus-within {
   letter-spacing: 0.5px;
 }
 
+.shortcut-footer-count,
+.shortcut-footer-button > button,
+button.shortcut-footer-button {
+  border: 1px solid transparent;
+  padding: 0 6px;
+}
+
 .shortcut-footer-button > button,
 button.shortcut-footer-button {
   background: transparent;
   color: @strata_text;
-  border: 1px solid transparent;
   border-radius: 4px;
   box-shadow: none;
   min-height: 20px;
   min-width: 0;
-  padding: 0 6px;
 }
 
 .shortcut-footer-button > button:hover,
@@ -3969,22 +3979,17 @@ dropdown.form-control popover row:selected check {
   padding: 2px 10px;
 }
 
-.segmented-control-option:hover {
-  background: alpha(@strata_highlight, 0.65);
+.segmented-control-option:hover,
+.segmented-control-option:active,
+.action-library-category:hover,
+.action-library-category:active {
+  background: transparent;
   color: @strata_text;
 }
 
 .segmented-control-option:checked {
   background: alpha(@strata_accent, 0.22);
   color: @strata_accent;
-}
-
-.segmented-control-option:checked:hover {
-  background: alpha(@strata_accent, 0.28);
-}
-
-.segmented-control-option:active {
-  background: alpha(@strata_accent, 0.28);
 }
 
 .segmented-control-option:focus-visible {
@@ -6151,31 +6156,6 @@ two-column presentation. */
   opacity: 0.7;
 }
 
-.settings-dialog switch {
-  min-width: 42px;
-  min-height: 22px;
-  border-radius: 20px;
-  background: @strata_muted;
-  border: 1px solid alpha(@strata_border, 0.8);
-}
-
-.settings-dialog switch slider {
-  min-width: 18px;
-  min-height: 18px;
-  margin: 1px;
-  background: @strata_dim_text;
-  box-shadow: none;
-}
-
-.settings-dialog switch:checked {
-  background: alpha(@strata_accent, 0.25);
-  border-color: alpha(@strata_accent, 0.65);
-}
-
-.settings-dialog switch:checked slider {
-  background: @strata_accent;
-}
-
 .settings-dialog .settings-option:disabled,
 .settings-dialog .theme-library:disabled {
   opacity: 0.45;
@@ -6895,13 +6875,7 @@ popover.settings-action-library > contents {
   padding: 0 9px;
 }
 
-.action-library-category:hover {
-  background: @strata_highlight;
-  color: @strata_text;
-}
-
-.action-library-category:checked,
-.action-library-category:active {
+.action-library-category:checked {
   background: alpha(@strata_accent, 0.2);
   color: @strata_text;
   border-color: @strata_accent;
@@ -7017,7 +6991,6 @@ popover.settings-action-library > contents {
 
 .settings-action-tabs > header > tabs > tab:hover {
   color: @strata_text;
-  background: alpha(@strata_highlight, 0.4);
 }
 
 .settings-action-tabs > header > tabs > tab:checked {
@@ -7026,12 +6999,8 @@ popover.settings-action-library > contents {
   border-bottom-color: @strata_accent;
 }
 
-.settings-action-tabs > header > tabs > tab:checked:hover {
-  background: alpha(@strata_accent, 0.18);
-}
-
 .settings-action-tabs > header > tabs > tab:active {
-  background: alpha(@strata_accent, 0.22);
+  color: @strata_accent;
 }
 
 .settings-action-tabs > header > tabs > tab:focus-visible {
