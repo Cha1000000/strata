@@ -22,6 +22,7 @@ use std::{
     collections::BTreeMap,
     error::Error,
     ffi::OsString,
+    fmt::Debug,
     fs,
     io::{Read, Write},
     os::unix::{ffi::OsStringExt, fs::PermissionsExt},
@@ -30,7 +31,82 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
+    time::{Duration, Instant},
 };
+
+const HOLD_LIMIT: Duration = Duration::from_secs(30);
+
+/// Holds a staged compression's writer on its worker until the test releases it, which
+/// dropping this does too, so a failed assertion never leaves the worker spinning.
+#[derive(Default)]
+struct HeldWriter {
+    held: Arc<AtomicBool>,
+    released: Arc<AtomicBool>,
+    ended: Arc<AtomicBool>,
+}
+
+impl HeldWriter {
+    /// For the writer: marks it held and waits for the release.
+    fn hold(&self) -> impl Fn() -> Result<(), String> + Send + 'static {
+        let (held, released) = (self.held.clone(), self.released.clone());
+        move || {
+            held.store(true, Ordering::Release);
+            let deadline = Instant::now() + HOLD_LIMIT;
+            while !released.load(Ordering::Acquire) {
+                if Instant::now() >= deadline {
+                    return Err("the test never released the writer".to_owned());
+                }
+                std::thread::yield_now();
+            }
+            Ok(())
+        }
+    }
+
+    fn spawn<T: 'static>(
+        &self,
+        compression: impl Future<Output = T> + 'static,
+    ) -> glib::JoinHandle<T> {
+        let ended = self.ended.clone();
+        glib::MainContext::default().spawn_local(async move {
+            let compressed = compression.await;
+            ended.store(true, Ordering::Release);
+            compressed
+        })
+    }
+
+    /// Fails instead of waiting on when the compression ends before its writer is held.
+    fn wait_until_held<T: Debug + 'static>(
+        &self,
+        task: &mut glib::JoinHandle<T>,
+    ) -> Result<(), String> {
+        let context = glib::MainContext::default();
+        let deadline = Instant::now() + HOLD_LIMIT;
+        while !self.held.load(Ordering::Acquire) {
+            if self.ended.load(Ordering::Acquire) {
+                return Err(format!(
+                    "the compression ended before its writer ran: {:?}",
+                    context.block_on(task)
+                ));
+            }
+            if Instant::now() >= deadline {
+                return Err(format!("the writer was not reached within {HOLD_LIMIT:?}"));
+            }
+            context.iteration(false);
+            std::thread::yield_now();
+        }
+        Ok(())
+    }
+
+    fn release(&self) {
+        self.released.store(true, Ordering::Release);
+    }
+}
+
+impl Drop for HeldWriter {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
 
 #[test]
 fn an_archive_replaced_immediately_after_publication_is_not_owned_for_undo()
@@ -94,13 +170,11 @@ fn compression_staging_stays_private_while_encoding() -> Result<(), Box<dyn Erro
     fs::write(&archive, b"original")?;
     fs::set_permissions(&archive, fs::Permissions::from_mode(0o640))?;
     let original = TrashedOriginal::from_metadata(&fs::symlink_metadata(&archive)?);
-    let started = Arc::new(AtomicBool::new(false));
-    let release = Arc::new(AtomicBool::new(false));
-    let worker_started = started.clone();
-    let worker_release = release.clone();
+    let writer = HeldWriter::default();
+    let hold = writer.hold();
     let worker_destination = destination.clone();
     let worker_archive = archive.clone();
-    let task = glib::MainContext::default().spawn_local(async move {
+    let mut task = writer.spawn(async move {
         write_staged_archive(
             &worker_destination,
             &worker_archive,
@@ -109,24 +183,16 @@ fn compression_staging_stays_private_while_encoding() -> Result<(), Box<dyn Erro
             move |mut file| {
                 file.write_all(b"replacement")
                     .map_err(|error| error.to_string())?;
-                worker_started.store(true, Ordering::Release);
-                while !worker_release.load(Ordering::Acquire) {
-                    std::thread::yield_now();
-                }
-                Ok(())
+                Ok(hold()?)
             },
         )
         .await
     });
-    let context = glib::MainContext::default();
-    while !started.load(Ordering::Acquire) {
-        context.iteration(false);
-        std::thread::yield_now();
-    }
+    writer.wait_until_held(&mut task)?;
     assert_eq!(compression_stage_mode(&destination)?, 0o600);
 
-    release.store(true, Ordering::Release);
-    let (name, replaced, placed) = context.block_on(task)??;
+    writer.release();
+    let (name, replaced, placed) = glib::MainContext::default().block_on(task)??;
     assert_eq!(
         (name, replaced),
         (
@@ -149,13 +215,11 @@ fn compression_new_archive_staging_stays_private_until_publish() -> Result<(), B
     let root = tempfile::tempdir()?;
     let destination = root.path().to_path_buf();
     let archive = destination.join("created.zip");
-    let started = Arc::new(AtomicBool::new(false));
-    let release = Arc::new(AtomicBool::new(false));
-    let worker_started = started.clone();
-    let worker_release = release.clone();
+    let writer = HeldWriter::default();
+    let hold = writer.hold();
     let worker_destination = destination.clone();
     let worker_archive = archive.clone();
-    let task = glib::MainContext::default().spawn_local(async move {
+    let mut task = writer.spawn(async move {
         write_staged_archive(
             &worker_destination,
             &worker_archive,
@@ -164,25 +228,17 @@ fn compression_new_archive_staging_stays_private_until_publish() -> Result<(), B
             move |mut file| {
                 file.write_all(b"created")
                     .map_err(|error| error.to_string())?;
-                worker_started.store(true, Ordering::Release);
-                while !worker_release.load(Ordering::Acquire) {
-                    std::thread::yield_now();
-                }
-                Ok(())
+                Ok(hold()?)
             },
         )
         .await
     });
-    let context = glib::MainContext::default();
-    while !started.load(Ordering::Acquire) {
-        context.iteration(false);
-        std::thread::yield_now();
-    }
+    writer.wait_until_held(&mut task)?;
     assert_eq!(compression_stage_mode(&destination)?, 0o600);
 
-    release.store(true, Ordering::Release);
+    writer.release();
     assert_eq!(
-        context.block_on(task)?,
+        glib::MainContext::default().block_on(task)?,
         Ok(("created.zip".to_owned(), None, None))
     );
     assert_eq!(fs::read(&archive)?, b"created");
@@ -894,18 +950,16 @@ fn cancelling_staged_compression_waits_for_worker_exit_before_cleanup() -> Resul
     let destination = root.path().to_path_buf();
     let archive = destination.join("existing.zip");
     fs::write(&archive, b"original")?;
-    let started = Arc::new(AtomicBool::new(false));
-    let release = Arc::new(AtomicBool::new(false));
+    let writer = HeldWriter::default();
+    let hold = writer.hold();
     let finished = Arc::new(AtomicBool::new(false));
     let cancelled = Arc::new(AtomicBool::new(false));
     let task_cancelled = cancelled.clone();
     let worker_cancelled = cancelled.clone();
-    let worker_started = started.clone();
-    let worker_release = release.clone();
     let worker_finished = finished.clone();
     let worker_destination = destination.clone();
     let worker_archive = archive.clone();
-    let task = glib::MainContext::default().spawn_local(async move {
+    let mut task = writer.spawn(async move {
         write_staged_archive(
             &worker_destination,
             &worker_archive,
@@ -914,28 +968,21 @@ fn cancelling_staged_compression_waits_for_worker_exit_before_cleanup() -> Resul
             move |mut file| {
                 file.write_all(b"partial")
                     .map_err(|error| error.to_string())?;
-                worker_started.store(true, Ordering::Release);
-                while !worker_release.load(Ordering::Acquire) {
-                    std::thread::yield_now();
-                }
+                hold()?;
                 worker_finished.store(true, Ordering::Release);
                 super::check_archive_cancelled(&worker_cancelled)
             },
         )
         .await
     });
-    let context = glib::MainContext::default();
-    while !started.load(Ordering::Acquire) {
-        context.iteration(false);
-        std::thread::yield_now();
-    }
+    writer.wait_until_held(&mut task)?;
     assert_eq!(stages(&destination, COMPRESSION_STAGE)?.len(), 1);
 
     cancelled.store(true, Ordering::Release);
     assert!(!finished.load(Ordering::Acquire));
     assert_eq!(stages(&destination, COMPRESSION_STAGE)?.len(), 1);
-    release.store(true, Ordering::Release);
-    let result = context.block_on(task)?;
+    writer.release();
+    let result = glib::MainContext::default().block_on(task)?;
     assert!(matches!(result, Err(ArchiveError::Cancelled)));
     assert!(finished.load(Ordering::Acquire));
     assert!(stages(&destination, COMPRESSION_STAGE)?.is_empty());
