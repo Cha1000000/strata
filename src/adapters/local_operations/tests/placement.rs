@@ -1381,7 +1381,8 @@ fn names_ntfs_3g_would_cut_are_never_renamed_over() -> Result<(), Box<dyn Error>
         ..ntfs_3g()
     };
     let (fits, cut, accented) = ("x".repeat(236), "x".repeat(237), "é".repeat(120));
-    let rows: [(Preset, bool, &str, bool, Result<Placed, PlaceError>); 9] = [
+    type Row<'a> = (Preset, bool, &'a str, bool, Result<Placed, PlaceError>);
+    let rows: [Row<'_>; 9] = [
         (ntfs_3g, true, &fits, false, Ok(ReservedDirectory)),
         (ntfs_3g, true, &cut, false, Ok(AfterCheck)),
         (ntfs_3g, true, &cut, true, Err(Exists)),
