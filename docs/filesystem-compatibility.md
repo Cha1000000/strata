@@ -516,9 +516,12 @@ if it is still what the copy read:
 - **Folders** are opened and checked like entries, and removed once empty. A folder that gained
   entries, or another folder put at its name, stays.
 - **The copy itself.** The move carries the identities of the entries it created, rather than
-  adopting whatever is at a destination name afterwards. Before deleting sources it checks the
-  published root and copied descendants; a merge also checks every merged ancestor and the actual
-  numbered placement names. If any of these entries is missing or has another identity, nothing
+  adopting whatever is at a destination name afterwards, and the size and modification time it
+  left each file with, as a stat after the close reports them on FUSE and SMB. Before deleting
+  sources it checks the published root and copied descendants; a merge also checks every merged
+  ancestor and the actual numbered placement names. If any of these entries is missing, has
+  another identity, or is a file of another size or modification time, as one rewritten in place
+  or another file given its freed inode number within its birth time's tick (as on ntfs3), nothing
   of that item is deleted. A fallback that copies out of a stage records the newly created copy's
   identities, not the discarded stage's.
 

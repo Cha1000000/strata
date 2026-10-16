@@ -1864,66 +1864,111 @@ fn moving_from_a_share_to_a_remote_target_right_after_a_paste_there_deletes_its_
 #[test]
 fn a_moved_source_stays_when_its_copy_is_gone_before_the_deletion() -> Result<(), Box<dyn Error>> {
     let _serial = serial()?;
-    for (conflict, published) in [
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    enum Replaced {
+        No,
+        Yes,
+        /// Rewritten with as many bytes, as a file that takes the copy's freed
+        /// inode number within its birth time's tick also looks, on ntfs3.
+        InPlace,
+    }
+    let rows = [
         (TransferConflict::FailIfExists, None),
         (TransferConflict::ReplaceExisting, None),
         (TransferConflict::FailIfExists, Some(Op::LinkFd)),
         (TransferConflict::FailIfExists, Some(Op::Rename)),
         (TransferConflict::ReplaceExisting, Some(Op::Exchange)),
-    ] {
-        for replaced in [false, true] {
-            let row = format!("{conflict:?}, published: {published:?}, replaced: {replaced}");
-            let root = tempfile::tempdir()?;
-            let sources = root.path().join("sources");
-            let destination = root.path().join("destination");
-            fs::create_dir(&sources)?;
-            fs::create_dir(&destination)?;
-            let source = sources.join("notes.txt");
-            fs::write(&source, b"notes")?;
-            if conflict == TransferConflict::ReplaceExisting {
-                fs::write(destination.join("notes.txt"), b"old")?;
-            }
-            let copy = destination.join("notes.txt");
-            let racer: super::fs_quirks::Racer = Box::new(move || {
-                fs::remove_file(&copy).expect("remove the copy");
-                if replaced {
-                    fs::write(&copy, b"other").expect("put another file there");
-                }
-            });
-            let _sources = FsQuirks::install(&sources, Quirks::default());
-            let mut quirks = Quirks {
-                trash: super::fs_quirks::Trash::Unsupported,
-                ..Quirks::ext4()
-            };
-            if let Some(op) = published {
-                quirks.after.push((op, "notes.txt", 0, racer));
-                if op == Op::Rename {
-                    quirks.tmpfile = Support::Rejected(Errno::OPNOTSUPP);
-                }
-            } else {
-                quirks.before.push((Op::SyncFs, "*", 0, racer));
-            }
-            let _destination = FsQuirks::install(&destination, quirks);
-
-            let (_operation, events) = paste_move(98, &destination, &source, conflict);
-            pump_until_transfer(&events);
-
-            assert!(
-                matches!(
-                    terminal_transfer(&events.borrow()),
-                    Some(OperationEvent::Pasted { .. })
-                ),
-                "{row}: {:?}",
-                events.borrow()
-            );
-            assert_eq!(fs::read(&source)?, b"notes", "{row}");
-            assert_eq!(
-                reported(&events).kept,
-                [kept(source.clone(), KeptCause::CopyGone)],
-                "{row}"
-            );
+    ]
+    .into_iter()
+    .flat_map(|(conflict, published)| {
+        [Replaced::No, Replaced::Yes].map(|replaced| (conflict, published, replaced))
+    })
+    .chain([(TransferConflict::FailIfExists, None, Replaced::InPlace)]);
+    for (conflict, published, replaced) in rows {
+        let row = format!("{conflict:?}, published: {published:?}, replaced: {replaced:?}");
+        let root = tempfile::tempdir()?;
+        let sources = root.path().join("sources");
+        let destination = root.path().join("destination");
+        fs::create_dir(&sources)?;
+        fs::create_dir(&destination)?;
+        let source = sources.join("notes.txt");
+        fs::write(&source, b"notes")?;
+        if conflict == TransferConflict::ReplaceExisting {
+            fs::write(destination.join("notes.txt"), b"old")?;
         }
+        let copy = destination.join("notes.txt");
+        let racer: super::fs_quirks::Racer = Box::new(move || {
+            if replaced != Replaced::InPlace {
+                fs::remove_file(&copy).expect("remove the copy");
+            }
+            if replaced != Replaced::No {
+                fs::write(&copy, b"other").expect("put another file there");
+            }
+        });
+        let _sources = FsQuirks::install(&sources, Quirks::default());
+        let mut quirks = Quirks {
+            trash: super::fs_quirks::Trash::Unsupported,
+            ..Quirks::ext4()
+        };
+        if let Some(op) = published {
+            quirks.after.push((op, "notes.txt", 0, racer));
+            if op == Op::Rename {
+                quirks.tmpfile = Support::Rejected(Errno::OPNOTSUPP);
+            }
+        } else {
+            quirks.before.push((Op::SyncFs, "*", 0, racer));
+        }
+        let _destination = FsQuirks::install(&destination, quirks);
+
+        let (_operation, events) = paste_move(98, &destination, &source, conflict);
+        pump_until_transfer(&events);
+
+        assert!(
+            matches!(
+                terminal_transfer(&events.borrow()),
+                Some(OperationEvent::Pasted { .. })
+            ),
+            "{row}: {:?}",
+            events.borrow()
+        );
+        assert_eq!(fs::read(&source).ok(), Some(b"notes".to_vec()), "{row}");
+        assert_eq!(
+            reported(&events).kept,
+            [kept(source.clone(), KeptCause::CopyGone)],
+            "{row}"
+        );
     }
+    Ok(())
+}
+
+#[test]
+fn a_recent_source_is_deleted_once_a_daemon_stamped_its_copy_again_at_close()
+-> Result<(), Box<dyn Error>> {
+    let _serial = serial()?;
+    let root = tempfile::tempdir()?;
+    let sources = root.path().join("sources");
+    let destination = root.path().join("destination");
+    fs::create_dir(&sources)?;
+    fs::create_dir(&destination)?;
+    let source = sources.join("notes.txt");
+    fs::write(&source, b"notes")?;
+    let _sources = FsQuirks::install(&sources, Quirks::default());
+    // A FUSE writeback cache stamps the close time, within the 2 s of the
+    // source's that the times check lets stand.
+    let _destination = FsQuirks::install(
+        &destination,
+        Quirks {
+            times_reset_at_close: true,
+            ..Quirks::sshfs()
+        },
+    );
+
+    let (_operation, events) =
+        paste_move(98, &destination, &source, TransferConflict::FailIfExists);
+    pump_until_transfer(&events);
+
+    assert_eq!(fs::read(destination.join("notes.txt"))?, b"notes");
+    assert!(!source.exists(), "{:?}", reported(&events).kept);
     Ok(())
 }
 

@@ -502,11 +502,17 @@ impl Ownership {
                 || self.states.get(path).is_some_and(|state| state.holds(stat)))
     }
 
+    /// A file rewritten in place, or another one given its inode number and
+    /// birth time, shows only in its size or modification time.
+    fn holds(&self, path: &Path, stat: &EntryStat) -> bool {
+        self.matches(path, stat) && self.states.get(path).is_none_or(|state| state.holds(stat))
+    }
+
     pub(super) fn stays(&self, fs: &dyn FsOps, at: Entry<'_>) -> bool {
         let Ok(stat) = fs.stat(at, true) else {
             return false;
         };
-        if !self.matches(Path::new(""), &stat) {
+        if !self.holds(Path::new(""), &stat) {
             return false;
         }
         if self.descendants.is_empty() {
@@ -531,7 +537,7 @@ impl Ownership {
             };
             let at = Entry::new(&dir, name);
             fs.stat(at, true)
-                .is_ok_and(|stat| self.matches(path, &stat))
+                .is_ok_and(|stat| self.holds(path, &stat))
         })
     }
 }

@@ -2020,11 +2020,15 @@ impl Copy {
     ) -> Result<(), Failure> {
         snapshot.apply(self.fs, fd, created, parent, mount, &self.refused_xattrs)?;
         let stat = self.fs.stat_fd(fd)?;
-        lock(&self.written).insert(
-            (created.identity.device, created.identity.inode),
-            (created.identity, manifest::State::of(&stat)),
-        );
+        self.record_state(created.identity, &stat);
         Ok(())
+    }
+
+    fn record_state(&self, identity: LocalFileIdentity, stat: &EntryStat) {
+        lock(&self.written).insert(
+            (identity.device, identity.inode),
+            (identity, manifest::State::of(stat)),
+        );
     }
 
     /// NFSv4 write delegations set the times at close, and FUSE daemons with
@@ -2040,7 +2044,15 @@ impl Copy {
         let lost = match family {
             Family::Nfs4 => true,
             Family::Fuse | Family::Smb => match self.fs.stat(entry, true) {
-                Ok(current) => !snapshot.times_match(&current),
+                Ok(current) if snapshot.times_match(&current) => {
+                    // Times moved by less than the check notices stay, so the
+                    // copy is known by them from now on.
+                    if same_entry(&current, identity, family) {
+                        self.record_state(identity, &current);
+                    }
+                    false
+                }
+                Ok(_) => true,
                 Err(error) if is_fatal(error) => return Err(error.into()),
                 Err(_) => false,
             },
