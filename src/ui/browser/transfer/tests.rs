@@ -3169,23 +3169,30 @@ fn a_conflict_prompt_says_which_name_the_item_takes_and_what_a_merge_overwrites(
             merge,
         )
     };
+    let saved_as = rust_i18n::t!(
+        "“%{name}” will be saved as “%{new_name}” in this location.",
+        name = "a:b",
+        new_name = "a_b"
+    );
     for merge in [false, true] {
         let as_named = explanation("a_b", "a_b", false, merge);
-        let renamed = explanation("a:b", "a_b", false, merge);
-        assert!(renamed.contains("a:b"), "{renamed}");
-        assert!(
-            renamed.len() > as_named.len() && renamed.ends_with(&as_named),
-            "{renamed}"
-        );
         assert!(!as_named.contains("a:b"), "{as_named}");
+        assert_eq!(
+            explanation("a:b", "a_b", false, merge),
+            crate::i18n::join_sentences(&saved_as, &as_named)
+        );
     }
     let replacing = explanation("folder", "folder", true, false);
     assert_eq!(replacing, explanation("folder", "folder", false, false));
     let merging = explanation("folder", "folder", false, true);
-    let merging_fixed = explanation("folder", "folder", true, true);
-    assert!(
-        merging_fixed.len() > merging.len() && merging_fixed.starts_with(&merging),
-        "{merging_fixed}"
+    assert_eq!(
+        explanation("folder", "folder", true, true),
+        crate::i18n::join_sentences(
+            &merging,
+            &crate::i18n::tr(
+                "Items whose names change to suit this location overwrite items with the new name."
+            )
+        )
     );
 }
 

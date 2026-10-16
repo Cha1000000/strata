@@ -83,7 +83,8 @@ impl OperationCompletion {
         publish(UndoEntry::Trash(locations));
     }
 
-    /// Whether undo leaves out moved items whose sources kept entries.
+    /// Records the undo of a transfer; returns the moved items it leaves out
+    /// because their sources kept entries, in the order they moved.
     fn record_transfer_undo(
         &self,
         (moved, moved_to, report): (&[Location], &HashMap<Location, Location>, &TransferReport),

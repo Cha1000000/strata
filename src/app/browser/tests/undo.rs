@@ -1300,28 +1300,39 @@ fn a_move_undo_record_keeps_the_names_the_move_changed_inside_its_item() {
 #[test]
 fn an_item_whose_move_left_entries_behind_is_excluded_from_the_move_undo() {
     let project = Location::local("/fixture/project");
+    let (zeta, alpha) = (
+        Location::local("/fixture/zeta"),
+        Location::local("/fixture/alpha"),
+    );
     let moved = Location::local("/fixture/report.txt");
     use crate::services::{KeptCause, SpecialKind};
-    // An entry the move left in the project, the project itself, and a link
-    // left out whole, which never moved.
+    // An entry the move left in the project, the project itself, a link left
+    // out whole, which never moved, and entries left in two items, which are
+    // named in the order they moved.
     for (left, cause, moving, kept_out_of_undo) in [
         (
-            "/fixture/project/notes.txt",
+            &["/fixture/project/notes.txt"][..],
             KeptCause::Changed,
             vec![project.clone()],
             vec![project.clone()],
         ),
         (
-            "/fixture/project",
+            &["/fixture/project"],
             KeptCause::Changed,
             vec![project.clone()],
             vec![project.clone()],
         ),
         (
-            "/fixture/link",
+            &["/fixture/link"],
             KeptCause::Skipped(SpecialKind::Symlink),
             Vec::new(),
             Vec::new(),
+        ),
+        (
+            &["/fixture/alpha/a.txt", "/fixture/zeta/z.txt"],
+            KeptCause::Changed,
+            vec![zeta.clone(), alpha.clone()],
+            vec![zeta.clone(), alpha.clone()],
         ),
     ] {
         let browser = Browser::new(Rc::new(FakeFileSource));
@@ -1343,10 +1354,13 @@ fn an_item_whose_move_left_entries_behind_is_excluded_from_the_move_undo() {
         emit(OperationEvent::ItemsReported {
             request_id,
             report: crate::services::TransferReport {
-                kept: vec![crate::services::KeptItem {
-                    location: Location::local(left),
-                    cause,
-                }],
+                kept: left
+                    .iter()
+                    .map(|left| crate::services::KeptItem {
+                        location: Location::local(left),
+                        cause: cause.clone(),
+                    })
+                    .collect(),
                 ..Default::default()
             },
         });
@@ -1366,7 +1380,7 @@ fn an_item_whose_move_left_entries_behind_is_excluded_from_the_move_undo() {
             }])),
             "moving the project back would replace the newer notes left in its folder"
         );
-        assert_eq!(*shown.borrow(), [kept_out_of_undo], "{left}");
+        assert_eq!(*shown.borrow(), [kept_out_of_undo], "{left:?}");
     }
 }
 
