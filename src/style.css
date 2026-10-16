@@ -6985,47 +6985,57 @@ popover.settings-action-library > contents {
 }
 
 .settings-action-tabs > header {
-  padding: 0 22px;
+  padding: 4px 22px 0;
   border-bottom: 1px solid alpha(@strata_border, 0.35);
 }
 
 /* GTK's negative tab-strip margins otherwise put the indicator below the divider. */
 .settings-action-tabs > header > tabs {
   margin: 0;
+  border-spacing: 4px;
 }
 
 .settings-action-tabs > header > tabs > tab {
   background: transparent;
   border: none;
   border-bottom: 2px solid transparent;
-  border-radius: 0;
+  border-radius: 6px 6px 0 0;
   box-shadow: none;
   color: @strata_dim_text;
-  margin: 0 20px 0 0;
+  margin: 0;
   min-height: 36px;
-  padding: 0;
+  padding: 0 14px;
   outline-offset: -4px;
 }
 
 .settings-action-tabs > header > tabs > tab label {
-  font-size: 0.85em;
-  font-weight: 600;
-  letter-spacing: 1px;
-  text-transform: uppercase;
+  font-size: 0.95em;
+  font-weight: 500;
+  letter-spacing: 0;
+  text-transform: none;
 }
 
 .settings-action-tabs > header > tabs > tab:hover {
   color: @strata_text;
-  background: alpha(@strata_highlight, 0.25);
+  background: alpha(@strata_highlight, 0.4);
 }
 
 .settings-action-tabs > header > tabs > tab:checked {
-  color: @strata_text;
+  color: @strata_accent;
+  background: alpha(@strata_accent, 0.12);
   border-bottom-color: @strata_accent;
 }
 
+.settings-action-tabs > header > tabs > tab:checked:hover {
+  background: alpha(@strata_accent, 0.18);
+}
+
+.settings-action-tabs > header > tabs > tab:active {
+  background: alpha(@strata_accent, 0.22);
+}
+
 .settings-action-tabs > header > tabs > tab:focus-visible {
-  outline: 2px solid alpha(@strata_accent, 0.5);
+  outline: 2px solid @strata_accent;
 }
 
 .settings-action-page {
