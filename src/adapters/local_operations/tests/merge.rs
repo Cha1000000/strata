@@ -650,18 +650,46 @@ fn an_item_put_at_a_placed_name_right_after_placing_stays_there() -> Result<(), 
     // A program that saves by renaming over the name does so as soon as the
     // child is placed: by a rename, or by a link and the stage's unlink.
     fn unstable_inodes() -> Quirks {
-        Quirks { rename_flags: super::fs_quirks::Support::Supported, ..Quirks::sshfs() }
+        Quirks {
+            rename_flags: super::fs_quirks::Support::Supported,
+            ..Quirks::sshfs()
+        }
     }
     let rows: [(&str, Preset, Op, Option<&str>); 9] = [
         ("rename", Quirks::default, Op::Rename, None),
         ("link", Quirks::without_rename_flags, Op::Unlink, None),
-        ("unstable inode without birth time", unstable_inodes, Op::Rename, None),
-        ("replaced descendant", Quirks::default, Op::Rename, Some("original")),
-        ("new descendant", Quirks::default, Op::Rename, Some("arrival")),
+        (
+            "unstable inode without birth time",
+            unstable_inodes,
+            Op::Rename,
+            None,
+        ),
+        (
+            "replaced descendant",
+            Quirks::default,
+            Op::Rename,
+            Some("original"),
+        ),
+        (
+            "new descendant",
+            Quirks::default,
+            Op::Rename,
+            Some("arrival"),
+        ),
         ("edited file", Quirks::default, Op::Rename, None),
-        ("edited descendant", Quirks::default, Op::Rename, Some("original")),
+        (
+            "edited descendant",
+            Quirks::default,
+            Op::Rename,
+            Some("original"),
+        ),
         ("edited same-size file", Quirks::default, Op::Rename, None),
-        ("edited same-size descendant", Quirks::default, Op::Rename, Some("original")),
+        (
+            "edited same-size descendant",
+            Quirks::default,
+            Op::Rename,
+            Some("original"),
+        ),
     ];
     for (row, preset, placed, descendant) in rows {
         let root = tempfile::tempdir()?;
@@ -677,15 +705,25 @@ fn an_item_put_at_a_placed_name_right_after_placing_stays_there() -> Result<(), 
         }
         let saved = root.path().join("saved.txt");
         let same_size = row.starts_with("edited same-size");
-        let contents: &'static [u8] = if same_size { b"modified" } else { b"saved by another program" };
+        let contents: &'static [u8] = if same_size {
+            b"modified"
+        } else {
+            b"saved by another program"
+        };
         fs::write(&saved, contents)?;
-        let over = descendant.map_or_else(|| target.join("a.txt"), |child| target.join("a.txt").join(child));
+        let over = descendant.map_or_else(
+            || target.join("a.txt"),
+            |child| target.join("a.txt").join(child),
+        );
         let in_place = row.starts_with("edited");
         let racer: Racer = Box::new(move || {
             if in_place {
                 fs::write(&over, contents).expect("edit the placed entry");
                 if same_size {
-                    fs::File::open(&over).expect("edited file").set_modified(std::time::UNIX_EPOCH + Duration::from_secs(1)).expect("detectable edit time");
+                    fs::File::open(&over)
+                        .expect("edited file")
+                        .set_modified(std::time::UNIX_EPOCH + Duration::from_secs(1))
+                        .expect("detectable edit time");
                 }
             } else {
                 fs::rename(&saved, &over).expect("rename over the placed name");
@@ -700,18 +738,23 @@ fn an_item_put_at_a_placed_name_right_after_placing_stays_there() -> Result<(), 
         );
         let (plans, on_merged) = recorded_plans();
         let merged = glib::MainContext::default().block_on(merge_local(
-            gio::File::for_path(&source), gio::File::for_path(&target), false,
-            gio::Cancellable::new(), &on_merged,
+            gio::File::for_path(&source),
+            gio::File::for_path(&target),
+            false,
+            gio::Cancellable::new(),
+            &on_merged,
         ));
         assert!(merged.is_ok(), "{row}: {merged:?}");
         let events = run_undo(undo_parts(plans.take()), staged_lookup(HashMap::new()));
-        assert!(restored(&events).is_none_or(|items| items.is_empty()), "{row}: {events:?}");
-        let surviving = descendant.map_or_else(|| target.join("a.txt"), |child| target.join("a.txt").join(child));
-        assert_eq!(
-            fs::read(surviving)?,
-            contents,
-            "{row}"
+        assert!(
+            restored(&events).is_none_or(|items| items.is_empty()),
+            "{row}: {events:?}"
         );
+        let surviving = descendant.map_or_else(
+            || target.join("a.txt"),
+            |child| target.join("a.txt").join(child),
+        );
+        assert_eq!(fs::read(surviving)?, contents, "{row}");
         assert_eq!(names(&target)?, ["a.txt"], "{row}");
     }
     Ok(())
@@ -2916,7 +2959,12 @@ fn a_merge_undo_without_trash_deletes_only_what_the_merge_created_unchanged()
 fn a_merge_undo_without_trash_deletes_what_its_paste_copied_only_if_unchanged()
 -> Result<(), Box<dyn Error>> {
     let _serial = serial()?;
-    for change in ["unchanged", "edited", "replaced before recording", "edited before recording"] {
+    for change in [
+        "unchanged",
+        "edited",
+        "replaced before recording",
+        "edited before recording",
+    ] {
         let edited = change != "unchanged";
         let root = tempfile::tempdir()?;
         let sources = root.path().join("sources");
@@ -2936,7 +2984,10 @@ fn a_merge_undo_without_trash_deletes_what_its_paste_copied_only_if_unchanged()
         )?;
         let mut after = Vec::new();
         if change.ends_with("before recording") {
-            for (op, name, relative) in [(Op::LinkFd, "notes.txt", "notes.txt"), (Op::Rename, "plain", "plain/a.txt")] {
+            for (op, name, relative) in [
+                (Op::LinkFd, "notes.txt", "notes.txt"),
+                (Op::Rename, "plain", "plain/a.txt"),
+            ] {
                 let saved = root.path().join(format!("saved-{name}"));
                 fs::write(&saved, b"concurrent arrival")?;
                 let over = destination.join(relative);
@@ -2951,7 +3002,13 @@ fn a_merge_undo_without_trash_deletes_what_its_paste_copied_only_if_unchanged()
                 after.push((op, name, 0, racer));
             }
         }
-        let _scope = FsQuirks::install(root.path(), without_trash(Quirks { after, ..Quirks::default() }));
+        let _scope = FsQuirks::install(
+            root.path(),
+            without_trash(Quirks {
+                after,
+                ..Quirks::default()
+            }),
+        );
         let item = |name: &str, conflict| PasteItem {
             source: Location::local(sources.join(name)),
             conflict,
@@ -3286,7 +3343,12 @@ fn a_failed_aside_puts_every_original_back_before_merging() -> Result<(), Box<dy
         ("b.txt", "old b"),
         ("mount/c.txt", "old c"),
     ];
-    for case in ["no safe placement", "second aside fails", "nested mount", "strict open crosses mount"] {
+    for case in [
+        "no safe placement",
+        "second aside fails",
+        "nested mount",
+        "strict open crosses mount",
+    ] {
         let root = tempfile::tempdir()?;
         let source = root.path().join("source");
         let target = root.path().join("target");
@@ -3353,7 +3415,8 @@ fn a_failed_aside_puts_every_original_back_before_merging() -> Result<(), Box<dy
 }
 
 #[test]
-fn a_flushed_merge_move_keeps_sources_when_published_entries_disappear() -> Result<(), Box<dyn Error>> {
+fn a_flushed_merge_move_keeps_sources_when_published_entries_disappear()
+-> Result<(), Box<dyn Error>> {
     let _serial = serial()?;
     for missing in ["", "nested", "nested/a.txt", "nested/a (1).txt"] {
         for replaced in [false, true] {
@@ -3366,37 +3429,66 @@ fn a_flushed_merge_move_keeps_sources_when_published_entries_disappear() -> Resu
             let mut before = Vec::new();
             if missing.ends_with("(1).txt") {
                 let taken = target.join("nested/a.txt");
-                let racer: Racer = Box::new(move || fs::write(&taken, b"arrival").expect("take name"));
+                let racer: Racer =
+                    Box::new(move || fs::write(&taken, b"arrival").expect("take name"));
                 before.push((Op::Rename, "a.txt", 0, racer));
             }
             let gone = target.join(missing);
             let racer: Racer = Box::new(move || {
                 if gone.is_dir() {
                     fs::remove_dir_all(&gone).expect("remove copied directory");
-                    if replaced { fs::create_dir(&gone).expect("replace directory"); }
+                    if replaced {
+                        fs::create_dir(&gone).expect("replace directory");
+                    }
                 } else {
                     fs::remove_file(&gone).expect("remove copied file");
-                    if replaced { fs::write(&gone, b"replacement").expect("replace file"); }
+                    if replaced {
+                        fs::write(&gone, b"replacement").expect("replace file");
+                    }
                 }
             });
             before.push((Op::SyncFs, "*", 0, racer));
-            let _quirks = FsQuirks::install(root.path(), without_trash(Quirks {
-                before,
-                ..Quirks::default()
-            }));
+            let _quirks = FsQuirks::install(
+                root.path(),
+                without_trash(Quirks {
+                    before,
+                    ..Quirks::default()
+                }),
+            );
             let events = run_paste(PasteRequest {
                 id: OperationRequestId(1619),
                 destination: Location::local(&destination),
-                items: vec![PasteItem { source: Location::local(&source), conflict: TransferConflict::Merge }],
+                items: vec![PasteItem {
+                    source: Location::local(&source),
+                    conflict: TransferConflict::Merge,
+                }],
                 move_sources: true,
             });
-            assert!(matches!(events.last(), Some(OperationEvent::Pasted { .. })), "{missing}, replaced {replaced}: {events:?}");
-            let kept = events.iter().filter_map(|event| match event {
-                OperationEvent::ItemsReported { report, .. } => Some(report.kept.clone()),
-                _ => None,
-            }).flatten().collect::<Vec<_>>();
-            assert_eq!(kept, [KeptItem { location: Location::local(&source), cause: KeptCause::CopyGone }], "{missing}, replaced {replaced}");
-            assert_eq!(fs::read(source.join("nested/a.txt"))?, b"incoming", "{missing}, replaced {replaced}");
+            assert!(
+                matches!(events.last(), Some(OperationEvent::Pasted { .. })),
+                "{missing}, replaced {replaced}: {events:?}"
+            );
+            let kept = events
+                .iter()
+                .filter_map(|event| match event {
+                    OperationEvent::ItemsReported { report, .. } => Some(report.kept.clone()),
+                    _ => None,
+                })
+                .flatten()
+                .collect::<Vec<_>>();
+            assert_eq!(
+                kept,
+                [KeptItem {
+                    location: Location::local(&source),
+                    cause: KeptCause::CopyGone
+                }],
+                "{missing}, replaced {replaced}"
+            );
+            assert_eq!(
+                fs::read(source.join("nested/a.txt"))?,
+                b"incoming",
+                "{missing}, replaced {replaced}"
+            );
         }
     }
     Ok(())

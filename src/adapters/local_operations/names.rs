@@ -1,7 +1,11 @@
 // SPDX-License-Identifier: MIT
 
-use std::{ffi::{OsStr, OsString}, os::unix::ffi::{OsStrExt, OsStringExt}, path::Path};
 use super::placement;
+use std::{
+    ffi::{OsStr, OsString},
+    os::unix::ffi::{OsStrExt, OsStringExt},
+    path::Path,
+};
 
 pub(super) fn parse_copy_suffix(stem: &OsStr) -> (&OsStr, Option<u64>) {
     let bytes = stem.as_bytes();
@@ -42,7 +46,10 @@ pub(super) fn duplicate_candidate_name(
 
 /// Keep Both's names: "name (1)", or one past the number it has, with a
 /// file's extension kept, wrapping past the largest number.
-pub(super) fn numbered_names(name: &OsStr, is_directory: bool) -> impl Iterator<Item = OsString> + '_ {
+pub(super) fn numbered_names(
+    name: &OsStr,
+    is_directory: bool,
+) -> impl Iterator<Item = OsString> + '_ {
     let (stem, extension) = if is_directory {
         (name, None)
     } else {
@@ -57,4 +64,3 @@ pub(super) fn numbered_names(name: &OsStr, is_directory: bool) -> impl Iterator<
         .take(placement::NUMBERED_NAME_ATTEMPTS as usize)
         .map(move |index| duplicate_candidate_name(base_stem, extension, index))
 }
-

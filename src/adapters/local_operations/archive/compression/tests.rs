@@ -33,35 +33,51 @@ use std::{
 };
 
 #[test]
-fn an_archive_replaced_immediately_after_publication_is_not_owned_for_undo() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock().map_err(|error| error.to_string())?;
+fn an_archive_replaced_immediately_after_publication_is_not_owned_for_undo()
+-> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
     for edited in [false, true] {
-    let root = tempdir_on_home_device()?;
-    let archive = root.path().join("existing.zip");
-    let _trash = HomeTrashGuard::new(&archive);
-    fs::write(&archive, b"original")?;
-    let arrival = root.path().join("arrival");
-    fs::write(&arrival, b"other program")?;
-    let over = archive.clone();
-    let racer = Box::new(move || {
-        if edited {
-            fs::write(&over, b"other program").expect("edit published archive");
-        } else {
-            fs::rename(&arrival, &over).expect("replace published archive");
-        }
-    });
-    let _quirks = FsQuirks::install(root.path(), Quirks {
-        after: vec![(Op::Rename, "existing.zip", 0, racer)],
-        ..Quirks::default()
-    });
-    let result = glib::MainContext::default().block_on(write_staged_archive(
-        root.path(), &archive, TransferConflict::ReplaceExisting, never_cancelled(),
-        |mut file| { file.write_all(b"archive").map_err(|error| error.to_string())?; Ok(()) },
-    ));
-    let (_, replaced, placed) = result?;
-    assert!(matches!(replaced, Some(ReplacedOriginal::Trashed(_))), "{replaced:?}");
-    assert!(placed.is_none());
-    assert_eq!(fs::read(&archive)?, b"other program");
+        let root = tempdir_on_home_device()?;
+        let archive = root.path().join("existing.zip");
+        let _trash = HomeTrashGuard::new(&archive);
+        fs::write(&archive, b"original")?;
+        let arrival = root.path().join("arrival");
+        fs::write(&arrival, b"other program")?;
+        let over = archive.clone();
+        let racer = Box::new(move || {
+            if edited {
+                fs::write(&over, b"other program").expect("edit published archive");
+            } else {
+                fs::rename(&arrival, &over).expect("replace published archive");
+            }
+        });
+        let _quirks = FsQuirks::install(
+            root.path(),
+            Quirks {
+                after: vec![(Op::Rename, "existing.zip", 0, racer)],
+                ..Quirks::default()
+            },
+        );
+        let result = glib::MainContext::default().block_on(write_staged_archive(
+            root.path(),
+            &archive,
+            TransferConflict::ReplaceExisting,
+            never_cancelled(),
+            |mut file| {
+                file.write_all(b"archive")
+                    .map_err(|error| error.to_string())?;
+                Ok(())
+            },
+        ));
+        let (_, replaced, placed) = result?;
+        assert!(
+            matches!(replaced, Some(ReplacedOriginal::Trashed(_))),
+            "{replaced:?}"
+        );
+        assert!(placed.is_none());
+        assert_eq!(fs::read(&archive)?, b"other program");
     }
     Ok(())
 }
@@ -890,8 +906,11 @@ fn cancelling_staged_compression_waits_for_worker_exit_before_cleanup() -> Resul
 }
 
 #[test]
-fn staged_archives_are_not_published_after_cancellation_or_close_failure() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock().map_err(|error| error.to_string())?;
+fn staged_archives_are_not_published_after_cancellation_or_close_failure()
+-> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
     for replacing in [false, true] {
         for boundary in ["encoding", "close", "close error"] {
             let root = tempfile::tempdir()?;
@@ -901,23 +920,38 @@ fn staged_archives_are_not_published_after_cancellation_or_close_failure() -> Re
             }
             let cancelled = Arc::new(AtomicBool::new(false));
             let on_close = cancelled.clone();
-            let mut quirks = Quirks { trash: Trash::Unsupported, ..Quirks::default() };
+            let mut quirks = Quirks {
+                trash: Trash::Unsupported,
+                ..Quirks::default()
+            };
             if boundary == "close" {
-                quirks.after.push((Op::Close, ".strata-compression-*", 0, Box::new(move || {
-                    on_close.store(true, Ordering::Release);
-                })));
+                quirks.after.push((
+                    Op::Close,
+                    ".strata-compression-*",
+                    0,
+                    Box::new(move || {
+                        on_close.store(true, Ordering::Release);
+                    }),
+                ));
             } else if boundary == "close error" {
-                quirks.fail.push((Op::Close, ".strata-compression-*", 0, Errno::IO));
+                quirks
+                    .fail
+                    .push((Op::Close, ".strata-compression-*", 0, Errno::IO));
             }
             let _scope = FsQuirks::install(root.path(), quirks);
             let on_write = cancelled.clone();
             let result = glib::MainContext::default().block_on(write_staged_archive(
                 root.path(),
                 &archive,
-                if replacing { TransferConflict::ReplaceExisting } else { TransferConflict::FailIfExists },
+                if replacing {
+                    TransferConflict::ReplaceExisting
+                } else {
+                    TransferConflict::FailIfExists
+                },
                 cancelled,
                 move |mut file| {
-                    file.write_all(b"replacement").map_err(|error| error.to_string())?;
+                    file.write_all(b"replacement")
+                        .map_err(|error| error.to_string())?;
                     if boundary == "encoding" {
                         on_write.store(true, Ordering::Release);
                     }
@@ -925,9 +959,15 @@ fn staged_archives_are_not_published_after_cancellation_or_close_failure() -> Re
                 },
             ));
             if boundary == "close error" {
-                assert!(matches!(result, Err(ArchiveError::Failed(_))), "{boundary}, replacing {replacing}: {result:?}");
+                assert!(
+                    matches!(result, Err(ArchiveError::Failed(_))),
+                    "{boundary}, replacing {replacing}: {result:?}"
+                );
             } else {
-                assert!(matches!(result, Err(ArchiveError::Cancelled)), "{boundary}, replacing {replacing}: {result:?}");
+                assert!(
+                    matches!(result, Err(ArchiveError::Cancelled)),
+                    "{boundary}, replacing {replacing}: {result:?}"
+                );
             }
             if replacing {
                 assert_eq!(fs::read(&archive)?, b"original");

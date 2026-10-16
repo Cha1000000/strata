@@ -1,11 +1,22 @@
 // SPDX-License-Identifier: MIT
 
-use crate::{model::Location, services::{OperationEvent, OperationRequestId, TransferReport}};
-use gtk::{gio, glib, prelude::*};
 use super::copy_engine::SharedProgress;
+use crate::{
+    model::Location,
+    services::{OperationEvent, OperationRequestId, TransferReport},
+};
+use gtk::{gio, glib, prelude::*};
 
-use std::{cell::{Cell, RefCell}, rc::Rc, sync::{Arc, atomic::{AtomicU64, Ordering}}, time::{Duration, Instant}};
 use super::{await_cancellable, io_error};
+use std::{
+    cell::{Cell, RefCell},
+    rc::Rc,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::{Duration, Instant},
+};
 
 pub(super) const TRANSFER_PROGRESS_INTERVAL: Duration = Duration::from_millis(33);
 // Smaller copies normally finish before the first sample; keep them on GIO's lower-overhead path.
@@ -180,7 +191,11 @@ impl TransferProgressTracker {
         self.emit_if_due();
     }
 
-    pub(super) fn begin_file(self: &Rc<Self>, name: String, track_bytes: bool) -> FileTransferProgress {
+    pub(super) fn begin_file(
+        self: &Rc<Self>,
+        name: String,
+        track_bytes: bool,
+    ) -> FileTransferProgress {
         self.set_current_file(name);
         let byte_progress = track_bytes.then(|| {
             let reported_bytes = Arc::new(AtomicU64::new(0));
@@ -430,4 +445,3 @@ pub(super) async fn move_file_with_progress(
     )
     .await
 }
-

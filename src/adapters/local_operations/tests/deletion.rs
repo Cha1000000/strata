@@ -8,7 +8,8 @@ use crate::adapters::local_operations::{
 use std::sync::{Barrier, atomic::Ordering, mpsc};
 
 #[test]
-fn permanent_deletion_reports_injected_unlink_failures_without_removing_the_item() -> Result<(), Box<dyn Error>> {
+fn permanent_deletion_reports_injected_unlink_failures_without_removing_the_item()
+-> Result<(), Box<dyn Error>> {
     let _serial = serial()?;
     for directory in [false, true] {
         let root = tempfile::tempdir()?;
@@ -18,12 +19,15 @@ fn permanent_deletion_reports_injected_unlink_failures_without_removing_the_item
         } else {
             fs::write(&path, b"keep")?;
         }
-        let quirks = FsQuirks::install(root.path(), Quirks {
-            fail: vec![(Op::Unlink, "item", 0, rustix::io::Errno::IO)],
-            ..Quirks::default()
-        });
+        let quirks = FsQuirks::install(
+            root.path(),
+            Quirks {
+                fail: vec![(Op::Unlink, "item", 0, rustix::io::Errno::IO)],
+                ..Quirks::default()
+            },
+        );
         let result = glib::MainContext::default().block_on(
-            permanently_delete_local_path_if_unchanged(path.clone(), None, gio::Cancellable::new())
+            permanently_delete_local_path_if_unchanged(path.clone(), None, gio::Cancellable::new()),
         );
         assert!(result.is_err());
         assert!(path.exists());
@@ -1054,46 +1058,78 @@ fn verified_trash_learns_fuse_refusals_and_cleans_leftovers_on_both_worker_route
             return;
         };
         for synchronous in [false, true] {
-            for trash in [Trash::FalseWithoutError, Trash::SucceedsWithoutMoving, Trash::ProtocolRefused] {
+            for trash in [
+                Trash::FalseWithoutError,
+                Trash::SucceedsWithoutMoving,
+                Trash::ProtocolRefused,
+            ] {
                 let root = tempfile::TempDir::new_in(volume.path()).expect("root");
                 let folder = root.path().join("folder");
                 fs::create_dir(&folder).expect("folder");
                 fs::write(folder.join("keep"), b"keep").expect("contents");
                 let leftovers = crate::adapters::trash_support::tests::leftover_trash(root.path());
                 let created = leftovers.clone();
-                let _quirks = FsQuirks::install(root.path(), Quirks {
-                    trash,
-                    before: vec![(Op::Trash, "folder", 0, Box::new(move || {
-                        fs::create_dir_all(created.join("files")).expect("files");
-                        fs::create_dir_all(created.join("info")).expect("info");
-                    }))],
-                    ..Quirks::default()
-                });
+                let _quirks = FsQuirks::install(
+                    root.path(),
+                    Quirks {
+                        trash,
+                        before: vec![(
+                            Op::Trash,
+                            "folder",
+                            0,
+                            Box::new(move || {
+                                fs::create_dir_all(created.join("files")).expect("files");
+                                fs::create_dir_all(created.join("info")).expect("info");
+                            }),
+                        )],
+                        ..Quirks::default()
+                    },
+                );
                 crate::adapters::volume::set_mountinfo_for_isolated_test(Some(format!(
-                    "9001 1 0:91 / {} rw - fuse.sshfs fixture rw\n", root.path().display()
+                    "9001 1 0:91 / {} rw - fuse.sshfs fixture rw\n",
+                    root.path().display()
                 )));
                 let context = glib::MainContext::default();
                 let result = if synchronous {
                     let path = folder.clone();
-                    context.block_on(super::super::run_blocking(move || {
-                        let parent = open_local_parent_directory(path.parent().expect("parent")).expect("open");
-                        let at = super::super::Entry::new(&parent, path.file_name().expect("name"));
-                        let identity = super::super::fs().stat(at, false).expect("stat").identity;
-                        // Keep the typed error as the worker's value.
-                        Ok(super::super::trash::trash_verified(at, &path, identity, &gio::Cancellable::new()))
-                    })).expect("worker")
+                    context
+                        .block_on(super::super::run_blocking(move || {
+                            let parent =
+                                open_local_parent_directory(path.parent().expect("parent"))
+                                    .expect("open");
+                            let at =
+                                super::super::Entry::new(&parent, path.file_name().expect("name"));
+                            let identity =
+                                super::super::fs().stat(at, false).expect("stat").identity;
+                            Ok(super::super::trash::trash_verified(
+                                at,
+                                &path,
+                                identity,
+                                &gio::Cancellable::new(),
+                            ))
+                        }))
+                        .expect("worker")
                 } else {
-                    context.block_on(trash_support::trash_with_cleanup(
-                        &gio::File::for_path(&folder), &gio::Cancellable::new(),
-                    )).map(drop)
+                    context
+                        .block_on(trash_support::trash_with_cleanup(
+                            &gio::File::for_path(&folder),
+                            &gio::Cancellable::new(),
+                        ))
+                        .map(drop)
                 };
                 let expected = if matches!(trash, Trash::ProtocolRefused) {
                     UnsupportedReason::FuseRefused
                 } else {
                     UnsupportedReason::Reported
                 };
-                assert_eq!(result.expect_err("not moved").failure, TrashFailure::Unsupported(expected));
-                assert_eq!(trash_support::unsupported_reason_for(&folder).map(|(_, reason)| reason), Some(expected));
+                assert_eq!(
+                    result.expect_err("not moved").failure,
+                    TrashFailure::Unsupported(expected)
+                );
+                assert_eq!(
+                    trash_support::unsupported_reason_for(&folder).map(|(_, reason)| reason),
+                    Some(expected)
+                );
                 assert!(!leftovers.exists(), "{synchronous:?} {trash:?}");
                 assert_eq!(fs::read(folder.join("keep")).expect("kept"), b"keep");
                 trash_support::forget_all();

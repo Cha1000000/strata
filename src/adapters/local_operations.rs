@@ -4,30 +4,36 @@
 mod tests;
 
 mod archive;
-mod native_fs;
 mod names;
-#[cfg(test)]
-use names::parse_copy_suffix;
+mod native_fs;
 #[cfg(test)]
 use names::duplicate_candidate_name;
 use names::numbered_names;
-pub(super) use native_fs::open_local_child_directory;
+#[cfg(test)]
+use names::parse_copy_suffix;
 use native_fs::LocalFileIdentity;
+pub(super) use native_fs::open_local_child_directory;
 #[cfg(test)]
 use native_fs::retry_local_open;
 
 use native_fs::{open_local_parent_directory, os_error_text};
 
 mod progress;
+use progress::BYTE_PROGRESS_MIN_FILE_SIZE;
+use progress::FileTransferProgress;
+use progress::Reported;
 #[cfg(test)]
 use progress::TRANSFER_PROGRESS_INTERVAL;
-use progress::BYTE_PROGRESS_MIN_FILE_SIZE;
-use progress::Reported;
 use progress::TransferProgressTracker;
-use progress::FileTransferProgress;
 use progress::copy_file_with_progress;
 use progress::move_file_with_progress;
 mod replacement;
+#[cfg(test)]
+use replacement::CopyStep;
+#[cfg(test)]
+use replacement::MergeCopied;
+#[cfg(test)]
+use replacement::MergeCopy;
 #[cfg(test)]
 use replacement::StageContent;
 #[cfg(test)]
@@ -35,99 +41,93 @@ use replacement::StagedSibling;
 use replacement::placement_error;
 #[cfg(test)]
 use replacement::publish_staged_without_replace;
-#[cfg(test)]
-use replacement::CopyStep;
-#[cfg(test)]
-use replacement::MergeCopy;
-#[cfg(test)]
-use replacement::MergeCopied;
 
 use replacement::split_local_path;
 
-use replacement::replace_owing;
-#[cfg(test)]
-use replacement::replace_local_with;
-#[cfg(test)]
-use replacement::publish_staged_replacement;
 use replacement::Copying;
 #[cfg(test)]
-use replacement::replace_local;
+use replacement::MergeHooks;
 #[cfg(test)]
 use replacement::MergePlan;
 #[cfg(test)]
 use replacement::StageOverwrite;
-#[cfg(test)]
-use replacement::trash_stage_overwrite;
-#[cfg(test)]
-use replacement::MergeHooks;
-use replacement::merge_owing;
 use replacement::can_trash;
-#[cfg(test)]
-use replacement::merge_local_with;
-use replacement::progress_merge_hooks;
 #[cfg(test)]
 use replacement::merge_copy;
 #[cfg(test)]
 use replacement::merge_local;
+#[cfg(test)]
+use replacement::merge_local_with;
+use replacement::merge_owing;
+use replacement::progress_merge_hooks;
+#[cfg(test)]
+use replacement::publish_staged_replacement;
+#[cfg(test)]
+use replacement::replace_local;
+#[cfg(test)]
+use replacement::replace_local_with;
+use replacement::replace_owing;
+#[cfg(test)]
+use replacement::trash_stage_overwrite;
 mod deletion;
-use deletion::permanently_delete;
-#[cfg(test)]
-use deletion::LocalDeleteStep;
-#[cfg(test)]
-use deletion::ensure_local_delete_target_unchanged;
-#[cfg(test)]
-use deletion::open_local_delete_target;
-#[cfg(test)]
-use deletion::run_local_delete_step;
-#[cfg(test)]
-use deletion::PinnedEntry;
-#[cfg(test)]
-use deletion::LocalDeleteQueue;
 #[cfg(test)]
 use deletion::LocalDeleteJob;
 #[cfg(test)]
-use deletion::process_local_delete_job;
-use deletion::local_device_is_rotational;
+use deletion::LocalDeleteQueue;
+#[cfg(test)]
+use deletion::LocalDeleteStep;
+#[cfg(test)]
+use deletion::PinnedEntry;
 use deletion::bounded_local_worker_count;
 #[cfg(test)]
+use deletion::ensure_local_delete_target_unchanged;
+#[cfg(test)]
 use deletion::local_delete_worker_count;
+use deletion::local_device_is_rotational;
+use deletion::local_file_identity;
 #[cfg(test)]
-use deletion::parallel_delete_local_blocking_with_workers;
-#[cfg(test)]
-use deletion::run_local_delete_workers;
+use deletion::open_local_delete_target;
 #[cfg(test)]
 use deletion::parallel_delete_local;
 #[cfg(test)]
+use deletion::parallel_delete_local_blocking_with_workers;
+#[cfg(test)]
 use deletion::parallel_delete_local_with;
+use deletion::permanently_delete;
 #[cfg(test)]
 use deletion::permanently_delete_local;
 #[cfg(test)]
 use deletion::permanently_delete_local_path_if_unchanged;
-use deletion::local_file_identity;
+#[cfg(test)]
+use deletion::process_local_delete_job;
+#[cfg(test)]
+use deletion::run_local_delete_step;
+#[cfg(test)]
+use deletion::run_local_delete_workers;
 
-use deletion::{DeletionTarget, permanently_delete_maybe_local_if_unchanged, run_deletion};
 #[cfg(test)]
 use deletion::run_deletion_in;
+use deletion::{DeletionTarget, permanently_delete_maybe_local_if_unchanged, run_deletion};
 mod restore;
-use restore::restore_renamed;
-#[cfg(test)]
-use restore::move_restore_path;
 use restore::RestoreEntry;
-use restore::trashed_entries_for_originals;
-use restore::restored_destination;
-use restore::restore_worker_count;
-use restore::restore_trash_entry;
-use restore::trashed_merge_original;
 #[cfg(test)]
 use restore::StagedOriginalLookup;
-use restore::run_merge_undo;
 #[cfg(test)]
 use restore::home_trash_entries_at;
+#[cfg(test)]
+use restore::move_restore_path;
+use restore::restore_renamed;
+use restore::restore_trash_entry;
+use restore::restore_worker_count;
+use restore::restored_destination;
+use restore::run_merge_undo;
+use restore::trashed_entries_for_originals;
+use restore::trashed_merge_original;
 
 mod copy_engine;
 mod create_entry;
-mod fs_ops;
 mod environment;
+mod fs_ops;
 mod merge_aside;
 mod owed;
 mod placement;
@@ -148,7 +148,22 @@ pub(crate) use archive::write_compression_fixture;
 
 #[cfg(test)]
 use std::cell::RefCell;
-use std::{cell::Cell, collections::{HashMap, HashSet}, ffi::{OsStr, OsString}, future::Future, io, os::unix::ffi::{OsStrExt, OsStringExt}, path::{Path, PathBuf}, pin::Pin, rc::Rc, sync::{Arc, atomic::{AtomicBool, Ordering}}, thread};
+use std::{
+    cell::Cell,
+    collections::{HashMap, HashSet},
+    ffi::{OsStr, OsString},
+    future::Future,
+    io,
+    os::unix::ffi::{OsStrExt, OsStringExt},
+    path::{Path, PathBuf},
+    pin::Pin,
+    rc::Rc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    thread,
+};
 
 use gtk::{gio, glib, prelude::*};
 
@@ -156,7 +171,22 @@ use fs_ops::{Entry, fs};
 use owed::{Deletion, Done, Owed, Settling};
 use placement::{COPY_PREFIX, PlaceError, RenameFailure};
 
-use crate::{adapters::{gio_file_for_location, location_for_file, trash_restore::RestoreContext, trash_support::{TrashError, TrashFailure, trash_with_cleanup}, volume::MountTable}, model::Location, services::{CancelledOperation, CompressRequest, CreateDirectoryRequest, CreateFileRequest, DeleteRequest, ExtractRequest, KeptCause, KeptItem, LoadHandle, OperationEvent, OperationProvider, OperationRequestId, PasteRequest, RenameRequest, ReplacedOriginal, RestoreRequest, RestoreSource, TransferConflict, TransferReport, UndoCopyRequest, UndoMergeRequest, UndoMoveRequest, UndoRenameRequest, validate_basename}};
+use crate::{
+    adapters::{
+        gio_file_for_location, location_for_file,
+        trash_restore::RestoreContext,
+        trash_support::{TrashError, TrashFailure, trash_with_cleanup},
+        volume::MountTable,
+    },
+    model::Location,
+    services::{
+        CancelledOperation, CompressRequest, CreateDirectoryRequest, CreateFileRequest,
+        DeleteRequest, ExtractRequest, KeptCause, KeptItem, LoadHandle, OperationEvent,
+        OperationProvider, OperationRequestId, PasteRequest, RenameRequest, ReplacedOriginal,
+        RestoreRequest, RestoreSource, TransferConflict, TransferReport, UndoCopyRequest,
+        UndoMergeRequest, UndoMoveRequest, UndoRenameRequest, validate_basename,
+    },
+};
 
 const INVALID_NAME_REASON: &str = crate::services::INVALID_NAME_REASON;
 const UNCONFIRMED_REASON: &str =
@@ -204,13 +234,17 @@ fn device_flush_failure(error: &str) -> String {
 }
 
 pub(crate) fn sync_filesystem(root: &Path) -> io::Result<()> {
-    let handle = fs().open_path(
-        root.as_os_str(),
-        rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::DIRECTORY | rustix::fs::OFlags::CLOEXEC,
-        rustix::fs::Mode::empty(),
-    )
-    .map_err(io::Error::from)?;
-    fs().sync_fs(std::os::fd::AsFd::as_fd(&handle)).map_err(io::Error::from)?;
+    let handle = fs()
+        .open_path(
+            root.as_os_str(),
+            rustix::fs::OFlags::RDONLY
+                | rustix::fs::OFlags::DIRECTORY
+                | rustix::fs::OFlags::CLOEXEC,
+            rustix::fs::Mode::empty(),
+        )
+        .map_err(io::Error::from)?;
+    fs().sync_fs(std::os::fd::AsFd::as_fd(&handle))
+        .map_err(io::Error::from)?;
     Ok(())
 }
 
@@ -1220,10 +1254,6 @@ fn deletion_undone_when_cancelled(location: &Location, permanent: bool) -> bool 
     location.native_path().is_some() && !permanent
 }
 
-/// Whether a delete failure is retryable as a permanent delete: it was a
-/// trash attempt (never a permanent one, which has no further fallback),
-/// and the destination doesn't support Trash at all rather than some other,
-/// unrelated failure.
 fn is_trash_unsupported_failure(permanent: bool, error: &TrashError) -> bool {
     !permanent && error.is_unsupported()
 }
@@ -1537,7 +1567,8 @@ async fn copy_new_recursively_on_filesystem(
     fat_family: bool,
 ) -> Result<gio::File, glib::Error> {
     copy_new_with_ownership(source, target, taken, cancellable, progress, fat_family)
-        .await.map(|(target, _)| target)
+        .await
+        .map(|(target, _)| target)
 }
 
 async fn copy_new_with_ownership(
@@ -1564,7 +1595,10 @@ async fn copy_new_with_ownership(
             &cancellable,
         )
         .await?;
-        return Ok((gio::File::for_path(target_path.with_file_name(copied.name)), copied.ownership));
+        return Ok((
+            gio::File::for_path(target_path.with_file_name(copied.name)),
+            copied.ownership,
+        ));
     }
 
     let source_type = if !target.is_native() || taken == Taken::Number {
@@ -1621,7 +1655,8 @@ async fn copy_new_with_ownership(
                 })
             }),
         )
-        .await.map(|target| (target, None));
+        .await
+        .map(|target| (target, None));
     }
 
     let copied = first_free_target(&target, taken, is_directory, &cancellable, |target| {
@@ -3060,7 +3095,13 @@ impl OperationProvider for LocalOperationProvider {
                     Err(error) if error.is_unsupported() => {
                         match remove_empty_directory(&file, &operation_cancellable).await {
                             Err(error) if was_cancelled(&error) => {
-                                emit(cancelled_event(request.id, completed, Vec::new(), vec![location.clone()], affected_locations));
+                                emit(cancelled_event(
+                                    request.id,
+                                    completed,
+                                    Vec::new(),
+                                    vec![location.clone()],
+                                    affected_locations,
+                                ));
                                 return;
                             }
                             _ => continue,

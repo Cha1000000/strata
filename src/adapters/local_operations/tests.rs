@@ -26,7 +26,9 @@ use crate::test_support::ASYNC_MAIN_CONTEXT_DEFAULT;
 use fs_quirks::{FsQuirks, Preset, Quirks};
 
 fn serial() -> Result<std::sync::MutexGuard<'static, ()>, String> {
-    ASYNC_MAIN_CONTEXT_DEFAULT.lock().map_err(|error| error.to_string())
+    ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())
 }
 
 mod aliases;
@@ -123,20 +125,20 @@ fn staged(
 }
 
 use super::{
-    DeletionTarget, TrashError, run_deletion_in, CopyStep, FAT32_MAX_FILE_SIZE, FailedAction, LocalFileIdentity, LocalOperationProvider,
-    MergeCopied, MergeHooks, MergePlan, MountTable, PinnedEntry, RestoreEntry, StageOverwrite,
-    StagedOriginalLookup, TRANSFER_PROGRESS_INTERVAL, Taken, TransferProgressTracker, TransferStop,
-    await_cancellable, copy_failure_after_cleanup, copy_failure_on_fat32,
-    copy_new_recursively_on_filesystem, copy_new_remote_file_with, copy_recursively,
-    deletion_error_message, deletion_error_summary, duplicate_candidate_name, fat_sanitized_name,
-    fat32_file_size_limit, home_trash_entries_at, io_error,
-    join_local_tasks, local_file_identity, merge_local, merge_local_with, move_local,
+    CopyStep, DeletionTarget, FAT32_MAX_FILE_SIZE, FailedAction, LocalFileIdentity,
+    LocalOperationProvider, MergeCopied, MergeHooks, MergePlan, MountTable, PinnedEntry,
+    RestoreEntry, StageOverwrite, StagedOriginalLookup, TRANSFER_PROGRESS_INTERVAL, Taken,
+    TransferProgressTracker, TransferStop, TrashError, await_cancellable,
+    copy_failure_after_cleanup, copy_failure_on_fat32, copy_new_recursively_on_filesystem,
+    copy_new_remote_file_with, copy_recursively, deletion_error_message, deletion_error_summary,
+    duplicate_candidate_name, fat_sanitized_name, fat32_file_size_limit, home_trash_entries_at,
+    io_error, join_local_tasks, local_file_identity, merge_local, merge_local_with, move_local,
     move_local_with, open_local_parent_directory, operation_error_summary, parallel_delete_local,
     parse_copy_suffix, permanently_delete_local, permanently_delete_local_path_if_unchanged,
-    replace_local, replace_local_with, run_merge_undo, set_removable_roots_for_test,
-    set_sync_observer, stop_transfer, sync_probe_observations, target_is_fat_family,
-    transfer_is_noop, transfer_sizes, trash_stage_overwrite, unique_fat_sibling_name,
-    validated_child, was_cancelled,
+    replace_local, replace_local_with, run_deletion_in, run_merge_undo,
+    set_removable_roots_for_test, set_sync_observer, stop_transfer, sync_probe_observations,
+    target_is_fat_family, transfer_is_noop, transfer_sizes, trash_stage_overwrite,
+    unique_fat_sibling_name, validated_child, was_cancelled,
 };
 use crate::{
     model::{EntryKind, FileEntry, Location, MetadataValue},

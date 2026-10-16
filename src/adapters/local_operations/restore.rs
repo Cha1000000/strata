@@ -1,13 +1,45 @@
 // SPDX-License-Identifier: MIT
 
-use crate::{adapters::{gio_file_for_location, location_for_file, trash_restore::{RestoreContext, plan_restore_for_location}, trash_support::trash_with_cleanup}, model::Location, services::{KeptCause, KeptItem, MoveRecord, OperationEvent, OperationRequestId, PlacedSnapshot, RenameCause, RenamedItem, TransferReport, TrashedOriginal}};
+use super::{
+    fs_ops::{Entry, fs},
+    placement::PlaceError,
+};
+use crate::{
+    adapters::{
+        gio_file_for_location, location_for_file,
+        trash_restore::{RestoreContext, plan_restore_for_location},
+        trash_support::trash_with_cleanup,
+    },
+    model::Location,
+    services::{
+        KeptCause, KeptItem, MoveRecord, OperationEvent, OperationRequestId, PlacedSnapshot,
+        RenameCause, RenamedItem, TransferReport, TrashedOriginal,
+    },
+};
 use gtk::{gio, glib, prelude::*};
-use std::{collections::{HashMap, HashSet}, ffi::{OsStr, OsString}, future::Future, io, os::unix::ffi::{OsStrExt, OsStringExt}, path::{Path, PathBuf}, pin::Pin, rc::Rc, sync::Arc};
-use super::{fs_ops::{Entry, fs}, placement::PlaceError};
+use std::{
+    collections::{HashMap, HashSet},
+    ffi::{OsStr, OsString},
+    future::Future,
+    io,
+    os::unix::ffi::{OsStrExt, OsStringExt},
+    path::{Path, PathBuf},
+    pin::Pin,
+    rc::Rc,
+    sync::Arc,
+};
 
-use super::{await_cancellable, cancelled_event, cancelled_local_operation, copy_engine, deletion::local_parent_worker_count, deletion_error_summary, deletion_undone_when_cancelled, io_error, item_error, kept_items, native_fs::{open_local_parent_beneath, open_local_parent_directory, os_error_detail}};
+use super::{
+    await_cancellable, cancelled_event, cancelled_local_operation, copy_engine,
+    deletion::local_parent_worker_count,
+    deletion_error_summary, deletion_undone_when_cancelled, io_error, item_error, kept_items,
+    native_fs::{open_local_parent_beneath, open_local_parent_directory, os_error_detail},
+};
 
-use super::{owed, placement, placement_failure, progress::TransferProgressTracker, rename_native, run_local_fs_step, translated_io_error};
+use super::{
+    owed, placement, placement_failure, progress::TransferProgressTracker, rename_native,
+    run_local_fs_step, translated_io_error,
+};
 
 use super::was_cancelled;
 
@@ -366,8 +398,6 @@ pub(super) async fn trashed_entries_for_originals(
         .collect())
 }
 
-/// Where a successful restore lands: the confirmed destination for a Trash
-/// dialog restore, the trashinfo original path for an undo restore.
 pub(super) fn restored_destination(entry: &RestoreEntry) -> Location {
     entry
         .confirmed_destination
@@ -458,7 +488,6 @@ pub(super) async fn restore_trash_entry(
     Ok(report)
 }
 
-/// Finds the Trash entry a merge staged for an overwritten original.
 pub(super) fn trashed_merge_original(
     location: Location,
     cancellable: gio::Cancellable,
@@ -564,8 +593,6 @@ pub(super) async fn undo_merged_overwrite(
         .map(Reverted::Restored)
 }
 
-/// Resolves where an overwritten original was staged. Production reads Trash;
-/// tests hand back fixture entries pointing at a fake trash root.
 pub(super) type StagedOriginalLookup = Rc<
     dyn Fn(
         Location,
@@ -742,7 +769,9 @@ pub(super) async fn run_merge_undo(
                         Ok(())
                     })
                 }
-                result => result.map(|identity| trashed_identity = identity).map_err(|error| error.error),
+                result => result
+                    .map(|identity| trashed_identity = identity)
+                    .map_err(|error| error.error),
             },
         };
         let deleted_locations = match result {
@@ -916,4 +945,3 @@ pub(super) fn home_trash_entries_at(
         .map(|(path, (_, entry))| (path, entry))
         .collect()
 }
-

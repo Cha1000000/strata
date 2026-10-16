@@ -1,13 +1,41 @@
 // SPDX-License-Identifier: MIT
 
-use crate::{adapters::{gio_file_for_location, location_for_file, trash_support::{TrashError, trash_with_cleanup}}, model::Location, services::{PlacedSnapshot, ReplacedOriginal, TransferReport, TrashedOriginal}};
-use gtk::{gio, glib, prelude::*};
 use super::fs_ops::{Entry, EntryStat, OffMain, fs};
+use crate::{
+    adapters::{
+        gio_file_for_location, location_for_file,
+        trash_support::{TrashError, trash_with_cleanup},
+    },
+    model::Location,
+    services::{PlacedSnapshot, ReplacedOriginal, TransferReport, TrashedOriginal},
+};
+use gtk::{gio, glib, prelude::*};
 
-use std::{collections::{HashMap, HashSet}, ffi::{OsStr, OsString}, future::Future, os::fd::{AsFd, OwnedFd}, path::{Path, PathBuf}, pin::Pin, rc::Rc, sync::{Arc, atomic::AtomicUsize}};
-use super::{owed::{Deletion, Owed}, placement::{Displacement, PlaceError, REPLACED_PREFIX}};
+use super::{
+    owed::{Deletion, Owed},
+    placement::{Displacement, PlaceError, REPLACED_PREFIX},
+};
+use std::{
+    collections::{HashMap, HashSet},
+    ffi::{OsStr, OsString},
+    future::Future,
+    os::fd::{AsFd, OwnedFd},
+    path::{Path, PathBuf},
+    pin::Pin,
+    rc::Rc,
+    sync::{Arc, atomic::AtomicUsize},
+};
 
-use super::{CopyInto, CopyRecord, await_cancellable, blocking_join_message, cancelled_local_operation, copy_children, copy_engine, copy_failure_after_cleanup, copy_recursively_with_progress, deletion::{PinnedEntry, parallel_delete_local}, fat_family_child_name, io_error, is_trash_unsupported_failure, merge_aside, native_fs::{LocalFileIdentity, open_local_parent_directory, os_error_detail}, native_path, os_io_error, placement, placement_error_kind, placement_failure, placement_reason, progress::TransferProgressTracker, run_blocking, translated_io_error, trash, was_cancelled};
+use super::{
+    CopyInto, CopyRecord, await_cancellable, blocking_join_message, cancelled_local_operation,
+    copy_children, copy_engine, copy_failure_after_cleanup, copy_recursively_with_progress,
+    deletion::{PinnedEntry, parallel_delete_local},
+    fat_family_child_name, io_error, is_trash_unsupported_failure, merge_aside,
+    native_fs::{LocalFileIdentity, open_local_parent_directory, os_error_detail},
+    native_path, os_io_error, placement, placement_error_kind, placement_failure, placement_reason,
+    progress::TransferProgressTracker,
+    run_blocking, translated_io_error, trash, was_cancelled,
+};
 
 pub(super) enum StageContent {
     Directory,
@@ -37,7 +65,11 @@ impl StagedSibling {
                     fs().mkdir(entry, rustix::fs::Mode::from_raw_mode(0o700))
                 }
                 StageContent::Symlink(link) => fs().symlink(link, entry),
-                StageContent::Fifo => fs().create_node(entry, rustix::fs::FileType::Fifo, rustix::fs::Mode::from_raw_mode(0o600)),
+                StageContent::Fifo => fs().create_node(
+                    entry,
+                    rustix::fs::FileType::Fifo,
+                    rustix::fs::Mode::from_raw_mode(0o600),
+                ),
             };
             match made {
                 Ok(()) => fs()
@@ -364,7 +396,10 @@ pub(super) fn displacement_or_refusal(
     }
 }
 
-pub(super) fn ensure_unchanged(entry: Entry<'_>, expected: LocalFileIdentity) -> Result<(), glib::Error> {
+pub(super) fn ensure_unchanged(
+    entry: Entry<'_>,
+    expected: LocalFileIdentity,
+) -> Result<(), glib::Error> {
     match fs().stat(entry, false) {
         Ok(stat) if stat.identity == expected => Ok(()),
         Ok(_) | Err(rustix::io::Errno::NOENT) => Err(translated_io_error(
@@ -526,9 +561,14 @@ pub(super) async fn replace_through_stage(
         let step_plan = plan.clone();
         let step = match removal {
             Removal::Trashed => {
-                let ownership = publish_staged_replacement(staged, target_path.to_path_buf(), durable).await?;
+                let ownership =
+                    publish_staged_replacement(staged, target_path.to_path_buf(), durable).await?;
                 if let Some(sources) = &mut copied.0 {
-                    sources.copied_to(copy_engine::published(parent, plan.target_name.clone(), ownership.clone()));
+                    sources.copied_to(copy_engine::published(
+                        parent,
+                        plan.target_name.clone(),
+                        ownership.clone(),
+                    ));
                 }
                 // Only a copy is undone by deleting it.
                 let placed = if moving {
@@ -550,9 +590,14 @@ pub(super) async fn replace_through_stage(
                 return Ok((replaced, copied));
             }
             Removal::Without(Displacement::SetAside) => {
-                let (replaced, ownership) = set_aside_and_publish(plan, staged, target_path, durable).await?;
+                let (replaced, ownership) =
+                    set_aside_and_publish(plan, staged, target_path, durable).await?;
                 if let Some(sources) = &mut copied.0 {
-                    sources.copied_to(copy_engine::published(parent, plan.target_name.clone(), ownership));
+                    sources.copied_to(copy_engine::published(
+                        parent,
+                        plan.target_name.clone(),
+                        ownership,
+                    ));
                 }
                 return Ok((replaced, copied));
             }
@@ -605,7 +650,11 @@ pub(super) async fn replace_through_stage(
                 match exchanged {
                     Ok(None) => {
                         if let Some(sources) = &mut copied.0 {
-                            sources.copied_to(copy_engine::published(staged.parent.clone(), plan.target_name.clone(), staged_ownership));
+                            sources.copied_to(copy_engine::published(
+                                staged.parent.clone(),
+                                plan.target_name.clone(),
+                                staged_ownership,
+                            ));
                         }
                         let replaced = StagedReplacement {
                             original: ReplacedOriginal::Deleted,
@@ -681,7 +730,8 @@ pub(super) async fn set_aside_and_publish(
         durable,
         gio::Cancellable::new(),
     )
-    .await {
+    .await
+    {
         Ok(ownership) => ownership,
         Err(error) => {
             let detail = crate::services::gio_error_detail(&error);
@@ -698,15 +748,18 @@ pub(super) async fn set_aside_and_publish(
             }));
         }
     };
-    Ok((StagedReplacement {
-        original: ReplacedOriginal::Deleted,
-        displaced: Some(DisplacedOriginal {
-            parent: OffMain::new(parent),
-            name: aside.name,
-            identity: aside.identity,
-        }),
-        placed: None,
-    }, ownership))
+    Ok((
+        StagedReplacement {
+            original: ReplacedOriginal::Deleted,
+            displaced: Some(DisplacedOriginal {
+                parent: OffMain::new(parent),
+                name: aside.name,
+                identity: aside.identity,
+            }),
+            placed: None,
+        },
+        ownership,
+    ))
 }
 
 /// Replaces `target` with `source` without a window in which neither exists.
@@ -890,10 +943,7 @@ pub(super) struct MergePlan {
     pub(super) placed: HashMap<Location, PlacedSnapshot>,
 }
 
-/// Backs up an overwritten original before the incoming copy lands. Production
-/// stages through Trash; tests substitute a rename so fixtures on filesystems
-/// without Trash support still exercise the flow. Unsupported Trash sets a local
-/// original aside instead.
+/// Unsupported native Trash triggers the set-aside fallback.
 pub(super) type StageOverwrite =
     Rc<dyn Fn(Location, gio::Cancellable) -> Pin<Box<dyn Future<Output = Result<(), TrashError>>>>>;
 
@@ -902,11 +952,12 @@ pub(super) fn trash_stage_overwrite(
     cancellable: gio::Cancellable,
 ) -> Pin<Box<dyn Future<Output = Result<(), TrashError>>>> {
     Box::pin(async move {
-        trash_with_cleanup(&gio_file_for_location(&location), &cancellable).await.map(drop)
+        trash_with_cleanup(&gio_file_for_location(&location), &cancellable)
+            .await
+            .map(drop)
     })
 }
 
-/// The injectable steps of a merge, bundled to keep the call sites small.
 pub(super) struct MergeHooks<'a> {
     pub(super) fat_family: bool,
     pub(super) copy_into_target: CopyStep,
@@ -1007,11 +1058,8 @@ pub(super) fn classify_merge<'a>(
     })
 }
 
-/// Combines the source folder into the existing destination folder: every
-/// child lands inside `target`, overwriting same-named entries, while
-/// destination-only contents stay. Unlike [`replace_owing`] this writes
-/// into the live destination, so a failed or cancelled merge leaves a
-/// partial result behind and never cleans what was already there.
+/// Publish completed children without replacing concurrent arrivals.
+/// Already-published children survive cancellation.
 pub(super) async fn merge_owing(
     source: gio::File,
     target: gio::File,
@@ -1217,7 +1265,10 @@ pub(super) fn progress_merge_hooks(
     }
 }
 
-pub(super) fn merge_copy(progress: Option<Rc<TransferProgressTracker>>, fat_family: bool) -> CopyStep {
+pub(super) fn merge_copy(
+    progress: Option<Rc<TransferProgressTracker>>,
+    fat_family: bool,
+) -> CopyStep {
     Rc::new(
         move |source,
               target,
@@ -1298,4 +1349,3 @@ pub(super) async fn merge_local(
     )
     .await
 }
-

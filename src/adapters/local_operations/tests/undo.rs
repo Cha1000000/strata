@@ -716,9 +716,13 @@ fn undoing_a_grouping_without_trash_removes_only_an_empty_group_folder()
         if arrived_meanwhile {
             fs::write(group.join("arrived.txt"), b"new")?;
         }
-        let can_trash = gio::File::for_path(&group).query_info(
-            "access::can-trash", gio::FileQueryInfoFlags::NONE, gio::Cancellable::NONE,
-        )?.boolean("access::can-trash");
+        let can_trash = gio::File::for_path(&group)
+            .query_info(
+                "access::can-trash",
+                gio::FileQueryInfoFlags::NONE,
+                gio::Cancellable::NONE,
+            )?
+            .boolean("access::can-trash");
         assert!(!can_trash, "precondition: GIO refuses Trash on tmpfs");
         let events = Rc::new(RefCell::new(Vec::new()));
         let emitted = events.clone();
@@ -739,7 +743,10 @@ fn undoing_a_grouping_without_trash_removes_only_an_empty_group_folder()
         );
         drive_until_transfer_settles(&events);
         let events = events.borrow();
-        assert!(matches!(events.last(), Some(OperationEvent::Pasted { .. })), "{events:?}");
+        assert!(
+            matches!(events.last(), Some(OperationEvent::Pasted { .. })),
+            "{events:?}"
+        );
         assert!(trashed_items(&events).is_empty());
         assert_eq!(fs::read(root.path().join("report.txt"))?, b"contents");
         assert_eq!(group.exists(), arrived_meanwhile);

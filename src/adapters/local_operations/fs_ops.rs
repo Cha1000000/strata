@@ -20,8 +20,8 @@ use rustix::{
     io::Errno,
 };
 
-use crate::adapters::volume::MountKey;
 use super::native_fs::{LocalFileIdentity, retry_local_open};
+use crate::adapters::volume::MountKey;
 
 /// `STATX_MNT_ID_UNIQUE` (Linux 6.8), which rustix does not name yet.
 const STATX_MNT_ID_UNIQUE: u32 = 0x4000;
@@ -67,7 +67,13 @@ impl EntryStat {
 pub(super) trait FsOps: super::environment::FsEnvironment {
     // Raw opens preserve each caller's retry, resolution and thread policies.
     // Some restore descriptor setup still runs before worker dispatch.
-    fn open_at(&self, at: Entry<'_>, flags: OFlags, mode: Mode, resolve: Option<ResolveFlags>) -> Result<OwnedFd, Errno>;
+    fn open_at(
+        &self,
+        at: Entry<'_>,
+        flags: OFlags,
+        mode: Mode,
+        resolve: Option<ResolveFlags>,
+    ) -> Result<OwnedFd, Errno>;
     fn open_path(&self, path: &OsStr, flags: OFlags, mode: Mode) -> Result<OwnedFd, Errno>;
     fn dup(&self, fd: BorrowedFd<'_>) -> Result<OwnedFd, Errno>;
     fn stat_vfs(&self, fd: BorrowedFd<'_>) -> Result<rustix::fs::StatVfs, Errno>;
@@ -307,7 +313,13 @@ fn read_sized(mut read: impl FnMut(&mut [u8]) -> Result<usize, Errno>) -> Result
 }
 
 impl FsOps for System {
-    fn open_at(&self, at: Entry<'_>, flags: OFlags, mode: Mode, resolve: Option<ResolveFlags>) -> Result<OwnedFd, Errno> {
+    fn open_at(
+        &self,
+        at: Entry<'_>,
+        flags: OFlags,
+        mode: Mode,
+        resolve: Option<ResolveFlags>,
+    ) -> Result<OwnedFd, Errno> {
         match resolve {
             Some(resolve) => rustix::fs::openat2(at.dir, at.name, flags, mode, resolve),
             None => rustix::fs::openat(at.dir, at.name, flags, mode),

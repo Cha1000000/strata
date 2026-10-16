@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: MIT
 
-use std::{os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt}, sync::atomic::Ordering};
+use std::{
+    os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt},
+    sync::atomic::Ordering,
+};
 
 use rustix::io::Errno;
 
@@ -1632,12 +1635,16 @@ fn a_moved_source_stays_when_its_copy_is_gone_before_the_deletion() -> Result<()
 }
 
 #[test]
-fn a_special_file_move_keeps_its_source_without_proven_published_ownership() -> Result<(), Box<dyn Error>> {
+fn a_special_file_move_keeps_its_source_without_proven_published_ownership()
+-> Result<(), Box<dyn Error>> {
     let _serial = serial()?;
     for (pipe, can_place, replace) in [
-        (false, true, true), (true, true, true),
-        (false, false, true), (true, false, true),
-        (false, false, false), (true, false, false),
+        (false, true, true),
+        (true, true, true),
+        (false, false, true),
+        (true, false, true),
+        (false, false, false),
+        (true, false, false),
     ] {
         let root = tempfile::tempdir()?;
         let sources = root.path().join("sources");
@@ -1646,7 +1653,13 @@ fn a_special_file_move_keeps_its_source_without_proven_published_ownership() -> 
         fs::create_dir(&destination)?;
         let source = sources.join("special");
         if pipe {
-            rustix::fs::mknodat(rustix::fs::CWD, &source, rustix::fs::FileType::Fifo, rustix::fs::Mode::from_raw_mode(0o600), 0)?;
+            rustix::fs::mknodat(
+                rustix::fs::CWD,
+                &source,
+                rustix::fs::FileType::Fifo,
+                rustix::fs::Mode::from_raw_mode(0o600),
+                0,
+            )?;
         } else {
             std::os::unix::fs::symlink("original-target", &source)?;
         }
@@ -1655,36 +1668,72 @@ fn a_special_file_move_keeps_its_source_without_proven_published_ownership() -> 
         fs::set_permissions(&arrival, fs::Permissions::from_mode(0o640))?;
         let replaced = Arc::new(AtomicBool::new(false));
         let creation = if pipe { Op::CreateNode } else { Op::Symlink };
-        let after = std::iter::once(creation).chain(can_place.then_some(Op::Rename)).filter(|_| replace).map(|op| {
-            let arrival = arrival.clone();
-            let target = destination.join("special");
-            let replaced = replaced.clone();
-            let racer: super::fs_quirks::Racer = Box::new(move || {
-                if !replaced.swap(true, Ordering::AcqRel) {
-                    fs::rename(&arrival, &target).expect("replace the published special file");
-                }
-            });
-            (op, "special", 0, racer)
-        }).collect();
+        let after = std::iter::once(creation)
+            .chain(can_place.then_some(Op::Rename))
+            .filter(|_| replace)
+            .map(|op| {
+                let arrival = arrival.clone();
+                let target = destination.join("special");
+                let replaced = replaced.clone();
+                let racer: super::fs_quirks::Racer = Box::new(move || {
+                    if !replaced.swap(true, Ordering::AcqRel) {
+                        fs::rename(&arrival, &target).expect("replace the published special file");
+                    }
+                });
+                (op, "special", 0, racer)
+            })
+            .collect();
         let _sources = FsQuirks::install(&sources, Quirks::default());
-        let _destination = FsQuirks::install(&destination, Quirks {
-            after,
-            ..if can_place { Quirks::default() } else { Quirks::without_placement() }
-        });
-        let (_operation, events) = paste_move(99, &destination, &source, TransferConflict::FailIfExists);
+        let _destination = FsQuirks::install(
+            &destination,
+            Quirks {
+                after,
+                ..if can_place {
+                    Quirks::default()
+                } else {
+                    Quirks::without_placement()
+                }
+            },
+        );
+        let (_operation, events) =
+            paste_move(99, &destination, &source, TransferConflict::FailIfExists);
         pump_until_transfer(&events);
 
-        assert_eq!(replaced.load(Ordering::Acquire), replace, "pipe: {pipe}, can_place: {can_place}");
-        assert!(fs::symlink_metadata(&source).is_ok(), "pipe: {pipe}, can_place: {can_place}: {:?}", events.borrow());
+        assert_eq!(
+            replaced.load(Ordering::Acquire),
+            replace,
+            "pipe: {pipe}, can_place: {can_place}"
+        );
+        assert!(
+            fs::symlink_metadata(&source).is_ok(),
+            "pipe: {pipe}, can_place: {can_place}: {:?}",
+            events.borrow()
+        );
         if replace {
-            assert_eq!(fs::read(destination.join("special"))?, b"another program's file");
-            assert_eq!(fs::metadata(destination.join("special"))?.mode() & 0o777, 0o640);
+            assert_eq!(
+                fs::read(destination.join("special"))?,
+                b"another program's file"
+            );
+            assert_eq!(
+                fs::metadata(destination.join("special"))?.mode() & 0o777,
+                0o640
+            );
         } else {
-            assert_eq!(reported(&events).kept, [kept(source.clone(), KeptCause::CopyGone)]);
+            assert_eq!(
+                reported(&events).kept,
+                [kept(source.clone(), KeptCause::CopyGone)]
+            );
             if pipe {
-                assert!(fs::symlink_metadata(destination.join("special"))?.file_type().is_fifo());
+                assert!(
+                    fs::symlink_metadata(destination.join("special"))?
+                        .file_type()
+                        .is_fifo()
+                );
             } else {
-                assert_eq!(fs::read_link(destination.join("special"))?, PathBuf::from("original-target"));
+                assert_eq!(
+                    fs::read_link(destination.join("special"))?,
+                    PathBuf::from("original-target")
+                );
             }
         }
         if pipe {
@@ -1697,7 +1746,8 @@ fn a_special_file_move_keeps_its_source_without_proven_published_ownership() -> 
 }
 
 #[test]
-fn destination_provenance_fails_closed_without_stable_inode_numbers() -> Result<(), Box<dyn Error>> {
+fn destination_provenance_fails_closed_without_stable_inode_numbers() -> Result<(), Box<dyn Error>>
+{
     let _serial = serial()?;
     for renumbered in [false, true] {
         let root = tempfile::tempdir()?;
@@ -1720,18 +1770,44 @@ fn destination_provenance_fails_closed_without_stable_inode_numbers() -> Result<
         });
         after.push((Op::Rename, "notes.txt", 0, racer));
         let _sources = FsQuirks::install(&sources, Quirks::default());
-        let _destination = FsQuirks::install(&destination, Quirks {
-            rename_flags: Support::Supported,
-            after,
-            ..Quirks::sshfs()
-        });
-        let (_operation, events) = paste_move(98, &destination, &source, TransferConflict::FailIfExists);
+        let _destination = FsQuirks::install(
+            &destination,
+            Quirks {
+                rename_flags: Support::Supported,
+                after,
+                ..Quirks::sshfs()
+            },
+        );
+        let (_operation, events) =
+            paste_move(98, &destination, &source, TransferConflict::FailIfExists);
         pump_until_transfer(&events);
-        assert!(matches!(terminal_transfer(&events.borrow()), Some(OperationEvent::Pasted { .. })), "renumbered {renumbered}: {:?}", events.borrow());
-        assert!(source.exists(), "renumbered {renumbered}: {:?}", events.borrow());
+        assert!(
+            matches!(
+                terminal_transfer(&events.borrow()),
+                Some(OperationEvent::Pasted { .. })
+            ),
+            "renumbered {renumbered}: {:?}",
+            events.borrow()
+        );
+        assert!(
+            source.exists(),
+            "renumbered {renumbered}: {:?}",
+            events.borrow()
+        );
         assert_eq!(fs::read(&source)?, b"notes");
-        assert_eq!(fs::read(destination.join("notes.txt"))?, if renumbered { b"notes".as_slice() } else { b"other".as_slice() });
-        assert_eq!(reported(&events).kept, [kept(source, KeptCause::CopyGone)], "renumbered {renumbered}");
+        assert_eq!(
+            fs::read(destination.join("notes.txt"))?,
+            if renumbered {
+                b"notes".as_slice()
+            } else {
+                b"other".as_slice()
+            }
+        );
+        assert_eq!(
+            reported(&events).kept,
+            [kept(source, KeptCause::CopyGone)],
+            "renumbered {renumbered}"
+        );
     }
     Ok(())
 }
@@ -1748,15 +1824,32 @@ fn a_replacing_move_keeps_the_actual_copy_out_identity() -> Result<(), Box<dyn E
     fs::write(source.join("notes.txt"), b"notes")?;
     fs::write(destination.join("folder/old.txt"), b"old")?;
     let _sources = FsQuirks::install(&sources, Quirks::default());
-    let destination_scope = FsQuirks::install(&destination, Quirks {
-        exchange: super::fs_quirks::Exchange::Rejected,
-        ..Quirks::vboxsf()
-    });
-    let (_operation, events) = paste_move(98, &destination, &source, TransferConflict::ReplaceExisting);
+    let destination_scope = FsQuirks::install(
+        &destination,
+        Quirks {
+            exchange: super::fs_quirks::Exchange::Rejected,
+            ..Quirks::vboxsf()
+        },
+    );
+    let (_operation, events) =
+        paste_move(98, &destination, &source, TransferConflict::ReplaceExisting);
     pump_until_transfer(&events);
-    assert!(matches!(terminal_transfer(&events.borrow()), Some(OperationEvent::Pasted { .. })), "{:?}", events.borrow());
+    assert!(
+        matches!(
+            terminal_transfer(&events.borrow()),
+            Some(OperationEvent::Pasted { .. })
+        ),
+        "{:?}",
+        events.borrow()
+    );
     assert_eq!(fs::read(destination.join("folder/notes.txt"))?, b"notes");
-    assert!(destination_scope.calls().iter().any(|call| call.op == Op::Mkdir && call.names.iter().any(|name| name == "folder")), "exclusive copy-out created the final folder");
+    assert!(
+        destination_scope
+            .calls()
+            .iter()
+            .any(|call| call.op == Op::Mkdir && call.names.iter().any(|name| name == "folder")),
+        "exclusive copy-out created the final folder"
+    );
     assert!(!source.exists());
     assert!(reported(&events).kept.is_empty(), "{:?}", reported(&events));
     Ok(())

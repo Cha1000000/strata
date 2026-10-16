@@ -35,7 +35,22 @@ use super::{
     restrictive::{self, Restrictive},
     same_entry, stable_inodes, stage,
 };
-use crate::{adapters::{local_operations::{cancelled_local_operation, fat_sanitized_name, fs_ops::{Entry, EntryStat, FsOps}, io_error, names::numbered_names, native_fs::{LocalFileIdentity, os_error_detail}, placement::{self, COPY_PREFIX, PlaceError}, replacement::{StageContent, StagedSibling}, work_queue::{self, Group, Job, WorkQueue}}, volume::{Family, MountKey}}, services::{KeptCause, RenameCause, SpecialKind}};
+use crate::{
+    adapters::{
+        local_operations::{
+            cancelled_local_operation, fat_sanitized_name,
+            fs_ops::{Entry, EntryStat, FsOps},
+            io_error,
+            names::numbered_names,
+            native_fs::{LocalFileIdentity, os_error_detail},
+            placement::{self, COPY_PREFIX, PlaceError},
+            replacement::{StageContent, StagedSibling},
+            work_queue::{self, Group, Job, WorkQueue},
+        },
+        volume::{Family, MountKey},
+    },
+    services::{KeptCause, RenameCause, SpecialKind},
+};
 
 /// `FS_CASEFOLD_FL`, which folders made inside a casefolded one inherit.
 const CASEFOLD: u32 = 0x4000_0000;
@@ -1085,7 +1100,10 @@ impl Merged {
             return Err(Failure::Changed);
         }
         lock(&tree.copies).push(manifest::Published::new(
-            target_parent.clone(), target_name.clone(), target_stat.identity));
+            target_parent.clone(),
+            target_name.clone(),
+            target_stat.identity,
+        ));
         if copy.durable {
             tree.reach(fs, &mount, target.as_fd(), &self.path)?;
         }
@@ -1255,10 +1273,20 @@ impl Live {
         if let Some(placing) = &self.placing
             && let Some(name) = path.file_name()
         {
-            placing.placed(copy.fs, (self.dir.as_fd(), name), &path, &ownership, &copy.cancelled);
+            placing.placed(
+                copy.fs,
+                (self.dir.as_fd(), name),
+                &path,
+                &ownership,
+                &copy.cancelled,
+            );
         }
         if let Some(name) = path.file_name() {
-            lock(&tree.copies).push(manifest::Published::proven(self.dir.clone(), name.to_os_string(), ownership));
+            lock(&tree.copies).push(manifest::Published::proven(
+                self.dir.clone(),
+                name.to_os_string(),
+                ownership,
+            ));
         }
         lock(&tree.placed).push(path);
         Ok(())
@@ -1327,13 +1355,23 @@ impl Place {
         if let Some(placing) = &self.placing {
             for (path, ownership) in &placed {
                 if let Some(name) = path.file_name() {
-                    placing.placed(fs, (self.live.as_fd(), name), path, ownership, &copy.cancelled);
+                    placing.placed(
+                        fs,
+                        (self.live.as_fd(), name),
+                        path,
+                        ownership,
+                        &copy.cancelled,
+                    );
                 }
             }
         }
         for (path, ownership) in &placed {
             if let Some(name) = path.file_name() {
-                lock(&tree.copies).push(manifest::Published::proven(self.live.clone(), name.to_os_string(), ownership.clone()));
+                lock(&tree.copies).push(manifest::Published::proven(
+                    self.live.clone(),
+                    name.to_os_string(),
+                    ownership.clone(),
+                ));
             }
         }
         let placed = placed.into_iter().map(|(path, _)| path).collect::<Vec<_>>();

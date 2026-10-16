@@ -8,8 +8,14 @@ use std::path::Path;
 use gtk::{gio, glib, prelude::*};
 use rustix::io::Errno;
 
+use super::{
+    await_cancellable,
+    fs_ops::{Entry, fs},
+    io_error,
+    native_fs::{LocalFileIdentity, open_local_parent_directory, os_error_text},
+    run_blocking,
+};
 use crate::services::TrashedOriginal;
-use super::{await_cancellable, fs_ops::{Entry, fs}, io_error, native_fs::{LocalFileIdentity, open_local_parent_directory, os_error_text}, run_blocking};
 
 const NOT_MOVED_REASON: &str = "Trash reported success, but the item was not moved";
 

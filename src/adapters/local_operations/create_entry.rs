@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: MIT
 
-use super::{
-    await_cancellable, operation_handle, cancelled_event, validated_child, was_cancelled,
-};
+use super::{await_cancellable, cancelled_event, operation_handle, validated_child, was_cancelled};
 use crate::{
     adapters::{gio_file_for_location, location_for_file},
     model::Location,

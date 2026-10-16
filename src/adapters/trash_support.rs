@@ -102,9 +102,9 @@ impl TrashEnvironment for SystemTrash {
     ) -> Pin<Box<dyn Future<Output = Result<Option<TrashedOriginal>, glib::Error>>>> {
         let file = file.clone();
         let cancellable = cancellable.clone();
-        Box::pin(async move {
-            super::local_operations::trash::trash_entry(&file, &cancellable).await
-        })
+        Box::pin(
+            async move { super::local_operations::trash::trash_entry(&file, &cancellable).await },
+        )
     }
 }
 
@@ -155,20 +155,33 @@ pub(crate) fn verified_with_cleanup(
 ) -> Result<(), TrashError> {
     let mounts = MountTable::current();
     let home = glib::home_dir();
-    let mount = path.parent().and_then(|parent| resolved_mount(&mounts, parent))
+    let mount = path
+        .parent()
+        .and_then(|parent| resolved_mount(&mounts, parent))
         .filter(|mount| is_fuse_fs_type(&mount.fs_type))
         .filter(|_| {
-            let parent_device = path.parent().and_then(|parent| std::fs::metadata(parent).ok()).map(|metadata| metadata.dev());
+            let parent_device = path
+                .parent()
+                .and_then(|parent| std::fs::metadata(parent).ok())
+                .map(|metadata| metadata.dev());
             let home_device = std::fs::metadata(&home).ok().map(|metadata| metadata.dev());
             parent_device.is_some() && parent_device != home_device
         });
-    let snapshot = mount.as_ref().map(|mount| TrashDirSnapshot::take(&mount.mount_point));
+    let snapshot = mount
+        .as_ref()
+        .map(|mount| TrashDirSnapshot::take(&mount.mount_point));
     let error = match attempt() {
         Ok(()) => return Ok(()),
         Err(error) => error,
     };
-    let facts = mount.as_ref().map(|mount| FuseFacts::gather(path, &mount.mount_point, &home));
-    let failure = decide(&error, mount.as_ref().map(|mount| mount.fs_type.as_str()), facts);
+    let facts = mount
+        .as_ref()
+        .map(|mount| FuseFacts::gather(path, &mount.mount_point, &home));
+    let failure = decide(
+        &error,
+        mount.as_ref().map(|mount| mount.fs_type.as_str()),
+        facts,
+    );
     if let (TrashFailure::Unsupported(reason), Some(mount)) = (failure, mount) {
         record_unsupported(mount, reason);
         if let Some(snapshot) = snapshot {

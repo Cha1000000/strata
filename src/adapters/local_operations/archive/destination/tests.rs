@@ -2,8 +2,8 @@
 
 use super::super::fixtures::names;
 use super::{
-    ExtractNameResolver, ExtractionDestination, FUSE_SUPER_MAGIC, MemberMetadata,
-    archive_stem, sanitized_archive_path,
+    ExtractNameResolver, ExtractionDestination, FUSE_SUPER_MAGIC, MemberMetadata, archive_stem,
+    sanitized_archive_path,
 };
 use crate::adapters::local_operations::tests::fs_quirks::{FsQuirks, Op, Quirks};
 use std::{
@@ -643,15 +643,18 @@ fn metadata_the_filesystem_cannot_store_is_skipped() -> Result<(), Box<dyn Error
         (Errno::IO, false),
     ] {
         let root = tempfile::tempdir()?;
-        let _quirks = FsQuirks::install(root.path(), Quirks {
-            fail: vec![
-                (Op::ChmodFd, "*", 0, errno),
-                (Op::SetTimes, "*", 0, errno),
-                (Op::SetTimes, "*", 0, errno),
-                (Op::SetLinkTimes, "*", 0, errno),
-            ],
-            ..Quirks::default()
-        });
+        let _quirks = FsQuirks::install(
+            root.path(),
+            Quirks {
+                fail: vec![
+                    (Op::ChmodFd, "*", 0, errno),
+                    (Op::SetTimes, "*", 0, errno),
+                    (Op::SetTimes, "*", 0, errno),
+                    (Op::SetLinkTimes, "*", 0, errno),
+                ],
+                ..Quirks::default()
+            },
+        );
         let destination = ExtractionDestination::open(root.path())?;
         destination.create_directories(Path::new("folder"))?;
         let (file, _) = destination.create_file(Path::new("file.txt"), None)?;

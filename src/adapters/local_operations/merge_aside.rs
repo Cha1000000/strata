@@ -18,7 +18,14 @@ use rustix::{
     io::Errno,
 };
 
-use super::{deletion::{PinnedEntry, parallel_delete_local}, fs_ops::{Entry, drop_off_main_thread, fs}, io_error, native_fs::{LocalFileIdentity, open_local_parent_directory, retry_local_open}, placement::{self, Feasibility, MERGE_PREFIX, PlaceError}, placement_reason, run_blocking, was_cancelled};
+use super::{
+    deletion::{PinnedEntry, parallel_delete_local},
+    fs_ops::{Entry, drop_off_main_thread, fs},
+    io_error,
+    native_fs::{LocalFileIdentity, open_local_parent_directory, retry_local_open},
+    placement::{self, Feasibility, MERGE_PREFIX, PlaceError},
+    placement_reason, run_blocking, was_cancelled,
+};
 
 struct Folder {
     name: OsString,
@@ -64,10 +71,17 @@ fn could_not_set_aside(name: &str, error: PlaceError) -> glib::Error {
 
 fn open_beneath(dir: &OwnedFd, relative: &Path) -> Result<OwnedFd, PlaceError> {
     retry_local_open(|| {
-        fs().open_at(Entry::new(dir, relative.as_os_str()), OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC, Mode::empty(), Some(ResolveFlags::BENEATH
-                | ResolveFlags::NO_SYMLINKS
-                | ResolveFlags::NO_MAGICLINKS
-                | ResolveFlags::NO_XDEV))
+        fs().open_at(
+            Entry::new(dir, relative.as_os_str()),
+            OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC,
+            Mode::empty(),
+            Some(
+                ResolveFlags::BENEATH
+                    | ResolveFlags::NO_SYMLINKS
+                    | ResolveFlags::NO_MAGICLINKS
+                    | ResolveFlags::NO_XDEV,
+            ),
+        )
     })
     .map_err(|error| match error {
         Errno::XDEV => PlaceError::CrossDevice,

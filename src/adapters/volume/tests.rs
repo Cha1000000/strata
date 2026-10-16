@@ -574,7 +574,9 @@ fn operation_mount_changes_invalidate_capabilities_before_preferences_are_read()
     crate::test_support::gtk_test(
         "adapters::volume::tests::operation_mount_changes_invalidate_capabilities_before_preferences_are_read",
         || {
-            use crate::services::{DeleteRequest, OperationEvent, OperationProvider, OperationRequestId};
+            use crate::services::{
+                DeleteRequest, OperationEvent, OperationProvider, OperationRequestId,
+            };
             use gtk::prelude::*;
 
             let root = tempfile::tempdir().expect("operation fixture");
@@ -585,7 +587,9 @@ fn operation_mount_changes_invalidate_capabilities_before_preferences_are_read()
             let operation = crate::adapters::LocalOperationProvider.delete(
                 DeleteRequest {
                     id: OperationRequestId(1615),
-                    entries: vec![crate::test_support::operations::entry(Location::local(&path))],
+                    entries: vec![crate::test_support::operations::entry(Location::local(
+                        &path,
+                    ))],
                     permanent: true,
                 },
                 Rc::new(move |event| {

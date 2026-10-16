@@ -1,8 +1,13 @@
 // SPDX-License-Identifier: MIT
 
-use crate::services::TrashedOriginal;
-use std::{ffi::{OsStr, OsString}, io, os::fd::{AsFd, OwnedFd}, path::Path};
 use super::fs_ops::{Entry, fs};
+use crate::services::TrashedOriginal;
+use std::{
+    ffi::{OsStr, OsString},
+    io,
+    os::fd::{AsFd, OwnedFd},
+    path::Path,
+};
 
 /// Many filesystems hand a freed inode number to the next item created, so
 /// the type and, where reported, the birth time tell the two apart.
@@ -64,16 +69,20 @@ pub(in crate::adapters) fn open_local_child_directory<Fd: AsFd>(
     parent: &Fd,
     name: &OsStr,
 ) -> Result<OwnedFd, String> {
-    // RESOLVE_NO_SYMLINKS (stronger than O_NOFOLLOW) plus RESOLVE_BENEATH and
-    // RESOLVE_NO_MAGICLINKS: if `name` changed to a symlink (or a magic
-    // link) since it was last inspected, this fails closed instead of
-    // opening whatever it now points to.
+    // Reject symlinks swapped in after inspection, including intermediate components.
     retry_local_open(|| {
-        fs().open_at(Entry::new(parent, name), rustix::fs::OFlags::RDONLY
+        fs().open_at(
+            Entry::new(parent, name),
+            rustix::fs::OFlags::RDONLY
                 | rustix::fs::OFlags::DIRECTORY
-                | rustix::fs::OFlags::CLOEXEC, rustix::fs::Mode::empty(), Some(rustix::fs::ResolveFlags::BENEATH
-                | rustix::fs::ResolveFlags::NO_SYMLINKS
-                | rustix::fs::ResolveFlags::NO_MAGICLINKS))
+                | rustix::fs::OFlags::CLOEXEC,
+            rustix::fs::Mode::empty(),
+            Some(
+                rustix::fs::ResolveFlags::BENEATH
+                    | rustix::fs::ResolveFlags::NO_SYMLINKS
+                    | rustix::fs::ResolveFlags::NO_MAGICLINKS,
+            ),
+        )
     })
     .map_err(|error| {
         rust_i18n::t!(
@@ -91,20 +100,26 @@ pub(super) fn local_directory_children<Fd: AsFd>(handle: &Fd) -> Result<Vec<OsSt
         .map_err(os_error_text)
 }
 
+/// Resolve ordinary parent aliases from `/`; descendants keep their separate no-follow policy.
 pub(super) fn open_local_parent_directory(parent_path: &Path) -> Result<OwnedFd, String> {
     if !parent_path.is_absolute() {
         return Err(crate::i18n::tr(
             "A local operation target must use an absolute path",
         ));
     }
-    let root = fs().open_path(OsStr::new("/"), rustix::fs::OFlags::PATH | rustix::fs::OFlags::DIRECTORY | rustix::fs::OFlags::CLOEXEC, rustix::fs::Mode::empty())
-    .map_err(|error| {
-        rust_i18n::t!(
-            "Could not open the filesystem root: %{error}",
-            error = os_error_detail(error)
+    let root = fs()
+        .open_path(
+            OsStr::new("/"),
+            rustix::fs::OFlags::PATH | rustix::fs::OFlags::DIRECTORY | rustix::fs::OFlags::CLOEXEC,
+            rustix::fs::Mode::empty(),
         )
-        .into_owned()
-    })?;
+        .map_err(|error| {
+            rust_i18n::t!(
+                "Could not open the filesystem root: %{error}",
+                error = os_error_detail(error)
+            )
+            .into_owned()
+        })?;
     let relative = parent_path
         .strip_prefix(Path::new("/"))
         .map_err(|_| crate::i18n::tr("A local operation target must use an absolute path"))?;
@@ -112,7 +127,12 @@ pub(super) fn open_local_parent_directory(parent_path: &Path) -> Result<OwnedFd,
         return Ok(root);
     }
     retry_local_open(|| {
-        fs().open_at(Entry::new(&root, relative.as_os_str()), rustix::fs::OFlags::PATH | rustix::fs::OFlags::DIRECTORY | rustix::fs::OFlags::CLOEXEC, rustix::fs::Mode::empty(), Some(rustix::fs::ResolveFlags::IN_ROOT | rustix::fs::ResolveFlags::NO_MAGICLINKS))
+        fs().open_at(
+            Entry::new(&root, relative.as_os_str()),
+            rustix::fs::OFlags::PATH | rustix::fs::OFlags::DIRECTORY | rustix::fs::OFlags::CLOEXEC,
+            rustix::fs::Mode::empty(),
+            Some(rustix::fs::ResolveFlags::IN_ROOT | rustix::fs::ResolveFlags::NO_MAGICLINKS),
+        )
     })
     .map_err(|error| {
         rust_i18n::t!(
@@ -124,20 +144,28 @@ pub(super) fn open_local_parent_directory(parent_path: &Path) -> Result<OwnedFd,
     })
 }
 
-pub(super) fn open_local_parent_beneath(parent_path: &Path, allowed_root: &Path) -> Result<OwnedFd, String> {
+pub(super) fn open_local_parent_beneath(
+    parent_path: &Path,
+    allowed_root: &Path,
+) -> Result<OwnedFd, String> {
     if !parent_path.is_absolute() || !allowed_root.is_absolute() {
         return Err(crate::i18n::tr(
             "A restore destination must use an absolute path",
         ));
     }
-    let root = fs().open_path(allowed_root.as_os_str(), rustix::fs::OFlags::PATH | rustix::fs::OFlags::DIRECTORY | rustix::fs::OFlags::CLOEXEC, rustix::fs::Mode::empty())
-    .map_err(|error| {
-        rust_i18n::t!(
-            "Could not open the restore area: %{error}",
-            error = os_error_detail(error)
+    let root = fs()
+        .open_path(
+            allowed_root.as_os_str(),
+            rustix::fs::OFlags::PATH | rustix::fs::OFlags::DIRECTORY | rustix::fs::OFlags::CLOEXEC,
+            rustix::fs::Mode::empty(),
         )
-        .into_owned()
-    })?;
+        .map_err(|error| {
+            rust_i18n::t!(
+                "Could not open the restore area: %{error}",
+                error = os_error_detail(error)
+            )
+            .into_owned()
+        })?;
     if parent_path == allowed_root {
         return Ok(root);
     }
@@ -145,9 +173,16 @@ pub(super) fn open_local_parent_beneath(parent_path: &Path, allowed_root: &Path)
         .strip_prefix(allowed_root)
         .map_err(|_| crate::i18n::tr("The restore destination is outside the trash volume"))?;
     retry_local_open(|| {
-        fs().open_at(Entry::new(&root, relative.as_os_str()), rustix::fs::OFlags::PATH | rustix::fs::OFlags::DIRECTORY | rustix::fs::OFlags::CLOEXEC, rustix::fs::Mode::empty(), Some(rustix::fs::ResolveFlags::BENEATH
-                | rustix::fs::ResolveFlags::NO_MAGICLINKS
-                | rustix::fs::ResolveFlags::NO_XDEV))
+        fs().open_at(
+            Entry::new(&root, relative.as_os_str()),
+            rustix::fs::OFlags::PATH | rustix::fs::OFlags::DIRECTORY | rustix::fs::OFlags::CLOEXEC,
+            rustix::fs::Mode::empty(),
+            Some(
+                rustix::fs::ResolveFlags::BENEATH
+                    | rustix::fs::ResolveFlags::NO_MAGICLINKS
+                    | rustix::fs::ResolveFlags::NO_XDEV,
+            ),
+        )
     })
     .map_err(|error| {
         rust_i18n::t!(
@@ -166,4 +201,3 @@ pub(super) fn os_error_text(error: impl Into<io::Error>) -> String {
 pub(super) fn os_error_detail(error: impl Into<io::Error>) -> String {
     crate::services::io_error_detail(&error.into())
 }
-

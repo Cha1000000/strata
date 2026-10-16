@@ -227,7 +227,8 @@ impl TrashEnvironment for RefusingMount {
         &self,
         file: &gio::File,
         _cancellable: &gio::Cancellable,
-    ) -> Pin<Box<dyn Future<Output = Result<Option<crate::services::TrashedOriginal>, glib::Error>>>> {
+    ) -> Pin<Box<dyn Future<Output = Result<Option<crate::services::TrashedOriginal>, glib::Error>>>>
+    {
         self.attempts.set(self.attempts.get() + 1);
         let parent = fs::canonicalize(file.path().expect("native").parent().expect("parent"))
             .expect("parent");

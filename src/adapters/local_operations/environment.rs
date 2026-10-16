@@ -1,10 +1,16 @@
 // SPDX-License-Identifier: MIT
 
+use super::fs_ops::{System, assert_off_main_thread};
 use crate::adapters::volume::{MountTable, MountType};
 use gtk::{gio, glib, prelude::*};
-use rustix::{fs::{AtFlags, StatxFlags}, io::Errno};
-use std::{os::fd::{AsRawFd, BorrowedFd}, path::Path};
-use super::fs_ops::{System, assert_off_main_thread};
+use rustix::{
+    fs::{AtFlags, StatxFlags},
+    io::Errno,
+};
+use std::{
+    os::fd::{AsRawFd, BorrowedFd},
+    path::Path,
+};
 
 pub(super) trait FsEnvironment: Send + Sync {
     fn can_trash(&self, path: &Path) -> bool;
@@ -102,5 +108,4 @@ impl FsEnvironment for System {
             .find_map(|line| line.strip_prefix("E:ID_FS_TYPE="))
             .map(str::to_owned))
     }
-
 }

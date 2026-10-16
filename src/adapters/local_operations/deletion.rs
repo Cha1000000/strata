@@ -1,13 +1,42 @@
 // SPDX-License-Identifier: MIT
 
-use crate::{adapters::{gio_file_for_location, trash_support::{LeftoverWatch, SystemTrash, TrashEnvironment, TrashError, TrashFailure}}, model::{FileEntry, Location}, services::{OperationEvent, OperationRequestId}};
-use gtk::{gio, glib, prelude::*};
-use std::{collections::HashSet, ffi::{OsStr, OsString}, future::Future, io, os::fd::{AsFd, OwnedFd}, path::{Path, PathBuf}, pin::Pin, rc::Rc, sync::{Arc, atomic::AtomicBool}, thread};
 use super::fs_ops::{Entry, fs};
+use crate::{
+    adapters::{
+        gio_file_for_location,
+        trash_support::{LeftoverWatch, SystemTrash, TrashEnvironment, TrashError, TrashFailure},
+    },
+    model::{FileEntry, Location},
+    services::{OperationEvent, OperationRequestId},
+};
+use gtk::{gio, glib, prelude::*};
+use std::{
+    collections::HashSet,
+    ffi::{OsStr, OsString},
+    future::Future,
+    io,
+    os::fd::{AsFd, OwnedFd},
+    path::{Path, PathBuf},
+    pin::Pin,
+    rc::Rc,
+    sync::{Arc, atomic::AtomicBool},
+    thread,
+};
 
-use super::{MAX_LOCAL_IO_WORKERS, await_cancellable, cancelled_event, deletion_error_message, deletion_error_summary, deletion_undone_when_cancelled, fs_ops, io_error, is_trash_unsupported_failure, join_local_tasks, native_fs::{LocalFileIdentity, local_directory_children, open_local_parent_directory, os_error_detail, retry_local_open}};
+use super::{
+    MAX_LOCAL_IO_WORKERS, await_cancellable, cancelled_event, deletion_error_message,
+    deletion_error_summary, deletion_undone_when_cancelled, fs_ops, io_error,
+    is_trash_unsupported_failure, join_local_tasks,
+    native_fs::{
+        LocalFileIdentity, local_directory_children, open_local_parent_directory, os_error_detail,
+        retry_local_open,
+    },
+};
 
-use super::{run_cancellable, translated_io_error, work_queue::{self, Group, Job, WorkQueue}};
+use super::{
+    run_cancellable, translated_io_error,
+    work_queue::{self, Group, Job, WorkQueue},
+};
 
 pub(super) fn permanently_delete(
     file: gio::File,
@@ -62,14 +91,8 @@ pub(super) fn permanently_delete(
     })
 }
 
-/// The outcome of resolving one delete target relative to its parent
-/// directory's file descriptor.
 pub(super) enum LocalDeleteStep {
-    /// A non-directory entry (file, symlink, or other special file) that has
-    /// already been unlinked.
     Removed,
-    /// A directory that was opened (not yet removed) along with its
-    /// immediate children, still to be deleted before the directory itself.
     Directory {
         handle: OwnedFd,
         children: Vec<OsString>,
@@ -91,7 +114,7 @@ pub(super) fn ensure_expected_local_identity(
     Ok(())
 }
 
-/// Fails closed if an opened directory is no longer at its original name.
+/// Check the name too: an open descriptor can outlive a rename.
 pub(super) fn ensure_local_delete_target_unchanged<ParentFd: AsFd, TargetFd: AsFd>(
     parent: &ParentFd,
     name: &OsStr,
@@ -125,9 +148,7 @@ pub(super) fn ensure_local_delete_target_unchanged<ParentFd: AsFd, TargetFd: AsF
     Ok(())
 }
 
-/// Inspects and, for non-directories, immediately deletes the entry named
-/// `name` inside `parent`. The type is re-read from disk here rather than
-/// trusted from any earlier listing.
+/// Unlinks non-directories immediately; returns pinned directories and their children.
 pub(super) fn open_local_delete_target<Fd: AsFd>(
     parent: &Fd,
     name: &OsStr,
@@ -145,26 +166,31 @@ pub(super) fn open_local_delete_target<Fd: AsFd>(
         })?;
     ensure_expected_local_identity(name, stat.identity, expected)?;
     if !stat.is_directory() {
-        fs().unlink(Entry::new(parent, name), rustix::fs::AtFlags::empty()).map_err(|error| {
-            rust_i18n::t!(
-                "Could not delete %{name}: %{error}",
-                name = name.to_string_lossy(),
-                error = os_error_detail(error)
-            )
-            .into_owned()
-        })?;
+        fs().unlink(Entry::new(parent, name), rustix::fs::AtFlags::empty())
+            .map_err(|error| {
+                rust_i18n::t!(
+                    "Could not delete %{name}: %{error}",
+                    name = name.to_string_lossy(),
+                    error = os_error_detail(error)
+                )
+                .into_owned()
+            })?;
         return Ok(LocalDeleteStep::Removed);
     }
-    // RESOLVE_NO_SYMLINKS (stronger than O_NOFOLLOW) plus RESOLVE_BENEATH and
-    // RESOLVE_NO_MAGICLINKS: if `name` changed to a symlink (or a magic link)
-    // in the moment since the statat above, this fails closed instead of
-    // opening whatever it now points to.
+    // Reject symlinks swapped in after the type check, including intermediate components.
     let handle = retry_local_open(|| {
-        fs().open_at(Entry::new(parent, name), rustix::fs::OFlags::RDONLY
+        fs().open_at(
+            Entry::new(parent, name),
+            rustix::fs::OFlags::RDONLY
                 | rustix::fs::OFlags::DIRECTORY
-                | rustix::fs::OFlags::CLOEXEC, rustix::fs::Mode::empty(), Some(rustix::fs::ResolveFlags::BENEATH
-                | rustix::fs::ResolveFlags::NO_SYMLINKS
-                | rustix::fs::ResolveFlags::NO_MAGICLINKS))
+                | rustix::fs::OFlags::CLOEXEC,
+            rustix::fs::Mode::empty(),
+            Some(
+                rustix::fs::ResolveFlags::BENEATH
+                    | rustix::fs::ResolveFlags::NO_SYMLINKS
+                    | rustix::fs::ResolveFlags::NO_MAGICLINKS,
+            ),
+        )
     })
     .map_err(|error| {
         rust_i18n::t!(
@@ -339,8 +365,10 @@ pub(super) fn remove_local_delete_directory(
         queue.fail(error);
         return;
     }
-    if let Err(error) = fs().unlink(Entry::new(parent.as_ref(), &name), rustix::fs::AtFlags::REMOVEDIR)
-    {
+    if let Err(error) = fs().unlink(
+        Entry::new(parent.as_ref(), &name),
+        rustix::fs::AtFlags::REMOVEDIR,
+    ) {
         queue.fail(
             rust_i18n::t!(
                 "Could not delete %{name}: %{error}",
@@ -492,10 +520,7 @@ pub(super) fn parallel_delete_local_with(
     })
 }
 
-/// Recursively and permanently deletes the entry named `name` inside
-/// `parent`, walking descriptor-relative to each already-open directory
-/// rather than re-resolving paths, so a component swapped out from under an
-/// in-progress delete cannot redirect it outside the tree it started in.
+/// Traverse pinned directories so a renamed component cannot redirect deletion.
 pub(super) fn permanently_delete_local(
     parent: OwnedFd,
     name: OsString,
@@ -512,13 +537,6 @@ pub(super) fn permanently_delete_local(
     )
 }
 
-/// Resolves ordinary parent aliases in one kernel lookup and pins the directory.
-/// This is the operation's starting point, not a recursive traversal: selected
-/// entries and their children retain their separate no-follow policy. Rooting at
-/// `/` permits absolute symlink targets without allowing procfs magic links.
-/// Entry point for permanently deleting a local path: opens the target's
-/// parent directory once, then hands off to the descriptor-relative walk in
-/// [`permanently_delete_local`] for everything below it.
 pub(super) fn permanently_delete_local_path_if_unchanged(
     path: PathBuf,
     expected: Option<LocalFileIdentity>,
@@ -561,7 +579,9 @@ pub(super) fn permanently_delete_local_path_if_unchanged_with_worker_count(
     })
 }
 
-pub(super) async fn local_file_identity(file: &gio::File) -> Result<Option<LocalFileIdentity>, glib::Error> {
+pub(super) async fn local_file_identity(
+    file: &gio::File,
+) -> Result<Option<LocalFileIdentity>, glib::Error> {
     if !file.is_native() {
         return Ok(None);
     }
@@ -592,13 +612,6 @@ pub(super) async fn local_file_identity(file: &gio::File) -> Result<Option<Local
     .map(Some)
 }
 
-/// Deletes `file` through the descriptor-relative local walk when it names a
-/// local path, or through the path-based GIO delete otherwise. Used for
-/// every permanent delete this module performs on the caller's behalf --
-/// not just the user-requested ones -- so that cleaning up a staged
-/// replacement's old target, or a move's now-copied source, gets the same
-/// race safety and doesn't act on whatever type that entry was earlier in
-/// the operation rather than what it actually is right before deletion.
 pub(super) fn permanently_delete_maybe_local(
     file: gio::File,
     directory: bool,
@@ -797,7 +810,12 @@ pub(super) async fn run_deletion_in(
                 let task = context.spawn_local(async move {
                     let file = gio_file_for_location(&operation_target.location);
                     if !permanent {
-                        return crate::adapters::trash_support::attempt(environment.as_ref(), &file, &cancellable).await;
+                        return crate::adapters::trash_support::attempt(
+                            environment.as_ref(),
+                            &file,
+                            &cancellable,
+                        )
+                        .await;
                     }
                     if operation_target
                         .location
@@ -831,8 +849,11 @@ pub(super) async fn run_deletion_in(
         let mut chunk_cancelled = false;
         for (target, result) in join_local_tasks(tasks).await {
             completed_count += 1;
-            let result = result.unwrap_or_else(|_| Err(TrashError::permanent(io_error("Delete worker failed"))));
-            if let (Some(leftovers), Some(path)) = (leftovers.as_mut(), target.location.native_path()) {
+            let result = result
+                .unwrap_or_else(|_| Err(TrashError::permanent(io_error("Delete worker failed"))));
+            if let (Some(leftovers), Some(path)) =
+                (leftovers.as_mut(), target.location.native_path())
+            {
                 leftovers.note(path, result.as_ref().err().map(|error| error.failure));
             }
             match result {
@@ -852,7 +873,9 @@ pub(super) async fn run_deletion_in(
                     failed_locations.push(target.location.clone());
                 }
                 Ok(identity) => {
-                    crate::adapters::bookmarks::deletion_completed(std::slice::from_ref(&target.location));
+                    crate::adapters::bookmarks::deletion_completed(std::slice::from_ref(
+                        &target.location,
+                    ));
                     if let Some(identity) = identity {
                         emit(OperationEvent::ItemTrashed {
                             request_id,
@@ -917,4 +940,3 @@ pub(super) async fn run_deletion_in(
         });
     }
 }
-

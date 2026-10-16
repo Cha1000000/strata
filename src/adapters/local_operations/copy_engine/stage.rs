@@ -12,7 +12,14 @@ use rustix::{
 };
 use unicode_normalization::UnicodeNormalization;
 
-use crate::adapters::{local_operations::{fs_ops::{Entry, EntryStat, FsOps}, native_fs::LocalFileIdentity, placement::{self, PlaceError, Placed}}, volume::Family};
+use crate::adapters::{
+    local_operations::{
+        fs_ops::{Entry, EntryStat, FsOps},
+        native_fs::LocalFileIdentity,
+        placement::{self, PlaceError, Placed},
+    },
+    volume::Family,
+};
 
 /// Local POSIX filesystems, which link an unnamed file atomically. The SMB
 /// client fakes `O_TMPFILE` with a visible file, and FUSE daemons that
@@ -116,5 +123,10 @@ pub(in crate::adapters::local_operations) fn publish(
     recorded: LocalFileIdentity,
     name: &OsStr,
 ) -> Result<Placed, PlaceError> {
-    placement::publish_staged(fs, Entry { dir, name: stage }, Entry { dir, name }, recorded)
+    placement::publish_staged(
+        fs,
+        Entry { dir, name: stage },
+        Entry { dir, name },
+        recorded,
+    )
 }

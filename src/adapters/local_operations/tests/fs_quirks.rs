@@ -1019,7 +1019,8 @@ impl FsEnvironment for Scoped {
                         Trash::Unsupported => false,
                         Trash::FalseWithoutError
                         | Trash::SucceedsWithoutMoving
-                        | Trash::Refused | Trash::ProtocolRefused => true,
+                        | Trash::Refused
+                        | Trash::ProtocolRefused => true,
                     })
                 })
                 .unwrap_or(false),
@@ -1083,14 +1084,20 @@ impl FsEnvironment for Scoped {
             None => System.device_format(fd),
         }
     }
-
 }
 
 impl FsOps for Scoped {
-    fn open_at(&self, at: Entry<'_>, flags: OFlags, mode: Mode, resolve: Option<ResolveFlags>) -> Result<OwnedFd, Errno> {
+    fn open_at(
+        &self,
+        at: Entry<'_>,
+        flags: OFlags,
+        mode: Mode,
+        resolve: Option<ResolveFlags>,
+    ) -> Result<OwnedFd, Errno> {
         match scope_for(at.dir) {
             Some(scope) => scope.run(Op::OpenAt, &[at.name], |scope| {
-                scope.resolved(at, |at| System.open_at(at, flags, mode, resolve))
+                scope
+                    .resolved(at, |at| System.open_at(at, flags, mode, resolve))
                     .map(|opened| scope.record_open(opened))
             }),
             None => System.open_at(at, flags, mode, resolve),
@@ -1105,7 +1112,9 @@ impl FsOps for Scoped {
             .and_then(|opened| scope_for(opened.as_fd()));
         match scope {
             Some(scope) => scope.run(Op::OpenPath, &[path], |scope| {
-                System.open_path(path, flags, mode).map(|opened| scope.record_open(opened))
+                System
+                    .open_path(path, flags, mode)
+                    .map(|opened| scope.record_open(opened))
             }),
             None => System.open_path(path, flags, mode),
         }
@@ -1116,7 +1125,11 @@ impl FsOps for Scoped {
             let opened = System.dup(fd)?;
             if let Some(scope) = scope {
                 let mut state = scope.state();
-                let reported = state.reported_losses.get(&fd.as_raw_fd()).copied().unwrap_or_default();
+                let reported = state
+                    .reported_losses
+                    .get(&fd.as_raw_fd())
+                    .copied()
+                    .unwrap_or_default();
                 state.reported_losses.insert(opened.as_raw_fd(), reported);
             }
             Ok(opened)

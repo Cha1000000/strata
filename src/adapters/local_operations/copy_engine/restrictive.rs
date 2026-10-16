@@ -13,8 +13,14 @@ use std::{
 
 use rustix::io::Errno;
 
-use crate::adapters::{local_operations::{fs_ops::{Entry, FsOps}, native_fs::LocalFileIdentity}, volume::Family};
 use super::{best_effort, is_fatal, stable_inodes};
+use crate::adapters::{
+    local_operations::{
+        fs_ops::{Entry, FsOps},
+        native_fs::LocalFileIdentity,
+    },
+    volume::Family,
+};
 
 #[derive(Clone, Debug)]
 pub(in crate::adapters::local_operations) struct Restrictive {

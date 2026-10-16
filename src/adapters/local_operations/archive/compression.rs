@@ -5,7 +5,23 @@
 #[cfg(test)]
 mod tests;
 
-use super::super::{copy_engine, fs_ops::{Entry, EntryStat, OffMain, fs}, native_fs::{LocalFileIdentity, local_directory_children, open_local_child_directory, open_local_parent_directory}, owed::{Deletion, Owed}, placement::{COMPRESSION_STAGE_PREFIX, Displacement, NUMBERED_NAME_ATTEMPTS, PlaceError, REPLACED_PREFIX, displacement_without_trash, exchange, file_creation_error, place_staged, put_back, remove_if_unchanged, reserve_hidden_name, set_aside, set_aside_if_safe}, placement_reason, replacement::{DisplacedOriginal, cannot_replace_safely, original_kept_aside}, trash::trash_verified};
+use super::super::{
+    copy_engine,
+    fs_ops::{Entry, EntryStat, OffMain, fs},
+    native_fs::{
+        LocalFileIdentity, local_directory_children, open_local_child_directory,
+        open_local_parent_directory,
+    },
+    owed::{Deletion, Owed},
+    placement::{
+        COMPRESSION_STAGE_PREFIX, Displacement, NUMBERED_NAME_ATTEMPTS, PlaceError,
+        REPLACED_PREFIX, displacement_without_trash, exchange, file_creation_error, place_staged,
+        put_back, remove_if_unchanged, reserve_hidden_name, set_aside, set_aside_if_safe,
+    },
+    placement_reason,
+    replacement::{DisplacedOriginal, cannot_replace_safely, original_kept_aside},
+    trash::trash_verified,
+};
 use super::{
     ArchiveError, COPY_BUF, archive_failed, check_archive_cancelled, copy_with_big_buf,
     decoders::FILE_ATTRIBUTE_UNIX_EXTENSION, destination::process_umask,
@@ -15,7 +31,20 @@ use crate::services::{
 };
 use gtk::{gio, glib};
 use rustix::fs::AtFlags;
-use std::{ffi::{OsStr, OsString}, io::{self, Read, Seek, SeekFrom, Write}, os::{fd::{AsFd, OwnedFd}, unix::fs::PermissionsExt}, path::{Path, PathBuf}, sync::{Arc, OnceLock, atomic::{AtomicBool, AtomicUsize, Ordering}}, time::{Duration, SystemTime, UNIX_EPOCH}};
+use std::{
+    ffi::{OsStr, OsString},
+    io::{self, Read, Seek, SeekFrom, Write},
+    os::{
+        fd::{AsFd, OwnedFd},
+        unix::fs::PermissionsExt,
+    },
+    path::{Path, PathBuf},
+    sync::{
+        Arc, OnceLock,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    },
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 /// Writes an archive through a private staging file, then publishes it at
 /// `archive_path` without ever replacing an entry it did not account for.
@@ -214,8 +243,9 @@ impl Publication {
     where
         F: FnOnce(std::fs::File) -> Result<(), ArchiveError>,
     {
-        let handle =
-            fs().dup(file.as_fd()).map_err(|error| self.creation_failed(errno_text(error)))?;
+        let handle = fs()
+            .dup(file.as_fd())
+            .map_err(|error| self.creation_failed(errno_text(error)))?;
         write_archive(std::fs::File::from(file))?;
         check_archive_cancelled(cancelled)?;
         fs().chmod_fd(handle.as_fd(), mode)
@@ -224,10 +254,13 @@ impl Publication {
             fs().sync_data(handle.as_fd())
                 .map_err(|error| self.creation_failed(errno_text(error)))?;
         }
-        let stat = fs().stat_fd(handle.as_fd()).map_err(|error| self.creation_failed(errno_text(error)))?;
+        let stat = fs()
+            .stat_fd(handle.as_fd())
+            .map_err(|error| self.creation_failed(errno_text(error)))?;
         let _ = stage.ownership.set(copy_engine::file_ownership(&stat));
         // Close before publication so NFS cannot silly-rename a failed stage.
-        fs().close(handle).map_err(|error| self.creation_failed(errno_text(error)))?;
+        fs().close(handle)
+            .map_err(|error| self.creation_failed(errno_text(error)))?;
         check_archive_cancelled(cancelled)?;
         self.publish(stage, strategy, cancelled)
     }
@@ -334,7 +367,12 @@ impl Publication {
             .map(|()| {
                 let name = OsStr::new(&self.name);
                 let placed = stage.ownership.get().and_then(|ownership| {
-                    copy_engine::placed_at_proven(fs(), (stage.parent.as_fd(), name), ownership, cancelled)
+                    copy_engine::placed_at_proven(
+                        fs(),
+                        (stage.parent.as_fd(), name),
+                        ownership,
+                        cancelled,
+                    )
                 });
                 self.published(Displaced::Trashed(identity.into(), placed))
             })
@@ -559,11 +597,14 @@ fn zip_member_options<'k>(
 /// Returns an error if `name` cannot be inspected, is an unsupported file
 /// type, or changes from a regular file between `statat` and `openat2`.
 fn open_archive_source<Fd: AsFd>(parent: &Fd, name: &OsStr) -> Result<ArchiveSource, String> {
-    let stat = fs().stat(Entry::new(parent, name), false)
+    let stat = fs()
+        .stat(Entry::new(parent, name), false)
         .map_err(errno_text)?;
     match stat.kind {
         rustix::fs::FileType::Symlink => {
-            let target = fs().readlink(Entry::new(parent, name)).map_err(errno_text)?;
+            let target = fs()
+                .readlink(Entry::new(parent, name))
+                .map_err(errno_text)?;
             let modified = u64::try_from(stat.mtime.0)
                 .ok()
                 .zip(Some(stat.mtime.1))
@@ -577,13 +618,21 @@ fn open_archive_source<Fd: AsFd>(parent: &Fd, name: &OsStr) -> Result<ArchiveSou
             .map(std::fs::File::from)
             .map(ArchiveSource::Directory),
         rustix::fs::FileType::RegularFile => {
-            let file = fs().open_at(Entry::new(parent, name), rustix::fs::OFlags::RDONLY
-                    | rustix::fs::OFlags::NONBLOCK
-                    | rustix::fs::OFlags::CLOEXEC, rustix::fs::Mode::empty(), Some(rustix::fs::ResolveFlags::BENEATH
-                    | rustix::fs::ResolveFlags::NO_SYMLINKS
-                    | rustix::fs::ResolveFlags::NO_MAGICLINKS))
-            .map(std::fs::File::from)
-            .map_err(errno_text)?;
+            let file = fs()
+                .open_at(
+                    Entry::new(parent, name),
+                    rustix::fs::OFlags::RDONLY
+                        | rustix::fs::OFlags::NONBLOCK
+                        | rustix::fs::OFlags::CLOEXEC,
+                    rustix::fs::Mode::empty(),
+                    Some(
+                        rustix::fs::ResolveFlags::BENEATH
+                            | rustix::fs::ResolveFlags::NO_SYMLINKS
+                            | rustix::fs::ResolveFlags::NO_MAGICLINKS,
+                    ),
+                )
+                .map(std::fs::File::from)
+                .map_err(errno_text)?;
             if !file.metadata().map_err(|error| io_text(&error))?.is_file() {
                 return Err(crate::i18n::tr("The file type changed during compression"));
             }

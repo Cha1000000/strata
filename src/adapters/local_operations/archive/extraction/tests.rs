@@ -1092,10 +1092,13 @@ fn directory_metadata_is_restored_deepest_first_only_on_completion() -> Result<(
 #[test]
 fn a_failed_directory_restore_leaves_restored_directories_writable() -> Result<(), Box<dyn Error>> {
     let root = tempfile::tempdir()?;
-    let _quirks = FsQuirks::install(root.path(), Quirks {
-        fail: vec![(Op::SetTimes, "*", 0, rustix::io::Errno::IO)],
-        ..Quirks::default()
-    });
+    let _quirks = FsQuirks::install(
+        root.path(),
+        Quirks {
+            fail: vec![(Op::SetTimes, "*", 0, rustix::io::Errno::IO)],
+            ..Quirks::default()
+        },
+    );
     let progress = AtomicUsize::new(0);
     let cancelled = AtomicBool::new(false);
     let mut session = ExtractionSession::open(root.path(), ARCHIVE, &progress, &cancelled)?;

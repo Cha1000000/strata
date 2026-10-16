@@ -19,7 +19,10 @@ use rustix::{
     io::Errno,
 };
 
-use super::{fs_ops::{Entry, EntryStat, FsOps}, native_fs::LocalFileIdentity};
+use super::{
+    fs_ops::{Entry, EntryStat, FsOps},
+    native_fs::LocalFileIdentity,
+};
 use crate::adapters::volume::{
     MountCapabilities, MountKey, learn_mount_capability, mount_capabilities,
 };
