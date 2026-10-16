@@ -1220,11 +1220,11 @@ pub(super) struct Merged {
 }
 
 /// How names are given in a merged folder, which a folder merged into it
-/// shares unless another filesystem is mounted there, as a bind mount of the
-/// same one shares its rules.
+/// shares unless another filesystem is mounted at either side, as a bind
+/// mount of the same one shares its rules.
 #[derive(Clone, Copy)]
 pub(super) struct MergedNames {
-    device: u64,
+    devices: (u64, u64),
     site: Site,
     fixing: bool,
 }
@@ -1256,31 +1256,23 @@ impl Merged {
         if copy.durable {
             tree.reach(fs, &mount, target.as_fd(), &self.path)?;
         }
-        let device = target_stat.identity.device;
-        let (names, source_stat) = match self.parent {
-            Some(parent) if parent.device == device => (parent, None),
+        let source_stat = fs.stat_fd(source.as_fd())?;
+        let devices = (source_stat.identity.device, target_stat.identity.device);
+        let names = match self.parent {
+            Some(parent) if parent.devices == devices => parent,
             _ => {
-                let source_stat = fs.stat_fd(source.as_fd())?;
                 let site = copy.site(&mount, target.as_fd());
-                let fixing = tree.crosses(&source_stat, &target_stat, &site);
-                let names = MergedNames {
-                    device,
+                MergedNames {
+                    devices,
                     site,
-                    fixing,
-                };
-                (names, Some(source_stat))
+                    fixing: tree.crosses(&source_stat, &target_stat, &site),
+                }
             }
         };
-        let recorded = match &self.recorded_in {
-            Some(folder) => {
-                let source_stat = match source_stat {
-                    Some(stat) => stat,
-                    None => fs.stat_fd(source.as_fd())?,
-                };
-                Some(folder.folder(source_name, source_stat.identity))
-            }
-            None => None,
-        };
+        let recorded = self
+            .recorded_in
+            .as_ref()
+            .map(|folder| folder.folder(source_name, source_stat.identity));
         // A stage made in the live folder inherits its casefolding.
         let naming = Naming::Decide.decide(fs, mount.family, target.as_fd());
         let folder = copy.names.in_folder(&names.site);

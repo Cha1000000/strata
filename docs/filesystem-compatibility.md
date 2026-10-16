@@ -390,8 +390,9 @@ among a paste's top-level items, that sorts first in bytes (`Readme.txt` beside 
 then numbered as an alias before copying. Fixed names that equal another name are numbered too, in
 the byte order of the names they replace. The completion report lists every fixed name with the name
 it was saved as. In a merge, a planned name equal to an existing item replaces that item like any
-other same-named one, and a folder merged into takes the rules of its own mount only where it is on
-another device than its parent: a bind mount of the same filesystem shares its rules. Under
+other same-named one. A folder merged into takes the rules of its own mount, and whether names are fixed
+is decided again, only where it or the folder merged into it is on another device than its parent:
+a bind mount of the same filesystem shares its rules. Under
 `/run/user/$UID/gvfs`, where one FUSE mount serves every GVfs location, the folder of each location
 counts as a filesystem of its own, with the rules of its kind, and what its refusals teach stays
 with it.

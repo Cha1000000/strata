@@ -1609,23 +1609,22 @@ struct ExistingFolder {
     device: Option<u64>,
 }
 
-/// The device GIO's `info` of `file` gives, where it gives one.
+/// The device GIO's `info` of `file` gives, where it gives one for a native
+/// file.
 fn device(file: &gio::File, info: &gio::FileInfo) -> Option<u64> {
-    let device = info
-        .has_attribute(gio::FILE_ATTRIBUTE_UNIX_DEVICE)
+    let device = (file.is_native() && info.has_attribute(gio::FILE_ATTRIBUTE_UNIX_DEVICE))
         .then(|| u64::from(info.attribute_uint32(gio::FILE_ATTRIBUTE_UNIX_DEVICE)));
     #[cfg(test)]
     let device = tests::fs_quirks::gio_device(file, device);
-    #[cfg(not(test))]
-    let _ = file;
     device
 }
 
-/// The names in a target folder, and the device it is on, where known.
+/// The names in a target folder, and the devices of the source folder copied
+/// into it and of the folder itself, where known.
 #[derive(Clone, Copy)]
 struct TargetFolder {
     names: FolderNames,
-    device: Option<u64>,
+    devices: (Option<u64>, Option<u64>),
 }
 
 /// What the GIO path knows of the names in the target folder it copies into.
@@ -1646,24 +1645,24 @@ impl GioNames {
     }
 
     /// The names in `target`, a folder the copy made, or the `existing` one
-    /// it copies into.
+    /// it copies `source`, on `source_device`, into.
     async fn of(
         &self,
-        source: &gio::File,
+        (source, source_device): (&gio::File, Option<u64>),
         target: &gio::File,
         existing: Option<ExistingFolder>,
         cancellable: &gio::Cancellable,
     ) -> Result<TargetFolder, glib::Error> {
-        let device = existing.and_then(|existing| existing.device);
+        let devices = (source_device, existing.and_then(|existing| existing.device));
         match (self.parent, existing) {
             (Some(parent), None) => Ok(parent),
             (Some(parent), Some(_)) => {
                 let folders = (source, target);
-                existing_folder_names(&self.policy, parent, folders, device, cancellable).await
+                existing_folder_names(&self.policy, parent, folders, devices, cancellable).await
             }
             (None, _) => Ok(TargetFolder {
                 names: self.policy.folder(source, target, cancellable).await?,
-                device,
+                devices,
             }),
         }
     }
@@ -1739,20 +1738,21 @@ impl LeftOut {
     }
 }
 
-/// The names in `target`, a folder on `device` that existed in `parent`:
-/// those of its own mount only where another filesystem is mounted there,
-/// as a bind mount of the parent's shares its rules.
+/// The names in `target`, a folder that existed in `parent`, as `source`
+/// arrives in it, the two on `devices`: looked up again only where another
+/// filesystem is mounted at either, as a bind mount of the parent's shares
+/// its rules.
 async fn existing_folder_names(
     policy: &NamePolicy,
     parent: TargetFolder,
     (source, target): (&gio::File, &gio::File),
-    device: Option<u64>,
+    devices: (Option<u64>, Option<u64>),
     cancellable: &gio::Cancellable,
 ) -> Result<TargetFolder, glib::Error> {
-    if target.is_native() && (device.is_none() || device != parent.device) {
+    if target.is_native() && (devices.1.is_none() || devices != parent.devices) {
         Ok(TargetFolder {
             names: policy.folder(source, target, cancellable).await?,
-            device,
+            devices,
         })
     } else {
         Ok(parent)
@@ -2148,7 +2148,7 @@ fn copy_recursively_with_progress(
     Box::pin(async move {
         let info = await_cancellable(&source, &cancellable, |source, cancellable, result| {
             source.query_info_async(
-                "standard::type,standard::size",
+                "standard::type,standard::size,unix::device",
                 gio::FileQueryInfoFlags::NOFOLLOW_SYMLINKS,
                 glib::Priority::DEFAULT,
                 Some(cancellable),
@@ -2165,7 +2165,10 @@ fn copy_recursively_with_progress(
                 };
                 make_copy_folder(&target, &cancellable, &created_root).await?;
             }
-            let folder = names.of(&source, &target, existing, &cancellable).await?;
+            let source_folder = (&source, device(&source, &info));
+            let folder = names
+                .of(source_folder, &target, existing, &cancellable)
+                .await?;
             let record = match record {
                 CopyRecord::Root(_) => CopyRecord::Nothing,
                 record => record,
@@ -4303,9 +4306,17 @@ async fn classify_merge_child(
         }
         Some(gio::FileType::Directory) if source_is_directory => {
             let folders = (&child_source, &child_target);
-            let device = target_info.and_then(|info| device(&child_target, &info));
+            let source_device = if child_source.is_native() && child_target.is_native() {
+                merged_folder_device(&child_source, cancellable).await?
+            } else {
+                None
+            };
+            let devices = (
+                source_device,
+                target_info.and_then(|info| device(&child_target, &info)),
+            );
             let folder =
-                existing_folder_names(policy, folder, folders, device, cancellable).await?;
+                existing_folder_names(policy, folder, folders, devices, cancellable).await?;
             classify_merge(folders, plan, cancellable, (policy, folder)).await?;
         }
         Some(gio::FileType::Directory) => {
@@ -4370,12 +4381,14 @@ async fn merge_owing(
     if let Some(locations) = affected_locations {
         locations.extend([&source, &target].into_iter().filter_map(location_for_file));
     }
-    merged_folder_device(&source, cancellable).await?;
-    let device = merged_folder_device(&target, cancellable).await?;
+    let devices = (
+        merged_folder_device(&source, cancellable).await?,
+        merged_folder_device(&target, cancellable).await?,
+    );
     let mut plan = MergePlan::default();
     let folder = TargetFolder {
         names: hooks.names.folder(&source, &target, cancellable).await?,
-        device,
+        devices,
     };
     let folders = (&source, &target);
     classify_merge(folders, &mut plan, cancellable, (&hooks.names, folder)).await?;

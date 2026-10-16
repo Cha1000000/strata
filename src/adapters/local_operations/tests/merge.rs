@@ -349,6 +349,68 @@ fn a_merge_onto_fat_takes_the_rules_of_a_folder_inside_it_only_from_another_devi
 }
 
 #[test]
+fn a_merge_within_one_disk_fixes_the_names_another_filesystem_mounted_in_its_source_brings()
+-> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let copies: [(&str, fn() -> CopyStep); 2] = [
+        ("engine", || super::super::merge_copy(None, fixing())),
+        ("GIO", || gio_merge_copy(fixing())),
+    ];
+    for (copy_row, copy) in copies {
+        for (own_device, landed) in [(true, "a_b"), (false, "a:b")] {
+            let row = format!("{copy_row}, own device {own_device}");
+            let root = tempfile::tempdir()?;
+            let stick = root.path().join("stick");
+            let source = stick.join("a");
+            let target = stick.join("b");
+            fs::create_dir_all(source.join("inner"))?;
+            fs::create_dir_all(target.join("inner"))?;
+            fs::write(source.join("inner/a:b"), "colon")?;
+            let _stick = FsQuirks::install(
+                &stick,
+                Quirks {
+                    own_device: true,
+                    ..Quirks::ntfs3()
+                },
+            );
+            let _inner = FsQuirks::install(
+                &source.join("inner"),
+                Quirks {
+                    own_device,
+                    ..Quirks::ext4()
+                },
+            );
+            let (stage, _) = rename_stage(root.path().join("staging"));
+            let (plans, on_merged) = recorded_plans();
+
+            glib::MainContext::default().block_on(merge_local_with(
+                gio::File::for_path(&source),
+                gio::File::for_path(&target),
+                false,
+                gio::Cancellable::new(),
+                None,
+                MergeHooks {
+                    names: fixing(),
+                    copy_into_target: copy(),
+                    stage_overwrite: stage,
+                    on_merged: &on_merged,
+                },
+            ))?;
+
+            assert_eq!(names(&target.join("inner"))?, [landed], "{row}");
+            assert_eq!(
+                plans.borrow()[0].created,
+                [Location::local(target.join("inner").join(landed))],
+                "{row}"
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn a_merge_records_the_names_its_copy_gives_a_cut_name() -> Result<(), Box<dyn Error>> {
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
         .lock()
