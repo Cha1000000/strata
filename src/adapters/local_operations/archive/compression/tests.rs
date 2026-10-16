@@ -890,39 +890,53 @@ fn cancelling_staged_compression_waits_for_worker_exit_before_cleanup() -> Resul
 }
 
 #[test]
-fn write_staged_archive_does_not_publish_when_cancelled_after_write() -> Result<(), Box<dyn Error>>
-{
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
-    let root = tempfile::tempdir()?;
-    let destination = root.path().to_path_buf();
-    let archive = destination.join("existing.zip");
-    fs::write(&archive, b"original")?;
-    let cancelled = Arc::new(AtomicBool::new(false));
-    let persist_cancelled = cancelled.clone();
-    let worker_cancelled = cancelled.clone();
-    let worker_destination = destination.clone();
-    let worker_archive = archive.clone();
-    let task = glib::MainContext::default().spawn_local(async move {
-        write_staged_archive(
-            &worker_destination,
-            &worker_archive,
-            TransferConflict::ReplaceExisting,
-            persist_cancelled,
-            move |mut file| {
-                file.write_all(b"replacement")
-                    .map_err(|error| error.to_string())?;
-                worker_cancelled.store(true, Ordering::Release);
-                Ok(())
-            },
-        )
-        .await
-    });
-    let result = glib::MainContext::default().block_on(task)?;
-    assert!(matches!(result, Err(ArchiveError::Cancelled)));
-    assert_eq!(fs::read(&archive)?, b"original");
-    assert!(stages(&destination, COMPRESSION_STAGE)?.is_empty());
+fn staged_archives_are_not_published_after_cancellation_or_close_failure() -> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock().map_err(|error| error.to_string())?;
+    for replacing in [false, true] {
+        for boundary in ["encoding", "close", "close error"] {
+            let root = tempfile::tempdir()?;
+            let archive = root.path().join("archive.zip");
+            if replacing {
+                fs::write(&archive, b"original")?;
+            }
+            let cancelled = Arc::new(AtomicBool::new(false));
+            let on_close = cancelled.clone();
+            let mut quirks = Quirks { trash: Trash::Unsupported, ..Quirks::default() };
+            if boundary == "close" {
+                quirks.after.push((Op::Close, ".strata-compression-*", 0, Box::new(move || {
+                    on_close.store(true, Ordering::Release);
+                })));
+            } else if boundary == "close error" {
+                quirks.fail.push((Op::Close, ".strata-compression-*", 0, Errno::IO));
+            }
+            let _scope = FsQuirks::install(root.path(), quirks);
+            let on_write = cancelled.clone();
+            let result = glib::MainContext::default().block_on(write_staged_archive(
+                root.path(),
+                &archive,
+                if replacing { TransferConflict::ReplaceExisting } else { TransferConflict::FailIfExists },
+                cancelled,
+                move |mut file| {
+                    file.write_all(b"replacement").map_err(|error| error.to_string())?;
+                    if boundary == "encoding" {
+                        on_write.store(true, Ordering::Release);
+                    }
+                    Ok(())
+                },
+            ));
+            if boundary == "close error" {
+                assert!(matches!(result, Err(ArchiveError::Failed(_))), "{boundary}, replacing {replacing}: {result:?}");
+            } else {
+                assert!(matches!(result, Err(ArchiveError::Cancelled)), "{boundary}, replacing {replacing}: {result:?}");
+            }
+            if replacing {
+                assert_eq!(fs::read(&archive)?, b"original");
+            } else {
+                assert!(!archive.exists());
+            }
+            assert!(stages(root.path(), COMPRESSION_STAGE)?.is_empty());
+        }
+    }
     Ok(())
 }
 

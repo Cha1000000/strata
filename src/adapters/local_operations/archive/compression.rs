@@ -252,8 +252,9 @@ impl Publication {
         }
         let stat = fs().stat_fd(handle.as_fd()).map_err(|error| self.creation_failed(errno_text(error)))?;
         let _ = stage.ownership.set(copy_engine::file_ownership(&stat));
-        // Closed before publication so NFS never silly-renames the stage.
-        drop(handle);
+        // Close before publication so NFS cannot silly-rename a failed stage.
+        fs().close(handle).map_err(|error| self.creation_failed(errno_text(error)))?;
+        check_archive_cancelled(cancelled)?;
         self.publish(stage, strategy, cancelled)
     }
 
