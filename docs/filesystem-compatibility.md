@@ -28,8 +28,10 @@ the GVfs backend, and Strata uses GIO for them.
   [Moves across filesystems](#moves-across-filesystems).
 - **Show only complete copies.** A copy appears under its final name once it is complete, except
   on mounts where nothing can be placed; see [Publishing a copy](#publishing-a-copy).
-- **Never block the interface.** No filesystem call runs on the GTK main thread, including probes,
-  mount lookups and waits. A hung NFS or FUSE server stalls the operation, not the window.
+- **Keep transfer work off the interface thread.** Native copying, placement, and paste/restore/delete
+  planning run on workers. Some existing conflict, archive-name, create-entry and bookmark checks
+  remain synchronous; removing those calls is tracked in [#1590](https://github.com/lgse/strata/issues/1590).
+  An unresponsive mount can still block the window through those remaining checks.
 - **Move metadata, not data.** Renames never copy file contents. Moves within one filesystem
   rename too, including on mounts with neither `RENAME_NOREPLACE` nor usable hard links. Moves
   copy only when the kernel returns `EXDEV` (across devices, bind mounts, btrfs subvolumes or
@@ -665,7 +667,7 @@ characters are not reported.
   the daemon's `FUSE_FSYNCDIR` syncing the whole device, as both daemons do; the kernel reports
   success for a daemon that does not implement it.
 - **vfat with `flush`** waits 100 ms at every close of a written file, which bounds copies of many
-  small files: 2,000 files take about 26 s with eight workers.
+  small files.
 
 ## Rename
 
@@ -857,42 +859,6 @@ Requirements and safety:
 
 Never point tests at real user shares or removable drives.
 
-### Lab measurements
-
-Flushes counted on the backing loop device for one call after writing 16 KiB, over three rounds.
-NFS and sshfs serve tmpfs in the lab, so they have no device to count.
-
-| Mount | Close | `syncfs` | `fsync` of the folder | `fdatasync` of the file |
-| --- | --- | --- | --- | --- |
-| ext4 | 0 | 2–4 | 2 | 2 |
-| vfat with `flush`, exFAT | 0 | 0 | 1 | 1 |
-| ntfs3 | 0 | 1 | 1 | 1 |
-| exfat-fuse, ntfs-3g | 0 | 0 | 1 | 1 |
-| SMB, on the server's device | 0 | 0 | 0 | 2 |
-
-On vfat, exFAT and both FUSE daemons `syncfs` writes the data back without flushing, and a folder's
-`fsync` alone writes no file data on vfat and exFAT. Both FUSE daemons sync and flush their whole
-device for a folder's `fsync`: after ten unsynced files it costs one flush, and ntfs-3g skips the
-flush of a clean device, so ten `fdatasync` calls also cost one. Moving 300 files to exfat-fuse in
-two batches took 302 flushes with a sync per file and 2 with one folder `fsync` per batch; on
-ntfs-3g about 290 and 2.
-
-Moving 1,000 files of 4 KiB with one flush per item cost 1,000 flushes and 16.6 s on vfat, against
-13.2 s with the default batches, and 3.7–3.9 s on ntfs3 and exfat-fuse, against 0.13–0.15 s.
-Batch limits from 64 items up differ by at most 0.1 s per 1,000 files, and large files show no
-difference. The loop devices sit in memory, so the flush latency of real USB media is not measured.
-
-Copying a folder of 2,000 files of 1 KiB with eight workers, in seconds:
-
-| Mount | No name claimed | Every name claimed | GIO, one file at a time | `cp -r` |
-| --- | --- | --- | --- | --- |
-| tmpfs, ext4 | 0.01 | 0.01–0.02 | 0.02–0.03 | 0.01–0.02 |
-| vfat with `flush` | 26.0 | 26.2 | 208 | 208 |
-| exFAT | 0.16 | 0.15 | 0.16 | 0.15 |
-| NFSv3 | 0.09 | 0.12 | 0.12 | 0.09 |
-| NFSv4.2 | 0.12 | 0.13–0.19 | 0.16 | 0.12 |
-| SMB, case-insensitive | 0.57–0.63 | 0.61–0.67 | 0.69–0.80 | 0.68 |
-| sshfs | 10.4–13.2 | 1.9–3.7 | 97–106 | 113–129 |
-
-vfat waits 100 ms at each close of a written file, which bounds every copier there. The lab's SFTP
-round trip takes about 46 ms, so the sshfs row compares copiers only.
+The historical [lab measurements](https://github.com/lgse/strata/pull/1615#issuecomment-6208891751)
+are retained with the pull request. They use memory-backed loop devices and loopback servers, not
+real USB latency or independent network clients.

@@ -65,6 +65,17 @@ null. When GLib sets it, ownership transfers to Strata, which takes it with
 thread. Callers re-check the item's identity afterwards, so a TRUE that moved
 nothing is caught too.
 
+### Checked descriptor close
+
+Location: `src/adapters/local_operations/fs_ops.rs::System::close`
+
+Reason: `OwnedFd` and rustix discard close errors, but NFS, SMB and FUSE can report
+failed writes only at close. The safe wrapper consumes the owned descriptor and
+calls `libc::close` exactly once. Linux releases the descriptor even when close
+reports `EINTR`; retrying could close a descriptor another thread has since reused.
+The copy and archive regressions inject delayed close errors and require publication
+to fail without deleting originals.
+
 ### Browser sandbox fork boundary
 
 Location: `src/sandbox/browser/process.rs::{fork,namespaces}`
