@@ -44,7 +44,10 @@ fn has_visible_button(overlay: &gtk::Overlay, label: &str) -> bool {
     visible_texts(overlay).iter().any(|text| text == label)
 }
 
-fn button_with_label(overlay: &gtk::Overlay, label: &str) -> Option<gtk::Button> {
+fn visible_widget<W: IsA<gtk::Widget>>(
+    overlay: &gtk::Overlay,
+    matches: impl Fn(&W) -> bool,
+) -> Option<W> {
     let mut stack = Vec::new();
     let mut child = overlay.first_child();
     while let Some(widget) = child {
@@ -52,11 +55,11 @@ fn button_with_label(overlay: &gtk::Overlay, label: &str) -> Option<gtk::Button>
         child = widget.next_sibling();
     }
     while let Some(widget) = stack.pop() {
-        if let Some(button) = widget.downcast_ref::<gtk::Button>()
-            && button.label().as_deref() == Some(label)
-            && button.is_visible()
+        if let Some(found) = widget.downcast_ref::<W>()
+            && found.is_visible()
+            && matches(found)
         {
-            return Some(button.clone());
+            return Some(found.clone());
         }
         let mut descendant = widget.first_child();
         while let Some(next) = descendant {
@@ -65,6 +68,19 @@ fn button_with_label(overlay: &gtk::Overlay, label: &str) -> Option<gtk::Button>
         }
     }
     None
+}
+
+fn button_with_label(overlay: &gtk::Overlay, label: &str) -> Option<gtk::Button> {
+    visible_widget(overlay, |button: &gtk::Button| {
+        button.label().as_deref() == Some(label)
+    })
+}
+
+fn check_button_with_label(overlay: &gtk::Overlay, label: &str) -> gtk::CheckButton {
+    visible_widget(overlay, |button: &gtk::CheckButton| {
+        button.label().as_deref() == Some(label)
+    })
+    .unwrap_or_else(|| panic!("visible {label:?} check button not found"))
 }
 
 fn click_button(overlay: &gtk::Overlay, label: &str) {
@@ -3188,49 +3204,119 @@ fn conflict_view() -> (crate::ui::browser::BrowserView, gtk::Overlay, gtk::Windo
     (view, overlay, window)
 }
 
+struct FatPaste {
+    sources: &'static [&'static str],
+    files: &'static [(&'static str, &'static str)],
+    disk: &'static [(&'static str, &'static str)],
+    prompt: (&'static str, &'static str),
+    choice: (&'static str, bool),
+    holds: &'static [(&'static str, &'static str)],
+}
+
 #[test]
-fn a_paste_onto_fat_asks_about_the_item_its_fixed_name_would_replace() {
+fn a_paste_onto_fat_asks_about_fixed_names_and_uses_the_names_it_planned() {
     crate::test_support::gtk_test(
-        "ui::browser::transfer::tests::a_paste_onto_fat_asks_about_the_item_its_fixed_name_would_replace",
+        "ui::browser::transfer::tests::a_paste_onto_fat_asks_about_fixed_names_and_uses_the_names_it_planned",
         || {
-            let fixture = tempfile::tempdir().expect("conflict fixture");
-            let source = fixture.path().join("source");
-            let disk = fixture.path().join("disk");
-            std::fs::create_dir_all(&source).expect("source dir");
-            std::fs::create_dir_all(&disk).expect("disk dir");
-            std::fs::write(source.join("a:b"), b"incoming").expect("source file");
-            std::fs::write(disk.join("a_b"), b"old").expect("destination file");
-            let _disk = crate::adapters::FsQuirks::install(&disk, crate::adapters::Quirks::vfat());
-            let (view, overlay, window) = conflict_view();
+            let rows = [
+                FatPaste {
+                    sources: &["a:b"],
+                    files: &[("a:b", "incoming")],
+                    disk: &[("a_b", "old")],
+                    prompt: ("a:b", "a_b"),
+                    choice: ("Replace", false),
+                    holds: &[("a_b", "incoming")],
+                },
+                FatPaste {
+                    sources: &["a:b", "c:d"],
+                    files: &[("a:b", "first"), ("c:d", "second")],
+                    disk: &[("a_b", "old"), ("c_d", "old")],
+                    prompt: ("a:b", "a_b"),
+                    choice: ("Replace", true),
+                    holds: &[("a_b", "first"), ("c_d", "second")],
+                },
+                FatPaste {
+                    sources: &["a:b", "a?b"],
+                    files: &[("a:b", "first"), ("a?b", "second")],
+                    disk: &[("a_b", "old")],
+                    prompt: ("a:b", "a_b"),
+                    choice: ("Skip", false),
+                    holds: &[("a_b", "old"), ("a_b (1)", "second")],
+                },
+                FatPaste {
+                    sources: &["x:y"],
+                    files: &[("x:y/new.txt", "new")],
+                    disk: &[("x_y/old.txt", "old")],
+                    prompt: ("x:y", "x_y"),
+                    choice: ("Merge", false),
+                    holds: &[("x_y/new.txt", "new"), ("x_y/old.txt", "old")],
+                },
+            ];
+            for row in rows {
+                let fixture = tempfile::tempdir().expect("conflict fixture");
+                let source = fixture.path().join("source");
+                let disk = fixture.path().join("disk");
+                for (root, files) in [(&source, row.files), (&disk, row.disk)] {
+                    for (path, contents) in files {
+                        let path = root.join(path);
+                        std::fs::create_dir_all(path.parent().expect("parent"))
+                            .expect("fixture folder");
+                        std::fs::write(path, contents).expect("fixture file");
+                    }
+                }
+                let _disk =
+                    crate::adapters::FsQuirks::install(&disk, crate::adapters::Quirks::vfat());
+                let (view, overlay, window) = conflict_view();
 
-            view.state.start_transfer(
-                Location::local(&disk),
-                vec![Location::local(source.join("a:b"))],
-                false,
-            );
+                view.state.start_transfer(
+                    Location::local(&disk),
+                    row.sources
+                        .iter()
+                        .map(|name| Location::local(source.join(name)))
+                        .collect(),
+                    false,
+                );
 
-            assert!(
-                wait_for_modal_layer(&overlay),
-                "conflict dialog modal did not appear"
-            );
-            assert!(
-                visible_texts(&overlay)
+                assert!(
+                    wait_for_modal_layer(&overlay),
+                    "conflict dialog modal did not appear"
+                );
+                let (name, new_name) = row.prompt;
+                assert!(
+                    visible_texts(&overlay)
+                        .iter()
+                        .any(|text| text.contains(name) && text.contains(new_name)),
+                    "the prompt names the item and the name it takes: {:?}",
+                    visible_texts(&overlay)
+                );
+                let (choice, apply_to_all) = row.choice;
+                if apply_to_all {
+                    check_button_with_label(&overlay, "Apply to All").set_active(true);
+                }
+                click_button(&overlay, choice);
+                wait_until(
+                    || {
+                        row.holds.iter().all(|(path, contents)| {
+                            std::fs::read(disk.join(path))
+                                .is_ok_and(|held| held == contents.as_bytes())
+                        })
+                    },
+                    &format!("{choice} to give each item the name its prompt planned"),
+                );
+                let mut listed = std::fs::read_dir(&disk)
+                    .expect("disk listing")
+                    .map(|entry| entry.expect("disk entry").file_name())
+                    .collect::<Vec<_>>();
+                listed.sort();
+                let mut expected = row
+                    .holds
                     .iter()
-                    .any(|text| text.contains("a:b") && text.contains("a_b")),
-                "the prompt names the item and the name it takes: {:?}",
-                visible_texts(&overlay)
-            );
-            click_button(&overlay, "Replace");
-            wait_until(
-                || std::fs::read(disk.join("a_b")).is_ok_and(|contents| contents == b"incoming"),
-                "the item to replace the one its fixed name equals",
-            );
-            assert_eq!(
-                std::fs::read_dir(&disk).expect("disk listing").count(),
-                1,
-                "nothing else lands beside it"
-            );
-            window.destroy();
+                    .map(|(path, _)| path.split('/').next().expect("top-level name").into())
+                    .collect::<Vec<std::ffi::OsString>>();
+                expected.dedup();
+                assert_eq!(listed, expected, "{choice}: nothing else lands beside them");
+                window.destroy();
+            }
         },
     );
 }
