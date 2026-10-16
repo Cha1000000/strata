@@ -5,7 +5,7 @@ use super::{
     ExtractNameResolver, ExtractionDestination, FUSE_SUPER_MAGIC, MemberMetadata, Placed,
     archive_stem, sanitized_archive_path,
 };
-use crate::adapters::local_operations::tests::fs_quirks::{FsQuirks, Op, Quirks};
+use crate::adapters::local_operations::tests::fs_quirks::{FsQuirks, Op, Quirks, Support};
 use std::{
     error::Error,
     ffi::{OsStr, OsString},
@@ -456,26 +456,41 @@ fn publish_staging_as_folder_skips_taken_names() -> Result<(), Box<dyn Error>> {
 
 #[test]
 fn numbered_names_fit_the_destination() -> Result<(), Box<dyn Error>> {
-    let root = tempfile::tempdir()?;
-    let folder = "b".repeat(253);
-    let file = format!("{}.txt", "r".repeat(251));
-    let numbered_file = format!("{} (2).txt", "r".repeat(247));
-    fs::write(root.path().join(&folder), b"taken")?;
-    fs::write(root.path().join(&file), b"taken")?;
-    let destination = ExtractionDestination::open(root.path())?;
+    let ntfs_3g = || Quirks {
+        rename_flags: Support::Rejected(rustix::io::Errno::INVAL),
+        ..Quirks::ntfs_3g()
+    };
+    for (mount, quirks) in [("host", None), ("ntfs-3g", Some(ntfs_3g))] {
+        let root = tempfile::tempdir()?;
+        let _quirks = quirks.map(|quirks| FsQuirks::install(root.path(), quirks()));
+        let folder = "b".repeat(253);
+        let file = format!("{}.txt", "r".repeat(251));
+        let numbered_file = format!("{} (2).txt", "r".repeat(247));
+        fs::write(root.path().join(&folder), b"taken")?;
+        fs::write(root.path().join(&file), b"taken")?;
+        let destination = ExtractionDestination::open(root.path())?;
 
-    let (name, _) = stage(&destination, &["a.txt"])?;
-    let published = destination.publish_staging_as_folder(&name, &format!("{folder}.zip"))?;
-    assert_eq!(published, format!("{} (1)", "b".repeat(251)));
+        let (name, _) = stage(&destination, &["a.txt"])?;
+        let published = destination
+            .publish_staging_as_folder(&name, &format!("{folder}.zip"))
+            .map_err(|error| format!("{mount}: {error}"))?;
+        let published_folder = format!("{} (1)", "b".repeat(251));
+        assert_eq!(published, published_folder, "{mount}");
 
-    let (name, staging) = stage(&destination, &[&file])?;
-    let published = destination.publish_single_root(&staging, Path::new(&file))?;
-    assert_eq!(published, OsString::from(&numbered_file));
-    destination.remove_directory_only_staging(&name)?;
+        let (name, staging) = stage(&destination, &[&file])?;
+        let published = destination.publish_single_root(&staging, Path::new(&file))?;
+        assert_eq!(published, OsString::from(&numbered_file), "{mount}");
+        destination.remove_directory_only_staging(&name)?;
 
-    fs::remove_file(root.path().join(&numbered_file))?;
-    let (_, created) = put_file(&destination, Path::new(&file))?;
-    assert_eq!(created, Path::new(&numbered_file));
+        fs::remove_file(root.path().join(&numbered_file))?;
+        let (_, created) = put_file(&destination, Path::new(&file))?;
+        assert_eq!(created, Path::new(&numbered_file), "{mount}");
+        assert_eq!(
+            names(root.path())?,
+            [&*published_folder, &folder, &numbered_file, &file],
+            "{mount}"
+        );
+    }
     Ok(())
 }
 

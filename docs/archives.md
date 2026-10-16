@@ -72,7 +72,7 @@ folder is moved whole over an empty placeholder Strata has just created. Where
 a file cannot be hard-linked, as on sshfs and vboxsf, it is renamed over an
 empty file Strata has just created and checked, and where hard links are
 unusable, a folder that cannot be moved over a placeholder is renamed once its
-name is found free.
+name is found free, as is a folder whose name ntfs-3g would cut.
 That step has one narrow window, described in
 [The reserved-name step and its risk](filesystem-compatibility.md#the-reserved-name-step-and-its-risk).
 Where none of these can place an entry, the error says so and names the hidden

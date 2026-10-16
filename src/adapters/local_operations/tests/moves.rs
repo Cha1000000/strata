@@ -247,19 +247,30 @@ fn items_without_noreplace_or_a_usable_link_are_renamed_without_copying()
         rename_flags: Support::Rejected(Errno::NOSYS),
         ..Quirks::sshfs()
     };
-    let cases: [(&str, Preset, bool); 6] = [
-        ("refused", refused, false),
-        ("sshfs", Quirks::sshfs, false),
-        ("sshfs", Quirks::sshfs, true),
-        ("linked before a probe", linked_before_a_probe, false),
-        ("vboxsf", Quirks::vboxsf, false),
-        ("vboxsf", Quirks::vboxsf, true),
+    let ntfs_3g = || Quirks {
+        rename_flags: Support::Rejected(Errno::INVAL),
+        ..Quirks::ntfs_3g()
+    };
+    let cut = "m".repeat(237);
+    let cases: [(&str, Preset, bool, &str); 7] = [
+        ("refused", refused, false, "moved"),
+        ("sshfs", Quirks::sshfs, false, "moved"),
+        ("sshfs", Quirks::sshfs, true, "moved"),
+        (
+            "linked before a probe",
+            linked_before_a_probe,
+            false,
+            "moved",
+        ),
+        ("vboxsf", Quirks::vboxsf, false, "moved"),
+        ("vboxsf", Quirks::vboxsf, true, "moved"),
+        ("ntfs-3g, a name it would cut", ntfs_3g, true, &cut),
     ];
-    for (case, quirks, folder) in cases {
+    for (case, quirks, folder, name) in cases {
         let root = tempfile::tempdir()?;
         let _scope = FsQuirks::install(root.path(), quirks());
         let source = root.path().join("item");
-        let moved = root.path().join("moved");
+        let moved = root.path().join(name);
         if folder {
             fs::create_dir(&source)?;
             fs::write(source.join("inside.txt"), b"inside")?;
@@ -285,7 +296,7 @@ fn items_without_noreplace_or_a_usable_link_are_renamed_without_copying()
         assert_eq!(fs::metadata(&moved)?.ino(), inode, "{case}");
         assert_eq!(progress.completed_files.get(), 0, "{case}");
         assert_eq!(progress.transferred_bytes.get(), 0, "{case}");
-        assert_eq!(names(root.path())?, ["moved"], "{case}");
+        assert_eq!(names(root.path())?, [name], "{case}");
     }
     Ok(())
 }

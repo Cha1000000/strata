@@ -1073,27 +1073,35 @@ fn same_filesystem_replacing_move_restores_the_original_when_placement_fails()
 }
 
 #[test]
-fn a_replacing_move_on_ntfs_3g_copies_a_folder_whose_name_it_would_cut()
+fn a_replacing_move_on_ntfs_3g_renames_names_it_would_cut_or_puts_the_original_back()
 -> Result<(), Box<dyn Error>> {
     let _serial = serial()?;
-    let name = "x".repeat(237);
-    for directory in [true, false] {
+    let (incoming, name) = ("y".repeat(237), "x".repeat(237));
+    for (directory, placing_fails) in [(true, false), (false, false), (true, true)] {
+        let case = format!("folder: {directory}, placing fails: {placing_fails}");
         let root = tempfile::tempdir()?;
         let sources = root.path().join("sources");
         let destination = root.path().join("destination");
         fs::create_dir(&sources)?;
         fs::create_dir(&destination)?;
-        let source = sources.join(&name);
+        let source = sources.join(&incoming);
         let target = destination.join(&name);
         write_item(&source, directory, b"new")?;
         write_item(&target, directory, b"old")?;
-        let moved = inode(&source)?;
+        let (moved, original) = (inode(&source)?, inode(&target)?);
+        // Skips the refused RENAME_NOREPLACE, failing the rename once the name is found free.
+        let fail = if placing_fails {
+            vec![(Op::Rename, "y*", 1, Errno::ACCESS)]
+        } else {
+            Vec::new()
+        };
         let quirks = FsQuirks::install(
             root.path(),
             without_trash(
                 FUSE_SUPER_MAGIC,
                 Quirks {
                     rename_flags: Support::Rejected(Errno::INVAL),
+                    fail,
                     ..Quirks::ntfs_3g()
                 },
             ),
@@ -1101,21 +1109,18 @@ fn a_replacing_move_on_ntfs_3g_copies_a_folder_whose_name_it_would_cut()
 
         let (result, replaced) = replace_reporting(&source, &target, true);
 
-        assert!(result.is_ok(), "folder: {directory}: {result:?}");
-        assert_eq!(replaced, [ReplacedOriginal::Deleted], "folder: {directory}");
-        assert_eq!(
-            read_item(&target, directory)?,
-            b"new",
-            "folder: {directory}"
-        );
-        assert!(!source.exists(), "folder: {directory}");
-        assert_eq!(names(&destination)?, [name.as_str()], "folder: {directory}");
-        assert_eq!(inode(&target)? == moved, !directory, "folder: {directory}");
-        assert_eq!(
-            quirks.used_name(".strata-replacement-*"),
-            directory,
-            "folder: {directory}"
-        );
+        assert_eq!(result.is_err(), placing_fails, "{case}: {result:?}");
+        let (kept, contents, reported) = if placing_fails {
+            (original, b"old", Vec::new())
+        } else {
+            (moved, b"new", vec![ReplacedOriginal::Deleted])
+        };
+        assert_eq!(replaced, reported, "{case}");
+        assert_eq!(inode(&target)?, kept, "{case}");
+        assert_eq!(read_item(&target, directory)?, contents, "{case}");
+        assert_eq!(source.exists(), placing_fails, "{case}");
+        assert_eq!(names(&destination)?, [name.as_str()], "{case}");
+        assert!(!quirks.used_name(".strata-replacement-*"), "{case}");
     }
     Ok(())
 }

@@ -352,13 +352,9 @@ pub(super) fn plan_replace(
     {
         return Ok(None);
     }
-    // Placing the source sets the original aside first, where a source that
-    // cannot be placed would leave it.
     let strategy = if move_source
         && fs().mount_key(source_parent.as_fd()) == fs().mount_key(target_parent.as_fd())
         && target_directory.is_some_and(|dir| dir.identity.device == source.identity.device)
-        && (!source.is_directory()
-            || placement::places_folder_at(fs(), target_parent.as_fd(), &target_name))
     {
         ReplaceStrategy::PlaceSource
     } else if fs().can_trash(target_path) {

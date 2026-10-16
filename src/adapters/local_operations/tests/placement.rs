@@ -1354,8 +1354,8 @@ fn a_reserved_name_reported_as_a_folder_is_taken() -> Result<(), Box<dyn Error>>
 #[test]
 fn names_ntfs_3g_would_cut_are_never_renamed_over() -> Result<(), Box<dyn Error>> {
     use {
-        PlaceError::Unsupported,
-        Placed::{OverReservedFile, ReservedDirectory},
+        PlaceError::{Exists, Unsupported},
+        Placed::{AfterCheck, OverReservedFile, ReservedDirectory},
     };
     fn ntfs_3g() -> Quirks {
         Quirks {
@@ -1376,20 +1376,32 @@ fn names_ntfs_3g_would_cut_are_never_renamed_over() -> Result<(), Box<dyn Error>
         fail: vec![(Op::Link, "x*", 0, Errno::PERM)],
         ..ntfs_3g()
     };
+    let probe_unsettled = || Quirks {
+        fail: vec![(Op::Create, ".strata-probe-*", 0, Errno::IO)],
+        ..ntfs_3g()
+    };
     let (fits, cut, accented) = ("x".repeat(236), "x".repeat(237), "é".repeat(120));
-    let rows: [(Preset, bool, &str, Result<Placed, PlaceError>); 7] = [
-        (ntfs_3g, true, &fits, Ok(ReservedDirectory)),
-        (ntfs_3g, true, &cut, Err(Unsupported)),
-        (ntfs_3g, true, &accented, Ok(ReservedDirectory)),
-        (unknown_fuseblk, true, &cut, Err(Unsupported)),
-        (exfat_fuseblk, true, &cut, Ok(ReservedDirectory)),
-        (links_refused, false, &fits, Ok(OverReservedFile)),
-        (links_refused, false, &cut, Err(Unsupported)),
+    let rows: [(Preset, bool, &str, bool, Result<Placed, PlaceError>); 9] = [
+        (ntfs_3g, true, &fits, false, Ok(ReservedDirectory)),
+        (ntfs_3g, true, &cut, false, Ok(AfterCheck)),
+        (ntfs_3g, true, &cut, true, Err(Exists)),
+        (probe_unsettled, true, &cut, false, Err(Unsupported)),
+        (ntfs_3g, true, &accented, false, Ok(ReservedDirectory)),
+        (unknown_fuseblk, true, &cut, false, Ok(AfterCheck)),
+        (exfat_fuseblk, true, &cut, false, Ok(ReservedDirectory)),
+        (links_refused, false, &fits, false, Ok(OverReservedFile)),
+        (links_refused, false, &cut, false, Err(Unsupported)),
     ];
-    for (row, (preset, folder, name, expected)) in rows.into_iter().enumerate() {
+    for (row, (preset, folder, name, arrives, expected)) in rows.into_iter().enumerate() {
         let context = format!("row {row}, {} units", name.chars().count());
         let root = tempfile::tempdir()?;
-        let _scope = FsQuirks::install(root.path(), preset());
+        let mut quirks = preset();
+        if arrives {
+            let arrival = root.path().join(name);
+            let racer: Racer = Box::new(move || fs::create_dir(&arrival).expect("arrival"));
+            quirks.after.push((Op::Rename, "x*", 0, racer));
+        }
+        let _scope = FsQuirks::install(root.path(), quirks);
         make(&root.path().join("source"), folder)?;
 
         assert_eq!(
@@ -1398,8 +1410,15 @@ fn names_ntfs_3g_would_cut_are_never_renamed_over() -> Result<(), Box<dyn Error>
             "{context}"
         );
 
-        let placed = if expected.is_ok() { name } else { "source" };
-        assert_eq!(names(root.path())?, [placed], "{context}");
+        let left = match (expected.is_ok(), arrives) {
+            (true, _) => vec![name],
+            (false, false) => vec!["source"],
+            (false, true) => vec!["source", name],
+        };
+        assert_eq!(names(root.path())?, left, "{context}");
+        if arrives {
+            assert!(names(&root.path().join(name))?.is_empty(), "{context}");
+        }
     }
     Ok(())
 }

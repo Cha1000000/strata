@@ -39,9 +39,8 @@ one is deleted.
   copy only when the kernel returns `EXDEV` (across devices, bind mounts, btrfs subvolumes or
   overlayfs lower-layer folders), or where no step below can place the item: on a mount whose
   support a probe cannot settle, for a folder on a mount without `RENAME_NOREPLACE` that has hard
-  links but cannot rename over an empty folder, for a folder named with 237 UTF-16 units or more
-  on ntfs-3g or a `fuseblk` mount whose device udev cannot tell, or for a file on an SFTP server
-  that refuses the reserved-name step's rename.
+  links but cannot rename over an empty folder, or for a file on an SFTP server that refuses the
+  reserved-name step's rename.
 
 ## Placing an item without replacing
 
@@ -57,7 +56,7 @@ that applies:
 | 2 | files, symlinks, special files | `linkat`, then remove the old name once the new one reports the item's identity | creating a link fails if the name exists, on the server for NFS and SMB |
 | 3 | folders | create an empty placeholder folder with `mkdirat`, then rename over it | a rename can only replace an empty folder; a filled or swapped placeholder fails with `ENOTEMPTY` or `ENOTDIR` |
 | 4 | symlinks | create a symlink with the same target, then remove the old one | creating a symlink fails if the name exists |
-| 5 | files, symlinks and special files that steps 2 and 4 cannot place, and folders that step 3 cannot place on mounts without usable hard links, once a probe has settled that `RENAME_NOREPLACE` is missing | the [reserved-name step](#the-reserved-name-step-and-its-risk) | a file is renamed only over Strata's own empty placeholder, checked just before, and a folder only to a name just found free; see the step's narrow window |
+| 5 | files, symlinks and special files that steps 2 and 4 cannot place, and folders that step 3 cannot place on mounts without usable hard links, once a probe has settled that `RENAME_NOREPLACE` is missing; folders whose name ntfs-3g would cut | the [reserved-name step](#the-reserved-name-step-and-its-risk) | a file is renamed only over Strata's own empty placeholder, checked just before, and a folder only to a name just found free; see the step's narrow window |
 | 6 | — | copy, then delete | only for a cross-device move (`EXDEV`), a move or restore from Trash that no step above can place, or a staged copy whose stage no step can place, which is copied again from the stage |
 
 `EEXIST` and `ENOTEMPTY` always mean the destination is taken. `EINVAL` from step 1 has three
@@ -73,8 +72,10 @@ ntfs-3g renames over an existing entry by first linking it to `<name>.ntfs-3g-<t
 name it stores cut once it passes 255 UTF-16 units: the rename fails with `EINVAL` for a name of
 237 units, and leaves an entry named after the cut for a longer one. There, and on a `fuseblk`
 mount whose device udev cannot tell, steps 3 and 5 never rename over a name of 237 units or
-more. A file is still linked by step 2. A folder, or a file whose own link is refused, is copied
-where step 6 applies, and renaming one to such a name is refused.
+more. A file is still linked by step 2, and one whose own link is refused is copied where step 6
+applies. A folder skips step 3's placeholder and takes step 5's folder check: it is renamed once
+the name is found free, so moves, renames, extraction and putting an original back still rename
+it.
 
 Residual limits:
 
@@ -123,12 +124,14 @@ links work. Then:
   refused for that one file, for example by `fs.protected_hardlinks`, and so does a symlink that
   step 4 cannot recreate either;
 - a folder takes it only when the mount has no usable hard links and refuses to rename over the
-  placeholder folder of step 3.
+  placeholder folder of step 3, or where ntfs-3g would cut its name when renaming it over that
+  placeholder.
 
 Mounts with `RENAME_NOREPLACE`, such as most local disks, removable media with kernel drivers and
 SMB, never take it. Mounts without it whose hard links work, such as NFS, OpenZFS 2.1 and earlier,
-ntfs-3g and 9p, take it only for a file whose own link is refused. Where a probe cannot settle what
-a mount supports, the step does not run.
+ntfs-3g and 9p, take it only for a file whose own link is refused, and ntfs-3g also for a folder
+named with 237 UTF-16 units or more. Where a probe cannot settle what a mount supports, the step
+does not run.
 
 For a file, Strata creates an empty placeholder at the destination with `O_CREAT | O_EXCL`, checks
 that the name still holds that placeholder (same inode, a regular file, still empty), then renames
@@ -168,7 +171,9 @@ What it risks, and why that is low:
   or a non-empty folder, and this mount refused to rename it over Strata's empty placeholder, so an
   item that arrives in between makes the rename fail. An `EPERM` refusal also leads here although
   it is not learned for the mount; if it was specific to the item, an empty folder that arrives in
-  that instant could be replaced.
+  that instant could be replaced. ntfs-3g renames a folder over an empty one, so there an empty
+  folder that arrives in that instant is replaced, and ntfs-3g leaves an entry named after the
+  cut beside it.
 
 Copying into a name created exclusively would protect an arrival completely, but it costs more than
 it protects. It rewrites every byte, and a file written during the copy stays behind at the source.

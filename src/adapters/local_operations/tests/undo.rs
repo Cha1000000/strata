@@ -436,18 +436,24 @@ fn renames_and_their_undo_keep_the_item_where_rename_flags_or_links_are_missing(
         rename_flags: Support::Rejected(Errno::NOSYS),
         ..Quirks::sshfs()
     };
-    let cases: [Preset; 4] = [
-        Quirks::without_rename_flags,
-        Quirks::vboxsf,
-        Quirks::sshfs,
-        linked_before_a_probe,
+    let ntfs_3g = || Quirks {
+        rename_flags: Support::Rejected(Errno::INVAL),
+        ..Quirks::ntfs_3g()
+    };
+    let cut = "x".repeat(240);
+    let cases: [(Preset, &str); 5] = [
+        (Quirks::without_rename_flags, "renamed"),
+        (Quirks::vboxsf, "renamed"),
+        (Quirks::sshfs, "renamed"),
+        (linked_before_a_probe, "renamed"),
+        (ntfs_3g, &cut),
     ];
-    for quirks in cases {
+    for (quirks, name) in cases {
         for folder in [false, true] {
             let root = tempfile::tempdir()?;
             let _scope = FsQuirks::install(root.path(), quirks());
             let source = root.path().join("item");
-            let renamed = root.path().join("renamed");
+            let renamed = root.path().join(name);
             if folder {
                 fs::create_dir(&source)?;
             } else {
@@ -455,7 +461,7 @@ fn renames_and_their_undo_keep_the_item_where_rename_flags_or_links_are_missing(
             }
             let original = inode(&source);
 
-            let events = rename(&source, "renamed");
+            let events = rename(&source, name);
             assert!(
                 matches!(events.as_slice(), [OperationEvent::Renamed { .. }]),
                 "{events:?}"
