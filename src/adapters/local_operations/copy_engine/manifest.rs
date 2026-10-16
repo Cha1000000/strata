@@ -327,6 +327,13 @@ impl Manifest {
         self.copies.push(copy);
     }
 
+    /// `from` and `to` are beneath the copy's root.
+    pub(in crate::adapters::local_operations) fn follow_rename(&mut self, from: &Path, to: &Path) {
+        for copy in &mut self.copies {
+            copy.ownership.renamed(from, to);
+        }
+    }
+
     pub(in crate::adapters::local_operations) fn keep(&self, path: &Path, cause: KeptCause) {
         let mut folder = self.root.clone();
         let mut names = path.iter().peekable();
@@ -462,6 +469,19 @@ impl Ownership {
             }
         }
         Ok(())
+    }
+
+    /// An entry the operation renamed afterwards keeps its identity under its new name.
+    fn renamed(&mut self, from: &Path, to: &Path) {
+        let rebase = |path: &PathBuf| crate::model::rebase_path(path, from, to);
+        self.descendants = std::mem::take(&mut self.descendants)
+            .into_iter()
+            .map(|(path, identity)| (rebase(&path).unwrap_or(path), identity))
+            .collect();
+        self.states = std::mem::take(&mut self.states)
+            .into_iter()
+            .map(|(path, state)| (rebase(&path).unwrap_or(path), state))
+            .collect();
     }
 
     fn identity_at(&self, path: &Path) -> Option<LocalFileIdentity> {

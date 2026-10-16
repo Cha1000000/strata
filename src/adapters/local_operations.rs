@@ -3550,7 +3550,7 @@ impl OperationProvider for LocalOperationProvider {
                     .await
                     .map(|moved| moved.owed)
                 };
-                let owed = match result {
+                let mut owed = match result {
                     Ok(owed) => owed,
                     Err(error) => {
                         settling.finish().await;
@@ -3581,7 +3581,7 @@ impl OperationProvider for LocalOperationProvider {
                         return;
                     }
                 };
-                restore_renamed(&item.record, &progress).await;
+                owed.follow_renames(&restore_renamed(&item.record, &progress).await);
                 let reported = progress.reported().since(started);
                 progress.finish_item(reported, item_sizes[index], item_files[index], None);
                 let done = Done {

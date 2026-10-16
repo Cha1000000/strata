@@ -47,8 +47,12 @@ use super::{
 use super::was_cancelled;
 
 /// Deepest first, so a renamed folder still has the name its entries' paths use. What keeps
-/// another name is reported; what is gone from that name is not.
-pub(super) async fn restore_renamed(record: &MoveRecord, progress: &TransferProgressTracker) {
+/// another name is reported; what is gone from that name is not. Returns the names given back
+/// beneath the original, where it has a local path.
+pub(super) async fn restore_renamed(
+    record: &MoveRecord,
+    progress: &TransferProgressTracker,
+) -> Vec<(PathBuf, PathBuf)> {
     let mut renamed = record
         .renamed
         .iter()
@@ -88,10 +92,20 @@ pub(super) async fn restore_renamed(record: &MoveRecord, progress: &TransferProg
             restored
         }
     };
+    let root = gio_file_for_location(&record.original).path();
+    let beneath = |location: &Location| {
+        let path = gio_file_for_location(location).path()?;
+        Some(path.strip_prefix(root.as_ref()?).ok()?.to_path_buf())
+    };
+    let mut given_back = Vec::new();
     let mut report = TransferReport::default();
     for ((_, saved_as, requested, cause), restored) in renamed.into_iter().zip(restored) {
         let cause = match restored {
-            Ok(()) | Err(NameKept::Gone) => continue,
+            Ok(()) => {
+                given_back.extend(beneath(&saved_as).zip(beneath(&requested)));
+                continue;
+            }
+            Err(NameKept::Gone) => continue,
             Err(NameKept::Taken) => RenameCause::Taken,
             Err(NameKept::Refused) => cause,
             Err(NameKept::Failed(error)) => {
@@ -109,6 +123,7 @@ pub(super) async fn restore_renamed(record: &MoveRecord, progress: &TransferProg
         });
     }
     progress.report(report);
+    given_back
 }
 
 fn depth(location: &Location) -> usize {

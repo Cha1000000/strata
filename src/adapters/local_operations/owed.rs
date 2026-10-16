@@ -8,6 +8,7 @@
 #[cfg(test)]
 use std::cell::Cell;
 use std::{
+    path::PathBuf,
     rc::Rc,
     sync::Arc,
     time::{Duration, Instant},
@@ -102,6 +103,18 @@ pub(super) struct Owed {
 impl Owed {
     pub(super) fn owe(&mut self, deletion: Deletion) {
         self.deletions.push(deletion);
+    }
+
+    /// Entries given back their names beneath the copy's root, deepest first, so the copy is
+    /// still found before its sources are deleted.
+    pub(super) fn follow_renames(&mut self, renamed: &[(PathBuf, PathBuf)]) {
+        for deletion in &mut self.deletions {
+            if let Deletion::Sources(_, manifest) = deletion {
+                for (from, to) in renamed {
+                    manifest.follow_rename(from, to);
+                }
+            }
+        }
     }
 
     pub(super) async fn settle(
