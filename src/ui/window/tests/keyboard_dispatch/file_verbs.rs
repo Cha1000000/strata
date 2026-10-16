@@ -227,11 +227,15 @@ fn typed_rename_passes_a_same_item_name_to_the_operation() {
 
             submit_rename(&fixture, "later.txt");
             plain(&fixture, Key::Escape);
+            open_rename(&fixture, Key::r);
+            fixture.shortcuts.prompt().set_text("later.txt");
             pump(200);
             assert!(
                 !directory.join("later.txt").exists(),
-                "a dismissed prompt renames nothing"
+                "a dismissed request must not submit the reopened prompt"
             );
+            assert_eq!(fixture.shortcuts.open_prompt_kind(), Some(Prompt::Rename));
+            plain(&fixture, Key::Escape);
 
             // The same item under another name is not refused by the prompt;
             // the operation itself refuses a separate hard link.
