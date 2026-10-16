@@ -1492,10 +1492,16 @@ fn links_the_destination_cannot_hold_are_left_out_with_hard_links_to_them()
     let per_link: &[(&[u8], Member<'_>)] = &[
         (b"bin", Folder),
         (b"bin/python", File),
-        (b"bin/bad", Link(b"x\xffy")),
+        (b"bin/bad", Link(b"far")),
         (b"bin/python3", Link(b"python")),
         (b"bin/10:00", File),
         (b"bin/now", Hard("bin/10:00")),
+    ];
+    let malformed: &[(&[u8], Member<'_>)] = &[
+        (b"bin", Folder),
+        (b"bin/python", File),
+        (b"bin/bad", Link(b"x\xffy")),
+        (b"bin/python3", Link(b"python")),
     ];
     let refusing_one_target = |errno| Quirks {
         fail: vec![(Op::Symlink, "bad", 0, errno)],
@@ -1554,6 +1560,13 @@ fn links_the_destination_cannot_hold_are_left_out_with_hard_links_to_them()
             per_link_listed,
             &["bad"],
             2,
+        ),
+        (
+            Quirks::cifs_posix(),
+            malformed,
+            &["bin/", "bin/python", "bin/python3"],
+            &["bad"],
+            1,
         ),
         (
             refusing_one_link,

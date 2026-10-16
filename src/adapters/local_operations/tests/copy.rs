@@ -1317,6 +1317,105 @@ fn selected_links_the_destination_cannot_hold_are_left_out_and_the_paste_goes_on
 }
 
 #[test]
+fn malformed_link_targets_are_left_out_where_names_must_be_utf8() -> Result<(), Box<dyn Error>> {
+    use crate::services::{KeptCause, KeptItem, SkippedItem, SpecialKind};
+    let _serial = serial()?;
+    let malformed = <OsStr as std::os::unix::ffi::OsStrExt>::from_bytes(b"x\xffy");
+    let posix = Quirks::cifs_posix;
+    let rows: [(&str, Preset, bool, bool); 4] = [
+        ("cifs-posix", posix, false, false),
+        ("cifs-posix, moved", posix, true, false),
+        ("cifs-posix, replacing", posix, false, true),
+        ("ext4", Quirks::ext4, false, false),
+    ];
+    for (label, preset, moving, replacing) in rows {
+        let held = label == "ext4";
+        let root = tempfile::tempdir()?;
+        let source = root.path().join("source");
+        let disk = root.path().join("disk");
+        let folder = source.join("folder");
+        fs::create_dir_all(&folder)?;
+        fs::create_dir(&disk)?;
+        let selected = source.join("bad");
+        std::os::unix::fs::symlink(malformed, &selected)?;
+        std::os::unix::fs::symlink(malformed, folder.join("bad"))?;
+        std::os::unix::fs::symlink("good", folder.join("good"))?;
+        if replacing {
+            fs::write(disk.join("bad"), b"earlier")?;
+        }
+        let scope = FsQuirks::install(&disk, preset());
+        let item = |source: &Path, conflict| PasteItem {
+            source: Location::local(source),
+            conflict,
+            target_name: None,
+        };
+        let conflict = if replacing {
+            TransferConflict::ReplaceExisting
+        } else {
+            TransferConflict::FailIfExists
+        };
+
+        let events = run_paste(PasteRequest {
+            id: OperationRequestId(1590),
+            destination: Location::local(&disk),
+            items: vec![
+                item(&folder, TransferConflict::FailIfExists),
+                item(&selected, conflict),
+            ],
+            move_sources: moving,
+        });
+
+        assert_eq!(
+            scope.count(Op::Symlink),
+            if held { 3 } else { 1 },
+            "{label}"
+        );
+        assert_eq!(
+            fs::read_link(disk.join("folder/good"))?,
+            Path::new("good"),
+            "{label}"
+        );
+        let report = followed_report(&events);
+        if held {
+            assert_eq!(
+                fs::read_link(disk.join("folder/bad"))?,
+                malformed,
+                "{label}"
+            );
+            assert_eq!(fs::read_link(disk.join("bad"))?, malformed, "{label}");
+            assert_eq!(report.skipped, [], "{label}");
+            continue;
+        }
+        assert_eq!(names(&disk.join("folder"))?, ["good"], "{label}");
+        if replacing {
+            assert_eq!(fs::read(disk.join("bad"))?, b"earlier", "{label}");
+        } else {
+            assert!(fs::symlink_metadata(disk.join("bad")).is_err(), "{label}");
+        }
+        if moving {
+            assert_eq!(names(&folder)?, ["bad"], "{label}");
+            assert_eq!(fs::read_link(&selected)?, malformed, "{label}");
+            let kept = [selected.clone(), folder.join("bad")].map(|path| KeptItem {
+                location: Location::local(path),
+                cause: KeptCause::Skipped(SpecialKind::Symlink),
+            });
+            let mut reported = report.kept.clone();
+            reported.sort_by(|left, right| left.location.compare(&right.location));
+            assert_eq!(reported, kept, "{label}");
+        } else {
+            let skipped = [disk.join("bad"), disk.join("folder/bad")].map(|path| SkippedItem {
+                location: Location::local(path),
+                kind: SpecialKind::Symlink,
+            });
+            let mut reported = report.skipped.clone();
+            reported.sort_by(|left, right| left.location.compare(&right.location));
+            assert_eq!(reported, skipped, "{label}");
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn a_selected_link_whose_name_sshfs_answers_as_not_permitted_is_numbered_not_left_out()
 -> Result<(), Box<dyn Error>> {
     let _serial = serial()?;

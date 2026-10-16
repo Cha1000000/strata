@@ -657,6 +657,10 @@ impl MemberNames {
         self.policy.profiles.holds_links(&self.site)
     }
 
+    pub(super) fn holds_link_to(&self, target: &OsStr) -> bool {
+        self.policy.profiles.holds_link_to(&self.site, target)
+    }
+
     pub(super) fn refuse_links(&self) {
         self.policy.profiles.refuse_links(&self.site);
     }

@@ -660,7 +660,7 @@ impl Made {
                             source,
                             Entry::new(dir, name),
                             &self.mount,
-                            Some(names),
+                            Some((names, &self.site)),
                         )
                     })
                 });
@@ -872,12 +872,13 @@ pub(super) fn read_link(fs: &dyn FsOps, at: Entry<'_>) -> Result<OsString, Failu
     })
 }
 
+/// Without `named`, the link is made from a stage, whose target was checked.
 pub(super) fn copy_link(
     copy: &Copy,
     source: Entry<'_>,
     target: Entry<'_>,
     mount: &Mount,
-    names: Option<&Names>,
+    named: Option<(&Names, &Site)>,
 ) -> Result<EntryStat, Failure> {
     let fs = copy.fs;
     let stat = copy.source_stat(source)?;
@@ -885,6 +886,10 @@ pub(super) fn copy_link(
         return Err(Failure::Changed);
     }
     let link = read_link(fs, source)?;
+    let names = named.map(|(names, _)| names);
+    if named.is_some_and(|(_, site)| !copy.names.profiles.holds_link_to(site, &link)) {
+        return Err(Failure::LinkRefused(Errno::ILSEQ));
+    }
     if let Err(error) = fs.symlink(&link, target) {
         if !taken(fs, target, error) {
             return Err(match creation_failure(fs, target, error) {

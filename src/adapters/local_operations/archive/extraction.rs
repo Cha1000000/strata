@@ -295,7 +295,9 @@ impl<'a> ExtractionSession<'a> {
                 self.directories.push((created.clone(), metadata));
                 Placement::Made(created)
             }
-            MemberContent::Symlink(target) if staging.names().holds_links() => {
+            MemberContent::Symlink(target)
+                if staging.names().holds_link_to(OsStr::from_bytes(target)) =>
+            {
                 let link = |placed: &_| {
                     staging.create_symlink(placed, OsStr::from_bytes(target), metadata.modified)
                 };

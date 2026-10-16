@@ -852,7 +852,11 @@ fn copy_special(
         return Err(Failure::LinkRefused(Errno::OPNOTSUPP));
     }
     let content = if link {
-        StageContent::Symlink(tree::read_link(copy.fs, source.entry())?)
+        let target = tree::read_link(copy.fs, source.entry())?;
+        if !copy.names.profiles.holds_link_to(&site, &target) {
+            return Err(Failure::LinkRefused(Errno::ILSEQ));
+        }
+        StageContent::Symlink(target)
     } else {
         StageContent::Fifo
     };
@@ -987,6 +991,9 @@ fn copy_stage(
                 return Err(Failure::LinkRefused(Errno::OPNOTSUPP));
             }
             let link = tree::read_link(copy.fs, source.entry())?;
+            if !copy.names.profiles.holds_link_to(&site, &link) {
+                return Err(Failure::LinkRefused(Errno::ILSEQ));
+            }
             let staged =
                 match StagedSibling::create(parent, STAGE_PREFIX, StageContent::Symlink(link)) {
                     // The stage's name is valid everywhere, unlike the target.

@@ -431,9 +431,11 @@ Replace would stage fail with "it is not a regular file, directory, or symbolic 
 vfat, exFAT and exfat-fuse have no symbolic links, so links copied there are left out without
 asking the mount. A mount that refuses one with `ENOSYS` or `EOPNOTSUPP`, as SMB without POSIX
 extensions does, is not asked again until it changes, and a GVfs location that answers "not
-supported", as `smb://` and `mtp://` do, is not asked again for the rest of the item. A mount that
-refuses one link, with `EPERM` while its name is free, or its target with `EINVAL`, `EILSEQ` or
-`EFBIG`, as ntfs3 and ntfs-3g refuse malformed or overlong targets, leaves out that link only; a
+supported", as `smb://` and `mtp://` do, is not asked again for the rest of the item. Where names
+must be UTF-8, as on every mount the [names table](#the-rules-each-destination-gets) does not give
+any bytes, a link whose target is not valid UTF-8 is left out without asking the mount: SMB with
+POSIX extensions would store each malformed byte as `?` without an error, and NTFS refuses it. A mount that refuses one link, with `EPERM` while its name is free, or its target with
+`EINVAL`, `EILSEQ` or `EFBIG`, as ntfs3 refuses an overlong target, leaves out that link only; a
 link whose name the mount refuses is first tried under stricter names, as described under [Names a
 mount refuses anyway](#names-a-mount-refuses-anyway). A taken name stays a taken name. Every link
 left out is reported, and the rest of the copy goes on. A merge leaves an item at a link's name
@@ -448,12 +450,12 @@ report says so and names them.
 
 Link targets are copied and extracted byte for byte, so a link pointing at an entry whose name was
 fixed, such as `latest` pointing at `2026-10-14T10:00`, no longer finds it at the destination.
-Targets are not checked against the destination's rules, and some mounts change or refuse them:
-ntfs3 reads a `\` in a target back as `/`; sshfs, with `contain_symlinks` on by default and not
-shown in mountinfo, creates absolute targets and targets holding `..` but cannot read them back;
-and SMB with POSIX extensions refuses a target longer than 1003 UTF-16 units with `ENOSPC`, which
-fails the copy as a full disk would, and one of 4,095 bytes with `ENAMETOOLONG`, which fails it as a
-name too long.
+Targets are otherwise not checked against the destination's rules, and some mounts change or
+refuse them: ntfs3 reads a `\` in a target back as `/`; sshfs, with `contain_symlinks` on by
+default and not shown in mountinfo, creates absolute targets and targets holding `..` but cannot
+read them back; and SMB with POSIX extensions refuses a target longer than 1003 UTF-16 units with
+`ENOSPC`, which fails the copy as a full disk would, and one of 4,095 bytes with `ENAMETOOLONG`,
+which fails it as a name too long.
 
 ### Merges
 

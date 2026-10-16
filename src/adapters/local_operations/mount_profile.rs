@@ -26,9 +26,10 @@ use super::{
 };
 use crate::{
     adapters::volume::{
-        Family, FuseFormat, MountCapabilities, MountKey, MountNames, MountType, NameLimit,
-        NameProfile, Strictness, family, gvfs_bridge_profile, gvfs_profile, holds_symlinks,
-        learn_mount_capability, max_file_size, mount_capabilities, teach_mount_capability,
+        Family, FuseFormat, MountCapabilities, MountKey, MountNames, MountType, NameEncoding,
+        NameLimit, NameProfile, Strictness, family, gvfs_bridge_profile, gvfs_profile,
+        holds_symlinks, learn_mount_capability, max_file_size, mount_capabilities,
+        teach_mount_capability,
     },
     services::NameMode,
 };
@@ -213,6 +214,15 @@ impl Profiles {
 
     pub(super) fn holds_links(&self, site: &Site) -> bool {
         self.taught(site).symlinks != Some(false)
+    }
+
+    /// Where names must be UTF-8, a link target that is not stays behind: SMB with POSIX
+    /// extensions stores each malformed byte as `?`, and NTFS refuses it.
+    pub(super) fn holds_link_to(&self, site: &Site, target: &OsStr) -> bool {
+        let taught = self.taught(site);
+        taught.symlinks != Some(false)
+            && (target.to_str().is_some()
+                || site.rules.taught(taught.strictness).encoding == NameEncoding::AnyBytes)
     }
 
     pub(super) fn refuse_links(&self, site: &Site) {
