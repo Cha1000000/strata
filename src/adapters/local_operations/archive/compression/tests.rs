@@ -33,6 +33,40 @@ use std::{
 };
 
 #[test]
+fn an_archive_replaced_immediately_after_publication_is_not_owned_for_undo() -> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock().map_err(|error| error.to_string())?;
+    for edited in [false, true] {
+    let root = tempdir_on_home_device()?;
+    let archive = root.path().join("existing.zip");
+    let _trash = HomeTrashGuard::new(&archive);
+    fs::write(&archive, b"original")?;
+    let arrival = root.path().join("arrival");
+    fs::write(&arrival, b"other program")?;
+    let over = archive.clone();
+    let racer = Box::new(move || {
+        if edited {
+            fs::write(&over, b"other program").expect("edit published archive");
+        } else {
+            fs::rename(&arrival, &over).expect("replace published archive");
+        }
+    });
+    let _quirks = FsQuirks::install(root.path(), Quirks {
+        after: vec![(Op::Rename, "existing.zip", 0, racer)],
+        ..Quirks::default()
+    });
+    let result = glib::MainContext::default().block_on(write_staged_archive(
+        root.path(), &archive, TransferConflict::ReplaceExisting, never_cancelled(),
+        |mut file| { file.write_all(b"archive").map_err(|error| error.to_string())?; Ok(()) },
+    ));
+    let (_, replaced, placed) = result?;
+    assert!(matches!(replaced, Some(ReplacedOriginal::Trashed(_))), "{replaced:?}");
+    assert!(placed.is_none());
+    assert_eq!(fs::read(&archive)?, b"other program");
+    }
+    Ok(())
+}
+
+#[test]
 fn compression_staging_stays_private_while_encoding() -> Result<(), Box<dyn Error>> {
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
         .lock()

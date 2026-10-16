@@ -99,6 +99,7 @@ fn file_stage(root: &Path) -> Result<super::StagedSibling, Box<dyn Error>> {
     )
     .map_err(|error| format!("{error:?}"))?;
     Ok(super::StagedSibling {
+        ownership: None,
         parent,
         name,
         identity: created.identity,

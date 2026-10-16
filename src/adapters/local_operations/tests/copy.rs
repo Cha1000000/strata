@@ -1085,7 +1085,7 @@ fn publish(staged: StagedSibling, target: &Path) -> Result<(), glib::Error> {
         target.to_path_buf(),
         false,
         gio::Cancellable::new(),
-    ))
+    )).map(drop)
 }
 
 #[test]

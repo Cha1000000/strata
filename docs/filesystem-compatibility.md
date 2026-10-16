@@ -447,8 +447,20 @@ if it is still what the copy read:
   as they were. Such files are compared by content; see [Racily clean files](#racily-clean-files).
 - **Folders** are opened and checked like entries, and removed once empty. A folder that gained
   entries, or another folder put at its name, stays.
-- **The copy itself.** If the copy is no longer where the move published it, nothing of that item
-  is deleted.
+- **The copy itself.** The move carries the identities of the entries it created, rather than
+  adopting whatever is at a destination name afterwards. Before deleting sources it checks the
+  published root and copied descendants; a merge also checks every merged ancestor and the actual
+  numbered placement names. If any of these entries is missing or has another identity, nothing
+  of that item is deleted. A fallback that copies out of a stage records the newly created copy's
+  identities, not the discarded stage's.
+
+Destination provenance requires the exact known device, inode, type and available birth time,
+including on mounts with unstable inode numbers. The relaxed source-identity rule above does not
+apply to this guard. If a FUSE daemon or CIFS client renumbers a published entry after a rename or
+cache eviction, the move keeps its source and reports that its copy is gone even if the bytes are
+still present. This is safe retention, not a successful source deletion. Exact comparison does not
+solve inode reuse where the mount supplies no birth time; the residual identity limits above
+still apply.
 
 What stays is reported by cause: changed during the move, could not be deleted (with the error, as
 in a read-only folder), a special file the destination cannot store, or an item whose copy was
@@ -548,7 +560,15 @@ filesystems is refused.
 Undoing a merge, or a copy or an archive that replaced its original through the Trash, deletes what
 the operation put at the original's path, then restores the original. As it places an item there,
 the operation records it as a [move](#moves-across-filesystems) records its sources, with the
-contents of files within a tick of coarse times. It reads such a file back only until the tick
+contents of files within a tick of coarse times. Eligibility for that record comes from known
+created identities for the whole tree and, for regular files, size and modification-time baselines
+captured before publication. A concurrent arrival, replaced descendant, or detectable in-place
+edit between publication and recording therefore cannot become deletion evidence. Placement and
+hard-link creation change change times and link counts, so those fields are captured after
+placement rather than compared to the pre-publication baseline. The size/time baseline is not a
+full content reread: a same-size edit hidden by timestamp resolution, or a writer restoring the
+old modification time before recording, can escape it. The later coarse-time digest cannot
+retroactively prove which bytes were published. It reads such a file back only until the tick
 passes, as any later rewrite changes its times. An item has no record if a cancel stops its
 recording, or if it would take the records of its paste or archive past 100,000 entries (some 20 MB
 kept in the undo history); one that does takes none of them. The undo first compares all of it by
@@ -567,8 +587,9 @@ copy merge records what it creates, under the name it was saved as and within th
 entries, only where an original could not go to the Trash, or where it overwrote nothing and the
 location offers no Trash; a paste with a merge records each item it copies beside it where the
 destination offers no Trash. The undo deletes an item only if all of it is unchanged. An item that
-changed, or has no record (one on a GVfs location, or one created where the Trash worked during the
-paste), stays whole and fails with "It was kept, as it may have changed since it was copied";
+changed, or has no record (one on a GVfs location, a GIO copy without native creation provenance,
+an entry whose client-reported identity changed during publication, or one created where the Trash
+worked during the paste), stays whole and fails with "It was kept, as it may have changed since it was copied";
 another undo does not try it again. One that changes after part of it was deleted fails with "The
 folder is not empty", and stays to undo. An item cut off after it deleted anything counts as
 failed, and one cut off while it compares as not attempted.

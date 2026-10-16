@@ -13,7 +13,7 @@ use super::super::{
     owed::{Deletion, Owed},
     placement::{
         COMPRESSION_STAGE_PREFIX, Displacement, NUMBERED_NAME_ATTEMPTS, PlaceError,
-        REPLACED_PREFIX, displacement_without_trash, exchange, file_creation_error, place,
+        REPLACED_PREFIX, displacement_without_trash, exchange, file_creation_error, place_staged,
         put_back, remove_if_unchanged, reserve_hidden_name, set_aside, set_aside_if_safe,
     },
     placement_reason,
@@ -37,7 +37,7 @@ use std::{
     },
     path::{Path, PathBuf},
     sync::{
-        Arc,
+        Arc, OnceLock,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -138,6 +138,7 @@ struct Published {
 }
 
 struct Stage {
+    ownership: OnceLock<copy_engine::Ownership>,
     parent: Arc<OwnedFd>,
     name: OsString,
     identity: LocalFileIdentity,
@@ -149,11 +150,11 @@ impl Stage {
     }
 
     fn place(&self, name: &OsStr) -> Result<(), PlaceError> {
-        place(
+        place_staged(
             fs(),
             self.entry(),
             Entry::new(&*self.parent, name),
-            Some(self.identity),
+            self.identity,
         )
         .map(drop)
     }
@@ -212,6 +213,7 @@ impl Publication {
         .map_err(|error| self.creation_failed(placement_reason(error)))?;
         let stage = match fs().stat_fd(file.as_fd()).map(|stat| stat.identity) {
             Ok(identity) => Stage {
+                ownership: OnceLock::new(),
                 parent,
                 name,
                 identity,
@@ -248,6 +250,8 @@ impl Publication {
             fs().sync_data(handle.as_fd())
                 .map_err(|error| self.creation_failed(errno_text(error)))?;
         }
+        let stat = fs().stat_fd(handle.as_fd()).map_err(|error| self.creation_failed(errno_text(error)))?;
+        let _ = stage.ownership.set(copy_engine::file_ownership(&stat));
         // Closed before publication so NFS never silly-renames the stage.
         drop(handle);
         self.publish(stage, strategy, cancelled)
@@ -354,7 +358,9 @@ impl Publication {
             .place(OsStr::new(&self.name))
             .map(|()| {
                 let name = OsStr::new(&self.name);
-                let placed = copy_engine::placed_at(fs(), (stage.parent.as_fd(), name), cancelled);
+                let placed = stage.ownership.get().and_then(|ownership| {
+                    copy_engine::placed_at_proven(fs(), (stage.parent.as_fd(), name), ownership, cancelled)
+                });
                 self.published(Displaced::Trashed(identity.into(), placed))
             })
             .map_err(|error| {

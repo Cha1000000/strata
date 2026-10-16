@@ -15,7 +15,7 @@ mod tree;
 
 use std::{
     borrow::Borrow,
-    collections::{BTreeSet, HashSet},
+    collections::{BTreeSet, HashMap, HashSet},
     ffi::{OsStr, OsString},
     os::fd::{AsFd, BorrowedFd, OwnedFd},
     path::{Path, PathBuf},
@@ -59,7 +59,7 @@ pub(super) use barrier::Barrier;
 use data::Data;
 #[cfg(test)]
 pub(super) use data::set_kernel_for_test;
-pub(super) use manifest::{Manifest, Published, Unlinks};
+pub(super) use manifest::{Manifest, Ownership, Published, Unlinks};
 use manifest::{Placed, Removed};
 #[cfg(test)]
 pub(super) use manifest::{now as clock_for_test, set_clock_for_test, set_placed_entries_for_test};
@@ -136,8 +136,7 @@ impl Placing {
         })
     }
 
-    /// A GIO copy, which walks into what it creates, records only these.
-    pub(super) fn wants(&self, path: &Path) -> bool {
+    fn wants(&self, path: &Path) -> bool {
         self.wanted.contains(path)
     }
 
@@ -148,6 +147,7 @@ impl Placing {
         fs: &dyn FsOps,
         (dir, name): (BorrowedFd<'_>, &OsStr),
         path: &Path,
+        ownership: &Ownership,
         cancelled: &AtomicBool,
     ) {
         let path = self.root.join(path);
@@ -156,23 +156,21 @@ impl Placing {
             None => self.wants(&path),
         };
         if wanted {
-            self.record(fs, (dir, name), path, cancelled);
+            self.record_proven(fs, (dir, name), path, ownership, cancelled);
         }
     }
 
-    fn record(
+    fn record_proven(
         &self,
         fs: &dyn FsOps,
-        (dir, name): (BorrowedFd<'_>, &OsStr),
+        at: (BorrowedFd<'_>, &OsStr),
         path: PathBuf,
+        ownership: &Ownership,
         cancelled: &AtomicBool,
     ) {
-        match manifest::placed(fs, (dir, name), cancelled, &self.left) {
+        match manifest::placed_proven(fs, at, cancelled, &self.left, ownership) {
             Ok(placed) => lock(&self.placed).push((path, placed)),
-            Err(failure) => {
-                let error = failure.into_error(name);
-                tracing::warn!(?path, %error, "could not record a placed item");
-            }
+            Err(failure) => tracing::warn!(?path, error = %failure.into_error(at.1), "could not record a placed item"),
         }
     }
 
@@ -184,23 +182,6 @@ impl Placing {
     }
 }
 
-/// Records what a merge copied to `path` some other way.
-pub(super) async fn record_placed(
-    placing: Arc<Placing>,
-    path: PathBuf,
-    cancellable: &gio::Cancellable,
-) {
-    let recorded = run_cancellable(cancellable, move |cancelled| {
-        let (parent, name) = split(&path)?;
-        placing.record(fs(), (parent.as_fd(), &name), path.clone(), &cancelled);
-        Ok::<_, glib::Error>(())
-    })
-    .await;
-    if let Ok(Err(error)) = recorded {
-        tracing::warn!(%error, "could not record a placed item");
-    }
-}
-
 /// The entries all records of what one operation placed may hold.
 pub(super) fn placed_budget() -> Arc<AtomicUsize> {
     Arc::new(manifest::placed_entries())
@@ -208,6 +189,7 @@ pub(super) fn placed_budget() -> Arc<AtomicUsize> {
 
 /// What is at `path`, recorded as an operation just put it there, within
 /// what is `left` of its [`placed_budget`]; nothing if cancelled meanwhile.
+#[cfg(test)]
 pub(super) async fn placed(
     path: PathBuf,
     left: Arc<AtomicUsize>,
@@ -221,14 +203,7 @@ pub(super) async fn placed(
     recorded.ok().flatten()
 }
 
-pub(super) fn placed_at(
-    fs: &dyn FsOps,
-    at: (BorrowedFd<'_>, &OsStr),
-    cancelled: &AtomicBool,
-) -> Option<PlacedSnapshot> {
-    placed_within(fs, at, cancelled, &manifest::placed_entries())
-}
-
+#[cfg(test)]
 fn placed_within(
     fs: &dyn FsOps,
     (dir, name): (BorrowedFd<'_>, &OsStr),
@@ -296,6 +271,7 @@ pub(super) async fn remove_placed(
 }
 
 pub(super) struct Copied {
+    pub ownership: Option<Ownership>,
     pub name: OsString,
     pub reported: Reported,
     pub manifest: Option<Manifest>,
@@ -332,17 +308,14 @@ pub(super) async fn copy_local(
             Destination::New(target, taken) => {
                 let (parent, name) = split(&target).map_err(Failure::Error)?;
                 let new = NewItem::Published(taken);
-                let name = copy_new(copy, source, (&parent, &name), new, options.workers)?;
-                let published = match source.recorded_in {
-                    Some(_) => Some(Published::at(copy.fs, parent, name.clone())?),
-                    None => None,
-                };
+                let (name, ownership) = copy_new(copy, source, (&parent, &name), new, options.workers)?;
+                let published = Some(Published::proven(parent, name.clone(), ownership));
                 Ok((name, Vec::new(), published))
             }
             Destination::Merge(folder, placing) => {
                 let name = folder.file_name().unwrap_or_default().to_os_string();
                 merge(copy, source, &folder, options.workers, placing)
-                    .map(|nested| (name, nested, None))
+                    .map(|(nested, published)| (name, nested, published))
             }
         },
     )
@@ -354,11 +327,13 @@ pub(super) async fn copy_local(
                 &target.with_file_name(&name),
                 followed.left,
             );
+            let ownership = published.as_ref().map(|copy| copy.ownership().clone());
             let mut manifest = followed.manifest;
             if let (Some(manifest), Some(published)) = (&mut manifest, published) {
                 manifest.copied_to(published);
             }
             Ok(Copied {
+                ownership,
                 name,
                 reported: followed.reported,
                 manifest,
@@ -427,10 +402,12 @@ pub(super) async fn copy_in_place(
         },
     )
     .await?;
-    followed.value?;
-    let manifest = followed
+    let (name, ownership) = followed.value?;
+    let mut manifest = followed
         .manifest
         .ok_or_else(|| io_error("Copy worker stopped unexpectedly"))?;
+    let (parent, _) = split(&target)?;
+    manifest.copied_to(Published::proven(parent, name, ownership));
     Ok((manifest, left_report(&target, followed.left)))
 }
 
@@ -507,15 +484,43 @@ fn sync_tree(fs: &dyn FsOps, at: Entry<'_>, cancelled: &AtomicBool) -> Result<()
     Ok(())
 }
 
-pub(super) async fn published(
+pub(super) fn file_ownership(stat: &EntryStat) -> Ownership {
+    Ownership::of(stat)
+}
+
+pub(super) fn staged_ownership(staged: &StagedSibling) -> Ownership {
+    staged.ownership.clone().unwrap_or_else(|| Ownership::new(staged.identity))
+}
+
+pub(super) fn published(
     parent: Arc<OwnedFd>,
     name: OsString,
-) -> Result<Published, glib::Error> {
-    run_blocking(move || {
-        let shown = name.clone();
-        Published::at(fs(), parent, name).map_err(|error| Failure::Os(error).into_error(&shown))
-    })
-    .await
+    ownership: Ownership,
+) -> Published {
+    Published::proven(parent, name, ownership)
+}
+
+pub(super) async fn placed_proven(
+    path: PathBuf,
+    ownership: Ownership,
+    left: Arc<AtomicUsize>,
+    cancellable: &gio::Cancellable,
+) -> Option<PlacedSnapshot> {
+    run_cancellable(cancellable, move |cancelled| {
+        let (parent, name) = split(&path).ok()?;
+        manifest::placed_proven(fs(), (parent.as_fd(), &name), &cancelled, &left, &ownership)
+            .ok().map(PlacedSnapshot::new)
+    }).await.ok().flatten()
+}
+
+pub(super) fn placed_at_proven(
+    fs: &dyn FsOps,
+    at: (BorrowedFd<'_>, &OsStr),
+    ownership: &Ownership,
+    cancelled: &AtomicBool,
+) -> Option<PlacedSnapshot> {
+    manifest::placed_proven(fs, at, cancelled, &manifest::placed_entries(), ownership)
+        .ok().map(PlacedSnapshot::new)
 }
 
 /// Must be opened before a copy writes beneath `path`.
@@ -630,9 +635,13 @@ async fn following<T: Send + 'static>(
             options,
         );
         let value = work(&copy, &source).map_err(|failure| failure.into_error(&source.name));
-        let manifest = source
-            .recorded_in
-            .map(|root| manifest::of(source.parent, root));
+        let manifest = source.recorded_in.map(|root| {
+            let mut manifest = manifest::of(source.parent, root);
+            for copy in std::mem::take(&mut *lock(&copy.copies)) {
+                manifest.copied_to(copy);
+            }
+            manifest
+        });
         (value, std::mem::take(&mut *lock(&copy.left)), manifest)
     })
     .await;
@@ -652,7 +661,7 @@ pub(super) async fn copy_from_stage(
     name: OsString,
     durable: bool,
     cancellable: &gio::Cancellable,
-) -> Result<(), glib::Error> {
+) -> Result<Ownership, glib::Error> {
     let source = Source {
         parent: staged.parent.clone(),
         name: staged.name.clone(),
@@ -742,7 +751,7 @@ fn copy_new(
     (parent, name): (&Arc<OwnedFd>, &OsStr),
     new: NewItem,
     workers: Option<usize>,
-) -> Result<OsString, Failure> {
+) -> Result<(OsString, Ownership), Failure> {
     let stat = copy.fs.stat(source.entry(), false)?;
     let taken = match new {
         NewItem::Published(taken) => taken,
@@ -754,15 +763,14 @@ fn copy_new(
     match stat.kind {
         FileType::RegularFile if in_place => FileCopy::new(copy, parent.as_fd())
             .in_place(source.entry(), &stat, name, recorded_in)
-            .map(|_| name.to_os_string()),
+            .map(|identity| (name.to_os_string(), copy.ownership(identity))),
         FileType::RegularFile => FileCopy::new(copy, parent.as_fd())
             .copy_from(
                 source.entry(),
                 &stat,
                 FileTarget::Final(name, taken),
                 recorded_in,
-            )
-            .map(|(name, _)| name),
+            ).map(|(name, identity)| (name, copy.ownership(identity))),
         FileType::Symlink => {
             copy.check_cancelled()?;
             let mount = Mount::new(copy.fs, parent.as_fd());
@@ -778,15 +786,15 @@ fn copy_new(
             if let Some(folder) = recorded_in {
                 folder.entry(&source.name, &link);
             }
-            Ok(name)
+            let identity = copy.fs.stat(Entry::new(&**parent, &name), false)?.identity;
+            Ok((name, Ownership::new(identity)))
         }
         FileType::Directory => {
             let workers = workers.unwrap_or_else(|| worker_count(source, parent));
             if in_place || placement::can_place(copy.fs, parent.as_fd(), true) == Some(false) {
                 return first_free(taken.names(name, true), taken, |name| {
                     direct_folder(copy, source, stat.identity, parent, name, workers)
-                })
-                .map(|(name, ())| name);
+                });
             }
             let staged = stage_folder(copy, source, stat.identity, parent, COPY_PREFIX, workers)?;
             publish_folder(copy, staged, name, taken, workers)
@@ -795,17 +803,17 @@ fn copy_new(
             copy.check_cancelled()?;
             let mount = Mount::new(copy.fs, parent.as_fd());
             let parent_stat = copy.fs.stat_fd(parent.as_fd())?;
-            let (name, pipe) = first_free(taken.names(name, false), taken, |name| {
+            let (name, (pipe, identity)) = first_free(taken.names(name, false), taken, |name| {
                 let target = Entry::new(&**parent, name);
                 match tree::copy_fifo(copy, source.entry(), target, &parent_stat, &mount, None)? {
-                    (pipe, Some(_)) => Ok(pipe),
+                    (pipe, Some(identity)) => Ok((pipe, identity)),
                     (_, None) => Err(Failure::NotCopyable),
                 }
             })?;
             if let Some(folder) = recorded_in {
                 folder.entry(&source.name, &pipe);
             }
-            Ok(name)
+            Ok((name, Ownership::new(identity)))
         }
         _ => Err(Failure::NotCopyable),
     }
@@ -829,6 +837,7 @@ fn copy_stage(
                 recorded_in,
             )?;
             Ok(StagedSibling {
+                ownership: Some(copy.ownership(identity)),
                 parent,
                 name,
                 identity,
@@ -887,8 +896,10 @@ fn stage_folder(
         name: staged.name.clone(),
         identity: staged.identity,
     };
-    match fill(copy, source, expected, &root, workers, None) {
+    let created = Arc::new(Created::default());
+    match fill(copy, source, expected, &root, workers, Some(&created)) {
         Ok(restrictive) => {
+            staged.ownership = Some(copy.created_ownership(staged.identity, lock(&created.0).clone()));
             staged.restrictive = restrictive;
             Ok(staged)
         }
@@ -902,7 +913,8 @@ fn publish_folder(
     name: &OsStr,
     taken: Taken,
     workers: usize,
-) -> Result<OsString, Failure> {
+) -> Result<(OsString, Ownership), Failure> {
+    let ownership = staged.ownership.clone().unwrap_or_else(|| Ownership::new(staged.identity));
     if let Err(failure) = copy.check_cancelled() {
         return Err(copy.discarding(staged, failure));
     }
@@ -916,7 +928,7 @@ fn publish_folder(
             &name,
         );
         match placed {
-            Ok(_) => return Ok(name),
+            Ok(_) => return Ok((name, ownership)),
             Err(PlaceError::Exists) if taken == Taken::Number => {}
             // Either name may hold the copy, so neither is removed.
             Err(PlaceError::Unconfirmed) => return Err(Failure::Place(PlaceError::Unconfirmed)),
@@ -939,7 +951,7 @@ fn publish_folder(
                 });
                 let discarded = copy.discard(staged);
                 return match (copied, discarded) {
-                    (Ok((name, ())), Ok(())) => Ok(name),
+                    (Ok(published), Ok(())) => Ok(published),
                     (Ok(_), Err(error)) => Err(Failure::Error(stage_left(&error))),
                     (Err(failure), discarded) => Err(copy.after_cleanup(failure, discarded)),
                 };
@@ -1088,7 +1100,7 @@ fn direct_folder(
     parent: &Arc<OwnedFd>,
     name: &OsStr,
     workers: usize,
-) -> Result<(), Failure> {
+) -> Result<Ownership, Failure> {
     let fs = copy.fs;
     copy.check_cancelled()?;
     let target = Entry::new(&**parent, name);
@@ -1110,7 +1122,7 @@ fn direct_folder(
     };
     let created = Arc::new(Created::default());
     fill(copy, source, expected, &root, workers, Some(&created))
-        .map(drop)
+        .map(|_| copy.created_ownership(identity, lock(&created.0).clone()))
         .map_err(|failure| {
             let family = Mount::new(fs, parent.as_fd()).family;
             let removed = created.remove(fs, &root, family);
@@ -1124,7 +1136,7 @@ fn from_stage(
     identity: LocalFileIdentity,
     parent: &Arc<OwnedFd>,
     name: &OsStr,
-) -> Result<(), Failure> {
+) -> Result<Ownership, Failure> {
     match identity.kind {
         FileType::Directory => {
             let workers = worker_count(source, parent);
@@ -1134,7 +1146,7 @@ fn from_stage(
             let parent_stat = copy.fs.stat_fd(parent.as_fd())?;
             FileCopy::new(copy, parent.as_fd())
                 .create_from(source.entry(), identity, None, name, &parent_stat)
-                .map(drop)
+                .map(|identity| copy.ownership(identity))
         }
         // The ladder recreates symlinks itself.
         _ => Err(Failure::Place(PlaceError::Unsupported)),
@@ -1147,12 +1159,12 @@ fn merge(
     folder: &Path,
     workers: Option<usize>,
     placing: Option<Arc<Placing>>,
-) -> Result<Vec<Barrier>, Failure> {
+) -> Result<(Vec<Barrier>, Option<Published>), Failure> {
     let (parent, name) = split(folder).map_err(Failure::Error)?;
     let workers = workers.unwrap_or_else(|| worker_count(source, &parent));
     let merged = tree::Merged {
         source: (source.parent.clone(), source.name.clone()),
-        target: (parent, name, None),
+        target: (parent.clone(), name.clone(), None),
         path: PathBuf::new(),
         recorded_in: source.recorded_in.clone(),
         placing,
@@ -1163,6 +1175,7 @@ fn merge(
             stages,
             placed,
             mut nested,
+            copies,
             ..
         },
     ) = tree::walk(copy, workers, None, |tree| {
@@ -1172,7 +1185,8 @@ fn merge(
         for barrier in &mut nested {
             barrier.path = folder.join(&barrier.path);
         }
-        return Ok(nested);
+        lock(&copy.copies).extend(copies);
+        return Ok((nested, None));
     };
     copy.keep_left_beneath(&placed);
     let mut cleanup = Ok(());
@@ -1431,6 +1445,8 @@ struct Copy {
     recording: bool,
     durable: bool,
     left: Mutex<Left>,
+    copies: Mutex<Vec<Published>>,
+    written: Mutex<HashMap<(u64, u64), (LocalFileIdentity, manifest::State)>>,
 }
 
 impl Copy {
@@ -1455,7 +1471,28 @@ impl Copy {
             recording: options.manifest,
             durable: options.durable,
             left: Mutex::default(),
+            copies: Mutex::default(),
+            written: Mutex::default(),
         })
+    }
+
+    fn ownership(&self, identity: LocalFileIdentity) -> Ownership {
+        self.created_ownership(identity, std::iter::empty())
+    }
+
+    fn created_ownership(
+        &self,
+        identity: LocalFileIdentity,
+        descendants: impl IntoIterator<Item = (PathBuf, LocalFileIdentity)>,
+    ) -> Ownership {
+        let descendants = descendants.into_iter().collect::<Vec<_>>();
+        let written = lock(&self.written);
+        let states = std::iter::once((PathBuf::new(), identity)).chain(descendants.iter().cloned())
+            .filter_map(|(path, identity)| {
+                let (known, state) = written.get(&(identity.device, identity.inode))?;
+                (*known == identity).then_some((path, *state))
+            }).collect::<Vec<_>>();
+        Ownership::created(identity, descendants).with_states(states)
     }
 
     fn uncounted(&self) -> Arc<Self> {
@@ -1687,9 +1724,11 @@ impl Copy {
         parent: &EntryStat,
         mount: &Mount,
     ) -> Result<(), Failure> {
-        snapshot
-            .apply(self.fs, fd, created, parent, mount, &self.refused_xattrs)
-            .map_err(Failure::Os)
+        snapshot.apply(self.fs, fd, created, parent, mount, &self.refused_xattrs)?;
+        let stat = self.fs.stat_fd(fd)?;
+        lock(&self.written).insert((created.identity.device, created.identity.inode),
+            (created.identity, manifest::State::of(&stat)));
+        Ok(())
     }
 
     /// NFSv4 write delegations set the times at close, and FUSE daemons with

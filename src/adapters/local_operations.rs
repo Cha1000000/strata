@@ -1823,8 +1823,6 @@ async fn copy_new_remote_file_with(
 enum CopyRecord {
     Nothing,
     Root(Rc<CreatedCopyRoot>),
-    /// The files a merge copies to the paths it wants.
-    Placing(Option<Arc<copy_engine::Placing>>),
 }
 
 fn copy_recursively_with_progress(
@@ -1895,11 +1893,6 @@ fn copy_recursively_with_progress(
                     break;
                 }
             }
-            if let CopyRecord::Placing(Some(placing)) = record
-                && let Some(path) = target.path().filter(|path| placing.wants(path))
-            {
-                copy_engine::record_placed(placing, path, &cancellable).await;
-            }
             Ok(())
         } else {
             let source_size = info
@@ -1927,12 +1920,6 @@ fn copy_recursively_with_progress(
                 reporter,
             )
             .await;
-            if result.is_ok()
-                && let CopyRecord::Placing(Some(placing)) = record
-                && let Some(path) = target.path().filter(|path| placing.wants(path))
-            {
-                copy_engine::record_placed(placing, path, &cancellable).await;
-            }
             if result.is_ok()
                 && let Some(file_progress) = file_progress
             {
@@ -1970,6 +1957,18 @@ async fn copy_new_recursively_on_filesystem(
     progress: Option<Rc<TransferProgressTracker>>,
     fat_family: bool,
 ) -> Result<gio::File, glib::Error> {
+    copy_new_with_ownership(source, target, taken, cancellable, progress, fat_family)
+        .await.map(|(target, _)| target)
+}
+
+async fn copy_new_with_ownership(
+    source: gio::File,
+    target: gio::File,
+    taken: Taken,
+    cancellable: gio::Cancellable,
+    progress: Option<Rc<TransferProgressTracker>>,
+    fat_family: bool,
+) -> Result<(gio::File, Option<copy_engine::Ownership>), glib::Error> {
     if source.is_native()
         && target.is_native()
         && let (Some(source_path), Some(target_path)) = (source.path(), target.path())
@@ -1986,7 +1985,7 @@ async fn copy_new_recursively_on_filesystem(
             &cancellable,
         )
         .await?;
-        return Ok(gio::File::for_path(target_path.with_file_name(copied.name)));
+        return Ok((gio::File::for_path(target_path.with_file_name(copied.name)), copied.ownership));
     }
 
     let source_type = if !target.is_native() || taken == Taken::Number {
@@ -2043,7 +2042,7 @@ async fn copy_new_recursively_on_filesystem(
                 })
             }),
         )
-        .await;
+        .await.map(|target| (target, None));
     }
 
     let copied = first_free_target(&target, taken, is_directory, &cancellable, |target| {
@@ -2086,7 +2085,7 @@ async fn copy_new_recursively_on_filesystem(
         }
     })
     .await?;
-    Ok(copied.0)
+    Ok((copied.0, None))
 }
 
 enum Moved {
@@ -2770,6 +2769,7 @@ enum StageContent {
 
 /// Created and discarded off the main thread; there is no `Drop` cleanup.
 struct StagedSibling {
+    ownership: Option<copy_engine::Ownership>,
     parent: Arc<OwnedFd>,
     name: OsString,
     identity: LocalFileIdentity,
@@ -2812,6 +2812,7 @@ impl StagedSibling {
             }
         })?;
         Ok(Self {
+            ownership: None,
             parent,
             name,
             identity,
@@ -2850,7 +2851,8 @@ async fn publish_staged_without_replace(
     target_path: PathBuf,
     durable: bool,
     cancellable: gio::Cancellable,
-) -> Result<(), glib::Error> {
+) -> Result<copy_engine::Ownership, glib::Error> {
+    let ownership = copy_engine::staged_ownership(&staged);
     let Some(target_name) = target_path.file_name().map(OsStr::to_os_string) else {
         let cleanup = discard_incomplete_staged(staged).await;
         return Err(copy_failure_after_cleanup(
@@ -2876,7 +2878,7 @@ async fn publish_staged_without_replace(
         }
     };
     let result = match placed {
-        Ok(_) => return Ok(()),
+        Ok(_) => return Ok(ownership),
         // Where the ladder cannot place the stage, publication falls back to
         // exclusive creation, even though it exposes partial copies.
         Err(PlaceError::Unsupported) => {
@@ -2888,7 +2890,7 @@ async fn publish_staged_without_replace(
     };
     let cleanup = discard_incomplete_staged(staged).await;
     match result {
-        Ok(()) => cleanup.map_err(|error| {
+        Ok(ownership) => cleanup.map(|()| ownership).map_err(|error| {
             io_error(rust_i18n::t!(
                 "The item was copied, but its staging copy could not be removed: %{error}",
                 error = crate::services::gio_error_detail(&error)
@@ -3287,7 +3289,7 @@ async fn replace_through_stage(
         ..copy_engine::Options::default()
     };
     let placed_entries = copying.placed_entries;
-    let (staged, sources, report) = copy_engine::copy_to_stage(
+    let (staged, mut sources, report) = copy_engine::copy_to_stage(
         source_path.to_path_buf(),
         target_path.to_path_buf(),
         options,
@@ -3296,19 +3298,24 @@ async fn replace_through_stage(
     )
     .await
     .map_err(|error| in_trash(error, removal))?;
-    let copied = (sources, report);
+    let staged_ownership = copy_engine::staged_ownership(&staged);
+    let mut copied = (sources.take(), report);
     loop {
         let parent = staged.parent.clone();
         let step_plan = plan.clone();
         let step = match removal {
             Removal::Trashed => {
-                publish_staged_replacement(staged, target_path.to_path_buf(), durable).await?;
+                let ownership = publish_staged_replacement(staged, target_path.to_path_buf(), durable).await?;
+                if let Some(sources) = &mut copied.0 {
+                    sources.copied_to(copy_engine::published(parent, plan.target_name.clone(), ownership.clone()));
+                }
                 // Only a copy is undone by deleting it.
                 let placed = if moving {
                     None
                 } else {
-                    copy_engine::placed(
+                    copy_engine::placed_proven(
                         target_path.to_path_buf(),
+                        ownership,
                         placed_entries.clone(),
                         cancellable,
                     )
@@ -3322,7 +3329,10 @@ async fn replace_through_stage(
                 return Ok((replaced, copied));
             }
             Removal::Without(Displacement::SetAside) => {
-                let replaced = set_aside_and_publish(plan, staged, target_path, durable).await?;
+                let (replaced, ownership) = set_aside_and_publish(plan, staged, target_path, durable).await?;
+                if let Some(sources) = &mut copied.0 {
+                    sources.copied_to(copy_engine::published(parent, plan.target_name.clone(), ownership));
+                }
                 return Ok((replaced, copied));
             }
             Removal::Trash => {
@@ -3373,6 +3383,9 @@ async fn replace_through_stage(
                 .await;
                 match exchanged {
                     Ok(None) => {
+                        if let Some(sources) = &mut copied.0 {
+                            sources.copied_to(copy_engine::published(staged.parent.clone(), plan.target_name.clone(), staged_ownership));
+                        }
                         let replaced = StagedReplacement {
                             original: ReplacedOriginal::Deleted,
                             displaced: Some(DisplacedOriginal {
@@ -3417,7 +3430,7 @@ async fn set_aside_and_publish(
     staged: StagedSibling,
     target_path: &Path,
     durable: bool,
-) -> Result<StagedReplacement, glib::Error> {
+) -> Result<(StagedReplacement, copy_engine::Ownership), glib::Error> {
     let name = plan.target_display();
     let parent = staged.parent.clone();
     let step_plan = plan.clone();
@@ -3441,28 +3454,30 @@ async fn set_aside_and_publish(
     };
     let parent = staged.parent.clone();
     // Publication finishes regardless of cancellation once the original is aside.
-    if let Err(error) = publish_staged_without_replace(
+    let ownership = match publish_staged_without_replace(
         staged,
         target_path.to_path_buf(),
         durable,
         gio::Cancellable::new(),
     )
-    .await
-    {
-        let detail = crate::services::gio_error_detail(&error);
-        let kept = aside.name.clone();
-        let step_plan = plan.clone();
-        let restored = run_blocking(move || {
-            placement::put_back(fs(), parent.as_fd(), &aside, &step_plan.target_name)
-                .map_err(placement_error)
-        })
-        .await;
-        return Err(io_error(match restored {
-            Ok(()) => could_not_replace(&name, &detail),
-            Err(_) => original_kept_aside(&name, &kept, &detail),
-        }));
-    }
-    Ok(StagedReplacement {
+    .await {
+        Ok(ownership) => ownership,
+        Err(error) => {
+            let detail = crate::services::gio_error_detail(&error);
+            let kept = aside.name.clone();
+            let step_plan = plan.clone();
+            let restored = run_blocking(move || {
+                placement::put_back(fs(), parent.as_fd(), &aside, &step_plan.target_name)
+                    .map_err(placement_error)
+            })
+            .await;
+            return Err(io_error(match restored {
+                Ok(()) => could_not_replace(&name, &detail),
+                Err(_) => original_kept_aside(&name, &kept, &detail),
+            }));
+        }
+    };
+    Ok((StagedReplacement {
         original: ReplacedOriginal::Deleted,
         displaced: Some(DisplacedOriginal {
             parent: OffMain::new(parent),
@@ -3470,7 +3485,7 @@ async fn set_aside_and_publish(
             identity: aside.identity,
         }),
         placed: None,
-    })
+    }, ownership))
 }
 
 /// Replaces `target` with `source` without a window in which neither exists.
@@ -3562,9 +3577,7 @@ async fn replace_owing(
     if let Some(original) = replaced.displaced {
         owed.owe(Deletion::Displaced(original, plan.target_display()));
     }
-    if let Some(mut sources) = sources {
-        let (parent, name) = (plan.target_parent.clone(), plan.target_name.clone());
-        sources.copied_to(copy_engine::published(parent, name).await?);
+    if let Some(sources) = sources {
         owed.owe(Deletion::Sources(source, sources));
     }
     Ok(owed)
@@ -3599,7 +3612,7 @@ async fn publish_staged_replacement(
     staged: StagedSibling,
     target_path: PathBuf,
     durable: bool,
-) -> Result<(), glib::Error> {
+) -> Result<copy_engine::Ownership, glib::Error> {
     publish_staged_without_replace(staged, target_path, durable, gio::Cancellable::new())
         .await
         .map_err(|error| original_in_trash(&crate::services::gio_error_detail(&error)))
@@ -4032,7 +4045,8 @@ fn merge_copy(progress: Option<Rc<TransferProgressTracker>>, fat_family: bool) -
                             target,
                             CopyInto::Existing,
                             cancellable,
-                            CopyRecord::Placing(placing),
+                            // GIO provides no creation provenance for destructive undo.
+                            CopyRecord::Nothing,
                             progress,
                             fat_family,
                         )
@@ -6257,8 +6271,9 @@ impl OperationProvider for LocalOperationProvider {
                 let replaced_permanently = Rc::new(Cell::new(false));
                 let undone = item.conflict != TransferConflict::Merge
                     && undone_when_cancelled(&source, &target);
+                let mut copied_ownership = None;
                 let result = if is_duplicate {
-                    copy_new_recursively_on_filesystem(
+                    copy_new_with_ownership(
                         source,
                         target,
                         taken,
@@ -6267,7 +6282,10 @@ impl OperationProvider for LocalOperationProvider {
                         fat_family,
                     )
                     .await
-                    .map(|target| (target, Owed::default()))
+                    .map(|(target, ownership)| {
+                        copied_ownership = ownership;
+                        (target, Owed::default())
+                    })
                 } else if item.conflict == TransferConflict::Merge {
                     merge_owing(
                         source,
@@ -6346,7 +6364,7 @@ impl OperationProvider for LocalOperationProvider {
                     .await
                     .map(|moved| (moved.target, moved.owed))
                 } else {
-                    copy_new_recursively_on_filesystem(
+                    copy_new_with_ownership(
                         source,
                         target,
                         taken,
@@ -6355,7 +6373,10 @@ impl OperationProvider for LocalOperationProvider {
                         fat_family,
                     )
                     .await
-                    .map(|target| (target, Owed::default()))
+                    .map(|(target, ownership)| {
+                        copied_ownership = ownership;
+                        (target, Owed::default())
+                    })
                 };
                 let (target, owed) = match result {
                     Ok(result) => result,
@@ -6406,8 +6427,10 @@ impl OperationProvider for LocalOperationProvider {
                     && item.conflict != TransferConflict::ReplaceExisting
                     && let Some(location) = &created_location
                     && let Some(path) = location.native_path()
-                    && let Some(placed) = copy_engine::placed(
+                    && let Some(ownership) = copied_ownership
+                    && let Some(placed) = copy_engine::placed_proven(
                         path.to_path_buf(),
+                        ownership,
                         copying.placed_entries.clone(),
                         &operation_cancellable,
                     )

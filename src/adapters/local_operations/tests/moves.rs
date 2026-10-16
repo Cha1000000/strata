@@ -1628,12 +1628,15 @@ fn a_moved_source_stays_when_its_copy_is_gone_before_the_deletion() -> Result<()
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
         .lock()
         .map_err(|error| error.to_string())?;
-    for conflict in [
-        TransferConflict::FailIfExists,
-        TransferConflict::ReplaceExisting,
+    for (conflict, published) in [
+        (TransferConflict::FailIfExists, None),
+        (TransferConflict::ReplaceExisting, None),
+        (TransferConflict::FailIfExists, Some(Op::LinkFd)),
+        (TransferConflict::FailIfExists, Some(Op::Rename)),
+        (TransferConflict::ReplaceExisting, Some(Op::Exchange)),
     ] {
         for replaced in [false, true] {
-            let row = format!("{conflict:?}, replaced: {replaced}");
+            let row = format!("{conflict:?}, published: {published:?}, replaced: {replaced}");
             let root = tempfile::tempdir()?;
             let sources = root.path().join("sources");
             let destination = root.path().join("destination");
@@ -1652,14 +1655,19 @@ fn a_moved_source_stays_when_its_copy_is_gone_before_the_deletion() -> Result<()
                 }
             });
             let _sources = FsQuirks::install(&sources, Quirks::default());
-            let _destination = FsQuirks::install(
-                &destination,
-                Quirks {
-                    trash: super::fs_quirks::Trash::Unsupported,
-                    before: vec![(Op::SyncFs, "*", 0, racer)],
-                    ..Quirks::ext4()
-                },
-            );
+            let mut quirks = Quirks {
+                trash: super::fs_quirks::Trash::Unsupported,
+                ..Quirks::ext4()
+            };
+            if let Some(op) = published {
+                quirks.after.push((op, "notes.txt", 0, racer));
+                if op == Op::Rename {
+                    quirks.tmpfile = Support::Rejected(Errno::OPNOTSUPP);
+                }
+            } else {
+                quirks.before.push((Op::SyncFs, "*", 0, racer));
+            }
+            let _destination = FsQuirks::install(&destination, quirks);
 
             let (_operation, events) = paste_move(98, &destination, &source, conflict);
             pump_until_transfer(&events);
@@ -1680,6 +1688,72 @@ fn a_moved_source_stays_when_its_copy_is_gone_before_the_deletion() -> Result<()
             );
         }
     }
+    Ok(())
+}
+
+#[test]
+fn destination_provenance_fails_closed_without_stable_inode_numbers() -> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock().map_err(|error| error.to_string())?;
+    for renumbered in [false, true] {
+        let root = tempfile::tempdir()?;
+        let sources = root.path().join("sources");
+        let destination = root.path().join("destination");
+        fs::create_dir(&sources)?;
+        fs::create_dir(&destination)?;
+        let source = sources.join("notes.txt");
+        fs::write(&source, b"notes")?;
+        let mut after = Vec::new();
+        let arrival = root.path().join("arrival");
+        fs::write(&arrival, b"other")?;
+        let over = destination.join("notes.txt");
+        let racer: super::fs_quirks::Racer = Box::new(move || {
+            if renumbered {
+                super::fs_quirks::renumbered(&over);
+            } else {
+                fs::rename(&arrival, &over).expect("replace copy");
+            }
+        });
+        after.push((Op::Rename, "notes.txt", 0, racer));
+        let _sources = FsQuirks::install(&sources, Quirks::default());
+        let _destination = FsQuirks::install(&destination, Quirks {
+            rename_flags: Support::Supported,
+            after,
+            ..Quirks::sshfs()
+        });
+        let (_operation, events) = paste_move(98, &destination, &source, TransferConflict::FailIfExists);
+        pump_until_transfer(&events);
+        assert!(matches!(terminal_transfer(&events.borrow()), Some(OperationEvent::Pasted { .. })), "renumbered {renumbered}: {:?}", events.borrow());
+        assert!(source.exists(), "renumbered {renumbered}: {:?}", events.borrow());
+        assert_eq!(fs::read(&source)?, b"notes");
+        assert_eq!(fs::read(destination.join("notes.txt"))?, if renumbered { b"notes".as_slice() } else { b"other".as_slice() });
+        assert_eq!(reported(&events).kept, [kept(source, KeptCause::CopyGone)], "renumbered {renumbered}");
+    }
+    Ok(())
+}
+
+#[test]
+fn a_replacing_move_keeps_the_actual_copy_out_identity() -> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock().map_err(|error| error.to_string())?;
+    let root = tempfile::tempdir()?;
+    let sources = root.path().join("sources");
+    let destination = root.path().join("destination");
+    let source = sources.join("folder");
+    fs::create_dir_all(&source)?;
+    fs::create_dir_all(destination.join("folder"))?;
+    fs::write(source.join("notes.txt"), b"notes")?;
+    fs::write(destination.join("folder/old.txt"), b"old")?;
+    let _sources = FsQuirks::install(&sources, Quirks::default());
+    let destination_scope = FsQuirks::install(&destination, Quirks {
+        exchange: super::fs_quirks::Exchange::Rejected,
+        ..Quirks::vboxsf()
+    });
+    let (_operation, events) = paste_move(98, &destination, &source, TransferConflict::ReplaceExisting);
+    pump_until_transfer(&events);
+    assert!(matches!(terminal_transfer(&events.borrow()), Some(OperationEvent::Pasted { .. })), "{:?}", events.borrow());
+    assert_eq!(fs::read(destination.join("folder/notes.txt"))?, b"notes");
+    assert!(destination_scope.calls().iter().any(|call| call.op == Op::Mkdir && call.names.iter().any(|name| name == "folder")), "exclusive copy-out created the final folder");
+    assert!(!source.exists());
+    assert!(reported(&events).kept.is_empty(), "{:?}", reported(&events));
     Ok(())
 }
 

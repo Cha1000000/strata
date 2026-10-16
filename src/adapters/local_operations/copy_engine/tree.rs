@@ -65,6 +65,7 @@ pub(super) struct Tree {
     created: Option<Arc<Created>>,
     stages: Mutex<Vec<StagedSibling>>,
     placed: Mutex<Vec<PathBuf>>,
+    copies: Mutex<Vec<manifest::Published>>,
     nested: Mutex<Nested>,
     source_family: OnceLock<Family>,
 }
@@ -174,6 +175,7 @@ pub(super) struct Walked {
     pub(super) links: Links,
     pub(super) stages: Vec<StagedSibling>,
     pub(super) placed: Vec<PathBuf>,
+    pub(super) copies: Vec<manifest::Published>,
     pub(super) nested: Vec<Barrier>,
 }
 
@@ -193,6 +195,7 @@ pub(super) fn walk(
         created,
         stages: Mutex::default(),
         placed: Mutex::default(),
+        copies: Mutex::default(),
         nested: Mutex::default(),
         source_family: OnceLock::new(),
     });
@@ -211,6 +214,7 @@ pub(super) fn walk(
         links: tree.links.take(),
         stages: std::mem::take(&mut *lock(&tree.stages)),
         placed: std::mem::take(&mut *lock(&tree.placed)),
+        copies: std::mem::take(&mut *lock(&tree.copies)),
         nested: std::mem::take(&mut lock(&tree.nested).barriers),
     };
     (result, walked)
@@ -981,6 +985,9 @@ impl File {
             placement::remove_if_unchanged(fs, target, created.identity, AtFlags::empty());
         }
         let Some(read) = written? else {
+            if let Some(created) = &tree.created {
+                lock(&created.0).retain(|(made, _)| made != &path);
+            }
             // It kept changing while it was read.
             if let Some(folder) = &self.recorded_in {
                 folder.keep(&self.name, KeptCause::Changed);
@@ -1085,6 +1092,8 @@ impl Merged {
         if expected.is_some_and(|expected| !same_entry(&target_stat, expected, mount.family)) {
             return Err(Failure::Changed);
         }
+        lock(&tree.copies).push(manifest::Published::new(
+            target_parent.clone(), target_name.clone(), target_stat.identity));
         if copy.durable {
             tree.reach(fs, &mount, target.as_fd(), &self.path)?;
         }
@@ -1233,7 +1242,7 @@ impl Live {
         }
         let nested = copy.nested();
         let path = self.path.join(target_name);
-        let (path, ()) = make_numbered(
+        let (path, ownership) = make_numbered(
             copy,
             &self.names,
             &path,
@@ -1254,7 +1263,10 @@ impl Live {
         if let Some(placing) = &self.placing
             && let Some(name) = path.file_name()
         {
-            placing.placed(copy.fs, (self.dir.as_fd(), name), &path, &copy.cancelled);
+            placing.placed(copy.fs, (self.dir.as_fd(), name), &path, &ownership, &copy.cancelled);
+        }
+        if let Some(name) = path.file_name() {
+            lock(&tree.copies).push(manifest::Published::proven(self.dir.clone(), name.to_os_string(), ownership));
         }
         lock(&tree.placed).push(path);
         Ok(())
@@ -1299,7 +1311,7 @@ impl Place {
         let mut result = Ok(());
         for (name, kind) in &children {
             match self.place_child(copy, name, *kind == FileType::Directory) {
-                Ok(path) => {
+                Ok((path, ownership)) => {
                     let requested = self.path.join(name);
                     if path != requested {
                         copy.relocate(&requested, &path);
@@ -1307,7 +1319,7 @@ impl Place {
                             super::rebase(&mut folder.path, &requested, &path);
                         }
                     }
-                    placed.push(path);
+                    placed.push((path, ownership));
                 }
                 Err(failure) => {
                     // Either name may hold the child, so the stage is kept.
@@ -1321,12 +1333,18 @@ impl Place {
         }
         // Placing a name of a file changes the change time of its others.
         if let Some(placing) = &self.placing {
-            for path in &placed {
+            for (path, ownership) in &placed {
                 if let Some(name) = path.file_name() {
-                    placing.placed(fs, (self.live.as_fd(), name), path, &copy.cancelled);
+                    placing.placed(fs, (self.live.as_fd(), name), path, ownership, &copy.cancelled);
                 }
             }
         }
+        for (path, ownership) in &placed {
+            if let Some(name) = path.file_name() {
+                lock(&tree.copies).push(manifest::Published::proven(self.live.clone(), name.to_os_string(), ownership.clone()));
+            }
+        }
+        let placed = placed.into_iter().map(|(path, _)| path).collect::<Vec<_>>();
         let mut placed_folders = restrictive
             .into_iter()
             .filter(|folder| placed.iter().any(|path| folder.path.starts_with(path)))
@@ -1352,11 +1370,12 @@ impl Place {
         copy: &Arc<Copy>,
         name: &OsStr,
         is_directory: bool,
-    ) -> Result<PathBuf, Failure> {
+    ) -> Result<(PathBuf, manifest::Ownership), Failure> {
         copy.check_cancelled()?;
         let fs = copy.fs;
         let staged = Entry::new(&*self.stage, name);
         let identity = fs.stat(staged, false)?.identity;
+        let ownership = manifest::Ownership::capture(fs, staged, identity)?;
         let path = self.path.join(name);
         make_numbered(
             copy,
@@ -1367,13 +1386,12 @@ impl Place {
             |candidate| {
                 let target = Entry::new(&*self.live, candidate);
                 match placement::place_staged(fs, staged, target, identity) {
-                    Ok(_) => Ok(()),
+                    Ok(_) => Ok(ownership.clone()),
                     Err(PlaceError::Unsupported) => self.copy_out(copy, name, identity, candidate),
                     Err(error) => Err(error.into()),
                 }
             },
         )
-        .map(|(path, ())| path)
     }
 
     fn copy_out(
@@ -1382,20 +1400,22 @@ impl Place {
         name: &OsStr,
         identity: LocalFileIdentity,
         candidate: &OsStr,
-    ) -> Result<(), Failure> {
+    ) -> Result<manifest::Ownership, Failure> {
         let source = Source {
             parent: self.stage.clone(),
             name: name.to_os_string(),
             recorded_in: None,
         };
-        from_stage(&copy.uncounted(), &source, identity, &self.live, candidate)?;
+        let ownership = from_stage(&copy.uncounted(), &source, identity, &self.live, candidate)?;
         copy.discard(StagedSibling {
+            ownership: None,
             parent: self.stage.clone(),
             name: name.to_os_string(),
             identity,
             restrictive: Vec::new(),
         })
-        .map_err(|error| Failure::Error(super::stage_left(&error)))
+        .map_err(|error| Failure::Error(super::stage_left(&error)))?;
+        Ok(ownership)
     }
 
     fn remove_stage(self, tree: &Tree) -> Result<(), Failure> {

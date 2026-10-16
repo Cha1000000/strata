@@ -215,6 +215,9 @@ impl Links {
                     if let Some(recorded) = name.recorded.take() {
                         recorded.keep(KeptCause::Changed);
                     }
+                    if let Some(created) = created {
+                        lock(&created.0).retain(|(path, _)| path != &name.path);
+                    }
                     continue;
                 }
                 _ => Err(Failure::Changed),
