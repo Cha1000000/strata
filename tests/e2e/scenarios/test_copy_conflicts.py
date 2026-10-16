@@ -62,7 +62,7 @@ def test_dismissing_a_copy_or_move_conflict_preserves_both_files(strata, moving,
     strata.open_directory("archive")
     strata.paste_into("archive")
     dialog = strata.wait_for_dialog()
-    assert (dialog.find(role="button", name="Keep Both") is not None) == (not moving)
+    assert dialog.find(role="button", name="Keep Both") is not None
     assert dialog.find(role="button", name="Merge") is None, (
         "a file collision cannot merge"
     )

@@ -252,6 +252,7 @@ fn two_names_are_never_taken_for_one_where_the_listing_changes_their_case()
             items: vec![PasteItem {
                 source: Location::local(&folder),
                 conflict: TransferConflict::FailIfExists,
+                target_name: None,
             }],
             move_sources: moving,
         });

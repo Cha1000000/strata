@@ -5,6 +5,7 @@ use crate::model::{FileEntry, Location};
 use crate::services::{DropCommit, TransferKind};
 use std::{
     cell::{Cell, RefCell},
+    collections::HashSet,
     path::Path,
 };
 
@@ -288,85 +289,6 @@ fn duplicate_transfer_uses_the_selected_entries_parent() {
 }
 
 #[test]
-fn transfer_collisions_detect_existing_destination_items() -> Result<(), Box<dyn std::error::Error>>
-{
-    let root = std::env::temp_dir().join(format!("strata-collision-test-{}", std::process::id()));
-    let _ignored = std::fs::remove_dir_all(&root);
-    let source_dir = root.join("source");
-    let destination = root.join("destination");
-    std::fs::create_dir_all(&source_dir)?;
-    std::fs::create_dir_all(&destination)?;
-    let source = source_dir.join("photo.jpg");
-    std::fs::write(&source, b"new")?;
-
-    assert!(
-        transfer_collision(&Location::local(&source), &Location::local(&destination)).is_none()
-    );
-    assert!(transfer_collision(&Location::local(&source), &Location::local(&source_dir)).is_none());
-    let trash_source = Location::uri("trash:///%5Cmnt%5CData%5C.Trash-1000%5Cfiles%5Cphoto.jpg");
-    assert!(transfer_collision(&trash_source, &Location::local(&destination)).is_none());
-    std::fs::write(destination.join("photo.jpg"), b"old")?;
-    let trash_collision = transfer_collision(&trash_source, &Location::local(&destination))
-        .expect("an external trash file collision");
-    assert!(!trash_collision.mergeable);
-    let collision = transfer_collision(&Location::local(&source), &Location::local(&destination))
-        .expect("a file collision");
-    assert!(!collision.mergeable, "a file collision cannot merge");
-
-    std::fs::remove_dir_all(root)?;
-    Ok(())
-}
-
-#[test]
-fn collision_candidates_include_case_only_name_matches() -> Result<(), Box<dyn std::error::Error>> {
-    let destination = tempfile::tempdir()?;
-    std::fs::write(destination.path().join("photo.jpg"), b"old")?;
-
-    let candidates = destination_name_candidates(destination.path()).expect("directory listing");
-
-    assert!(candidates.contains(&destination_name_key(std::ffi::OsStr::new("PHOTO.JPG"))));
-    Ok(())
-}
-
-#[test]
-fn transfer_collisions_mark_folder_pairs_as_mergeable() -> Result<(), Box<dyn std::error::Error>> {
-    let root = std::env::temp_dir().join(format!("strata-mergeable-test-{}", std::process::id()));
-    let _ignored = std::fs::remove_dir_all(&root);
-    let source_dir = root.join("source");
-    let destination = root.join("destination");
-    std::fs::create_dir_all(source_dir.join("folder"))?;
-    std::fs::create_dir_all(&destination)?;
-    std::fs::write(source_dir.join("file.txt"), b"new")?;
-
-    let folder = transfer_collision(
-        &Location::local(source_dir.join("folder")),
-        &Location::local(&destination),
-    );
-    assert!(
-        folder.is_none(),
-        "no collision until the destination exists"
-    );
-
-    std::fs::create_dir_all(destination.join("folder"))?;
-    std::fs::write(destination.join("file.txt"), b"old")?;
-    let folder = transfer_collision(
-        &Location::local(source_dir.join("folder")),
-        &Location::local(&destination),
-    )
-    .expect("a folder collision");
-    assert!(folder.mergeable, "two folders can merge");
-    let file = transfer_collision(
-        &Location::local(source_dir.join("file.txt")),
-        &Location::local(&destination),
-    )
-    .expect("a file collision");
-    assert!(!file.mergeable);
-
-    std::fs::remove_dir_all(root)?;
-    Ok(())
-}
-
-#[test]
 fn start_transfer_skips_noops_before_emitting_progress() {
     crate::test_support::gtk_test(
         "ui::browser::transfer::tests::start_transfer_skips_noops_before_emitting_progress",
@@ -419,6 +341,7 @@ fn start_transfer_skips_noops_before_emitting_progress() {
                     vec![source, Location::local(&other_path)],
                     moving,
                 );
+                wait_until(|| !started.borrow().is_empty(), "the transfer to start");
                 assert_eq!(*started.borrow(), vec![(1, moving)]);
                 let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
                 while !finished.get() {
@@ -2062,6 +1985,7 @@ fn a_cancelled_transfer_reloads_its_unwatched_destination_while_a_watched_folder
                     vec![PasteItem {
                         source: Location::local(&item),
                         conflict: TransferConflict::FailIfExists,
+                        target_name: None,
                     }],
                     moving,
                     false,
@@ -2170,6 +2094,7 @@ fn a_completed_transfer_reloads_its_unwatched_destination_once() {
                     vec![PasteItem {
                         source: Location::local(&item),
                         conflict: TransferConflict::ReplaceExisting,
+                        target_name: None,
                     }],
                     moving,
                     true,
@@ -2903,6 +2828,10 @@ fn background_move_without_reveal_restores_the_source_column() {
                 vec![Location::local(&source)],
                 DropCommit::Move,
             );
+            wait_until(
+                || view.state.drop_active_depths.get().is_some(),
+                "the move to start",
+            );
             assert_eq!(view.state.drop_active_depths.get(), Some((2, 0)));
 
             wait_until(
@@ -3204,6 +3133,238 @@ fn conflict_dialog_verifies_theme_following() {
                 first, second,
                 "the conflict dialog must re-theme when the active theme changes"
             );
+            window.destroy();
+        },
+    );
+}
+
+#[test]
+fn a_conflict_prompt_says_which_name_the_item_takes_and_what_a_merge_overwrites() {
+    let destination = Location::local("/media/stick");
+    let explanation = |source: &str, target: &str, fixes_inside, merge| {
+        conflict_explanation(
+            &TransferCollision {
+                source: Location::local(format!("/home/user/{source}")),
+                target_name: Some(OsString::from(target)),
+                mergeable: true,
+                fixes_inside,
+            },
+            &destination,
+            merge,
+        )
+    };
+    for merge in [false, true] {
+        let as_named = explanation("a_b", "a_b", false, merge);
+        let renamed = explanation("a:b", "a_b", false, merge);
+        assert!(renamed.contains("a:b"), "{renamed}");
+        assert!(
+            renamed.len() > as_named.len() && renamed.ends_with(&as_named),
+            "{renamed}"
+        );
+        assert!(!as_named.contains("a:b"), "{as_named}");
+    }
+    let replacing = explanation("folder", "folder", true, false);
+    assert_eq!(replacing, explanation("folder", "folder", false, false));
+    let merging = explanation("folder", "folder", false, true);
+    let merging_fixed = explanation("folder", "folder", true, true);
+    assert!(
+        merging_fixed.len() > merging.len() && merging_fixed.starts_with(&merging),
+        "{merging_fixed}"
+    );
+}
+
+fn conflict_view() -> (crate::ui::browser::BrowserView, gtk::Overlay, gtk::Window) {
+    let view = crate::ui::browser::BrowserView::new(
+        Rc::new(crate::adapters::LocalFileSource),
+        crate::ui::browser::PeekBehavior::default(),
+    );
+    view.set_operation_provider(Rc::new(crate::adapters::LocalOperationProvider));
+    let browser_widget = view.widget();
+    let root = crate::ui::blur::BlurBin::new(&browser_widget);
+    let overlay = gtk::Overlay::new();
+    overlay.set_child(Some(&root));
+    let window = gtk::Window::builder().child(&overlay).build();
+    window.present();
+    (view, overlay, window)
+}
+
+#[test]
+fn a_paste_onto_fat_asks_about_the_item_its_fixed_name_would_replace() {
+    crate::test_support::gtk_test(
+        "ui::browser::transfer::tests::a_paste_onto_fat_asks_about_the_item_its_fixed_name_would_replace",
+        || {
+            let fixture = tempfile::tempdir().expect("conflict fixture");
+            let source = fixture.path().join("source");
+            let disk = fixture.path().join("disk");
+            std::fs::create_dir_all(&source).expect("source dir");
+            std::fs::create_dir_all(&disk).expect("disk dir");
+            std::fs::write(source.join("a:b"), b"incoming").expect("source file");
+            std::fs::write(disk.join("a_b"), b"old").expect("destination file");
+            let _disk = crate::adapters::FsQuirks::install(&disk, crate::adapters::Quirks::vfat());
+            let (view, overlay, window) = conflict_view();
+
+            view.state.start_transfer(
+                Location::local(&disk),
+                vec![Location::local(source.join("a:b"))],
+                false,
+            );
+
+            assert!(
+                wait_for_modal_layer(&overlay),
+                "conflict dialog modal did not appear"
+            );
+            assert!(
+                visible_texts(&overlay)
+                    .iter()
+                    .any(|text| text.contains("a:b") && text.contains("a_b")),
+                "the prompt names the item and the name it takes: {:?}",
+                visible_texts(&overlay)
+            );
+            click_button(&overlay, "Replace");
+            wait_until(
+                || std::fs::read(disk.join("a_b")).is_ok_and(|contents| contents == b"incoming"),
+                "the item to replace the one its fixed name equals",
+            );
+            assert_eq!(
+                std::fs::read_dir(&disk).expect("disk listing").count(),
+                1,
+                "nothing else lands beside it"
+            );
+            window.destroy();
+        },
+    );
+}
+
+#[test]
+fn keeping_both_on_a_move_puts_the_item_beside_the_other_and_undo_moves_it_back() {
+    crate::test_support::gtk_test(
+        "ui::browser::transfer::tests::keeping_both_on_a_move_puts_the_item_beside_the_other_and_undo_moves_it_back",
+        || {
+            let fixture = tempfile::tempdir().expect("move fixture");
+            let original = fixture.path().join("original");
+            let current = fixture.path().join("current");
+            std::fs::create_dir_all(&original).expect("original dir");
+            std::fs::create_dir_all(&current).expect("current dir");
+            std::fs::write(original.join("todo.txt"), b"moved").expect("moved file");
+            std::fs::write(current.join("todo.txt"), b"existing").expect("existing file");
+            let (view, overlay, window) = conflict_view();
+
+            view.state.start_transfer(
+                Location::local(&current),
+                vec![Location::local(original.join("todo.txt"))],
+                true,
+            );
+            assert!(
+                wait_for_modal_layer(&overlay),
+                "conflict dialog modal did not appear"
+            );
+            click_button(&overlay, "Keep Both");
+            let kept = current.join("todo (1).txt");
+            wait_until(
+                || {
+                    std::fs::read(&kept).is_ok_and(|contents| contents == b"moved")
+                        && !original.join("todo.txt").exists()
+                },
+                "the move beside the existing item",
+            );
+
+            let browser = view.browser();
+            wait_until(
+                || browser.pending_undo_move().is_some(),
+                "the move undo to become pending",
+            );
+            let (generation, records) = browser.pending_undo_move().expect("pending move undo");
+            assert!(view.state.undo_move(generation, records));
+            wait_until(
+                || {
+                    std::fs::read(original.join("todo.txt"))
+                        .is_ok_and(|contents| contents == b"moved")
+                        && !kept.exists()
+                },
+                "the undo to move the item back",
+            );
+            assert_eq!(
+                std::fs::read(current.join("todo.txt")).expect("existing file"),
+                b"existing"
+            );
+            window.destroy();
+        },
+    );
+}
+
+#[test]
+fn a_destination_slow_to_answer_shows_the_transfer_preparing_and_cancel_abandons_it() {
+    crate::test_support::gtk_test(
+        "ui::browser::transfer::tests::a_destination_slow_to_answer_shows_the_transfer_preparing_and_cancel_abandons_it",
+        || {
+            let fixture = tempfile::tempdir().expect("slow fixture");
+            let source = fixture.path().join("notes.txt");
+            let disk = fixture.path().join("disk");
+            std::fs::create_dir_all(&disk).expect("disk dir");
+            std::fs::write(&source, b"notes").expect("source file");
+            let (release, held) = std::sync::mpsc::channel::<()>();
+            let answered = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let listed = answered.clone();
+            let _disk = crate::adapters::FsQuirks::install(
+                &disk,
+                crate::adapters::Quirks {
+                    before: vec![(
+                        crate::adapters::FsOp::Names,
+                        "*",
+                        0,
+                        Box::new(move || {
+                            let _released = held.recv();
+                            listed.store(true, std::sync::atomic::Ordering::SeqCst);
+                        }),
+                    )],
+                    ..crate::adapters::Quirks::ext4()
+                },
+            );
+            let (view, overlay, window) = conflict_view();
+            let started = Rc::new(Cell::new(0));
+            let observed = started.clone();
+            view.browser().observe(move |event| {
+                if matches!(
+                    operation_event(event),
+                    crate::app::BrowserEvent::TransferStarted { .. }
+                ) {
+                    observed.set(observed.get() + 1);
+                }
+            });
+
+            view.state.start_transfer(
+                Location::local(&disk),
+                vec![Location::local(&source)],
+                false,
+            );
+            let preparing = crate::i18n::tr("Preparing items…");
+            wait_until(
+                || visible_texts(&overlay).contains(&preparing),
+                "the transfer to show it prepares its items",
+            );
+            assert_eq!(started.get(), 0);
+            click_button(&overlay, "Cancel");
+            wait_until(
+                || find_widget_with_class(&overlay, "app-modal-layer").is_none(),
+                "the preparing transfer to go away",
+            );
+            release.send(()).expect("held listing");
+            wait_until(
+                || answered.load(std::sync::atomic::Ordering::SeqCst),
+                "the destination to answer",
+            );
+
+            view.state.start_transfer(
+                Location::local(&disk),
+                vec![Location::local(&source)],
+                false,
+            );
+            wait_until(
+                || std::fs::read(disk.join("notes.txt")).is_ok_and(|contents| contents == b"notes"),
+                "a later paste to copy the item",
+            );
+            assert_eq!(started.get(), 1, "the cancelled paste never started");
+            view.browser().clear_observer();
             window.destroy();
         },
     );

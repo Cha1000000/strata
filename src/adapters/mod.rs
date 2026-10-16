@@ -25,11 +25,14 @@ pub(crate) use local_operations::{
     ARCHIVE_PREVIEW_FAILED_MESSAGE, ARCHIVE_TOO_LARGE_MESSAGE, ARCHIVE_UNSUPPORTED_MESSAGE,
     INVALID_ARCHIVE, MAX_ARCHIVE_PASSWORD_BYTES, MAYBE_BAD_PASSWORD, PASSWORD_REQUIRED,
     archive_payload_valid, encode_archive_result, flush_filesystem, list_archive_entries_direct,
+    transfer_targets,
 };
 #[cfg(test)]
 pub(crate) use local_operations::{
     ArchiveListing, ArchiveListingStatus, decode_archive_listing, write_compression_fixture,
 };
+#[cfg(test)]
+pub(crate) use local_operations::{FsOp, FsQuirks, Quirks};
 #[cfg(test)]
 pub(crate) use local_operations::{
     clear_sync_probe, install_sync_probe, release_sync_probe, sync_probe_is_blocked,

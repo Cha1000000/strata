@@ -445,6 +445,7 @@
   "It was kept, as it may have changed since it was copied": "Il a été conservé, car il a pu changer depuis sa copie",
   "Items in Trash cannot be opened": "Les éléments de la corbeille ne peuvent pas être ouverts",
   "Items shown in sidebar": "Éléments affichés dans la barre latérale",
+  "Items whose names change to suit this location overwrite items with the new name.": "Les éléments dont le nom change pour convenir à cet emplacement écrasent ceux qui portent le nouveau nom.",
   "Jobs": "Tâches",
   "Jump to a folder…": "Aller à un dossier…",
   "Just now": "À l’instant",

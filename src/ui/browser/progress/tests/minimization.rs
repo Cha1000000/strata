@@ -100,6 +100,7 @@ impl Fixture {
             vec![PasteItem {
                 source: Location::local(self.temp.path().join(name)),
                 conflict: TransferConflict::FailIfExists,
+                target_name: None,
             }],
             moving,
             false,

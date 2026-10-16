@@ -68,10 +68,12 @@ fn each_transfer_item_keeps_its_own_conflict_decision() -> Result<(), Box<dyn Er
                 PasteItem {
                     source: Location::local(sources.join("replace.txt")),
                     conflict: TransferConflict::ReplaceExisting,
+                    target_name: None,
                 },
                 PasteItem {
                     source: Location::local(sources.join("late.txt")),
                     conflict: TransferConflict::FailIfExists,
+                    target_name: None,
                 },
             ],
             move_sources: true,
@@ -142,10 +144,12 @@ fn cutting_in_the_same_folder_remains_a_noop() -> Result<(), Box<dyn Error>> {
                 PasteItem {
                     source: Location::local(&file),
                     conflict: TransferConflict::FailIfExists,
+                    target_name: None,
                 },
                 PasteItem {
                     source: Location::local(&directory),
                     conflict: TransferConflict::FailIfExists,
+                    target_name: None,
                 },
             ],
             move_sources: true,
@@ -193,6 +197,7 @@ fn keeping_both_preserves_transfer_noops() -> Result<(), Box<dyn Error>> {
                 items: vec![PasteItem {
                     source: Location::local(&source),
                     conflict: TransferConflict::KeepBoth,
+                    target_name: None,
                 }],
                 move_sources: moving,
             })?;
@@ -225,6 +230,7 @@ fn keeping_both_in_a_cross_folder_paste_generates_a_unique_name() -> Result<(), 
         items: vec![PasteItem {
             source: Location::local(&source),
             conflict: TransferConflict::KeepBoth,
+            target_name: None,
         }],
         move_sources: false,
     })?;
@@ -260,6 +266,7 @@ fn keeping_both_while_moving_renames_the_destination_instead_of_replacing_it()
         items: vec![PasteItem {
             source: Location::local(&source),
             conflict: TransferConflict::KeepBoth,
+            target_name: None,
         }],
         move_sources: true,
     });
@@ -330,6 +337,7 @@ fn keeping_both_numbers_a_long_name_within_the_limit_of_its_mount() -> Result<()
                     items: vec![PasteItem {
                         source: Location::local(&source),
                         conflict: TransferConflict::KeepBoth,
+                        target_name: None,
                     }],
                     move_sources: moving,
                 });
@@ -372,14 +380,17 @@ fn mixed_conflict_choices_apply_independently_across_a_multi_item_paste()
                 PasteItem {
                     source: Location::local(sources.join("new.txt")),
                     conflict: TransferConflict::FailIfExists,
+                    target_name: None,
                 },
                 PasteItem {
                     source: Location::local(sources.join("replace.txt")),
                     conflict: TransferConflict::ReplaceExisting,
+                    target_name: None,
                 },
                 PasteItem {
                     source: Location::local(sources.join("keep.txt")),
                     conflict: TransferConflict::KeepBoth,
+                    target_name: None,
                 },
             ],
             move_sources: false,
@@ -431,6 +442,7 @@ fn pasting_onto_itself_with_replace_is_a_noop() -> Result<(), Box<dyn Error>> {
             items: vec![PasteItem {
                 source: Location::local(&source),
                 conflict: TransferConflict::ReplaceExisting,
+                target_name: None,
             }],
             move_sources: false,
         },
@@ -475,6 +487,7 @@ fn pasting_onto_itself_with_keep_both_creates_numbered_copy() -> Result<(), Box<
             items: vec![PasteItem {
                 source: Location::local(&source),
                 conflict: TransferConflict::KeepBoth,
+                target_name: None,
             }],
             move_sources: false,
         },
@@ -556,6 +569,7 @@ fn keep_both_copy_renumbers_when_its_name_is_taken_meanwhile() -> Result<(), Box
             items: vec![PasteItem {
                 source: Location::local(&source),
                 conflict: TransferConflict::KeepBoth,
+                target_name: None,
             }],
             move_sources: false,
         })?;
@@ -727,6 +741,7 @@ fn keep_both_takes_the_next_number_past_names_already_taken() -> Result<(), Box<
             items: vec![PasteItem {
                 source: Location::local(&source),
                 conflict: TransferConflict::KeepBoth,
+                target_name: None,
             }],
             move_sources: moving,
         });
@@ -795,6 +810,7 @@ fn replace_and_merge_act_on_the_name_the_prompt_confirmed() -> Result<(), Box<dy
             items: vec![PasteItem {
                 source: Location::local(source.join(confirmed)),
                 conflict,
+                target_name: None,
             }],
             move_sources: false,
         });
@@ -814,6 +830,150 @@ fn replace_and_merge_act_on_the_name_the_prompt_confirmed() -> Result<(), Box<dy
         assert_eq!(
             names(&disk)?.len(),
             1 + usize::from(fixed.is_some()),
+            "{context}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn the_prompt_sees_the_name_a_paste_gives_each_item_and_what_has_it() -> Result<(), Box<dyn Error>>
+{
+    use super::super::transfer_targets::{Collision, TransferTarget, transfer_targets};
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let file = Some(Collision { mergeable: false });
+    let folder = Some(Collision { mergeable: true });
+    let (vfat, ext4): (Preset, Preset) = (Quirks::vfat, Quirks::ext4);
+    // Per source: its name and what it meets on vfat, then on ext4, and
+    // whether names inside it change on vfat. `own.txt` is pasted from the
+    // destination itself and `old.txt` from a Trash on another disk.
+    let rows = [
+        ("a:b", ("a_b", file), ("a:b", None), false),
+        ("Photo.jpg", ("Photo.jpg", file), ("Photo.jpg", None), false),
+        ("x:y", ("x_y", folder), ("x:y", None), true),
+        ("folder", ("folder", folder), ("folder", folder), true),
+        ("data", ("data", file), ("data", file), false),
+        ("link", ("link", None), ("link", file), false),
+        ("new.txt", ("new.txt", None), ("new.txt", None), false),
+        ("own.txt", ("own.txt", None), ("own.txt", None), false),
+        ("old.txt", ("old.txt", file), ("old.txt", file), false),
+    ];
+    for (preset, on_vfat) in [(vfat, true), (ext4, false)] {
+        let root = tempfile::tempdir()?;
+        let (source, disk) = (root.path().join("source"), root.path().join("disk"));
+        for name in ["x:y", "folder"] {
+            fs::create_dir_all(source.join(name))?;
+        }
+        for name in ["a:b", "Photo.jpg", "data", "new.txt"] {
+            fs::write(source.join(name), name)?;
+        }
+        std::os::unix::fs::symlink("a:b", source.join("link"))?;
+        for name in ["x_y", "folder", "data"] {
+            fs::create_dir_all(disk.join(name))?;
+        }
+        for name in ["a_b", "photo.JPG", "link", "own.txt", "old.txt"] {
+            fs::write(disk.join(name), name)?;
+        }
+        let _disk = FsQuirks::install(&disk, preset());
+        let sources = rows
+            .iter()
+            .map(|(name, ..)| match *name {
+                "own.txt" => Location::local(disk.join(name)),
+                "old.txt" => Location::uri(format!(
+                    "trash:///%5Cmnt%5CData%5C.Trash-1000%5Cfiles%5C{name}"
+                )),
+                _ => Location::local(source.join(name)),
+            })
+            .collect::<Vec<_>>();
+
+        let targets = glib::MainContext::default().block_on(transfer_targets(
+            &Location::local(&disk),
+            &sources,
+            false,
+            &gio::Cancellable::new(),
+        ))?;
+
+        let expected = rows
+            .iter()
+            .map(|(_, vfat, ext4, fixes_inside)| {
+                let (name, collision) = if on_vfat { *vfat } else { *ext4 };
+                TransferTarget {
+                    name: Some(OsString::from(name)),
+                    collision,
+                    fixes_inside: on_vfat && *fixes_inside,
+                }
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(targets, expected, "vfat {on_vfat}");
+    }
+    Ok(())
+}
+
+#[test]
+fn a_paste_gives_an_item_the_name_its_prompt_showed() -> Result<(), Box<dyn Error>> {
+    use crate::services::RenameCause::Invalid;
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let (replace, keep_both, merge, fail) = (
+        TransferConflict::ReplaceExisting,
+        TransferConflict::KeepBoth,
+        TransferConflict::Merge,
+        TransferConflict::FailIfExists,
+    );
+    // The item, how it collided, the name the prompt showed, whether it is
+    // moved, and where it lands.
+    for (item, conflict, shown, moving, landed) in [
+        ("a:b", replace, "a_b", false, "a_b"),
+        ("a:b", keep_both, "a_b", false, "a_b (1)"),
+        ("a:b", keep_both, "a_b", true, "a_b (1)"),
+        ("a:b", fail, "a_b (1)", false, "a_b (1)"),
+        ("x:y", merge, "x_y", false, "x_y"),
+    ] {
+        let context = format!("{item} as {shown}, {conflict:?}, moving {moving}");
+        let root = tempfile::tempdir()?;
+        let (source, disk) = (root.path().join("source"), root.path().join("disk"));
+        fs::create_dir_all(&source)?;
+        fs::create_dir_all(&disk)?;
+        let merging = conflict == merge;
+        let file = |item: &str| {
+            if merging {
+                format!("{item}/same.txt")
+            } else {
+                item.to_owned()
+            }
+        };
+        if merging {
+            fs::create_dir(source.join(item))?;
+            fs::create_dir(disk.join(shown))?;
+        }
+        fs::write(source.join(file(item)), "incoming")?;
+        fs::write(disk.join(file(&shown.replace(" (1)", ""))), "old")?;
+        let _disk = FsQuirks::install(&disk, Quirks::vfat());
+
+        let events = run_paste(PasteRequest {
+            id: OperationRequestId(1615),
+            destination: Location::local(&disk),
+            items: vec![PasteItem {
+                source: Location::local(source.join(item)),
+                conflict,
+                target_name: Some(OsString::from(shown)),
+            }],
+            move_sources: moving,
+        });
+
+        assert_eq!(fs::read(disk.join(file(landed)))?, b"incoming", "{context}");
+        assert_eq!(
+            names(&disk)?.len(),
+            1 + usize::from(landed != shown || conflict == fail),
+            "{context}"
+        );
+        assert_eq!(source.join(item).exists(), !moving, "{context}");
+        assert_eq!(
+            renamed_beneath(&disk, &followed_report(&events)),
+            vec![(item.to_owned(), landed.to_owned(), Invalid)],
             "{context}"
         );
     }

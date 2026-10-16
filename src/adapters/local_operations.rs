@@ -12,6 +12,7 @@ mod mount_profile;
 mod naming;
 mod owed;
 mod placement;
+mod transfer_targets;
 mod trash;
 mod work_queue;
 
@@ -26,6 +27,9 @@ pub(crate) use archive::{
 
 #[cfg(test)]
 pub(crate) use archive::write_compression_fixture;
+#[cfg(test)]
+pub(crate) use tests::fs_quirks::{FsQuirks, Op as FsOp, Quirks};
+pub(crate) use transfer_targets::transfer_targets;
 
 use std::{
     cell::{Cell, RefCell},
@@ -68,9 +72,9 @@ use crate::{
     services::{
         CancelledOperation, CompressRequest, CreateDirectoryRequest, CreateFileRequest,
         DeleteRequest, ExtractRequest, KeptCause, KeptItem, LoadHandle, MoveRecord, NameMode,
-        OperationEvent, OperationProvider, OperationRequestId, PasteRequest, PlacedSnapshot,
-        RenameCause, RenameRequest, RenamedItem, ReplacedOriginal, RestoreRequest, RestoreSource,
-        SkippedItem, SpecialKind, TransferConflict, TransferReport, TrashedOriginal,
+        OperationEvent, OperationProvider, OperationRequestId, PasteItem, PasteRequest,
+        PlacedSnapshot, RenameCause, RenameRequest, RenamedItem, ReplacedOriginal, RestoreRequest,
+        RestoreSource, SkippedItem, SpecialKind, TransferConflict, TransferReport, TrashedOriginal,
         UndoCopyRequest, UndoMergeRequest, UndoMoveRequest, UndoRenameRequest, validate_basename,
     },
 };
@@ -1252,17 +1256,16 @@ pub(crate) fn transfer_source_name(source: &gio::File) -> Option<OsString> {
     crate::model::transfer_file_name(source)
 }
 
-/// The name each source takes in the destination: its own, or one planned
-/// against the other sources' names where `fixing` says it comes from
-/// another filesystem than the destination's, whose rules are `rules`.
-/// `None` for a source without a name.
+/// The name each item named `names` takes in the destination: its own, or
+/// one planned against the other items' names where `fixing` says it comes
+/// from another filesystem than the destination's, whose rules are `rules`.
+/// `None` for an item without a name.
 fn paste_targets(
-    sources: &[gio::File],
+    names: &[Option<OsString>],
     rules: &NameProfile,
     fixing: &[bool],
     kinds: &[Option<gio::FileType>],
 ) -> Result<Vec<Option<Planned>>, PlaceError> {
-    let names = sources.iter().map(transfer_source_name).collect::<Vec<_>>();
     let entries = names
         .iter()
         .zip(kinds)
@@ -1280,6 +1283,57 @@ fn paste_targets(
         .iter()
         .map(|name| name.as_ref().and_then(|_| planned.next()))
         .collect())
+}
+
+/// The names a paste of `items` from `sources` gives them: each name the
+/// conflict prompt showed, as it is, and names planned for the rest.
+fn planned_paste(
+    items: &[PasteItem],
+    sources: &[gio::File],
+    rules: &NameProfile,
+    crossing: &[bool],
+    kinds: &[Option<gio::FileType>],
+) -> Result<Vec<Option<Planned>>, PlaceError> {
+    let names = items
+        .iter()
+        .zip(sources)
+        .map(|(item, source)| {
+            item.target_name
+                .clone()
+                .or_else(|| transfer_source_name(source))
+        })
+        .collect::<Vec<_>>();
+    // Replace and Merge act on the name the user saw, which is the item's
+    // own where no prompt showed another.
+    let fixing = items
+        .iter()
+        .zip(crossing)
+        .map(|(item, crossing)| {
+            *crossing
+                && item.target_name.is_none()
+                && !matches!(
+                    item.conflict,
+                    TransferConflict::ReplaceExisting | TransferConflict::Merge
+                )
+        })
+        .collect::<Vec<_>>();
+    let mut planned = paste_targets(&names, rules, &fixing, kinds)?;
+    for (index, item) in items.iter().enumerate() {
+        let (Some(shown), Some(planned), Some(name)) = (
+            &item.target_name,
+            &mut planned[index],
+            transfer_source_name(&sources[index]),
+        ) else {
+            continue;
+        };
+        let is_directory = kinds[index] == Some(gio::FileType::Directory);
+        planned.cause = (name != *shown).then(|| {
+            fix_name(&name, rules, is_directory)
+                .cause
+                .unwrap_or(RenameCause::Alias)
+        });
+    }
+    Ok(planned)
 }
 
 #[derive(Clone)]
@@ -6646,19 +6700,7 @@ impl OperationProvider for LocalOperationProvider {
             };
             let rules = names.applied(pasted_into.profile.names, pasted_into.profile.strictness);
             let crossing = pasted_into.fixing(&filesystems);
-            // Replace and Merge act on the name the prompt confirmed.
-            let fixing = crossing
-                .iter()
-                .zip(&request.items)
-                .map(|(crossing, item)| {
-                    *crossing
-                        && !matches!(
-                            item.conflict,
-                            TransferConflict::ReplaceExisting | TransferConflict::Merge
-                        )
-                })
-                .collect::<Vec<_>>();
-            let planned = match paste_targets(&sources, &rules, &fixing, &kinds) {
+            let planned = match planned_paste(&request.items, &sources, &rules, &crossing, &kinds) {
                 Ok(planned) => planned,
                 Err(error) => {
                     emit(OperationEvent::TransferFailed {

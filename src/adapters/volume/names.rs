@@ -252,6 +252,15 @@ impl NameProfile {
         rules
     }
 
+    /// Whether the rules change names for more than their length.
+    pub(crate) fn changes_characters(self) -> bool {
+        self.rules == NameRules::Windows
+            || self.strip != Strip::None
+            || self.reserved != Reserved::None
+            || self.encoding != NameEncoding::AnyBytes
+            || self.mapped.is_some()
+    }
+
     /// These rules and what refusals taught a mount that learns.
     pub(crate) fn taught(self, strictness: Strictness) -> Self {
         if self.learns {

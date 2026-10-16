@@ -705,19 +705,12 @@ impl ViewState {
             }
             BrowserEvent::TransferStarted { total, moving } => {
                 let browser = self.browser.clone();
+                let (icon, title) = super::progress::transfer_heading(*moving);
                 self.show_file_operation_progress(
                     *total,
-                    if *moving {
-                        crate::assets::icons::FOLDER
-                    } else {
-                        crate::assets::icons::COPY
-                    },
-                    if *moving {
-                        "Moving items"
-                    } else {
-                        "Copying items"
-                    },
-                    "Cancelling will not undo completed changes",
+                    icon,
+                    title,
+                    super::progress::TRANSFER_SUBTITLE,
                     super::progress::file_operation_cancel(browser),
                 );
                 self.update_transfer_progress(0, 0, None, 0, None);

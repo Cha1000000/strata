@@ -468,6 +468,7 @@ fn start(view: &BrowserView, operations: &HeldOperations, started: Started) -> O
             vec![PasteItem {
                 source: Location::local("/source/run"),
                 conflict: TransferConflict::FailIfExists,
+                target_name: None,
             }],
             started == Started::Move,
             false,

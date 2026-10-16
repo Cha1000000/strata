@@ -266,6 +266,7 @@ fn every_recent_spelling_is_rejected_by_creation_and_transfer_commands() {
             vec![PasteItem {
                 source: Location::local("/fixture/source.txt"),
                 conflict: TransferConflict::FailIfExists,
+                target_name: None,
             }],
             false,
             true,
@@ -490,6 +491,7 @@ fn a_stopped_transfer_reloads_its_destination_once() {
             vec![PasteItem {
                 source: Location::uri("sftp://host/source/item.txt"),
                 conflict: TransferConflict::FailIfExists,
+                target_name: None,
             }],
             false,
             false,
@@ -1026,6 +1028,7 @@ fn completed_operations_refresh_only_columns_without_a_monitor() {
                     vec![PasteItem {
                         source: item.location,
                         conflict: TransferConflict::FailIfExists,
+                        target_name: None,
                     }],
                     true,
                     false,

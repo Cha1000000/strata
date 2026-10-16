@@ -373,7 +373,7 @@ clears its marks.
 **Ctrl+V** (see [keyboard navigation](keyboard-navigation.md#input-precedence)),
 and pasting never changes pointer or keyboard ownership. Focusing a conflict
 button does not choose it: nothing changes until you accept, and Cancel or
-**Esc** leaves both items untouched. Keep Both is offered only for copies.
+**Esc** leaves both items untouched.
 
 **d** / **Delete** show a **Move to Trash?** confirmation with its confirm button
 focused; pressing **d** again confirms it, so **d d** trashes. **D** / **Shift+Delete**, and **d** inside Trash, show the permanent

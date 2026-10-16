@@ -20,6 +20,7 @@ fn a_copy_reports_the_destination_it_created_and_no_moved_item() -> Result<(), B
         items: vec![PasteItem {
             source: Location::local(&source),
             conflict: TransferConflict::FailIfExists,
+            target_name: None,
         }],
         move_sources: false,
     });
@@ -58,6 +59,7 @@ fn duplicating_a_file_preserves_contents_and_reports_the_generated_name()
         items: vec![PasteItem {
             source: Location::local(&source),
             conflict: TransferConflict::FailIfExists,
+            target_name: None,
         }],
         move_sources: false,
     })?;
@@ -92,6 +94,7 @@ fn a_copy_that_replaces_an_existing_item_reports_its_destination() -> Result<(),
         items: vec![PasteItem {
             source: Location::local(&source),
             conflict: TransferConflict::ReplaceExisting,
+            target_name: None,
         }],
         move_sources: false,
     })?;
@@ -124,6 +127,7 @@ fn a_move_reports_where_each_item_landed_instead_of_a_created_destination()
             .map(|source| PasteItem {
                 source: Location::local(source),
                 conflict: TransferConflict::FailIfExists,
+                target_name: None,
             })
             .into(),
         move_sources: true,
@@ -182,10 +186,12 @@ fn an_item_replaced_without_trash_is_left_out_of_the_paste_undo() -> Result<(), 
                 PasteItem {
                     source: Location::local(sources.join("replace.txt")),
                     conflict: TransferConflict::ReplaceExisting,
+                    target_name: None,
                 },
                 PasteItem {
                     source: Location::local(sources.join("new.txt")),
                     conflict: TransferConflict::FailIfExists,
+                    target_name: None,
                 },
             ],
             move_sources,
@@ -291,6 +297,7 @@ fn a_cancel_that_cuts_off_an_item_counts_it_as_not_attempted() -> Result<(), Box
                 .map(|source| PasteItem {
                     source: Location::local(source),
                     conflict: TransferConflict::FailIfExists,
+                    target_name: None,
                 })
                 .collect(),
             moving,

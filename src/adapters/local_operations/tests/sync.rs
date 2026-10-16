@@ -83,6 +83,7 @@ fn bytes_already_written_are_flushed_before_cancellation_and_cancel_is_not_paste
             items: vec![PasteItem {
                 source: Location::local(&source),
                 conflict: TransferConflict::FailIfExists,
+                target_name: None,
             }],
             move_sources: false,
         },
@@ -142,6 +143,7 @@ fn a_cancel_after_the_flush_starts_does_not_report_success() -> Result<(), Box<d
             items: vec![PasteItem {
                 source: Location::local(&source),
                 conflict: TransferConflict::FailIfExists,
+                target_name: None,
             }],
             move_sources: false,
         },
@@ -191,6 +193,7 @@ fn failed_final_flush_reports_that_writes_may_still_be_pending() -> Result<(), B
             items: vec![PasteItem {
                 source: Location::local(&source),
                 conflict: TransferConflict::FailIfExists,
+                target_name: None,
             }],
             move_sources: false,
         },
@@ -298,10 +301,12 @@ fn bytes_already_written_are_flushed_before_transfer_failure() -> Result<(), Box
                 PasteItem {
                     source: Location::local(&source),
                     conflict: TransferConflict::FailIfExists,
+                    target_name: None,
                 },
                 PasteItem {
                     source: Location::local(root.path().join("missing.bin")),
                     conflict: TransferConflict::FailIfExists,
+                    target_name: None,
                 },
             ],
             move_sources: false,
@@ -425,6 +430,7 @@ fn paste_moves(
                 .map(|source| PasteItem {
                     source: Location::local(source),
                     conflict: TransferConflict::FailIfExists,
+                    target_name: None,
                 })
                 .collect(),
             move_sources: true,
@@ -597,6 +603,7 @@ fn the_barrier_before_deleting_a_moved_source_follows_the_destination_family()
                 items: vec![PasteItem {
                     source: Location::local(&folder),
                     conflict: TransferConflict::FailIfExists,
+                    target_name: None,
                 }],
                 move_sources: moving,
             },
@@ -1160,6 +1167,7 @@ fn a_merging_move_flushes_each_filesystem_it_wrote_to_before_deleting() -> Resul
             items: vec![PasteItem {
                 source: Location::local(sources.join("media")),
                 conflict: TransferConflict::Merge,
+                target_name: None,
             }],
             move_sources: true,
         },
@@ -1277,6 +1285,7 @@ fn a_replace_on_smb_syncs_its_copy_only_where_the_original_is_deleted() -> Resul
             items: vec![PasteItem {
                 source: Location::local(sources.join("folder")),
                 conflict: TransferConflict::ReplaceExisting,
+                target_name: None,
             }],
             move_sources: false,
         });
@@ -1450,6 +1459,7 @@ fn moved_files_are_synced_on_smb_whatever_the_conflict() -> Result<(), Box<dyn E
                 items: vec![PasteItem {
                     source: Location::local(&item),
                     conflict,
+                    target_name: None,
                 }],
                 move_sources: true,
             },
@@ -1722,6 +1732,7 @@ fn an_original_that_cannot_be_deleted_fails_its_replacing_move() -> Result<(), B
             items: vec![PasteItem {
                 source: Location::local(&source),
                 conflict: TransferConflict::ReplaceExisting,
+                target_name: None,
             }],
             move_sources: true,
         },

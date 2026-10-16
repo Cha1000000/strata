@@ -445,6 +445,7 @@
   "It was kept, as it may have changed since it was copied": "Được giữ lại vì có thể đã thay đổi kể từ khi được sao chép",
   "Items in Trash cannot be opened": "Không thể mở các mục trong Thùng rác",
   "Items shown in sidebar": "Các mục hiển thị trong thanh bên",
+  "Items whose names change to suit this location overwrite items with the new name.": "Các mục được đổi tên cho phù hợp với vị trí này sẽ ghi đè các mục mang tên mới đó.",
   "Jobs": "Tác vụ",
   "Jump to a folder…": "Chuyển đến thư mục…",
   "Just now": "Vừa xong",

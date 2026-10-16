@@ -397,6 +397,7 @@ fn renames_moves_and_deletions_report_the_locations_they_changed() {
         vec![PasteItem {
             source: Location::local("/fixture/pictures"),
             conflict: TransferConflict::FailIfExists,
+            target_name: None,
         }],
         true,
         true,
@@ -406,6 +407,7 @@ fn renames_moves_and_deletions_report_the_locations_they_changed() {
         vec![PasteItem {
             source: Location::local("/fixture/archive/pictures"),
             conflict: TransferConflict::FailIfExists,
+            target_name: None,
         }],
         false,
         true,

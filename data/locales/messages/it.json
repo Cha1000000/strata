@@ -939,6 +939,7 @@
   "“%{name}” was left in “%{folder}”, as its copy was no longer where the move put it": "“%{name}” è rimasto in “%{folder}”, perché la sua copia non era più dove lo spostamento l’aveva messa",
   "“%{name}” was replaced, but its original could not be removed from “%{kept}”: %{error}": "“%{name}” è stato sostituito, ma non è stato possibile rimuovere l’originale da “%{kept}”: %{error}",
   "“%{name}” was saved as “%{new_name}”": "“%{name}” è stato salvato come “%{new_name}”",
+  "“%{name}” will be saved as “%{new_name}” in this location.": "“%{name}” verrà salvato come “%{new_name}” in questa posizione.",
   "“%{new_name}” could not be renamed back to “%{name}”: %{error}": "Impossibile rinominare di nuovo “%{new_name}” in “%{name}”: %{error}",
   "“%{path}” does not contain an action.toml file": "“%{path}” non contiene un file action.toml",
   "“%{path}” is not an absolute path, so it cannot be passed to an action": "“%{path}” non è un percorso assoluto, quindi non può essere passato a un’azione",

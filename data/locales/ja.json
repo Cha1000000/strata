@@ -445,6 +445,7 @@
   "It was kept, as it may have changed since it was copied": "コピー後に変更された可能性があるため、残されました",
   "Items in Trash cannot be opened": "ゴミ箱内の項目は開けません",
   "Items shown in sidebar": "サイドバーに表示する項目",
+  "Items whose names change to suit this location overwrite items with the new name.": "この場所に合わせて名前が変わる項目は、変更後の名前の項目を上書きします。",
   "Jobs": "ジョブ",
   "Jump to a folder…": "フォルダーへ移動…",
   "Just now": "たった今",

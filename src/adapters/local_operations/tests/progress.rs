@@ -194,6 +194,7 @@ fn copying_a_file_emits_bytes_before_item_completion() -> Result<(), Box<dyn Err
             items: vec![PasteItem {
                 source: Location::local(&source),
                 conflict: TransferConflict::FailIfExists,
+                target_name: None,
             }],
             move_sources: false,
         },
@@ -255,6 +256,7 @@ fn nested_copy_reports_files_before_the_selected_folder_finishes() -> Result<(),
             items: vec![PasteItem {
                 source: Location::local(&source),
                 conflict: TransferConflict::FailIfExists,
+                target_name: None,
             }],
             move_sources: false,
         },
@@ -309,6 +311,7 @@ fn copying_many_selected_files_completes_the_bounded_bulk_path() -> Result<(), B
         items.push(PasteItem {
             source: Location::local(path),
             conflict: TransferConflict::FailIfExists,
+            target_name: None,
         });
     }
 
@@ -381,6 +384,7 @@ fn bulk_copy_reports_bytes_before_each_file_completes() -> Result<(), Box<dyn Er
         items.push(PasteItem {
             source: Location::local(path),
             conflict: TransferConflict::FailIfExists,
+            target_name: None,
         });
     }
     let streamed = Arc::new(AtomicBool::new(false));
@@ -515,6 +519,7 @@ fn linked_names_count_as_copied_before_their_folder_is_published() -> Result<(),
             items: vec![PasteItem {
                 source: Location::local(&tree),
                 conflict: TransferConflict::FailIfExists,
+                target_name: None,
             }],
             move_sources: false,
         },
@@ -602,6 +607,7 @@ fn copied_links_count_their_bytes_as_they_are_made() -> Result<(), Box<dyn Error
             items: vec![PasteItem {
                 source: Location::local(&tree),
                 conflict: TransferConflict::FailIfExists,
+                target_name: None,
             }],
             move_sources: false,
         },
@@ -659,6 +665,7 @@ fn a_folder_copied_out_of_its_stage_counts_each_file_once() -> Result<(), Box<dy
             items: vec![PasteItem {
                 source: Location::local(&tree),
                 conflict: TransferConflict::FailIfExists,
+                target_name: None,
             }],
             move_sources: false,
         },
@@ -712,6 +719,7 @@ fn bulk_copy_preserves_symlinks_and_one_file_directories() -> Result<(), Box<dyn
         items.push(PasteItem {
             source: Location::local(path),
             conflict: TransferConflict::FailIfExists,
+            target_name: None,
         });
     }
     let folder = source.join("folder");
@@ -721,6 +729,7 @@ fn bulk_copy_preserves_symlinks_and_one_file_directories() -> Result<(), Box<dyn
     items.push(PasteItem {
         source: Location::local(&folder),
         conflict: TransferConflict::FailIfExists,
+        target_name: None,
     });
     let link = source.join("link");
     std::os::unix::fs::symlink("file-00.txt", &link)?;
@@ -728,6 +737,7 @@ fn bulk_copy_preserves_symlinks_and_one_file_directories() -> Result<(), Box<dyn
     items.push(PasteItem {
         source: Location::local(&link),
         conflict: TransferConflict::FailIfExists,
+        target_name: None,
     });
 
     let events = Rc::new(RefCell::new(Vec::new()));
@@ -793,10 +803,12 @@ fn cancelling_between_moves_reports_completed_and_unattempted_sources() -> Resul
                 PasteItem {
                     source: Location::local(&first),
                     conflict: TransferConflict::FailIfExists,
+                    target_name: None,
                 },
                 PasteItem {
                     source: Location::local(&second),
                     conflict: TransferConflict::FailIfExists,
+                    target_name: None,
                 },
             ],
             move_sources: true,

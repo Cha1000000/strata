@@ -176,6 +176,17 @@ fn transfer_rate_status(rate: Option<f64>, transferred: u64, total: Option<u64>)
     .into_owned()
 }
 
+pub(super) const TRANSFER_SUBTITLE: &str = "Cancelling will not undo completed changes";
+
+/// The icon and untranslated title of a transfer's progress row.
+pub(super) fn transfer_heading(moving: bool) -> (&'static str, &'static str) {
+    if moving {
+        (crate::assets::icons::FOLDER, "Moving items")
+    } else {
+        (crate::assets::icons::COPY, "Copying items")
+    }
+}
+
 pub(in crate::ui::browser) fn cancelled_operation_summary(
     completed: usize,
     failed: usize,
@@ -207,7 +218,35 @@ impl FileProgressState {
             self.present_file_operation_progress(icon, title_text, subtitle_text, on_cancel);
             return;
         }
+        self.present_file_operation_progress_later(icon, title_text, subtitle_text, on_cancel);
+    }
 
+    /// A transfer's row while it still finds where its items go, preparing
+    /// them, which only a destination slower than the usual delay shows.
+    pub(super) fn show_transfer_preparation(
+        self: &Rc<Self>,
+        moving: bool,
+        on_cancel: Rc<dyn Fn()>,
+    ) {
+        self.dismiss_file_operation_progress();
+        self.transfer_progress.set(Some(TransferProgressSnapshot {
+            completed_items: 0,
+            completed_files: 0,
+            total_files: None,
+            transferred_bytes: 0,
+            total_bytes: None,
+        }));
+        let (icon, title) = transfer_heading(moving);
+        self.present_file_operation_progress_later(icon, title, TRANSFER_SUBTITLE, on_cancel);
+    }
+
+    fn present_file_operation_progress_later(
+        self: &Rc<Self>,
+        icon: &str,
+        title_text: &str,
+        subtitle_text: &str,
+        on_cancel: Rc<dyn Fn()>,
+    ) {
         let weak = Rc::downgrade(self);
         let icon = icon.to_owned();
         let title_text = title_text.to_owned();

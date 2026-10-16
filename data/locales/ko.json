@@ -445,6 +445,7 @@
   "It was kept, as it may have changed since it was copied": "복사된 후 변경되었을 수 있어 남겨졌습니다",
   "Items in Trash cannot be opened": "휴지통의 항목은 열 수 없습니다",
   "Items shown in sidebar": "사이드바에 표시할 항목",
+  "Items whose names change to suit this location overwrite items with the new name.": "이 위치에 맞게 이름이 바뀌는 항목은 바뀐 이름과 같은 이름의 항목을 덮어씁니다.",
   "Jobs": "작업",
   "Jump to a folder…": "폴더로 이동…",
   "Just now": "방금",

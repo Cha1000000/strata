@@ -939,6 +939,7 @@
   "“%{name}” was left in “%{folder}”, as its copy was no longer where the move put it": "Элемент «%{name}» остался в «%{folder}», так как его копии больше нет там, куда её поместило перемещение",
   "“%{name}” was replaced, but its original could not be removed from “%{kept}”: %{error}": "«%{name}» заменён, но не удалось удалить оригинал из «%{kept}»: %{error}",
   "“%{name}” was saved as “%{new_name}”": "Элемент «%{name}» сохранён как «%{new_name}»",
+  "“%{name}” will be saved as “%{new_name}” in this location.": "Элемент «%{name}» будет сохранён в этом расположении как «%{new_name}».",
   "“%{new_name}” could not be renamed back to “%{name}”: %{error}": "Не удалось вернуть «%{new_name}» прежнее имя «%{name}»: %{error}",
   "“%{path}” does not contain an action.toml file": "«%{path}» не содержит файла action.toml",
   "“%{path}” is not an absolute path, so it cannot be passed to an action": "«%{path}» не является абсолютным путём, поэтому его нельзя передать действию",

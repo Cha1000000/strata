@@ -1421,6 +1421,7 @@ fn a_merged_paste_reports_no_created_location() -> Result<(), Box<dyn Error>> {
         items: vec![PasteItem {
             source: Location::local(sources.join("folder")),
             conflict: TransferConflict::Merge,
+            target_name: None,
         }],
         move_sources: false,
     })?;
@@ -1656,6 +1657,7 @@ fn undoing_a_merge_with_numbered_aliases_removes_only_its_items() -> Result<(), 
         items: vec![PasteItem {
             source: Location::local(sources.join("folder")),
             conflict: TransferConflict::Merge,
+            target_name: None,
         }],
         move_sources: false,
     });
@@ -1867,6 +1869,7 @@ fn a_merge_a_cancel_cuts_off_counts_as_failed_as_it_keeps_what_it_placed()
             items: vec![PasteItem {
                 source: Location::local(sources.join("run")),
                 conflict: TransferConflict::Merge,
+                target_name: None,
             }],
             move_sources: false,
         },
@@ -3031,6 +3034,7 @@ fn a_paste_records_no_more_than_its_limit_across_its_merges() -> Result<(), Box<
             .map(|name| PasteItem {
                 source: Location::local(sources.join(name)),
                 conflict: TransferConflict::Merge,
+                target_name: None,
             })
             .into(),
         move_sources: false,
@@ -3285,6 +3289,7 @@ fn a_merge_undo_without_trash_deletes_what_its_paste_copied_only_if_unchanged()
         let item = |name: &str, conflict| PasteItem {
             source: Location::local(sources.join(name)),
             conflict,
+            target_name: None,
         };
 
         let events = run_paste(PasteRequest {
@@ -3890,6 +3895,7 @@ fn check_a_merge_undo_drops_from_view_only_what_it_removed() -> Result<(), Box<d
             vec![PasteItem {
                 source: Location::local(source.join("folder")),
                 conflict: TransferConflict::Merge,
+                target_name: None,
             }],
             false,
             false,

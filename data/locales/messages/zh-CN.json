@@ -939,6 +939,7 @@
   "“%{name}” was left in “%{folder}”, as its copy was no longer where the move put it": "“%{name}”已留在“%{folder}”中，因为移动生成的副本已不在当初放置的位置",
   "“%{name}” was replaced, but its original could not be removed from “%{kept}”: %{error}": "已替换“%{name}”，但无法从“%{kept}”中删除原项目：%{error}",
   "“%{name}” was saved as “%{new_name}”": "“%{name}”已保存为“%{new_name}”",
+  "“%{name}” will be saved as “%{new_name}” in this location.": "“%{name}”在此位置将保存为“%{new_name}”。",
   "“%{new_name}” could not be renamed back to “%{name}”: %{error}": "无法将“%{new_name}”改回原名称“%{name}”：%{error}",
   "“%{path}” does not contain an action.toml file": "“%{path}”中没有 action.toml 文件",
   "“%{path}” is not an absolute path, so it cannot be passed to an action": "“%{path}”不是绝对路径，无法传递给操作",

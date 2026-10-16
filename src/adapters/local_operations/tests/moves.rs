@@ -472,6 +472,7 @@ fn paste_move(
             items: vec![PasteItem {
                 source: Location::local(source),
                 conflict,
+                target_name: None,
             }],
             move_sources: true,
         },
@@ -700,6 +701,7 @@ fn keep_both_move_renumbers_when_its_name_is_taken_meanwhile() -> Result<(), Box
             items: vec![PasteItem {
                 source: Location::local(&source),
                 conflict: TransferConflict::KeepBoth,
+                target_name: None,
             }],
             move_sources: true,
         });
@@ -1667,6 +1669,7 @@ fn a_move_across_volumes_reads_the_source_mount_once() -> Result<(), Box<dyn Err
             .map(|name| PasteItem {
                 source: Location::local(sources.join(name)),
                 conflict: TransferConflict::FailIfExists,
+                target_name: None,
             })
             .collect(),
         move_sources: true,

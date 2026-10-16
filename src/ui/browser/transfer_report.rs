@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 
-use std::time::Duration;
+use std::{ffi::OsStr, time::Duration};
 
 use crate::model::Location;
 use crate::services::{
@@ -33,13 +33,14 @@ enum Presentation {
     },
 }
 
-/// The name of `location`, with a mark for each control character, which
-/// would otherwise break the line or not show.
 fn display_name(location: &Location) -> String {
-    location
-        .file_name()
-        .unwrap_or_default()
-        .to_string_lossy()
+    shown_name(&location.file_name().unwrap_or_default())
+}
+
+/// `name` with a mark for each control character, which would otherwise
+/// break the line or not show.
+pub(super) fn shown_name(name: &OsStr) -> String {
+    name.to_string_lossy()
         .chars()
         .map(|character| {
             if character.is_control() {

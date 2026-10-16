@@ -1261,6 +1261,7 @@ fn selected_links_the_destination_cannot_hold_are_left_out_and_the_paste_goes_on
         let item = |source: &Path, conflict| PasteItem {
             source: Location::local(source),
             conflict,
+            target_name: None,
         };
 
         let events = run_paste(PasteRequest {
@@ -1357,6 +1358,7 @@ fn a_selected_link_whose_name_sshfs_answers_as_not_permitted_is_numbered_not_lef
         items: vec![PasteItem {
             source: Location::local(&link),
             conflict: TransferConflict::KeepBoth,
+            target_name: None,
         }],
         move_sources: false,
     });
@@ -1392,6 +1394,7 @@ fn a_paste_through_a_symbolic_link_takes_the_rules_of_the_mount_behind_it()
             .map(|name| PasteItem {
                 source: Location::local(source.join(name)),
                 conflict: TransferConflict::FailIfExists,
+                target_name: None,
             })
             .collect(),
         move_sources: false,
@@ -1470,6 +1473,7 @@ fn a_paste_fixes_the_names_it_brings_onto_fat_and_keeps_those_already_there()
             .map(|source| PasteItem {
                 source: Location::local(source),
                 conflict: TransferConflict::FailIfExists,
+                target_name: None,
             })
             .collect(),
         move_sources: false,
@@ -1988,6 +1992,7 @@ fn paste_into(destination: &Path, items: &[PathBuf]) -> Vec<OperationEvent> {
             .map(|source| PasteItem {
                 source: Location::local(source),
                 conflict: TransferConflict::FailIfExists,
+                target_name: None,
             })
             .collect(),
         move_sources: false,
@@ -2334,6 +2339,7 @@ fn a_kept_copy_the_mount_refused_is_reported_with_the_name_it_took() -> Result<(
         items: vec![PasteItem {
             source: Location::local(source.join("a:b")),
             conflict: TransferConflict::KeepBoth,
+            target_name: None,
         }],
         move_sources: false,
     });
@@ -2382,6 +2388,7 @@ fn a_bulk_copy_records_for_undo_where_a_refused_name_was_saved() -> Result<(), B
             .map(|source| PasteItem {
                 source: Location::local(source),
                 conflict: TransferConflict::FailIfExists,
+                target_name: None,
             })
             .collect(),
         move_sources: false,
@@ -3042,6 +3049,7 @@ fn names_moved_within_one_gvfs_bridge_backend_are_kept_and_fixed_between_two()
         items: vec![PasteItem {
             source: Location::local(phone.join("Music/con.mp3")),
             conflict: TransferConflict::FailIfExists,
+            target_name: None,
         }],
         move_sources: true,
     });

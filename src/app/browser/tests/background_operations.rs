@@ -10,6 +10,7 @@ fn copy(browser: &Rc<Browser>, name: &str) -> OperationRequestId {
         vec![PasteItem {
             source: Location::local(format!("/fixture/{name}")),
             conflict: TransferConflict::FailIfExists,
+            target_name: None,
         }],
         false,
         false,

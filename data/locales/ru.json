@@ -445,6 +445,7 @@
   "It was kept, as it may have changed since it was copied": "Элемент оставлен, так как мог измениться после копирования",
   "Items in Trash cannot be opened": "Элементы в корзине нельзя открыть",
   "Items shown in sidebar": "Элементы в боковой панели",
+  "Items whose names change to suit this location overwrite items with the new name.": "Элементы, имена которых меняются для этого расположения, перезапишут элементы с новыми именами.",
   "Jobs": "Задания",
   "Jump to a folder…": "Перейти к папке…",
   "Just now": "Только что",

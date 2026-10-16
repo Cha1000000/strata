@@ -294,6 +294,7 @@ fn rules_a_mount_learned_fix_names_a_redo_brings_but_not_those_an_undo_gives_bac
             items: vec![PasteItem {
                 source: Location::local(source.join("a:b")),
                 conflict: TransferConflict::FailIfExists,
+                target_name: None,
             }],
             move_sources: false,
         });
@@ -917,6 +918,7 @@ fn undoing_a_move_gives_back_names_numbered_as_aliases() -> Result<(), Box<dyn E
             items: vec![PasteItem {
                 source: Location::local(&project),
                 conflict: TransferConflict::FailIfExists,
+                target_name: None,
             }],
             move_sources: true,
         });
@@ -1001,6 +1003,7 @@ fn moved_onto_fat(project: &Path, usb: &Path) -> MoveRecord {
         items: vec![PasteItem {
             source: Location::local(project),
             conflict: TransferConflict::FailIfExists,
+            target_name: None,
         }],
         move_sources: true,
     });

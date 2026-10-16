@@ -324,8 +324,8 @@ Feature unit tests sit beside their implementations. Cross-feature browser tests
 failure rather than a skip.
 
 This separation is not a redesign of operation policy or a claim that all UI filesystem calls have
-been eliminated. Collision probes, destination creation and permission editing still deserve
-application/adapter boundaries in focused follow-ups. Likewise, alternate renderers, staged
+been eliminated. Collision probes for typed names, destination creation and permission editing still
+deserve application/adapter boundaries in focused follow-ups. Likewise, alternate renderers, staged
 publication/metadata orchestration, native transfer security and the settings workspace should be
 refactored independently of browser composition. Investigation and scope decisions are recorded in
 [issue #397](https://github.com/lgse/strata/issues/397).

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 
-use crate::adapters::gio_file_for_location;
+use crate::adapters::{gio_file_for_location, transfer_targets};
 use crate::app::Browser;
 use crate::model::{FileEntry, Location};
 use crate::services::{
@@ -10,6 +10,8 @@ use crate::services::{
 use crate::ui::browser::ViewState;
 use crate::ui::browser::entry::item_count_label;
 use crate::ui::browser::paths::{can_remove_location, compact_display_path, is_trash_location};
+use crate::ui::browser::progress::FileProgressState;
+use crate::ui::browser::transfer_report::shown_name;
 use crate::ui::controls::{
     ModalTone, focus_button, form_check_button, message_dialog_description, message_dialog_layout,
     stack_actions_when_constrained, wrap_button_label,
@@ -21,8 +23,7 @@ use crate::ui::keys::{
 use crate::ui::modal::{ModalHost, dismiss_modal_layer, modal_layer, show_error_dialog};
 use gtk::prelude::*;
 use gtk::{gio, glib};
-use std::collections::HashSet;
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::Duration;
@@ -45,8 +46,12 @@ enum ConflictChoice {
 #[derive(Clone)]
 struct TransferCollision {
     source: Location,
+    /// The name the paste gives the item, which the item already there has.
+    target_name: Option<OsString>,
     /// Both colliding items are directories, so their contents can be merged.
     mergeable: bool,
+    /// Names inside the item change to suit the destination.
+    fixes_inside: bool,
 }
 
 #[derive(Clone)]
@@ -132,54 +137,57 @@ fn transfer_is_noop(source: &Location, destination: &Location, move_sources: boo
                 .is_some_and(|parent| parent.equal(&destination)))
 }
 
-#[derive(Eq, Hash, PartialEq)]
-enum DestinationNameKey {
-    Folded(String),
-    Native(OsString),
-}
-
-fn destination_name_key(name: &OsStr) -> DestinationNameKey {
-    name.to_str().map_or_else(
-        || DestinationNameKey::Native(name.to_owned()),
-        |name| DestinationNameKey::Folded(glib::casefold(name).into()),
-    )
-}
-
-fn destination_name_candidates(path: &Path) -> Option<HashSet<DestinationNameKey>> {
-    Some(
-        std::fs::read_dir(path)
-            .ok()?
-            .filter_map(|entry| {
-                entry
-                    .ok()
-                    .map(|entry| destination_name_key(&entry.file_name()))
-            })
-            .collect(),
-    )
-}
-
-fn transfer_collision(source: &Location, destination: &Location) -> Option<TransferCollision> {
-    let source_file = gio_file_for_location(source);
-    let destination_file = gio_file_for_location(destination);
-    let name = source.file_name()?;
-    let target = destination_file.child(&name);
-    if source_file.equal(&target)
-        || source_file.equal(&destination_file)
-        || destination_file.has_prefix(&source_file)
-        || !target.query_exists(None::<&gio::Cancellable>)
-    {
-        return None;
-    }
-    let is_directory = |file: &gio::File| {
-        file.query_file_type(
-            gio::FileQueryInfoFlags::NOFOLLOW_SYMLINKS,
-            None::<&gio::Cancellable>,
-        ) == gio::FileType::Directory
+/// What the conflict prompt says of `collision` in `destination`: the name
+/// the item will take there, where that is another, and what the choice
+/// does.
+fn conflict_explanation(
+    collision: &TransferCollision,
+    destination: &Location,
+    merge: bool,
+) -> String {
+    let own_name = collision.source.file_name();
+    let target_name = collision
+        .target_name
+        .clone()
+        .or_else(|| own_name.clone())
+        .unwrap_or_default();
+    let name = shown_name(&target_name);
+    let folder = compact_display_path(destination);
+    let choice = if merge {
+        let merging = rust_i18n::t!(
+            "A folder named “%{name}” already exists in %{folder}. Merging combines the contents of both folders; incoming items overwrite items with the same name.",
+            name = name,
+            folder = folder
+        );
+        if collision.fixes_inside {
+            crate::i18n::join_sentences(
+                &merging,
+                &crate::i18n::tr(
+                    "Items whose names change to suit this location overwrite items with the new name.",
+                ),
+            )
+        } else {
+            merging.into_owned()
+        }
+    } else {
+        rust_i18n::t!(
+            "An item named “%{name}” already exists in %{folder}. Replacing it will overwrite its contents.",
+            name = name,
+            folder = folder
+        )
+        .into_owned()
     };
-    Some(TransferCollision {
-        source: source.clone(),
-        mergeable: is_directory(&source_file) && is_directory(&target),
-    })
+    match own_name.filter(|own_name| *own_name != target_name) {
+        Some(own_name) => crate::i18n::join_sentences(
+            &rust_i18n::t!(
+                "“%{name}” will be saved as “%{new_name}” in this location.",
+                name = shown_name(&own_name),
+                new_name = name
+            ),
+            &choice,
+        ),
+        None => choice,
+    }
 }
 
 fn cross_volume_drop_description(volume: VolumeRelation) -> &'static str {
@@ -573,34 +581,76 @@ impl ViewState {
         if sources.is_empty() {
             return;
         }
-        let mut accepted = Vec::new();
-        let mut collisions = Vec::new();
-        let destination_names = destination
-            .native_path()
-            .and_then(destination_name_candidates);
-        for source in sources {
-            let may_collide = match (&destination_names, source.file_name()) {
-                (Some(existing), Some(name)) => existing.contains(&destination_name_key(&name)),
-                _ => true,
+        let cancellable = gio::Cancellable::new();
+        let preparation = self.show_transfer_preparation(move_sources, &cancellable);
+        let weak = Rc::downgrade(self);
+        glib::MainContext::default().spawn_local(async move {
+            let targets =
+                transfer_targets(&destination, &sources, move_sources, &cancellable).await;
+            preparation.dismiss_file_operation_progress();
+            let Some(state) = weak.upgrade().filter(|_| !cancellable.is_cancelled()) else {
+                return;
             };
-            if may_collide && let Some(collision) = transfer_collision(&source, &destination) {
-                collisions.push(collision);
-            } else {
-                accepted.push(PasteItem {
-                    source,
-                    conflict: TransferConflict::FailIfExists,
-                });
+            let targets = match targets {
+                Ok(targets) => targets,
+                Err(error) => {
+                    show_error_dialog(
+                        &state.overlay,
+                        &crate::i18n::tr("Unable to transfer"),
+                        error.message(),
+                    );
+                    return;
+                }
+            };
+            let mut accepted = Vec::new();
+            let mut collisions = Vec::new();
+            for (source, target) in sources.into_iter().zip(targets) {
+                match target.collision {
+                    Some(collision) => collisions.push(TransferCollision {
+                        source,
+                        target_name: target.name,
+                        mergeable: collision.mergeable,
+                        fixes_inside: target.fixes_inside,
+                    }),
+                    None => accepted.push(PasteItem {
+                        source,
+                        conflict: TransferConflict::FailIfExists,
+                        target_name: target.name,
+                    }),
+                }
             }
-        }
-        self.resolve_transfer_collisions(
-            destination,
-            collisions,
-            accepted,
-            move_sources,
-            reveal,
-            send_to,
-            focus,
+            state.resolve_transfer_collisions(
+                destination,
+                collisions,
+                accepted,
+                move_sources,
+                reveal,
+                send_to,
+                focus,
+            );
+        });
+    }
+
+    /// Shows the transfer's progress row while it finds where its items go,
+    /// once that takes a while; its Cancel cancels `cancellable`.
+    fn show_transfer_preparation(
+        &self,
+        moving: bool,
+        cancellable: &gio::Cancellable,
+    ) -> Rc<FileProgressState> {
+        let progress = Rc::new(FileProgressState::new(&self.overlay));
+        let shown = Rc::downgrade(&progress);
+        let cancellable = cancellable.clone();
+        progress.show_transfer_preparation(
+            moving,
+            Rc::new(move || {
+                cancellable.cancel();
+                if let Some(progress) = shown.upgrade() {
+                    progress.dismiss_file_operation_progress();
+                }
+            }),
         );
+        progress
     }
 
     #[expect(
@@ -655,27 +705,14 @@ impl ViewState {
         }
         let collision = collisions.remove(0);
         let source = collision.source.clone();
+        let target_name = collision.target_name.clone();
         let name = source.display_name();
         // Merge stays copy-only: undoing a merged move cannot tell which
         // destination contents the source actually owned.
         let allow_merge = collision.mergeable && !move_sources;
-        let folder = compact_display_path(&destination);
-        let explanation = if allow_merge {
-            rust_i18n::t!(
-                "A folder named “%{name}” already exists in %{folder}. Merging combines the contents of both folders; incoming items overwrite items with the same name.",
-                name = name,
-                folder = folder
-            )
-        } else {
-            rust_i18n::t!(
-                "An item named “%{name}” already exists in %{folder}. Replacing it will overwrite its contents.",
-                name = name,
-                folder = folder
-            )
-        };
+        let explanation = conflict_explanation(&collision, &destination, allow_merge);
         let state = self.clone();
         let send_to_conflict = send_to.clone();
-        // Move undo/reveal assumes an unrenamed `transfer_target`.
         let apply_to_all_visible = !collisions.is_empty();
         let skip_visible = !accepted.is_empty() || !collisions.is_empty();
         self.confirm_replace_conflict(
@@ -684,7 +721,7 @@ impl ViewState {
             apply_to_all_visible,
             skip_visible,
             ConflictActions {
-                keep_both: !move_sources,
+                keep_both: true,
                 merge: allow_merge,
                 focus,
             },
@@ -696,11 +733,13 @@ impl ViewState {
                         accepted.push(PasteItem {
                             source: source.clone(),
                             conflict: TransferConflict::ReplaceExisting,
+                            target_name: target_name.clone(),
                         });
                         if apply_to_all {
                             accepted.extend(remaining.drain(..).map(|collision| PasteItem {
                                 source: collision.source,
                                 conflict: TransferConflict::ReplaceExisting,
+                                target_name: collision.target_name,
                             }));
                         }
                     }
@@ -708,6 +747,7 @@ impl ViewState {
                         accepted.push(PasteItem {
                             source: source.clone(),
                             conflict: TransferConflict::Merge,
+                            target_name: target_name.clone(),
                         });
                         if apply_to_all {
                             // File collisions still need their own prompt.
@@ -717,6 +757,7 @@ impl ViewState {
                             accepted.extend(mergeable.into_iter().map(|collision| PasteItem {
                                 source: collision.source,
                                 conflict: TransferConflict::Merge,
+                                target_name: collision.target_name,
                             }));
                             remaining = rest;
                         }
@@ -725,11 +766,13 @@ impl ViewState {
                         accepted.push(PasteItem {
                             source: source.clone(),
                             conflict: TransferConflict::KeepBoth,
+                            target_name: target_name.clone(),
                         });
                         if apply_to_all {
                             accepted.extend(remaining.drain(..).map(|collision| PasteItem {
                                 source: collision.source,
                                 conflict: TransferConflict::KeepBoth,
+                                target_name: collision.target_name,
                             }));
                         }
                     }

@@ -66,6 +66,9 @@ pub enum TransferConflict {
 pub struct PasteItem {
     pub source: Location,
     pub conflict: TransferConflict,
+    /// The name the conflict prompt showed for the item in the destination,
+    /// which the paste then uses as it is; `None` lets the paste plan it.
+    pub target_name: Option<OsString>,
 }
 
 /// A completed move: where an item started and where it ended up.

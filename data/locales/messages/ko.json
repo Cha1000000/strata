@@ -939,6 +939,7 @@
   "“%{name}” was left in “%{folder}”, as its copy was no longer where the move put it": "이동으로 만든 사본이 원래 둔 위치에 더 이상 없어 “%{name}” 항목이 “%{folder}”에 남겨졌습니다",
   "“%{name}” was replaced, but its original could not be removed from “%{kept}”: %{error}": "“%{name}”을(를) 바꿨지만 “%{kept}”에서 원본을 제거할 수 없습니다: %{error}",
   "“%{name}” was saved as “%{new_name}”": "“%{name}” 항목은 “%{new_name}”(으)로 저장되었습니다",
+  "“%{name}” will be saved as “%{new_name}” in this location.": "“%{name}” 항목은 이 위치에 “%{new_name}”(으)로 저장됩니다.",
   "“%{new_name}” could not be renamed back to “%{name}”: %{error}": "“%{new_name}”의 이름을 “%{name}”(으)로 되돌릴 수 없습니다: %{error}",
   "“%{path}” does not contain an action.toml file": "“%{path}”에 action.toml 파일이 없습니다",
   "“%{path}” is not an absolute path, so it cannot be passed to an action": "“%{path}”은(는) 절대 경로가 아니므로 작업에 전달할 수 없습니다",

@@ -616,6 +616,7 @@ fn sparse_files_keep_their_holes_where_both_ends_can() -> Result<(), Box<dyn Err
             items: vec![PasteItem {
                 source: Location::local(&source),
                 conflict: TransferConflict::FailIfExists,
+                target_name: None,
             }],
             move_sources: false,
         });
@@ -705,6 +706,7 @@ fn a_sparse_source_that_grows_is_counted_once() -> Result<(), Box<dyn Error>> {
             items: vec![PasteItem {
                 source: Location::local(&source),
                 conflict: TransferConflict::FailIfExists,
+                target_name: None,
             }],
             move_sources: false,
         });
@@ -1009,6 +1011,7 @@ fn selected_names_of_a_linked_file_on_an_smb_share_are_opened_one_at_a_time()
                 .map(|name| PasteItem {
                     source: Location::local(mounts.sources.join(name)),
                     conflict: TransferConflict::FailIfExists,
+                    target_name: None,
                 })
                 .collect(),
             move_sources: false,
@@ -1137,6 +1140,7 @@ fn another_name_of_a_file_just_written_on_smb_is_copied_once_the_client_closes_i
                     .map(|source| PasteItem {
                         source: Location::local(source),
                         conflict: TransferConflict::FailIfExists,
+                        target_name: None,
                     })
                     .collect(),
                 move_sources: false,

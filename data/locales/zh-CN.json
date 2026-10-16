@@ -445,6 +445,7 @@
   "It was kept, as it may have changed since it was copied": "复制后可能已发生变化，因此已保留",
   "Items in Trash cannot be opened": "无法打开回收站中的项目",
   "Items shown in sidebar": "侧边栏中显示的项目",
+  "Items whose names change to suit this location overwrite items with the new name.": "为适应此位置而更改名称的项目会覆盖使用新名称的项目。",
   "Jobs": "任务",
   "Jump to a folder…": "跳转到文件夹…",
   "Just now": "刚刚",
