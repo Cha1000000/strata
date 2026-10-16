@@ -145,8 +145,9 @@ selection (the stem is selected); folder names containing dots are selected in f
 Names containing `/` or NUL, `.`/`..`, and whitespace-only names (including
 Unicode whitespace) are invalid. Valid names are used exactly as typed,
 including spaces around a nonblank name, hidden-file prefixes, and Unicode.
-Name conflicts, filesystem-specific limits, and permission errors retain the
-original item and report an error.
+Name conflicts, names the location would store as another (see [Names the user
+types](filesystem-compatibility.md#names-the-user-types)), filesystem-specific
+limits, and permission errors retain the original item and report an error.
 
 ## Filename patterns while filtering
 

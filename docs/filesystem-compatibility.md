@@ -6,8 +6,10 @@ and stacked filesystems (overlayfs, eCryptfs, mergerfs). They disagree about ren
 case, names and Trash. This document records what Strata guarantees on every mount, how local
 file operations adapt to what a mount supports, and how to test that.
 
-GVfs locations (`smb://`, `sftp://`, `mtp://`) are not covered here: their semantics come from
-the GVfs backend, and Strata uses GIO for them.
+Strata reaches GVfs locations (`smb://`, `sftp://`, `mtp://`) through GIO, so most of their
+semantics come from the GVfs backend. This document covers them only where it says so: the
+[names](#names) they get by their address, the links they refuse, and how a native item moved to
+one is deleted.
 
 ## Guarantees
 
@@ -170,12 +172,19 @@ Strata learns capabilities per mount instead of trusting the filesystem type. Th
 `STATX_MNT_ID_UNIQUE`, which is never reused, on Linux 6.8 and later, otherwise `STATX_MNT_ID` with
 the device number. Entries are dropped whenever Strata's mount monitor reports a change.
 
-- It records whether `RENAME_NOREPLACE`, `RENAME_EXCHANGE`, hard links and renaming over an empty
-  folder work.
+- It records whether `RENAME_NOREPLACE`, `RENAME_EXCHANGE`, hard links, symbolic links and renaming
+  over an empty folder work, and what the mount's type says of the [names](#names) it stores and of
+  file sizes: FAT holds no file of 4 GiB or more, so a paste that selects one fails before copying
+  anything.
 - A capability is recorded only from a definitive answer (`ENOSYS`, `EOPNOTSUPP`, or a rejected
   exchange), from Strata's own placeholder, or from a probe on Strata's own temporary names
   (`.strata-probe-*`) in the destination. An `EINVAL` or `EPERM` from placing a user's item never
-  marks a mount as unsupported, because it can also mean an invalid name or a protected file.
+  marks a mount as unsupported, because it can also mean an invalid name or a protected file. Only
+  a mount whose type does not show its name rules remembers which rules a refused name needed; see
+  [Names a mount refuses anyway](#names-a-mount-refuses-anyway).
+- An operation reads a mount's name rules, link support and file size limit once and keeps them
+  for its whole run, so its planning and its copy agree even when a mount change drops the cache
+  meanwhile.
 - The cache orders the steps above, each safe on its own, so a stale entry can make an operation
   slower or refuse it. The exception is the
   [reserved-name step](#the-reserved-name-step-and-its-risk), which the cache alone enables: a
@@ -239,7 +248,7 @@ item moved to one is deleted by Strata, as described under
   name with an exclusive `linkat` once its data and metadata are complete; `AT_EMPTY_PATH` is
   tried first, then `/proc/self/fd`, which Linux before 6.10 needs. A crash leaves nothing
   behind. A name the mount refuses is linked under stricter rules first, as described under
-  [Folders, names and case aliases](#folders-names-and-case-aliases). If the link is still refused
+  [Names a mount refuses anyway](#names-a-mount-refuses-anyway). If the link is still refused
   for any reason other than a taken name or a full disk, the bytes already written are copied on
   the same device into a hidden stage, without reading the source again. A refused name never
   turns `O_TMPFILE` off. SMB is left out although its client accepts `O_TMPFILE`: it fakes one
@@ -256,10 +265,10 @@ item moved to one is deleted by Strata, as described under
   inode, and the item's folder only once it is empty. A stage built before this was known is copied
   again from the stage, on the same device.
 - **Keep Both and Duplicate** choose their number when the copy is published, so a name taken in
-  the meantime moves the copy on to the next number. Moves within one filesystem try each numbered
-  name with the placement routine. GVfs destinations are probed off the main thread, and the copy
-  retries on "exists". After an unconfirmed publish, both names are kept and no other number is
-  tried.
+  the meantime moves the copy on to the next number, cut where needed to fit the mount's [length
+  limit](#length). Moves within one filesystem try each numbered name with the placement routine.
+  GVfs destinations are probed off the main thread, and the copy retries on "exists". After an
+  unconfirmed publish, both names are kept and no other number is tried.
 
 A crash or an unplugged device can leave a `.strata-copy-*` stage behind. It holds only a partial
 copy whose source still exists, and is safe to delete; nothing removes it automatically.
@@ -353,10 +362,12 @@ created exclusively, so a taken name inside a folder the copy made means one of 
 - **A case alias.** On case-insensitive destinations (vfat, exFAT, exfat-fuse, ntfs3 with `nocase`,
   SMB, and casefolded ext4, f2fs and tmpfs folders), two source names can be one destination name.
   The later name in byte order gets the next Keep Both number, so `Makefile` and `makefile` become
-  `Makefile` and `makefile (1)`, and the completion report lists it. Strata never predicts aliases;
-  only the destination's "exists" counts, which also covers 8.3 short names and Unicode
-  normalization. A source sibling that already has the numbered name keeps it, and the alias moves
-  on to `makefile (2)`.
+  `Makefile` and `makefile (1)`, and the completion report lists it. Only on FAT and exFAT, for
+  names brought from another filesystem, are aliases numbered before copying, by their
+  case-folded names (see [When names are fixed](#when-names-are-fixed)); elsewhere only the
+  destination's "exists" counts, which also covers 8.3 short names and Unicode normalization. A
+  source sibling that already has the numbered name keeps it, and the alias moves on to
+  `makefile (2)`.
 - **The copy's own entry after a lost reply.** NFS `CREATE`, `MKDIR`, `SYMLINK` and `LINK` are not
   idempotent. An entry listed under exactly the requested name, still as fresh as the copy would
   have made it (an empty folder, an empty file with one link, or a symlink with the same target),
@@ -375,64 +386,8 @@ Where `mknodat` is refused, and always on SMB, it is an exclusive read-only crea
 made by `mknodat` and looked up by name while other files were being written stalled the folder's
 publication for Samba's 35 s lease-break timeout.
 
-Names an item brings from another filesystem are fixed before copying, by the rules of the mount
-that holds each target folder, found through symbolic links and nested mounts: characters the mount
-cannot store become `_`, trailing dots and spaces are dropped, device names Windows reserves get
-`_`, and names too long for the mount are shortened. Names already on the destination's filesystem,
-as in a duplicate, are kept. The conflict prompt looks for each item under the name the paste gives
-it, says so where that name is another, and Replace, Merge and Keep Both act on that name; a merge
-prompt where names inside the folder change also says they overwrite items of the new name. The
-prompt waits for that lookup off the GTK thread, showing the transfer preparing its items with
-Cancel where the destination is slow to answer, docked for a copy as its progress will be, which
-then takes that row's place at once; the same paste repeated meanwhile is ignored. It asks nothing
-of a selected link the destination is known not to hold, which the paste leaves out. A name that
-needs no change keeps it, even where a fixed name would equal it, unless FAT or exFAT takes it for
-another such name in its folder, or among a paste's top-level items, that sorts first in bytes
-(`Readme.txt` beside `README.txt`): it is then numbered as an alias before copying. Fixed names that
-equal another name are numbered too, in the byte order of the names they replace. The completion
-report lists every fixed name with the name it was saved as. In a merge, a planned name equal to an
-existing item replaces that item like any other same-named one. A folder merged into takes the rules
-of its own mount, and whether names are fixed is decided again, only where it or the folder merged
-into it is on another device than its parent: a bind mount of the same filesystem shares its rules.
-Under `/run/user/$UID/gvfs`, where one FUSE mount serves every GVfs location, the folder of each
-location counts as a filesystem of its own, with the rules of its kind, and what its refusals teach
-stays with it.
-
-A mount may still refuse a name: a call that creates it fails with `EINVAL`, `EILSEQ`, `EBADMSG`,
-`ENAMETOOLONG`, or `ENOENT` in a folder that exists, or placing a staged copy fails with an error the
-placement routine puts down to the name. The entry is then tried again under the name its folder's
-rules give, then under each of the Windows rules that changes it on its own (valid UTF-8, the
-characters Windows refuses, trailing dots and spaces, device names, 255 bytes and UTF-16 units), and
-then under those rules together, fewest first, skipping names already tried. The first name the
-mount takes is used, numbered where it is taken, and reported as fixed, for a Keep Both copy from
-the item's own name to the numbered one. A mount whose type does not show its rules
-(sshfs and other FUSE daemons, 9p, virtiofs, vboxsf, a `fuseblk` device udev cannot name, unknown
-types) remembers the rules that worked until it changes, so later names brought onto it are fixed by
-them before they are copied; names undo gives back are not. Any other mount tries each refused name
-again on its own, so one odd folder never puts a whole disk under Windows rules. Undo tries entries
-inside an item again, but gives the item itself back under its own name or fails. An extraction
-tries each refused member name again, links and hard links included, and also a name whose lookup
-fails with `EINVAL`, `EILSEQ`, `EBADMSG` or `ENAMETOOLONG`, as sshfs fails some. Copies through GIO
-do not try again. Where no rule helps, the item fails with "The name isn’t valid at this location",
-or "The name is too long"; an extraction names the member.
-
-Undoing a move fixes only names the original mount cannot hold at all, such as malformed UTF-8, and
-then gives the entries inside the item the names they had, deepest first, also where the item came
-from a GVfs location onto a local disk or the other way round. An entry whose name another item took
-meanwhile keeps the name it was saved as and is reported as taken; one whose name the location now
-refuses is reported as fixed again; any other failure is listed with the name the entry kept and the
-error. An entry no longer at the name it was saved as, because it was deleted or renamed since, is
-passed over without a report.
-
-Names the user types are never fixed. Renaming an item, creating a file or folder by name, or naming
-a new archive is refused before anything changes where the folder's rules, including any a mount
-has learned from refusals, would store the name as another, and the message names what the location
-cannot hold: the characters, each quoted and given by code point where it shows nothing of its own
-(`U+0009`, `U+0301`), a leading space (MTP) or a trailing space or period, a device name Windows
-reserves, or the length. The 10xer create and rename prompts check the name off the GTK thread
-before they close and stay open with that message. A rename is held to the length of a file, since
-Samba's shorter limit for folders applies only to the folders it creates. Names Strata chooses
-itself, such as "new folder", are not checked.
+Names an item brings from another filesystem are fixed by the destination's rules before its
+folder's names are claimed; see [Names](#names).
 
 ### Hard links
 
@@ -465,20 +420,27 @@ asking the mount. A mount that refuses one with `ENOSYS` or `EOPNOTSUPP`, as SMB
 extensions does, is not asked again until it changes, and a GVfs location that answers "not
 supported", as `smb://` and `mtp://` do, is not asked again for the rest of the item. A mount that
 refuses one link, with `EPERM` while its name is free, or its target with `EINVAL`, `EILSEQ` or
-`EFBIG`, as ntfs3 and ntfs-3g refuse malformed or overlong targets, leaves out that link only; a link
-whose name the mount refuses is first tried under stricter names, as above. A taken name stays a
-taken name. Every link left out is reported, and the rest of the copy goes on. A merge leaves an
-item at a link's name where the destination is known to hold no links; where it learns so only
-when it copies the link, that item was already moved out of the way, as any item a merge replaces.
+`EFBIG`, as ntfs3 and ntfs-3g refuse malformed or overlong targets, leaves out that link only; a
+link whose name the mount refuses is first tried under stricter names, as described under [Names a
+mount refuses anyway](#names-a-mount-refuses-anyway). A taken name stays a taken name. Every link
+left out is reported, and the rest of the copy goes on. A merge leaves an item at a link's name
+where the destination is known to hold no links; where it learns so only when it copies the link,
+that item was already moved out of the way, as any item a merge replaces.
 
 A selected link is left out the same way, and the paste goes on with the next item. An extraction
-leaves out link members the same way, with any hard link to one. A Replace by a
-link leaves the original as it is. A move keeps the source of each link it left out, with the
-folders that hold it, also where GIO copies the item, and lists them as left behind. Undo leaves
-those items out, and the report says so and names them.
+leaves out link members the same way, with any hard link to one. A Replace by a link leaves the
+original as it is. A move keeps the source of each link it left out, with the folders that hold it,
+also where GIO copies the item, and lists them as left behind. Undo leaves those items out, and the
+report says so and names them.
 
 Link targets are copied and extracted byte for byte, so a link pointing at an entry whose name was
-fixed no longer finds it at the destination.
+fixed, such as `latest` pointing at `2026-10-14T10:00`, no longer finds it at the destination.
+Targets are not checked against the destination's rules, and some mounts change or refuse them:
+ntfs3 reads a `\` in a target back as `/`; sshfs, with `contain_symlinks` on by default and not
+shown in mountinfo, creates absolute targets and targets holding `..` but cannot read them back;
+and SMB with POSIX extensions refuses a target longer than 1003 UTF-16 units with `ENOSPC`, which
+fails the copy as a full disk would, and one of 4,095 bytes with `ENAMETOOLONG`, which fails it as a
+name too long.
 
 ### Merges
 
@@ -590,7 +552,8 @@ report there.
 
 - ntfs-3g and exfat-fuse are recognised by the format udev records for the mount's device
   (`ID_FS_TYPE` in `/run/udev/data/b<major>:<minor>`), read off the main thread and cached with
-  the mount's capabilities.
+  the mount's capabilities. The same record gives them, and FAT served by FUSE, their
+  [name rules](#the-rules-each-destination-gets).
 - A removable device gets a folder `fsync` besides. Before Linux 5.8, every file is synced too,
   since `syncfs` reports no writeback errors there.
 - If the flush fails, nothing behind it is deleted, both copies stay, and the error says the device
@@ -610,8 +573,9 @@ move to Trash fails after the copy was staged. Undoing moves is batched the same
 flushes once per item.
 
 **Parallel moves.** A paste of more than eight native files into a native folder, none of them in
-conflict, copies or moves up to eight files at a time, one where either disk is rotational. Each
-move tries a rename first; one that has to copy joins the batches.
+conflict, copies or moves up to eight files at a time, one where either disk is rotational. A FAT,
+exFAT or NTFS destination whose device does not say counts as rotational. Each move tries a rename
+first; one that has to copy joins the batches.
 
 ### Restoring from Trash
 
@@ -664,8 +628,9 @@ the second puts the first back by a rename.
 After a transfer or an archive extraction, Strata reports what it could not do as asked:
 
 - names the destination doesn't allow or that are too long for it, names it took for another (case
-  aliases), and names taken during a merge, an extraction or an undo, each with the name the item was
-  saved as, and an item saved under several names in turn once, from its first name to its last;
+  aliases), and names taken during a merge, an extraction or an undo, each with the name the item
+  was saved as, and an item saved under several names in turn once, from its first name to its
+  last;
 - special files and symbolic links left out of a copy, and symbolic links left out of an extraction;
 - source entries a move left behind, entries a restore left in the Trash, originals an undo left
   there because what replaced them may have changed, and names an undo could not give back, with
@@ -723,11 +688,212 @@ reported.
   nothing until the folder is revalidated. Strata revalidates before giving it back; other programs
   may not. Folder access times come back as the modification time.
 - **ntfs-3g and exfat-fuse** are recognised only from the host's udev records. Without them, as in
-  containers, they keep per-file syncs and the 2 s comparison window. Their batched flush relies on
+  containers, they keep per-file syncs and the 2 s comparison window, and get Windows name rules
+  that leave `aux.c` and `con.txt` alone until a refusal teaches more. Their batched flush relies on
   the daemon's `FUSE_FSYNCDIR` syncing the whole device, as both daemons do; the kernel reports
   success for a daemon that does not implement it.
 - **vfat with `flush`** waits 100 ms at every close of a written file, which bounds copies of many
   small files: 2,000 files take about 26 s with eight workers.
+
+## Names
+
+Mounts disagree about which names they store, and many change or refuse a name without a clear
+error: vfat drops a trailing dot, SMB stores `:` as a private-use character that other clients
+show, and exfat-fuse can corrupt its volume on a malformed name. Strata takes each mount's rules
+from what the mount shows, fixes the names an item brings from another filesystem before anything
+is created, reports every fix, and refuses a name the user types that the location would store as
+another. What the lab's mounts do with names sent unchanged is under [Lab
+measurements](#lab-measurements).
+
+### The rules each destination gets
+
+A folder takes the rules of the mount behind it, found through symbolic links and nested mounts,
+off the main thread: the mount's type and superblock options from mountinfo, the device format udev
+records for a `fuseblk` mount, and `f_namelen` from `statfs`, which only filesystems that count
+bytes mean (0 means unknown, and other values are clamped to 64 to 4,095 bytes). The rules are
+cached with the mount's [capabilities](#what-a-mount-supports), so a remount, such as ntfs3's with
+`windows_names`, applies from the next operation. GVfs locations get the rules of their address.
+
+| Destination | Characters | Trailing dots and spaces | Device names | Length |
+| --- | --- | --- | --- | --- |
+| ext2/3/4, XFS, btrfs, f2fs, tmpfs, bcachefs, ZFS, overlayfs, NFS | any bytes | kept | kept | `f_namelen` bytes |
+| vfat, msdos, exFAT; a FUSE daemon on a device udev records as FAT or exFAT, such as exfat-fuse | Windows, UTF-8 | dropped | bare | 255 UTF-16 units |
+| ntfs3, and ntfs on Linux 7.1 and later | Windows, UTF-8 | dropped | bare; all with `windows_names` | 255 units |
+| ntfs-3g, on a device udev records as NTFS | Windows, UTF-8 | dropped | all | 255 units |
+| a `fuseblk` mount whose device udev cannot tell | Windows, UTF-8 | dropped | bare | 255 units |
+| SMB without POSIX extensions | Windows, mapped, UTF-8; nothing above U+FFFF with `nocase` | dropped | all | `f_namelen` bytes and 255 units; folders 213 bytes |
+| SMB with POSIX extensions | UTF-8 | kept | kept | `f_namelen` bytes; folders 213 bytes |
+| HFS+ | UTF-8 | kept | kept | 255 units |
+| sshfs, other FUSE daemons, 9p, virtiofs, vboxsf, ceph, eCryptfs, unknown types | any bytes | kept | kept | `f_namelen` bytes |
+| `smb://` | Windows, UTF-8 | dropped | all | 255 bytes and units; folders 213 bytes |
+| `mtp://` | Windows, UTF-8 | dropped, with leading spaces | all | 255 bytes and 254 units |
+| `sftp://` | any bytes | kept | kept | 255 bytes |
+| other GVfs locations | any bytes | kept | kept | none |
+
+- **Windows:** `< > : " \ | ? *` and U+0001 to U+001F become `_`; U+007F stays.
+- **UTF-8:** each malformed sequence becomes one `_`, so `caf\xe9.txt` becomes `caf_.txt`. Most of
+  these mounts refuse such names, SMB with POSIX extensions stores each byte as `?`, and exfat-fuse
+  corrupts its volume on some of them. With `nocase`, SMB refuses every character above U+FFFF, so
+  each becomes `_` there (`a😀b` becomes `a_b`), as on vfat mounted with `iocharset=utf8` and
+  without `utf8`. vfat and exFAT mounted with `iocharset=ascii` and without `utf8` get `_` for
+  every character beyond ASCII.
+- **Mapped:** with `mapposix`, the cifs client's default, the client stores the characters Windows
+  refuses, and trailing dots and spaces, as the private-use characters U+F001 to U+F029, which
+  other clients show, and reads those back as what they stand for, so a name that really holds
+  U+F022 would list as `x:y`. Strata sends neither: the characters become `_` by the Windows rule,
+  and so do those private-use characters, except U+F026, which the client reads back unchanged.
+  With `mapchars`, the same holds for U+F02A, U+F03A, U+F03C, U+F03E, U+F03F and U+F07C.
+- **Trailing dots and spaces** are dropped, repeatedly (`notes. .` becomes `notes`), and a name
+  left empty becomes `_`. MTP also drops leading spaces, except before a dot, where that would hide
+  the item.
+- **Device names** get `_` after the device word: `CON`, `PRN`, `AUX`, `NUL`, `COM0` to `COM9`,
+  `LPT0` to `LPT9`, `COM¹` to `COM³`, `LPT¹` to `LPT³`, `CONIN$` and `CONOUT$`, in any case and
+  with any spaces after the word. **Bare** is the Windows 11 rule: a whole name (`CON` becomes
+  `CON_`, `aux` becomes `aux_`) and `NUL` before an extension (`nul.txt` becomes `nul_.txt`), while
+  `aux.c` and `con.txt` keep their names, so a source tree copied to a stick still builds. **All**
+  also covers a device word before the first dot (`con.txt` becomes `con_.txt`, `PRN.tar.gz`
+  becomes `PRN_.tar.gz`). FAT, exFAT and ntfs3 store device names, and Windows 11 opens all but the
+  bare ones. ntfs-3g and ntfs3 with `windows_names` refuse them, and Samba lists them under 8.3
+  aliases (`CON` as `CSHOFG~F`). udisks mounts ntfs-3g with `windows_names`, which its mountinfo
+  does not show, and ntfs3 without it.
+
+Under `/run/user/$UID/gvfs`, the GVfs bridge, where one FUSE mount serves every GVfs location, the
+folder of each location takes the rules of its address: `smb-share:` those of `smb://`, `mtp:`
+those of `mtp://`. A folder there whose location cannot be read gets the rules of `mtp://` with
+SMB's limit for folders.
+
+### Length
+
+A name fits when its UTF-8 bytes and its UTF-16 units both fit, wherever each is counted. FAT,
+exFAT, NTFS and HFS+ count 255 UTF-16 units whatever `f_namelen` says (1530 on vfat and exFAT), so
+a name of 255 CJK characters (765 bytes) fits there, where ext4 takes 85. SMB counts both the
+server's bytes and the 255 units the protocol carries. Samba 4.24 first creates a folder as
+`.::TMPNAME:D:<pid>%<random>:<name>`, which takes up to 42 of the server's 255 bytes (the lab
+measured a limit of 217), so folder names on SMB are held to 213 bytes. That costs other servers at
+most 42 bytes on folder names of 214 to 255 bytes; other Samba versions and Windows servers are
+unverified. MTP takes 255 bytes and 254 units: past that, libmtp sends an empty name instead of
+failing, which phones refuse or hang on.
+
+A name that is too long is cut at the end of its stem. A file keeps its extension, the last one or
+`.tar` with up to four letters or digits after it (`.tar.gz`, `.tar.zst`), where that takes at most
+half the limit; otherwise the whole name is cut, as a folder's always is. The cut moves back to the
+start of the grapheme cluster it falls in, by at most eight characters, so flags, emoji sequences,
+accented letters, Hangul syllables and, with Pango 1.54 or later, consonants joined by a virama
+stay whole; a longer cluster is cut inside. The stem keeps at least its first character, so `x.txt`
+never becomes the hidden `.txt`, and no marker is added: the name stays a prefix of the original.
+Trailing dots and spaces and device names are then checked again. Every number Strata adds to a
+name, for Keep Both, aliases, names taken meanwhile, new files and folders, archive members and new
+archives, cuts the stem the same way to fit ` (n)`, and `.tar` stays before ` (1).gz`.
+
+### When names are fixed
+
+Names are fixed where an item brings them onto another filesystem: in a copy or a move across
+filesystems, a merge, drag and drop, Send to, and the redo of such a move. Inside a copied tree,
+each folder decides by its own device. A duplicate, Keep Both, a move within one filesystem and a
+restore from Trash keep every name, so `CON` duplicated on a stick stays `CON`. Under the GVfs
+bridge, the folder of each location counts as a filesystem of its own, and what its refusals teach
+stays with it, so a song moved between two folders of one phone keeps its name. A folder merged
+into takes the rules of its own mount, and whether names are fixed is decided again, only where it
+or the folder merged into it is on another device than its parent: a bind mount of the same
+filesystem shares its rules.
+
+A folder's names are planned before its first entry is created, and the plan depends only on the
+folder's entries. A name that needs no change keeps it, even where a fixed name would equal it.
+Fixed names that equal another name are numbered, in the byte order of the names they replace, so
+`a:b` beside `a_b` in a folder copied to a stick becomes `a_b (1)`. FAT and exFAT also take names
+that differ only in case for one, so there a kept name that equals one sorting before it in bytes
+is numbered as an alias, among a paste's top-level items too (`Readme.txt` beside `README.txt`). In
+a merge, a planned name equal to an existing item replaces that item like any other same-named one.
+The completion report lists every fixed name with the name it was saved as, and says which were
+shortened.
+
+An extraction gives its member names, and the folder it names after the archive, the rules of the
+destination, numbers members whose names became one in archive order, and leaves out the links the
+destination cannot hold; see [Extraction output](archives.md#extraction-output).
+
+Undoing a move fixes only names the original mount cannot hold at all, such as malformed UTF-8, and
+then gives the entries inside the item the names they had, deepest first, also where the item came
+from a GVfs location onto a local disk or the other way round. An entry whose name another item
+took meanwhile keeps the name it was saved as and is reported as taken; one whose name the location
+now refuses is reported as fixed again; any other failure is listed with the name the entry kept
+and the error. An entry no longer at the name it was saved as, because it was deleted or renamed
+since, is passed over without a report. Redo fixes the names again.
+
+### The conflict prompt
+
+Before a paste asks about conflicts, it works out, off the GTK thread, the name each item will get,
+and looks for an existing item, a broken link included, under that name. Where that name is
+another, the prompt says so first ("“a:b” will be saved as “a_b” in this location."), so copying
+`a:b` onto a stick that holds `a_b` offers Replace or Keep Both instead of failing with "already
+exists". Replace, Merge and Keep Both act on that name, and Keep Both is offered for moves too.
+Where a folder from another filesystem would be merged into a destination whose rules change
+characters, the prompt also says that items whose names change overwrite items with the new names.
+Where the destination is slow to answer, the transfer shows itself preparing its items, with
+Cancel, docked for a copy as its progress will be, and its progress then takes that row's place at
+once; the same paste repeated meanwhile is ignored. The prompt asks nothing of a selected link the
+destination is known not to hold, which the paste leaves out.
+
+### Names a mount refuses anyway
+
+A mount may still refuse a name: a call that creates it fails with `EINVAL`, `EILSEQ`, `EBADMSG`,
+`ENAMETOOLONG`, or `ENOENT` in a folder that exists, or placing a staged copy fails with an error
+the placement routine puts down to the name. The entry is then tried again under the name its
+folder's rules give, then under each of the Windows rules that changes it on its own (UTF-8, the
+characters Windows refuses, trailing dots and spaces, all device names, 255 bytes and UTF-16
+units), and then under those rules together, fewest first, skipping names already tried. The first
+name the mount takes is used, numbered where it is taken, and reported as fixed, for a Keep Both
+copy from the item's own name to the numbered one.
+
+A mount whose type does not show its rules (sshfs and other FUSE daemons, 9p, virtiofs, vboxsf,
+ceph, eCryptfs, a `fuseblk` device udev cannot tell, unknown types, and the GVfs bridge's folders
+other than SMB and MTP ones) remembers the rules that worked until it changes. Later names brought
+onto it are fixed by them before they are copied, and names the user types there are checked
+against them; names undo gives back are not. A mount that refused only `x.` learns trailing dots
+alone and keeps `a:b`. Any other mount tries each refused name again on its own, so one odd folder
+never puts a whole disk under Windows rules. Undo tries entries inside an item again, but gives the
+item itself back under its own name or fails. An extraction tries each refused member name again,
+links and hard links included, and also a name whose lookup fails with `EINVAL`, `EILSEQ`,
+`EBADMSG` or `ENAMETOOLONG`, as sshfs fails some. Copies through GIO do not try again. Where no
+rule helps, the item fails with "The name isn’t valid at this location", or "The name is too long";
+an extraction names the member.
+
+### Names the user types
+
+Names the user types are never fixed. Renaming an item, creating a file or folder by name, or
+naming a new archive is refused before anything changes where the folder's rules, including any a
+mount has learned from refusals, would store the name as another, and the message names what the
+location cannot hold: the characters, each quoted and given by code point where it shows nothing of
+its own (`U+0009`, `U+0301`), a leading space (MTP) or a trailing space or period, a device name
+Windows reserves, or the length. The 10xer create and rename prompts check the name off the GTK
+thread before they close and stay open with that message. A rename is held to the length of a file,
+since Samba's shorter limit for folders applies only to the folders it creates. Names Strata
+chooses itself, such as "new folder", are not checked.
+
+### Limits of the name rules
+
+- **Paths.** Only names are checked. An item deep enough fails where its whole path is too long:
+  SMB and sshfs refuse paths of about 4 KB, since every request carries the whole path from the
+  share or the server's root, and Windows' 260-character `MAX_PATH`, which Linux drivers do not
+  enforce, is not predicted.
+- **Case and normalization.** Strata plans case aliases only on FAT and exFAT, and elsewhere leaves
+  them to the destination's "exists" (see [Folders, names and case
+  aliases](#folders-names-and-case-aliases)). NTFS keeps `Makefile` and `makefile` apart on Linux,
+  though Windows takes them for one name. No lab mount normalizes Unicode, except that NFC and NFD
+  forms are one name in casefolded ext4 folders, and Strata never normalizes a name.
+- **Windows 10** cannot open files such as `aux.c` or `con.txt`, which FAT, exFAT and ntfs3 keep
+  under the Windows 11 rule.
+- **Legacy code pages are not supported.** vfat mounted without `utf8` and with an `iocharset`
+  other than `utf8` or `ascii` stores each byte of a UTF-8 name as a code-page character, and SMB
+  with an `iocharset` other than UTF-8 writes `?` for what it cannot convert, both without an
+  error. The kernel's exFAT with a code page other than UTF-8 or ASCII refuses what it cannot
+  convert, which no rule fixes, so the item fails. udisks mounts vfat with `utf8` and exFAT with
+  `iocharset=utf8`.
+- **msdos** keeps 8.3 names and refuses names that start with a dot unless mounted with
+  `dotsOK=yes`, so Strata's hidden `.strata-*` names fail there, and so does every copy that needs
+  a stage. Only an explicit `-t msdos` mounts it.
+- **HFS+** stores names decomposed and turns characters it cannot map into `?`, without an error.
+- **GVfs.** Rules come from the address alone, not from the share or device behind it, and a copy
+  through GIO fails on a name the backend refuses, with the backend's error.
 
 ## Rename
 
@@ -745,6 +911,8 @@ Local renames go through the same routine instead of GIO's check-then-rename.
   [reserved-name step](#the-reserved-name-step-and-its-risk) like any other placement, and so does
   renaming a folder where renaming over an empty folder is refused.
 - A rename and its undo never copy. Where no step can place the item, the rename is refused.
+- A typed name that the location would store as another is refused before anything changes; see
+  [Names the user types](#names-the-user-types).
 
 Other locations are renamed through GIO. GLib (2.88.3, and its main branch in October 2026) calls a
 location's rename without checking that its backend has one, and the stand-in GIO uses for an
@@ -788,7 +956,8 @@ The prefixes live in `placement.rs`. Names that may hold user data are never del
 ## Filesystem notes
 
 Rename and link support decides which placement step runs. "Rejects flags" means
-`renameat2` returns `EINVAL` for both `RENAME_NOREPLACE` and `RENAME_EXCHANGE`.
+`renameat2` returns `EINVAL` for both `RENAME_NOREPLACE` and `RENAME_EXCHANGE`. The names each
+filesystem stores are under [Names](#names).
 
 | Filesystem | No-replace | Exchange | Hard links | Notes |
 | --- | --- | --- | --- | --- |
@@ -847,7 +1016,17 @@ names of one file at once or, during its deferred close, another name of a file 
 stale read-only folders, and writeback errors that `syncfs` reports. Tests can also pretend to run
 on another kernel release, freeze the clock that the racily clean check and the wait for SMB's
 deferred close read, and set a paste's batch limits and clock. The seam also asserts that no call
-runs on the main context's thread. Run them with:
+runs on the main context's thread.
+
+For names they emulate the errno each lab mount returned for a name it refuses, names stored or
+listed as others (vfat dropping trailing dots, SMB reading private-use characters back and listing
+device names under 8.3 aliases, `?` for malformed bytes on SMB with POSIX extensions), length
+limits in bytes and for SMB folders, `f_namelen`, refused symbolic links, and a filesystem mounted
+inside another with a device of its own. Presets for the lab's mounts (`Quirks::vfat()`, `exfat()`,
+`exfat_fuse()`, `ntfs3()`, `ntfs3_windows_names()`, `ntfs_3g()`, `cifs()`, `cifs_nocase()`,
+`cifs_posix()`, `sshfs()`) carry each mount's mountinfo line and udev format, so the name rules come
+from the real derivation, and their refusals are written from the lab's results, not from Strata's
+rules. Run them with:
 
 ```bash
 ./scripts/test-headless.py local_operations::
@@ -888,11 +1067,20 @@ Unit tests layer quirks on a fully featured filesystem, so on a limited mount so
 design: a test expecting a plain rename sees the ladder link instead on NFS, fixtures with
 symlinks, FIFOs or Unix permissions cannot exist on vfat, a racer keyed to a step the mount never
 takes (an `O_TMPFILE` link, a hole, a `syncfs`, an exchange) never runs, and a time with a fraction
-of a second is rounded away on vfat, exfat-fuse and sshfs. On NFS a file renamed over while open
-reads as `.nfsXXXX`, and on casefolded folders `/proc` shows files the test process created as
+of a second is rounded away on vfat, exfat-fuse and sshfs. A fixture's name can be one the mount
+refuses (`a:b` on vfat), and a preset can expect a name stored that the real mount refuses, folds
+or lists as another (Samba's 8.3 aliases, folders over 217 bytes). On NFS a file renamed over while
+open reads as `.nfsXXXX`, and on casefolded folders `/proc` shows files the test process created as
 `name (deleted)`, so quirk patterns by name miss them. The container has no udev database, so
-exfat-fuse and ntfs-3g are not recognised there and keep their per-file syncs. Read failures
-against a run of the same filter on `origin/main`.
+exfat-fuse and ntfs-3g are not recognised there: they keep their per-file syncs, and get the name
+rules of a `fuseblk` device udev cannot tell, which learn from refusals (ntfs-3g refuses device
+names). Read failures against a run of the same filter on `origin/main`.
+
+Tests that layer a preset storing any bytes over the lab's exfat-fuse send it names that are not
+valid UTF-8, and the daemon writes an overlong `/` into the volume as a real `/` (see
+[Lab measurements](#lab-measurements)), so after a run of `local_operations::` there, `fsck.exfat`
+finds the volume corrupt. Run `down` and `up`, which format fresh images, before checking names or
+the volume on exfat-fuse.
 
 Requirements and safety:
 
@@ -963,3 +1151,37 @@ Copying a folder of 2,000 files of 1 KiB with eight workers, in seconds:
 
 vfat waits 100 ms at each close of a written file, which bounds every copier there. The lab's SFTP
 round trip takes about 46 ms, so the sshfs row compares copiers only.
+
+Names sent unchanged, as each lab mount stored or refused them (Linux 7.2, Samba 4.24.7, sshfs
+3.7.6, exfat-fuse 1.4.0, ntfs-3g 2026.7.7); ok means stored and listed as sent:
+
+| Mount | `x:y` | Trailing dot / space | `CON` | `x\xffy` | Longest name | Symbolic link |
+| --- | --- | --- | --- | --- | --- | --- |
+| tmpfs, ext4, NFS | ok | ok | ok | ok | 255 bytes | ok |
+| vfat | `EINVAL` | stored as `x` / `EINVAL` | ok | `EINVAL` | 255 UTF-16 units | `EPERM` |
+| exFAT | `EINVAL` | stored as `x` / ok | ok | `EILSEQ` | 255 units | `EPERM` |
+| exfat-fuse | `ENOENT` | ok, beside `x` | ok | `EILSEQ` | 255 units | `ENOSYS` |
+| ntfs3 | ok | ok | ok | `EINVAL` | 255 units | ok |
+| ntfs3 with `windows_names`, ntfs-3g | `EINVAL` | `EINVAL` | `EINVAL` | `EINVAL`; `EILSEQ` on ntfs-3g | 255 units | ok |
+| SMB with `mapposix` | stored as U+F022 | stored as U+F029 / U+F028 | listed as `CSHOFG~F` | `ENOENT`; `EINVAL` with `nocase` | 255 bytes; folders 217 | `ENOTSUP` |
+| SMB with POSIX extensions | ok | ok | ok | stored as `x?y` | 255 bytes; folders 217 | ok |
+| sshfs | ok | ok | ok | ok | 255 bytes, then `EBADMSG` | ok |
+
+- exfat-fuse writes an overlong `/` (`\xc0\xaf`) into the volume as a real `/`, after which that
+  folder cannot be listed (`EIO`), and stores an encoded surrogate that aborts the daemon at the
+  folder's next listing, leaving the mount answering `ENOTCONN`.
+- `f_namelen` is 1530 on vfat and exFAT and 255 on ntfs3 and both FUSE daemons, which all count
+  UTF-16 units; SMB reports 255 whatever the server counts.
+- With `nocase`, SMB refuses every character above U+FFFF with `EINVAL`.
+- ntfs3 with `windows_names` and ntfs-3g accept `CONIN$` and `COM¹`, which Windows 11 reserves.
+- Through cifs without POSIX extensions, server names that Windows refuses are listed as Samba's
+  8.3 aliases, which a copy from the share then takes, and a server name that is not valid UTF-8
+  is not listed at all.
+- No mount normalizes Unicode: NFC and NFD forms of a name coexist everywhere except in casefolded
+  ext4 folders, where they are one name.
+
+With the rules above, copies and extractions of these names, and of names up to 768 bytes, stored
+the planned name on every lab mount. The NFS, SMB and SFTP servers listed the same names as their
+clients, with no private-use characters and no 8.3 aliases, and a trace of the exfat-fuse daemon
+showed no name reaching it that was malformed, held a character Windows refuses, ended in a dot or
+a space, or passed 255 units.

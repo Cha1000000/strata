@@ -247,6 +247,14 @@ supports. Its syscalls go through the `FsOps` seam in `fs_ops.rs`, and what each
 cached in `adapters/volume/mount_capabilities.rs`. See
 [Filesystem compatibility](filesystem-compatibility.md).
 
+The names a mount stores are derived from mountinfo, udev and `statfs` in
+`adapters/volume/names.rs` and `mounts.rs`, and cached with its capabilities;
+`adapters/local_operations/mount_profile.rs` reads them once per operation, so its planner and
+workers agree. `naming.rs` fixes, plans and numbers names by those rules for copies, moves, merges
+and extraction; `transfer_targets.rs` works out, off the main thread, the name each pasted item
+will get and whether something has it, for the conflict prompt; and `typed_names.rs` refuses a
+typed name the location would store as another.
+
 Copies between native paths, including moves across filesystems, merges, Replace stages and
 restore copies, go through `adapters/local_operations/copy_engine.rs`. It copies through
 descriptors on worker threads, on the queue `work_queue.rs` shares with deletions, and records
@@ -269,7 +277,7 @@ Local archive operations live under `adapters/local_operations/archive/`:
 | Operation entry points, worker lifecycle and progress events | `archive.rs` in the parent directory |
 | Staged publication, source traversal and compression writers | `compression.rs` |
 | Per-operation extraction state, copying, cleanup, size preflight, hard-link resolution, deferred directory metadata and outcomes | `extraction.rs` |
-| Confined destination writes, link creation, mode and time restoration, path validation, staging folder lifecycle, publication and conflict naming | `destination.rs` |
+| Confined destination writes, link creation, mode and time restoration, path validation, staging folder lifecycle, publication, member names by the destination's rules and conflict naming | `destination.rs` |
 | ZIP, TAR/gzip and 7z member enumeration, passwords and decoder errors | `decoders.rs` |
 
 Every decoder feeds one `ExtractionSession` per operation. The session has no codec or widget
@@ -288,8 +296,10 @@ A directory member repeated in the archive is restored once, each field from the
 that stores it.
 Member identity tracking stays
 inside each decoder rather than assuming unique names or matching header/callback order. The
-session validates pending names and applies established root renames without filesystem probes
-or name reservations; final leaf conflicts remain unknown until a member is attempted. Sequential formats do not scan unread content to complete that list.
+session validates pending names and maps them through the folders it made, fixing the rest by the
+destination's rules, without filesystem probes or name reservations; final leaf conflicts remain
+unknown until a member is attempted. Sequential formats do not scan unread content to complete
+that list.
 Before writing, the session checks claimed uncompressed size against destination free space from
 `fstatvfs` on the pinned root, and it refuses a member whose extracted size does not match the
 size declared by the archive header. ZIP and 7z advertise a total up front, so an oversized
@@ -306,7 +316,8 @@ Decoders pass symlinks, TAR hard links and each member's mode and modification t
 `MemberContent` and `MemberMetadata`, and refuse FIFOs and device nodes. Restoring metadata is
 best effort: `EPERM`, `EOPNOTSUPP` and `EINVAL` from filesystems without Unix permissions or times
 are ignored behind the `MetadataCalls` seam in `destination.rs`. TAR extraction preserves
-native path bytes, including hard-link target identity. The sandboxed RAR helper streams
+native path bytes where the destination stores them, and hard-link target identity through fixed
+names. The sandboxed RAR helper streams
 `STRRAR03` records carrying each member's mode and
 time (a RAR 5 FILETIME, or the DOS local time of older formats, which only the parent can
 convert in the user's zone); RAR links are not yet extracted as links. Error records and failed

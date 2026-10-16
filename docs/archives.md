@@ -33,8 +33,8 @@ Strata publishes the folder:
   without its extension, such as `photos/` for `photos.zip`. If that name is
   taken, the folder becomes `photos (1)/`, `photos (2)/` and so on. Entries
   inside the folder keep the archive's names, even when the destination
-  already has an entry with the same name; only duplicates within the archive
-  are renamed.
+  already has an entry with the same name; only duplicates within the archive,
+  and names the destination cannot store (below), are renamed.
 - If extraction fails or is cancelled after writing a file, everything written
   so far stays in the archive-named folder, even if it is a single entry. The
   error message ends with ``Extracted entries remain in `<folder>`.``, and the
@@ -51,8 +51,7 @@ Strata publishes the folder:
   prompt opens.
 
 Member names follow the rules of the destination's mount, as the names a copy
-brings there do (see [Folders, names and case
-aliases](filesystem-compatibility.md#folders-names-and-case-aliases)):
+brings there do (see [Names](filesystem-compatibility.md#names)):
 characters it cannot store become `_`, trailing dots and spaces are dropped,
 device names Windows reserves get `_`, and names too long for it are shortened.
 So does the name of the folder named after the archive. A member whose name the
@@ -207,7 +206,7 @@ attribute.
 
 An archive name that the destination would store as another name is refused
 before anything is written, as other [names the user
-types](filesystem-compatibility.md#folders-names-and-case-aliases) are.
+types](filesystem-compatibility.md#names-the-user-types) are.
 
 When the requested archive already exists, the creation prompt offers Cancel,
 Keep Both, and Replace. Keep Both publishes the next available numbered name,

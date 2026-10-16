@@ -389,8 +389,8 @@ the typed name in the keyboard-focused folder; spaces and Unicode are kept. A
 trailing `/` makes a folder instead and is removed before the name is checked. An
 empty name, `.`, `..`, or a name containing `/` keeps the prompt open with the
 reason, and so does a name already taken (including by a broken link) or one the
-location would store as another (see [Folders, names and case
-aliases](filesystem-compatibility.md#folders-names-and-case-aliases)), so you can
+location would store as another (see [Names the user
+types](filesystem-compatibility.md#names-the-user-types)), so you can
 fix it. Nothing is renumbered, replaced, or followed. **Esc**, focus leaving
 the prompt, a clicked row, another prompt, leaving the mode, or closing the
 window discard the name. **Ctrl+Shift+N** still adds a numbered **new folder**
