@@ -4,7 +4,9 @@ use std::time::{Duration, Instant};
 
 use gtk::prelude::*;
 
-use super::super::{browser_for_window, build_sidebar, pin_locations_at};
+use super::super::{
+    browser_for_window, build_sidebar, move_pinned_place, pin_gap_index, pin_locations_at,
+};
 use crate::model::Location;
 use crate::test_support::gtk_test_with_env;
 use crate::ui::preferences::PreferenceManager;
@@ -103,78 +105,58 @@ fn a_rejected_place_click_returns_the_highlight_to_the_open_location() {
     );
 }
 
+fn pin(path: &str, name: &str) -> (Location, String) {
+    (Location::local(path), name.to_owned())
+}
+
 #[test]
-fn pin_locations_at_inserts_at_specified_indices() {
-    let mut places = vec![
-        (Location::local("/pinned/a"), "A".to_owned()),
-        (Location::local("/pinned/b"), "B".to_owned()),
-    ];
-
-    let changed = pin_locations_at(&mut places, &[Location::local("/pinned/first")], 0);
-    assert!(changed);
+fn pin_locations_at_inserts_at_specified_indices_with_their_display_names() {
+    let mut places = vec![pin("/pinned/a", "A"), pin("/pinned/b", "B")];
+    for (folder, index) in [
+        (pin("/pinned/first", "First"), 0),
+        (pin("/pinned/middle", "Middle"), 2),
+        (pin("/pinned/last", "Last"), 99),
+    ] {
+        assert!(pin_locations_at(&mut places, &[folder], index));
+    }
     assert_eq!(
         places,
         vec![
-            (Location::local("/pinned/first"), "first".to_owned()),
-            (Location::local("/pinned/a"), "A".to_owned()),
-            (Location::local("/pinned/b"), "B".to_owned()),
-        ]
-    );
-
-    let changed = pin_locations_at(&mut places, &[Location::local("/pinned/middle")], 2);
-    assert!(changed);
-    assert_eq!(
-        places,
-        vec![
-            (Location::local("/pinned/first"), "first".to_owned()),
-            (Location::local("/pinned/a"), "A".to_owned()),
-            (Location::local("/pinned/middle"), "middle".to_owned()),
-            (Location::local("/pinned/b"), "B".to_owned()),
-        ]
-    );
-
-    let changed = pin_locations_at(&mut places, &[Location::local("/pinned/last")], 99);
-    assert!(changed);
-    assert_eq!(
-        places,
-        vec![
-            (Location::local("/pinned/first"), "first".to_owned()),
-            (Location::local("/pinned/a"), "A".to_owned()),
-            (Location::local("/pinned/middle"), "middle".to_owned()),
-            (Location::local("/pinned/b"), "B".to_owned()),
-            (Location::local("/pinned/last"), "last".to_owned()),
+            pin("/pinned/first", "First"),
+            pin("/pinned/a", "A"),
+            pin("/pinned/middle", "Middle"),
+            pin("/pinned/b", "B"),
+            pin("/pinned/last", "Last"),
         ]
     );
 }
 
 #[test]
-fn pin_locations_at_already_pinned_folder_is_a_noop() {
-    let mut places = vec![
-        (Location::local("/pinned/a"), "A".to_owned()),
-        (Location::local("/pinned/b"), "B".to_owned()),
-        (Location::local("/pinned/c"), "C".to_owned()),
+fn pin_locations_at_skips_existing_and_standard_places_without_reordering() {
+    let original = vec![
+        pin("/pinned/a", "A"),
+        pin("/pinned/b", "B"),
+        pin("/pinned/c", "C"),
     ];
-    let original = places.clone();
-
-    let changed = pin_locations_at(&mut places, &[Location::local("/pinned/b")], 0);
-    assert!(!changed);
-    assert_eq!(places, original);
+    let home = (Location::local(gtk::glib::home_dir()), "Home".to_owned());
+    for sources in [vec![pin("/pinned/b", "Renamed")], vec![home]] {
+        let mut places = original.clone();
+        assert!(!pin_locations_at(&mut places, &sources, 0));
+        assert_eq!(places, original);
+    }
 }
 
 #[test]
 fn pin_locations_at_multi_folder_drag_preserves_selection_order_and_skips_duplicates() {
-    let mut places = vec![
-        (Location::local("/pinned/a"), "A".to_owned()),
-        (Location::local("/pinned/b"), "B".to_owned()),
-    ];
+    let mut places = vec![pin("/pinned/a", "A"), pin("/pinned/b", "B")];
 
     let changed = pin_locations_at(
         &mut places,
         &[
-            Location::local("/pinned/new_1"),
-            Location::local("/pinned/a"),
-            Location::local("/pinned/new_1"),
-            Location::local("/pinned/new_2"),
+            pin("/pinned/new_1", "New 1"),
+            pin("/pinned/a", "A"),
+            pin("/pinned/new_1", "New 1"),
+            pin("/pinned/new_2", "New 2"),
         ],
         1,
     );
@@ -182,12 +164,58 @@ fn pin_locations_at_multi_folder_drag_preserves_selection_order_and_skips_duplic
     assert_eq!(
         places,
         vec![
-            (Location::local("/pinned/a"), "A".to_owned()),
-            (Location::local("/pinned/new_1"), "new_1".to_owned()),
-            (Location::local("/pinned/new_2"), "new_2".to_owned()),
-            (Location::local("/pinned/b"), "B".to_owned()),
+            pin("/pinned/a", "A"),
+            pin("/pinned/new_1", "New 1"),
+            pin("/pinned/new_2", "New 2"),
+            pin("/pinned/b", "B"),
         ]
     );
+}
+
+#[test]
+fn a_gap_falls_back_to_its_surviving_neighbour_and_never_jumps_to_the_end() {
+    let places = vec![pin("/pinned/a", "A"), pin("/pinned/b", "B")];
+    let a = Location::local("/pinned/a");
+    let b = Location::local("/pinned/b");
+    let gone = Location::local("/pinned/unpinned-elsewhere");
+    for (gap, expected) in [
+        ((Some(&a), Some(&b)), Some(1)),
+        ((Some(&a), Some(&gone)), Some(1)),
+        ((Some(&gone), Some(&b)), Some(1)),
+        ((None, Some(&gone)), None),
+        ((Some(&gone), Some(&gone)), None),
+        ((Some(&gone), None), Some(2)),
+        ((None, None), Some(2)),
+    ] {
+        assert_eq!(pin_gap_index(&places, gap), expected, "{gap:?}");
+    }
+}
+
+#[test]
+fn moving_a_pin_into_an_adjacent_gap_is_a_noop() {
+    let original = vec![pin("/a", "A"), pin("/b", "B"), pin("/c", "C")];
+    for (source, index, expected) in [
+        (1, 1, None),
+        (1, 2, None),
+        (1, 0, Some(["B", "A", "C"])),
+        (0, 3, Some(["B", "C", "A"])),
+        (2, 1, Some(["A", "C", "B"])),
+    ] {
+        let mut places = original.clone();
+        assert_eq!(
+            move_pinned_place(&mut places, source, index),
+            expected.is_some()
+        );
+        let names = places
+            .iter()
+            .map(|(_, name)| name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            expected.unwrap_or(["A", "B", "C"]),
+            "{source} -> {index}"
+        );
+    }
 }
 
 #[test]
@@ -207,27 +235,26 @@ fn pinning_merges_latest_bookmarks_and_persists_aliases_in_selection_order() {
             let mut external = initial.clone();
             external.insert(0, (Location::local("/external/pin"), "External".to_owned()));
             save_pinned_places(&external).expect("external edit");
-            let locations = [
-                Location::local("/mount/folder"),
-                Location::local("/aliases/folder"),
-                initial[0].0.clone(),
-                Location::local("/mount/folder"),
+            let folders = [
+                (Location::local("/mount/folder"), "Mounted".to_owned()),
+                (Location::local("/aliases/folder"), "Alias".to_owned()),
+                initial[0].clone(),
+                (Location::local("/mount/folder"), "Mounted".to_owned()),
             ];
+            let locations = folders.clone().map(|(location, _)| location);
             assert!(
                 sidebar
                     .state
-                    .pin_locations_before(&locations, Some(&initial[0].0))
+                    .pin_folders_into(&folders, (None, Some(&initial[0].0)))
             );
-            external.splice(
-                1..1,
-                [
-                    (locations[0].clone(), "folder".to_owned()),
-                    (locations[1].clone(), "folder".to_owned()),
-                ],
-            );
+            external.splice(1..1, folders[..2].iter().cloned());
             assert_eq!(load_pinned_places().expect("saved pins"), external);
             assert_eq!(*sidebar.state.pinned_places.borrow(), external);
-            assert!(sidebar.state.pin_locations_before(&locations, None));
+            assert!(
+                !sidebar
+                    .state
+                    .pin_folders_into(&folders, (Some(&initial[1].0), None))
+            );
             assert_eq!(load_pinned_places().expect("unchanged pins"), external);
             let later = (Location::local("/external/later"), "Later".to_owned());
             external.insert(0, later);
@@ -235,27 +262,21 @@ fn pinning_merges_latest_bookmarks_and_persists_aliases_in_selection_order() {
             assert!(
                 sidebar
                     .state
-                    .reorder_pinned_before(&locations[0], Some(&initial[1].0))
+                    .reorder_pinned_into(&locations[0], (Some(&initial[0].0), Some(&initial[1].0)))
             );
             let moved = external.remove(2);
             external.insert(4, moved);
             assert_eq!(load_pinned_places().expect("reordered pins"), external);
             external.retain(|(location, _)| location != &locations[0]);
             save_pinned_places(&external).expect("external unpin");
-            assert!(sidebar.state.reorder_pinned_before(&locations[0], None));
+            assert!(
+                !sidebar
+                    .state
+                    .reorder_pinned_into(&locations[0], (Some(&initial[1].0), None))
+            );
             assert_eq!(load_pinned_places().expect("no resurrected pin"), external);
             view.browser().clear_observer();
             sidebar.disconnect();
         },
     );
-}
-
-#[test]
-fn pin_locations_at_ignores_standard_places() {
-    let mut places = vec![(Location::local("/pinned/a"), "A".to_owned())];
-    let home = Location::local(gtk::glib::home_dir());
-
-    let changed = pin_locations_at(&mut places, &[home], 0);
-    assert!(!changed);
-    assert_eq!(places, vec![(Location::local("/pinned/a"), "A".to_owned())]);
 }

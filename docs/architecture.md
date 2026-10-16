@@ -409,7 +409,10 @@ locations against the latest bookmarks, preserves labels, and never resurrects a
 concurrently unpinned source. Row bodies retain their existing transfer, reorder and
 spring-navigation behavior; remote pins have insertion gaps even when their rows
 cannot accept transfers. Internal folder drags carry a provider-matched snapshot of entry
-locations and directory eligibility, without filesystem probes. Pinning prefers the
+locations, display names and directory eligibility, without filesystem probes. External
+folders take their label from the same metadata query that confirms their type, so drag
+pins are labelled like menu pins. Trash locations and web links are rejected before any
+probe; GVfs would otherwise fetch a hovered link. Pinning prefers the
 Copy protocol action, but accepts Move-only offers from provider-matched internal
 sources, whose drag-end handlers never delete data. Foreign sources must offer
 Copy: completing an external Move could ask the other application to delete the
@@ -421,9 +424,11 @@ transfers; cancellation, failure, or timeout rejects the whole selection. Cancel
 a GIO query does not guarantee interruption of an already-blocked kernel call.
 Only confirmed directory selections show an insertion indicator. Directory symlinks
 are accepted without canonicalizing or collapsing different location spellings.
-Insertion resolves its anchor against the latest bookmarks, preserves selection
-order, skips existing pins without reordering them, and finishes the drop protocol
-only after the bookmark update succeeds or fails.
+Each gap remembers the pins on both sides; insertion resolves the following pin against
+the latest bookmarks, falls back to the preceding one, and rejects the drop when both
+were unpinned elsewhere. Insertion preserves selection order, skips existing pins
+without reordering them, and finishes the drop protocol only after the bookmark update
+completes; a drop that changes nothing finishes as rejected.
 
 ### Window keyboard routing
 

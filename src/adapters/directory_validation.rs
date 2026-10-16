@@ -9,21 +9,24 @@ use crate::model::Location;
 
 /// Queries metadata only, follows directory symlinks, and never probes on the GTK thread.
 /// One query at a time bounds speculative work even for very large foreign selections.
-pub(crate) async fn all_directories(locations: &[Location]) -> bool {
+/// Returns `None` unless every location is a directory.
+pub(crate) async fn folder_names(locations: Vec<Location>) -> Option<Vec<(Location, String)>> {
     if locations.is_empty() {
-        return false;
+        return None;
     }
+    let mut folders = Vec::with_capacity(locations.len());
     for location in locations {
-        let result = super::gio_file_for_location(location)
+        let info = super::gio_file_for_location(&location)
             .query_info_future(
-                gio::FILE_ATTRIBUTE_STANDARD_TYPE,
+                "standard::type,standard::display-name",
                 gio::FileQueryInfoFlags::NONE,
                 glib::Priority::DEFAULT,
             )
-            .await;
-        if !result.is_ok_and(|info| info.file_type() == gio::FileType::Directory) {
-            return false;
-        }
+            .await
+            .ok()
+            .filter(|info| info.file_type() == gio::FileType::Directory)?;
+        let name = info.display_name().to_string();
+        folders.push((location, name));
     }
-    true
+    Some(folders)
 }

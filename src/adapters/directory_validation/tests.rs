@@ -26,7 +26,9 @@ fn foreign_folder_validation_preserves_symlinks_and_native_names_and_rejects_mix
                 let folder = Location::local(folder);
                 let link = Location::local(link);
                 let file = Location::local(file);
-                for (locations, expected) in [
+                let alias = folder_names(vec![link.clone()]).await;
+                assert_eq!(alias, Some(vec![(link.clone(), "alias".to_owned())]));
+                for (locations, accepted) in [
                     (vec![], false),
                     (vec![folder.clone(), link.clone()], true),
                     (vec![file.clone()], false),
@@ -36,7 +38,15 @@ fn foreign_folder_validation_preserves_symlinks_and_native_names_and_rejects_mix
                         false,
                     ),
                 ] {
-                    assert_eq!(all_directories(&locations).await, expected, "{locations:?}");
+                    let folders = folder_names(locations.clone()).await;
+                    assert_eq!(
+                        folders.map(|folders| folders
+                            .into_iter()
+                            .map(|(location, _)| location)
+                            .collect()),
+                        accepted.then_some(locations.clone()),
+                        "{locations:?}"
+                    );
                 }
                 fs::remove_file(directory.path().join("alias")).expect("remove alias");
                 symlink(
@@ -44,7 +54,7 @@ fn foreign_folder_validation_preserves_symlinks_and_native_names_and_rejects_mix
                     directory.path().join("alias"),
                 )
                 .expect("broken link");
-                assert!(!all_directories(&[link]).await);
+                assert!(folder_names(vec![link]).await.is_none());
             })
         })
         .expect("private main context");

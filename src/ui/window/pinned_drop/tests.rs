@@ -29,8 +29,11 @@ fn pending_folder_validation_is_shared_and_delivers_the_whole_selection_once() {
                     validation.action(gdk::DragAction::COPY),
                     gdk::DragAction::COPY
                 );
-                let sources: Rc<[Location]> =
-                    vec![Location::uri("sftp://host/a"), Location::local("/mount/b")].into();
+                let sources: Rc<[Folder]> = vec![
+                    (Location::uri("sftp://host/a"), "A".to_owned()),
+                    (Location::local("/mount/b"), "B".to_owned()),
+                ]
+                .into();
                 send.send(Some(sources.clone())).expect("complete query");
                 let (done, received) = futures_channel::oneshot::channel();
                 validation.on_ready(move |result| {
@@ -69,7 +72,9 @@ fn a_stalled_query_times_out_and_drops_its_pending_io() {
                 );
                 assert!(
                     query_send
-                        .send(Some(vec![Location::local("/late")].into()))
+                        .send(Some(
+                            vec![(Location::local("/late"), "Late".to_owned())].into()
+                        ))
                         .is_err()
                 );
             })
@@ -106,5 +111,18 @@ fn a_rejected_selection_cannot_become_a_copy_or_partial_pin() {
     validation.on_ready(|result| assert!(result.is_none()));
     for offered in [gdk::DragAction::COPY, gdk::DragAction::MOVE] {
         assert_eq!(validation.action(offered), gdk::DragAction::empty());
+    }
+}
+
+#[test]
+fn trash_and_web_links_are_rejected_before_any_probe() {
+    for (location, expected) in [
+        (Location::local("/home/user/folder"), true),
+        (Location::uri("sftp://host/folder"), true),
+        (Location::uri("trash:///folder"), false),
+        (Location::uri("http://example.com/"), false),
+        (Location::uri("HTTPS://example.com/folder"), false),
+    ] {
+        assert_eq!(can_pin(&location), expected, "{location:?}");
     }
 }

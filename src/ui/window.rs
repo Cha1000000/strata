@@ -1662,10 +1662,12 @@ impl SidebarState {
         }
         self.append_heading("PINNED");
         let drag_cache = Rc::new(pinned_drop::FolderDragCache::default());
+        let mut previous = None;
         for (ordinal, (index, location, name)) in pinned.into_iter().enumerate() {
             if !self.local_only {
-                pinned_drop::append_gap(self, Some(location.clone()), &drag_cache);
+                pinned_drop::append_gap(self, previous, Some(location.clone()), &drag_cache);
             }
+            previous = Some(location.clone());
             self.visible_pins.borrow_mut().push(location.clone());
             let row = if self.local_only {
                 let row = self.append_place(crate::assets::icons::FOLDER, &name, location);
@@ -1679,7 +1681,7 @@ impl SidebarState {
             }
         }
         if !self.local_only {
-            pinned_drop::append_gap(self, None, &drag_cache);
+            pinned_drop::append_gap(self, previous, None, &drag_cache);
         }
     }
 
@@ -1833,37 +1835,18 @@ impl SidebarState {
         self.update_pinned_places(|places| remove_pinned_place(places, location));
     }
 
-    fn pin_locations_before(
-        self: &Rc<Self>,
-        locations: &[Location],
-        before: Option<&Location>,
-    ) -> bool {
+    fn pin_folders_into(self: &Rc<Self>, folders: &[(Location, String)], gap: PinGap<'_>) -> bool {
         self.update_pinned_places(|places| {
-            let index = before
-                .and_then(|anchor| places.iter().position(|(location, _)| location == anchor))
-                .unwrap_or(places.len());
-            pin_locations_at(places, locations, index)
+            pin_gap_index(places, gap).is_some_and(|index| pin_locations_at(places, folders, index))
         })
     }
 
-    fn reorder_pinned_before(
-        self: &Rc<Self>,
-        source: &Location,
-        before: Option<&Location>,
-    ) -> bool {
+    fn reorder_pinned_into(self: &Rc<Self>, source: &Location, gap: PinGap<'_>) -> bool {
         self.update_pinned_places(|places| {
             let Some(source) = places.iter().position(|(location, _)| location == source) else {
                 return false;
             };
-            let target = before
-                .and_then(|anchor| places.iter().position(|(location, _)| location == anchor));
-            match target {
-                Some(target) => reorder_pinned_places(places, source, target, false),
-                None => {
-                    let target = places.len() - 1;
-                    reorder_pinned_places(places, source, target, true)
-                }
-            }
+            pin_gap_index(places, gap).is_some_and(|index| move_pinned_place(places, source, index))
         })
     }
 
@@ -1872,8 +1855,10 @@ impl SidebarState {
         change: impl FnOnce(&mut Vec<(Location, String)>) -> bool,
     ) -> bool {
         // Merge into the shared file, never this window's stale snapshot.
+        let mut changed = false;
         let result = load_pinned_places().and_then(|mut places| {
-            if change(&mut places) {
+            changed = change(&mut places);
+            if changed {
                 save_pinned_places(&places)?;
             }
             Ok(places)
@@ -1882,7 +1867,7 @@ impl SidebarState {
             Ok(places) => {
                 self.pinned_places.replace(places);
                 self.rebuild();
-                true
+                changed
             }
             Err(error) => {
                 show_error_dialog(
@@ -2121,9 +2106,9 @@ impl SidebarState {
             let content = gtk::gdk::ContentProvider::for_value(&payload.to_value());
             if let Some(index) = parse_pinned_drag_source(&payload)
                 && let Some(state) = weak_state.upgrade()
-                && let Some((location, _)) = state.pinned_places.borrow().get(index)
+                && let Some(place) = state.pinned_places.borrow().get(index)
             {
-                pinned_drop::start_reorder(&content, location.clone());
+                pinned_drop::start_reorder(&content, place.clone());
             }
             Some(content)
         });
@@ -2975,9 +2960,34 @@ fn remove_pinned_place(places: &mut Vec<(Location, String)>, location: &Location
     places.len() != original_len
 }
 
+/// The `(after, before)` pins around an insertion gap when the sidebar was built.
+type PinGap<'a> = (Option<&'a Location>, Option<&'a Location>);
+
+/// Resolves a gap against the latest bookmarks; `None` when both of a gap's
+/// neighbours were unpinned elsewhere, so a drop cannot land somewhere unrelated.
+fn pin_gap_index(places: &[(Location, String)], (after, before): PinGap<'_>) -> Option<usize> {
+    let position = |anchor: &Location| places.iter().position(|(location, _)| location == anchor);
+    match (before.and_then(position), after.and_then(position)) {
+        (Some(index), _) => Some(index),
+        (None, Some(index)) => Some(index + 1),
+        (None, None) if before.is_none() => Some(places.len()),
+        (None, None) => None,
+    }
+}
+
+/// `index` is an insertion point in the list before `source` is removed.
+fn move_pinned_place(places: &mut Vec<(Location, String)>, source: usize, index: usize) -> bool {
+    if source >= places.len() || index > places.len() || index == source || index == source + 1 {
+        return false;
+    }
+    let place = places.remove(source);
+    places.insert(index - usize::from(index > source), place);
+    true
+}
+
 fn pin_locations_at(
     places: &mut Vec<(Location, String)>,
-    sources: &[Location],
+    sources: &[(Location, String)],
     target_index: usize,
 ) -> bool {
     let mut seen = places
@@ -2986,10 +2996,10 @@ fn pin_locations_at(
         .collect::<std::collections::HashSet<_>>();
     let additions = sources
         .iter()
-        .filter(|location| {
-            !is_standard_place_location(location) && seen.insert((*location).clone())
+        .filter(|(location, _)| {
+            !is_standard_place_location(location) && seen.insert(location.clone())
         })
-        .map(|location| (location.clone(), location.display_name()))
+        .cloned()
         .collect::<Vec<_>>();
     if additions.is_empty() {
         return false;

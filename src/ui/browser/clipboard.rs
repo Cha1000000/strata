@@ -213,7 +213,8 @@ pub(crate) struct PreparedFileDrop {
 #[derive(Clone)]
 pub(crate) struct DragSnapshot {
     pub locations: Rc<[Location]>,
-    pub all_directories: bool,
+    /// Locations with display names, present only when every entry is a directory.
+    pub folders: Option<Rc<[(Location, String)]>>,
 }
 
 struct ActiveDrag {
@@ -783,7 +784,12 @@ pub(in crate::ui) fn file_drag_content(entries: &[FileEntry]) -> Option<gtk::gdk
             content: content.downgrade(),
             snapshot: DragSnapshot {
                 locations,
-                all_directories: entries.iter().all(FileEntry::is_directory),
+                folders: entries.iter().all(FileEntry::is_directory).then(|| {
+                    entries
+                        .iter()
+                        .map(|entry| (entry.location.clone(), entry.display_name.clone()))
+                        .collect()
+                }),
             },
         });
     });

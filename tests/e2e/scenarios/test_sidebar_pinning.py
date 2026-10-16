@@ -45,7 +45,7 @@ def drag_to_pin(strata, names, index=0, *, modifiers=()):
 @pytest.mark.parametrize("move_only", [False, True], ids=["copy-or-move", "move-only"])
 def test_folder_pins_keep_selection_order_skip_duplicates_and_survive_restart(strata, mode, move_only):
     modifiers = ["shift"] if move_only else []
-    names = ["pin-a", "pin-b", "pin-c", "pin-d", "pin-e"]
+    names = ["pin-a", "pin-b", "pin-c", "pin-d", "pin-e", "pin-f"]
     for name in names:
         strata.fixture.path(name).mkdir()
         strata.entry(name)
@@ -64,6 +64,10 @@ def test_folder_pins_keep_selection_order_skip_duplicates_and_survive_restart(st
     expected.append(f"{strata.fixture.path(names[4]).as_uri()} {names[4]}")
     strata.wait(lambda: bookmarks(strata) == expected, "insertion after the last pin")
     drag_to_pin(strata, [names[0]], index=-1, modifiers=modifiers)
+    # Only lands at the expected slot if the duplicate drop above left pin-a first.
+    drag_to_pin(strata, [names[5]], index=1, modifiers=modifiers)
+    expected.insert(1, f"{strata.fixture.path(names[5]).as_uri()} {names[5]}")
+    strata.wait(lambda: bookmarks(strata) == expected, "a duplicate drop to leave the order unchanged")
     for name in names:
         assert strata.fixture.path(name).is_dir(), "pinning must not move the source"
     strata.application.stop()

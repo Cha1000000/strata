@@ -8,31 +8,37 @@ use std::{cell::RefCell, future::Future, rc::Rc, time::Duration};
 use gtk::{gdk, glib, prelude::*};
 
 use super::SidebarState;
-use crate::{model::Location, ui::browser::active_drag_snapshot};
+use crate::{
+    model::Location,
+    ui::browser::{active_drag_snapshot, paths::is_trash_location},
+};
 
-type FolderResult = Option<Rc<[Location]>>;
+type Folder = (Location, String);
+type FolderResult = Option<Rc<[Folder]>>;
 type Completion = Box<dyn FnOnce(FolderResult)>;
 
+const VALIDATION_TIMEOUT: Duration = Duration::from_secs(2);
+
 thread_local! {
-    static ACTIVE_REORDER: RefCell<Option<(glib::WeakRef<gdk::ContentProvider>, Location)>> = const { RefCell::new(None) };
+    static ACTIVE_REORDER: RefCell<Option<(glib::WeakRef<gdk::ContentProvider>, Folder)>> = const { RefCell::new(None) };
 }
 
-pub(super) fn start_reorder(content: &gdk::ContentProvider, location: Location) {
-    ACTIVE_REORDER.with(|active| active.replace(Some((content.downgrade(), location))));
+pub(super) fn start_reorder(content: &gdk::ContentProvider, folder: Folder) {
+    ACTIVE_REORDER.with(|active| active.replace(Some((content.downgrade(), folder))));
 }
 
 pub(super) fn clear_reorder() {
     ACTIVE_REORDER.with(|active| active.take());
 }
 
-fn reorder_source(drop: &gdk::Drop) -> Option<Location> {
+fn reorder_source(drop: &gdk::Drop) -> Option<Folder> {
     let content = drop.drag()?.content();
     ACTIVE_REORDER.with(|active| {
         active
             .borrow()
             .as_ref()
             .filter(|(provider, _)| provider.upgrade().as_ref() == Some(&content))
-            .map(|(_, location)| location.clone())
+            .map(|(_, folder)| folder.clone())
     })
 }
 
@@ -62,11 +68,10 @@ impl FolderValidation {
         validation.result.replace(ValidationResult::Pending);
         let weak = Rc::downgrade(&validation);
         let job = glib::MainContext::ref_thread_default().spawn_local(async move {
-            let result = futures_lite::future::race(query, async move {
-                glib::timeout_future(timeout).await;
-                None
-            })
-            .await;
+            let result = glib::future_with_timeout(timeout, query)
+                .await
+                .ok()
+                .flatten();
             if let Some(validation) = weak.upgrade() {
                 validation.finish(result);
             }
@@ -125,13 +130,12 @@ impl FolderDragCache {
         {
             return validation.clone();
         }
-        let validation = if let Some(location) = reorder_source(drop) {
-            FolderValidation::ready(Some(vec![location].into()))
+        let validation = if let Some(folder) = reorder_source(drop) {
+            FolderValidation::ready(Some(vec![folder].into()))
         } else if let Some(snapshot) = active_drag_snapshot(drop) {
-            FolderValidation::ready(
-                (snapshot.all_directories && !snapshot.locations.is_empty())
-                    .then_some(snapshot.locations),
-            )
+            FolderValidation::ready(snapshot.folders.filter(|folders| {
+                !folders.is_empty() && folders.iter().all(|(location, _)| can_pin(location))
+            }))
         } else {
             let drop = drop.clone();
             FolderValidation::start(
@@ -146,11 +150,14 @@ impl FolderDragCache {
                         .iter()
                         .map(crate::adapters::location_for_file)
                         .collect::<Option<Vec<_>>>()?;
-                    crate::adapters::directory_validation::all_directories(&locations)
+                    if !locations.iter().all(can_pin) {
+                        return None;
+                    }
+                    crate::adapters::directory_validation::folder_names(locations)
                         .await
-                        .then(|| locations.into())
+                        .map(Into::into)
                 },
-                Duration::from_secs(2),
+                VALIDATION_TIMEOUT,
             )
         };
         // Drop the old request outside the borrow: cancellation can complete a pending drop.
@@ -160,6 +167,16 @@ impl FolderDragCache {
         std::mem::drop(old);
         validation
     }
+}
+
+/// Checked before probing: trash cannot be pinned, and GVfs would fetch web links on hover.
+fn can_pin(location: &Location) -> bool {
+    !is_trash_location(location)
+        && !location.uri_value().is_some_and(|uri| {
+            glib::Uri::parse_scheme(uri).is_some_and(|scheme| {
+                scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https")
+            })
+        })
 }
 
 fn pin_action(drop: &gdk::Drop) -> gdk::DragAction {
@@ -224,6 +241,7 @@ impl PinDropSite {
 
 pub(super) fn append_gap(
     state: &Rc<SidebarState>,
+    after: Option<Location>,
     before: Option<Location>,
     cache: &Rc<FolderDragCache>,
 ) {
@@ -273,18 +291,20 @@ pub(super) fn append_gap(
         let validation = drop_cache.validation(drop);
         let state = weak_state.clone();
         let widget = widget.clone();
+        let after = after.clone();
         let before = before.clone();
         let reorder = reorder_source(drop).is_some();
         let drop = drop.clone();
         validation.on_ready(move |locations| {
             let success = match (locations, state.upgrade(), widget.upgrade()) {
                 (Some(locations), Some(state), Some(widget)) if widget.root().is_some() => {
+                    let gap = (after.as_ref(), before.as_ref());
                     if reorder {
-                        locations.first().is_some_and(|source| {
-                            state.reorder_pinned_before(source, before.as_ref())
-                        })
+                        locations
+                            .first()
+                            .is_some_and(|(source, _)| state.reorder_pinned_into(source, gap))
                     } else {
-                        state.pin_locations_before(&locations, before.as_ref())
+                        state.pin_folders_into(&locations, gap)
                     }
                 }
                 _ => false,

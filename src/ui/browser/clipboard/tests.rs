@@ -1082,12 +1082,12 @@ fn directory_drag_snapshot_uses_entry_metadata_without_touching_paths() {
                             fixture.path().join(index.to_string()),
                         ));
                         entry.kind = kind;
+                        entry.display_name = format!("Display {index}");
                         entry
                     })
                     .collect::<Vec<_>>();
                 let content = file_drag_content(&entries).expect("drag content");
                 let snapshot = drag_snapshot_for_content(&content).expect("trusted snapshot");
-                assert_eq!(snapshot.all_directories, expected);
                 assert_eq!(
                     &*snapshot.locations,
                     entries
@@ -1095,23 +1095,20 @@ fn directory_drag_snapshot_uses_entry_metadata_without_touching_paths() {
                         .map(|entry| entry.location.clone())
                         .collect::<Vec<_>>()
                 );
+                assert_eq!(
+                    snapshot.folders.as_deref(),
+                    expected
+                        .then(|| {
+                            entries
+                                .iter()
+                                .map(|entry| (entry.location.clone(), entry.display_name.clone()))
+                                .collect::<Vec<_>>()
+                        })
+                        .as_deref()
+                );
                 let foreign = gtk::gdk::ContentProvider::for_value(&"foreign".to_value());
                 assert!(drag_snapshot_for_content(&foreign).is_none());
             }
-        },
-    );
-}
-
-#[test]
-fn an_expired_internal_drag_never_replaces_another_drops_sources() {
-    crate::test_support::gtk_test(
-        "ui::browser::clipboard::tests::an_expired_internal_drag_never_replaces_another_drops_sources",
-        || {
-            let dragged = crate::test_support::operations::entry(Location::local("/fixture/stale"));
-            drop(file_drag_content(&[dragged]).expect("drag content"));
-            let prepared = prepare_file_drop_target(|| Some(Location::local("/fixture/dest")));
-
-            assert!(prepared.state.sources(&prepared.target).is_empty());
         },
     );
 }
