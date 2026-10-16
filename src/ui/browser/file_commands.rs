@@ -61,11 +61,9 @@ pub(crate) enum CreateRefusal {
     Unsupported,
     Invalid(&'static str),
     Exists(String),
-    /// A name the location would store as another, with why.
     Unstorable(String),
 }
 
-/// A file or folder the user typed the name of, before it is made.
 pub(crate) struct TypedEntry {
     parent: Location,
     name: String,
@@ -73,9 +71,7 @@ pub(crate) struct TypedEntry {
 }
 
 impl TypedEntry {
-    /// Why the entry cannot be made as typed, read off the main thread. The
-    /// operation still checks collisions atomically; this keeps the name
-    /// editable.
+    /// The operation still checks collisions atomically; this keeps the name editable.
     pub(crate) async fn refusal(&self) -> Option<CreateRefusal> {
         let folder = gio_file_for_location(&self.parent);
         if let Some(message) =

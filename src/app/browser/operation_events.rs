@@ -83,8 +83,6 @@ impl OperationCompletion {
         publish(UndoEntry::Trash(locations));
     }
 
-    /// Records the undo of a transfer; returns the moved items it leaves out
-    /// because their sources kept entries, in the order they moved.
     fn record_transfer_undo(
         &self,
         (moved, moved_to, report): (&[Location], &HashMap<Location, Location>, &TransferReport),
@@ -148,8 +146,6 @@ impl OperationCompletion {
     }
 }
 
-/// The moved items whose sources kept entries the report lists, each the
-/// entry itself or a folder holding it.
 fn kept_back<'a>(moved: &'a [Location], report: &TransferReport) -> HashSet<&'a Location> {
     let moved = moved.iter().collect::<HashSet<_>>();
     let mut kept_back = HashSet::new();

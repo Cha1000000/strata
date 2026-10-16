@@ -132,8 +132,6 @@ fn kept_line(item: &KeptItem, in_trash: bool) -> String {
     }
 }
 
-/// A section's first lines, the only ones formatted, how many it has, and
-/// what follows them.
 struct Lines {
     listed: Vec<String>,
     count: usize,
@@ -186,7 +184,6 @@ fn bullets(lines: &Lines) -> String {
     text
 }
 
-/// The renamed items by cause, in the order each cause first appears.
 fn renamed_sections(renamed: &[RenamedItem]) -> Vec<(String, Lines)> {
     let mut sections = Vec::<(RenameCause, Lines)>::new();
     for item in renamed {
@@ -257,8 +254,6 @@ fn left_sections(report: &TransferReport) -> Vec<(String, Lines)> {
     left
 }
 
-/// The detail of the dialog of an operation that failed, was cancelled or
-/// completed with errors: its `outcome`, then everything it reported.
 pub(super) fn outcome_detail(outcome: String, report: &TransferReport) -> String {
     let mut reported = renamed_sections(&report.renamed);
     reported.extend(left_sections(report));

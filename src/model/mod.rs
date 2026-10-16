@@ -284,8 +284,7 @@ impl Location {
         destination.child(&self.file_name()?)
     }
 
-    /// `self`, within `from`, at the same place within `to`, which may be
-    /// of the other kind, as a move between a share and a local disk is.
+    /// `to` may be of the other kind, as in a move between a share and a local disk.
     pub fn rebase(&self, from: &Self, to: &Self) -> Option<Self> {
         if let (LocationKind::Native(path), LocationKind::Native(from), LocationKind::Native(to)) =
             (&self.kind, &from.kind, &to.kind)

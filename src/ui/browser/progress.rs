@@ -178,7 +178,6 @@ fn transfer_rate_status(rate: Option<f64>, transferred: u64, total: Option<u64>)
 
 pub(super) const TRANSFER_SUBTITLE: &str = "Cancelling will not undo completed changes";
 
-/// The icon and untranslated title of a transfer's progress row.
 pub(super) fn transfer_heading(moving: bool) -> (&'static str, &'static str) {
     if moving {
         (crate::assets::icons::FOLDER, "Moving items")
@@ -216,8 +215,6 @@ impl FileProgressState {
         self.show_operation_progress(total, at_once, icon, title_text, subtitle_text, on_cancel);
     }
 
-    /// Shows the row of an operation of `total` items, `at_once` or after the
-    /// usual delay.
     pub(super) fn show_operation_progress(
         self: &Rc<Self>,
         total: usize,
@@ -236,15 +233,12 @@ impl FileProgressState {
         self.present_file_operation_progress_later(icon, title_text, subtitle_text, on_cancel);
     }
 
-    /// Whether the row is on screen.
     pub(super) fn is_presented(&self) -> bool {
         self.file_progress_view.borrow().is_some()
     }
 
-    /// A transfer's row while it still finds where its items go, preparing
-    /// them, which only a destination slower than the usual delay shows. It
-    /// shows where the transfer's own row will, docked for a copy, with the
-    /// first item and the destination that row names.
+    /// Shown only where finding where the items go outlasts the usual delay, where the transfer's
+    /// own row will be.
     pub(super) fn show_transfer_preparation(
         self: &Rc<Self>,
         moving: bool,

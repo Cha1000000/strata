@@ -164,7 +164,6 @@ pub(crate) fn tr(message: &str) -> String {
     rust_i18n::t!(message).into_owned()
 }
 
-/// `name` in the language's quotation marks.
 pub(crate) fn quoted(name: &str) -> String {
     rust_i18n::t!("“%{name}”", name = name).into_owned()
 }

@@ -66,8 +66,7 @@ pub enum TransferConflict {
 pub struct PasteItem {
     pub source: Location,
     pub conflict: TransferConflict,
-    /// The name the conflict prompt showed for the item in the destination,
-    /// which the paste then uses as it is; `None` lets the paste plan it.
+    /// What the conflict prompt showed, which the paste uses as it is; `None` lets it plan one.
     pub target_name: Option<OsString>,
 }
 
@@ -95,12 +94,9 @@ pub struct UndoMoveItem {
     pub conflict: TransferConflict,
 }
 
-/// How a transfer names what it brings onto another filesystem.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum NameMode {
-    /// By the destination's rules, as forward transfers do.
     Fix,
-    /// As they were, as an undo gives items back to where they came from.
     Keep,
 }
 
@@ -151,9 +147,7 @@ pub enum ReplacedOriginal {
     Deleted,
 }
 
-/// What an operation put at a path, as it put it there, so that undo
-/// deletes it only while it is unchanged. Only the provider that recorded
-/// it can read it.
+/// Only the provider that recorded it can read it.
 #[derive(Clone)]
 pub struct PlacedSnapshot(Arc<dyn Any + Send + Sync>);
 
@@ -325,7 +319,6 @@ pub enum RenameCause {
     /// Characters, trailing dots or spaces, a reserved name or an encoding
     /// the destination cannot store.
     Invalid,
-    /// Shortened to fit the destination's name length.
     TooLong,
 }
 
@@ -342,7 +335,6 @@ pub enum SpecialKind {
     Pipe,
     Socket,
     Device,
-    /// A symbolic link the destination refuses.
     Symlink,
 }
 
@@ -362,8 +354,6 @@ pub enum KeptCause {
     Skipped(SpecialKind),
     /// Its copy was no longer where the move put it.
     CopyGone,
-    /// An undo could not give it back the name it had, so it is still at
-    /// `saved_as`, for the reason `error`.
     NameNotRestored {
         saved_as: Location,
         error: String,
@@ -594,7 +584,6 @@ pub enum OperationEvent {
         /// The finished archive, recorded so undo can trash it.
         archive: Location,
         original: Option<ReplacedOriginal>,
-        /// The archive as it replaced an original moved to Trash.
         placed: Option<PlacedSnapshot>,
     },
     Extracted {

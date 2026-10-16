@@ -129,9 +129,7 @@ impl ViewState {
             .show_file_operation_progress(total, icon, title, subtitle, on_cancel);
     }
 
-    /// Shows the row of the transfer that just started, in place of the row
-    /// that showed it preparing: at once where that one was on screen, so
-    /// the transfer never leaves the screen in between.
+    /// At once where the preparing row was on screen, so the transfer never leaves the screen.
     pub(in crate::ui::browser) fn show_transfer_progress(
         self: &Rc<Self>,
         total: usize,

@@ -58,8 +58,6 @@ const REMOTE_DIRECTORY_BATCH_SIZE: usize = 128;
 const PEEK_MAX_ENTRIES: usize = 64;
 const PEEK_TIME_BUDGET: Duration = Duration::from_secs(3);
 
-/// How a progress row names the folder `location` an operation goes into:
-/// a description, and a short label.
 pub(crate) fn folder_destination_texts(location: &Location) -> (String, String) {
     let path = location.display_path();
     (
@@ -509,8 +507,6 @@ struct MergeUndoState {
     created: Vec<Location>,
     /// `None` once its incoming copy was saved under another name.
     overwritten: Vec<Option<Location>>,
-    /// Where each location is in `created` and in `overwritten`, so that a
-    /// report costs one lookup per entry.
     created_at: HashMap<Location, Vec<usize>>,
     overwritten_at: HashMap<Location, Vec<usize>>,
     placed: HashMap<Location, PlacedSnapshot>,
@@ -937,8 +933,7 @@ fn moved_target(
         .or_else(|| source.transfer_target(destination))
 }
 
-/// Items that never left their own directory carry no undo. Each record
-/// keeps the followed `renamed` entries beneath where its item went.
+/// Items that never left their own directory carry no undo.
 fn move_records(
     sources: &[Location],
     destination: &Location,
@@ -1540,7 +1535,6 @@ impl Browser {
         false
     }
 
-    /// Selects `targets` once the open `directory` has reloaded.
     pub fn reveal_reloaded_locations(
         self: &Rc<Self>,
         directory: &Location,

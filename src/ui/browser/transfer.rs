@@ -50,7 +50,6 @@ struct TransferCollision {
     target_name: Option<OsString>,
     /// Both colliding items are directories, so their contents can be merged.
     mergeable: bool,
-    /// Names inside the item change to suit the destination.
     fixes_inside: bool,
 }
 
@@ -137,9 +136,6 @@ fn transfer_is_noop(source: &Location, destination: &Location, move_sources: boo
                 .is_some_and(|parent| parent.equal(&destination)))
 }
 
-/// What the conflict prompt says of `collision` in `destination`: the name
-/// the item will take there, where that is another, and what the choice
-/// does.
 fn conflict_explanation(
     collision: &TransferCollision,
     destination: &Location,
@@ -661,9 +657,6 @@ impl ViewState {
         });
     }
 
-    /// Shows the transfer's progress row while it finds where `sources` go in
-    /// `destination`, once that takes a while; its Cancel cancels
-    /// `cancellable`.
     fn show_transfer_preparation(
         &self,
         moving: bool,

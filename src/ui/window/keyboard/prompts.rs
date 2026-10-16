@@ -355,8 +355,6 @@ impl Dispatcher {
     }
 }
 
-/// Keeps the create or rename `prompt` open with why its name is refused,
-/// or closes it where nothing can be made or renamed here.
 fn refuse_typed_name(
     shortcuts: &ShortcutFooter,
     view: &BrowserView,
