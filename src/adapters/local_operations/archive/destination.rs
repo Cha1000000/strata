@@ -653,10 +653,6 @@ impl MemberNames {
         fix_name(name, &self.rules().fixed, is_directory)
     }
 
-    pub(super) fn holds_links(&self) -> bool {
-        self.policy.profiles.holds_links(&self.site)
-    }
-
     pub(super) fn holds_link_to(&self, target: &OsStr) -> bool {
         self.policy.profiles.holds_link_to(&self.site, target)
     }

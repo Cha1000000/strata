@@ -33,13 +33,14 @@ pub(crate) use mount_snapshot::{
     RemovableRoot, invalidate_mount_snapshot, watch_operation_mounts, with_mount_snapshot,
 };
 #[cfg(test)]
+pub(crate) use mounts::FAT32_MAX_FILE_SIZE;
+#[cfg(test)]
 pub(crate) use mounts::set_mountinfo_for_isolated_test;
 pub(crate) use mounts::{
-    CoarseTimes, Family, FuseFormat, MountKey as TrashMountKey, MountSite, MountTable, MountType,
-    family, holds_symlinks, is_fuse_fs_type, is_local_fuse_overlay, max_file_size,
+    CoarseTimes, Family, FuseFormat, LONGEST_NAME_NTFS_3G_RENAMES_OVER, MountKey as TrashMountKey,
+    MountSite, MountTable, MountType, family, holds_symlinks, is_fuse_fs_type,
+    is_local_fuse_overlay, max_file_size,
 };
-#[cfg(test)]
-pub(crate) use mounts::{FAT32_MAX_FILE_SIZE, LONGEST_NAME_NTFS_3G_RENAMES_OVER};
 pub(crate) use names::{
     MountNames, NameEncoding, NameLimit, NameProfile, NameRules, PrivateUse, Reserved, StrictRule,
     Strictness, Strip, gvfs_bridge_profile, gvfs_profile,
