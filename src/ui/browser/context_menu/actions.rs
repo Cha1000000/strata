@@ -68,10 +68,40 @@ impl Drop for ActionMenuSection {
         for handler in self.monitor_handlers.get_mut().drain(..) {
             self.monitor.disconnect(handler);
         }
-        if self.popover.parent().is_some() {
-            self.popover.unparent();
-        }
+        release_popover(&self.popover);
     }
+}
+
+// GTK before 4.22 can keep a window's pointer focus on a hidden popover and crash
+// on its missing surface after unparenting. A sensitivity change repicks the target.
+fn release_popover(popover: &gtk::PopoverMenu) {
+    if popover.parent().is_none() {
+        return;
+    }
+    popover.set_sensitive(false);
+    popover.set_sensitive(true);
+    popover.unparent();
+}
+
+// GTK before 4.22 leaves each replaced model's position handler on its freed
+// section box, so the popover must start without a model.
+#[expect(
+    unsafe_code,
+    reason = "gtk4-rs requires a model to construct a nested PopoverMenu"
+)]
+fn nested_popover_menu() -> gtk::PopoverMenu {
+    use gtk::glib::translate::{IntoGlib, from_glib_none};
+
+    // SAFETY: GTK accepts a null model and returns a new floating widget.
+    let widget = unsafe {
+        gtk::ffi::gtk_popover_menu_new_from_model_full(
+            std::ptr::null_mut(),
+            gtk::PopoverMenuFlags::NESTED.into_glib(),
+        )
+    };
+    // SAFETY: `widget` is the non-null widget GTK just returned; this sinks its floating reference.
+    let widget: gtk::Widget = unsafe { from_glib_none(widget) };
+    widget.downcast().expect("GTK constructs a PopoverMenu")
 }
 
 impl ActionMenuSection {
@@ -84,9 +114,7 @@ impl ActionMenuSection {
     ) -> Rc<Self> {
         let model = gio::Menu::new();
         let root = gio::Menu::new();
-        let popover =
-            gtk::PopoverMenu::from_model_full(&gio::Menu::new(), gtk::PopoverMenuFlags::NESTED);
-        popover.set_menu_model(gio::MenuModel::NONE);
+        let popover = nested_popover_menu();
         popover.set_has_arrow(false);
         popover.add_css_class("folder-context-popover");
         popover.add_css_class("actions-context-popover");
@@ -167,9 +195,8 @@ impl ActionMenuSection {
                 gtk::glib::idle_add_local_once(move || {
                     if let Some(popover) = weak.upgrade()
                         && !popover.is_visible()
-                        && popover.parent().is_some()
                     {
-                        popover.unparent();
+                        release_popover(&popover);
                     }
                 });
             });
