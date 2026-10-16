@@ -2,6 +2,7 @@
 
 use std::os::unix::fs::MetadataExt;
 
+use super::fs_quirks::{Op, Racer};
 use super::*;
 use crate::services::{RenameCause, RenamedItem};
 
@@ -417,51 +418,126 @@ fn top_level_items_a_destination_takes_for_an_earlier_one_are_numbered_and_repor
 fn an_item_already_at_a_top_level_name_is_never_taken_for_one_the_paste_saved()
 -> Result<(), Box<dyn Error>> {
     let _serial = serial()?;
-    let root = tempfile::tempdir()?;
-    let source = root.path().join("source");
-    let destination = root.path().join("destination");
-    fs::create_dir_all(&source)?;
-    fs::create_dir(&destination)?;
-    let items = (0..10)
-        .map(|index| format!("item {index}"))
-        .collect::<Vec<_>>();
-    for name in &items {
-        fs::write(source.join(name), name)?;
-    }
-    fs::write(destination.join("item 3"), b"theirs")?;
-    let _destination = FsQuirks::install(
-        &destination,
-        Quirks {
-            case_insensitive: true,
-            ..Quirks::ext4()
-        },
-    );
-    let events = Rc::new(RefCell::new(Vec::new()));
-    let emitted = events.clone();
-
-    let _operation = LocalOperationProvider.paste(
-        PasteRequest {
-            id: OperationRequestId(1530),
-            destination: Location::local(&destination),
-            items: items
-                .iter()
-                .map(|name| PasteItem {
-                    source: Location::local(source.join(name)),
-                    conflict: TransferConflict::FailIfExists,
-                    target_name: None,
-                })
+    let padding = (0..8).map(|index| format!("item {index}"));
+    let spellings = ["Makefile", "makefile"].map(String::from);
+    // Past eight files a paste copies several at once.
+    let rows = [
+        (
+            "theirs at the same spelling",
+            Some("item 3"),
+            padding
+                .clone()
+                .chain(["item 8", "item 9"].map(String::from))
                 .collect(),
-            move_sources: false,
-        },
-        Rc::new(move |event| emitted.borrow_mut().push(event)),
-    );
-    drive_until_transfer_settles(&events);
+            false,
+        ),
+        (
+            "theirs at another spelling, at once",
+            Some("MAKEFILE"),
+            spellings.iter().cloned().chain(padding).collect(),
+            false,
+        ),
+        (
+            "theirs at another spelling, one at a time",
+            Some("MAKEFILE"),
+            spellings.to_vec(),
+            false,
+        ),
+        (
+            "theirs once the earlier spelling was saved",
+            Some("MAKEFILE"),
+            spellings.to_vec(),
+            true,
+        ),
+        (
+            "one name from two folders",
+            None,
+            vec!["one/notes.txt".to_string(), "two/notes.txt".to_string()],
+            false,
+        ),
+    ];
+    for (row, theirs, items, after_saved) in rows {
+        let items: Vec<String> = items;
+        let root = tempfile::tempdir()?;
+        let source = root.path().join("source");
+        let destination = root.path().join("destination");
+        fs::create_dir(&destination)?;
+        for item in &items {
+            let path = source.join(item);
+            fs::create_dir_all(path.parent().ok_or("no parent")?)?;
+            fs::write(path, item)?;
+        }
+        let moved_out = root.path().join("moved out");
+        let mut before = Vec::new();
+        match theirs {
+            Some(theirs) if after_saved => {
+                let (saved, taken, moved_out) = (
+                    destination.join("Makefile"),
+                    destination.join(theirs),
+                    moved_out.clone(),
+                );
+                let racer: Racer = Box::new(move || {
+                    fs::rename(&saved, &moved_out).expect("move the saved item out");
+                    fs::write(&taken, b"theirs").expect("take its name");
+                });
+                before.push((Op::OpenSource, "makefile", 0, racer));
+            }
+            Some(theirs) => fs::write(destination.join(theirs), b"theirs")?,
+            None => {}
+        }
+        let _source = FsQuirks::install(
+            &source,
+            Quirks {
+                before,
+                ..Quirks::ext4()
+            },
+        );
+        let _destination = FsQuirks::install(
+            &destination,
+            Quirks {
+                case_insensitive: true,
+                ..Quirks::ext4()
+            },
+        );
 
-    assert!(matches!(
-        terminal_transfer(&events.borrow()),
-        Some(OperationEvent::TransferFailed { .. })
-    ));
-    assert_eq!(fs::read(destination.join("item 3"))?, b"theirs");
-    assert!(!destination.join("item 3 (1)").exists());
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let emitted = events.clone();
+
+        let _operation = LocalOperationProvider.paste(
+            PasteRequest {
+                id: OperationRequestId(1530),
+                destination: Location::local(&destination),
+                items: items
+                    .iter()
+                    .map(|item| PasteItem {
+                        source: Location::local(source.join(item)),
+                        conflict: TransferConflict::FailIfExists,
+                        target_name: None,
+                    })
+                    .collect(),
+                move_sources: false,
+            },
+            Rc::new(move |event| emitted.borrow_mut().push(event)),
+        );
+        drive_until_transfer_settles(&events);
+
+        let events = events.take();
+        assert!(
+            matches!(
+                terminal_transfer(&events),
+                Some(OperationEvent::TransferFailed { .. })
+            ),
+            "{row}: {events:?}"
+        );
+        if let Some(theirs) = theirs {
+            assert_eq!(fs::read(destination.join(theirs))?, b"theirs", "{row}");
+        }
+        let saved = names(&destination)?;
+        assert!(
+            saved.iter().all(|name| !name.ends_with(" (1)")),
+            "{row}: {saved:?}"
+        );
+        assert_eq!(moved_out.exists(), after_saved, "{row}");
+    }
     Ok(())
 }

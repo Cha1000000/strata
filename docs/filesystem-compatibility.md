@@ -848,11 +848,11 @@ Fixed names that equal another name are numbered, in the byte order of the names
 `a:b` beside `a_b` in a folder copied to a stick becomes `a_b (1)`. FAT and exFAT also take names
 that differ only in case for one, so there a kept name that equals one sorting before it in bytes
 is numbered as an alias, among a paste's top-level items too (`Readme.txt` beside `README.txt`).
-Elsewhere, a top-level item whose name the destination reports taken by an item the same paste
-saved under another spelling, as SMB and casefolded folders do for `makefile` after `Makefile`, is
-numbered and reported as an alias too; where more than eight files are copied at once, the one
-saved second is numbered. Any other item at the name keeps it taken. In a merge, a planned name
-equal to an existing item replaces that item like any other same-named one.
+Elsewhere, a top-level item whose name the destination reports taken by an earlier item of the
+same paste saved under another spelling, as SMB and casefolded folders do for `makefile` after
+`Makefile`, is numbered and reported as an alias too. Any other item at the name, including one
+that took the earlier item's place since, keeps it taken. In a merge, a planned name equal to an
+existing item replaces that item like any other same-named one.
 The completion report lists every fixed name with the name it was saved as, and says which were
 shortened.
 

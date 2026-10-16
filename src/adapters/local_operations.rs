@@ -4,8 +4,10 @@
 mod tests;
 
 mod archive;
+mod case_variants;
 mod names;
 mod native_fs;
+use case_variants::CaseVariants;
 use names::{Key, PlanEntry, Planned, Taken, fix::fix_name, numbered_names, plan_names};
 use native_fs::LocalFileIdentity;
 pub(super) use native_fs::open_local_child_directory;
@@ -1151,7 +1153,7 @@ async fn execute_parallel_copy_plans(
     (worker_count, moving): (usize, bool),
     cancellable: &gio::Cancellable,
     copying: &Copying,
-    settling: &mut Settling,
+    (settling, variants): (&mut Settling, &mut CaseVariants),
 ) -> ParallelCopyOutcome {
     let mut outcome = ParallelCopyOutcome {
         failed: Vec::new(),
@@ -1159,13 +1161,18 @@ async fn execute_parallel_copy_plans(
         written_paths: Vec::new(),
     };
     let last = plans.last().map(|plan| plan.index);
-    let saved = plans
-        .iter()
-        .map(|plan| plan.written_path.clone())
-        .collect::<Rc<[_]>>();
     while outcome.next < plans.len() && !cancellable.is_cancelled() {
-        let end = (outcome.next + worker_count).min(plans.len());
-        let chunk = &plans[outcome.next..end];
+        let start = outcome.next;
+        let full = (start + worker_count).min(plans.len());
+        // An item waits for the earlier ones whose names differ from its own only in case.
+        let end = (start + 1..full)
+            .find(|&position| {
+                plans[start..position]
+                    .iter()
+                    .any(|earlier| variants.follows(plans[position].index, earlier.index))
+            })
+            .unwrap_or(full);
+        let chunk = &plans[start..end];
         outcome
             .written_paths
             .extend(chunk.iter().map(|plan| plan.written_path.clone()));
@@ -1174,8 +1181,11 @@ async fn execute_parallel_copy_plans(
             .iter()
             .cloned()
             .map(|plan| {
-                let (cancellable, copying, saved) =
-                    (cancellable.clone(), copying.clone(), saved.clone());
+                let (cancellable, copying, earlier) = (
+                    cancellable.clone(),
+                    copying.clone(),
+                    variants.earlier(plan.index),
+                );
                 context.spawn_local(async move {
                     let target = gio::File::for_path(&plan.written_path);
                     let mut taken = Taken::Fail;
@@ -1184,7 +1194,7 @@ async fn execute_parallel_copy_plans(
                             Err(error)
                                 if taken == Taken::Fail
                                     && error.matches(gio::IOErrorEnum::Exists)
-                                    && taken_by_paste(&target, &saved).await =>
+                                    && case_variants::taken_by(&target, &earlier).await =>
                             {
                                 taken = Taken::Number;
                             }
@@ -1200,6 +1210,7 @@ async fn execute_parallel_copy_plans(
         for (plan, task) in chunk.iter().zip(tasks) {
             match task.await {
                 Ok(Ok((transferred, taken))) => {
+                    variants.saved(plan.index, &transferred.target).await;
                     let aliased = taken == Taken::Number;
                     let cause = plan.renamed.or(aliased.then_some(RenameCause::Alias));
                     if let (Some(cause), Some(name)) = (cause, plan.source_path.file_name()) {
@@ -1278,39 +1289,6 @@ async fn transfer_planned(
         reported: copied.reported,
         owed: Owed::default(),
     })
-}
-
-/// Whether `target` holds an item that an earlier one of the paste was saved as under another
-/// spelling, as a case-insensitive destination whose rules do not fold shows only by "exists".
-async fn taken_by_paste(target: &gio::File, saved: &[PathBuf]) -> bool {
-    let Some(path) = target.path() else {
-        return false;
-    };
-    let earlier = saved
-        .iter()
-        .filter(|earlier| {
-            earlier.parent() == path.parent() && earlier.file_name() != path.file_name()
-        })
-        .cloned()
-        .collect::<Vec<_>>();
-    if earlier.is_empty() {
-        return false;
-    }
-    gio::spawn_blocking(move || {
-        let identity = |path: &Path| {
-            let dir = open_local_parent_directory(path.parent()?).ok()?;
-            fs().stat(Entry::new(&dir, path.file_name()?), false)
-                .ok()
-                .map(|stat| stat.identity)
-        };
-        identity(&path).is_some_and(|found| {
-            earlier
-                .iter()
-                .any(|earlier| identity(earlier) == Some(found))
-        })
-    })
-    .await
-    .unwrap_or(false)
 }
 
 async fn first_free_target<T, F: Future<Output = Result<T, glib::Error>>>(
@@ -3018,6 +2996,10 @@ impl OperationProvider for LocalOperationProvider {
                         .map(|planned| destination.child(&planned.target))
                 })
                 .collect::<Vec<_>>();
+            let mut variants =
+                CaseVariants::new(planned.iter().enumerate().filter_map(|(index, planned)| {
+                    Some((index, planned.as_ref()?.target.clone()))
+                }));
             let progress =
                 TransferProgressTracker::new(request.id, total_bytes, total_files, emit.clone());
             progress.emit();
@@ -3047,7 +3029,7 @@ impl OperationProvider for LocalOperationProvider {
                     (worker_count, request.move_sources),
                     &operation_cancellable,
                     &copying,
-                    &mut settling,
+                    (&mut settling, &mut variants),
                 )
                 .await;
                 settling.finish().await;
@@ -3119,7 +3101,6 @@ impl OperationProvider for LocalOperationProvider {
                     None => false,
                 };
             let mut written_paths = Vec::new();
-            let mut saved = Vec::new();
             for (index, item) in request.items.iter().enumerate() {
                 if operation_cancellable.is_cancelled() || settling.failure().is_some() {
                     settling.finish().await;
@@ -3330,7 +3311,11 @@ impl OperationProvider for LocalOperationProvider {
                             Err(error)
                                 if taken == Taken::Fail
                                     && error.matches(gio::IOErrorEnum::Exists)
-                                    && taken_by_paste(&target, &saved).await =>
+                                    && case_variants::taken_by(
+                                        &target,
+                                        &variants.earlier(index),
+                                    )
+                                    .await =>
                             {
                                 taken = Taken::Number;
                                 aliased = true;
@@ -3391,7 +3376,7 @@ impl OperationProvider for LocalOperationProvider {
                 if let Some(target) = target_location.clone() {
                     affected_locations.insert(target);
                 }
-                saved.extend(target.path());
+                variants.saved(index, &target).await;
                 let cause = planned[index]
                     .as_ref()
                     .and_then(|planned| planned.cause)
