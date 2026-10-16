@@ -137,7 +137,6 @@ pub(super) trait FsOps: Send + Sync {
     fn xattr_names(&self, fd: BorrowedFd<'_>) -> Result<Vec<OsString>, Errno>;
     fn get_xattr(&self, fd: BorrowedFd<'_>, name: &OsStr) -> Result<Vec<u8>, Errno>;
     fn set_xattr(&self, fd: BorrowedFd<'_>, name: &OsStr, value: &[u8]) -> Result<(), Errno>;
-    /// The mount holding `fd`, and where it is mounted.
     fn mount_type(&self, fd: BorrowedFd<'_>) -> Option<(MountType, MountSite)>;
     /// The format udev's database records (`ID_FS_TYPE`) for the block
     /// device holding `fd`, where it has a record.
@@ -183,7 +182,6 @@ pub(super) fn assert_off_main_thread() {
     );
 }
 
-/// The path the kernel resolved `fd` to.
 pub(super) fn opened_path(fd: BorrowedFd<'_>) -> std::io::Result<PathBuf> {
     assert_off_main_thread();
     std::fs::read_link(format!("/proc/self/fd/{}", fd.as_raw_fd()))

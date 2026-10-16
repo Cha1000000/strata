@@ -39,11 +39,8 @@ pub(super) fn parse_copy_suffix(stem: &OsStr) -> (&OsStr, Option<u64>) {
     (stem, None)
 }
 
-/// The names a mount that refused `name` may take for it, in a folder whose
-/// names follow `rules`, with the Windows rules each needs beyond those and
-/// why: the name the folder's rules give, then those each rule that changes
-/// that gives alone, then those such rules give together, fewest first, each
-/// where it is a new name.
+/// The folder's rules' name first, then the names each rule that changes it gives alone, then
+/// such rules together, fewest first, each where it is a new name.
 pub(super) fn stricter_names(
     name: &OsStr,
     rules: &NameProfile,
@@ -77,7 +74,6 @@ pub(super) fn stricter_names(
     names
 }
 
-/// Whether a mount may refuse `name` for a reason the Windows rules know.
 pub(super) fn may_be_refused(name: &OsStr) -> bool {
     let strictest = NameProfile::posix(None).stricter(Strictness::all());
     fix::fix_name(name, &strictest, false).cause.is_some()
@@ -94,7 +90,6 @@ pub(super) fn numbered_names(
     numbered_names_after(name, is_directory, limit, 0)
 }
 
-/// [`numbered_names`] past the first `skipped`, which are never made.
 fn numbered_names_after(
     name: &OsStr,
     is_directory: bool,
@@ -118,7 +113,6 @@ fn numbered_names_after(
         .map(move |index| numbered_name(base_stem, index, extension, limit, is_directory))
 }
 
-/// `stem (number)` and `extension`, cut to fit `limit`.
 pub(super) fn numbered_name(
     stem: &OsStr,
     number: u64,
@@ -142,7 +136,6 @@ pub(super) enum Taken {
 }
 
 impl Taken {
-    /// `limit` is read only to number names.
     pub(super) fn names(
         self,
         name: &OsStr,
@@ -157,7 +150,6 @@ impl Taken {
     }
 }
 
-/// How a folder tells its names apart.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum Key {
     Exact,
@@ -178,25 +170,18 @@ impl Key {
 pub(super) struct PlanEntry<'a> {
     pub name: &'a OsStr,
     pub is_directory: bool,
-    /// Whether `profile` fixes the name, rather than it being kept.
     pub fixing: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct Planned {
     pub target: OsString,
-    /// Why `target` differs from the name: the fix's cause, or
-    /// [`RenameCause::Alias`] where the folder takes a name that needs no
-    /// fix for a sibling's that keeps it.
     pub cause: Option<RenameCause>,
 }
 
-/// The names of a folder's entries, in their order. A name that needs no
-/// fix is kept unless a mount that folds names takes it for another kept
-/// name, which sorts first. Fixed names, and the kept names that sort later,
-/// are numbered past the kept names and each other in the byte order of the
-/// names they come from, so the plan depends only on the entries. Fails
-/// when a name has no free number left.
+/// Fixed names, and kept names a folding mount takes for an earlier kept one, are numbered past
+/// the kept names in the byte order of the names they come from, so the plan depends only on
+/// the entries.
 pub(super) fn plan_names(
     entries: &[PlanEntry<'_>],
     profile: &NameProfile,

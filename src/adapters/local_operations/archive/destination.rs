@@ -338,9 +338,6 @@ impl ExtractionDestination {
             .map_err(staging_removal_failed)
     }
 
-    /// The name of the folder an archive's entries are published in, before
-    /// it is numbered: the archive's name without its extension, as the
-    /// destination stores it.
     pub(super) fn folder_name<'a>(&self, archive_name: &'a str) -> Fixed<'a> {
         self.names
             .fixed(OsStr::new(archive_stem(archive_name)), true)
@@ -440,7 +437,6 @@ impl ExtractionDestination {
         self.names.rules().limit
     }
 
-    /// Whether nothing is at `name` in `directory`, never following a link there.
     fn is_free(&self, directory: BorrowedFd<'_>, name: &OsStr) -> Result<bool, Unmade> {
         match fs().stat(
             Entry {
@@ -473,7 +469,6 @@ impl ExtractionDestination {
         }
     }
 
-    /// Makes the folder `name` in `directory`, or finds the name taken.
     fn make_folder(&self, directory: BorrowedFd<'_>, name: &OsStr) -> Result<bool, Unmade> {
         let entry = Entry {
             dir: directory,
@@ -511,7 +506,6 @@ impl ExtractionDestination {
         .map_err(|error| Unmade::of(placed.parent.as_fd(), error, errno_text(error)))
     }
 
-    /// Makes a symbolic link at `placed`.
     pub(super) fn create_symlink(
         &self,
         placed: &Placed,
@@ -640,8 +634,6 @@ impl ExtractionDestination {
     }
 }
 
-/// How members are named at a destination: by the rules of its mount, as
-/// the extraction first saw it, with what its refusals taught it since.
 #[derive(Clone)]
 pub(super) struct MemberNames {
     policy: NamePolicy,
@@ -664,19 +656,14 @@ impl MemberNames {
         fix_name(name, &self.rules().fixed, is_directory)
     }
 
-    /// Whether the destination may hold symbolic links, as far as the
-    /// extraction knows.
     pub(super) fn holds_links(&self) -> bool {
         self.policy.profiles.holds_links(&self.site)
     }
 
-    /// Teaches the destination that it holds no symbolic links.
     pub(super) fn refuse_links(&self) {
         self.policy.profiles.refuse_links(&self.site);
     }
 
-    /// Teaches a destination that learns that names also follow the
-    /// Windows rules in `strictness`.
     fn learn(&self, strictness: Strictness) {
         if self.site.rules.learns {
             self.policy.profiles.learn(&self.site, strictness);
@@ -684,18 +671,13 @@ impl MemberNames {
     }
 }
 
-/// Why a member was not made.
 pub(super) enum Unmade {
-    /// The destination refused its name with the error.
     Refused(Errno),
-    /// The destination cannot hold a symbolic link, as the error says.
     Unheld(Errno),
     Failed(String),
 }
 
 impl Unmade {
-    /// A call that makes something in `directory` failed with `error`, as
-    /// `message` says unless the destination refused the name.
     fn of(directory: BorrowedFd<'_>, error: Errno, message: String) -> Self {
         if refuses_name(fs(), directory, error) {
             Self::Refused(error)
@@ -704,7 +686,6 @@ impl Unmade {
         }
     }
 
-    /// A refused name as the failure `failed` words from why it was refused.
     pub(super) fn worded(self, failed: impl FnOnce(&str) -> String) -> Self {
         match self {
             Self::Refused(error) => Self::Failed(failed(&error_detail(refusal_reason(error)))),
@@ -820,30 +801,20 @@ fn remove_tree(parent: BorrowedFd<'_>, name: &OsStr, files: bool) -> rustix::io:
     Ok(true)
 }
 
-/// Where members go in the staging folder. Each name is fixed by the
-/// destination's rules, each folder is made once for the member path that
-/// names it, and a name another member took, or that the destination finds
-/// taken, is numbered past, so distinct folders are never merged. A name the
-/// destination refuses is fixed by stricter rules, as copies do.
+/// A name another member took, or that the destination finds taken, is numbered past, so
+/// distinct folders are never merged. A name the destination refuses is fixed by stricter
+/// rules, as copies do.
 pub(super) struct ExtractNameResolver {
     names: MemberNames,
-    /// Per member path of a folder, where the folder is in the staging
-    /// folder, and its index.
     folders: HashMap<PathBuf, (PathBuf, usize)>,
-    /// Per folder index and name, the member name that took it. Names the
-    /// destination takes for one another are found taken there.
     taken: HashMap<(usize, OsString), OsString>,
-    /// Members saved under another name, and why, by staging path.
     renamed: Vec<(PathBuf, PathBuf, RenameCause)>,
 }
 
-/// The name a member takes in a folder of the staging folder.
 pub(super) struct Placed {
     pub(super) parent: Rc<OwnedFd>,
     pub(super) name: OsString,
-    /// Where the member is in the staging folder.
     pub(super) path: PathBuf,
-    /// Where it would be under its own name.
     pub(super) requested: PathBuf,
     folder: usize,
     member: OsString,
@@ -856,12 +827,9 @@ impl Placed {
     }
 }
 
-/// A name claimed for a member in a folder.
 struct Claim<T> {
     name: OsString,
     cause: Option<RenameCause>,
-    /// What was made there; `None` where the member path named something
-    /// else the extraction made.
     made: Option<T>,
 }
 
@@ -875,9 +843,6 @@ impl ExtractNameResolver {
         }
     }
 
-    /// The folder at the member path `path`, and the folders holding it,
-    /// made in `staging` where the extraction has not made them yet;
-    /// returns where it is in the staging folder.
     pub(super) fn folder(
         &mut self,
         staging: &ExtractionDestination,
@@ -927,10 +892,6 @@ impl ExtractNameResolver {
         Ok((parent, index))
     }
 
-    /// Makes the member `path`, which is not a folder, with `make` under a
-    /// free name in its folder, which is made where it is new. The name is
-    /// the member's once [`Self::made`] says it was made there. A name the
-    /// destination refused under every rule is left for the caller to word.
     pub(super) fn leaf<T>(
         &mut self,
         staging: &ExtractionDestination,
@@ -959,8 +920,6 @@ impl ExtractNameResolver {
         claim.made.ok_or_else(|| no_available_name(member).into())
     }
 
-    /// The member `placed` was made there; returns where it is in the
-    /// staging folder.
     pub(super) fn made(&mut self, placed: Placed) -> PathBuf {
         if let Some(cause) = placed.cause {
             self.renamed
@@ -971,8 +930,6 @@ impl ExtractNameResolver {
         placed.path
     }
 
-    /// Where the member `path` would be under its own name, in its folder,
-    /// which is made where it is new.
     pub(super) fn requested(
         &mut self,
         staging: &ExtractionDestination,
@@ -983,8 +940,6 @@ impl ExtractNameResolver {
         Ok(folder.join(member))
     }
 
-    /// Where the member `path` would go, as far as the folders made so far
-    /// tell, without making anything or numbering a name.
     pub(super) fn known(&self, path: &Path) -> PathBuf {
         let mut member = PathBuf::new();
         let mut known = PathBuf::new();
@@ -999,15 +954,10 @@ impl ExtractNameResolver {
         known
     }
 
-    /// What was saved under another name, and why, by staging path.
     pub(super) fn take_renamed(&mut self) -> Vec<(PathBuf, PathBuf, RenameCause)> {
         std::mem::take(&mut self.renamed)
     }
 
-    /// The first name for the member `name` in the folder `folder` that
-    /// `make`, told why it is not `name`, makes: the name the destination's
-    /// rules give, then where the destination refuses it, those stricter
-    /// rules give in turn, which a destination that learns keeps.
     fn claim<T>(
         &self,
         folder: usize,
@@ -1051,9 +1001,6 @@ impl ExtractNameResolver {
         Err(refused.unwrap_or_else(|| no_available_name(name).into()))
     }
 
-    /// The first of `base`, a name for the member `name` that is not `name`
-    /// for `cause`, and its numbered names, that no other member took in the
-    /// folder `folder` and that `make` makes.
     fn numbered<T>(
         &self,
         folder: usize,
@@ -1097,10 +1044,6 @@ impl ExtractNameResolver {
     }
 }
 
-/// Why a member named `name` was saved as `saved`: the fix `fixed` gave
-/// its name, that another member, `taken_by`, took the name first, unless
-/// that member had the same name, or that the destination took it for
-/// another.
 fn rename_cause(
     name: &OsStr,
     fixed: Option<RenameCause>,

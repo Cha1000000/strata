@@ -68,7 +68,6 @@ pub(super) struct Tree {
     stages: Mutex<Vec<StagedSibling>>,
     placed: Mutex<Vec<PathBuf>>,
     nested: Mutex<Nested>,
-    /// The mount the tree's source is read through, and its site there.
     source: OnceLock<(Mount, Site)>,
 }
 
@@ -132,10 +131,8 @@ impl Tree {
         self.source.get().map(|(mount, _)| mount.family) == Some(Family::Smb)
     }
 
-    /// Whether the names of a source folder on `source`'s device are brought
-    /// onto another filesystem in a target folder on `target`'s, at `site`.
-    /// The tree's source is read through one mount and site, which in
-    /// practice hold every source folder on its device.
+    /// The tree's source is read through one mount and site, which in practice hold every source
+    /// folder on its device.
     fn crosses(&self, source: &EntryStat, target: &EntryStat, site: &Site) -> bool {
         self.source.get().is_none_or(|(_, source_site)| {
             crosses(
@@ -145,8 +142,6 @@ impl Tree {
         })
     }
 
-    /// The names of a folder's children as they arrive in a target folder
-    /// whose names follow `rules`.
     fn plan(
         &self,
         source: BorrowedFd<'_>,
@@ -286,7 +281,6 @@ impl Naming {
 /// another job's entry mistaken for one whose reply was lost.
 pub(super) struct Names {
     requested: Vec<OsString>,
-    /// How many entries ask for each collision key.
     keys: OnceLock<HashMap<OsString, usize>>,
     numbered: Mutex<HashSet<OsString>>,
     /// What the folder's jobs made, by collision key, where a taken name may
@@ -347,8 +341,6 @@ impl Names {
         })
     }
 
-    /// Whether this job is the one to try `name`, which no entry of the
-    /// folder asks for but `own`, the job's own entry.
     fn claims(&self, name: &OsStr, own: Option<&OsStr>) -> bool {
         let key = stage::collision_key(name);
         let asked = match self.requested().get(&key) {
@@ -377,8 +369,6 @@ impl Names {
         Err(Failure::Place(PlaceError::Exists))
     }
 
-    /// `name`, which stricter rules gave `refused`, a name the mount refused,
-    /// or a number of it where it is taken.
     fn stricter<T>(
         &self,
         (refused, name): (&OsStr, &OsStr),
@@ -422,8 +412,6 @@ pub(super) fn make_numbered<T>(
     Ok((saved, made))
 }
 
-/// Reports a child the plan named otherwise, from its own name to the
-/// planned one; `make_numbered` reports any later name from there.
 fn planned_rename(copy: &Copy, folder: &Path, name: &OsStr, planned: &Planned) {
     if let Some(cause) = planned.cause {
         copy.renamed(folder.join(name), folder.join(&planned.target), cause);
@@ -436,7 +424,6 @@ pub(super) struct Folder {
     pub(super) parent: EntryStat,
     pub(super) path: PathBuf,
     pub(super) naming: Naming,
-    /// Where the target takes its names from.
     pub(super) site: Site,
     pub(super) mount: Mount,
     /// Names link only within one scope, whose restrictive folders get their
@@ -727,8 +714,7 @@ impl Made {
         Ok(true)
     }
 
-    /// Leaves a special file out, reported under its own name since nothing
-    /// took the planned one.
+    /// Reported under its own name, since nothing took the planned one.
     fn skip(&self, copy: &Copy, name: &OsStr, kind: SpecialKind) -> Result<(), Failure> {
         copy.skip(self.path.join(name), (name, self.recorded.as_deref()), kind)
     }
@@ -1214,14 +1200,11 @@ pub(super) struct Merged {
     pub(super) path: PathBuf,
     pub(super) recorded_in: Option<Arc<manifest::Folder>>,
     pub(super) placing: Option<Arc<Placing>>,
-    /// How names are given in the folder merged into the parent; `None` at
-    /// the root.
     pub(super) parent: Option<MergedNames>,
 }
 
-/// How names are given in a merged folder, which a folder merged into it
-/// shares unless another filesystem is mounted at either side, as a bind
-/// mount of the same one shares its rules.
+/// Shared by a folder merged into it unless another filesystem is mounted at either side, as a
+/// bind mount of the same one shares its rules.
 #[derive(Clone, Copy)]
 pub(super) struct MergedNames {
     devices: (u64, u64),

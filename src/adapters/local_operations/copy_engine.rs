@@ -111,7 +111,6 @@ pub(super) enum Destination {
     Merge(PathBuf, Option<Arc<Placing>>),
 }
 
-/// The paths a merge records what it places at, as it places it.
 pub(super) struct Placing {
     root: PathBuf,
     wanted: HashSet<PathBuf>,
@@ -121,10 +120,8 @@ pub(super) struct Placing {
 }
 
 impl Placing {
-    /// `root` is the merged folder. Beneath it, `wanted` are the paths undo
-    /// reverts. Where the merge records all it creates, `unwanted` are the
-    /// overwritten paths undo leaves. `left` is the operation's
-    /// [`placed_budget`].
+    /// Beneath `root`, `wanted` are the paths undo reverts; where the merge records all it
+    /// creates, `unwanted` are the overwritten paths undo leaves.
     pub(super) fn new(
         root: PathBuf,
         wanted: HashSet<PathBuf>,
@@ -145,8 +142,6 @@ impl Placing {
         self.wanted.contains(path)
     }
 
-    /// `path` is where the merge placed `name` of `dir`, beneath its folder,
-    /// which may be a name it numbered instead of a wanted one.
     fn placed(
         &self,
         fs: &dyn FsOps,
@@ -188,7 +183,6 @@ impl Placing {
     }
 }
 
-/// Records what a merge copied to `path` some other way.
 pub(super) async fn record_placed(
     placing: Arc<Placing>,
     path: PathBuf,
@@ -205,13 +199,10 @@ pub(super) async fn record_placed(
     }
 }
 
-/// The entries all records of what one operation placed may hold.
 pub(super) fn placed_budget() -> Arc<AtomicUsize> {
     Arc::new(manifest::placed_entries())
 }
 
-/// What is at `path`, recorded as an operation just put it there, within
-/// what is `left` of its [`placed_budget`]; nothing if cancelled meanwhile.
 pub(super) async fn placed(
     path: PathBuf,
     left: Arc<AtomicUsize>,
@@ -249,7 +240,6 @@ fn placed_within(
     }
 }
 
-/// Deletes what an operation placed at `path` if all of it is unchanged.
 pub(super) async fn remove_placed(
     path: PathBuf,
     placed: PlacedSnapshot,
@@ -548,8 +538,6 @@ struct Followed<T> {
 struct Left {
     renamed: Vec<(PathBuf, PathBuf, RenameCause)>,
     skipped: Vec<(PathBuf, SpecialKind)>,
-    /// The name the item was to have, where the mount refused it, and why
-    /// the one it took differs.
     item: Option<(OsString, RenameCause)>,
 }
 
@@ -733,8 +721,6 @@ fn split(path: &Path) -> Result<(Arc<OwnedFd>, OsString), glib::Error> {
     Ok((Arc::new(parent), name.to_os_string()))
 }
 
-/// The first of the names `taken` allows for `name` that `attempt` makes
-/// in `dir`, or what the mount takes for one it refused.
 fn first_free<T>(
     copy: &Copy,
     dir: BorrowedFd<'_>,
@@ -754,10 +740,8 @@ fn first_free<T>(
     Err(Failure::Place(PlaceError::Exists))
 }
 
-/// Makes what a mount refused under `name` under the names it may take
-/// for it instead, in a folder whose names follow `rules`, until one is
-/// made. A mount that learns keeps the rules that made it. Fails as at
-/// first where none is.
+/// A mount that learns keeps the rules that made a name. Fails as at first where none is
+/// made.
 fn retry_refused<T>(
     copy: &Copy,
     rules: &FolderRules,
@@ -988,7 +972,6 @@ fn publish_folder(
         name: staged.name.clone(),
         recorded_in: None,
     };
-    // Where the stage cannot be placed, it is copied under the name instead.
     let mut copied_from = None;
     let published = first_free(copy, staged.parent.as_fd(), (name, taken, true), |name| {
         if copied_from.is_none() {
@@ -1264,9 +1247,7 @@ fn merge(
 enum Failure {
     Cancelled,
     Os(Errno),
-    /// A call that creates a name failed as mounts fail names they refuse.
     NameRefused(Errno),
-    /// The destination cannot hold a symbolic link, as this error says.
     LinkRefused(Errno),
     Place(PlaceError),
     Changed,
@@ -1357,7 +1338,6 @@ impl Failure {
     }
 }
 
-/// A name the mount refused with `error`, as a failure to copy the item `name`.
 fn refused_name(name: &str, error: Errno) -> glib::Error {
     let kind = if error == Errno::NAMETOOLONG {
         gio::IOErrorEnum::FilenameTooLong
@@ -1372,7 +1352,6 @@ fn refused_name(name: &str, error: Errno) -> glib::Error {
     glib::Error::new(kind, &message)
 }
 
-/// Why a mount refused a name with `error`.
 pub(super) fn refusal_reason(error: Errno) -> String {
     if error == Errno::NAMETOOLONG {
         os_error_text(error)
@@ -1381,8 +1360,7 @@ pub(super) fn refusal_reason(error: Errno) -> String {
     }
 }
 
-/// How a call that creates `at` failed: as mounts fail names they refuse,
-/// SMB and exfat-fuse with `ENOENT` in a folder that still exists.
+/// SMB and exfat-fuse refuse a name with `ENOENT` in a folder that still exists.
 fn creation_failure(fs: &dyn FsOps, at: Entry<'_>, error: Errno) -> Failure {
     if refuses_name(fs, at.dir, error) {
         Failure::NameRefused(error)
@@ -1391,8 +1369,6 @@ fn creation_failure(fs: &dyn FsOps, at: Entry<'_>, error: Errno) -> Failure {
     }
 }
 
-/// Whether a call that creates something in `dir` failed with `error`
-/// because the mount refuses the name.
 pub(super) fn refuses_name(fs: &dyn FsOps, dir: BorrowedFd<'_>, error: Errno) -> bool {
     match error {
         Errno::INVAL | Errno::ILSEQ | Errno::NAMETOOLONG | Errno::BADMSG => true,
@@ -1428,7 +1404,6 @@ fn is_unsupported(error: Errno) -> bool {
     matches!(error, Errno::OPNOTSUPP | Errno::NOTTY | ENOTSUPP)
 }
 
-/// Whether a symbolic link refused with `error` says the mount holds none.
 pub(super) fn holds_no_links(error: Errno) -> bool {
     error == Errno::NOSYS || is_unsupported(error)
 }
@@ -1447,7 +1422,6 @@ fn same_entry(current: &EntryStat, identity: LocalFileIdentity, family: Family) 
     }
 }
 
-/// Removes what a copy made at `entry`; anything else there is an error.
 fn remove_own(
     fs: &dyn FsOps,
     entry: Entry<'_>,
@@ -1609,13 +1583,11 @@ impl Copy {
         )
     }
 
-    /// The mount holding `dir`, as this operation first saw it.
     fn mount(&self, dir: BorrowedFd<'_>) -> Mount {
         let (key, capabilities) = self.names.profiles.mount(self.fs, dir);
         Mount::with(key, capabilities)
     }
 
-    /// How long a name may be in `dir`, for numbering one taken there.
     fn name_limit(&self, dir: BorrowedFd<'_>) -> NameLimit {
         self.folder_rules(dir).limit
     }
@@ -1624,17 +1596,12 @@ impl Copy {
         self.names.in_folder(&self.site(&self.mount(dir), dir))
     }
 
-    /// Where `dir`, on `mount`, takes its names from.
     fn site(&self, mount: &Mount, dir: BorrowedFd<'_>) -> Site {
         self.names.profiles.site(mount.key, mount.names, dir)
     }
 
-    /// The item a forward copy was given, which the mount refused to name
-    /// `refused_name`, one of the names `taken` allows for `name`, in `dir`,
-    /// under a name it takes instead, numbered where that is taken. It is
-    /// reported from `name` where that was planned for it, or for Keep Both,
-    /// where it is the item's own name; a name planned otherwise is reported
-    /// by the planner. Names given back, as undo does, stay refused.
+    /// Names given back, as undo does, stay refused. A name planned otherwise than for Keep Both
+    /// is reported by the planner.
     fn retry_item<T>(
         &self,
         dir: BorrowedFd<'_>,
@@ -1663,9 +1630,8 @@ impl Copy {
         Ok((made, value))
     }
 
-    /// The error with which `site` refused to hold a symbolic link,
-    /// as `failure` shows. A target the mount refuses fails as a name that
-    /// stricter rules could not help. A mount without links at all learns.
+    /// A target the mount refuses fails as a name stricter rules could not help. A mount without
+    /// links at all learns.
     fn refused_link(&self, site: &Site, failure: &Failure) -> Option<Errno> {
         let error = match failure {
             Failure::LinkRefused(error) => *error,
@@ -2018,8 +1984,6 @@ impl Drop for SourceFd {
     }
 }
 
-/// A listed name that no longer holds the entry, or holds another kind, is a
-/// change; other errors, such as an unreadable entry, are reported as they are.
 fn open_failure(name: &OsStr, error: Errno) -> Failure {
     match error {
         Errno::NOENT | Errno::NOTDIR | Errno::LOOP | Errno::STALE | Errno::NXIO | Errno::NODEV => {
@@ -2448,7 +2412,6 @@ impl<'a> FileCopy<'a> {
             dir,
             name: &stage.name,
         };
-        // Where the stage cannot be placed, it is copied under the name instead.
         let mut created_from = false;
         let published = first_free(copy, dir, (name, taken, false), |name| {
             if !created_from {

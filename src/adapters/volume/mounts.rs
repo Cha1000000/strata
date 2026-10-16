@@ -33,8 +33,6 @@ impl MountEntry {
     }
 }
 
-/// Where a mount sits: its mount point, and the folder of its filesystem
-/// shown there, which is `/` unless a bind mount shows a subfolder.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct MountSite {
     pub point: PathBuf,
@@ -97,10 +95,9 @@ impl MountType {
         }
     }
 
-    /// `device_format` is udev's `ID_FS_TYPE`, read for `fuseblk` only, and
-    /// `name_max` the mount's `f_namelen`, which only byte-counting
-    /// filesystems mean. A `fuseblk` mount whose device udev cannot tell is
-    /// taken for a Windows format, as for `coarse_times`.
+    /// `name_max` is the mount's `f_namelen`, which only byte-counting filesystems mean. A
+    /// `fuseblk` mount whose device udev cannot tell is taken for a Windows format, as for
+    /// `coarse_times`.
     pub(crate) fn name_profile(&self, device_format: Option<&str>, name_max: u32) -> NameProfile {
         let has = |name| self.super_options.split(',').any(|option| option == name);
         let bytes = byte_limit(name_max);
@@ -174,7 +171,6 @@ impl MountType {
         }
     }
 
-    /// The bridge mounts every GVfs backend in a folder of its own.
     pub(crate) fn is_gvfs_bridge(&self) -> bool {
         self.fs_type == "fuse.gvfsd-fuse"
     }
@@ -188,8 +184,6 @@ enum FatFormat {
     Exfat,
 }
 
-/// FAT and exFAT, served by the kernel or by a FUSE daemon on a device udev
-/// names. `device_format` is udev's `ID_FS_TYPE`, read for `fuseblk` only.
 fn fat_format(fs_type: &str, device_format: Option<&str>) -> Option<FatFormat> {
     match (fs_type, device_format) {
         ("vfat" | "msdos", _) | ("fuseblk", Some("vfat")) => Some(FatFormat::Fat),

@@ -23,13 +23,10 @@ use crate::{
 #[derive(Debug)]
 pub(in crate::adapters::local_operations) struct Fixed<'a> {
     pub name: Cow<'a, OsStr>,
-    /// [`RenameCause::Invalid`], or [`RenameCause::TooLong`] where text
-    /// was cut off the end.
     pub cause: Option<RenameCause>,
 }
 
-/// `name` as the mount stores it: unchanged where it can, and the same
-/// again when fixed twice.
+/// A fixed name is fixed to itself.
 pub(in crate::adapters::local_operations) fn fix_name<'a>(
     name: &'a OsStr,
     profile: &NameProfile,
@@ -55,9 +52,8 @@ pub(in crate::adapters::local_operations) fn fix_name<'a>(
     }
 }
 
-/// Splits a file's name before its extension, which keeps its dot: the
-/// last one, or `.tar` with the one after it. Folders and names such as
-/// `.bashrc` have none.
+/// The extension keeps its dot: the last one, or `.tar` with the one after it. Folders and
+/// names such as `.bashrc` have none.
 pub(in crate::adapters::local_operations) fn split_extension(
     name: &OsStr,
     is_directory: bool,
@@ -86,20 +82,16 @@ pub(in crate::adapters::local_operations) fn split_extension(
     )
 }
 
-/// What keeps a name the user typed from being stored as typed.
 #[derive(Debug, Eq, PartialEq)]
 pub(in crate::adapters::local_operations) enum Refusal {
-    /// Each character the mount cannot hold, once, in the order typed.
     Characters(Vec<char>),
     LeadingSpace,
     TrailingDotOrSpace,
-    /// The Windows device name the name starts with.
     Reserved(String),
     TooLong,
 }
 
-/// Why the mount would store `name` as another name, which is exactly when
-/// [`fix_name`] changes it. A new folder's name may have to be shorter.
+/// `Some` exactly when [`fix_name`] changes `name`. A new folder's name may have to be shorter.
 pub(in crate::adapters::local_operations) fn refusal(
     name: &str,
     profile: &NameProfile,
@@ -127,8 +119,6 @@ pub(in crate::adapters::local_operations) fn refusal(
     (!Limit::of(profile.limit, new_folder).fits(name.as_bytes())).then_some(Refusal::TooLong)
 }
 
-/// Replaces each character the mount cannot hold or would read back as
-/// another one, and each malformed sequence where it needs UTF-8, by `_`.
 fn storable<'a>(name: Cow<'a, OsStr>, profile: &NameProfile) -> Cow<'a, OsStr> {
     let checks_encoding = profile.encoding != NameEncoding::AnyBytes;
     if !checks_encoding && profile.rules == NameRules::Posix && profile.mapped.is_none() {
@@ -156,8 +146,6 @@ fn storable<'a>(name: Cow<'a, OsStr>, profile: &NameProfile) -> Cow<'a, OsStr> {
     Cow::Owned(OsString::from_vec(stored))
 }
 
-/// Whether the mount cannot hold `character`, or would read it back as
-/// another one.
 fn refuses(profile: &NameProfile, character: char) -> bool {
     !holds(profile.encoding, character)
         || profile.rules == NameRules::Windows && windows_refuses(character)
@@ -251,7 +239,6 @@ fn unreserved(name: Cow<'_, OsStr>, reserved: Reserved) -> Cow<'_, OsStr> {
     Cow::Owned(OsString::from_vec(unreserved))
 }
 
-/// Where the device name `name` starts with ends, if the mount reserves it.
 fn reserved_word(name: &[u8], reserved: Reserved) -> Option<usize> {
     if reserved == Reserved::None {
         return None;
@@ -289,7 +276,6 @@ fn is_device(word: &[u8]) -> bool {
         })
 }
 
-/// The bytes and UTF-16 units one name may take.
 #[derive(Clone, Copy)]
 struct Limit {
     bytes: Option<usize>,
@@ -336,7 +322,6 @@ impl Limit {
         }
     }
 
-    /// Where the longest start of `name` that fits ends, between characters.
     fn prefix_end(self, name: &[u8]) -> usize {
         let (mut bytes, mut units) = (0, 0);
         for (piece_bytes, piece_units) in pieces(name) {
@@ -350,8 +335,6 @@ impl Limit {
     }
 }
 
-/// The bytes and UTF-16 units of each character, and of each byte of a
-/// malformed sequence.
 fn pieces(name: &[u8]) -> impl Iterator<Item = (usize, usize)> + '_ {
     name.utf8_chunks().flat_map(|chunk| {
         chunk
@@ -366,11 +349,9 @@ fn units(name: &[u8]) -> usize {
     pieces(name).map(|(_, units)| units).sum()
 }
 
-/// `stem`, `tail` and `extension` joined, with the end of `stem` cut until
-/// the name fits. Only the stem [`split_extension`] finds in `stem` and
-/// `extension` together is cut, so `.tar` stays before ` (1).gz`; where
-/// that extension takes more than half the limit, the whole name is cut and
-/// `tail` goes last.
+/// Only the stem [`split_extension`] finds in `stem` and `extension` together is cut, so
+/// `.tar` stays before ` (1).gz`; where that extension takes more than half the limit, the
+/// whole name is cut and `tail` goes last.
 pub(in crate::adapters::local_operations) fn fit(
     stem: &OsStr,
     tail: &str,
@@ -391,9 +372,6 @@ fn shortened(name: &OsStr, limit: Limit, is_directory: bool) -> OsString {
     OsString::from_vec(cut(name.as_bytes(), name.len(), b"", limit, is_directory))
 }
 
-/// `name` with `tail` put at `at`, cutting the stem before it and keeping
-/// an extension that takes at most half the limit; the stem is never cut
-/// away.
 fn cut(name: &[u8], at: usize, tail: &[u8], limit: Limit, is_directory: bool) -> Vec<u8> {
     let (stem, _) = split_extension(OsStr::from_bytes(name), is_directory);
     let (stem_end, at) = if limit.half().fits(&name[stem.len()..]) {
@@ -414,9 +392,6 @@ fn cut(name: &[u8], at: usize, tail: &[u8], limit: Limit, is_directory: bool) ->
 /// clusters, such as a letter under hundreds of marks, are cut inside.
 const CLUSTER_WALK_BACK: usize = 8;
 
-/// The start of the grapheme cluster `end` falls in, if it starts after the
-/// stem does and at most [`CLUSTER_WALK_BACK`] characters back; else `end`.
-/// A malformed byte is a cluster of its own.
 fn cluster_start(stem: &[u8], end: usize) -> usize {
     let mut offset = 0;
     for chunk in stem.utf8_chunks() {
@@ -445,8 +420,6 @@ fn text_cluster_start(text: &str, end: usize) -> Option<usize> {
         .map(|index| starts[index])
 }
 
-/// Whether each character of `text` starts a grapheme cluster, and one more
-/// for its end.
 #[expect(
     unsafe_code,
     reason = "Pango's bindings leave out the log attributes that hold its cluster breaks"

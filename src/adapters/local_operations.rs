@@ -87,8 +87,6 @@ const UNCONFIRMED_REASON: &str =
 const UNSUPPORTED_REASON: &str =
     "This location can\u{2019}t guarantee that another item won\u{2019}t be overwritten";
 
-/// Why a transfer leaves out an item it was given, which the destination
-/// cannot hold, instead of failing it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, glib::ErrorDomain)]
 #[error_domain(name = "strata-unheld")]
 enum Unheld {
@@ -101,8 +99,6 @@ fn unheld(error: &glib::Error) -> Option<SpecialKind> {
     })
 }
 
-/// What a transfer reports of the item at `source` it left out, as
-/// `destination` cannot hold it: a move keeps its source.
 fn left_out(
     source: &Location,
     destination: &gio::File,
@@ -552,9 +548,8 @@ where
     .await
 }
 
-/// Renames `file` through its GIO backend. GLib calls a backend's rename
-/// without checking it has one, and GIO's stand-in for a location no
-/// backend serves, as `smb://` is without a running GVfs, has none.
+/// GLib calls a backend's rename without checking it has one, and GDummyFile, which serves
+/// `smb://` without a running GVfs, has none.
 async fn set_display_name(
     file: &gio::File,
     name: &str,
@@ -1176,8 +1171,6 @@ fn transfer_size(
     })
 }
 
-/// Each item's size, file count, kind and GIO's id of its filesystem, as
-/// far as they could be read, and the totals.
 #[derive(Debug)]
 struct TransferSizes {
     sizes: Vec<Option<u64>>,
@@ -1288,10 +1281,6 @@ pub(crate) fn transfer_source_name(source: &gio::File) -> Option<OsString> {
     crate::model::transfer_file_name(source)
 }
 
-/// The name each item named `names` takes in the destination: its own, or
-/// one planned against the other items' names where `fixing` says it comes
-/// from another filesystem than the destination's, whose rules are `rules`.
-/// `None` for an item without a name.
 fn paste_targets(
     names: &[Option<OsString>],
     rules: &NameProfile,
@@ -1317,9 +1306,6 @@ fn paste_targets(
         .collect())
 }
 
-/// The names a paste of `items` from `sources` gives them: each name the
-/// conflict prompt showed, as it is, and names planned for the rest. A shown
-/// name that is not one plain name gives its item none.
 fn planned_paste(
     items: &[PasteItem],
     sources: &[gio::File],
@@ -1382,7 +1368,6 @@ struct ParallelCopyPlan {
     source_path: PathBuf,
     target_location: Location,
     written_path: PathBuf,
-    /// Why the target's name differs from the source's.
     renamed: Option<RenameCause>,
 }
 
@@ -1523,7 +1508,6 @@ async fn execute_parallel_copy_plans(
         for (plan, task) in chunk.iter().zip(tasks) {
             match task.await {
                 Ok(Ok(transferred)) => {
-                    // The engine reports a name the mount refused from the planned one.
                     if let (Some(cause), Some(name)) = (plan.renamed, plan.source_path.file_name())
                     {
                         let requested = gio::File::for_path(plan.written_path.with_file_name(name));
@@ -1616,7 +1600,6 @@ impl CopyInto {
         gio::FileCopyFlags::ALL_METADATA | overwrite
     }
 
-    /// The folder already at `target`, which the copy then does not make.
     async fn existing_folder(
         self,
         target: &gio::File,
@@ -1642,14 +1625,11 @@ impl CopyInto {
     }
 }
 
-/// A target folder a copy found in place.
 #[derive(Clone, Copy)]
 struct ExistingFolder {
     device: Option<u64>,
 }
 
-/// The device GIO's `info` of `file` gives, where it gives one for a native
-/// file.
 fn device(file: &gio::File, info: &gio::FileInfo) -> Option<u64> {
     let device = (file.is_native() && info.has_attribute(gio::FILE_ATTRIBUTE_UNIX_DEVICE))
         .then(|| u64::from(info.attribute_uint32(gio::FILE_ATTRIBUTE_UNIX_DEVICE)));
@@ -1658,15 +1638,12 @@ fn device(file: &gio::File, info: &gio::FileInfo) -> Option<u64> {
     device
 }
 
-/// The names in a target folder, and the devices of the source folder copied
-/// into it and of the folder itself, where known.
 #[derive(Clone, Copy)]
 struct TargetFolder {
     names: FolderNames,
     devices: (Option<u64>, Option<u64>),
 }
 
-/// What the GIO path knows of the names in the target folder it copies into.
 #[derive(Clone, Default)]
 struct GioNames {
     policy: NamePolicy,
@@ -1683,8 +1660,6 @@ impl GioNames {
         }
     }
 
-    /// The names in `target`, a folder the copy made, or the `existing` one
-    /// it copies `source`, on `source_device`, into.
     async fn of(
         &self,
         (source, source_device): (&gio::File, Option<u64>),
@@ -1715,13 +1690,9 @@ impl GioNames {
     }
 }
 
-/// The symbolic links a GIO copy of one item left out, as the destination
-/// cannot hold them.
 #[derive(Clone, Default)]
 struct LeftOut {
-    /// Whether the destination refused one, so the rest need no call.
     refused: Rc<Cell<bool>>,
-    /// Each at its source, and where it was to go.
     links: Rc<RefCell<Vec<(gio::File, gio::File)>>>,
 }
 
@@ -1738,7 +1709,6 @@ impl LeftOut {
             .collect()
     }
 
-    /// What a copy reports of them.
     fn report(&self, progress: Option<&TransferProgressTracker>) {
         let Some(progress) = progress else {
             return;
@@ -1762,7 +1732,6 @@ impl LeftOut {
         }
     }
 
-    /// Keeps their sources in `sources`, the record of the moved `source`.
     fn keep_in(&self, sources: &copy_engine::Manifest, source: &Path) {
         let Some(parent) = source.parent() else {
             return;
@@ -1777,10 +1746,8 @@ impl LeftOut {
     }
 }
 
-/// The names in `target`, a folder that existed in `parent`, as `source`
-/// arrives in it, the two on `devices`: looked up again only where another
-/// filesystem is mounted at either, as a bind mount of the parent's shares
-/// its rules.
+/// Looked up again only where another filesystem is mounted at either, as a bind mount of the
+/// parent shares its rules.
 async fn existing_folder_names(
     policy: &NamePolicy,
     parent: TargetFolder,
@@ -1843,16 +1810,11 @@ fn renamed_item(
     })
 }
 
-/// A folder's children, as their names, their kinds, and the names they
-/// take in a target folder whose names are `names`, with why those differ.
-/// Children that keep their names come batch by batch; those whose names
-/// are fixed come once the folder is listed, numbered past every sibling.
-/// Where the mount takes two names for one, which of them keeps its name
-/// depends on both, so such a folder is listed first.
+/// Children whose names are fixed come once the folder is listed, numbered past every sibling.
+/// Where the mount takes two names for one, the whole folder is listed first.
 struct NamedChildren<'a> {
     enumerator: &'a gio::FileEnumerator,
     names: FolderNames,
-    /// The names of the children that kept them.
     kept: Vec<OsString>,
     held: Vec<(OsString, gio::FileType)>,
     listed: bool,
@@ -1869,7 +1831,6 @@ impl<'a> NamedChildren<'a> {
         }
     }
 
-    /// The next of them; none once all came.
     async fn next(
         &mut self,
         cancellable: &gio::Cancellable,
@@ -1944,18 +1905,14 @@ fn was_cancelled(error: &glib::Error) -> bool {
     error.matches(gio::IOErrorEnum::Cancelled)
 }
 
-/// Whether an item a cancel cuts off while it is copied or moved from
-/// `source` to `target` is left as it was: between local folders a cancelled
-/// copy removes what it wrote, or fails when it cannot. A merge keeps what it
-/// placed, and GIO's copies to or from other locations are not checked.
+/// A cancelled copy between local folders removes what it wrote, or fails; GIO's copies to or
+/// from other locations are not checked.
 fn undone_when_cancelled(source: &gio::File, target: &gio::File) -> bool {
     source.is_native() && target.is_native()
 }
 
-/// Whether deleting `location` leaves it whole when a cancel cuts it off:
-/// GLib checks the cancel only before it moves a local item to Trash, while
-/// a permanent delete can remove a file, or part of a folder, before it
-/// sees the cancel.
+/// GLib checks the cancel only before it moves a local item to Trash, while a permanent delete
+/// can remove a file, or part of a folder, before it sees the cancel.
 fn deletion_undone_when_cancelled(location: &Location, permanent: bool) -> bool {
     location.native_path().is_some() && !permanent
 }
@@ -2166,12 +2123,10 @@ async fn copy_new_remote_file_with(
     }
 }
 
-/// What a GIO copy records of what it writes.
 #[derive(Clone)]
 enum CopyRecord {
     Nothing,
     Root(Rc<CreatedCopyRoot>),
-    /// The files a merge copies to the paths it wants.
     Placing(Option<Arc<copy_engine::Placing>>),
 }
 
@@ -2257,7 +2212,6 @@ fn copy_recursively_with_progress(
                             continue;
                         }
                         let saved_as = target.child(&planned.target);
-                        // A folder that failed partway keeps its fixed name.
                         if let Some(cause) = planned.cause
                             && (copied.is_ok() || query_exists(&saved_as, &cancellable).await)
                         {
@@ -2309,7 +2263,7 @@ fn copy_recursively_with_progress(
             )
             .await
             .map_err(|error| match link {
-                // As SMB and MTP backends refuse links.
+                // SMB and MTP backends refuse links.
                 Some(link) if error.matches(gio::IOErrorEnum::NotSupported) => {
                     let message = rust_i18n::t!(
                         "Could not copy %{name}: %{error}",
@@ -2370,8 +2324,6 @@ fn copy_recursively(
     })
 }
 
-/// A move gives `left` to collect the links GIO left out, whose sources it
-/// keeps; a copy reports them.
 async fn copy_new_recursively_on_filesystem(
     source: gio::File,
     target: gio::File,
@@ -2521,7 +2473,6 @@ type MoveAttempt = Rc<
     ) -> Pin<Box<dyn Future<Output = Result<Moved, glib::Error>>>>,
 >;
 
-/// Collects the links it leaves out in its `LeftOut`.
 type RemoteCopy = Rc<
     dyn Fn(
         gio::File,
@@ -2769,10 +2720,8 @@ fn could_not_move(name: &str, error: &str) -> String {
     .into_owned()
 }
 
-/// Gives the entries a move renamed beneath an item their names back once
-/// undo returned the item, deepest first, so that a renamed folder still
-/// has the name its entries' paths use. What keeps another name is reported,
-/// and what is gone from that name is not.
+/// Deepest first, so a renamed folder still has the name its entries' paths use. What keeps
+/// another name is reported; what is gone from that name is not.
 async fn restore_renamed(record: &MoveRecord, progress: &TransferProgressTracker) {
     let mut renamed = record
         .renamed
@@ -2836,7 +2785,6 @@ async fn restore_renamed(record: &MoveRecord, progress: &TransferProgressTracker
     progress.report(report);
 }
 
-/// How deep `location` is, comparable between locations of one kind.
 fn depth(location: &Location) -> usize {
     match location.native_path() {
         Some(path) => path.components().count(),
@@ -2850,16 +2798,11 @@ fn depth(location: &Location) -> usize {
 
 enum NameKept {
     Taken,
-    /// Nothing is at the name it was saved as any more.
     Gone,
-    /// The location cannot hold the name now.
     Refused,
-    /// For this reason, ready for a `…: %{error}` slot.
     Failed(String),
 }
 
-/// Gives each entry at the first path of a pair the name of the second, in
-/// their order, opening each folder once.
 fn restore_native_names(paths: &[(PathBuf, PathBuf)]) -> Vec<Result<(), NameKept>> {
     let mut folders = HashMap::<&Path, Result<Arc<OwnedFd>, String>>::new();
     let mut open = |folder| {
@@ -2881,7 +2824,6 @@ fn restore_native_names(paths: &[(PathBuf, PathBuf)]) -> Vec<Result<(), NameKept
             let folders = open(from_folder).and_then(|from| Ok((from, open(to_folder)?)));
             let (from_dir, to_dir) = match folders {
                 Ok(folders) => folders,
-                // As where the folder holding it is gone.
                 Err(_)
                     if std::fs::symlink_metadata(from)
                         .is_err_and(|error| error.kind() == io::ErrorKind::NotFound) =>
@@ -2914,8 +2856,6 @@ fn restore_native_names(paths: &[(PathBuf, PathBuf)]) -> Vec<Result<(), NameKept
         .collect()
 }
 
-/// Gives the entry at `saved_as`, a location GIO renames, the name of
-/// `requested`.
 async fn restore_name(saved_as: &Location, requested: &Location) -> Result<(), NameKept> {
     // GIO renames take a name as text.
     let Ok(name) = requested.file_name().unwrap_or_default().into_string() else {
@@ -2942,8 +2882,6 @@ async fn rename_native(source: PathBuf, target: PathBuf) -> Result<(), glib::Err
         .map_err(|failure| rename_failure_error(failure, &source, &target))
 }
 
-/// Renames `source` to `target` off the main thread, with how the rename
-/// failed where it could be tried.
 async fn renamed_native(
     source: PathBuf,
     target: PathBuf,
@@ -3154,7 +3092,6 @@ async fn move_restore_path(
     )
     .await
     .map_err(|error| {
-        // A cancelled copy removed what it made, or failed.
         if was_cancelled(&error) {
             error
         } else if error.matches(gio::IOErrorEnum::Exists) {
@@ -3512,7 +3449,6 @@ struct MergeCopy {
 struct MergeCopied {
     sources: Option<copy_engine::Manifest>,
     nested: Vec<copy_engine::Barrier>,
-    /// The links GIO left out of a move of a source it deletes.
     left: Vec<gio::File>,
 }
 
@@ -3827,7 +3763,6 @@ fn place_source(
 struct StagedReplacement {
     original: ReplacedOriginal,
     displaced: Option<DisplacedOriginal>,
-    /// What replaced an original in Trash, for undo to delete.
     placed: Option<PlacedSnapshot>,
 }
 
@@ -3879,7 +3814,6 @@ async fn replace_through_stage(
         let step = match removal {
             Removal::Trashed => {
                 publish_staged_replacement(staged, target_path.to_path_buf(), durable).await?;
-                // Only a copy is undone by deleting it.
                 let placed = if moving {
                     None
                 } else {
@@ -4187,7 +4121,6 @@ type StagedCopy = (Option<copy_engine::Manifest>, TransferReport);
 struct Copying {
     progress: Option<Rc<TransferProgressTracker>>,
     names: NamePolicy,
-    /// Shared by all the records of what one paste placed.
     placed_entries: Arc<AtomicUsize>,
 }
 
@@ -4223,8 +4156,7 @@ async fn replace_local(
 
 /// What a merge will write: `created` are the topmost destination paths with
 /// no existing counterpart, `overwritten` are leaf collisions whose originals
-/// were staged in Trash so undo can restore them, and `placed` what a copy
-/// put at either, under the names it was saved as.
+/// were staged in Trash so undo can restore them.
 #[derive(Default)]
 struct MergePlan {
     created: Vec<Location>,
@@ -4298,7 +4230,6 @@ fn classify_merge<'a>(
     })
 }
 
-/// Classifies a source child against the destination entry it lands on.
 async fn classify_merge_child(
     (child_source, source_is_directory, child_target): (gio::File, bool, gio::File),
     plan: &mut MergePlan,
@@ -4366,7 +4297,6 @@ async fn classify_merge_child(
     Ok(())
 }
 
-/// The device of `folder`, one of the two a merge combines.
 async fn merged_folder_device(
     folder: &gio::File,
     cancellable: &gio::Cancellable,
@@ -4473,7 +4403,6 @@ async fn merge_owing(
         }
         _ => false,
     };
-    // Undo applies to copies, and deletes what they placed only unchanged.
     let placing = target_path
         .as_ref()
         .filter(|_| !move_source && (!trashed.is_empty() || records_created))
@@ -4738,8 +4667,6 @@ fn permanently_delete(
     })
 }
 
-/// [`permanently_delete`] of `file` but for the `kept` entries beneath it
-/// and the folders holding them.
 fn permanently_delete_keeping(
     file: gio::File,
     kept: Rc<Vec<gio::File>>,
@@ -5888,14 +5815,9 @@ fn trashed_merge_original(
 
 enum Reverted {
     Restored(TransferReport),
-    /// What the operation put in place of the original may have changed
-    /// since, so it stays, and so does the original in Trash.
     Kept,
 }
 
-/// Deletes what an operation placed at `path` if all of it is unchanged, and
-/// tells whether nothing of it is left. Sets `deleting` once it deleted
-/// anything.
 async fn remove_unchanged(
     path: &Path,
     placed: &PlacedSnapshot,
@@ -5925,9 +5847,6 @@ async fn remove_unchanged(
     Ok(removed.kept.is_empty())
 }
 
-/// Reverts one overwritten merge path: deletes what the operation put there
-/// if all of it is unchanged, so the staged original can move back out of
-/// Trash. Sets `deleting` once it deleted anything.
 async fn undo_merged_overwrite(
     (location, placed): (&Location, Option<&PlacedSnapshot>),
     staged: &RestoreEntry,
@@ -6065,7 +5984,6 @@ async fn run_merge_undo(
                 completed_locations.push(location.clone());
                 None
             }
-            // Once its incoming copy is deleted, a cut-off item is no longer whole.
             Err(error) if was_cancelled(&error) => {
                 if deleting {
                     failed_locations.push(location.clone());
@@ -6120,7 +6038,6 @@ async fn run_merge_undo(
         .await;
         let found = queried.is_ok();
         let mut trashed_identity = None;
-        // Without Trash, only what the merge left unchanged is deleted.
         let mut deleting = false;
         let mut kept = false;
         let result = match queried {
@@ -6728,7 +6645,7 @@ impl OperationProvider for LocalOperationProvider {
                     ));
                     return;
                 }
-                // A file too large for FAT32, which says so.
+                // Too large for FAT32, which the error says.
                 Err(error) => {
                     emit(OperationEvent::TransferFailed {
                         request_id: request.id,
@@ -6849,8 +6766,7 @@ impl OperationProvider for LocalOperationProvider {
                 });
                 return;
             }
-            // A paste with a merge is undone as one, which deletes what it
-            // copied beside the merge where there is no Trash, as recorded.
+            // Undo deletes what a paste with a merge copied beside it where there is no Trash.
             let records_copies = !request.move_sources
                 && request
                     .items

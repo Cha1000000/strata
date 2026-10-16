@@ -11,9 +11,6 @@ use super::{
 };
 use crate::adapters::volume::NameProfile;
 
-/// Why `name` cannot be given to an item in a folder whose names follow
-/// `rules`, as the user reads it. A new folder's name may have to be
-/// shorter.
 pub(super) fn refused(name: &str, rules: &NameProfile, new_folder: bool) -> Option<String> {
     Some(match refusal(name, rules, new_folder)? {
         Refusal::Characters(characters) => rust_i18n::t!(
@@ -36,14 +33,12 @@ pub(super) fn refused(name: &str, rules: &NameProfile, new_folder: bool) -> Opti
     })
 }
 
-/// [`refused`] by the rules of names in `folder`, read off the main thread.
 pub(crate) async fn refused_in(folder: &gio::File, name: &str, new_folder: bool) -> Option<String> {
     refused(name, &folder_name_rules(folder).await?, new_folder)
 }
 
-/// A character as a name shows it, or its code point where it shows nothing
-/// of its own: control and format characters, spaces, marks that join the
-/// character before, and private-use or unassigned code points.
+/// Its code point where it shows nothing of its own: control and format characters, spaces,
+/// marks that join the character before, and private-use or unassigned code points.
 fn shown(character: char) -> String {
     use glib::{Unichar, UnicodeType};
     if matches!(

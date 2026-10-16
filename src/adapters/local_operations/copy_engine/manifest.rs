@@ -62,7 +62,6 @@ pub(in crate::adapters::local_operations) fn now() -> SystemTime {
     SystemTime::now()
 }
 
-/// Sleeps, or moves the time tests pretend it is on.
 pub(super) fn sleep(duration: Duration) {
     #[cfg(test)]
     if let Some(pretended) = lock(&TEST_NOW).as_mut() {
@@ -324,8 +323,6 @@ impl Manifest {
         self.copy = Some(copy);
     }
 
-    /// Keeps the recorded entry at `path`, beneath the folder holding the
-    /// moved item, for `cause`.
     pub(in crate::adapters::local_operations) fn keep(&self, path: &Path, cause: KeptCause) {
         let mut folder = self.root.clone();
         let mut names = path.iter().peekable();
@@ -393,7 +390,6 @@ pub(super) fn snapshot(
     })
 }
 
-/// What an operation put at a name, as it was once there.
 pub(in crate::adapters::local_operations) struct Placed {
     name: OsString,
     node: Node,
@@ -420,7 +416,6 @@ pub(in crate::adapters::local_operations) fn set_placed_entries_for_test(limit: 
     *lock(&TEST_PLACED_ENTRIES) = limit;
 }
 
-/// How many entries an operation's record of what it placed may hold.
 pub(super) fn placed_entries() -> AtomicUsize {
     #[cfg(test)]
     if let Some(limit) = *lock(&TEST_PLACED_ENTRIES) {
@@ -429,9 +424,8 @@ pub(super) fn placed_entries() -> AtomicUsize {
     AtomicUsize::new(PLACED_ENTRIES)
 }
 
-/// Run right after placing, so that it records what was placed. Fails once
-/// the operation's records would hold more than `left` entries, and gives
-/// back what it took, as a failed record is not kept.
+/// Run right after placing. Fails once the operation's records would hold more than `left`
+/// entries, and gives back what it took.
 pub(super) fn placed(
     fs: &dyn FsOps,
     (dir, name): (BorrowedFd<'_>, &OsStr),
@@ -454,8 +448,6 @@ pub(super) fn placed(
     }
 }
 
-/// The entries the operation's records may still hold, and how many one
-/// record took of them.
 struct Budget<'a> {
     left: &'a AtomicUsize,
     taken: AtomicUsize,
@@ -469,8 +461,8 @@ pub(super) fn of(parent: Arc<OwnedFd>, root: Arc<Folder>) -> Manifest {
     }
 }
 
-/// With `placed`, the entries it may still record, a file within a tick of
-/// its mount's coarse times is digested, for a deletion to compare.
+/// With `placed`, a file within a tick of its mount's coarse times is digested, for a deletion
+/// to compare.
 fn record(
     fs: &dyn FsOps,
     dir: BorrowedFd<'_>,
@@ -554,8 +546,6 @@ fn digested(
     })
 }
 
-/// The digest of the file's first `end` bytes, or of all of it if shorter,
-/// with how many bytes it read if `stopped` cut it short.
 fn digest_of(
     fs: &dyn FsOps,
     file: BorrowedFd<'_>,
@@ -606,12 +596,10 @@ pub(super) fn delete(
 
 pub(in crate::adapters::local_operations) struct Removed {
     pub kept: Vec<(PathBuf, KeptCause)>,
-    /// Whether any entry was deleted.
     pub removed: bool,
     pub result: Result<(), glib::Error>,
 }
 
-/// Deletes the recorded entries that are still as recorded.
 pub(super) fn remove(
     fs: &'static dyn FsOps,
     parent: Arc<OwnedFd>,
@@ -716,7 +704,6 @@ impl Deletion {
             })
     }
 
-    /// Whether the folder lists a name its record lacks.
     fn added_to(&self, opened: BorrowedFd<'_>, folder: &Folder) -> Result<bool, Errno> {
         let recorded: HashSet<OsString> = lock(&folder.children)
             .iter()

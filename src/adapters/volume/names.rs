@@ -7,7 +7,6 @@ mod tests;
 
 use std::ffi::OsStr;
 
-/// Which characters a mount refuses besides `/` and NUL.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum NameRules {
     Posix,
@@ -15,17 +14,14 @@ pub(crate) enum NameRules {
     Windows,
 }
 
-/// Where dots and spaces are dropped from a name.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Strip {
     None,
-    /// Trailing dots and spaces.
     Trailing,
     /// Trailing dots and spaces, and leading spaces.
     Ends,
 }
 
-/// Which Windows device names (`CON`, `nul.txt`) a mount must not get.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Reserved {
     None,
@@ -40,7 +36,6 @@ pub(crate) enum Reserved {
 pub(crate) enum NameEncoding {
     AnyBytes,
     Utf8,
-    /// UTF-8 without characters above U+FFFF.
     Utf8Bmp,
     Ascii,
 }
@@ -73,15 +68,12 @@ pub(crate) struct NameProfile {
     pub encoding: NameEncoding,
     pub mapped: Option<PrivateUse>,
     pub limit: NameLimit,
-    /// Whether the mount takes names that differ only in case for one, as
-    /// FAT and exFAT do.
     pub folds: bool,
     /// Whether names the mount refuses may teach it stricter rules, where
     /// nothing it reports shows its rules.
     pub learns: bool,
 }
 
-/// One of the Windows rules a mount that refused a name may need.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum StrictRule {
     Utf8,
@@ -101,7 +93,6 @@ impl StrictRule {
     ];
 }
 
-/// Which of the Windows rules a mount needs beyond its own.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct Strictness(u8);
 
@@ -123,7 +114,6 @@ impl Strictness {
     }
 }
 
-/// Where a mount's name rules come from.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum MountNames {
     Profile(NameProfile),
@@ -206,7 +196,6 @@ impl NameProfile {
         }
     }
 
-    /// A mount whose type tells nothing about its names.
     pub(crate) fn unknown(name_max: u32) -> Self {
         Self::posix(byte_limit(name_max)).learning()
     }
@@ -227,7 +216,6 @@ impl NameProfile {
         }
     }
 
-    /// These rules and the Windows rules in `strictness`.
     pub(crate) fn stricter(self, strictness: Strictness) -> Self {
         let within = |limit: Option<u16>| {
             Some(limit.map_or(WINDOWS_UNITS, |limit| limit.min(WINDOWS_UNITS)))
@@ -252,7 +240,6 @@ impl NameProfile {
         rules
     }
 
-    /// Whether the rules change names for more than their length.
     pub(crate) fn changes_characters(self) -> bool {
         self.rules == NameRules::Windows
             || self.strip != Strip::None
@@ -261,7 +248,6 @@ impl NameProfile {
             || self.mapped.is_some()
     }
 
-    /// These rules and what refusals taught a mount that learns.
     pub(crate) fn taught(self, strictness: Strictness) -> Self {
         if self.learns {
             self.stricter(strictness)
@@ -277,8 +263,6 @@ pub(crate) fn byte_limit(name_max: u32) -> Option<u16> {
     (name_max != 0).then(|| name_max.clamp(64, 4095) as u16)
 }
 
-/// The rules of a GVfs backend, by its URI scheme or by the text before the
-/// colon of its folder on the FUSE bridge (`smb-share:server=…`).
 pub(crate) fn gvfs_profile(backend: &str) -> NameProfile {
     match backend {
         "smb" | "smb-share" => NameProfile::smb(Some(SAMBA_BYTES)),
@@ -296,9 +280,8 @@ pub(crate) fn gvfs_profile(backend: &str) -> NameProfile {
     }
 }
 
-/// The rules inside a GVfs FUSE bridge folder, by the folder the bridge
-/// serves its backend from (`mtp:host=…`). Where that is unknown, the
-/// strictest rules a backend needs apply, and refusals teach the rest.
+/// Where the backend is unknown, the strictest rules a backend needs apply, and refusals teach
+/// the rest.
 pub(crate) fn gvfs_bridge_profile(backend_folder: Option<&OsStr>) -> NameProfile {
     let scheme = backend_folder.and_then(|folder| {
         let folder = folder.as_encoded_bytes();

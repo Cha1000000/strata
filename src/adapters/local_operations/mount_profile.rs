@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 
-//! What the mount behind a folder says about itself: learned once per
-//! mount from mountinfo, udev and `statfs`, and read once per operation.
+//! What the mount behind a folder says about itself: learned once per mount from mountinfo,
+//! udev and `statfs`, and read once per operation.
 
 #[cfg(test)]
 mod tests;
@@ -31,7 +31,6 @@ use crate::{
     services::NameMode,
 };
 
-/// The mount holding `dir`, with what its type tells learned on first sight.
 pub(super) fn known_mount(fs: &dyn FsOps, dir: BorrowedFd<'_>) -> (MountKey, MountCapabilities) {
     let key = fs.mount_key(dir);
     (key, known(fs, dir, key))
@@ -45,9 +44,8 @@ fn known(fs: &dyn FsOps, dir: BorrowedFd<'_>, key: MountKey) -> MountCapabilitie
     learn_mount_type(fs, dir, key)
 }
 
-/// For `fuseblk`, udev's record of the device tells which daemon serves it.
-/// Where another thread learned the mount meanwhile, what it learned, and
-/// learned since, stays.
+/// For `fuseblk`, udev's record of the device tells which daemon serves it. What another
+/// thread learned of the mount meanwhile stays.
 fn learn_mount_type(fs: &dyn FsOps, dir: BorrowedFd<'_>, key: MountKey) -> MountCapabilities {
     let mount = fs.mount_type(dir);
     let mount_type = mount.as_ref().map(|(mount_type, _)| mount_type);
@@ -103,21 +101,17 @@ fn folders(path: &Path) -> impl Iterator<Item = &OsStr> {
     })
 }
 
-/// What an operation needs to know of a mount it writes into.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct MountProfile {
     pub names: NameProfile,
-    /// What the mount's refusals taught it.
     pub strictness: Strictness,
     pub symlinks: Option<bool>,
     pub max_file_size: Option<u64>,
     pub family: Family,
-    /// The format of a FUSE daemon's block device.
     pub fuse_format: Option<FuseFormat>,
 }
 
 impl MountProfile {
-    /// Of a mount as `seen`, at `site`, which refusals taught `taught`.
     fn of(seen: MountCapabilities, site: &Site, taught: MountCapabilities) -> Self {
         Self {
             names: site.rules,
@@ -140,7 +134,6 @@ impl MountProfile {
         }
     }
 
-    /// A GVfs location, known by its scheme alone.
     pub(super) fn gvfs(scheme: &str) -> Self {
         Self {
             names: gvfs_profile(scheme),
@@ -152,21 +145,17 @@ impl MountProfile {
         }
     }
 
-    /// Whether the mount is a disk in a format Windows writes, as sticks and
-    /// memory cards are.
     pub(super) fn windows_disk(&self) -> bool {
         matches!(self.family, Family::Fat | Family::Ntfs3) || self.fuse_format.is_some()
     }
 }
 
-/// One operation's view of the mounts it writes into. Each mount is read
-/// once, so the operation's planner and workers agree even when a mount
-/// change drops what was learned of the mounts meanwhile.
+/// Each mount is read once per operation, so its planner and workers agree even when a mount
+/// change drops what was learned.
 #[derive(Clone, Default)]
 pub(super) struct Profiles(Arc<Mutex<HashMap<MountKey, MountCapabilities>>>);
 
 impl Profiles {
-    /// The mount holding `dir`, as this operation first saw it.
     pub(super) fn mount(
         &self,
         fs: &dyn FsOps,
@@ -188,8 +177,7 @@ impl Profiles {
         MountProfile::of(seen, &site, self.taught(&site))
     }
 
-    /// The site of `dir`, on the mount `key` whose names are `names`. A
-    /// GVfs bridge backend is seen from then on as it is now.
+    /// A GVfs bridge backend is seen from then on as it is now.
     pub(super) fn site(
         &self,
         key: MountKey,
@@ -205,27 +193,21 @@ impl Profiles {
         site
     }
 
-    /// What refusals at `site` taught it up to now.
     fn taught(&self, site: &Site) -> MountCapabilities {
         self.seen().get(&site.key()).copied().unwrap_or_default()
     }
 
-    /// Teaches `site`, which learns, that names must also follow the
-    /// Windows rules in `strictness`: in this operation, and in later ones
-    /// until its mount changes.
+    /// Lasts for later operations too, until the mount changes.
     pub(super) fn learn(&self, site: &Site, strictness: Strictness) {
         self.teach(site, |capabilities| {
             capabilities.strictness = capabilities.strictness.and(strictness);
         });
     }
 
-    /// Whether `site` may hold symbolic links, as far as this operation
-    /// knows.
     pub(super) fn holds_links(&self, site: &Site) -> bool {
         self.taught(site).symlinks != Some(false)
     }
 
-    /// Teaches `site` that it holds no symbolic links.
     pub(super) fn refuse_links(&self, site: &Site) {
         self.teach(site, |capabilities| capabilities.symlinks = Some(false));
     }
@@ -242,8 +224,6 @@ impl Profiles {
     }
 }
 
-/// How one transfer names what it brings onto another filesystem, with the
-/// mounts it writes into as it first saw them.
 #[derive(Clone)]
 pub(super) struct NamePolicy {
     pub profiles: Profiles,
@@ -264,10 +244,7 @@ impl NamePolicy {
         }
     }
 
-    /// The rules of a mount whose names are `rules`, and which refusals
-    /// taught `strictness`, that names brought onto it follow. Names given
-    /// back keep everything but what no name the mount holds can have, and
-    /// only a refusal of one changes it.
+    /// Names given back keep all but what no name on the mount can have.
     pub(super) fn applied(&self, rules: NameProfile, strictness: Strictness) -> NameProfile {
         match self.mode {
             NameMode::Fix => rules.taught(strictness),
@@ -275,8 +252,6 @@ impl NamePolicy {
         }
     }
 
-    /// How names are made in a folder at `site`, with what its refusals
-    /// taught it so far.
     pub(super) fn in_folder(&self, site: &Site) -> FolderRules {
         let strictness = if site.rules.learns {
             self.profiles.taught(site).strictness
@@ -290,8 +265,6 @@ impl NamePolicy {
         }
     }
 
-    /// `destination`, a folder `sources` are pasted into, through any
-    /// symbolic links to the mount that holds it.
     pub(super) async fn destination(
         &self,
         destination: &gio::File,
@@ -331,8 +304,6 @@ impl NamePolicy {
         })
     }
 
-    /// How names are given to what is copied from the folder `source` into
-    /// the folder `target`.
     pub(super) async fn folder(
         &self,
         source: &gio::File,
@@ -384,20 +355,14 @@ impl NamePolicy {
     }
 }
 
-/// What a paste knows of its destination before it plans the names of its
-/// items there.
 pub(super) struct PasteDestination {
     pub profile: MountProfile,
-    /// Per item, whether its name comes from another filesystem, where GIO's
-    /// ids of the filesystems need not decide.
+    /// `None` where GIO's filesystem ids decide.
     crossing: Vec<Option<bool>>,
-    /// GIO's id of the filesystem of a destination that is not native.
     filesystem: Option<glib::GString>,
 }
 
 impl PasteDestination {
-    /// Whether each item's name is fixed, given GIO's id of the filesystem
-    /// of each.
     pub(super) fn fixing(&self, filesystems: &[Option<glib::GString>]) -> Vec<bool> {
         self.crossing
             .iter()
@@ -409,8 +374,6 @@ impl PasteDestination {
     }
 }
 
-/// [`NamePolicy::destination`] of a native folder, with the native folders
-/// of the items pasted there.
 fn native_destination(
     profiles: &Profiles,
     path: &Path,
@@ -453,40 +416,30 @@ fn native_destination(
     }
 }
 
-/// How names are made in one folder a transfer copies into.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct FolderRules {
-    /// What names brought into the folder are fixed by.
     pub fixed: NameProfile,
-    /// How long names numbered there may be.
     pub limit: NameLimit,
     pub site: Site,
 }
 
-/// How names are given to what a transfer copies into one folder.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct FolderNames {
     pub rules: NameProfile,
-    /// Whether the names come from another filesystem, and so are fixed.
     pub fixing: bool,
-    /// Whether the folder may hold symbolic links.
     pub links: bool,
 }
 
-/// Where a folder takes its names from: its mount, or on the GVfs bridge,
-/// which serves every backend from one mount, the backend serving it.
+/// The GVfs bridge serves every backend from one mount, so there a site is a backend.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct Site {
-    /// The rules of names there.
     pub rules: NameProfile,
     pub mount: MountKey,
-    /// `mount`, or a key of the bridge backend's own; `None` on the bridge
-    /// where no backend is known.
+    /// `None` on the bridge where no backend is known.
     backend: Option<MountKey>,
 }
 
 impl Site {
-    /// The site of `dir`, on the mount `mount` whose names are `names`.
     pub(super) fn of(mount: MountKey, names: Option<MountNames>, dir: BorrowedFd<'_>) -> Self {
         let (rules, backend) = match names {
             Some(MountNames::Profile(rules)) => (rules, Some(mount)),
@@ -509,29 +462,22 @@ impl Site {
         }
     }
 
-    /// The key what refusals at the site teach is kept under.
     pub(super) fn key(&self) -> MountKey {
         self.backend.unwrap_or(self.mount)
     }
 }
 
-/// A key of the backend the bridge serves from `folder`, which it names
-/// `<scheme>:<details>`, such as `mtp:host=…` or `smb-share:server=…`.
+/// The bridge names a backend's folder `<scheme>:<details>`, such as `smb-share:server=…`.
 fn backend_key(bridge: MountKey, folder: &OsStr) -> MountKey {
     let mut hasher = DefaultHasher::new();
     (bridge, folder).hash(&mut hasher);
     MountKey::Backend(hasher.finish())
 }
 
-/// Whether names listed in a folder on `source`, a device and a site, are
-/// brought onto another filesystem in a folder on `target`. Names on a GVfs
-/// bridge backend no one knows always are.
 pub(super) fn crosses(source: (u64, &Site), target: (u64, &Site)) -> bool {
     source.0 != target.0 || source.1.backend.is_none() || source.1.backend != target.1.backend
 }
 
-/// [`crosses`] from the folder `source` into a folder on `target`, looking
-/// up the source's mount only where it may share the target's.
 fn crosses_into(fs: &dyn FsOps, source: BorrowedFd<'_>, target: (u64, &Site)) -> bool {
     let Ok(stat) = fs.stat_fd(source) else {
         return true;
@@ -564,20 +510,16 @@ pub(super) async fn filesystem_id(
     Ok(info.attribute_string(gio::FILE_ATTRIBUTE_ID_FILESYSTEM))
 }
 
-/// The rules of names in `dir`, with what refusals there taught them.
 pub(super) fn name_rules(fs: &dyn FsOps, dir: BorrowedFd<'_>) -> NameProfile {
     let (key, seen) = known_mount(fs, dir);
     let site = Site::of(key, seen.names, dir);
     site.rules.taught(mount_capabilities(site.key()).strictness)
 }
 
-/// How long a name may be in `dir`, for numbering a name taken there.
 pub(super) fn name_limit(fs: &dyn FsOps, dir: BorrowedFd<'_>) -> NameLimit {
     name_rules(fs, dir).limit
 }
 
-/// [`name_rules`] of `folder`, read off the main thread where it is native,
-/// and from its scheme elsewhere; `None` where it cannot be opened.
 pub(super) async fn folder_name_rules(folder: &gio::File) -> Option<NameProfile> {
     let Some(path) = folder.path().filter(|_| folder.is_native()) else {
         return Some(gvfs_profile(
@@ -592,7 +534,6 @@ pub(super) async fn folder_name_rules(folder: &gio::File) -> Option<NameProfile>
     .and_then(Result::ok)
 }
 
-/// [`name_limit`] of `folder`, as [`folder_name_rules`] reads it.
 pub(super) async fn folder_name_limit(folder: &gio::File) -> NameLimit {
     folder_name_rules(folder)
         .await

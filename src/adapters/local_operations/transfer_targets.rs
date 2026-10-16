@@ -21,15 +21,10 @@ use super::{
 };
 use crate::{adapters::gio_file_for_location, model::Location, services::NameMode};
 
-/// Where a paste puts one of its items.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct TransferTarget {
-    /// The name the item takes there; `None` for an item without one.
     pub name: Option<OsString>,
-    /// Whether an item already has that name there, and if so, whether both
-    /// are folders, whose contents a merge can combine.
     pub collision: Option<Collision>,
-    /// Whether names inside the item change to suit the destination.
     pub fixes_inside: bool,
 }
 
@@ -38,10 +33,8 @@ pub(crate) struct Collision {
     pub mergeable: bool,
 }
 
-/// Where a paste of `sources` into `destination` would put each, by the
-/// names the paste plans for them, and what is already there. Nothing
-/// collides with a link the paste leaves out, as the destination is known
-/// not to hold links. Fails when cancelled, or when no name is left.
+/// Nothing collides with a link the paste leaves out, as the destination is known not to hold
+/// links.
 pub(crate) async fn transfer_targets(
     destination: &Location,
     sources: &[Location],
@@ -138,16 +131,11 @@ pub(crate) async fn transfer_targets(
 
 const REMOTE_ITEM_ATTRIBUTES: &str = "standard::type,id::filesystem";
 
-/// What is at the names a paste looks up: found in a native destination,
-/// or the names still to look up in another.
 enum Existing {
     Found(Vec<Option<bool>>),
     Remote(Vec<Option<OsString>>),
 }
 
-/// GIO's `attributes` of each of `files` there is, not following a link,
-/// asked a few at a time without blocking; `None` where they cannot be read.
-/// Fails only when cancelled.
 async fn query_each(
     files: &[Option<gio::File>],
     attributes: &'static str,
@@ -199,9 +187,6 @@ fn kind_and_filesystem(info: &gio::FileInfo) -> KindAndFilesystem {
     )
 }
 
-/// Each item's kind, not following a link, and GIO's id of the filesystem
-/// of each that is not native, as far as they could be read: those of items
-/// that are not native from `remote`, which holds what was read of them.
 fn item_kinds(
     items: &[gio::File],
     remote: Vec<Option<KindAndFilesystem>>,
@@ -234,9 +219,6 @@ fn item_kinds(
 /// for in the folder's listing.
 pub(super) const LOOKUPS_WITHOUT_LISTING: usize = 32;
 
-/// For each of `names`, whether an item has it in the native folder at
-/// `path` and is a folder. Where many names are looked up, only those its
-/// listing may hold are.
 fn existing_folders(path: &Path, names: &[Option<OsString>]) -> Vec<Option<bool>> {
     let fs = fs();
     let wanted = names.iter().flatten().count();

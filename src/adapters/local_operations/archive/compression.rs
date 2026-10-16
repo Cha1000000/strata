@@ -130,7 +130,6 @@ enum Replacement {
 
 enum Displaced {
     None,
-    /// With what replaced it, for undo to delete.
     Trashed(TrashedOriginal, Option<PlacedSnapshot>),
     Aside(DisplacedOriginal),
 }

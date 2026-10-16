@@ -74,10 +74,8 @@ pub(super) enum ArchiveOutcome<T> {
     },
 }
 
-/// Where a member went in the staging folder.
 enum Placement {
     Made(PathBuf),
-    /// Left out, from where it would have gone.
     LeftOut(PathBuf),
 }
 
@@ -111,13 +109,9 @@ pub(super) struct ExtractionSession<'a> {
     records_hard_link_targets: bool,
     /// Native archive identity must survive conflict renames for later hard links.
     created_names: HashMap<PathBuf, PathBuf>,
-    /// Links left out, by member path, so hard links to them are left out too.
     skipped_links: HashSet<PathBuf>,
-    /// Links left out, by where each would have been in the staging folder.
     skipped: Vec<PathBuf>,
     directories: Vec<(PathBuf, MemberMetadata)>,
-    /// Where what the extraction renamed and left out is reported, once
-    /// it is published.
     report: &'a mut TransferReport,
 }
 
@@ -264,8 +258,6 @@ impl<'a> ExtractionSession<'a> {
         Ok(())
     }
 
-    /// Where the member a hard link `name` points to was extracted, or
-    /// `None` where it is a link the destination could not hold.
     fn hard_link_target(&self, name: &str, target: &Path) -> Result<Option<PathBuf>, ArchiveError> {
         let target_path = sanitized_archive_path(target).ok();
         if let Some(created) = target_path
@@ -437,7 +429,6 @@ impl<'a> ExtractionSession<'a> {
         Ok(())
     }
 
-    /// Publication moves the top-level entry of `path` out of the staging folder.
     fn note_root(&mut self, path: &Path) {
         if let Some(root) = path.components().next() {
             let root = PathBuf::from(root.as_os_str());
@@ -605,16 +596,12 @@ impl<'a> ExtractionSession<'a> {
     }
 }
 
-/// What an extraction saved under another name, and why, and the links it
-/// left out, by staging path.
 struct Reported {
     renamed: Vec<(PathBuf, PathBuf, RenameCause)>,
     skipped: Vec<PathBuf>,
 }
 
 impl Reported {
-    /// Adds it to `report`, each staging path put where `place` says its
-    /// entry was published.
     fn add_to(self, report: &mut TransferReport, place: impl Fn(&Path) -> PathBuf) {
         report.renamed.extend(
             self.renamed
@@ -633,8 +620,6 @@ impl Reported {
             }));
     }
 
-    /// [`Self::add_to`] for entries published in `folder`, the folder named
-    /// after the archive, with that folder's own name where it changed.
     fn in_folder(
         self,
         report: &mut TransferReport,

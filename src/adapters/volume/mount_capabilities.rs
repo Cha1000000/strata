@@ -17,8 +17,7 @@ pub(crate) enum MountKey {
         device: u64,
     },
     Device(u64),
-    /// One backend of the GVfs FUSE bridge, which serves every backend
-    /// from one mount, keyed by the bridge and the backend's folder.
+    /// A GVfs FUSE bridge backend, keyed by the bridge and the backend's folder.
     Backend(u64),
     #[cfg(test)]
     Test(u64),
@@ -41,11 +40,8 @@ pub(crate) struct MountCapabilities {
     pub fuse_format: Option<FuseFormat>,
     pub coarse_times: Option<CoarseTimes>,
     pub deferred_close: Option<Duration>,
-    /// From mountinfo, udev and `statfs`.
     pub names: Option<MountNames>,
-    /// What names a mount whose rules nothing shows refused taught it.
     pub strictness: Strictness,
-    /// `Some(false)` where the driver has no symbolic links.
     pub symlinks: Option<bool>,
     pub max_file_size: Option<u64>,
 }
@@ -109,8 +105,6 @@ pub(crate) fn learn_mount_capability(key: MountKey, learn: impl FnOnce(&mut Moun
     learn(capabilities().entry(key).or_default());
 }
 
-/// Learns of `key`, the mount `mount` or a part of it such as a GVfs
-/// bridge backend, while what was learned of that mount stands.
 pub(crate) fn teach_mount_capability(
     mount: MountKey,
     key: MountKey,
