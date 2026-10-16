@@ -296,7 +296,7 @@ fn tenxer_paste_focuses_the_preferred_conflict_choice() {
             enter_folder(&fixture, "dest");
             plain(&fixture, Key::p);
             wait_until(|| modal_visible(&fixture.overlay));
-            wait_focused_button(&fixture, "Replace");
+            wait_focused_button(&fixture, "Keep Both");
             close_modal(&fixture);
             assert!(directory.join("b.txt").exists(), "cancel keeps the source");
             assert_eq!(contents(&destination.join("b.txt")), "existing");
