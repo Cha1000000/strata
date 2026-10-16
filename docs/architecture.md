@@ -319,9 +319,9 @@ size itself, so that match is the control that stops a ZIP member lying about it
 Decoders pass symlinks, TAR hard links and each member's mode and modification time through
 `MemberContent` and `MemberMetadata`, and refuse FIFOs and device nodes. Restoring metadata is
 best effort: `EPERM`, `EOPNOTSUPP` and `EINVAL` from filesystems without Unix permissions or times
-are ignored behind the `MetadataCalls` seam in `destination.rs`. TAR extraction preserves
-native path bytes where the destination stores them, and hard-link target identity through fixed
-names. The sandboxed RAR helper streams
+are ignored in `destination.rs`, which makes those calls through the `FsOps` seam. TAR extraction
+preserves native path bytes where the destination stores them, and hard-link target identity
+through fixed names. The sandboxed RAR helper streams
 `STRRAR03` records carrying each member's mode and
 time (a RAR 5 FILETIME, or the DOS local time of older formats, which only the parent can
 convert in the user's zone); RAR links are not yet extracted as links. Error records and failed

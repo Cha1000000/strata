@@ -31,7 +31,7 @@ one is deleted.
 - **Show only complete copies.** A copy appears under its final name once it is complete, except
   on mounts where nothing can be placed; see [Publishing a copy](#publishing-a-copy).
 - **Keep transfer work off the interface thread.** Native copying, placement, and paste/restore/delete
-  planning run on workers. Some existing conflict, archive-name, create-entry and bookmark checks
+  planning run on workers. Some existing archive-name, undo and redo replay, and bookmark checks
   remain synchronous; removing those calls is tracked in [#1590](https://github.com/lgse/strata/issues/1590).
   An unresponsive mount can still block the window through those remaining checks.
 - **Move metadata, not data.** Renames never copy file contents. Moves within one filesystem
@@ -794,8 +794,8 @@ A name fits when its UTF-8 bytes and its UTF-16 units both fit, wherever each is
 exFAT, NTFS and HFS+ count 255 UTF-16 units whatever `f_namelen` says (1530 on vfat and exFAT), so
 a name of 255 CJK characters (765 bytes) fits there, where ext4 takes 85. SMB counts both the
 server's bytes and the 255 units the protocol carries. Samba 4.24 first creates a folder as
-`.::TMPNAME:D:<pid>%<random>:<name>`, which takes up to 42 of the server's 255 bytes (the lab
-measured a limit of 217), so folder names on SMB are held to 213 bytes. That costs other servers at
+`.::TMPNAME:D:<pid>%<random>:<name>`, which takes up to 42 of the server's 255 bytes, so folder
+names on SMB are held to 213 bytes. That costs other servers at
 most 42 bytes on folder names of 214 to 255 bytes; other Samba versions and Windows servers are
 unverified. MTP takes 255 bytes and 254 units: past that, libmtp sends an empty name instead of
 failing, which phones refuse or hang on.
@@ -1095,7 +1095,7 @@ symlinks, FIFOs or Unix permissions cannot exist on vfat, a racer keyed to a ste
 takes (an `O_TMPFILE` link, a hole, a `syncfs`, an exchange) never runs, and a time with a fraction
 of a second is rounded away on vfat, exfat-fuse and sshfs. A fixture's name can be one the mount
 refuses (`a:b` on vfat), and a preset can expect a name stored that the real mount refuses, folds
-or lists as another (Samba's 8.3 aliases, folders over 217 bytes). On NFS a file renamed over while
+or lists as another (Samba's 8.3 aliases, long SMB folder names). On NFS a file renamed over while
 open reads as `.nfsXXXX`, and on casefolded folders `/proc` shows files the test process created as
 `name (deleted)`, so quirk patterns by name miss them. The container has no udev database, so
 exfat-fuse and ntfs-3g are not recognised there: they keep their per-file syncs, and get the name
