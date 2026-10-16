@@ -745,8 +745,7 @@ fn keep_both_takes_the_next_number_past_names_already_taken() -> Result<(), Box<
 fn replace_and_merge_act_on_the_name_the_prompt_confirmed() -> Result<(), Box<dyn Error>> {
     let _serial = serial()?;
     let (replace, merge) = (TransferConflict::ReplaceExisting, TransferConflict::Merge);
-    let (vfat, ntfs3, cifs): (fn() -> Quirks, fn() -> Quirks, fn() -> Quirks) =
-        (Quirks::vfat, Quirks::ntfs3, Quirks::cifs);
+    let (vfat, ntfs3, cifs): (Preset, Preset, Preset) = (Quirks::vfat, Quirks::ntfs3, Quirks::cifs);
     for (preset, quirks, confirmed, fixed, conflict) in [
         ("vfat", vfat, "CON", Some("CON_"), replace),
         ("ntfs3", ntfs3, "a:b", Some("a_b"), replace),

@@ -1479,7 +1479,8 @@ fn a_refused_name_tries_each_rule_alone_before_rules_together() {
     // As ntfs-3g where udev cannot name its device.
     let windows = NameProfile::windows(Reserved::Bare, NameEncoding::Utf8).learning();
     let (long, cut) = ("a".repeat(300), "a".repeat(255));
-    let rows: [(&[u8], NameProfile, Vec<(&[StrictRule], &str, RenameCause)>); 10] = [
+    type Fixes<'a> = Vec<(&'a [StrictRule], &'a str, RenameCause)>;
+    let rows: [(&[u8], NameProfile, Fixes<'_>); 10] = [
         (b"plain", posix, vec![]),
         (b"x\xffy", posix, vec![(&[Utf8], "x_y", Invalid)]),
         (b"a:b", posix, vec![(&[Characters], "a_b", Invalid)]),

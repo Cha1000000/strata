@@ -11,6 +11,8 @@ use crate::{
     services::{KeptCause, KeptItem, PlacedSnapshot, ReplacedOriginal},
 };
 
+type MakeCopy = fn() -> CopyStep;
+
 fn real_copy() -> CopyStep {
     super::super::merge_copy(None, NamePolicy::default())
 }
@@ -274,7 +276,7 @@ fn no_plan(_: MergePlan) {}
 fn a_merge_onto_fat_takes_the_rules_of_a_folder_inside_it_only_from_another_device_mounted_there()
 -> Result<(), Box<dyn Error>> {
     let _serial = serial()?;
-    let copies: [(&str, fn() -> CopyStep); 2] = [
+    let copies: [(&str, MakeCopy); 2] = [
         ("engine", || super::super::merge_copy(None, fixing())),
         ("GIO", || gio_merge_copy(fixing())),
     ];
@@ -352,7 +354,7 @@ fn a_merge_onto_fat_takes_the_rules_of_a_folder_inside_it_only_from_another_devi
 fn a_merge_within_one_disk_fixes_the_names_another_filesystem_mounted_in_its_source_brings()
 -> Result<(), Box<dyn Error>> {
     let _serial = serial()?;
-    let copies: [(&str, fn() -> CopyStep); 2] = [
+    let copies: [(&str, MakeCopy); 2] = [
         ("engine", || super::super::merge_copy(None, fixing())),
         ("GIO", || gio_merge_copy(fixing())),
     ];

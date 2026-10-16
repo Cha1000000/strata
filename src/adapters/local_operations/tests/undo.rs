@@ -168,7 +168,8 @@ fn an_undone_move_gives_names_back_as_they_were_and_a_redone_one_fixes_them()
 -> Result<(), Box<dyn Error>> {
     let _serial = serial()?;
     let malformed = || OsString::from_vec(b"x\xc0\xafy".to_vec());
-    let rows: [(&str, Preset, NameMode, Vec<OsString>, [&str; 2]); 4] = [
+    type Row<'a> = (&'a str, Preset, NameMode, Vec<OsString>, [&'a str; 2]);
+    let rows: [Row<'_>; 4] = [
         (
             "ntfs3 undo",
             Quirks::ntfs3,

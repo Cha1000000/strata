@@ -1320,6 +1320,8 @@ enum Member<'a> {
     Hard(&'a str),
 }
 
+type Entry<'a> = (&'a [u8], Member<'a>);
+
 fn extract_members(
     destination: &Path,
     archive: &str,
@@ -1640,7 +1642,7 @@ fn a_refused_member_name_takes_the_first_stricter_rules_it_passes_and_teaches_on
         ..Quirks::ext4()
     };
     type Refused<'a> = &'a [(Op, &'a str)];
-    let rows: [(fn() -> Quirks, Refused<'_>, Refused<'_>); 2] = [
+    let rows: [(Preset, Refused<'_>, Refused<'_>); 2] = [
         (unknown_daemon, &[(Op::Mkdir, "10:00")], &[]),
         (
             strict_ext4,
@@ -1811,7 +1813,7 @@ fn members_the_destination_will_not_make_fail_the_extraction_naming_them_and_why
     // Only `py:3` has a stricter name; the destination refuses it too, and
     // the first refusal is the one reported.
     type Fails<'a> = &'a [(Op, &'a str, Errno)];
-    let rows: [((&[u8], Member<'_>), Fails<'_>, String); 9] = [
+    let rows: [(Entry<'_>, Fails<'_>, String); 9] = [
         (
             (b"bin/python3", Link(b"python")),
             &[(Op::Symlink, "python3", Errno::NOSPC)],
@@ -1908,17 +1910,17 @@ fn the_report_names_entries_where_the_extraction_left_them() -> Result<(), Box<d
     ];
     let long = format!("{}.zip", "a".repeat(256));
     let cut = "a".repeat(255);
-    type Renamed<'a> = &'a [(&'a [u8], &'a str, RenameCause)];
-    let rows: [(
+    type Row<'a> = (
         Preset,
-        &str,
-        _,
-        &[(&[u8], Member<'_>)],
-        _,
+        &'a str,
+        Option<&'a str>,
+        &'a [Entry<'a>],
+        Result<(), ArchiveError>,
         fn(&Outcome) -> bool,
-        Renamed<'_>,
-        &[&str],
-    ); 9] = [
+        &'a [(&'a [u8], &'a str, RenameCause)],
+        &'a [&'a str],
+    );
+    let rows: [Row<'_>; 9] = [
         (
             Quirks::vfat,
             ARCHIVE,

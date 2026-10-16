@@ -2188,7 +2188,7 @@ fn a_name_refused_for_its_trailing_dot_takes_the_name_without_it_unless_a_siblin
             },
         );
 
-        paste_into(&disk, &[source.clone()]);
+        paste_into(&disk, std::slice::from_ref(&source));
 
         assert_eq!(names(&disk.join("dots"))?, saved, "{siblings:?}");
         assert_eq!(
@@ -2204,7 +2204,16 @@ fn a_mount_that_learns_keeps_only_the_rules_its_refused_names_needed() -> Result
 {
     let _serial = serial()?;
     type Refusal = fn(&OsStr) -> Option<Errno>;
-    let rows: [(Refusal, &str, &str, &[&str], [&str; 3], [&str; 3], bool); 2] = [
+    type Row<'a> = (
+        Refusal,
+        &'a str,
+        &'a str,
+        &'a [&'a str],
+        [&'a str; 3],
+        [&'a str; 3],
+        bool,
+    );
+    let rows: [Row<'_>; 2] = [
         // Neither rule alone gives a name the mount takes.
         (
             refuses_colons_and_aux,
