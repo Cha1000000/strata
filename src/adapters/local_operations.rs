@@ -1287,7 +1287,8 @@ fn paste_targets(
 }
 
 /// The names a paste of `items` from `sources` gives them: each name the
-/// conflict prompt showed, as it is, and names planned for the rest.
+/// conflict prompt showed, as it is, and names planned for the rest. A shown
+/// name that is not one plain name gives its item none.
 fn planned_paste(
     items: &[PasteItem],
     sources: &[gio::File],
@@ -1298,10 +1299,9 @@ fn planned_paste(
     let names = items
         .iter()
         .zip(sources)
-        .map(|(item, source)| {
-            item.target_name
-                .clone()
-                .or_else(|| transfer_source_name(source))
+        .map(|(item, source)| match &item.target_name {
+            Some(shown) => plain_name(shown).then(|| shown.clone()),
+            None => transfer_source_name(source),
         })
         .collect::<Vec<_>>();
     // Replace and Merge act on the name the user saw, which is the item's
@@ -1335,6 +1335,11 @@ fn planned_paste(
         });
     }
     Ok(planned)
+}
+
+fn plain_name(name: &OsStr) -> bool {
+    !matches!(name.as_bytes(), b"" | b"." | b"..")
+        && !name.as_bytes().iter().any(|byte| matches!(byte, b'/' | b'\0'))
 }
 
 #[derive(Clone)]

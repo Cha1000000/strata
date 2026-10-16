@@ -979,3 +979,50 @@ fn a_paste_gives_an_item_the_name_its_prompt_showed() -> Result<(), Box<dyn Erro
     }
     Ok(())
 }
+
+#[test]
+fn a_paste_fails_an_item_whose_shown_name_is_not_one_plain_name() -> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    for shown in ["../escaped", "sub/x", "a\0b"] {
+        let root = tempfile::tempdir()?;
+        let (source, disk) = (root.path().join("source"), root.path().join("disk"));
+        fs::create_dir_all(&source)?;
+        fs::create_dir_all(disk.join("sub"))?;
+        fs::write(source.join("item"), "incoming")?;
+
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let emitted = events.clone();
+        let _operation = LocalOperationProvider.paste(
+            PasteRequest {
+                id: OperationRequestId(1615),
+                destination: Location::local(&disk),
+                items: vec![PasteItem {
+                    source: Location::local(source.join("item")),
+                    conflict: TransferConflict::FailIfExists,
+                    target_name: Some(OsString::from(shown)),
+                }],
+                move_sources: false,
+            },
+            Rc::new(move |event| emitted.borrow_mut().push(event)),
+        );
+        wait_for_operation(&events, |event| {
+            matches!(
+                event,
+                OperationEvent::Pasted { .. }
+                    | OperationEvent::TransferFailed { .. }
+                    | OperationEvent::Failed { .. }
+            )
+        });
+
+        assert!(
+            matches!(events.borrow().last(), Some(OperationEvent::Failed { .. })),
+            "{shown:?}"
+        );
+        assert_eq!(names(root.path())?, ["disk", "source"], "{shown:?}");
+        assert_eq!(names(&disk)?, ["sub"], "{shown:?}");
+        assert!(names(&disk.join("sub"))?.is_empty(), "{shown:?}");
+    }
+    Ok(())
+}
