@@ -575,6 +575,9 @@ fn decoder_cannot_reopen_or_mutate_a_read_only_source_descriptor() {
         assert_eq!(contents, SOURCE);
         std::fs::write(writable.join("output"), b"decoder output")
             .expect("private writes permitted");
+        let decoded = gdk_pixbuf::Pixbuf::from_file(writable.join("loader.png"))
+            .expect("system image loader");
+        assert_eq!((decoded.width(), decoded.height()), (3, 2));
         // libtest applies the policy on its test thread, not the process leader.
         let input = PathBuf::from("/proc")
             .join(std::fs::read_link("/proc/thread-self").expect("decoder thread"))
@@ -605,6 +608,12 @@ fn decoder_cannot_reopen_or_mutate_a_read_only_source_descriptor() {
     let source = tempfile::NamedTempFile::new().expect("source");
     let scratch = tempfile::tempdir().expect("decoder scratch");
     std::fs::write(source.path(), SOURCE).expect("fixture");
+    let image = gdk_pixbuf::Pixbuf::new(gdk_pixbuf::Colorspace::Rgb, false, 8, 3, 2)
+        .expect("fixture pixbuf");
+    image.fill(0x2860_a0ff);
+    image
+        .savev(scratch.path().join("loader.png"), "png", &[])
+        .expect("fixture image");
     let before = source.as_file().metadata().expect("metadata");
     let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
         .args(["--exact", "sandbox::browser::tests::decoder_cannot_reopen_or_mutate_a_read_only_source_descriptor", "--nocapture"])

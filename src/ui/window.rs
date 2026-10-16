@@ -56,6 +56,7 @@ mod drive_dialogs;
 mod drive_ops;
 mod keyboard;
 mod open_argument;
+mod pinned_drop;
 mod sidebar;
 mod unlock_argument;
 mod volume_password;
@@ -300,7 +301,6 @@ pub(super) fn present_target(
     crate::assets::register_icon_theme();
     let _theme_manager = super::theme::ThemeManager::shared();
     let preference_manager = super::preferences::PreferenceManager::shared();
-    load_styles();
     tracing::debug!(
         elapsed_ms = present_started.elapsed().as_millis() as u64,
         "present theme and styles ready"
@@ -759,6 +759,26 @@ pub(super) fn build_appearance_menu(
             }
         });
     }
+    let (customize_columns, _, _) = appearance_option(
+        crate::assets::icons::COLUMNS,
+        "Customize columns…",
+        false,
+        true,
+        gtk::AccessibleRole::MenuItem,
+    );
+    customize_columns.set_visible(current_mode == BrowserMode::List);
+    {
+        let view = view.downgrade();
+        let popover_weak = popover_weak.clone();
+        customize_columns.connect_clicked(move |_| {
+            if let Some(popover) = popover_weak.upgrade() {
+                popover.popdown();
+            }
+            if let Some(view) = view.upgrade() {
+                view.open_list_columns_popover();
+            }
+        });
+    }
     for (button, mode) in [
         (&columns, BrowserMode::Columns),
         (&icons, BrowserMode::Icons),
@@ -791,6 +811,7 @@ pub(super) fn build_appearance_menu(
         let list_check = list_check.clone();
         let group_by_type = group_by_type.clone();
         let column_sizes = column_sizes.clone();
+        let customize_columns = customize_columns.clone();
         let button_icon = button_icon.clone();
         view.connect_view_mode_changed(move |mode| {
             columns_check.set_visible(mode == BrowserMode::Columns);
@@ -798,6 +819,7 @@ pub(super) fn build_appearance_menu(
             list_check.set_visible(mode == BrowserMode::List);
             group_by_type.set_sensitive(mode.supports_type_grouping());
             column_sizes.set_visible(mode == BrowserMode::Columns);
+            customize_columns.set_visible(mode == BrowserMode::List);
             crate::assets::set_primary_icon(&button_icon, browser_mode_icon(mode));
         });
     }
@@ -958,6 +980,7 @@ pub(super) fn build_appearance_menu(
 
     content.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
     content.append(&group_by_type);
+    content.append(&customize_columns);
     content.append(&column_sizes);
     let (hidden, hidden_check, hidden_icon) = appearance_option_with_shortcut(
         if hidden_files_shown {
@@ -1631,24 +1654,34 @@ impl SidebarState {
             .filter(|(_, (location, _))| !self.local_only || location.native_path().is_some())
             .map(|(index, (location, name))| (index, location.clone(), name.clone()))
             .collect::<Vec<_>>();
-        if !pinned.is_empty() {
-            if self.widget.first_child().is_some() {
-                self.append_separator();
+        if pinned.is_empty() && self.local_only {
+            return;
+        }
+        if self.widget.first_child().is_some() {
+            self.append_separator();
+        }
+        self.append_heading("PINNED");
+        let drag_cache = Rc::new(pinned_drop::FolderDragCache::default());
+        let mut previous = None;
+        for (ordinal, (index, location, name)) in pinned.into_iter().enumerate() {
+            if !self.local_only {
+                pinned_drop::append_gap(self, previous, Some(location.clone()), &drag_cache);
             }
-            self.append_heading("PINNED");
-            for (ordinal, (index, location, name)) in pinned.into_iter().enumerate() {
-                self.visible_pins.borrow_mut().push(location.clone());
-                let row = if self.local_only {
-                    let row = self.append_place(crate::assets::icons::FOLDER, &name, location);
-                    row.add_css_class("sidebar-pinned-row");
-                    row
-                } else {
-                    self.append_pinned_place(index, &name, location)
-                };
-                if let Some(keycap) = pin_keycap(ordinal) {
-                    self.add_keycap(&row, &keycap);
-                }
+            previous = Some(location.clone());
+            self.visible_pins.borrow_mut().push(location.clone());
+            let row = if self.local_only {
+                let row = self.append_place(crate::assets::icons::FOLDER, &name, location);
+                row.add_css_class("sidebar-pinned-row");
+                row
+            } else {
+                self.append_pinned_place(index, &name, location)
+            };
+            if let Some(keycap) = pin_keycap(ordinal) {
+                self.add_keycap(&row, &keycap);
             }
+        }
+        if !self.local_only {
+            pinned_drop::append_gap(self, previous, None, &drag_cache);
         }
     }
 
@@ -1802,13 +1835,30 @@ impl SidebarState {
         self.update_pinned_places(|places| remove_pinned_place(places, location));
     }
 
+    fn pin_folders_into(self: &Rc<Self>, folders: &[(Location, String)], gap: PinGap<'_>) -> bool {
+        self.update_pinned_places(|places| {
+            pin_gap_index(places, gap).is_some_and(|index| pin_locations_at(places, folders, index))
+        })
+    }
+
+    fn reorder_pinned_into(self: &Rc<Self>, source: &Location, gap: PinGap<'_>) -> bool {
+        self.update_pinned_places(|places| {
+            let Some(source) = places.iter().position(|(location, _)| location == source) else {
+                return false;
+            };
+            pin_gap_index(places, gap).is_some_and(|index| move_pinned_place(places, source, index))
+        })
+    }
+
     fn update_pinned_places(
         self: &Rc<Self>,
         change: impl FnOnce(&mut Vec<(Location, String)>) -> bool,
-    ) {
+    ) -> bool {
         // Merge into the shared file, never this window's stale snapshot.
+        let mut changed = false;
         let result = load_pinned_places().and_then(|mut places| {
-            if change(&mut places) {
+            changed = change(&mut places);
+            if changed {
                 save_pinned_places(&places)?;
             }
             Ok(places)
@@ -1817,12 +1867,16 @@ impl SidebarState {
             Ok(places) => {
                 self.pinned_places.replace(places);
                 self.rebuild();
+                changed
             }
-            Err(error) => show_error_dialog(
-                &self.view.widget(),
-                &crate::i18n::tr("Unable to update pinned folders"),
-                &crate::services::io_error_message(&error),
-            ),
+            Err(error) => {
+                show_error_dialog(
+                    &self.view.widget(),
+                    &crate::i18n::tr("Unable to update pinned folders"),
+                    &crate::services::io_error_message(&error),
+                );
+                false
+            }
         }
     }
     fn event_changes_active_place(event: &BrowserEvent) -> bool {
@@ -1833,6 +1887,9 @@ impl SidebarState {
                 | BrowserEvent::ColumnsTruncated { .. }
                 | BrowserEvent::ColumnsRelocated { .. }
                 | BrowserEvent::FocusChanged { .. }
+                // A clicked place is highlighted before validation; a rejection
+                // leaves the previous location open, including while a mount runs.
+                | BrowserEvent::LocationNavigationRejected { .. }
         )
     }
 
@@ -2043,8 +2100,17 @@ impl SidebarState {
         let drag = gtk::DragSource::builder()
             .actions(gtk::gdk::DragAction::MOVE)
             .build();
+        let weak_state = Rc::downgrade(self);
         drag.connect_prepare(move |_, _, _| {
-            Some(gtk::gdk::ContentProvider::for_value(&payload().to_value()))
+            let payload = payload();
+            let content = gtk::gdk::ContentProvider::for_value(&payload.to_value());
+            if let Some(index) = parse_pinned_drag_source(&payload)
+                && let Some(state) = weak_state.upgrade()
+                && let Some(place) = state.pinned_places.borrow().get(index)
+            {
+                pinned_drop::start_reorder(&content, place.clone());
+            }
+            Some(content)
         });
         drag.connect_drag_begin(move |drag, _| {
             if let Some(row) = drag.widget() {
@@ -2053,6 +2119,7 @@ impl SidebarState {
             }
         });
         drag.connect_drag_end(move |drag, _, _| {
+            pinned_drop::clear_reorder();
             if let Some(row) = drag.widget() {
                 row.remove_css_class("dragging");
                 row.set_cursor_from_name(Some("pointer"));
@@ -2891,6 +2958,55 @@ fn remove_pinned_place(places: &mut Vec<(Location, String)>, location: &Location
     let original_len = places.len();
     places.retain(|(pinned, _)| pinned != location);
     places.len() != original_len
+}
+
+/// The `(after, before)` pins around an insertion gap when the sidebar was built.
+type PinGap<'a> = (Option<&'a Location>, Option<&'a Location>);
+
+/// Resolves a gap against the latest bookmarks; `None` when both of a gap's
+/// neighbours were unpinned elsewhere, so a drop cannot land somewhere unrelated.
+fn pin_gap_index(places: &[(Location, String)], (after, before): PinGap<'_>) -> Option<usize> {
+    let position = |anchor: &Location| places.iter().position(|(location, _)| location == anchor);
+    match (before.and_then(position), after.and_then(position)) {
+        (Some(index), _) => Some(index),
+        (None, Some(index)) => Some(index + 1),
+        (None, None) if before.is_none() => Some(places.len()),
+        (None, None) => None,
+    }
+}
+
+/// `index` is an insertion point in the list before `source` is removed.
+fn move_pinned_place(places: &mut Vec<(Location, String)>, source: usize, index: usize) -> bool {
+    if source >= places.len() || index > places.len() || index == source || index == source + 1 {
+        return false;
+    }
+    let place = places.remove(source);
+    places.insert(index - usize::from(index > source), place);
+    true
+}
+
+fn pin_locations_at(
+    places: &mut Vec<(Location, String)>,
+    sources: &[(Location, String)],
+    target_index: usize,
+) -> bool {
+    let mut seen = places
+        .iter()
+        .map(|(location, _)| location.clone())
+        .collect::<std::collections::HashSet<_>>();
+    let additions = sources
+        .iter()
+        .filter(|(location, _)| {
+            !is_standard_place_location(location) && seen.insert(location.clone())
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    if additions.is_empty() {
+        return false;
+    }
+    let index = target_index.min(places.len());
+    places.splice(index..index, additions);
+    true
 }
 
 fn is_smb_location(location: &Location) -> bool {
@@ -4166,16 +4282,3 @@ fn startup_location(manager: &PreferenceManager) -> Location {
 
 #[cfg(test)]
 mod tests;
-
-pub(super) fn load_styles() {
-    let provider = gtk::CssProvider::new();
-    provider.load_from_string(include_str!("../style.css"));
-
-    if let Some(display) = gtk::gdk::Display::default() {
-        gtk::style_context_add_provider_for_display(
-            &display,
-            &provider,
-            gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
-        );
-    }
-}

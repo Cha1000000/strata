@@ -242,9 +242,9 @@ impl PreviewDrawer {
             .slot
             .set_visible(self.state.is_enabled() || self.state.reserves_column_space());
         let weak = Rc::downgrade(&self.state);
-        split.add_tick_callback(move |split, _| {
+        crate::ui::frame::tick_while_active(split, 60, move |split| {
             let Some(state) = weak.upgrade() else {
-                return glib::ControlFlow::Break;
+                return;
             };
             state.publish_column_width_limit(split);
             if state.is_enabled() || state.reserves_column_space() {
@@ -253,7 +253,6 @@ impl PreviewDrawer {
             if !state.preview_present() {
                 state.sync_sidebar_without_preview();
             }
-            glib::ControlFlow::Continue
         });
         let weak = Rc::downgrade(&self.state);
         split.connect_unmap(move |_| {

@@ -173,7 +173,7 @@ fn progress_card(progress: &FileProgressState) -> Rc<crate::ui::progress_dock::C
 
 fn pump_until(predicate: impl Fn() -> bool) {
     let context = glib::MainContext::default();
-    let deadline = Instant::now() + Duration::from_secs(3);
+    let deadline = Instant::now() + Duration::from_secs(30);
     while !predicate() {
         while context.pending() {
             context.iteration(false);

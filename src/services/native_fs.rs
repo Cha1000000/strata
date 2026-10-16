@@ -23,6 +23,10 @@ pub(crate) fn native_kind(file_type: fs::FileType, path: &Path) -> EntryKind {
     if !file_type.is_symlink() {
         return EntryKind::Other;
     }
+    symlink_kind(path)
+}
+
+pub(crate) fn symlink_kind(path: &Path) -> EntryKind {
     match fs::metadata(path) {
         Ok(metadata) if metadata.is_dir() => EntryKind::DirectorySymbolicLink,
         Ok(metadata) if metadata.is_file() => EntryKind::FileSymbolicLink,

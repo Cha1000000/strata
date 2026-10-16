@@ -267,7 +267,7 @@ pub(super) fn check_menu_option(label: &str, selected: bool) -> (gtk::Button, gt
 
 const MENU_OPTION_CLASS: &str = "column-menu-option";
 
-fn menu_action(label: &str) -> gtk::Button {
+pub(super) fn menu_action(label: &str) -> gtk::Button {
     let action = super::accessibility::menu_item_button();
     action.set_child(Some(&menu_option_label(label)));
     action.add_css_class(MENU_OPTION_CLASS);

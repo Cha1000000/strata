@@ -62,7 +62,18 @@ def test_the_entry_context_menu_offers_named_actions_and_accelerators(strata):
         "Customize…", "Copy path", "Copy name", "Properties", "Move to Trash",
         "Permanently delete",
     ])
+    # A closed menu is released on a frame after it closes, unless it reopens first.
+    strata.choose_menu_item("Copy")
+    time.sleep(0.5)
+    strata.open_context_menu("documents")
+    assert "Open in…" in strata.menu_items()
     strata.dismiss_menu()
+    time.sleep(0.5)
+    strata.open_context_menu("todo.txt")
+    assert "Open in…" not in strata.menu_items()
+    strata.dismiss_menu()
+    log = strata.application.log()
+    assert "GLib-CRITICAL" not in log and "Gtk-CRITICAL" not in log
 
 
 @pytest.mark.preferences(browser_mode="list", single_click_previews=False)

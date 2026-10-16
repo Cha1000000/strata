@@ -1,7 +1,3 @@
-* {
-  font-family: "JetBrains Mono", "JetBrainsMono Nerd Font", monospace;
-}
-
 .file-icon {
   min-width: 1.307692rem;
   min-height: 1.307692rem;
@@ -18,16 +14,54 @@ window {
   font-size: 13px;
 }
 
-/* GTK's default theme sets `font: initial` here, which drops the window font
-   and falls back to gtk-font-name (Adwaita Sans). */
-popover.background,
-popover.background > contents {
-  font-family: "JetBrains Mono", "JetBrainsMono Nerd Font", monospace;
+/* GTK's built-in theme radii, restated so the Corner roundness preference
+   scales them with the rest of the stylesheet. */
+button,
+entry,
+spinbutton,
+checkbutton,
+modelbutton.flat,
+tooltip {
+  border-radius: 5px;
+}
+
+popover > contents {
+  border-radius: 9px;
+}
+
+check {
+  border-radius: 3px;
+}
+
+/* Strata draws its own chrome; GTK's client-side decoration only supplies the
+   invisible resize edges plus a hairline where the desktop draws no border. */
+window.csd {
+  border-radius: 0;
+  box-shadow: 0 0 0 1px alpha(@strata_border, 0.6);
+}
+
+window.csd.maximized,
+window.csd.fullscreen,
+window.csd.tiled,
+window.csd.tiled-top,
+window.csd.tiled-right,
+window.csd.tiled-bottom,
+window.csd.tiled-left {
+  box-shadow: none;
+}
+
+window.solid-csd {
+  padding: 0;
+  border: none;
+  box-shadow: none;
+}
+
+window.solid-csd headerbar {
+  margin: 0;
 }
 
 popover.background label,
 popover.background button {
-  font-family: "JetBrains Mono", "JetBrainsMono Nerd Font", monospace;
   font-size: inherit;
   letter-spacing: 0;
 }
@@ -1999,6 +2033,9 @@ menubutton.form-control:disabled > button {
 switch {
   background: @strata_muted;
   border: 1px solid alpha(@strata_border, 0.72);
+  /* Track and thumb share one radius so they keep the same corner shape at
+     every roundness; GTK caps each at half its size. */
+  border-radius: 14px;
   box-shadow: none;
   min-height: 22px;
   min-width: 40px;
@@ -2014,6 +2051,7 @@ switch slider,
 switch:checked slider {
   background: @strata_text;
   border: none;
+  border-radius: 14px;
   box-shadow: 0 1px 3px alpha(#000000, 0.4);
   min-height: 18px;
   min-width: 18px;
@@ -2253,6 +2291,20 @@ scrollbar.horizontal > range > trough > slider {
   transform: scale(1.02);
 }
 
+.sidebar-pin-gap,
+.sidebar-pin-gap:drop(active) {
+  min-height: 4px;
+  margin: 0 8px;
+  background: transparent;
+  outline: none;
+  box-shadow: none;
+}
+
+.sidebar-pin-gap.eligible,
+.sidebar-pin-gap.eligible:drop(active) {
+  background-image: linear-gradient(to bottom, transparent 33%, @strata_accent 33%, @strata_accent 66%, transparent 66%);
+}
+
 .sidebar-row:focus {
   outline: 1px solid @strata_accent;
   outline-offset: -1px;
@@ -2377,7 +2429,9 @@ scrollbar.horizontal > range > trough > slider {
   color: @strata_dim_text;
   font-size: 0.78em;
   font-weight: 700;
-  padding: 1px 10px 2px;
+  padding-top: 1px;
+  padding-right: 10px;
+  padding-bottom: 2px;
 }
 
 paned > separator {
@@ -3363,7 +3417,7 @@ entry.preview-command-entry selection {
   background: @strata_surface;
   color: @strata_text;
   border-top: 1px solid @strata_border;
-  padding: 3px 10px;
+  padding: 3px 4px;
   min-height: 24px;
   font-size: 0.85em;
 }
@@ -3820,7 +3874,8 @@ dropdown.form-control popover listview {
   padding: 8px;
 }
 
-dropdown.form-control popover listview {
+dropdown.form-control popover listview,
+.font-choice-list {
   background: @strata_surface;
   color: @strata_text;
 }
@@ -3832,6 +3887,7 @@ dropdown.form-control popover listview {
 }
 
 .column-menu-option,
+.font-choice-list > row,
 dropdown.form-control popover row {
   background: transparent;
   border: none;
@@ -3844,6 +3900,7 @@ dropdown.form-control popover row {
 }
 
 .column-menu-option:hover,
+.font-choice-list > row:hover,
 dropdown.form-control popover row:hover,
 dropdown.form-control popover row:selected {
   background: alpha(@strata_accent, 0.15);
@@ -3851,6 +3908,7 @@ dropdown.form-control popover row:selected {
 }
 
 .column-menu-option:active,
+.font-choice-list > row:active,
 dropdown.form-control popover row:active {
   background: alpha(@strata_accent, 0.22);
   transform: scale(0.97);
@@ -3858,6 +3916,7 @@ dropdown.form-control popover row:active {
 
 
 .column-menu-option:focus-visible,
+.font-choice-list > row:focus-visible,
 dropdown.form-control popover row:focus-visible {
   outline: 2px solid @strata_accent;
   outline-offset: -2px;
@@ -4241,7 +4300,6 @@ textview > popover.menu undershoot {
 .item-context-menu,
 text > popover.menu > contents > scrolledwindow > viewport > stack,
 textview > popover.menu > contents > scrolledwindow > viewport > stack {
-  font-family: "JetBrains Mono", "JetBrainsMono Nerd Font", monospace;
   padding: 8px;
 }
 
@@ -5113,11 +5171,11 @@ textview > popover.menu button.model:focus-visible,
   opacity: 0;
   padding: 0 7px;
   border-radius: 5px;
-  transition: opacity 120ms ease-out;
 }
 
 .file-list row:hover .file-size {
   opacity: 1;
+  transition: opacity 120ms ease-out;
 }
 
 .file-list row:selected .file-size {
@@ -5197,6 +5255,7 @@ textview > popover.menu button.model:focus-visible,
 
 .keyboard-navigation .file-list row:hover:not(:selected) .file-size {
   opacity: 0;
+  transition: none;
 }
 
 .file-marquee,
@@ -5731,11 +5790,6 @@ menubutton.icons-thumbnail-menu > button:focus-visible {
   color: @strata_dim_text;
   font-size: 0.82em;
   padding: 0 4px 2px;
-}
-
-.list-fast-scroll .list-row,
-.list-fast-scroll .file-list-mode row {
-  transition: none;
 }
 
 .file-icons > child .icons-card.drop-destination .icons-card-icon-frame,
@@ -6359,9 +6413,9 @@ two-column presentation. */
 .about-logo {
   min-width: 58px;
   min-height: 58px;
-  border: 1px solid alpha(@strata_dim_text, 0.35);
+  border: 1px solid @strata_border;
   border-radius: 14px;
-  background: shade(@strata_dim_text, 0.3);
+  background: @strata_surface;
 }
 
 .about-name {

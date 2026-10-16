@@ -40,6 +40,51 @@ fn draining_is_bounded_and_dismissed_query_never_publishes() {
 }
 
 #[test]
+fn changed_search_limits_restart_the_worker_on_the_next_update() {
+    crate::test_support::gtk_test(
+        "ui::search_session::tests::changed_search_limits_restart_the_worker_on_the_next_update",
+        || {
+            let fixture = tempfile::tempdir().expect("fixture");
+            std::fs::write(fixture.path().join("alpha.txt"), "a").expect("alpha file");
+            let input = SearchInput {
+                root: fixture.path().into(),
+                show_hidden: false,
+                scope: SearchScope::Subfolders,
+                refused: Default::default(),
+            };
+            let manager = crate::ui::preferences::PreferenceManager::shared();
+            manager.set_search_entry_limit(200_000);
+            let (default_limits, _) =
+                index_filter(input.root.clone(), false, true, manager.search_limits());
+            let session = SearchSession::default();
+            let deliver: Deliver = Rc::new(|_| {});
+            let shares_default_index = |session: &SearchSession| {
+                session
+                    .0
+                    .worker
+                    .borrow()
+                    .as_ref()
+                    .is_some_and(|worker| worker.handle.shares_index_with(&default_limits))
+            };
+            session.update(input.clone(), "alpha", false, deliver.clone());
+            assert!(shares_default_index(&session));
+            session.update(input.clone(), "alpha.txt", false, deliver.clone());
+            assert!(
+                shares_default_index(&session),
+                "unchanged limits keep the running worker"
+            );
+            manager.set_search_entry_limit(0);
+            session.update(input, "txt", false, deliver);
+            assert!(
+                !shares_default_index(&session),
+                "a changed limit indexes again on the next query"
+            );
+            session.cancel();
+        },
+    );
+}
+
+#[test]
 fn restart_intent_cancellation_and_drop_retire_worker_delivery() {
     crate::test_support::gtk_test(
         "ui::search_session::tests::restart_intent_cancellation_and_drop_retire_worker_delivery",

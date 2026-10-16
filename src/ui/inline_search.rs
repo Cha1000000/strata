@@ -82,6 +82,14 @@ struct State {
 }
 
 impl State {
+    fn set_empty_state(&self, empty: bool) {
+        if empty {
+            self.status.set_valign(gtk::Align::Center);
+        } else {
+            self.status.set_valign(gtk::Align::Start);
+        }
+    }
+
     fn selected_entries(&self) -> Vec<FileEntry> {
         self.collection
             .selected_positions()
@@ -303,7 +311,12 @@ impl InlineSearch {
         if state.stack.visible_child_name().as_deref() != Some("search") {
             return false;
         }
-        state.collection.view.grab_focus()
+        if let Some(position) = state.collection.current_position() {
+            state.collection.restore_focus(position);
+            true
+        } else {
+            state.collection.view.grab_focus()
+        }
     }
 
     pub(super) fn selected_anchor(&self) -> Option<(gtk::Widget, FileEntry)> {
@@ -395,6 +408,11 @@ impl InlineSearch {
             .cloned()
             .collect();
         if pruned.len() != state.collection.sorted.n_items() as usize {
+            if pruned.is_empty() {
+                state.status.set_text(&crate::i18n::tr("No matching files"));
+                state.set_empty_state(true);
+                state.status.set_visible(true);
+            }
             update_results(state, pruned, state.recursive.get());
         }
     }
@@ -536,6 +554,7 @@ fn show_directory_listing(state: &State) {
     }
     state.updating.set(true);
     state.collection.clear();
+    state.set_empty_state(false);
     state.stack.set_visible_child_name("files");
     state.updating.set(false);
     state.emit_selection_changed();
@@ -609,14 +628,14 @@ pub(super) fn wrap(
     } = options;
     let stack = gtk::Stack::builder().hexpand(true).vexpand(true).build();
     stack.add_named(content, Some("files"));
-    let results = gtk::Box::new(gtk::Orientation::Vertical, 4);
-    let status = gtk::Label::new(None);
-    status.add_css_class("status-message");
-    status.set_wrap(true);
-    status.set_wrap_mode(gtk::pango::WrapMode::WordChar);
-    status.set_justify(gtk::Justification::Center);
-    results.append(&status);
     let recursive = Rc::new(Cell::new(false));
+    let weak_entry = entry.downgrade();
+    let focus_entry = Rc::new(move || {
+        weak_entry
+            .upgrade()
+            .filter(|entry| entry.is_mapped())
+            .is_some_and(|entry| entry.grab_focus_without_selecting())
+    });
     let (collection, scroll, overlay) = build_collection(
         presentation,
         recursive.clone(),
@@ -626,10 +645,20 @@ pub(super) fn wrap(
             activate: activate.clone(),
             single_click,
             focus_items,
+            focus_entry,
         },
     );
-    results.append(&overlay);
-    stack.add_named(&results, Some("search"));
+    let status = gtk::Label::new(None);
+    status.add_css_class("status-message");
+    status.set_wrap(true);
+    status.set_wrap_mode(gtk::pango::WrapMode::WordChar);
+    status.set_justify(gtk::Justification::Center);
+    status.set_halign(gtk::Align::Center);
+    status.set_valign(gtk::Align::Center);
+    status.set_can_target(false);
+    overlay.add_overlay(&status);
+    overlay.set_measure_overlay(&status, false);
+    stack.add_named(&overlay, Some("search"));
     let state = Rc::new(State {
         entry: entry.downgrade(),
         stack: stack.clone(),
@@ -745,6 +774,7 @@ pub(super) fn wrap(
             }
             if state.collection.sorted.n_items() == 0 {
                 state.status.set_text(&crate::i18n::tr("Searching…"));
+                state.set_empty_state(true);
                 state.status.set_visible(true);
             }
             let show_hidden = weak_browser
@@ -773,9 +803,11 @@ pub(super) fn wrap(
                         batch.items,
                         batch.has_more,
                     );
+                    let is_empty = items.is_empty();
+                    state.set_empty_state(is_empty);
                     state
                         .status
-                        .set_visible(items.is_empty() || batch.coverage.is_partial());
+                        .set_visible(is_empty || batch.coverage.is_partial());
                     state.status.set_text(&if batch.coverage.is_partial() {
                         batch.coverage.message()
                     } else if batch.indexing {

@@ -169,8 +169,8 @@ archive hands the keys to its member tree. **Ctrl+A** / **Ctrl+C** select all
 and copy the document's text, never listing items; with **l** the keys go to the
 document itself (text, source, or PDF) once it has rendered.
 
-A password prompt takes focus as soon as it appears, including when **i** or
-cursor movement shows a locked archive. It then owns the keys like any other
+A password prompt shown by **i** or cursor movement leaves focus in the
+listing; **l** hands it the keys. A focused prompt owns the keys like any other
 surface: the header shows the owner bar, the Miller column drops its bar, and
 **i**, **h**, **j**, **k**, and **l** are typed into the password until **Esc**,
 **Shift+Tab**, or unlocking moves focus. If the drawer is hidden for lack of room

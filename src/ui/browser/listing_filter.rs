@@ -484,6 +484,23 @@ impl ViewState {
             && (self.filter_focus().is_some() || self.footer_filter_has_focus())
     }
 
+    /// Focuses the results showing in the pane at `depth` on their cursor, or
+    /// the pane once they are gone.
+    pub(super) fn focus_pane_results(&self, depth: usize) {
+        let target = self
+            .mode_views
+            .borrow()
+            .filter_at(depth)
+            .map(|(entry, button, search)| Target::Pane {
+                entry,
+                button,
+                search,
+            });
+        if !target.is_some_and(|target| self.focus_results_on_cursor(&target)) {
+            self.mode_views.borrow().focus_visible_pane(depth);
+        }
+    }
+
     fn filter_depth(&self) -> Option<usize> {
         if self.mode.get() == BrowserMode::Columns {
             self.focused_column_depth()
@@ -584,18 +601,20 @@ impl BrowserView {
         }
     }
 
-    /// Returns keyboard focus to the results replacing the listing, on the
-    /// row they last focused, without rewriting their selection. Returns
-    /// `false` without results.
+    /// Returns keyboard focus to the results replacing the listing, on their
+    /// cursor, without rewriting their selection. Returns `false` without
+    /// results.
     pub(in crate::ui) fn focus_results_cursor(&self) -> bool {
-        let Some(view) = self
+        let Some((target, view)) = self
             .filter_target()
-            .and_then(|target| target.results_view())
+            .and_then(|target| target.results_view().map(|view| (target, view)))
         else {
             return false;
         };
         self.keyboard_navigation();
-        view.grab_focus();
+        if !self.state.focus_results_on_cursor(&target) {
+            view.grab_focus();
+        }
         true
     }
 

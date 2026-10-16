@@ -208,8 +208,16 @@ pub trait PreviewProvider {
 /// Leading bytes read to decide a local file's preview family.
 pub(crate) const CONTENT_SAMPLE_BYTES: usize = 8 * 1024;
 
-fn content_type_for_path(path: &Path) -> glib::GString {
-    gio::content_type_guess(Some(path), None::<&[u8]>).0
+pub(crate) fn guess_content_type(path: &Path) -> (String, bool) {
+    let (guessed, uncertain) = gio::content_type_guess(Some(path), None::<&[u8]>);
+    if !guessed.starts_with("image/") && crate::sandbox::raw_metadata::is_raw(path) {
+        return ("image/x-dcraw".to_owned(), false);
+    }
+    (guessed.to_string(), uncertain)
+}
+
+fn content_type_for_path(path: &Path) -> String {
+    guess_content_type(path).0
 }
 
 pub(crate) fn is_image_path(path: &Path) -> bool {

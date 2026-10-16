@@ -26,7 +26,12 @@ MENU_RETRY_INTERVAL = 1.0
 def _row_label_matches(node: Node) -> bool:
     """False while a recycled row's child label still shows the previous name."""
 
-    label = node.find(role="label", rendered=False)
+    # List metadata may precede Name; the thumbnail identifies its caption.
+    icon = node.find(role="image", rendered=False)
+    name_cell = icon.parent if icon is not None else None
+    label = name_cell.find(role="label", rendered=False) if name_cell is not None else None
+    if label is None:
+        label = node.find(role="label", rendered=False)
     return label is None or label.name == node.name
 # `ui::accessibility::describe_pane` names every browser pane after its
 # directory and describes it with the presentation that drew it.

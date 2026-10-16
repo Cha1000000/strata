@@ -11,10 +11,21 @@ Strata defines its named colors as `@strata_bg`, `@strata_surface`,
 `@theme_*` names; user stylesheets referencing those names must be updated.
 Custom theme TOML keys are unchanged.
 
-Strata's token provider takes precedence over GTK theme defaults, but user
-`~/.config/gtk-4.0/gtk.css` retains GTK's higher user priority. The namespace
-prevents accidental collisions with other stylesheets' `@theme_*` colors;
-it does not override deliberate user selectors or `@strata_*` definitions.
+Strata isolates its appearance from desktop GTK styling:
+
+- The GTK theme is pinned to GTK's built-in `Default` theme. A desktop theme
+  selected through the settings portal, `settings.ini`, or `GTK_THEME` is
+  ignored; `GTK_THEME` is dropped from the environment before GTK starts.
+- The built-in theme's light or dark variant follows the active Strata theme's
+  background, not the desktop color scheme, and the high-contrast variant is
+  never used.
+- Above GTK's user priority, Strata unsets every property and restates the
+  built-in theme before its own stylesheets, so `~/.config/gtk-4.0/gtk.css`
+  cannot change any property of Strata's widgets.
+
+The `@strata_*` namespace prevents accidental collisions with other
+stylesheets' `@theme_*` colors; it does not stop deliberate `@strata_*`
+redefinitions in a user stylesheet.
 
 ## Custom theme files
 
@@ -39,11 +50,19 @@ border = "#315b75"
 dim_text = "#6f8da3"
 ```
 
-Strata discovers valid `.toml` files in this directory on startup and displays them under **Your themes**. If a custom filename matches a bundled theme ID, the custom theme replaces that bundled entry so saved preferences and selection always use the user’s palette. Colors load as `#rrggbb`, or `#rrggbbaa` when translucent, so GTK-only forms such as 9-digit hex still apply; the file is not rewritten. Interface icons ignore the alpha.
+Strata discovers valid `.toml` files in this directory on startup, re-reads them when they change (see [Live updates](#live-updates)), and displays them under **Your themes**. If a custom filename matches a bundled theme ID, the custom theme replaces that bundled entry so saved preferences and selection always use the user’s palette. Colors load as `#rrggbb`, or `#rrggbbaa` when translucent, so GTK-only forms such as 9-digit hex still apply; the file is not rewritten. Interface icons ignore the alpha.
 
 The configurator derives a new file's ID from the theme name, lowercased, keeping ASCII letters and digits and joining the rest with `-` (for example `Ocean Blue` becomes `ocean-blue.toml`). Names without ASCII letters or digits are saved as `custom-theme.toml`. The `name` field keeps the name exactly as typed, so names such as `日本語` are still shown as written.
 
 Theme files may be symlinks into a dotfiles repository. The configurator never replaces an existing theme: when the ID matches a bundled theme or a loaded custom theme, or `<theme-id>.toml` already exists, whether it loaded or not (for example an invalid file or a link to a missing or broken dotfile), the new theme is saved as the next free `<theme-id>-2.toml`, `<theme-id>-3.toml`, and so on. Saving a theme named `Dracula` therefore creates `dracula-2.toml` and leaves the bundled Dracula theme in place.
+
+## Live updates
+
+Strata watches `~/.config/strata/themes/` while it runs. When a `.toml` file changes there, the custom themes are read again; if the theme currently selected resolves to different colors, it is re-applied to every open window, including icon colors and code-preview syntax colors. No restart is needed.
+
+This makes dynamic themes work: a generator can rewrite a theme file in place, for example a [matugen](https://github.com/InioX/matugen) template that follows the wallpaper and writes `~/.config/strata/themes/matugen.toml` on every change. Select that theme once (Settings → Appearance, or `theme = "matugen"` in `settings.toml`) and open windows follow the file.
+
+Writes are debounced, so a generator touching several files in a row triggers one re-read. If a file is caught mid-write, invalid, or removed, the current appearance stays in place; the next read that produces valid colors applies them.
 
 ## Syntax colors
 

@@ -53,7 +53,7 @@ const INDEX_TIME_BUDGET: Duration = Duration::from_secs(10);
 const INITIAL_DIRECTORY_BATCH: usize = 1;
 const MAX_PENDING_DIRECTORIES: usize = 4_096;
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct TraversalBudget {
     max_entries: usize,
     max_depth: usize,
@@ -70,6 +70,33 @@ impl TraversalBudget {
             time_budget: INDEX_TIME_BUDGET,
             initial_directory_batch: INITIAL_DIRECTORY_BATCH,
             max_pending_directories: MAX_PENDING_DIRECTORIES,
+        }
+    }
+
+    fn with_limits(limits: SearchLimits) -> Self {
+        Self {
+            max_entries: limits.max_entries.unwrap_or(usize::MAX),
+            time_budget: limits.time_budget.unwrap_or(Duration::MAX),
+            ..Self::standard()
+        }
+    }
+}
+
+/// How far one index walk may go. The defaults keep local searches responsive and bound
+/// index memory; slow or network mounts may need more of both.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SearchLimits {
+    /// `None` walks until every root is exhausted.
+    pub time_budget: Option<Duration>,
+    /// `None` keeps every entry; memory grows with the tree.
+    pub max_entries: Option<usize>,
+}
+
+impl Default for SearchLimits {
+    fn default() -> Self {
+        Self {
+            time_budget: Some(INDEX_TIME_BUDGET),
+            max_entries: Some(MAX_INDEX_ENTRIES),
         }
     }
 }
@@ -216,7 +243,18 @@ impl SearchCoverage {
             rust_i18n::t!("%{first}; %{second}", first = first, second = second).into_owned()
         });
         reasons.map_or_else(String::new, |reasons| {
-            rust_i18n::t!("Partial search — %{reasons}", reasons = reasons).into_owned()
+            let message =
+                rust_i18n::t!("Partial search — %{reasons}", reasons = reasons).into_owned();
+            if self.entry_limit || self.time_limit {
+                crate::i18n::join_sentences(
+                    &message,
+                    &crate::i18n::tr(
+                        "Raise the limits in Settings → General → Search & filtering.",
+                    ),
+                )
+            } else {
+                message
+            }
         })
     }
 }
@@ -275,6 +313,7 @@ struct RefreshState {
     hidden: bool,
     recursive: bool,
     exclusions: SearchExclusions,
+    budget: TraversalBudget,
     /// A rescan arrived while a walk ran: walk once more after it publishes.
     rerun: bool,
     /// The next walk only rescans unchanged roots, so it waits out `MIN_REFRESH_INTERVAL`.
@@ -301,6 +340,7 @@ impl SharedIndex {
                 hidden: false,
                 recursive: false,
                 exclusions: SearchExclusions::default(),
+                budget: TraversalBudget::standard(),
                 rerun: false,
                 throttled: false,
                 last_walk: None,
@@ -494,7 +534,7 @@ impl QueryScorer<'_> {
 }
 
 type IndexRegistry = Vec<(
-    (Vec<PathBuf>, bool, bool, SearchExclusions),
+    (Vec<PathBuf>, bool, bool, SearchExclusions, SearchLimits),
     Weak<SharedIndex>,
 )>;
 static SHARED_INDEXES: OnceLock<Mutex<IndexRegistry>> = OnceLock::new();
@@ -520,6 +560,13 @@ impl SearchHandle {
     }
 }
 
+impl SearchHandle {
+    #[cfg(test)]
+    pub(crate) fn shares_index_with(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.index, &other.index)
+    }
+}
+
 impl Drop for SearchHandle {
     fn drop(&mut self) {
         tracing::debug!("search session cancelled");
@@ -538,6 +585,7 @@ pub fn index_filter(
     root: PathBuf,
     show_hidden: bool,
     include_subfolders: bool,
+    limits: SearchLimits,
 ) -> (SearchHandle, Receiver<SearchEvent>) {
     index_scoped(
         vec![root],
@@ -545,6 +593,7 @@ pub fn index_filter(
         include_subfolders,
         SearchScorer::Name(filter_score_normalized),
         Vec::new(),
+        limits,
     )
 }
 
@@ -553,6 +602,7 @@ pub fn index_paths(
     show_hidden: bool,
     recursive: bool,
     frecency: Frecency,
+    limits: SearchLimits,
 ) -> (SearchHandle, Receiver<SearchEvent>) {
     index_scoped(
         vec![root],
@@ -563,6 +613,7 @@ pub fn index_paths(
             folders: None,
         },
         Vec::new(),
+        limits,
     )
 }
 
@@ -571,6 +622,7 @@ pub fn index_folder_paths(
     show_hidden: bool,
     frecency: Frecency,
     refused: RefusedFolders,
+    limits: SearchLimits,
 ) -> (SearchHandle, Receiver<SearchEvent>) {
     index_scoped(
         vec![root],
@@ -581,6 +633,7 @@ pub fn index_folder_paths(
             folders: Some(Arc::new(refused)),
         },
         Vec::new(),
+        limits,
     )
 }
 
@@ -589,7 +642,7 @@ pub fn index_trees(
     roots: Vec<PathBuf>,
     show_hidden: bool,
 ) -> (SearchHandle, Receiver<SearchEvent>) {
-    index_trees_with_exclusions(roots, show_hidden, Vec::new())
+    index_trees_with_exclusions(roots, show_hidden, Vec::new(), SearchLimits::default())
 }
 
 /// Concurrent sessions share a snapshot until the last handle is dropped.
@@ -598,6 +651,7 @@ pub fn index_trees_with_exclusions(
     roots: Vec<PathBuf>,
     show_hidden: bool,
     exclusions: Vec<String>,
+    limits: SearchLimits,
 ) -> (SearchHandle, Receiver<SearchEvent>) {
     index_scoped(
         roots,
@@ -605,6 +659,7 @@ pub fn index_trees_with_exclusions(
         true,
         SearchScorer::Name(fuzzy_score_normalized),
         exclusions,
+        limits,
     )
 }
 
@@ -614,6 +669,7 @@ fn index_scoped(
     recursive: bool,
     scorer: SearchScorer,
     exclusions: Vec<String>,
+    limits: SearchLimits,
 ) -> (SearchHandle, Receiver<SearchEvent>) {
     let mut seen = HashSet::new();
     let roots: Vec<_> = roots
@@ -626,6 +682,7 @@ fn index_scoped(
         show_hidden,
         recursive,
         search_exclusions.clone(),
+        limits,
     );
     let registry = SHARED_INDEXES.get_or_init(|| Mutex::new(Vec::new()));
     let mut registry = registry
@@ -646,7 +703,7 @@ fn index_scoped(
             index.clone(),
             roots,
             show_hidden,
-            TraversalBudget::standard(),
+            TraversalBudget::with_limits(limits),
             recursive,
             search_exclusions,
         );
@@ -677,7 +734,7 @@ pub(crate) fn rebase_search_indexes(from: &Path, to: &Path, scope: RenameScope) 
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     registry.retain(|(_, index)| index.strong_count() > 0);
-    for ((roots, hidden, recursive, exclusions), index) in registry.iter_mut() {
+    for ((roots, hidden, recursive, exclusions, _), index) in registry.iter_mut() {
         let affected = roots.iter().any(|root| match scope {
             RenameScope::Related => {
                 from.starts_with(root)
@@ -724,7 +781,7 @@ pub(crate) fn refresh_search_indexes_for_directory(directory: &Path) {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     registry.retain(|(_, index)| index.strong_count() > 0);
-    for ((roots, hidden, recursive, exclusions), index) in registry.iter() {
+    for ((roots, hidden, recursive, exclusions, _), index) in registry.iter() {
         let Some(index) = index.upgrade() else {
             continue;
         };
@@ -847,7 +904,7 @@ fn refresh_index(index: &Arc<SharedIndex>) {
         let traversal = REFRESH_TRAVERSAL
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let (generation, roots, hidden, recursive, exclusions) = {
+        let (generation, roots, hidden, recursive, exclusions, budget) = {
             let mut refresh = index
                 .refresh
                 .lock()
@@ -865,6 +922,7 @@ fn refresh_index(index: &Arc<SharedIndex>) {
                 refresh.hidden,
                 refresh.recursive,
                 refresh.exclusions.clone(),
+                refresh.budget,
             )
         };
         index.cancel_initial_indexer.store(true, Ordering::Release);
@@ -873,26 +931,14 @@ fn refresh_index(index: &Arc<SharedIndex>) {
             ..SharedIndex::new()
         };
         if recursive {
-            build_index(
-                &replacement,
-                roots,
-                hidden,
-                TraversalBudget {
-                    max_entries: MAX_INDEX_ENTRIES,
-                    max_depth: MAX_INDEX_DEPTH,
-                    time_budget: INDEX_TIME_BUDGET,
-                    initial_directory_batch: INITIAL_DIRECTORY_BATCH,
-                    max_pending_directories: MAX_PENDING_DIRECTORIES,
-                },
-                exclusions,
-            );
+            build_index(&replacement, roots, hidden, budget, exclusions);
         } else {
             directory::build_index(
                 &replacement,
                 roots,
                 hidden,
-                MAX_INDEX_ENTRIES,
-                INDEX_TIME_BUDGET,
+                budget.max_entries,
+                budget.time_budget,
                 &exclusions,
             );
         }
@@ -1149,6 +1195,11 @@ fn start_indexer(
     recursive: bool,
     exclusions: SearchExclusions,
 ) {
+    index
+        .refresh
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .budget = budget;
     let worker_index = index.clone();
     let worker = std::thread::Builder::new()
         .name("strata-search-index".into())

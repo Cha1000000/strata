@@ -2,6 +2,7 @@
 
 pub(crate) mod bookmarks;
 pub(crate) mod directory_summary;
+pub(crate) mod directory_validation;
 mod file_manager1;
 mod gio_location;
 mod local_actions;

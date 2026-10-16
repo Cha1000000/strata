@@ -34,12 +34,94 @@ struct Indicator {
     target: Cell<(f64, f64)>,
     started: Cell<i64>,
     active: Cell<u64>,
+    animating: Cell<bool>,
+}
+
+fn step_indicator(
+    overlay: &gtk::Overlay,
+    line: &gtk::DrawingArea,
+    headers: &[Header],
+    indicator: &Indicator,
+    now: i64,
+) -> bool {
+    let Some(header) = headers
+        .iter()
+        .find(|header| header.id == indicator.active.get())
+    else {
+        return false;
+    };
+    let Some(bounds) = header.widget.compute_bounds(overlay) else {
+        return false;
+    };
+    let target = (bounds.x() as f64, bounds.width() as f64);
+    if indicator.target.get() != target {
+        indicator.from.set(indicator.position.get());
+        indicator.target.set(target);
+        indicator.started.set(now);
+    }
+    let progress = if !motion::animations_enabled() || indicator.from.get().1 == 0.0 {
+        1.0
+    } else {
+        ((now - indicator.started.get()) as f64 / 220_000.0).clamp(0.0, 1.0)
+    };
+    let eased = motion::emphasized_deceleration(progress);
+    let from = indicator.from.get();
+    let position = (
+        from.0 + (target.0 - from.0) * eased,
+        from.1 + (target.1 - from.1) * eased,
+    );
+    if indicator.position.replace(position) != position {
+        line.queue_draw();
+    }
+    progress < 1.0
+}
+
+fn follow_active_tab(
+    overlay: &gtk::Overlay,
+    line: &gtk::DrawingArea,
+    headers: &Rc<RefCell<Vec<Header>>>,
+    indicator: &Rc<Indicator>,
+) {
+    let Some(clock) = overlay.frame_clock() else {
+        return;
+    };
+    let moving = step_indicator(
+        overlay,
+        line,
+        &headers.borrow(),
+        indicator,
+        clock.frame_time(),
+    );
+    if !moving || indicator.animating.replace(true) {
+        return;
+    }
+    let line = line.downgrade();
+    let headers = headers.clone();
+    let indicator = indicator.clone();
+    overlay.add_tick_callback(move |overlay, clock| {
+        let moving = line.upgrade().is_some_and(|line| {
+            step_indicator(
+                overlay,
+                &line,
+                &headers.borrow(),
+                &indicator,
+                clock.frame_time(),
+            )
+        });
+        if moving {
+            return glib::ControlFlow::Continue;
+        }
+        indicator.animating.set(false);
+        glib::ControlFlow::Break
+    });
 }
 
 pub(super) struct TabStrip {
     widget: gtk::Box,
     row: gtk::Box,
     scroller: gtk::ScrolledWindow,
+    overlay: gtk::Overlay,
+    line: gtk::DrawingArea,
     headers: Rc<RefCell<Vec<Header>>>,
     indicator: Rc<Indicator>,
     pub(super) actions: gtk::Box,
@@ -97,46 +179,13 @@ impl TabStrip {
             context.rectangle(x, height as f64 - 3.0, width, 3.0);
             let _ = context.fill();
         });
-        let ticking_headers = headers.clone();
-        let ticking_indicator = indicator.clone();
-        let ticking_line = line.downgrade();
-        overlay.add_tick_callback(move |overlay, clock| {
-            let Some(line) = ticking_line.upgrade() else {
-                return glib::ControlFlow::Break;
-            };
-            let headers = ticking_headers.borrow();
-            let Some(header) = headers
-                .iter()
-                .find(|header| header.id == ticking_indicator.active.get())
-            else {
-                return glib::ControlFlow::Continue;
-            };
-            let Some(bounds) = header.widget.compute_bounds(overlay) else {
-                return glib::ControlFlow::Continue;
-            };
-            let target = (bounds.x() as f64, bounds.width() as f64);
-            if ticking_indicator.target.get() != target {
-                ticking_indicator.from.set(ticking_indicator.position.get());
-                ticking_indicator.target.set(target);
-                ticking_indicator.started.set(clock.frame_time());
+        let layout_headers = headers.clone();
+        let layout_indicator = indicator.clone();
+        let layout_line = line.downgrade();
+        crate::ui::frame::after_layout(&overlay, move |overlay| {
+            if let Some(line) = layout_line.upgrade() {
+                follow_active_tab(overlay, &line, &layout_headers, &layout_indicator);
             }
-            let progress = if !motion::animations_enabled() || ticking_indicator.from.get().1 == 0.0
-            {
-                1.0
-            } else {
-                ((clock.frame_time() - ticking_indicator.started.get()) as f64 / 220_000.0)
-                    .clamp(0.0, 1.0)
-            };
-            let eased = motion::emphasized_deceleration(progress);
-            let from = ticking_indicator.from.get();
-            let position = (
-                from.0 + (target.0 - from.0) * eased,
-                from.1 + (target.1 - from.1) * eased,
-            );
-            if ticking_indicator.position.replace(position) != position {
-                line.queue_draw();
-            }
-            glib::ControlFlow::Continue
         });
         let scroll = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::BOTH_AXES);
         let adjustment = scroller.hadjustment();
@@ -156,6 +205,8 @@ impl TabStrip {
             widget,
             row,
             scroller,
+            overlay,
+            line,
             headers,
             indicator,
             actions,
@@ -299,6 +350,7 @@ impl TabStrip {
                 header.widget.remove_css_class("active");
             }
         }
+        follow_active_tab(&self.overlay, &self.line, &self.headers, &self.indicator);
         let selected_headers = Rc::downgrade(&self.headers);
         let selected_indicator = self.indicator.clone();
         let row = self.row.downgrade();

@@ -856,6 +856,15 @@ fn tenxer_interactive_previews_keep_a_defined_key_owner() {
             );
             fixture.press(Key::k, ModifierType::empty());
             assert_eq!(focused_name(&browser), "locked.zip");
+            wait_until(|| {
+                widget_with_class(&fixture.preview.widget(), "preview-archive-password").is_some()
+            });
+            assert!(
+                fixture.view.item_view_has_focus(),
+                "navigating onto a locked archive leaves focus in the list"
+            );
+            assert!(!owner_bar(&fixture));
+            fixture.press(Key::l, ModifierType::empty());
             wait_until(|| password_has_focus(&fixture));
             assert!(
                 owner_bar(&fixture),
@@ -873,6 +882,14 @@ fn tenxer_interactive_previews_keep_a_defined_key_owner() {
 
             move_to_named(&fixture, &browser, "locked.zip");
             fixture.press(Key::i, ModifierType::empty());
+            wait_until(|| {
+                widget_with_class(&fixture.preview.widget(), "preview-archive-password").is_some()
+            });
+            assert!(
+                fixture.view.item_view_has_focus(),
+                "i leaves focus in the list"
+            );
+            fixture.press(Key::l, ModifierType::empty());
             wait_until(|| password_has_focus(&fixture));
             assert!(owner_bar(&fixture));
             fixture.press(Key::Escape, ModifierType::empty());

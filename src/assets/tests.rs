@@ -162,8 +162,11 @@ fn cold_interface_icons_render_when_decoder_workers_cannot_start() {
             )
             .expect("bundled icon resources");
             assert!(!names.is_empty());
-            for resource in names {
-                let name = resource.strip_suffix(".svg").expect("bundled SVG icon");
+            let names = names
+                .iter()
+                .map(|resource| resource.strip_suffix(".svg").expect("bundled SVG icon"))
+                .chain([icons::STRATA_LOGO]);
+            for name in names {
                 let image = super::primary_icon(name, 18);
                 let first = image
                     .paintable()

@@ -115,6 +115,9 @@ impl SearchDialog {
         )));
         status.add_css_class("search-status");
         status.set_wrap(true);
+        status.set_justify(gtk::Justification::Center);
+        status.set_halign(gtk::Align::Center);
+        status.set_valign(gtk::Align::Center);
 
         let list = gtk::ListBox::new();
         list.add_css_class("search-results");
@@ -379,7 +382,9 @@ impl SearchDialog {
             return;
         }
         let exclusions = self.state.preferences.search_exclusions();
-        let (handle, receiver) = index_trees_with_exclusions(roots, show_hidden, exclusions);
+        let limits = self.state.preferences.search_limits();
+        let (handle, receiver) =
+            index_trees_with_exclusions(roots, show_hidden, exclusions, limits);
         self.state.search.replace(Some(handle));
         let weak = Rc::downgrade(&self.state);
         let _poll = glib::timeout_add_local(Duration::from_millis(16), move || {
@@ -413,11 +418,7 @@ impl SearchDialog {
                     state.indexing_spinner.set_visible(false);
                 }
                 if query == state.field.text().trim() {
-                    crate::ui::accessibility::set_description(
-                        &state.truncated_hint,
-                        Some(&coverage.message()),
-                    );
-                    state.truncated_hint.set_visible(coverage.is_partial());
+                    show_coverage(&state.truncated_hint, coverage);
                 }
                 if !query.is_empty() && query == state.field.text().trim() {
                     render_results(&state, items, indexing, coverage);
@@ -569,8 +570,7 @@ fn render_results(
     let query_empty = query.is_empty();
     state.rendered_query.replace(query);
     let has_results = !state.visible_results.borrow().is_empty();
-    crate::ui::accessibility::set_description(&state.truncated_hint, Some(&coverage.message()));
-    state.truncated_hint.set_visible(coverage.is_partial());
+    show_coverage(&state.truncated_hint, coverage);
     state
         .results
         .set_visible_child_name(if has_results { "results" } else { "status" });
@@ -932,6 +932,14 @@ fn clear_results(state: &SearchState) {
         state.list.remove(&child);
     }
     state.reconciling_results.set(false);
+}
+
+/// The hint names why results are partial and, for limit stops, where to raise the limits.
+fn show_coverage(hint: &gtk::Box, coverage: SearchCoverage) {
+    let message = coverage.is_partial().then(|| coverage.message());
+    crate::ui::accessibility::set_description(hint, message.as_deref());
+    hint.set_tooltip_text(message.as_deref());
+    hint.set_visible(message.is_some());
 }
 
 #[cfg(test)]

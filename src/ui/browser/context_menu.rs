@@ -1246,6 +1246,10 @@ pub(in crate::ui) fn install_resolved_item_context_menu(
         if !selection.entries_match_target(&context_entries(&state, &open_multiple_target)) {
             return;
         }
+        if crate::ui::open_with::uses_portal() {
+            crate::ui::open_with::launch_with_portal(&state.overlay, selection.files, false);
+            return;
+        }
         let Some(app) = selection.default else {
             return;
         };
@@ -2202,7 +2206,8 @@ fn prepare_open_with(
             }
         };
         let explanation = applications.unavailable_reason();
-        open_button.set_visible(applications.default.is_some());
+        open_button
+            .set_visible(applications.default.is_some() || crate::ui::open_with::uses_portal());
         result.replace(Some(OpenWithSelection {
             locations,
             files,

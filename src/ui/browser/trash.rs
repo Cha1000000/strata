@@ -3,7 +3,7 @@
 use crate::adapters::directory_summary::{DirectorySummary, summarize_directory};
 use crate::adapters::trash::{EmptyTrashOutcome, empty_trash};
 use crate::adapters::trash_restore::restore_destinations_for_locations;
-use crate::model::{FileEntry, Location};
+use crate::model::{EntryKind, FileEntry, Location};
 use crate::services::{LoadHandle, RestoreTrashItem};
 use crate::ui::blur::BlurBin;
 use crate::ui::browser::ViewState;
@@ -872,15 +872,18 @@ impl ViewState {
             name.set_hexpand(true);
             name.set_xalign(0.0);
             crate::ui::accessibility::set_description(&name, Some(&entry.location.display_path()));
-            let metadata = gtk::Label::new(Some(&if entry.is_directory() {
-                crate::i18n::tr("Folder")
-            } else {
-                match entry.size {
-                    crate::model::MetadataValue::Known(size) => format_file_size(size),
-                    crate::model::MetadataValue::Unknown
-                    | crate::model::MetadataValue::Unavailable => "—".to_owned(),
-                }
-            }));
+            let metadata =
+                gtk::Label::new(Some(&if entry.kind == EntryKind::DirectorySymbolicLink {
+                    crate::i18n::tr("Folder link")
+                } else if entry.is_directory() {
+                    crate::i18n::tr("Folder")
+                } else {
+                    match entry.size {
+                        crate::model::MetadataValue::Known(size) => format_file_size(size),
+                        crate::model::MetadataValue::Unknown
+                        | crate::model::MetadataValue::Unavailable => "—".to_owned(),
+                    }
+                }));
             metadata.add_css_class("delete-confirmation-file-metadata");
             row.append(&icon);
             row.append(&name);
