@@ -4,7 +4,6 @@
 //! replaces an entry, and shows a partial item under its final name only
 //! where the destination cannot place a stage.
 
-mod attribute_cache;
 mod barrier;
 mod data;
 mod links;
@@ -1585,6 +1584,12 @@ impl Mount {
         }
     }
 
+    /// The SMB client answers stats from attributes it cached, whose change time can predate
+    /// one the server set since, such as once the deferred close of a file written there lands.
+    fn caches_attributes(&self) -> bool {
+        self.attribute_cache.is_some()
+    }
+
     fn keeps_inode_numbers(fs: &dyn FsOps, dir: BorrowedFd<'_>) -> bool {
         known_mount(fs, dir).1.stable_inodes.unwrap_or(true)
     }
@@ -1611,7 +1616,6 @@ static TMPFILE_LINK: AtomicU8 = AtomicU8::new(TMPFILE_LINK_UNKNOWN);
 pub(super) fn forget_learned_copy_support() {
     TMPFILE_LINK.store(TMPFILE_LINK_UNKNOWN, Ordering::Relaxed);
     data::forget_learned();
-    attribute_cache::forget();
 }
 
 fn link_tmpfile(fs: &dyn FsOps, fd: BorrowedFd<'_>, to: Entry<'_>) -> Result<(), Errno> {
@@ -1730,7 +1734,7 @@ impl Copy {
 
     /// A move records an entry from this stat, or from descriptors opened after it.
     fn source_stat(&self, at: Entry<'_>) -> Result<EntryStat, Errno> {
-        let forced = self.recording && attribute_cache::stale(self.fs, at.dir);
+        let forced = self.recording && Mount::new(self.fs, at.dir).caches_attributes();
         self.fs.stat(at, forced)
     }
 
@@ -2377,7 +2381,6 @@ impl<'a> FileCopy<'a> {
             Some(fd) => self.through_tmpfile(&source, fd, &parent, target),
             None => self.through_named_stage(&source, &parent, target),
         }?;
-        attribute_cache::wrote_file(&self.target);
         if let (Some(folder), Some(read)) = (recorded_in, self.read.take()) {
             self.copy.wrote(copied.1, &read);
             folder.file(at.name, read);
@@ -2695,10 +2698,7 @@ impl<'a> FileCopy<'a> {
                 .settle_times(target, created.identity, snapshot, self.target.family)
         })(fd);
         match filled {
-            Ok(()) => {
-                attribute_cache::wrote_file(&self.target);
-                Ok(created.identity)
-            }
+            Ok(()) => Ok(created.identity),
             Err(failure) => {
                 let removed = self.remove_made(name, created.identity);
                 Err(self.copy.after_cleanup(failure, removed))

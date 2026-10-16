@@ -834,22 +834,25 @@ fn undoing_a_cross_volume_move_deletes_the_moved_items_once_they_are_flushed()
 
 /// Moves `items` onto a fresh mount, lands the deferred closes, undoes the
 /// move `undone_after` later, and counts the forced stats of each `counted`
-/// entry during the undo.
+/// entry during the undo. With `read_after`, the items are copied away that
+/// long after the move first, and the closes land after that read.
 fn forced_stats_undoing_a_move(
     preset: Preset,
     (items, counted): (&[&str], &[&str]),
-    (started, undone_after): (SystemTime, Duration),
+    (started, read_after, undone_after): (SystemTime, Option<Duration>, Duration),
 ) -> Result<Vec<usize>, Box<dyn Error>> {
     let row = format!(
-        "{:?} {items:?} after {undone_after:?}",
+        "{:?} {items:?} read after {read_after:?}, undone after {undone_after:?}",
         preset().mount_type.map(|(kind, _)| kind)
     );
     let _clock = ClockGuard::set(started);
     let root = tempfile::tempdir()?;
     let origin = root.path().join("origin");
     let share = root.path().join("share");
+    let viewer = root.path().join("viewer");
     fs::create_dir_all(origin.join("project/sub"))?;
     fs::create_dir(&share)?;
+    fs::create_dir(&viewer)?;
     fs::write(origin.join("notes.txt"), b"notes")?;
     fs::write(origin.join("project/sub/b.txt"), b"b")?;
     for folder in [origin.clone(), origin.join("project")] {
@@ -863,19 +866,24 @@ fn forced_stats_undoing_a_move(
         )?;
     }
     let scope = FsQuirks::install(&share, preset());
-    run_paste(PasteRequest {
-        id: OperationRequestId(1592),
-        destination: Location::local(&share),
+    let request = |id, destination: &Path, folder: &Path, move_sources| PasteRequest {
+        id: OperationRequestId(id),
+        destination: Location::local(destination),
         items: items
             .iter()
             .map(|item| PasteItem {
-                source: Location::local(origin.join(item)),
+                source: Location::local(folder.join(item)),
                 conflict: TransferConflict::FailIfExists,
                 target_name: None,
             })
             .collect(),
-        move_sources: true,
-    });
+        move_sources,
+    };
+    run_paste(request(1592, &share, &origin, true));
+    if let Some(read_after) = read_after {
+        super::super::copy_engine::set_clock_for_test(Some(started + read_after));
+        run_paste(request(1593, &viewer, &share, false));
+    }
     land_deferred_closes(&share)?;
     super::super::copy_engine::set_clock_for_test(Some(started + undone_after));
     scope.clear_calls();
@@ -888,7 +896,7 @@ fn forced_stats_undoing_a_move(
         .iter()
         .map(|(original, current)| (original.as_path(), current.as_path()))
         .collect();
-    let (_operation, events) = undo_items(1593, &moved, TransferConflict::FailIfExists);
+    let (_operation, events) = undo_items(1594, &moved, TransferConflict::FailIfExists);
     pump_until_transfer(&events);
 
     let events = events.take();
@@ -921,33 +929,36 @@ fn forced_stats_undoing_a_move(
 }
 
 #[test]
-fn undoing_a_move_onto_a_share_forces_stats_only_while_its_client_caches_older_change_times()
+fn undoing_a_move_onto_a_share_forces_each_stat_it_records_there_and_nowhere_else()
 -> Result<(), Box<dyn Error>> {
     let _serial = serial()?;
     let started = SystemTime::now();
     let (now, later) = (Duration::ZERO, Duration::from_millis(1500));
     let in_folder = ["b.txt", "link", "pipe"];
-    // Files written there make the undo force the stats of all it moves back.
-    let rows: [(&[&str], &[&str], Duration, bool); 4] = [
-        (&["notes.txt"], &["notes.txt"], now, true),
-        (&["project"], &in_folder, now, true),
-        (&["link", "pipe"], &["link", "pipe"], now, false),
-        (&["notes.txt", "project"], &in_folder, later, false),
+    // The last row reads the items once the cache from the move expired, and
+    // their deferred closes reach the server only after that.
+    let rows: [(&[&str], &[&str], Option<Duration>, Duration); 5] = [
+        (&["notes.txt"], &["notes.txt"], None, now),
+        (&["project"], &in_folder, None, now),
+        (&["link", "pipe"], &["link", "pipe"], None, now),
+        (&["notes.txt", "project"], &in_folder, None, later),
+        (
+            &["notes.txt", "project"],
+            &["notes.txt", "b.txt"],
+            Some(Duration::from_millis(1100)),
+            Duration::from_millis(1200),
+        ),
     ];
-    for (items, counted, undone_after, forced) in rows {
-        let on_ext4 =
-            forced_stats_undoing_a_move(Quirks::ext4, (items, counted), (started, Duration::ZERO))?;
-        let on_share = forced_stats_undoing_a_move(
-            Quirks::cifs_posix,
-            (items, counted),
-            (started, undone_after),
-        )?;
+    for (items, counted, read_after, undone_after) in rows {
+        let timing = (started, read_after, undone_after);
+        let on_ext4 = forced_stats_undoing_a_move(Quirks::ext4, (items, counted), timing)?;
+        let on_nfs = forced_stats_undoing_a_move(Quirks::nfs42, (items, counted), timing)?;
+        let on_share = forced_stats_undoing_a_move(Quirks::cifs_posix, (items, counted), timing)?;
 
-        let expected = on_ext4
-            .iter()
-            .map(|count| count + usize::from(forced))
-            .collect::<Vec<_>>();
-        assert_eq!(on_share, expected, "{items:?} after {undone_after:?}");
+        let context = format!("{items:?} read after {read_after:?}");
+        assert_eq!(on_nfs, on_ext4, "{context}");
+        let recorded_forced = on_ext4.iter().map(|count| count + 1).collect::<Vec<_>>();
+        assert_eq!(on_share, recorded_forced, "{context}");
     }
     Ok(())
 }

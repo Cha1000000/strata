@@ -500,12 +500,13 @@ if it is still what the copy read:
   and link count, so Strata counts the names it removed itself, across every item of a paste, a
   restore or an undo, and accepts only those changes.
 - **SMB change times.** The SMB client answers a stat from the attributes it cached for a file
-  (`acregmax`, or `actimeo` in the mount's options, one second by default), which can hold a change
-  time from before a change this machine made reached the server, such as the times the server sets
-  once the client's deferred close of a file it wrote reaches it. On an SMB mount Strata copied or
-  moved a file to within that time, a move records each source entry with a forced stat too, so
-  moving or undoing right after a paste there does not keep unchanged entries as changed. Elsewhere
-  the record takes no extra round trip.
+  (`acregmax`, or `actimeo` in the mount's options, one second by default, and longer for a file
+  this machine keeps reading), which can hold a change time from before a change reached the
+  server, such as the times the server sets once the client's deferred close of a file written
+  there reaches it. So a move from an SMB mount records each source entry with a forced stat too,
+  one more round trip per entry, and moving or undoing after a paste there, or after reading the
+  files, does not keep unchanged entries as changed. Elsewhere, and on SMB mounts with `actimeo=0`,
+  which cache nothing, the record takes no extra round trip.
 - **Relaxed identity.** FUSE daemons without `use_ino`, vfat and exFAT, and cifs mounted with
   `noserverino` give an entry a new inode number once the kernel evicts it. There, the type and the
   birth time, where both stats report one, stand in for the inode, and the change time is compared
@@ -751,9 +752,6 @@ reported.
   attribute from cached attributes, so write access given back right after it was taken does
   nothing until the folder is revalidated. Strata revalidates before giving it back; other programs
   may not. Folder access times come back as the modification time.
-- **SMB change times.** A file this machine keeps reading can keep its cached change time for
-  longer than the attribute cache time, as can one another program on this machine just changed. A
-  move then keeps such a source as changed, and nothing is deleted.
 - **ntfs-3g and exfat-fuse** are recognised only from the host's udev records. Without them, as in
   containers, they keep per-file syncs and the 2 s comparison window, and get Windows name rules
   that leave `aux.c` and `con.txt` alone until a refusal teaches more. Their batched flush relies on
@@ -1086,8 +1084,8 @@ renumbered after eviction, SMB's refusal to open two names of one file at once o
 deferred close, another name of a file just written, its stale read-only folders and change times
 answered from its attribute cache, and writeback errors that `syncfs` reports. Tests can also
 pretend to run on another kernel release, freeze the clock that the racily clean check, the wait for
-SMB's deferred close and SMB's attribute cache read, and set a paste's batch limits and clock. The
-seam also asserts that no call runs on the main context's thread.
+SMB's deferred close and the emulated attribute cache read, and set a paste's batch limits and
+clock. The seam also asserts that no call runs on the main context's thread.
 
 For names they emulate the errno each lab mount returned for a name it refuses, names stored or
 listed as others (vfat dropping trailing dots, SMB reading private-use characters back and listing

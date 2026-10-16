@@ -24,8 +24,7 @@ use rustix::{
 };
 
 use super::{
-    Barrier, Copy, Created, Failure, Mount, Placing, Source, attribute_cache, best_effort,
-    creation_failure,
+    Barrier, Copy, Created, Failure, Mount, Placing, Source, best_effort, creation_failure,
     data::Data,
     direct_folder, from_stage, is_fatal, is_unsupported,
     links::{self, Links, Role},
@@ -1150,7 +1149,6 @@ impl File {
             }
             return Ok(role);
         };
-        attribute_cache::wrote_file(&self.mount);
         copy.wrote(created.identity, &read);
         if let Some(folder) = &self.recorded_in {
             folder.file(&self.name, read);
