@@ -1323,14 +1323,21 @@ fn wait_for_a_later_change_time(probe: &Path, than: &fs::Metadata) {
 #[test]
 fn a_file_rewritten_as_it_is_read_is_copied_again_whole() -> Result<(), Box<dyn Error>> {
     let _serial = serial()?;
-    // Each pass reads the data, then the end of the file.
+    // Each pass reads the data, then the end of the file. Every write lands in
+    // one tick of a coarse clock, so only a file last written in an earlier
+    // tick shows a same-size rewrite in its times.
     for row in ["same size", "shrinks"] {
+        // Before the kernel's coarse clock, which may run a tick behind.
+        let tick = SystemTime::now() - Duration::from_secs(1);
+        let _clock = ClockGuard::set(tick);
         let root = tempfile::tempdir()?;
         let folder = root.path().join("source/folder");
         fs::create_dir_all(&folder)?;
         let db = folder.join("db");
         fs::write(&db, b"first")?;
         let (before, expected): (Vec<_>, &[u8]) = if row == "same size" {
+            let hour_before = tick.duration_since(SystemTime::UNIX_EPOCH)?.as_secs() - 3600;
+            set_times(&db, hour_before, 0)?;
             (vec![(Op::Read, "db", 1, rewrite(&db, b"other"))], b"other")
         } else {
             (
@@ -1343,6 +1350,7 @@ fn a_file_rewritten_as_it_is_read_is_copied_again_whole() -> Result<(), Box<dyn 
         };
         let quirks = Quirks {
             before,
+            coarse_clock: Some(tick),
             ..Quirks::default()
         };
 

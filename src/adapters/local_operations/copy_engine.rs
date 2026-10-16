@@ -1906,7 +1906,7 @@ impl Copy {
         target: BorrowedFd<'_>,
         parent: &EntryStat,
         counted: bool,
-    ) -> Result<(), Failure> {
+    ) -> Result<Option<u64>, Failure> {
         let route = data::Route::new(self.fs, target_mount, source, source_stat, parent);
         let progress = (counted && self.counted).then_some(&*self.progress);
         data.copy(
@@ -1930,7 +1930,7 @@ impl Copy {
         (source, source_stat): (BorrowedFd<'_>, &EntryStat),
         target: BorrowedFd<'_>,
         counted: bool,
-    ) -> Result<ring::digest::Digest, Failure> {
+    ) -> Result<(ring::digest::Digest, u64), Failure> {
         let progress = (counted && self.counted).then_some(&*self.progress);
         data.copy_digested(
             self.fs,
@@ -1969,10 +1969,14 @@ impl Copy {
             let counted = attempt == 0;
             let unsettled =
                 mount_times.and_then(|coarse| manifest::unsettled(&stat, coarse, manifest::now()));
-            let digest = match unsettled {
-                Some(_) => Some(self.copy_digested(data, (source_fd, &stat), target, counted)?),
+            let (digest, end) = match unsettled {
+                Some(_) => {
+                    let (digest, end) =
+                        self.copy_digested(data, (source_fd, &stat), target, counted)?;
+                    (Some(digest), Some(end))
+                }
                 None => {
-                    self.copy_data(
+                    let end = self.copy_data(
                         data,
                         target_mount,
                         (source_fd, &stat),
@@ -1980,7 +1984,7 @@ impl Copy {
                         parent,
                         counted,
                     )?;
-                    None
+                    (None, end)
                 }
             };
             let snapshot = Snapshot::read(self.fs, source_fd, &stat)?;
@@ -1992,7 +1996,9 @@ impl Copy {
                 return Ok(Some((snapshot, read)));
             }
             let read = self.fs.stat_fd(source_fd)?;
-            if !manifest::changed(&stat, &read) {
+            // A rewrite within one tick of a coarse clock keeps the times, not
+            // always the size the copy read up to.
+            if !manifest::changed(&stat, &read) && end.is_none_or(|end| end == read.size) {
                 let read = manifest::Read {
                     stat: read,
                     contents: digest
@@ -2488,7 +2494,7 @@ impl<'a> FileCopy<'a> {
                 parent,
                 false,
             )
-            .and_then(|()| {
+            .and_then(|_| {
                 self.copy
                     .apply_metadata(fd.as_fd(), &stage.created, snapshot, parent, &self.target)
             });

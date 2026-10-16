@@ -267,6 +267,10 @@ pub(crate) struct Quirks {
     /// last stat of the entry saw, until this long after by the test clock,
     /// as the SMB client answers from its attribute cache (`actimeo`).
     pub cached_change_times: Option<Duration>,
+    /// Times stamped at or after this instant read as it, as one tick of the coarse clock
+    /// stamps them where the kernel has no multigrain timestamps. The tick lasts as long as
+    /// the scope.
+    pub coarse_clock: Option<SystemTime>,
 }
 
 impl Quirks {
@@ -1009,6 +1013,11 @@ impl Scope {
                 .or_insert(stat.identity.inode);
             stat.identity.birth = Some((*state.births.entry(path).or_default(), 0));
         }
+        if let Some(tick) = state.quirks.coarse_clock.and_then(timespec) {
+            stat.mtime = stat.mtime.min(tick);
+            stat.ctime = stat.ctime.min(tick);
+            stat.identity.birth = stat.identity.birth.map(|birth| birth.min(tick));
+        }
         if state.quirks.no_birth_time {
             stat.identity.birth = None;
         }
@@ -1472,6 +1481,11 @@ fn scope_for(dir: BorrowedFd<'_>) -> Option<Arc<Scope>> {
         .filter(|scope| path.starts_with(&scope.root))
         .max_by_key(|scope| scope.root.as_os_str().len())
         .cloned()
+}
+
+fn timespec(time: SystemTime) -> Option<(i64, u32)> {
+    let since = time.duration_since(SystemTime::UNIX_EPOCH).ok()?;
+    Some((i64::try_from(since.as_secs()).ok()?, since.subsec_nanos()))
 }
 
 fn own_device(path: &Path) -> Option<u64> {

@@ -211,6 +211,7 @@ pub(super) struct Data {
 }
 
 impl Data {
+    /// The offset at which the copy found the source's end, where its own reads tell.
     #[expect(
         clippy::too_many_arguments,
         reason = "one ladder step per argument group, all borrowed from the job"
@@ -224,12 +225,12 @@ impl Data {
         (source, target): (BorrowedFd<'_>, BorrowedFd<'_>),
         size: u64,
         mut progress: impl FnMut(u64),
-    ) -> Result<(), Failure> {
+    ) -> Result<Option<u64>, Failure> {
         if route.clone {
             match fs.reflink(target, source) {
                 Ok(()) => {
                     progress(size);
-                    return Ok(());
+                    return Ok(None);
                 }
                 // Writeback may have reverted the page cache, so a fallback
                 // could read wrong bytes.
@@ -252,12 +253,14 @@ impl Data {
             match self.copy_data_ranges(ends, route, size, &mut progress)? {
                 // On past the size, which the source may have outgrown.
                 Walked::Done => {
-                    return self.read_write(ends, size, Until::End(size), &mut progress, None);
+                    self.read_write(ends, size, Until::End(size), &mut progress, None)?;
+                    return Ok(None);
                 }
                 Walked::Dense(from) => offset = from,
             }
         }
         self.copy_span(ends, route, offset, Until::End(size), &mut progress)
+            .map(Some)
     }
 
     pub(super) fn copy_digested(
@@ -267,7 +270,7 @@ impl Data {
         (source, target): (BorrowedFd<'_>, BorrowedFd<'_>),
         size: u64,
         mut progress: impl FnMut(u64),
-    ) -> Result<digest::Digest, Failure> {
+    ) -> Result<(digest::Digest, u64), Failure> {
         let ends = Ends {
             fs,
             cancelled,
@@ -275,8 +278,8 @@ impl Data {
             target,
         };
         let mut digest = digest::Context::new(&digest::SHA256);
-        self.read_write(ends, 0, Until::End(size), &mut progress, Some(&mut digest))?;
-        Ok(digest.finish())
+        let end = self.read_write(ends, 0, Until::End(size), &mut progress, Some(&mut digest))?;
+        Ok((digest.finish(), end))
     }
 
     fn copy_data_ranges(
@@ -327,13 +330,13 @@ impl Data {
         mut offset: u64,
         until: Until,
         progress: &mut impl FnMut(u64),
-    ) -> Result<(), Failure> {
+    ) -> Result<u64, Failure> {
         if let Some(largest) = route.copy_range.filter(|_| !self.copy_range_slow) {
             match (
                 self.copy_ranges(ends, (offset, until.expected()), largest, progress)?,
                 until,
             ) {
-                (Ranged::Done, Until::At(_)) => return Ok(()),
+                (Ranged::Done, Until::At(end)) => return Ok(end),
                 // On past the size, which the source may have outgrown.
                 (Ranged::Done, Until::End(size)) => offset = size,
                 (Ranged::From(copied), _) => offset = copied,
@@ -407,7 +410,7 @@ impl Data {
         until: Until,
         progress: &mut impl FnMut(u64),
         mut digest: Option<&mut digest::Context>,
-    ) -> Result<(), Failure> {
+    ) -> Result<u64, Failure> {
         // Sized by what is left, so copying a small file maps no large buffer.
         let wanted = usize::try_from(until.expected().saturating_sub(offset))
             .map_or(MIB, |left| left.clamp(64 * 1024, MIB));
@@ -422,7 +425,7 @@ impl Data {
                 Until::End(_) => self.buffer.len(),
             };
             if limit == 0 {
-                return Ok(());
+                return Ok(offset);
             }
             let read = match ends
                 .fs
@@ -433,7 +436,7 @@ impl Data {
                 Err(error) => return Err(error.into()),
             };
             if read == 0 {
-                return Ok(());
+                return Ok(offset);
             }
             if let Some(digest) = &mut digest {
                 digest.update(&self.buffer[..read]);

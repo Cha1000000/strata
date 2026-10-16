@@ -489,8 +489,10 @@ count, size, and modification and change times. It records names only and holds 
 After the destination is flushed (see [Durability](#durability)), each source entry is deleted only
 if it is still what the copy read:
 
-- **Torn files.** A file that changes while it is read is copied once more. If it changes again,
-  its copy is removed and the source is kept. A selected file then fails with "changed while it was
+- **Torn files.** A file that changes while it is read is copied once more: a stat after the copy
+  shows another size or other times, or the copy's own reads found the file's end away from its
+  size, which is all a rewrite within one tick of a coarse clock may leave. If it changes again, its
+  copy is removed and the source is kept. A selected file then fails with "changed while it was
   being copied", and nothing is published.
 - **The check.** A forced stat (`AT_STATX_FORCE_SYNC`, which revalidates NFS and SMB) must show the
   same type, size and modification time and, where inode numbers are stable, the same inode, change
@@ -1061,8 +1063,9 @@ device format udev records, refused `O_TMPFILE` and its links, refused clones, a
 that ends early, short reads and writes, times reset at close (NFSv4.2 delegations, FUSE writeback
 caches), refused `chown`, foreign groups, extended attributes refused by prefix, injected or listed
 with ACLs first, refused `mknodat` of files and pipes, NFS silly renames, files that report no
-size, reported modes, change times that equal the modification time (FAT), single link counts
-(sshfs), entries renumbered after eviction, SMB's refusal to open two names of one file at once or,
+size, reported modes, change times that equal the modification time (FAT), times stamped within one
+tick of a coarse clock (kernels without multigrain timestamps), single link counts (sshfs), entries
+renumbered after eviction, SMB's refusal to open two names of one file at once or,
 during its deferred close, another name of a file just written, its stale read-only folders and
 change times answered from its attribute cache, and writeback errors that `syncfs` reports. Tests
 can also pretend to run on another kernel release, freeze the clock that the racily clean check,
