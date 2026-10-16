@@ -75,6 +75,7 @@ sidebar. In Icons, **h** / **j** / **k** / **l** and arrows move among tiles.
 | **i** | On a file: toggle the preview drawer without moving focus into it. On a directory: in Columns, open the next Miller column without moving focus into it (mirroring usually has already); in List and Icons, toggle the folder-peek popover. |
 | **J** / **K** | Scroll the open preview without taking focus |
 | **<** / **>** | While the open preview shows audio or video: move to the previous / next file of the same type and keep playing, without taking focus |
+| **+** / **=** / **−** | Icons: larger / smaller thumbnails, the same steps as **Ctrl+Alt++** / **Ctrl+Alt+−** |
 
 In Columns, the saved **Mirror columns selection** preference (on by default)
 applies to the cursor: shortly after **j** / **k** / arrows land on a directory,
@@ -718,6 +719,7 @@ These GUI conventions stay available alongside the Yazi verbs:
 | **Alt+Enter** | Properties |
 | **Menu** / **Shift+F10** | Context menu |
 | **Ctrl++** / **Ctrl+−** / **Ctrl+0** | Text size |
+| **Ctrl+Alt++** / **Ctrl+Alt+−** / **Ctrl+Alt+0** | Icons thumbnail size |
 
 Context-menu shortcut hints follow this map (**x** cut, **y** yank, **p** paste,
 **d** / **D** trash / delete, **r** rename, **M** / **C** move / copy to, **R**

@@ -35,6 +35,8 @@ catalog! {
         COPY_TO: Binding = Binding::shift(Key::c);
         RESTORE: Binding = Binding::shift(Key::r);
         TENXER_HIDDEN_FILES: Binding = Binding::plain(Key::period);
+        TENXER_THUMBNAILS_LARGER: Binding = Binding::plain(Key::plus);
+        TENXER_THUMBNAILS_SMALLER: Binding = Binding::plain(Key::minus);
 
         VISUAL_SELECT: Binding = Binding::plain(Key::v);
         VISUAL_UNSET: Binding = Binding::shift(Key::v);
@@ -94,6 +96,7 @@ catalog! {
         // Where no tab strip takes them first, as in file choosers, these page too.
         TENXER_PAGE_UP_PAGE_UP: Binding = Binding::ctrl(Key::Page_Up);
         TENXER_PAGE_DOWN_PAGE_DOWN: Binding = Binding::ctrl(Key::Page_Down);
+        TENXER_THUMBNAILS_LARGER_EQUAL: Binding = Binding::plain(Key::equal);
 
         // The reference shows these as "Shift reverses" beside the sort chord.
         SORT_BY_NAME_REVERSED: Binding = Binding::shift(Key::a);

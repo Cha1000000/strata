@@ -13,7 +13,7 @@ use crate::{
     app::{Browser, VisualKind},
     model::Location,
     ui::{
-        browser_modes::BrowserMode,
+        browser_modes::{BrowserMode, ThumbnailResize},
         keys::{Binding, KeyPress, bindings::*},
         preview::{ArchiveMove, MediaCommand, PreviewSurface, preview_target},
         tenxer_mode::Chord,
@@ -415,6 +415,10 @@ impl Dispatcher {
         let search = self.view.selected_search_results().is_some();
         if let Some(command) = media_track(press) {
             return self.preview.media_key(command);
+        }
+        // Before the search branch: the Shift that types + counts as held there.
+        if let Some(change) = ThumbnailResize::for_tenxer_key(press) {
+            return self.view.resize_icons_thumbnails(change);
         }
         let held = press.modifiers();
         if search && !held.is_empty() {
