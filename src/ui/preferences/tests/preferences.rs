@@ -1265,6 +1265,7 @@ fn all_preference_setters_publish_and_persist_without_duplicate_notifications() 
                 |m| m.set_sort_preferences(ViewPreferences::default()),
                 |m| m.set_text_size(TextSize::new(11)),
                 |m| m.set_corner_roundness(CornerRoundness::new(150)),
+                |m| m.set_interface_font(None),
                 |m| m.set_interface_renderer(InterfaceRenderer::System),
                 |m| m.set_language(crate::i18n::Language::Auto),
                 |m| m.set_checks_for_updates(true),

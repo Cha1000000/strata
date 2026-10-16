@@ -265,9 +265,8 @@ impl LocalPreviewProvider {
                 }
                 None => None,
             };
-            let (guessed_type, uncertain) =
-                gio::content_type_guess(Some(Path::new(&entry.native_name)), None::<&[u8]>);
-            let mut content_type = guessed_type.to_string();
+            let (mut content_type, uncertain) =
+                crate::services::guess_content_type(Path::new(&entry.native_name));
             let mut content = content_family(&content_type);
             if crate::services::is_model(&entry.native_name) {
                 content = PreviewContent::Unsupported;
@@ -547,6 +546,11 @@ impl LocalPreviewProvider {
                 PreviewContent::Pdf { .. } => Some(ParseOperation::PreviewPdf(pdf_render_size(
                     request.media_size,
                 ))),
+                PreviewContent::Image
+                    if crate::sandbox::raw_metadata::is_raw(Path::new(&entry.native_name)) =>
+                {
+                    Some(ParseOperation::PreviewRaw)
+                }
                 PreviewContent::Image => Some(ParseOperation::PreviewImage),
                 PreviewContent::Media => None,
                 PreviewContent::Text { .. }
@@ -560,7 +564,10 @@ impl LocalPreviewProvider {
             }};
             if let Some(operation) = &operation {
                 let staged = if entry.location.native_path().is_none() {
-                    if !matches!(operation, ParseOperation::PreviewImage) {
+                    if !matches!(
+                        operation,
+                        ParseOperation::PreviewImage | ParseOperation::PreviewRaw
+                    ) {
                         emit(PreviewEvent::Failed {
                             request_id,
                             entry,

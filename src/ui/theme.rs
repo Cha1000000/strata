@@ -17,6 +17,7 @@ use super::preferences::{
     desktop_text_scale_factor, notify_live, snapped_root_font_px,
 };
 
+mod font;
 mod omarchy;
 mod roundness;
 
@@ -24,7 +25,9 @@ mod roundness;
 /// restated, so `~/.config/gtk-4.0/gtk.css` cannot decide any of them.
 const RESET_STYLE_PRIORITY: u32 = gtk::STYLE_PROVIDER_PRIORITY_USER + 1;
 const BASE_THEME_STYLE_PRIORITY: u32 = RESET_STYLE_PRIORITY + 1;
-const STYLE_PRIORITY: u32 = BASE_THEME_STYLE_PRIORITY + 1;
+/// Below Strata's stylesheet, so its intentional monospace rules still win.
+const FONT_STYLE_PRIORITY: u32 = BASE_THEME_STYLE_PRIORITY + 1;
+const STYLE_PRIORITY: u32 = FONT_STYLE_PRIORITY + 1;
 const RESET_CSS: &str = "* { all: unset; }";
 const TOKEN_STYLE_PRIORITY: u32 = STYLE_PRIORITY + 1;
 const STYLE_CSS: &str = include_str!("../style.css");
@@ -103,6 +106,7 @@ struct AppearancePreferences {
     omarchy_variant: OmarchyVariant,
     text_size: TextSize,
     corner_roundness: CornerRoundness,
+    interface_font: Option<String>,
     element_glow: bool,
     file_icon_colors: FileIconColors,
 }
@@ -181,6 +185,7 @@ pub struct ThemeManager {
     provider: gtk::CssProvider,
     reset_provider: gtk::CssProvider,
     base_theme_provider: gtk::CssProvider,
+    font_provider: gtk::CssProvider,
     base_provider: gtk::CssProvider,
     base_roundness: Cell<Option<CornerRoundness>>,
     themes: RefCell<Vec<Theme>>,
@@ -225,6 +230,7 @@ impl ThemeManager {
             omarchy_variant: preferences.omarchy_variant(),
             text_size: preferences.text_size(),
             corner_roundness: preferences.corner_roundness(),
+            interface_font: preferences.interface_font(),
             element_glow: preferences.element_glow(),
             file_icon_colors: preferences.file_icon_colors(),
         };
@@ -233,6 +239,7 @@ impl ThemeManager {
             provider: gtk::CssProvider::new(),
             reset_provider: gtk::CssProvider::new(),
             base_theme_provider: gtk::CssProvider::new(),
+            font_provider: gtk::CssProvider::new(),
             base_provider: gtk::CssProvider::new(),
             base_roundness: Cell::new(None),
             themes: RefCell::new(themes),
@@ -415,6 +422,11 @@ impl ThemeManager {
             );
             gtk::style_context_add_provider_for_display(
                 &display,
+                &self.font_provider,
+                FONT_STYLE_PRIORITY,
+            );
+            gtk::style_context_add_provider_for_display(
+                &display,
                 &self.base_provider,
                 STYLE_PRIORITY,
             );
@@ -497,7 +509,10 @@ impl ThemeManager {
             "{}\n@define-color strata_glow {glow};\n",
             tokens_css(tokens, root_font_px)
         ));
-        apply_interface_font(root_font_px);
+        let family = self.preferences.interface_font();
+        self.font_provider
+            .load_from_string(&font::stylesheet(family.as_deref()));
+        apply_interface_font(family.as_deref(), root_font_px);
         crate::assets::set_interface_icon_scale(root_font_px / 13.0);
         let dark_background =
             parse_rgb_channels(&tokens.background).is_none_or(|[red, green, blue]| {
@@ -532,6 +547,7 @@ impl ThemeManager {
             omarchy_variant: self.preferences.omarchy_variant(),
             text_size: self.preferences.text_size(),
             corner_roundness: self.preferences.corner_roundness(),
+            interface_font: self.preferences.interface_font(),
             element_glow: self.preferences.element_glow(),
             file_icon_colors: self.preferences.file_icon_colors(),
         };
@@ -1192,12 +1208,6 @@ fn source_style_scheme_xml(tokens: &ThemeTokens, palette: Option<&SourcePalette>
     )
 }
 
-const INTERFACE_FONT_FAMILY: &str = "JetBrains Mono";
-
-fn interface_font_name(root_font_px: f64) -> String {
-    format!("{INTERFACE_FONT_FAMILY} {root_font_px:.6}px")
-}
-
 /// GTK's automatic font rendering hints glyph outlines but not their metrics,
 /// so GPU glyph atlas slots are sized from unhinted extents and lose the top
 /// pixel row at some sizes (GNOME/gtk#8395). Manual rendering hints metrics
@@ -1260,9 +1270,9 @@ fn set_enum_setting(settings: &gtk::Settings, property: &str, nick: &str) {
     }
 }
 
-fn apply_interface_font(root_font_px: f64) {
+fn apply_interface_font(family: Option<&str>, root_font_px: f64) {
     if let Some(settings) = gtk::Settings::default() {
-        settings.set_gtk_font_name(Some(&interface_font_name(root_font_px)));
+        settings.set_gtk_font_name(Some(&font::font_name(family, root_font_px)));
     }
 }
 
