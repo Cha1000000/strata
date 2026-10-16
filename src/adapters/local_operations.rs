@@ -1339,7 +1339,10 @@ fn planned_paste(
 
 fn plain_name(name: &OsStr) -> bool {
     !matches!(name.as_bytes(), b"" | b"." | b"..")
-        && !name.as_bytes().iter().any(|byte| matches!(byte, b'/' | b'\0'))
+        && !name
+            .as_bytes()
+            .iter()
+            .any(|byte| matches!(byte, b'/' | b'\0'))
 }
 
 #[derive(Clone)]
