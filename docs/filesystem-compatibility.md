@@ -40,7 +40,8 @@ one is deleted.
   overlayfs lower-layer folders), or where no step below can place the item: on a mount whose
   support a probe cannot settle, for a folder on a mount without `RENAME_NOREPLACE` that has hard
   links but cannot rename over an empty folder, for a folder named with 237 UTF-16 units or more
-  on ntfs-3g, or for a file on an SFTP server that refuses the reserved-name step's rename.
+  on ntfs-3g or a `fuseblk` mount whose device udev cannot tell, or for a file on an SFTP server
+  that refuses the reserved-name step's rename.
 
 ## Placing an item without replacing
 
@@ -434,7 +435,8 @@ extensions does, is not asked again until it changes, and a GVfs location that a
 supported", as `smb://` and `mtp://` do, is not asked again for the rest of the item. Where names
 must be UTF-8, as on every mount the [names table](#the-rules-each-destination-gets) does not give
 any bytes, a link whose target is not valid UTF-8 is left out without asking the mount: SMB with
-POSIX extensions would store each malformed byte as `?` without an error, and NTFS refuses it. A mount that refuses one link, with `EPERM` while its name is free, or its target with
+POSIX extensions would store each malformed byte as `?` without an error, and NTFS refuses it. A
+mount that refuses one link, with `EPERM` while its name is free, or its target with
 `EINVAL`, `EILSEQ` or `EFBIG`, as ntfs3 refuses an overlong target, leaves out that link only; a
 link whose name the mount refuses is first tried under stricter names, as described under [Names a
 mount refuses anyway](#names-a-mount-refuses-anyway). A taken name stays a taken name. Every link
