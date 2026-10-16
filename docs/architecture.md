@@ -253,7 +253,10 @@ restore copies, go through `adapters/local_operations/copy_engine.rs`. It copies
 descriptors on worker threads, on the queue `work_queue.rs` shares with deletions, and records
 what a move read so that only unchanged sources are deleted. `owed.rs` batches the deletions a
 paste owes behind one durability barrier per destination filesystem, and the completion report
-reaches the UI as `OperationEvent::ItemsReported`.
+reaches the UI as `OperationEvent::ItemsReported`. Replacement/merge, deletion, restore/undo and
+progress orchestration live in their adjacent `replacement`, `deletion`, `restore` and `progress`
+modules. `native_fs` owns shared descriptor and identity primitives; the syscall seam composes
+`FsEnvironment` for Trash, mount-table and udev queries without a second injection registry.
 
 Filesystem work for Trash lives in `adapters/trash.rs`. Measurement shares one entry/time budget
 across root and descendant batches; depth truncation and unreadable descendants remain branch-local.

@@ -51,7 +51,7 @@ If a maintained safe API gains this capability, this exception should be removed
 
 ### Verified Trash result
 
-Location: `src/adapters/local_operations/fs_ops.rs::System::trash`
+Location: `src/adapters/local_operations/environment.rs::System::trash`
 
 Reason: GLib can return FALSE from `g_file_trash` without setting an error
 (GLib #4060). gio-rs asserts in debug builds that FALSE always carries an
