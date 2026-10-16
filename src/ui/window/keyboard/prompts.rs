@@ -330,7 +330,7 @@ impl Dispatcher {
             let browser = view.browser();
             let refusal = match unstorable {
                 Some(message) => Some(CreateRefusal::Unstorable(message)),
-                None => taken.then(|| CreateRefusal::Exists(text)),
+                None => taken.then_some(CreateRefusal::Exists(text)),
             };
             match refusal {
                 Some(refusal) => {

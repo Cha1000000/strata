@@ -180,6 +180,7 @@ async fn query_each(
 }
 
 type KindAndFilesystem = (gio::FileType, Option<glib::GString>);
+type ItemKinds = (Vec<Option<gio::FileType>>, Vec<Option<glib::GString>>);
 
 fn kind_and_filesystem(info: &gio::FileInfo) -> KindAndFilesystem {
     (
@@ -192,7 +193,7 @@ fn item_kinds(
     items: &[gio::File],
     remote: Vec<Option<KindAndFilesystem>>,
     cancellable: &gio::Cancellable,
-) -> Result<(Vec<Option<gio::FileType>>, Vec<Option<glib::GString>>), glib::Error> {
+) -> Result<ItemKinds, glib::Error> {
     let mut kinds = Vec::with_capacity(items.len());
     let mut filesystems = Vec::with_capacity(items.len());
     for (item, remote) in items.iter().zip(remote) {

@@ -120,6 +120,7 @@ type PinHandler = Rc<dyn Fn(Location, String)>;
 type UnpinHandler = Rc<dyn Fn(&Location)>;
 type PinStatusHandler = Rc<dyn Fn(&Location) -> PinStatus>;
 type PrintHandler = Rc<dyn Fn(FileEntry)>;
+type PreparingTransfer = ((Location, Vec<Location>, bool), gio::Cancellable);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum PinStatus {
@@ -282,7 +283,7 @@ pub(super) struct ViewState {
     suppress_scroll_after_drop: Cell<bool>,
     transfer_replaces_cursor: Cell<bool>,
     transfer_preparation: RefCell<Option<Rc<FileProgressState>>>,
-    preparing_transfers: RefCell<Vec<((Location, Vec<Location>, bool), gio::Cancellable)>>,
+    preparing_transfers: RefCell<Vec<PreparingTransfer>>,
     drop_active_depths: Cell<Option<(usize, usize)>>,
     find: RefCell<find::FindState>,
     listing_filter: listing_filter::FilterState,
