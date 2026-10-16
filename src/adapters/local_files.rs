@@ -2319,10 +2319,22 @@ fn flush_monitor_changes(
         .drain()
         .map(|(_, change)| change)
         .collect();
-    if changes
-        .iter()
-        .any(|change| matches!(change, PendingMonitorChange::Rescan))
-    {
+    let needs_rescan = {
+        let moved_sources: HashSet<_> = changes
+            .iter()
+            .filter_map(|change| match change {
+                PendingMonitorChange::Move { from, .. } => Some(from),
+                _ => None,
+            })
+            .collect();
+        // A move's query can finish after the recreated source's query and remove its new row.
+        changes.iter().any(|change| match change {
+            PendingMonitorChange::Rescan => true,
+            PendingMonitorChange::Upsert(location) => moved_sources.contains(location),
+            _ => false,
+        })
+    };
+    if needs_rescan {
         notify(DirectoryChange::Rescan);
         return;
     }

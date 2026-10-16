@@ -400,15 +400,46 @@ fn large_monitor_bursts_collapse_to_one_rescan() {
 
 #[test]
 fn conflicting_move_events_fall_back_to_a_rescan() {
-    let change = merge_pending_change(
-        PendingMonitorChange::Move {
-            from: Location::local("/fixture/old"),
-            to: Location::local("/fixture/new"),
-        },
-        PendingMonitorChange::Remove(Location::local("/fixture/new")),
-    );
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .expect("main context lock");
+    for recreate_source in [false, true] {
+        let from = Location::local("/fixture/old");
+        let to = Location::local("/fixture/new");
+        let mut pending = HashMap::new();
+        queue_monitor_change(
+            &mut pending,
+            Some(to.clone()),
+            PendingMonitorChange::Move {
+                from: from.clone(),
+                to: to.clone(),
+            },
+        );
+        if recreate_source {
+            queue_monitor_change(
+                &mut pending,
+                Some(from.clone()),
+                PendingMonitorChange::Upsert(from),
+            );
+        } else {
+            queue_monitor_change(
+                &mut pending,
+                Some(to.clone()),
+                PendingMonitorChange::Remove(to),
+            );
+        }
+        let changes = Rc::new(RefCell::new(Vec::new()));
+        let observed = changes.clone();
+        let notify: Rc<dyn Fn(DirectoryChange)> =
+            Rc::new(move |change| observed.borrow_mut().push(change));
 
-    assert!(matches!(change, PendingMonitorChange::Rescan));
+        flush_monitor_changes(&RefCell::new(pending), &notify, &Rc::new(Cell::new(false)));
+
+        assert!(
+            matches!(changes.borrow().as_slice(), [DirectoryChange::Rescan]),
+            "recreate source: {recreate_source}"
+        );
+    }
 }
 
 #[test]
