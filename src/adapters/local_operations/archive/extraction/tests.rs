@@ -1506,6 +1506,16 @@ fn links_the_destination_cannot_hold_are_left_out_with_hard_links_to_them()
         fail: vec![(Op::Symlink, "bad", 0, errno)],
         ..Quirks::ntfs3()
     };
+    // A stricter name would be `dot`, which a link the mount cannot hold never tries.
+    let unheld: &[(&[u8], Member<'_>)] = &[
+        (b"bin", Folder),
+        (b"bin/python", File),
+        (b"bin/dot.", Link(b"python")),
+    ];
+    let refusing_one_link = Quirks {
+        fail: vec![(Op::Symlink, "dot.", 0, Errno::PERM)],
+        ..Quirks::ext4()
+    };
     let per_link_listed = &["bin/", "bin/10_00", "bin/now", "bin/python", "bin/python3"][..];
     for (quirks, members, listed, skipped, calls) in [
         (
@@ -1550,6 +1560,13 @@ fn links_the_destination_cannot_hold_are_left_out_with_hard_links_to_them()
             &["bad"],
             2,
         ),
+        (
+            refusing_one_link,
+            unheld,
+            &["bin/", "bin/python"],
+            &["dot."],
+            1,
+        ),
     ] {
         let root = tempfile::tempdir()?;
         let quirks = FsQuirks::install(root.path(), quirks);
@@ -1589,6 +1606,10 @@ fn refuses_colons(name: &OsStr) -> Option<Errno> {
 
 fn refuses_colons_as_bad_messages(name: &OsStr) -> Option<Errno> {
     name.as_bytes().contains(&b':').then_some(Errno::BADMSG)
+}
+
+fn refuses_trailing_dots(name: &OsStr) -> Option<Errno> {
+    name.as_bytes().ends_with(b".").then_some(Errno::BADMSG)
 }
 
 #[test]
@@ -1735,60 +1756,128 @@ fn a_refused_member_name_takes_the_first_stricter_rules_it_passes_and_teaches_on
 }
 
 #[test]
+fn a_mount_that_learns_keeps_only_the_rules_its_refused_member_names_needed()
+-> Result<(), Box<dyn Error>> {
+    let root = tempfile::tempdir()?;
+    let quirks = FsQuirks::install(
+        root.path(),
+        Quirks {
+            mount_type: Some(("fuse.strictfs", "rw,user_id=0,group_id=0")),
+            invalid_name: Some(refuses_trailing_dots),
+            ..Quirks::default()
+        },
+    );
+    let refused_creates = || {
+        quirks
+            .calls()
+            .into_iter()
+            .filter(|call| call.op == Op::Create)
+            .flat_map(|call| call.names)
+            .filter(|name| name.as_bytes().ends_with(b"."))
+            .map(|name| name.to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+    };
+    let mut report = TransferReport::default();
+
+    extract_members(
+        root.path(),
+        ARCHIVE,
+        &[(b"note:1.", Member::File), (b"x", Member::File)],
+        Ok(()),
+        &mut report,
+    )?;
+
+    assert_eq!(entries(&root.path().join("archive"))?, ["note:1", "x"]);
+    assert_eq!(refused_creates(), ["note:1.", "note_1."]);
+    quirks.clear_calls();
+    let mut report = TransferReport::default();
+
+    extract_members(
+        root.path(),
+        "later.zip",
+        &[(b"text:1", Member::File), (b"dot.", Member::File)],
+        Ok(()),
+        &mut report,
+    )?;
+
+    let later = root.path().join("later");
+    assert_eq!(entries(&later)?, ["dot", "text:1"]);
+    assert_eq!(
+        report.renamed,
+        renamed(&later, &[(b"dot.", "dot", RenameCause::Invalid)])
+    );
+    assert!(refused_creates().is_empty());
+    Ok(())
+}
+
+#[test]
 fn members_the_destination_will_not_make_fail_the_extraction_naming_them_and_why()
 -> Result<(), Box<dyn Error>> {
     use Member::{File, Folder, Hard, Link};
     let invalid = "The name isn’t valid at this location";
-    // No stricter rules change these names, so a name refusal stays one.
-    let rows: [((&[u8], Member<'_>), (Op, &str, Errno), String); 8] = [
+    // Only `py:3` has a stricter name; the destination refuses it too, and
+    // the first refusal is the one reported.
+    type Fails<'a> = &'a [(Op, &'a str, Errno)];
+    let rows: [((&[u8], Member<'_>), Fails<'_>, String); 9] = [
         (
             (b"bin/python3", Link(b"python")),
-            (Op::Symlink, "python3", Errno::NOSPC),
+            &[(Op::Symlink, "python3", Errno::NOSPC)],
             "Could not create symbolic link “bin/python3”: There is not enough space on the device"
                 .to_owned(),
         ),
         (
             (b"bin/python3", Link(b"python")),
-            (Op::Symlink, "python3", Errno::BADMSG),
+            &[(Op::Symlink, "python3", Errno::BADMSG)],
             format!("Could not create symbolic link “bin/python3”: {invalid}"),
         ),
         (
+            (b"bin/py:3", Link(b"python")),
+            &[
+                (Op::Symlink, "py:3", Errno::BADMSG),
+                (Op::Symlink, "py_3", Errno::NAMETOOLONG),
+            ],
+            format!("Could not create symbolic link “bin/py:3”: {invalid}"),
+        ),
+        (
             (b"bin/lib", Folder),
-            (Op::Mkdir, "lib", Errno::INVAL),
+            &[(Op::Mkdir, "lib", Errno::INVAL)],
             format!("Could not create “bin/lib”: {invalid}"),
         ),
         (
             (b"lib/x", File),
-            (Op::Mkdir, "lib", Errno::BADMSG),
+            &[(Op::Mkdir, "lib", Errno::BADMSG)],
             format!("Could not create “lib”: {invalid}"),
         ),
         (
             (b"bin/plain", File),
-            (Op::Create, "plain", Errno::BADMSG),
+            &[(Op::Create, "plain", Errno::BADMSG)],
             format!("Could not create “bin/plain”: {invalid}"),
         ),
         (
             (b"bin/plain", File),
-            (Op::Stat, "plain", Errno::ILSEQ),
+            &[(Op::Stat, "plain", Errno::ILSEQ)],
             format!("Could not create “bin/plain”: {invalid}"),
         ),
         (
             (b"bin/plain", File),
-            (Op::Create, "plain", Errno::NAMETOOLONG),
+            &[(Op::Create, "plain", Errno::NAMETOOLONG)],
             "Could not create “bin/plain”: The name is too long".to_owned(),
         ),
         (
             (b"bin/hard", Hard("bin/python")),
-            (Op::Link, "hard", Errno::INVAL),
+            &[(Op::Link, "hard", Errno::INVAL)],
             format!("Could not link “bin/hard” to “bin/python”: {invalid}"),
         ),
     ];
-    for (member, (op, name, errno), failure) in rows {
+    for (member, fails, failure) in rows {
         let root = tempfile::tempdir()?;
         let _quirks = FsQuirks::install(
             root.path(),
             Quirks {
-                fail: vec![(op, name, 0, errno)],
+                fail: fails
+                    .iter()
+                    .map(|(op, name, errno)| (*op, *name, 0, *errno))
+                    .collect(),
                 ..Quirks::ext4()
             },
         );
@@ -1803,7 +1892,7 @@ fn members_the_destination_will_not_make_fail_the_extraction_naming_them_and_why
         );
 
         let Err(ArchiveError::Failed(message)) = outcome else {
-            panic!("{op:?} {name} {errno:?} did not fail: {outcome:?}");
+            panic!("{fails:?} did not fail: {outcome:?}");
         };
         assert_eq!(
             message,
