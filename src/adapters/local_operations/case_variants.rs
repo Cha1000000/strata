@@ -4,10 +4,7 @@
 //! case-insensitive destination whose rules do not fold, such as SMB or a
 //! casefolded folder, shows that one took another's name only by "exists".
 
-use std::{
-    collections::HashMap,
-    ffi::{OsStr, OsString},
-};
+use std::{collections::HashMap, ffi::OsString};
 
 use gtk::{gio, prelude::*};
 
@@ -97,7 +94,7 @@ async fn identity(target: &gio::File) -> Option<LocalFileIdentity> {
     gio::spawn_blocking(move || {
         let (parent, name) = (path.parent()?, path.file_name()?);
         let dir = open_local_parent_directory(parent).ok()?;
-        fs().stat(Entry::new(&dir, OsStr::new(name)), false)
+        fs().stat(Entry::new(&dir, name), false)
             .ok()
             .map(|stat| stat.identity)
     })
