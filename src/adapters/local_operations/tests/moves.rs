@@ -2115,68 +2115,130 @@ fn a_special_file_move_keeps_its_source_without_proven_published_ownership()
 }
 
 #[test]
-fn destination_provenance_fails_closed_without_stable_inode_numbers() -> Result<(), Box<dyn Error>>
-{
+fn copies_a_mount_numbers_afresh_are_known_by_type_birth_time_size_and_time()
+-> Result<(), Box<dyn Error>> {
     let _serial = serial()?;
-    for renumbered in [false, true] {
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    enum Change {
+        None,
+        /// Rewritten in place with as many bytes, a tick after the source.
+        Rewritten,
+        /// Replaced by another file of its size within the tick that stamped
+        /// the source.
+        ReplacedWithinTheTick,
+    }
+    // exFAT and FUSE daemons without `use_ino` number an entry afresh once
+    // the kernel evicts it, here right after the copy is published; on ext4,
+    // which keeps inode numbers, another number is another file. Whether the
+    // move deletes its source.
+    let rows: [(Preset, &str, Change, bool); 5] = [
+        (Quirks::sshfs, "notes.txt", Change::None, true),
+        (Quirks::exfat, "folder", Change::None, true),
+        (Quirks::exfat, "folder", Change::Rewritten, false),
+        (
+            Quirks::exfat_fuse,
+            "folder",
+            Change::ReplacedWithinTheTick,
+            false,
+        ),
+        (Quirks::ext4, "notes.txt", Change::None, false),
+    ];
+    for (preset, item, change, deleted) in rows {
+        let row = format!("{:?}, {item}, {change:?}", preset().mount_type);
+        let within_the_tick = change == Change::ReplacedWithinTheTick;
+        // Before the kernel's coarse clock, which may run a tick behind.
+        let tick = SystemTime::now() - Duration::from_secs(1);
+        let _clock = within_the_tick.then(|| ClockGuard::set(tick));
+        // Multigrain times at the source, so only the destination's call for
+        // a comparison of contents.
+        let _kernel = KernelGuard::set(Some((6, 13, 0)));
+        let coarse_clock = within_the_tick.then_some(tick);
         let root = tempfile::tempdir()?;
         let sources = root.path().join("sources");
         let destination = root.path().join("destination");
         fs::create_dir(&sources)?;
         fs::create_dir(&destination)?;
-        let source = sources.join("notes.txt");
-        fs::write(&source, b"notes")?;
-        let mut after = Vec::new();
+        let source = sources.join(item);
+        let copy = destination.join(item);
+        let mut copied = vec![copy.clone()];
+        let notes = if item == "folder" {
+            fs::create_dir_all(source.join("sub"))?;
+            fs::write(source.join("sub/b.txt"), b"b")?;
+            copied.extend(["notes.txt", "sub", "sub/b.txt"].map(|path| copy.join(path)));
+            source.join("notes.txt")
+        } else {
+            source.clone()
+        };
+        fs::write(&notes, b"notes")?;
+        if change == Change::Rewritten {
+            let hour_before = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?;
+            set_times(&notes, hour_before.as_secs() - 3600, 0)?;
+        }
         let arrival = root.path().join("arrival");
         fs::write(&arrival, b"other")?;
-        let over = destination.join("notes.txt");
+        let copied_notes = if item == "folder" {
+            copy.join("notes.txt")
+        } else {
+            copy.clone()
+        };
+        let replaced = copied_notes.clone();
+        let evicted = Arc::new(AtomicBool::new(false));
+        let evicting = evicted.clone();
         let racer: super::fs_quirks::Racer = Box::new(move || {
-            if renumbered {
-                super::fs_quirks::renumbered(&over);
-            } else {
-                fs::rename(&arrival, &over).expect("replace copy");
+            match change {
+                Change::None => {}
+                Change::Rewritten => fs::write(&replaced, b"NOTES").expect("rewrite the copy"),
+                Change::ReplacedWithinTheTick => {
+                    fs::rename(&arrival, &replaced).expect("replace the copy");
+                }
             }
+            for path in &copied {
+                super::fs_quirks::renumbered(path);
+            }
+            evicting.store(true, Ordering::Release);
         });
-        after.push((Op::Rename, "notes.txt", 0, racer));
-        let _sources = FsQuirks::install(&sources, Quirks::default());
+        let _sources = FsQuirks::install(
+            &sources,
+            Quirks {
+                coarse_clock,
+                ..Quirks::ext4()
+            },
+        );
         let _destination = FsQuirks::install(
             &destination,
             Quirks {
                 rename_flags: Support::Supported,
-                after,
-                ..Quirks::sshfs()
+                tmpfile: Support::Rejected(Errno::OPNOTSUPP),
+                coarse_clock,
+                after: vec![(Op::Rename, item, 0, racer)],
+                ..preset()
             },
         );
+
         let (_operation, events) =
             paste_move(98, &destination, &source, TransferConflict::FailIfExists);
         pump_until_transfer(&events);
+
         assert!(
             matches!(
                 terminal_transfer(&events.borrow()),
                 Some(OperationEvent::Pasted { .. })
             ),
-            "renumbered {renumbered}: {:?}",
+            "{row}: {:?}",
             events.borrow()
         );
-        assert!(
-            source.exists(),
-            "renumbered {renumbered}: {:?}",
-            events.borrow()
-        );
-        assert_eq!(fs::read(&source)?, b"notes");
-        assert_eq!(
-            fs::read(destination.join("notes.txt"))?,
-            if renumbered {
-                b"notes".as_slice()
-            } else {
-                b"other".as_slice()
-            }
-        );
-        assert_eq!(
-            reported(&events).kept,
-            [kept(source, KeptCause::CopyGone)],
-            "renumbered {renumbered}"
-        );
+        assert!(evicted.load(Ordering::Acquire), "{row}");
+        if deleted {
+            assert!(!source.exists(), "{row}: {:?}", reported(&events).kept);
+            assert_eq!(fs::read(&copied_notes)?, b"notes", "{row}");
+        } else {
+            assert_eq!(fs::read(&notes).ok(), Some(b"notes".to_vec()), "{row}");
+            assert_eq!(
+                reported(&events).kept,
+                [kept(source, KeptCause::CopyGone)],
+                "{row}"
+            );
+        }
     }
     Ok(())
 }

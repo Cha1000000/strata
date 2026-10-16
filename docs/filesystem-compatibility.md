@@ -525,13 +525,12 @@ if it is still what the copy read:
   of that item is deleted. A fallback that copies out of a stage records the newly created copy's
   identities, not the discarded stage's.
 
-Destination provenance requires the exact known device, inode, type and available birth time,
-including on mounts with unstable inode numbers. The relaxed source-identity rule above does not
-apply to this guard. If a FUSE daemon or CIFS client renumbers a published entry after a rename or
-cache eviction, the move keeps its source and reports that its copy is gone even if the bytes are
-still present. This is safe retention, not a successful source deletion. Exact comparison does not
-solve inode reuse where the mount supplies no birth time; the residual identity limits above
-still apply.
+Where the destination keeps inode numbers, its entries must keep the exact device, inode, type and
+available birth time. Where it numbers an evicted entry afresh (FUSE daemons without `use_ino`,
+vfat and exFAT, cifs with `noserverino`), the type and the birth time, where both stats report one,
+stand in for the inode as they do for sources, and a file must also keep its recorded size and
+modification time, and its contents where those times cannot tell. An entry renumbered after a
+rename or a cache eviction then still proves the copy, and the move deletes its sources.
 
 What stays is reported by cause: changed during the move, could not be deleted (with the error, as
 in a read-only folder), a special file or symbolic link the destination cannot store, or an item
@@ -717,8 +716,10 @@ reported.
   renamed into it, so a move then keeps that whole folder instead of only the changed entry.
 - **Relaxed identity.** Where a source has no stable inode numbers and reports no birth time
   (sshfs, exfat-fuse, ntfs-3g), a different file with the same type, size and times put at a source
-  name passes for the original, unless it is racily clean and compared. A copy recognises its own
-  entries by inode number, and on FUSE its claimed files by type and size. Where the kernel can
+  name passes for the original, unless it is racily clean and compared. The same goes for a move's
+  copy on such a destination before its sources are deleted: a different file of its type, size and
+  modification time, as another copy of the source would have, passes for it. A copy recognises its
+  own entries by inode number, and on FUSE its claimed files by type and size. Where the kernel can
   renumber an evicted entry (FUSE, vfat, exFAT, cifs with `noserverino`), a renumbered entry stops
   the copy as changed; nothing is deleted, and its hidden stage can be left behind.
 - **Modes that cannot be stored.** On vfat, exFAT, exfat-fuse, ntfs-3g and SMB without POSIX

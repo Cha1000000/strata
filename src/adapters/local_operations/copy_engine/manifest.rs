@@ -517,12 +517,26 @@ impl Ownership {
 
     /// A file rewritten in place, or another one given its inode number and
     /// birth time, shows only in its size or modification time, and within
-    /// one tick of a coarse clock only in its contents.
-    fn holds(&self, fs: &dyn FsOps, at: Entry<'_>, path: &Path, stat: &EntryStat) -> bool {
-        if !self.matches(path, stat) {
+    /// one tick of a coarse clock only in its contents. Where the mount
+    /// numbers an evicted entry afresh, the type and birth time stand in for
+    /// the inode number, for a file only beside its recorded size and time.
+    fn holds(
+        &self,
+        fs: &dyn FsOps,
+        (at, path): (Entry<'_>, &Path),
+        stat: &EntryStat,
+        stable_inodes: bool,
+    ) -> bool {
+        let Some(identity) = self.identity_at(path) else {
             return false;
-        }
-        self.states.get(path).is_none_or(|state| {
+        };
+        let state = self.states.get(path);
+        let same = if stable_inodes || (identity.kind == FileType::RegularFile && state.is_none()) {
+            stat.identity == identity
+        } else {
+            stat.identity.may_be(&identity)
+        };
+        same && state.is_none_or(|state| {
             state.holds(stat)
                 && state
                     .contents
@@ -534,7 +548,8 @@ impl Ownership {
         let Ok(stat) = fs.stat(at, true) else {
             return false;
         };
-        if !self.holds(fs, at, Path::new(""), &stat) {
+        let stable_inodes = Mount::keeps_inode_numbers(fs, at.dir);
+        if !self.holds(fs, (at, Path::new("")), &stat, stable_inodes) {
             return false;
         }
         if self.descendants.is_empty() {
@@ -559,7 +574,7 @@ impl Ownership {
             };
             let at = Entry::new(&dir, name);
             fs.stat(at, true)
-                .is_ok_and(|stat| self.holds(fs, at, path, &stat))
+                .is_ok_and(|stat| self.holds(fs, (at, path), &stat, stable_inodes))
         })
     }
 }
