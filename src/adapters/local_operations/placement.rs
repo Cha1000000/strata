@@ -914,6 +914,15 @@ pub(super) fn links_hold(fs: &dyn FsOps, dir: BorrowedFd<'_>) -> bool {
     mount.capabilities().hard_links == Some(true)
 }
 
+/// Whether a folder can be placed at `name` in `dir` once it is free: not
+/// where only a rename over a name ntfs-3g would cut could place it.
+pub(super) fn places_folder_at(fs: &dyn FsOps, dir: BorrowedFd<'_>, name: &OsStr) -> bool {
+    let mount = Mount::new(fs, dir);
+    mount.renames_over(name)
+        || mount.allows_reserved_name(true)
+        || mount.capabilities().no_replace == Some(true)
+}
+
 /// Whether a staged entry could be placed in `dir`; `None` until the mount
 /// is known, without probing it.
 pub(super) fn can_place(fs: &dyn FsOps, dir: BorrowedFd<'_>, directory: bool) -> Option<bool> {

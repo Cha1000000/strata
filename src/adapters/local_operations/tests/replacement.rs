@@ -1073,6 +1073,50 @@ fn same_filesystem_replacing_move_restores_the_original_when_placement_fails()
 }
 
 #[test]
+fn a_replacing_move_on_ntfs_3g_copies_a_folder_whose_name_it_would_cut()
+-> Result<(), Box<dyn Error>> {
+    let _serial = serial()?;
+    let name = "x".repeat(237);
+    for directory in [true, false] {
+        let root = tempfile::tempdir()?;
+        let sources = root.path().join("sources");
+        let destination = root.path().join("destination");
+        fs::create_dir(&sources)?;
+        fs::create_dir(&destination)?;
+        let source = sources.join(&name);
+        let target = destination.join(&name);
+        write_item(&source, directory, b"new")?;
+        write_item(&target, directory, b"old")?;
+        let moved = inode(&source)?;
+        let quirks = FsQuirks::install(
+            root.path(),
+            without_trash(
+                FUSE_SUPER_MAGIC,
+                Quirks {
+                    rename_flags: Support::Rejected(Errno::INVAL),
+                    ..Quirks::ntfs_3g()
+                },
+            ),
+        );
+
+        let (result, replaced) = replace_reporting(&source, &target, true);
+
+        assert!(result.is_ok(), "folder: {directory}: {result:?}");
+        assert_eq!(replaced, [ReplacedOriginal::Deleted], "folder: {directory}");
+        assert_eq!(read_item(&target, directory)?, b"new", "folder: {directory}");
+        assert!(!source.exists(), "folder: {directory}");
+        assert_eq!(names(&destination)?, [name.as_str()], "folder: {directory}");
+        assert_eq!(inode(&target)? == moved, !directory, "folder: {directory}");
+        assert_eq!(
+            quirks.used_name(".strata-replacement-*"),
+            directory,
+            "folder: {directory}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn a_true_alias_is_a_no_op_but_a_hard_link_elsewhere_is_replaced() -> Result<(), Box<dyn Error>> {
     let _serial = serial()?;
     let root = tempfile::tempdir()?;
