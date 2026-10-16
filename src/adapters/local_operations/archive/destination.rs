@@ -22,7 +22,7 @@ use rustix::{
 };
 
 use super::super::{
-    copy_engine::{refuses_name, refuses_node, taken},
+    copy_engine::{refusal_reason, refuses_name, refuses_node, taken},
     fs_ops::{Entry, fs},
     mount_profile::{FolderRules, NamePolicy, Site},
     naming::{
@@ -526,12 +526,7 @@ impl ExtractionDestination {
             return Err(Unmade::of(
                 placed.parent.as_fd(),
                 error,
-                rust_i18n::t!(
-                    "Could not create symbolic link “%{path}”: %{error}",
-                    path = placed.path.display(),
-                    error = errno_detail(error)
-                )
-                .into_owned(),
+                symlink_failed(&placed.path, &errno_detail(error)),
             ));
         }
         // A link's time is cosmetic, and FUSE daemons such as sshfs apply it to the target.
@@ -576,13 +571,7 @@ impl ExtractionDestination {
                 Unmade::of(
                     placed.parent.as_fd(),
                     error,
-                    rust_i18n::t!(
-                        "Could not link “%{path}” to “%{target}”: %{error}",
-                        path = placed.path.display(),
-                        target = target.display(),
-                        error = errno_detail(error)
-                    )
-                    .into_owned(),
+                    hard_link_failed(&placed.path, target, &errno_detail(error)),
                 )
             })
     }
@@ -698,21 +687,58 @@ impl MemberNames {
 /// Why a member was not made.
 pub(super) enum Unmade {
     /// The destination refused its name with the error.
-    Refused(Errno, String),
+    Refused(Errno),
     /// The destination cannot hold a symbolic link, as the error says.
     Unheld(Errno),
     Failed(String),
 }
 
 impl Unmade {
-    /// A call that makes something in `directory` failed with `error`.
+    /// A call that makes something in `directory` failed with `error`, as
+    /// `message` says unless the destination refused the name.
     fn of(directory: BorrowedFd<'_>, error: Errno, message: String) -> Self {
         if refuses_name(fs(), directory, error) {
-            Self::Refused(error, message)
+            Self::Refused(error)
         } else {
             Self::Failed(message)
         }
     }
+
+    /// A refused name as the failure `failed` words from why it was refused.
+    pub(super) fn worded(self, failed: impl FnOnce(&str) -> String) -> Self {
+        match self {
+            Self::Refused(error) => Self::Failed(failed(&error_detail(refusal_reason(error)))),
+            unmade => unmade,
+        }
+    }
+}
+
+pub(super) fn creation_failed(path: &Path, error: &str) -> String {
+    rust_i18n::t!(
+        "Could not create “%{name}”: %{error}",
+        name = path.display(),
+        error = error
+    )
+    .into_owned()
+}
+
+pub(super) fn symlink_failed(path: &Path, error: &str) -> String {
+    rust_i18n::t!(
+        "Could not create symbolic link “%{path}”: %{error}",
+        path = path.display(),
+        error = error
+    )
+    .into_owned()
+}
+
+pub(super) fn hard_link_failed(path: &Path, target: &Path, error: &str) -> String {
+    rust_i18n::t!(
+        "Could not link “%{path}” to “%{target}”: %{error}",
+        path = path.display(),
+        target = target.display(),
+        error = error
+    )
+    .into_owned()
 }
 
 impl From<String> for Unmade {
@@ -724,8 +750,9 @@ impl From<String> for Unmade {
 impl From<Unmade> for String {
     fn from(unmade: Unmade) -> Self {
         match unmade {
-            Unmade::Refused(_, message) | Unmade::Failed(message) => message,
+            Unmade::Refused(error) => refusal_reason(error),
             Unmade::Unheld(error) => errno_text(error),
+            Unmade::Failed(message) => message,
         }
     }
 }
@@ -874,11 +901,13 @@ impl ExtractNameResolver {
         for member in missing.into_iter().rev() {
             let name = member.file_name().ok_or_else(no_file_name)?;
             let directory = staging.open_directory(&parent)?;
-            let claim = self.claim(index, name, true, |candidate, _| {
-                Ok(staging
-                    .make_folder(directory.as_fd(), candidate)?
-                    .then_some(()))
-            })?;
+            let claim = self
+                .claim(index, name, true, |candidate, _| {
+                    Ok(staging
+                        .make_folder(directory.as_fd(), candidate)?
+                        .then_some(()))
+                })
+                .map_err(|unmade| unmade.worded(|error| creation_failed(member, error)))?;
             let made = parent.join(&claim.name);
             if claim.made.is_none() {
                 // A member under a link's or a file's name fails there.
@@ -900,7 +929,8 @@ impl ExtractNameResolver {
 
     /// Makes the member `path`, which is not a folder, with `make` under a
     /// free name in its folder, which is made where it is new. The name is
-    /// the member's once [`Self::made`] says it was made there.
+    /// the member's once [`Self::made`] says it was made there. A name the
+    /// destination refused under every rule is left for the caller to word.
     pub(super) fn leaf<T>(
         &mut self,
         staging: &ExtractionDestination,

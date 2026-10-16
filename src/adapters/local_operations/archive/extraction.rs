@@ -31,8 +31,8 @@ use super::{
     ArchiveError, COPY_BUF, archive_failed, archive_io_failed, archive_read_failed,
     check_archive_cancelled,
     destination::{
-        ExtractNameResolver, ExtractionDestination, Unmade, archive_stem, process_umask,
-        sanitized_archive_path,
+        ExtractNameResolver, ExtractionDestination, Unmade, archive_stem, creation_failed,
+        hard_link_failed, process_umask, sanitized_archive_path, symlink_failed,
     },
 };
 
@@ -336,26 +336,34 @@ impl<'a> ExtractionSession<'a> {
                         Placement::LeftOut(resolver.requested(staging, &path)?)
                     }
                     // A target the mount cannot store is refused like the link.
-                    Err(Unmade::Refused(Errno::INVAL | Errno::ILSEQ, _)) => {
+                    Err(Unmade::Refused(Errno::INVAL | Errno::ILSEQ)) => {
                         Placement::LeftOut(resolver.requested(staging, &path)?)
                     }
-                    Err(unmade) => return Err(unmade.into()),
+                    Err(unmade) => {
+                        return Err(unmade.worded(|error| symlink_failed(&path, error)).into());
+                    }
                 }
             }
             MemberContent::Symlink(_) => Placement::LeftOut(resolver.requested(staging, &path)?),
             MemberContent::HardLink(_) => match hard_link_target.flatten() {
                 Some(target) => {
-                    let (placed, ()) = resolver.leaf(staging, &path, |placed| {
-                        staging.create_hard_link(placed, &target)
-                    })?;
+                    let (placed, ()) = resolver
+                        .leaf(staging, &path, |placed| {
+                            staging.create_hard_link(placed, &target)
+                        })
+                        .map_err(|unmade| {
+                            unmade.worded(|error| hard_link_failed(&path, &target, error))
+                        })?;
                     Placement::Made(resolver.made(placed))
                 }
                 None => Placement::LeftOut(resolver.requested(staging, &path)?),
             },
             MemberContent::File(reader, declared_size) => {
-                let (placed, mut file) = resolver.leaf(staging, &path, |placed| {
-                    staging.create_file(placed, metadata.mode)
-                })?;
+                let (placed, mut file) = resolver
+                    .leaf(staging, &path, |placed| {
+                        staging.create_file(placed, metadata.mode)
+                    })
+                    .map_err(|unmade| unmade.worded(|error| creation_failed(&path, error)))?;
                 let result = copy_member(
                     &name,
                     reader,

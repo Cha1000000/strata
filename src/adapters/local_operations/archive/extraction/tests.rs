@@ -1735,14 +1735,60 @@ fn a_refused_member_name_takes_the_first_stricter_rules_it_passes_and_teaches_on
 }
 
 #[test]
-fn a_link_refused_for_another_reason_fails_the_extraction() -> Result<(), Box<dyn Error>> {
-    // No stricter rules change `python3`, so a name refusal stays one.
-    for errno in [Errno::NOSPC, Errno::BADMSG] {
+fn members_the_destination_will_not_make_fail_the_extraction_naming_them_and_why()
+-> Result<(), Box<dyn Error>> {
+    use Member::{File, Folder, Hard, Link};
+    let invalid = "The name isn’t valid at this location";
+    // No stricter rules change these names, so a name refusal stays one.
+    let rows: [((&[u8], Member<'_>), (Op, &str, Errno), String); 8] = [
+        (
+            (b"bin/python3", Link(b"python")),
+            (Op::Symlink, "python3", Errno::NOSPC),
+            "Could not create symbolic link “bin/python3”: There is not enough space on the device"
+                .to_owned(),
+        ),
+        (
+            (b"bin/python3", Link(b"python")),
+            (Op::Symlink, "python3", Errno::BADMSG),
+            format!("Could not create symbolic link “bin/python3”: {invalid}"),
+        ),
+        (
+            (b"bin/lib", Folder),
+            (Op::Mkdir, "lib", Errno::INVAL),
+            format!("Could not create “bin/lib”: {invalid}"),
+        ),
+        (
+            (b"lib/x", File),
+            (Op::Mkdir, "lib", Errno::BADMSG),
+            format!("Could not create “lib”: {invalid}"),
+        ),
+        (
+            (b"bin/plain", File),
+            (Op::Create, "plain", Errno::BADMSG),
+            format!("Could not create “bin/plain”: {invalid}"),
+        ),
+        (
+            (b"bin/plain", File),
+            (Op::Stat, "plain", Errno::ILSEQ),
+            format!("Could not create “bin/plain”: {invalid}"),
+        ),
+        (
+            (b"bin/plain", File),
+            (Op::Create, "plain", Errno::NAMETOOLONG),
+            "Could not create “bin/plain”: The name is too long".to_owned(),
+        ),
+        (
+            (b"bin/hard", Hard("bin/python")),
+            (Op::Link, "hard", Errno::INVAL),
+            format!("Could not link “bin/hard” to “bin/python”: {invalid}"),
+        ),
+    ];
+    for (member, (op, name, errno), failure) in rows {
         let root = tempfile::tempdir()?;
         let _quirks = FsQuirks::install(
             root.path(),
             Quirks {
-                fail: vec![(Op::Symlink, "python3", 0, errno)],
+                fail: vec![(op, name, 0, errno)],
                 ..Quirks::ext4()
             },
         );
@@ -1751,20 +1797,17 @@ fn a_link_refused_for_another_reason_fails_the_extraction() -> Result<(), Box<dy
         let outcome = extract_members(
             root.path(),
             ARCHIVE,
-            &[
-                (b"bin/python", Member::File),
-                (b"bin/python3", Member::Link(b"python")),
-            ],
+            &[(b"bin/python", File), member],
             Ok(()),
             &mut report,
         );
 
         let Err(ArchiveError::Failed(message)) = outcome else {
-            panic!("{errno:?} was taken for a refused link: {outcome:?}");
+            panic!("{op:?} {name} {errno:?} did not fail: {outcome:?}");
         };
-        assert!(
-            message.starts_with("Could not create symbolic link “bin/python3”"),
-            "{message}"
+        assert_eq!(
+            message,
+            format!("{failure}. Extracted entries remain in “archive”.")
         );
         assert!(report.skipped.is_empty());
     }

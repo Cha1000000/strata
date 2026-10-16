@@ -1319,7 +1319,7 @@ impl Failure {
                     _ => io_error(message),
                 }
             }
-            Self::NameRefused(error) => refused_name(&name, error == Errno::NAMETOOLONG),
+            Self::NameRefused(error) => refused_name(&name, error),
             Self::LinkRefused(error) => glib::Error::new(
                 Unheld::Symlink,
                 &rust_i18n::t!(
@@ -1329,7 +1329,7 @@ impl Failure {
                 ),
             ),
             Self::Place(error @ PlaceError::Io(errno)) if error.refuses_name() => {
-                refused_name(&name, errno == Errno::NAMETOOLONG)
+                refused_name(&name, errno)
             }
             Self::Place(PlaceError::IntoItself) => placement_error(PlaceError::IntoItself),
             Self::Place(PlaceError::Changed) => io_error(rust_i18n::t!(
@@ -1357,25 +1357,28 @@ impl Failure {
     }
 }
 
-/// A name the mount refused, as a failure to copy the item `name`.
-fn refused_name(name: &str, too_long: bool) -> glib::Error {
-    let (kind, reason) = if too_long {
-        (
-            gio::IOErrorEnum::FilenameTooLong,
-            os_error_detail(Errno::NAMETOOLONG),
-        )
+/// A name the mount refused with `error`, as a failure to copy the item `name`.
+fn refused_name(name: &str, error: Errno) -> glib::Error {
+    let kind = if error == Errno::NAMETOOLONG {
+        gio::IOErrorEnum::FilenameTooLong
     } else {
-        (
-            gio::IOErrorEnum::InvalidFilename,
-            crate::services::error_detail(crate::i18n::tr(INVALID_NAME_REASON)),
-        )
+        gio::IOErrorEnum::InvalidFilename
     };
     let message = rust_i18n::t!(
         "Could not copy %{name}: %{error}",
         name = name,
-        error = reason
+        error = crate::services::error_detail(refusal_reason(error))
     );
     glib::Error::new(kind, &message)
+}
+
+/// Why a mount refused a name with `error`.
+pub(super) fn refusal_reason(error: Errno) -> String {
+    if error == Errno::NAMETOOLONG {
+        os_error_text(error)
+    } else {
+        crate::i18n::tr(INVALID_NAME_REASON)
+    }
 }
 
 /// How a call that creates `at` failed: as mounts fail names they refuse,
