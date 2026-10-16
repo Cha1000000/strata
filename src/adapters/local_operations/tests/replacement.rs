@@ -1103,7 +1103,11 @@ fn a_replacing_move_on_ntfs_3g_copies_a_folder_whose_name_it_would_cut()
 
         assert!(result.is_ok(), "folder: {directory}: {result:?}");
         assert_eq!(replaced, [ReplacedOriginal::Deleted], "folder: {directory}");
-        assert_eq!(read_item(&target, directory)?, b"new", "folder: {directory}");
+        assert_eq!(
+            read_item(&target, directory)?,
+            b"new",
+            "folder: {directory}"
+        );
         assert!(!source.exists(), "folder: {directory}");
         assert_eq!(names(&destination)?, [name.as_str()], "folder: {directory}");
         assert_eq!(inode(&target)? == moved, !directory, "folder: {directory}");
