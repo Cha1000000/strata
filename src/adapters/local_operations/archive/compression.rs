@@ -342,7 +342,7 @@ impl Publication {
             &gio::Cancellable::new(),
         ) {
             Ok(()) => {}
-            Err(error) if error.matches(gio::IOErrorEnum::NotSupported) => {
+            Err(error) if error.is_unsupported() => {
                 let replacement = self.without_trash(&stage.parent)?;
                 return self.publish(stage, Strategy::Replace(replacement, identity), cancelled);
             }
@@ -350,7 +350,7 @@ impl Publication {
                 return Err(archive_failed(rust_i18n::t!(
                     "Could not move %{name} to Trash: %{error}",
                     name = self.name,
-                    error = crate::services::gio_error_detail(&error)
+                    error = crate::services::gio_error_detail(&error.error)
                 )));
             }
         }

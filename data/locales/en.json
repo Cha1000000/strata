@@ -1300,5 +1300,7 @@
   "whole selection": "whole selection",
   "your package manager": "your package manager",
   "{paths} is for whole-selection actions; use {path} for a per-item action": "{paths} is for whole-selection actions; use {path} for a per-item action",
-  "{path} is for per-item actions; use {paths} for a whole selection": "{path} is for per-item actions; use {paths} for a whole selection"
+  "{path} is for per-item actions; use {paths} for a whole selection": "{path} is for per-item actions; use {paths} for a whole selection",
+  "Delete without Trash": "Delete without Trash",
+  "Deletion without Trash": "Deletion without Trash"
 }

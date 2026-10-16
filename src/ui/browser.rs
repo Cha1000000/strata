@@ -1945,7 +1945,9 @@ impl BrowserView {
         launch_terminal(&location, &self.state.overlay);
     }
 
+    /// A user Reload also retries Trash on mounts that refused it earlier.
     pub fn refresh(&self) {
+        crate::adapters::trash_support::forget_all();
         self.state.refresh_browser();
     }
 

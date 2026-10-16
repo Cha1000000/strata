@@ -93,7 +93,14 @@ The tests create their own temporary payloads and metadata. They cover:
   `services::file_source::tests`);
 - the explained, Cancel-first permanent confirmation when Trash is unsupported,
   both before a Trash attempt (the listing reports no Trash support) and after
-  one fails, in the foreground, docked, and after a mixed failure.
+  one fails, in the foreground, docked, and after a mixed failure, with local or
+  network wording (`ui::browser::trash::tests`);
+- FUSE trash refusals: the error classifier and mount-health facts, the
+  per-mount record keyed by mount ID, and removal of only new, empty trash
+  folders (`adapters::trash_support::tests`); the retryable result on FUSE but
+  not on a local disk (`adapters::local_operations::tests::deletion`); and the
+  up-front confirmation after a recorded refusal until Reload
+  (`ui::window::tests::keyboard_dispatch::file_commands`).
 
 Run the real keyboard and drag/drop regressions in the pinned E2E container:
 
@@ -142,6 +149,13 @@ or `.trashinfo` contents, and never run a blanket cleanup scan of other mounts.
    it and check that the original name bytes return; trash it again and delete
    it permanently. The pinned E2E container sets `GIO_USE_VFS=local`, so it
    cannot browse `trash:///` and does not cover this step.
+8. On a writable FUSE mount that cannot hold a Trash (for example sshfs to a
+   server root you can write, or an rclone remote without VFS cache), press
+   Delete. Expect the Cancel-first confirmation naming the mount and its type,
+   no `.Trash-$uid` left at the mount root, an up-front confirmation on the next
+   Delete, and Move to Trash hidden until Reload. A disconnected sshfs mount
+   must show the raw error, not "doesn't support Trash". The E2E container has
+   no FUSE, so it does not cover this step.
 
 Dispose of the entire dedicated test environment afterward. No fixture utility
 in this repository modifies or cleans the user's real Trash.

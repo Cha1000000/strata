@@ -571,7 +571,7 @@ fn docked_deletion_without_trash_support_explains_and_focuses_cancel() {
                     deleted_locations: Vec::new(),
                     retryable_locations: vec![deleted.location.clone()],
                     has_non_retryable_failures: false,
-                    message: "deleted.txt: This location doesn't support Trash. Delete permanently instead.".into(),
+                    message: "deleted.txt: This location doesn't support Trash.".into(),
                 },
             );
             pump_until(|| {

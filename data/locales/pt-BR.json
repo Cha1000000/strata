@@ -1300,5 +1300,7 @@
   "whole selection": "seleção inteira",
   "your package manager": "seu gerenciador de pacotes",
   "{paths} is for whole-selection actions; use {path} for a per-item action": "{paths} é para ações na seleção inteira; use {path} para uma ação por item",
-  "{path} is for per-item actions; use {paths} for a whole selection": "{path} é para ações por item; use {paths} para a seleção inteira"
+  "{path} is for per-item actions; use {paths} for a whole selection": "{path} é para ações por item; use {paths} para a seleção inteira",
+  "Delete without Trash": "Excluir sem usar a Lixeira",
+  "Deletion without Trash": "Exclusão sem a Lixeira"
 }

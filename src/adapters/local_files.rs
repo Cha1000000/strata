@@ -645,7 +645,12 @@ fn scan_native_directory(
             )
             .ok()
     });
-    let can_trash = probed_capabilities.as_ref().and_then(info_can_trash);
+    let can_trash = match probed_capabilities.as_ref().and_then(info_can_trash) {
+        Some(true) if super::trash_support::unsupported_reason_for_directory(path).is_some() => {
+            Some(false)
+        }
+        other => other,
+    };
     let can_delete = probed_capabilities.as_ref().and_then(info_can_delete);
 
     let mut metadata_complete = true;

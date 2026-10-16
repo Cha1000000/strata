@@ -1300,5 +1300,7 @@
   "whole selection": "всё выделение",
   "your package manager": "менеджер пакетов",
   "{paths} is for whole-selection actions; use {path} for a per-item action": "{paths} предназначен для действий над всем выделением; для действия над каждым элементом используйте {path}",
-  "{path} is for per-item actions; use {paths} for a whole selection": "{path} предназначен для действий над каждым элементом; для всего выделения используйте {paths}"
+  "{path} is for per-item actions; use {paths} for a whole selection": "{path} предназначен для действий над каждым элементом; для всего выделения используйте {paths}",
+  "Delete without Trash": "Удалить без корзины",
+  "Deletion without Trash": "Удаление без корзины"
 }

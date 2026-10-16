@@ -28,7 +28,12 @@ pub(crate) use mount_capabilities::{
     MountCapabilities, MountKey, XattrNamespace, learn_mount_capability, mount_capabilities,
 };
 pub(crate) use mount_snapshot::{RemovableRoot, invalidate_mount_snapshot, with_mount_snapshot};
-pub(crate) use mounts::{CoarseTimes, Family, FuseFormat, MountTable, MountType, family};
+#[cfg(test)]
+pub(crate) use mounts::set_mountinfo_for_isolated_test;
+pub(crate) use mounts::{
+    CoarseTimes, Family, FuseFormat, MountKey as TrashMountKey, MountTable, MountType, family,
+    is_fuse_fs_type, is_local_fuse_overlay,
+};
 
 pub(crate) const REMOTE_QUERY_TIMEOUT: Duration = Duration::from_secs(2);
 

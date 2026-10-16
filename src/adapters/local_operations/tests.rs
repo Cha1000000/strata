@@ -119,13 +119,13 @@ fn staged(
 }
 
 use super::{
-    CopyStep, FAT32_MAX_FILE_SIZE, FailedAction, LocalFileIdentity, LocalOperationProvider,
+    DeletionTarget, TrashError, run_deletion_in, CopyStep, FAT32_MAX_FILE_SIZE, FailedAction, LocalFileIdentity, LocalOperationProvider,
     MergeCopied, MergeHooks, MergePlan, MountTable, PinnedEntry, RestoreEntry, StageOverwrite,
     StagedOriginalLookup, TRANSFER_PROGRESS_INTERVAL, Taken, TransferProgressTracker, TransferStop,
     await_cancellable, copy_failure_after_cleanup, copy_failure_on_fat32,
     copy_new_recursively_on_filesystem, copy_new_remote_file_with, copy_recursively,
     deletion_error_message, deletion_error_summary, duplicate_candidate_name, fat_sanitized_name,
-    fat32_file_size_limit, home_trash_entries_at, io_error, is_trash_unsupported_failure,
+    fat32_file_size_limit, home_trash_entries_at, io_error,
     join_local_tasks, local_file_identity, merge_local, merge_local_with, move_local,
     move_local_with, open_local_parent_directory, operation_error_summary, parallel_delete_local,
     parse_copy_suffix, permanently_delete_local, permanently_delete_local_path_if_unchanged,

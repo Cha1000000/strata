@@ -10,7 +10,7 @@ mod fs_ops;
 mod merge_aside;
 mod owed;
 mod placement;
-mod trash;
+pub(super) mod trash;
 mod work_queue;
 
 #[cfg(test)]
@@ -58,6 +58,10 @@ use crate::{
     adapters::{
         gio_file_for_location, location_for_file,
         trash_restore::{RestoreContext, plan_restore_for_location},
+        trash_support::{
+            LeftoverWatch, SystemTrash, TrashEnvironment, TrashError, TrashFailure,
+            trash_with_cleanup,
+        },
         volume::MountTable,
     },
     model::{FileEntry, Location},
@@ -483,7 +487,7 @@ async fn stop_transfer(
     }
 }
 
-async fn await_cancellable<O, T>(
+pub(super) async fn await_cancellable<O, T>(
     object: &O,
     cancellable: &gio::Cancellable,
     start: impl FnOnce(&O, &gio::Cancellable, gio::GioFutureResult<Result<T, glib::Error>>) + 'static,
@@ -1616,8 +1620,21 @@ fn deletion_undone_when_cancelled(location: &Location, permanent: bool) -> bool 
 /// trash attempt (never a permanent one, which has no further fallback),
 /// and the destination doesn't support Trash at all rather than some other,
 /// unrelated failure.
-fn is_trash_unsupported_failure(permanent: bool, error: &glib::Error) -> bool {
-    !permanent && error.matches(gio::IOErrorEnum::NotSupported)
+fn is_trash_unsupported_failure(permanent: bool, error: &TrashError) -> bool {
+    !permanent && error.is_unsupported()
+}
+
+/// GIO deletes a directory only when it is empty.
+async fn remove_empty_directory(
+    file: &gio::File,
+    cancellable: &gio::Cancellable,
+) -> Result<(), glib::Error> {
+    await_cancellable(file, cancellable, |file, cancellable, result| {
+        file.delete_async(glib::Priority::DEFAULT, Some(cancellable), move |output| {
+            result.resolve(output)
+        });
+    })
+    .await
 }
 
 fn cancelled_local_operation() -> glib::Error {
@@ -1630,7 +1647,10 @@ async fn run_local_fs_step<T: Send + 'static>(
     run_blocking(move || work().map_err(io_error)).await
 }
 
-fn open_local_child_directory<Fd: AsFd>(parent: &Fd, name: &OsStr) -> Result<OwnedFd, String> {
+pub(super) fn open_local_child_directory<Fd: AsFd>(
+    parent: &Fd,
+    name: &OsStr,
+) -> Result<OwnedFd, String> {
     // RESOLVE_NO_SYMLINKS (stronger than O_NOFOLLOW) plus RESOLVE_BENEATH and
     // RESOLVE_NO_MAGICLINKS: if `name` changed to a symlink (or a magic
     // link) since it was last inspected, this fails closed instead of
@@ -3222,7 +3242,7 @@ fn place_source(
             };
         }
         Err(error) if is_trash_unsupported_failure(false, &error) => {}
-        Err(error) => return Err(error),
+        Err(error) => return Err(error.error),
     }
     let name = plan.target_display();
     let aside = placement::set_aside(fs(), target, REPLACED_PREFIX, plan.target.identity)
@@ -3355,7 +3375,7 @@ async fn replace_through_stage(
                             )
                             .map(Removal::Without)
                         }
-                        Err(error) => Err(error),
+                        Err(error) => Err(error.error),
                     }
                 })
                 .await
@@ -3671,20 +3691,17 @@ struct MergePlan {
 
 /// Backs up an overwritten original before the incoming copy lands. Production
 /// stages through Trash; tests substitute a rename so fixtures on filesystems
-/// without Trash support still exercise the flow. `NotSupported` sets a local
+/// without Trash support still exercise the flow. Unsupported Trash sets a local
 /// original aside instead.
-type StageOverwrite = Rc<
-    dyn Fn(Location, gio::Cancellable) -> Pin<Box<dyn Future<Output = Result<(), glib::Error>>>>,
->;
+type StageOverwrite =
+    Rc<dyn Fn(Location, gio::Cancellable) -> Pin<Box<dyn Future<Output = Result<(), TrashError>>>>>;
 
 fn trash_stage_overwrite(
     location: Location,
     cancellable: gio::Cancellable,
-) -> Pin<Box<dyn Future<Output = Result<(), glib::Error>>>> {
+) -> Pin<Box<dyn Future<Output = Result<(), TrashError>>>> {
     Box::pin(async move {
-        trash::trash_entry(&gio_file_for_location(&location), &cancellable)
-            .await
-            .map(drop)
+        trash_with_cleanup(&gio_file_for_location(&location), &cancellable).await.map(drop)
     })
 }
 
@@ -3848,13 +3865,13 @@ async fn merge_owing(
                         merge_aside::set_aside(&mut aside, root, path, location.display_name())
                             .await
                     }
-                    _ if was_cancelled(&error) => Err(error),
+                    _ if was_cancelled(&error.error) => Err(error.error),
                     _ => Err(glib::Error::new(
                         gio::IOErrorEnum::Failed,
                         &rust_i18n::t!(
                             "Could not move %{name} to Trash before merging: %{error}",
                             name = location.display_name(),
-                            error = crate::services::gio_error_detail(&error)
+                            error = crate::services::gio_error_detail(&error.error)
                         ),
                     )),
                 },
@@ -4917,19 +4934,24 @@ fn deletion_error_summary(errors: &[String], permanent: bool) -> String {
     )
 }
 
-/// Backends without Trash support (most remote filesystems, including SMB)
-/// fail a move-to-trash with `NOT_SUPPORTED`. Give an actionable message for
-/// that specific case instead of the raw GIO error text.
-fn deletion_error_message(name: &str, permanent: bool, error: &glib::Error) -> String {
-    if !permanent && error.matches(gio::IOErrorEnum::NotSupported) {
-        rust_i18n::t!(
-            "%{name}: This location doesn't support Trash. Delete permanently instead.",
-            name = name
-        )
-        .into_owned()
-    } else {
-        item_error(name, crate::services::gio_error_detail(error))
+/// The retry dialog offers the permanent delete, so an unsupported Trash
+/// needs no instruction here.
+fn deletion_error_message(name: &str, error: &TrashError) -> String {
+    match error.failure {
+        TrashFailure::Unsupported(_) => {
+            rust_i18n::t!("%{name}: This location doesn't support Trash.", name = name)
+        }
+        TrashFailure::ReadOnly => {
+            rust_i18n::t!("%{name}: This location is read-only.", name = name)
+        }
+        TrashFailure::NoSpace => {
+            rust_i18n::t!("%{name}: Not enough space to move to Trash.", name = name)
+        }
+        TrashFailure::Cancelled | TrashFailure::NotFound | TrashFailure::Other => {
+            return item_error(name, crate::services::gio_error_detail(&error.error));
+        }
     }
+    .into_owned()
 }
 
 fn item_error(name: &str, error: impl std::fmt::Display) -> String {
@@ -5480,8 +5502,8 @@ async fn run_merge_undo(
         let result = match queried {
             Err(error) if error.matches(gio::IOErrorEnum::NotFound) => Ok(()),
             Err(error) => Err(error),
-            Ok(_) => match trash::trash_entry(&file, &cancellable).await {
-                Err(error) if error.matches(gio::IOErrorEnum::NotSupported) => {
+            Ok(_) => match trash_with_cleanup(&file, &cancellable).await {
+                Err(error) if error.is_unsupported() => {
                     match (placed.get(location), location.native_path()) {
                         (Some(placed), Some(path)) => {
                             remove_unchanged(path, placed, &unlinks, &cancellable, &mut deleting)
@@ -5502,7 +5524,7 @@ async fn run_merge_undo(
                         Ok(())
                     })
                 }
-                result => result.map(|identity| trashed_identity = identity),
+                result => result.map(|identity| trashed_identity = identity).map_err(|error| error.error),
             },
         };
         let deleted_locations = match result {
@@ -5736,6 +5758,33 @@ async fn run_deletion(
     emit: Rc<dyn Fn(OperationEvent)>,
     cancellable: gio::Cancellable,
 ) {
+    run_deletion_in(
+        Rc::new(SystemTrash),
+        request_id,
+        targets,
+        permanent,
+        emit,
+        cancellable,
+    )
+    .await;
+}
+
+async fn run_deletion_in(
+    environment: Rc<dyn TrashEnvironment>,
+    request_id: OperationRequestId,
+    targets: Vec<DeletionTarget>,
+    permanent: bool,
+    emit: Rc<dyn Fn(OperationEvent)>,
+    cancellable: gio::Cancellable,
+) {
+    let mut leftovers = if permanent {
+        None
+    } else {
+        let paths = targets
+            .iter()
+            .filter_map(|target| target.location.native_path().map(Path::to_owned));
+        Some(LeftoverWatch::observe(environment.as_ref(), paths).await)
+    };
     let mut errors = Vec::new();
     let mut deleted_locations = Vec::new();
     let mut failed_locations = Vec::new();
@@ -5766,6 +5815,9 @@ async fn run_deletion(
 
     for chunk in targets.chunks(batch_size) {
         if cancellable.is_cancelled() {
+            if let Some(leftovers) = leftovers.take() {
+                leftovers.clean_up().await;
+            }
             emit(cancelled_event(
                 request_id,
                 deleted_locations,
@@ -5786,10 +5838,11 @@ async fn run_deletion(
                 let target = target.clone();
                 let operation_target = target.clone();
                 let cancellable = cancellable.clone();
+                let environment = environment.clone();
                 let task = context.spawn_local(async move {
                     let file = gio_file_for_location(&operation_target.location);
                     if !permanent {
-                        return trash::trash_entry(&file, &cancellable).await;
+                        return super::trash_support::attempt(environment.as_ref(), &file, &cancellable).await;
                     }
                     if operation_target
                         .location
@@ -5814,6 +5867,7 @@ async fn run_deletion(
                         .await
                     }
                     .map(|()| None)
+                    .map_err(TrashError::permanent)
                 });
                 (target, task)
             })
@@ -5822,8 +5876,12 @@ async fn run_deletion(
         let mut chunk_cancelled = false;
         for (target, result) in join_local_tasks(tasks).await {
             completed_count += 1;
-            match result.unwrap_or_else(|_| Err(io_error("Delete worker failed"))) {
-                Err(error) if was_cancelled(&error) => {
+            let result = result.unwrap_or_else(|_| Err(TrashError::permanent(io_error("Delete worker failed"))));
+            if let (Some(leftovers), Some(path)) = (leftovers.as_mut(), target.location.native_path()) {
+                leftovers.note(path, result.as_ref().err().map(|error| error.failure));
+            }
+            match result {
+                Err(error) if error.failure == TrashFailure::Cancelled => {
                     chunk_cancelled = true;
                     if deletion_undone_when_cancelled(&target.location, permanent) {
                         cut_off.push(target.location.clone());
@@ -5835,11 +5893,7 @@ async fn run_deletion(
                     if is_trash_unsupported_failure(permanent, &error) {
                         retryable_locations.push(target.location.clone());
                     }
-                    errors.push(deletion_error_message(
-                        &target.display_name,
-                        permanent,
-                        &error,
-                    ));
+                    errors.push(deletion_error_message(&target.display_name, &error));
                     failed_locations.push(target.location.clone());
                 }
                 Ok(identity) => {
@@ -5876,6 +5930,9 @@ async fn run_deletion(
                     .iter()
                     .map(|target| target.location.clone()),
             );
+            if let Some(leftovers) = leftovers.take() {
+                leftovers.clean_up().await;
+            }
             emit(cancelled_event(
                 request_id,
                 deleted_locations,
@@ -5885,6 +5942,9 @@ async fn run_deletion(
             ));
             return;
         }
+    }
+    if let Some(leftovers) = leftovers {
+        leftovers.clean_up().await;
     }
     if errors.is_empty() {
         emit(OperationEvent::Deleted {
@@ -6703,10 +6763,19 @@ impl OperationProvider for LocalOperationProvider {
             }
             for location in &request.cleanup_locations {
                 let file = gio_file_for_location(location);
-                let identity = match trash::trash_entry(&file, &operation_cancellable).await {
+                let identity = match trash_with_cleanup(&file, &operation_cancellable).await {
                     Ok(identity) => identity,
+                    Err(error) if error.is_unsupported() => {
+                        match remove_empty_directory(&file, &operation_cancellable).await {
+                            Err(error) if was_cancelled(&error) => {
+                                emit(cancelled_event(request.id, completed, Vec::new(), vec![location.clone()], affected_locations));
+                                return;
+                            }
+                            _ => continue,
+                        }
+                    }
                     Err(error) => {
-                        if was_cancelled(&error) {
+                        if was_cancelled(&error.error) {
                             emit(cancelled_event(
                                 request.id,
                                 completed,
@@ -6718,7 +6787,7 @@ impl OperationProvider for LocalOperationProvider {
                             emit(OperationEvent::TransferFailed {
                                 request_id: request.id,
                                 completed_locations: completed,
-                                message: crate::services::gio_error_message(&error),
+                                message: crate::services::gio_error_message(&error.error),
                             });
                         }
                         return;

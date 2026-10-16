@@ -110,6 +110,8 @@ pub(crate) enum Trash {
     FalseWithoutError,
     /// TRUE, but nothing moved.
     SucceedsWithoutMoving,
+    /// A FUSE backend refuses a step of the trash protocol.
+    ProtocolRefused,
     /// Offered, but moving an item there is not supported.
     Refused,
 }
@@ -1183,7 +1185,7 @@ impl FsOps for Scoped {
                         Trash::Unsupported => false,
                         Trash::FalseWithoutError
                         | Trash::SucceedsWithoutMoving
-                        | Trash::Refused => true,
+                        | Trash::Refused | Trash::ProtocolRefused => true,
                     })
                 })
                 .unwrap_or(false),
@@ -1204,6 +1206,10 @@ impl FsOps for Scoped {
                 Trash::Unsupported | Trash::Refused => Err(glib::Error::new(
                     gio::IOErrorEnum::NotSupported,
                     "Trash is not supported here",
+                )),
+                Trash::ProtocolRefused => Err(glib::Error::new(
+                    gio::IOErrorEnum::Failed,
+                    "The backend refused the Trash protocol",
                 )),
                 Trash::FalseWithoutError => Ok(false),
                 Trash::SucceedsWithoutMoving => Ok(true),

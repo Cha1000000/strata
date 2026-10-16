@@ -1300,5 +1300,7 @@
   "whole selection": "intera selezione",
   "your package manager": "il tuo gestore di pacchetti",
   "{paths} is for whole-selection actions; use {path} for a per-item action": "{paths} è per le azioni sull’intera selezione; usa {path} per un’azione per elemento",
-  "{path} is for per-item actions; use {paths} for a whole selection": "{path} è per le azioni per elemento; usa {paths} per l’intera selezione"
+  "{path} is for per-item actions; use {paths} for a whole selection": "{path} è per le azioni per elemento; usa {paths} per l’intera selezione",
+  "Delete without Trash": "Elimina senza cestino",
+  "Deletion without Trash": "Eliminazione senza cestino"
 }

@@ -351,74 +351,82 @@ fn a_staging_failure_aborts_the_merge_and_reports_only_what_was_staged()
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
         .lock()
         .map_err(|error| error.to_string())?;
-    let root = tempfile::tempdir()?;
-    let source = root.path().join("source");
-    let target = root.path().join("target");
-    fs::create_dir_all(&source)?;
-    fs::create_dir_all(&target)?;
-    fs::write(source.join("a.txt"), b"new a")?;
-    fs::write(source.join("b.txt"), b"new b")?;
-    fs::write(target.join("a.txt"), b"old a")?;
-    fs::write(target.join("b.txt"), b"old b")?;
-    let staging = root.path().join("staging");
-    fs::create_dir_all(&staging)?;
-    let staging_into = staging.clone();
-    let (plans, on_merged) = recorded_plans();
-    let staged_once = Rc::new(Cell::new(false));
-    let flagged = staged_once.clone();
-    let stage: StageOverwrite = Rc::new(move |location: Location, _cancellable| {
-        let staging = staging_into.clone();
-        let flagged = flagged.clone();
-        Box::pin(async move {
-            if flagged.replace(true) {
-                return Err(glib::Error::new(
-                    gio::IOErrorEnum::Failed,
-                    "injected staging failure",
-                ));
-            }
-            let path = location
-                .native_path()
-                .ok_or_else(|| glib::Error::new(gio::IOErrorEnum::Failed, "no path"))?;
-            std::fs::rename(path, staging.join("staged"))
-                .map_err(|error| glib::Error::new(gio::IOErrorEnum::Failed, &error.to_string()))?;
-            Ok(())
-        })
-    });
+    for (code, expected_message) in [
+        (
+            gio::IOErrorEnum::Failed,
+            "Could not move b.txt to Trash before merging: injected staging failure",
+        ),
+        (
+            gio::IOErrorEnum::ReadOnly,
+            "Could not move b.txt to Trash before merging: The file system is read-only",
+        ),
+    ] {
+        let root = tempfile::tempdir()?;
+        let source = root.path().join("source");
+        let target = root.path().join("target");
+        fs::create_dir_all(&source)?;
+        fs::create_dir_all(&target)?;
+        fs::write(source.join("a.txt"), b"new a")?;
+        fs::write(source.join("b.txt"), b"new b")?;
+        fs::write(target.join("a.txt"), b"old a")?;
+        fs::write(target.join("b.txt"), b"old b")?;
+        let staging = root.path().join("staging");
+        fs::create_dir_all(&staging)?;
+        let staging_into = staging.clone();
+        let (plans, on_merged) = recorded_plans();
+        let stage: StageOverwrite = Rc::new(move |location: Location, _cancellable| {
+            let staging = staging_into.clone();
+            Box::pin(async move {
+                if location.display_name() == "b.txt" {
+                    return Err(glib::Error::new(code, "injected staging failure").into());
+                }
+                let path = location
+                    .native_path()
+                    .ok_or_else(|| glib::Error::new(gio::IOErrorEnum::Failed, "no path"))?;
+                std::fs::rename(path, staging.join("staged")).map_err(|error| {
+                    glib::Error::new(gio::IOErrorEnum::Failed, &error.to_string())
+                })?;
+                Ok(())
+            })
+        });
 
-    let result = glib::MainContext::default().block_on(merge_local_with(
-        gio::File::for_path(&source),
-        gio::File::for_path(&target),
-        false,
-        gio::Cancellable::new(),
-        None,
-        MergeHooks {
-            fat_family: false,
-            copy_into_target: real_copy(),
-            stage_overwrite: stage,
-            on_merged: &on_merged,
-        },
-    ));
+        let result = glib::MainContext::default().block_on(merge_local_with(
+            gio::File::for_path(&source),
+            gio::File::for_path(&target),
+            false,
+            gio::Cancellable::new(),
+            None,
+            MergeHooks {
+                fat_family: false,
+                copy_into_target: real_copy(),
+                stage_overwrite: stage,
+                on_merged: &on_merged,
+            },
+        ));
 
-    assert!(result.is_err());
-    assert_eq!(fs::read(source.join("a.txt"))?, b"new a");
-    assert_eq!(fs::read(source.join("b.txt"))?, b"new b");
-    let moved_out = ["a.txt", "b.txt"]
-        .iter()
-        .filter(|name| !target.join(name).exists())
-        .count();
-    assert_eq!(
-        moved_out, 1,
-        "enumeration order is unspecified: exactly one original was staged"
-    );
-    let staged_contents = fs::read(staging.join("staged"))?;
-    assert!(
-        staged_contents == b"old a" || staged_contents == b"old b",
-        "the staged file keeps its original content"
-    );
-    let plans = plans.borrow();
-    assert_eq!(plans.len(), 1);
-    assert!(plans[0].created.is_empty());
-    assert_eq!(plans[0].overwritten.len(), 1, "only the staged original");
+        let error = result.expect_err("staging failure aborts the merge");
+        assert_eq!(error.message(), expected_message, "{code:?}");
+        assert_eq!(fs::read(source.join("a.txt"))?, b"new a");
+        assert_eq!(fs::read(source.join("b.txt"))?, b"new b");
+        assert_eq!(fs::read(target.join("b.txt"))?, b"old b", "{code:?}");
+        let staged = fs::exists(staging.join("staged"))?;
+        assert_eq!(
+            !target.join("a.txt").exists(),
+            staged,
+            "enumeration order is unspecified: a.txt is staged only if it came first"
+        );
+        if staged {
+            assert_eq!(fs::read(staging.join("staged"))?, b"old a");
+        }
+        let plans = plans.borrow();
+        assert_eq!(plans.len(), 1);
+        assert!(plans[0].created.is_empty());
+        assert_eq!(
+            plans[0].overwritten.len(),
+            usize::from(staged),
+            "only the staged original"
+        );
+    }
     Ok(())
 }
 

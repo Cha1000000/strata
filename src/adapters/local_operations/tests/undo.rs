@@ -723,6 +723,53 @@ fn undoing_a_grouping_reports_the_trashed_group_folder() {
 }
 
 #[test]
+fn undoing_a_grouping_without_trash_removes_only_an_empty_group_folder()
+-> Result<(), Box<dyn Error>> {
+    const NAME: &str = "adapters::local_operations::tests::undo::undoing_a_grouping_without_trash_removes_only_an_empty_group_folder";
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock().map_err(|error| error.to_string())?;
+    let Some((_home_side, volume)) = crate::test_support::distinct_device_dirs(NAME) else {
+        return Ok(());
+    };
+    for arrived_meanwhile in [false, true] {
+        let root = tempfile::TempDir::new_in(volume.path())?;
+        let group = root.path().join("group");
+        fs::create_dir(&group)?;
+        fs::write(group.join("report.txt"), b"contents")?;
+        if arrived_meanwhile {
+            fs::write(group.join("arrived.txt"), b"new")?;
+        }
+        let can_trash = gio::File::for_path(&group).query_info(
+            "access::can-trash", gio::FileQueryInfoFlags::NONE, gio::Cancellable::NONE,
+        )?.boolean("access::can-trash");
+        assert!(!can_trash, "precondition: GIO refuses Trash on tmpfs");
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let emitted = events.clone();
+        let _operation = LocalOperationProvider.undo_move(
+            UndoMoveRequest {
+                cleanup_locations: vec![Location::local(&group)],
+                id: OperationRequestId(43),
+                items: vec![UndoMoveItem {
+                    record: MoveRecord {
+                        original: Location::local(root.path().join("report.txt")),
+                        current: Location::local(group.join("report.txt")),
+                        renamed: Vec::new(),
+                    },
+                    conflict: TransferConflict::FailIfExists,
+                }],
+            },
+            Rc::new(move |event| emitted.borrow_mut().push(event)),
+        );
+        drive_until_transfer_settles(&events);
+        let events = events.borrow();
+        assert!(matches!(events.last(), Some(OperationEvent::Pasted { .. })), "{events:?}");
+        assert!(trashed_items(&events).is_empty());
+        assert_eq!(fs::read(root.path().join("report.txt"))?, b"contents");
+        assert_eq!(group.exists(), arrived_meanwhile);
+    }
+    Ok(())
+}
+
+#[test]
 fn undoing_a_move_gives_back_names_numbered_as_aliases() -> Result<(), Box<dyn Error>> {
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
         .lock()

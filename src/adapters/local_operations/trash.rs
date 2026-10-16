@@ -17,7 +17,7 @@ use crate::services::TrashedOriginal;
 
 const NOT_MOVED_REASON: &str = "Trash reported success, but the item was not moved";
 
-pub(super) async fn trash_entry(
+pub(in crate::adapters) async fn trash_entry(
     file: &gio::File,
     cancellable: &gio::Cancellable,
 ) -> Result<Option<TrashedOriginal>, glib::Error> {
@@ -44,13 +44,24 @@ pub(super) fn trash_local_blocking(
     let parent = open_local_parent_directory(parent).map_err(io_error)?;
     let at = Entry::new(&parent, name);
     let identity = fs().stat(at, false).map_err(errno_error)?.identity;
-    trash_verified(at, path, identity, cancellable)?;
+    verify_trash(at, path, identity, cancellable)?;
     Ok(identity.into())
 }
 
 /// An item still there afterwards fails as `NotSupported`, so callers fall
 /// back as they would without Trash.
 pub(super) fn trash_verified(
+    at: Entry<'_>,
+    path: &Path,
+    identity: LocalFileIdentity,
+    cancellable: &gio::Cancellable,
+) -> Result<(), crate::adapters::trash_support::TrashError> {
+    crate::adapters::trash_support::verified_with_cleanup(path, || {
+        verify_trash(at, path, identity, cancellable)
+    })
+}
+
+fn verify_trash(
     at: Entry<'_>,
     path: &Path,
     identity: LocalFileIdentity,

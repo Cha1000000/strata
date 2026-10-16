@@ -1300,5 +1300,7 @@
   "whole selection": "toàn bộ lựa chọn",
   "your package manager": "trình quản lý gói của bạn",
   "{paths} is for whole-selection actions; use {path} for a per-item action": "{paths} dành cho hành động trên toàn bộ lựa chọn; dùng {path} cho hành động theo từng mục",
-  "{path} is for per-item actions; use {paths} for a whole selection": "{path} dành cho hành động theo từng mục; dùng {paths} cho toàn bộ lựa chọn"
+  "{path} is for per-item actions; use {paths} for a whole selection": "{path} dành cho hành động theo từng mục; dùng {paths} cho toàn bộ lựa chọn",
+  "Delete without Trash": "Xóa không qua Thùng rác",
+  "Deletion without Trash": "Xóa không qua Thùng rác"
 }

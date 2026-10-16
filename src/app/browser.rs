@@ -62,6 +62,8 @@ enum OperationDestination<'a> {
     Folder(&'a Location),
     Trash,
     PermanentDeletion,
+    /// A network or cloud provider may still keep a copy.
+    DeletionWithoutTrash,
 }
 
 #[derive(Clone)]
@@ -2697,6 +2699,26 @@ impl Browser {
     }
 
     pub fn delete(self: &Rc<Self>, entries: Vec<FileEntry>, permanent: bool) {
+        let destination = if permanent {
+            OperationDestination::PermanentDeletion
+        } else {
+            OperationDestination::Trash
+        };
+        self.delete_to(entries, destination);
+    }
+
+    /// `remote` names the operation for storage that may keep its own copy.
+    pub fn delete_permanently(self: &Rc<Self>, entries: Vec<FileEntry>, remote: bool) {
+        let destination = if remote {
+            OperationDestination::DeletionWithoutTrash
+        } else {
+            OperationDestination::PermanentDeletion
+        };
+        self.delete_to(entries, destination);
+    }
+
+    fn delete_to(self: &Rc<Self>, entries: Vec<FileEntry>, destination: OperationDestination) {
+        let permanent = !matches!(destination, OperationDestination::Trash);
         if entries.is_empty() {
             return;
         }
@@ -2714,11 +2736,7 @@ impl Browser {
         };
         self.deletion_operation.set(true);
         self.deletion_permanent.set(permanent);
-        self.set_operation_destination(if permanent {
-            OperationDestination::PermanentDeletion
-        } else {
-            OperationDestination::Trash
-        });
+        self.set_operation_destination(destination);
         self.operation_backgroundable.set(true);
         self.operation_description.replace(
             entries
@@ -3469,6 +3487,10 @@ impl Browser {
             ),
             OperationDestination::PermanentDeletion => {
                 let text = crate::i18n::tr("Permanent deletion");
+                (text.clone(), text)
+            }
+            OperationDestination::DeletionWithoutTrash => {
+                let text = crate::i18n::tr("Deletion without Trash");
                 (text.clone(), text)
             }
         };

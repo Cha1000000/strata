@@ -68,6 +68,7 @@ pub(in crate::ui) fn pane_refresh_button(browser: &Rc<Browser>, depth: usize) ->
             return;
         }
         if let Some(browser) = weak_browser.upgrade() {
+            crate::adapters::trash_support::forget_all();
             browser.retry_column(depth);
         }
     });

@@ -109,6 +109,85 @@ fn restore_error_summary(errors: &[String]) -> String {
     summary
 }
 
+/// How far a deletion that bypasses Trash reaches. A network or cloud
+/// provider may keep its own copy, so only local storage is "permanent".
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum DeletionReach {
+    /// Includes `fuseblk` drives and local FUSE overlays such as mergerfs.
+    Local,
+    Remote,
+}
+
+/// A mixed selection uses the stronger local warning.
+pub(super) fn deletion_reach(entries: &[FileEntry]) -> DeletionReach {
+    deletion_reach_with(entries, crate::adapters::MountTable::current)
+}
+
+fn deletion_reach_with(
+    entries: &[FileEntry],
+    mounts: impl Fn() -> crate::adapters::MountTable,
+) -> DeletionReach {
+    let table = std::cell::OnceCell::new();
+    let remote = |location: &Location| match location.native_path() {
+        Some(path) => {
+            let mounts = table.get_or_init(&mounts);
+            mounts.is_network_path(path)
+                && !mounts
+                    .fs_type_for(path)
+                    .is_some_and(crate::adapters::is_local_fuse_overlay)
+        }
+        None => !location
+            .uri_value()
+            .and_then(glib::Uri::parse_scheme)
+            .is_some_and(|scheme| scheme.eq_ignore_ascii_case("trash")),
+    };
+    if !entries.is_empty() && entries.iter().all(|entry| remote(&entry.location)) {
+        DeletionReach::Remote
+    } else {
+        DeletionReach::Local
+    }
+}
+
+/// The partial-failure dialog's button that opens the confirmation.
+pub(super) fn delete_retry_label(entries: &[FileEntry]) -> String {
+    crate::i18n::tr(match deletion_reach(entries) {
+        DeletionReach::Local => "Delete Permanently",
+        DeletionReach::Remote => "Delete without Trash",
+    })
+}
+
+fn reach_description(reach: DeletionReach, single: bool) -> String {
+    crate::i18n::tr(match (reach, single) {
+        (DeletionReach::Local, true) => {
+            "This item will be permanently deleted. This action cannot be undone."
+        }
+        (DeletionReach::Local, false) => {
+            "These items will be permanently deleted. This action cannot be undone."
+        }
+        (DeletionReach::Remote, true) => {
+            "This item will be deleted without using Trash. Strata can't undo this; whether it can be recovered depends on the storage provider."
+        }
+        (DeletionReach::Remote, false) => {
+            "These items will be deleted without using Trash. Strata can't undo this; whether they can be recovered depends on the storage provider."
+        }
+    })
+}
+
+/// Names the mount a failed trash attempt recorded, when the dialog's first
+/// item is on one.
+fn trash_unavailable_reason(entries: &[FileEntry]) -> Option<String> {
+    let parent = entries.first()?.location.parent()?;
+    let (mount, _) = crate::adapters::trash_support::unsupported_reason_for(parent.native_path()?)?;
+    Some(
+        rust_i18n::t!(
+            "Trash isn't available on %{mount_point} (%{fs_type}).",
+            mount_point = mount.mount_point.display(),
+            fs_type = mount.fs_type
+        )
+        .into_owned(),
+    )
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum DeleteDialog {
     Permanent,
@@ -824,27 +903,23 @@ impl ViewState {
             return;
         };
 
+        let reach = deletion_reach(&entries);
         let entries = Rc::new(entries);
         let count = entries.len();
-        let (title, confirm_label) = if trash {
-            (
-                rust_i18n::t!("Move %{value1} to Trash?", value1 = item_count_label(count))
-                    .into_owned(),
-                crate::i18n::tr("Move to Trash"),
-            )
-        } else {
-            (
-                rust_i18n::t!(
-                    "Permanently delete %{value1}?",
-                    value1 = item_count_label(count)
-                )
-                .into_owned(),
-                rust_i18n::t!(
-                    "Permanently delete %{value1}",
-                    value1 = item_count_label(count)
-                )
-                .into_owned(),
-            )
+        let items = item_count_label(count);
+        let (title, confirm_label) = match (trash, reach) {
+            (true, _) => (
+                rust_i18n::t!("Move %{value1} to Trash?", value1 = items),
+                crate::i18n::tr("Move to Trash").into(),
+            ),
+            (false, DeletionReach::Local) => (
+                rust_i18n::t!("Permanently delete %{value1}?", value1 = items),
+                rust_i18n::t!("Permanently delete %{value1}", value1 = items),
+            ),
+            (false, DeletionReach::Remote) => (
+                rust_i18n::t!("Delete %{value1} without Trash?", value1 = items),
+                rust_i18n::t!("Delete %{value1}", value1 = items),
+            ),
         };
         let layout = message_dialog_layout(
             crate::assets::icons::TRASH,
@@ -910,23 +985,25 @@ impl ViewState {
         file_scroller.add_css_class("delete-confirmation-list");
         layout.body.append(&file_scroller);
         let single = count == 1;
-        let explanation = message_dialog_description(&crate::i18n::tr(match (kind, single) {
-            (DeleteDialog::Trash, true) => "This item can be restored from Trash.",
-            (DeleteDialog::Trash, false) => "These items can be restored from Trash.",
-            (DeleteDialog::TrashUnavailable, true) => {
-                "This location doesn't support Trash. This item will be permanently deleted. This action cannot be undone."
-            }
-            (DeleteDialog::TrashUnavailable, false) => {
-                "This location doesn't support Trash. These items will be permanently deleted. This action cannot be undone."
-            }
-            (DeleteDialog::Permanent, true) => {
-                "This item will be permanently deleted. This action cannot be undone."
-            }
-            (DeleteDialog::Permanent, false) => {
-                "These items will be permanently deleted. This action cannot be undone."
-            }
-        }));
-        layout.body.append(&explanation);
+        let paragraphs = match kind {
+            DeleteDialog::Trash => vec![crate::i18n::tr(if single {
+                "This item can be restored from Trash."
+            } else {
+                "These items can be restored from Trash."
+            })],
+            DeleteDialog::TrashUnavailable => [
+                Some(crate::i18n::tr("This location doesn't support Trash.")),
+                trash_unavailable_reason(&entries),
+                Some(reach_description(reach, single)),
+            ]
+            .into_iter()
+            .flatten()
+            .collect(),
+            DeleteDialog::Permanent => vec![reach_description(reach, single)],
+        };
+        for paragraph in paragraphs {
+            layout.body.append(&message_dialog_description(&paragraph));
+        }
         let content = layout.content;
         let close = layout.close;
         let cancel = layout.cancel;
@@ -993,7 +1070,7 @@ impl ViewState {
                     }
                     let entries = Rc::try_unwrap(entries_for_dissolve)
                         .unwrap_or_else(|shared| shared.as_ref().clone());
-                    browser.delete(entries, true);
+                    browser.delete_permanently(entries, reach == DeletionReach::Remote);
                     browser.focus_active();
                 },
             );
@@ -1058,10 +1135,17 @@ impl ViewState {
                 return;
             };
             subtitle.set_label(&rust_i18n::t!(
-                if summary.truncated() {
-                    "At least %{items} · at least %{size} will be permanently deleted"
-                } else {
-                    "%{items} · %{size} will be permanently deleted"
+                match (reach, summary.truncated()) {
+                    (DeletionReach::Local, true) => {
+                        "At least %{items} · at least %{size} will be permanently deleted"
+                    }
+                    (DeletionReach::Local, false) => {
+                        "%{items} · %{size} will be permanently deleted"
+                    }
+                    (DeletionReach::Remote, true) => {
+                        "At least %{items} · at least %{size} will be deleted"
+                    }
+                    (DeletionReach::Remote, false) => "%{items} · %{size} will be deleted",
                 },
                 items = item_count_label(summary.item_count),
                 size = format_file_size(summary.total_size)

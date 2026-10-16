@@ -673,6 +673,18 @@ impl ViewState {
                 folder = folder
             )
         };
+        let without_trash = destination
+            .native_path()
+            .and_then(crate::adapters::trash_support::unsupported_reason_for)
+            .is_some();
+        let explanation = if without_trash {
+            format!(
+                "{explanation}\n\n{}",
+                crate::i18n::tr("Replaced items can't be moved to Trash here and will be deleted.")
+            )
+        } else {
+            explanation.into_owned()
+        };
         let state = self.clone();
         let send_to_conflict = send_to.clone();
         // Move undo/reveal assumes an unrenamed `transfer_target`.
