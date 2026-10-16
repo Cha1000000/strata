@@ -284,7 +284,7 @@ fn links_left_out_get_their_own_section_and_undo_says_what_it_leaves_out() {
             .collect::<Vec<_>>();
         let listed = (0..left_out.min(LISTED_ITEMS))
             .filter(|_| noted)
-            .map(|index| format!("project {index}"))
+            .map(|index| crate::i18n::quoted(&format!("project {index}")))
             .collect::<Vec<_>>();
         assert_eq!(names, listed, "{row}");
         assert_eq!(

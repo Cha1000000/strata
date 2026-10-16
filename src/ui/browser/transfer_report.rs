@@ -240,7 +240,9 @@ fn left_sections(report: &TransferReport) -> Vec<(String, Lines)> {
         if !kept.is_empty() {
             let mut lines = Lines::of(kept, |item| kept_line(item, in_trash));
             if !in_trash && !report.kept_out_of_undo.is_empty() {
-                let left_out = Lines::of(&report.kept_out_of_undo, display_name);
+                let left_out = Lines::of(&report.kept_out_of_undo, |item| {
+                    crate::i18n::quoted(&display_name(item))
+                });
                 lines.note = Some(format!(
                     "{}\n\n{}",
                     crate::i18n::tr(
@@ -279,7 +281,7 @@ fn presentation(report: &TransferReport) -> Option<Presentation> {
     if renamed.len() > 1 {
         return Some(Presentation::Information {
             message,
-            summary: crate::i18n::tr("Some names changed during the transfer"),
+            summary: crate::i18n::tr("Names changed for different reasons"),
             detail: sections(renamed),
         });
     }
