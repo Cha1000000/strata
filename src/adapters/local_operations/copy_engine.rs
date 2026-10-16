@@ -759,24 +759,7 @@ fn copy_new(
                 FileTarget::Final(name, taken),
                 recorded_in,
             ).map(|(name, identity)| (name, copy.ownership(identity))),
-        FileType::Symlink => {
-            copy.check_cancelled()?;
-            let mount = Mount::new(copy.fs, parent.as_fd());
-            let (name, link) = first_free(taken.names(name, false), taken, |name| {
-                tree::copy_link(
-                    copy,
-                    source.entry(),
-                    Entry::new(&**parent, name),
-                    &mount,
-                    None,
-                )
-            })?;
-            if let Some(folder) = recorded_in {
-                folder.entry(&source.name, &link);
-            }
-            let identity = copy.fs.stat(Entry::new(&**parent, &name), false)?.identity;
-            Ok((name, Ownership::new(identity)))
-        }
+        FileType::Symlink | FileType::Fifo => copy_special(copy, source, (parent, name), &stat, taken),
         FileType::Directory => {
             let workers = workers.unwrap_or_else(|| worker_count(source, parent));
             if in_place || placement::can_place(copy.fs, parent.as_fd(), true) == Some(false) {
@@ -787,23 +770,78 @@ fn copy_new(
             let staged = stage_folder(copy, source, stat.identity, parent, COPY_PREFIX, workers)?;
             publish_folder(copy, staged, name, taken, workers)
         }
-        FileType::Fifo => {
-            copy.check_cancelled()?;
-            let mount = Mount::new(copy.fs, parent.as_fd());
-            let parent_stat = copy.fs.stat_fd(parent.as_fd())?;
-            let (name, (pipe, identity)) = first_free(taken.names(name, false), taken, |name| {
-                let target = Entry::new(&**parent, name);
-                match tree::copy_fifo(copy, source.entry(), target, &parent_stat, &mount, None)? {
-                    (pipe, Some(identity)) => Ok((pipe, identity)),
-                    (_, None) => Err(Failure::NotCopyable),
-                }
-            })?;
-            if let Some(folder) = recorded_in {
-                folder.entry(&source.name, &pipe);
-            }
-            Ok((name, Ownership::new(identity)))
-        }
         _ => Err(Failure::NotCopyable),
+    }
+}
+
+fn copy_special(
+    copy: &Arc<Copy>,
+    source: &Source,
+    (parent, name): (&Arc<OwnedFd>, &OsStr),
+    stat: &EntryStat,
+    taken: Taken,
+) -> Result<(OsString, Ownership), Failure> {
+    copy.check_cancelled()?;
+    let content = if stat.kind == FileType::Symlink {
+        StageContent::Symlink(tree::read_link(copy.fs, source.entry())?)
+    } else {
+        StageContent::Fifo
+    };
+    // These creation syscalls return no descriptor; retain ownership in a private stage.
+    let staged = StagedSibling::create(parent.clone(), COPY_PREFIX, content).map_err(|error| {
+        match error {
+            PlaceError::Io(error) if stat.kind == FileType::Fifo && tree::refuses_pipes(error) => Failure::NotCopyable,
+            error => error.into(),
+        }
+    })?;
+    let mount = Mount::new(copy.fs, parent.as_fd());
+    let prepared = (|| {
+        let at = Entry::new(&**parent, &staged.name);
+        if stat.kind == FileType::Fifo {
+            let parent_stat = copy.fs.stat_fd(parent.as_fd())?;
+            tree::finish_pipe(copy, stat, (at, staged.identity), &parent_stat, &mount)?;
+        } else if mount.family != Family::Fuse {
+            best_effort(copy.fs.set_link_times(at, stat.atime, stat.mtime))?;
+        }
+        copy.check_cancelled()
+    })();
+    if let Err(failure) = prepared {
+        return Err(copy.discarding(staged, failure));
+    }
+    let published = first_free(taken.names(name, false), taken, |name| {
+        match stage::publish(copy.fs, parent.as_fd(), &staged.name, staged.identity, name) {
+            Ok(placement::Placed::RecreatedSymlink) => Ok((Ownership::unproven(), false)),
+            Ok(_) => Ok((Ownership::new(staged.identity), false)),
+            Err(PlaceError::Unsupported) => {
+                let from = Entry::new(&**parent, &staged.name);
+                let to = Entry::new(&**parent, name);
+                let uncounted = copy.uncounted();
+                if stat.kind == FileType::Symlink {
+                    tree::copy_link(&uncounted, from, to, &mount, None)?;
+                } else {
+                    let parent_stat = copy.fs.stat_fd(parent.as_fd())?;
+                    if tree::copy_fifo(&uncounted, from, to, &parent_stat, &mount, None)?.1.is_none() {
+                        return Err(Failure::NotCopyable);
+                    }
+                }
+                Ok((Ownership::unproven(), true))
+            }
+            Err(error) => Err(error.into()),
+        }
+    });
+    match published {
+        Ok((name, (ownership, copied_out))) => {
+            if copied_out {
+                copy.discard(staged).map_err(|error| Failure::Error(stage_left(&error)))?;
+            }
+            if let Some(folder) = &source.recorded_in {
+                folder.entry(&source.name, stat);
+            }
+            copy.add_file(if stat.kind == FileType::Symlink { stat.size } else { 0 });
+            Ok((name, ownership))
+        }
+        Err(Failure::Place(PlaceError::Unconfirmed)) => Err(Failure::Place(PlaceError::Unconfirmed)),
+        Err(failure) => Err(copy.discarding(staged, failure)),
     }
 }
 

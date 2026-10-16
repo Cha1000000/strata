@@ -781,8 +781,6 @@ fn a_named_pipe_whose_copy_fails_is_not_left_behind() -> Result<(), Box<dyn Erro
     use crate::adapters::volume::learn_mount_capability;
     use rustix::io::Errno;
     let _serial = serial()?;
-    // A selected pipe made at its final name, and a pipe in a folder made in
-    // place, where the mount cannot place a stage.
     for selected in [true, false] {
         let root = tempfile::tempdir()?;
         let source = root.path().join("source");
@@ -794,7 +792,7 @@ fn a_named_pipe_whose_copy_fails_is_not_left_behind() -> Result<(), Box<dyn Erro
         let scope = FsQuirks::install(
             &destination,
             Quirks {
-                fail: vec![(Op::SetTimes, "pipe", 0, Errno::IO)],
+                fail: vec![(Op::SetTimes, if selected { ".strata-copy-*" } else { "pipe" }, 0, Errno::IO)],
                 ..Quirks::without_folder_placement()
             },
         );
@@ -831,6 +829,7 @@ fn a_selected_named_pipe_is_recreated_where_the_destination_can() -> Result<(), 
     let _serial = serial()?;
     for (row, preset, pipes) in [
         ("tmpfs", Quirks::default as Preset, true),
+        ("recreated without placement", Quirks::without_placement, true),
         ("vfat", Quirks::vfat, false),
     ] {
         let root = tempfile::tempdir()?;

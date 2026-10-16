@@ -12,6 +12,7 @@ use super::{CopyInto, CopyRecord, await_cancellable, blocking_join_message, canc
 pub(super) enum StageContent {
     Directory,
     Symlink(OsString),
+    Fifo,
 }
 
 /// Created and discarded off the main thread; there is no `Drop` cleanup.
@@ -36,6 +37,7 @@ impl StagedSibling {
                     fs().mkdir(entry, rustix::fs::Mode::from_raw_mode(0o700))
                 }
                 StageContent::Symlink(link) => fs().symlink(link, entry),
+                StageContent::Fifo => fs().create_node(entry, rustix::fs::FileType::Fifo, rustix::fs::Mode::from_raw_mode(0o600)),
             };
             match made {
                 Ok(()) => fs()
@@ -52,6 +54,7 @@ impl StagedSibling {
                             stat.kind == rustix::fs::FileType::Symlink
                                 && fs().readlink(entry).is_ok_and(|current| current == *link)
                         }
+                        StageContent::Fifo => stat.kind == rustix::fs::FileType::Fifo,
                     })
                     .ok_or(PlaceError::Exists)
                 }

@@ -334,21 +334,25 @@ impl State {
 
 #[derive(Clone, Debug)]
 pub(in crate::adapters::local_operations) struct Ownership {
-    pub(super) identity: LocalFileIdentity,
+    identity: Option<LocalFileIdentity>,
     descendants: HashMap<PathBuf, LocalFileIdentity>,
     states: HashMap<PathBuf, State>,
 }
 
 impl Ownership {
     pub(super) fn new(identity: LocalFileIdentity) -> Self {
-        Self { identity, descendants: HashMap::new(), states: HashMap::new() }
+        Self { identity: Some(identity), descendants: HashMap::new(), states: HashMap::new() }
+    }
+
+    pub(super) fn unproven() -> Self {
+        Self { identity: None, descendants: HashMap::new(), states: HashMap::new() }
     }
 
     pub(super) fn created(
         identity: LocalFileIdentity,
         descendants: impl IntoIterator<Item = (PathBuf, LocalFileIdentity)>,
     ) -> Self {
-        Self { identity, descendants: descendants.into_iter().collect(), states: HashMap::new() }
+        Self { identity: Some(identity), descendants: descendants.into_iter().collect(), states: HashMap::new() }
     }
 
     pub(super) fn with_states(mut self, states: impl IntoIterator<Item = (PathBuf, State)>) -> Self {
@@ -403,7 +407,7 @@ impl Ownership {
     }
 
     fn identity_at(&self, path: &Path) -> Option<LocalFileIdentity> {
-        if path.as_os_str().is_empty() { Some(self.identity) } else { self.descendants.get(path).copied() }
+        if path.as_os_str().is_empty() { self.identity } else { self.descendants.get(path).copied() }
     }
 
     fn matches(&self, path: &Path, stat: &EntryStat) -> bool {

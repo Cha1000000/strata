@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 
-use std::os::unix::fs::{FileTypeExt, MetadataExt};
+use std::{os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt}, sync::atomic::Ordering};
 
 use rustix::io::Errno;
 
@@ -1626,6 +1626,71 @@ fn a_moved_source_stays_when_its_copy_is_gone_before_the_deletion() -> Result<()
                 [kept(source.clone(), KeptCause::CopyGone)],
                 "{row}"
             );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn a_special_file_move_keeps_its_source_without_proven_published_ownership() -> Result<(), Box<dyn Error>> {
+    let _serial = serial()?;
+    for (pipe, can_place, replace) in [
+        (false, true, true), (true, true, true),
+        (false, false, true), (true, false, true),
+        (false, false, false), (true, false, false),
+    ] {
+        let root = tempfile::tempdir()?;
+        let sources = root.path().join("sources");
+        let destination = root.path().join("destination");
+        fs::create_dir(&sources)?;
+        fs::create_dir(&destination)?;
+        let source = sources.join("special");
+        if pipe {
+            rustix::fs::mknodat(rustix::fs::CWD, &source, rustix::fs::FileType::Fifo, rustix::fs::Mode::from_raw_mode(0o600), 0)?;
+        } else {
+            std::os::unix::fs::symlink("original-target", &source)?;
+        }
+        let arrival = root.path().join("arrival");
+        fs::write(&arrival, b"another program's file")?;
+        fs::set_permissions(&arrival, fs::Permissions::from_mode(0o640))?;
+        let replaced = Arc::new(AtomicBool::new(false));
+        let creation = if pipe { Op::CreateNode } else { Op::Symlink };
+        let after = std::iter::once(creation).chain(can_place.then_some(Op::Rename)).filter(|_| replace).map(|op| {
+            let arrival = arrival.clone();
+            let target = destination.join("special");
+            let replaced = replaced.clone();
+            let racer: super::fs_quirks::Racer = Box::new(move || {
+                if !replaced.swap(true, Ordering::AcqRel) {
+                    fs::rename(&arrival, &target).expect("replace the published special file");
+                }
+            });
+            (op, "special", 0, racer)
+        }).collect();
+        let _sources = FsQuirks::install(&sources, Quirks::default());
+        let _destination = FsQuirks::install(&destination, Quirks {
+            after,
+            ..if can_place { Quirks::default() } else { Quirks::without_placement() }
+        });
+        let (_operation, events) = paste_move(99, &destination, &source, TransferConflict::FailIfExists);
+        pump_until_transfer(&events);
+
+        assert_eq!(replaced.load(Ordering::Acquire), replace, "pipe: {pipe}, can_place: {can_place}");
+        assert!(fs::symlink_metadata(&source).is_ok(), "pipe: {pipe}, can_place: {can_place}: {:?}", events.borrow());
+        if replace {
+            assert_eq!(fs::read(destination.join("special"))?, b"another program's file");
+            assert_eq!(fs::metadata(destination.join("special"))?.mode() & 0o777, 0o640);
+        } else {
+            assert_eq!(reported(&events).kept, [kept(source.clone(), KeptCause::CopyGone)]);
+            if pipe {
+                assert!(fs::symlink_metadata(destination.join("special"))?.file_type().is_fifo());
+            } else {
+                assert_eq!(fs::read_link(destination.join("special"))?, PathBuf::from("original-target"));
+            }
+        }
+        if pipe {
+            assert!(fs::symlink_metadata(&source)?.file_type().is_fifo());
+        } else {
+            assert_eq!(fs::read_link(&source)?, PathBuf::from("original-target"));
         }
     }
     Ok(())

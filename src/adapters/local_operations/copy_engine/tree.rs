@@ -752,12 +752,14 @@ pub(super) fn copy_link(
                 && fs.readlink(target).is_ok_and(|current| current == link)
         })?;
     }
+    if read_link(fs, target)? != link {
+        return Err(Failure::Changed);
+    }
     // sshfs sets a link's times on what it points to.
     if mount.family != Family::Fuse
         && let Err(error) = best_effort(fs.set_link_times(target, stat.atime, stat.mtime))
     {
-        // The copy failed, so its link must not stay at a real name.
-        if fs.readlink(target).is_ok_and(|current| current == link) {
+        if names.is_some() && fs.readlink(target).is_ok_and(|current| current == link) {
             let _ = fs.unlink(target, AtFlags::empty());
         }
         return Err(error.into());
@@ -789,9 +791,12 @@ pub(super) fn copy_fifo(
         Err(error) if refuses_pipes(error) => return Ok((stat, None)),
         Err(error) => return Err(error.into()),
     };
+    if identity.kind != FileType::Fifo {
+        return Err(Failure::Changed);
+    }
     let finished = finish_pipe(copy, &stat, (target, identity), parent, mount);
-    // Closed by now, so the pipe is removed rather than renamed aside on NFS.
-    if finished.is_err() {
+    // An unprovable public creation cannot authorize deleting a concurrent arrival.
+    if finished.is_err() && names.is_some() {
         placement::remove_if_unchanged(fs, target, identity, AtFlags::empty());
     }
     finished?;
@@ -799,7 +804,7 @@ pub(super) fn copy_fifo(
     Ok((stat, Some(identity)))
 }
 
-fn finish_pipe(
+pub(super) fn finish_pipe(
     copy: &Copy,
     stat: &EntryStat,
     (target, identity): (Entry<'_>, LocalFileIdentity),
@@ -813,7 +818,7 @@ fn finish_pipe(
         Err(_) => return Ok(()),
     };
     let created = fs.stat_fd(fd.as_fd())?;
-    if !same_entry(&created, identity, mount.family) {
+    if created.kind != FileType::Fifo || !same_entry(&created, identity, mount.family) {
         return Err(Failure::Place(PlaceError::Changed));
     }
     Snapshot::of(stat).apply_to_pipe(
@@ -829,7 +834,7 @@ fn finish_pipe(
 
 /// How filesystems without named pipes refuse one: vfat with `EPERM`,
 /// exfat-fuse with `EIO` and SMB with `EOPNOTSUPP`.
-fn refuses_pipes(error: Errno) -> bool {
+pub(super) fn refuses_pipes(error: Errno) -> bool {
     matches!(error, Errno::PERM | Errno::IO | Errno::NOSYS | Errno::INVAL) || is_unsupported(error)
 }
 
