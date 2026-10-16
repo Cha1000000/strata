@@ -5,7 +5,11 @@ use rustix::{fs::Mode, io::Errno};
 use super::super::{
     fs_ops::{Entry, fs},
     mount_profile::Profiles,
-    naming::{Key, PlanEntry, Planned, fix::fix_name, plan_names, stricter_names},
+    naming::{
+        Key, PlanEntry, Planned,
+        fix::{Refusal, fix_name, refusal},
+        plan_names, stricter_names,
+    },
 };
 use super::*;
 use crate::{
@@ -1498,7 +1502,72 @@ fn fixing_a_fixed_name_changes_nothing() {
                 !fixed.as_encoded_bytes().starts_with(b"."),
                 "{name:?} {profile:?}"
             );
+            if let Some(typed) = name.to_str() {
+                assert_eq!(
+                    refusal(typed, profile, folder).is_none(),
+                    *fixed == *name,
+                    "{name:?} {profile:?}"
+                );
+            }
+            if let Some(fixed) = fixed.to_str() {
+                assert_eq!(
+                    refusal(fixed, profile, folder),
+                    None,
+                    "{name:?} {profile:?}"
+                );
+            }
         }
+    }
+}
+
+#[test]
+fn a_typed_name_is_refused_for_the_first_thing_its_mount_would_change() {
+    use Refusal::{Characters, LeadingSpace, Reserved as Device, TooLong, TrailingDotOrSpace};
+    let posix = NameProfile::posix(Some(255));
+    let bmp = NameProfile::windows(Reserved::Full, NameEncoding::Utf8Bmp);
+    let ascii = NameProfile::windows(Reserved::Bare, NameEncoding::Ascii);
+    let smb = NameProfile {
+        mapped: Some(PrivateUse::Sfm),
+        ..NameProfile::smb(Some(255))
+    };
+    let mtp = gvfs_profile("mtp");
+    let folder_name = "f".repeat(214);
+    let rows: [(NameProfile, &str, bool, Option<Refusal>); 23] = [
+        (posix, "a:b.", false, None),
+        (posix, "CON", false, None),
+        (posix, &"a".repeat(255), false, None),
+        (posix, &"a".repeat(256), false, Some(TooLong)),
+        (fat(), "a:b:c?d.", false, Some(Characters(vec![':', '?']))),
+        (fat(), "a\u{1}b", false, Some(Characters(vec!['\u{1}']))),
+        (fat(), "x.", false, Some(TrailingDotOrSpace)),
+        (fat(), "CON ", false, Some(TrailingDotOrSpace)),
+        (fat(), " x", false, None),
+        (fat(), "CON", false, Some(Device("CON".to_owned()))),
+        (fat(), "nul.txt", false, Some(Device("nul".to_owned()))),
+        (fat(), "aux.c", false, None),
+        (fat(), &"\u{4e2d}".repeat(255), false, None),
+        (fat(), &"\u{4e2d}".repeat(256), false, Some(TooLong)),
+        (
+            bmp,
+            "a\u{1f600}b",
+            false,
+            Some(Characters(vec!['\u{1f600}'])),
+        ),
+        (bmp, "CON .txt", false, Some(Device("CON".to_owned()))),
+        (ascii, "caf\u{e9}", false, Some(Characters(vec!['\u{e9}']))),
+        (smb, "x\u{f022}y", false, Some(Characters(vec!['\u{f022}']))),
+        (smb, &folder_name, true, Some(TooLong)),
+        (smb, &folder_name, false, None),
+        (mtp, " x", false, Some(LeadingSpace)),
+        (mtp, " .x", false, None),
+        (mtp, "x ", false, Some(TrailingDotOrSpace)),
+    ];
+    for (profile, name, new_folder, expected) in rows {
+        assert_eq!(
+            refusal(name, &profile, new_folder),
+            expected,
+            "{name:?} {profile:?}"
+        );
     }
 }
 

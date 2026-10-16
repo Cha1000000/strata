@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 
+use super::fs_quirks::Preset;
 use super::*;
 use crate::services::{CreateDirectoryRequest, CreateFileRequest};
 
@@ -160,4 +161,77 @@ fn a_folder_reported_by_a_file_create_is_a_taken_name() {
     let error = glib::Error::new(gio::IOErrorEnum::IsDirectory, "creation failed");
     assert!(super::super::create_entry::name_taken(&error, false));
     assert!(!super::super::create_entry::name_taken(&error, true));
+}
+
+#[test]
+fn a_typed_name_the_location_would_store_otherwise_is_refused_before_anything_is_made()
+-> Result<(), Box<dyn Error>> {
+    let long_folder_name = "f".repeat(214);
+    let rows: [(Preset, &str, bool, Option<String>); 6] = [
+        (
+            Quirks::vfat,
+            "a:b",
+            false,
+            Some(
+                rust_i18n::t!(
+                    "Names in this location can’t contain %{characters}",
+                    characters = ":"
+                )
+                .into_owned(),
+            ),
+        ),
+        (
+            Quirks::vfat,
+            "notes.",
+            false,
+            Some(crate::i18n::tr(
+                "Names in this location can’t end with a space or a period",
+            )),
+        ),
+        (
+            Quirks::vfat,
+            "aux",
+            true,
+            Some(
+                rust_i18n::t!(
+                    "“%{name}” is a reserved name in this location",
+                    name = "aux"
+                )
+                .into_owned(),
+            ),
+        ),
+        (
+            Quirks::cifs,
+            &long_folder_name,
+            true,
+            Some(crate::i18n::tr("The name is too long")),
+        ),
+        (Quirks::cifs, &long_folder_name, false, None),
+        (Quirks::ext4, "a:b", true, None),
+    ];
+    for (quirks, name, directory, refusal) in rows {
+        let root = tempfile::tempdir()?;
+        let _scope = FsQuirks::install(root.path(), quirks());
+
+        let events = create(root.path(), name, false, 1, directory);
+
+        match refusal {
+            Some(refusal) => {
+                assert!(
+                    matches!(events.as_slice(), [OperationEvent::Failed { message, .. }] if *message == refusal),
+                    "{name:?}: {events:?}"
+                );
+                assert!(names(root.path())?.is_empty(), "{name:?}");
+            }
+            None => {
+                assert!(
+                    matches!(events.as_slice(), [OperationEvent::Created { .. }]),
+                    "{name:?}: {events:?}"
+                );
+                assert_eq!(names(root.path())?, [name], "{name:?}");
+                assert_eq!(root.path().join(name).is_dir(), directory, "{name:?}");
+            }
+        }
+    }
+    Ok(())
 }

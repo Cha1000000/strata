@@ -504,6 +504,8 @@
   "Minimize": "Minimize",
   "Minimize window": "Minimize window",
   "Mirror columns selection": "Mirror columns selection",
+  "Names in this location can’t end with a space or a period": "Names in this location can’t end with a space or a period",
+  "Names in this location can’t start with a space": "Names in this location can’t start with a space",
   "Show sizes in Columns view": "Show sizes in Columns view",
   "Show file sizes and folder item counts when hovering or selecting items in Columns view.": "Show file sizes and folder item counts when hovering or selecting items in Columns view.",
   "Mode": "Mode",

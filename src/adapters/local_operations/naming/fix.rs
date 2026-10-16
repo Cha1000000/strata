@@ -5,6 +5,7 @@
 
 use std::{
     borrow::Cow,
+    collections::HashSet,
     ffi::{OsStr, OsString},
     ops::Range,
     os::unix::ffi::{OsStrExt, OsStringExt},
@@ -85,6 +86,47 @@ pub(in crate::adapters::local_operations) fn split_extension(
     )
 }
 
+/// What keeps a name the user typed from being stored as typed.
+#[derive(Debug, Eq, PartialEq)]
+pub(in crate::adapters::local_operations) enum Refusal {
+    /// Each character the mount cannot hold, once, in the order typed.
+    Characters(Vec<char>),
+    LeadingSpace,
+    TrailingDotOrSpace,
+    /// The Windows device name the name starts with.
+    Reserved(String),
+    TooLong,
+}
+
+/// Why the mount would store `name` as another name, which is exactly when
+/// [`fix_name`] changes it. A new folder's name may have to be shorter.
+pub(in crate::adapters::local_operations) fn refusal(
+    name: &str,
+    profile: &NameProfile,
+    new_folder: bool,
+) -> Option<Refusal> {
+    let mut seen = HashSet::new();
+    let characters: Vec<char> = name
+        .chars()
+        .filter(|character| refuses(profile, *character) && seen.insert(*character))
+        .collect();
+    if !characters.is_empty() {
+        return Some(Refusal::Characters(characters));
+    }
+    let typed = OsStr::new(name);
+    if *trimmed(Cow::Borrowed(typed), profile.strip) != *typed {
+        return Some(if name.ends_with(['.', ' ']) {
+            Refusal::TrailingDotOrSpace
+        } else {
+            Refusal::LeadingSpace
+        });
+    }
+    if let Some(word_end) = reserved_word(name.as_bytes(), profile.reserved) {
+        return Some(Refusal::Reserved(name[..word_end].to_owned()));
+    }
+    (!Limit::of(profile.limit, new_folder).fits(name.as_bytes())).then_some(Refusal::TooLong)
+}
+
 /// Replaces each character the mount cannot hold or would read back as
 /// another one, and each malformed sequence where it needs UTF-8, by `_`.
 fn storable<'a>(name: Cow<'a, OsStr>, profile: &NameProfile) -> Cow<'a, OsStr> {
@@ -92,13 +134,7 @@ fn storable<'a>(name: Cow<'a, OsStr>, profile: &NameProfile) -> Cow<'a, OsStr> {
     if !checks_encoding && profile.rules == NameRules::Posix && profile.mapped.is_none() {
         return name;
     }
-    let refused = |character: char| {
-        !holds(profile.encoding, character)
-            || profile.rules == NameRules::Windows && windows_refuses(character)
-            || profile
-                .mapped
-                .is_some_and(|mapped| reads_back(mapped, character))
-    };
+    let refused = |character: char| refuses(profile, character);
     let chunks = || name.as_bytes().utf8_chunks();
     if !chunks().any(|chunk| {
         chunk.valid().chars().any(refused) || checks_encoding && !chunk.invalid().is_empty()
@@ -118,6 +154,16 @@ fn storable<'a>(name: Cow<'a, OsStr>, profile: &NameProfile) -> Cow<'a, OsStr> {
         }
     }
     Cow::Owned(OsString::from_vec(stored))
+}
+
+/// Whether the mount cannot hold `character`, or would read it back as
+/// another one.
+fn refuses(profile: &NameProfile, character: char) -> bool {
+    !holds(profile.encoding, character)
+        || profile.rules == NameRules::Windows && windows_refuses(character)
+        || profile
+            .mapped
+            .is_some_and(|mapped| reads_back(mapped, character))
 }
 
 fn holds(encoding: NameEncoding, character: char) -> bool {
@@ -194,34 +240,39 @@ fn part(name: Cow<'_, OsStr>, range: Range<usize>) -> Cow<'_, OsStr> {
 /// Puts `_` after a device name Windows would open instead of the file:
 /// `CON` becomes `CON_`, and `nul.txt` becomes `nul_.txt`.
 fn unreserved(name: Cow<'_, OsStr>, reserved: Reserved) -> Cow<'_, OsStr> {
-    if reserved == Reserved::None {
-        return name;
-    }
     let bytes = name.as_bytes();
-    let base_end = bytes
-        .iter()
-        .position(|byte| *byte == b'.')
-        .unwrap_or(bytes.len());
-    // Windows drops the spaces after a device name.
-    let word_end = bytes[..base_end]
-        .iter()
-        .rposition(|byte| *byte != b' ')
-        .map_or(0, |last| last + 1);
-    let word = &bytes[..word_end];
-    let refused = is_device(word)
-        && match reserved {
-            Reserved::None => false,
-            Reserved::Bare => base_end == bytes.len() || word.eq_ignore_ascii_case(b"NUL"),
-            Reserved::Full => true,
-        };
-    if !refused {
+    let Some(word_end) = reserved_word(bytes, reserved) else {
         return name;
-    }
+    };
     let mut unreserved = Vec::with_capacity(bytes.len() + 1);
-    unreserved.extend_from_slice(word);
+    unreserved.extend_from_slice(&bytes[..word_end]);
     unreserved.push(b'_');
     unreserved.extend_from_slice(&bytes[word_end..]);
     Cow::Owned(OsString::from_vec(unreserved))
+}
+
+/// Where the device name `name` starts with ends, if the mount reserves it.
+fn reserved_word(name: &[u8], reserved: Reserved) -> Option<usize> {
+    if reserved == Reserved::None {
+        return None;
+    }
+    let base_end = name
+        .iter()
+        .position(|byte| *byte == b'.')
+        .unwrap_or(name.len());
+    // Windows drops the spaces after a device name.
+    let word_end = name[..base_end]
+        .iter()
+        .rposition(|byte| *byte != b' ')
+        .map_or(0, |last| last + 1);
+    let word = &name[..word_end];
+    let refused = is_device(word)
+        && match reserved {
+            Reserved::None => false,
+            Reserved::Bare => base_end == name.len() || word.eq_ignore_ascii_case(b"NUL"),
+            Reserved::Full => true,
+        };
+    refused.then_some(word_end)
 }
 
 fn is_device(word: &[u8]) -> bool {

@@ -512,6 +512,39 @@ fn wait_for_operation(
     }
 }
 
+fn drive_until_rename_settles(events: &Rc<RefCell<Vec<OperationEvent>>>) {
+    wait_for_operation(events, |event| {
+        matches!(
+            event,
+            OperationEvent::Renamed { .. }
+                | OperationEvent::Failed { .. }
+                | OperationEvent::Cancelled { .. }
+        )
+    });
+}
+
+fn settle(start: impl FnOnce(Rc<dyn Fn(OperationEvent)>) -> LoadHandle) -> Vec<OperationEvent> {
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let emitted = events.clone();
+    let _operation = start(Rc::new(move |event| emitted.borrow_mut().push(event)));
+    drive_until_rename_settles(&events);
+    events.take()
+}
+
+fn rename(path: &Path, new_name: &str) -> Vec<OperationEvent> {
+    let entry = file_entry(path);
+    settle(|emit| {
+        LocalOperationProvider.rename(
+            crate::services::RenameRequest {
+                id: OperationRequestId(46),
+                entry,
+                new_name: new_name.to_owned(),
+            },
+            emit,
+        )
+    })
+}
+
 /// Has the main thread cancel the operation the first time a racer runs, and
 /// holds that racer's worker until it did, as a user's cancel lands while the
 /// worker is inside an item. `None` until a racer runs, then whether the

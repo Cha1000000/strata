@@ -14,7 +14,7 @@ use super::{
 use crate::{
     adapters::local_operations::{
         LocalOperationProvider,
-        tests::fs_quirks::{FsQuirks, Quirks},
+        tests::fs_quirks::{FsQuirks, Preset, Quirks},
     },
     model::Location,
     services::{
@@ -108,6 +108,75 @@ fn compression_provider_rejects_escaping_archive_names() -> Result<(), Box<dyn E
     assert!(matches!(events.as_slice(), [OperationEvent::Failed { .. }]));
     assert!(!root.path().join("outside.zip").exists());
     assert!(stages(&destination, COMPRESSION_STAGE)?.is_empty());
+    Ok(())
+}
+
+#[test]
+fn an_archive_name_the_location_would_store_otherwise_is_refused_before_anything_is_written()
+-> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let rows: [(Preset, &str, Option<String>); 3] = [
+        (
+            Quirks::vfat,
+            "nul",
+            Some(
+                rust_i18n::t!(
+                    "“%{name}” is a reserved name in this location",
+                    name = "nul"
+                )
+                .into_owned(),
+            ),
+        ),
+        (
+            Quirks::ntfs3,
+            "a:b",
+            Some(
+                rust_i18n::t!(
+                    "Names in this location can’t contain %{characters}",
+                    characters = ":"
+                )
+                .into_owned(),
+            ),
+        ),
+        (Quirks::ext4, "a:b", None),
+    ];
+    for (quirks, archive_name, refusal) in rows {
+        let root = tempfile::tempdir()?;
+        let destination = root.path().join("destination");
+        let source = root.path().join("source.txt");
+        fs::create_dir(&destination)?;
+        fs::write(&source, b"source")?;
+        let _scope = FsQuirks::install(&destination, quirks());
+
+        let events = run_compression(CompressRequest {
+            id: OperationRequestId(1),
+            entries: vec![test_file_entry(&source)],
+            destination: Location::local(&destination),
+            archive_name: archive_name.to_owned(),
+            conflict: TransferConflict::FailIfExists,
+            format: ArchiveFormat::Zip,
+            password: None,
+        });
+
+        match refusal {
+            Some(refusal) => {
+                assert!(
+                    matches!(events.last(), Some(OperationEvent::Failed { message, .. }) if *message == refusal),
+                    "{archive_name}: {events:?}"
+                );
+                assert!(entry_names(&destination)?.is_empty(), "{archive_name}");
+            }
+            None => {
+                assert!(
+                    matches!(events.last(), Some(OperationEvent::Compressed { .. })),
+                    "{archive_name}: {events:?}"
+                );
+                assert_eq!(entry_names(&destination)?, [format!("{archive_name}.zip")]);
+            }
+        }
+    }
     Ok(())
 }
 

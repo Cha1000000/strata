@@ -2248,7 +2248,7 @@ fn a_mount_that_learns_keeps_only_the_rules_its_refused_names_needed() -> Result
         .lock()
         .map_err(|error| error.to_string())?;
     type Refusal = fn(&OsStr) -> Option<Errno>;
-    let rows: [(Refusal, &str, &str, &[&str], [&str; 3], [&str; 3]); 2] = [
+    let rows: [(Refusal, &str, &str, &[&str], [&str; 3], [&str; 3], bool); 2] = [
         // Neither rule alone gives a name the mount takes.
         (
             refuses_colons_and_aux,
@@ -2257,6 +2257,7 @@ fn a_mount_that_learns_keeps_only_the_rules_its_refused_names_needed() -> Result
             &["aux.c:", "aux.c_", "aux_.c:"],
             ["b:c", "aux.txt", "x."],
             ["aux_.txt", "b_c", "x."],
+            true,
         ),
         (
             refuses_trailing_dots,
@@ -2265,9 +2266,10 @@ fn a_mount_that_learns_keeps_only_the_rules_its_refused_names_needed() -> Result
             &["x."],
             ["a:b", "aux.txt", "y."],
             ["a:b", "aux.txt", "y"],
+            false,
         ),
     ];
-    for (refuses, first, saved, refused, later, later_saved) in rows {
+    for (refuses, first, saved, refused, later, later_saved, typed_colon_refused) in rows {
         let root = tempfile::tempdir()?;
         let source = root.path().join("source");
         let disk = root.path().join("disk");
@@ -2307,6 +2309,24 @@ fn a_mount_that_learns_keeps_only_the_rules_its_refused_names_needed() -> Result
 
         assert_eq!(names(&disk.join("two"))?, later_saved, "{first}");
         assert_eq!(refused_calls(), [] as [&str; 0], "{first}");
+
+        let typed = rename(&disk.join("two").join(later_saved[1]), "c:d");
+
+        if typed_colon_refused {
+            let refusal = rust_i18n::t!(
+                "Names in this location can’t contain %{characters}",
+                characters = ":"
+            );
+            assert!(
+                matches!(typed.as_slice(), [OperationEvent::Failed { message, .. }] if *message == refusal),
+                "{first}: {typed:?}"
+            );
+        } else {
+            assert!(
+                matches!(typed.as_slice(), [OperationEvent::Renamed { .. }]),
+                "{first}: {typed:?}"
+            );
+        }
     }
     Ok(())
 }

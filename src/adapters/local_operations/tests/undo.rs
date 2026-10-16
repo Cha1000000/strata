@@ -2,20 +2,9 @@
 
 use rustix::io::Errno;
 
-use super::fs_quirks::{Op, Support};
+use super::fs_quirks::{Op, Preset, Support};
 use super::*;
 use crate::services::RenameRequest;
-
-fn drive_until_rename_settles(events: &Rc<RefCell<Vec<OperationEvent>>>) {
-    wait_for_operation(events, |event| {
-        matches!(
-            event,
-            OperationEvent::Renamed { .. }
-                | OperationEvent::Failed { .. }
-                | OperationEvent::Cancelled { .. }
-        )
-    });
-}
 
 #[test]
 fn undoing_a_move_returns_each_item_to_its_original_directory() -> Result<(), Box<dyn Error>> {
@@ -430,28 +419,6 @@ fn inode(path: &Path) -> u64 {
     std::os::unix::fs::MetadataExt::ino(&fs::symlink_metadata(path).expect("entry exists"))
 }
 
-fn settle(start: impl FnOnce(Rc<dyn Fn(OperationEvent)>) -> LoadHandle) -> Vec<OperationEvent> {
-    let events = Rc::new(RefCell::new(Vec::new()));
-    let emitted = events.clone();
-    let _operation = start(Rc::new(move |event| emitted.borrow_mut().push(event)));
-    drive_until_rename_settles(&events);
-    events.take()
-}
-
-fn rename(path: &Path, new_name: &str) -> Vec<OperationEvent> {
-    let entry = file_entry(path);
-    settle(|emit| {
-        LocalOperationProvider.rename(
-            RenameRequest {
-                id: OperationRequestId(46),
-                entry,
-                new_name: new_name.to_owned(),
-            },
-            emit,
-        )
-    })
-}
-
 fn undo_rename(current: &Path, original: &Path) -> Vec<OperationEvent> {
     let request = UndoRenameRequest {
         id: OperationRequestId(47),
@@ -511,6 +478,122 @@ fn renames_and_their_undo_keep_the_item_where_rename_flags_or_links_are_missing(
             );
             assert_eq!(inode(&source), original);
             assert_eq!(names(root.path())?, ["item"]);
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn a_typed_name_the_location_would_store_otherwise_is_refused_before_the_rename()
+-> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let characters = |characters: &[&str]| {
+        rust_i18n::t!(
+            "Names in this location can’t contain %{characters}",
+            characters =
+                crate::i18n::list(characters.iter().map(|character| character.to_string()))
+        )
+        .into_owned()
+    };
+    let reserved = |name: &str| {
+        rust_i18n::t!("“%{name}” is a reserved name in this location", name = name).into_owned()
+    };
+    let gvfs_bridge: Preset = || Quirks {
+        mount_type: Some(("fuse.gvfsd-fuse", "rw,user_id=1000,group_id=1000")),
+        ..Quirks::default()
+    };
+    let long_folder_name = "f".repeat(214);
+    let rows: [(Preset, &str, bool, &str, Option<String>); 11] = [
+        (
+            Quirks::vfat,
+            "",
+            false,
+            "a:b?",
+            Some(characters(&[":", "?"])),
+        ),
+        (
+            Quirks::vfat,
+            "",
+            false,
+            "tab\tname",
+            Some(characters(&["U+0009"])),
+        ),
+        (
+            Quirks::vfat,
+            "",
+            false,
+            "notes.",
+            Some(crate::i18n::tr(
+                "Names in this location can’t end with a space or a period",
+            )),
+        ),
+        (Quirks::vfat, "", true, "CON", Some(reserved("CON"))),
+        (Quirks::vfat, "", false, "aux.c", None),
+        (Quirks::ntfs3, "", false, "a:b", Some(characters(&[":"]))),
+        (Quirks::ntfs_3g, "", false, "con.txt", Some(reserved("con"))),
+        (
+            Quirks::cifs_nocase,
+            "",
+            false,
+            "a\u{1f600}",
+            Some(characters(&["\u{1f600}"])),
+        ),
+        // Samba makes only new folders under longer temporary names.
+        (Quirks::cifs, "", true, &long_folder_name, None),
+        (Quirks::ext4, "", false, "a:b.", None),
+        (
+            gvfs_bridge,
+            "mtp:host=Phone",
+            false,
+            " x",
+            Some(crate::i18n::tr(
+                "Names in this location can’t start with a space",
+            )),
+        ),
+    ];
+    for (quirks, backend, folder, typed, refusal) in rows {
+        let root = tempfile::tempdir()?;
+        let mount = root.path().join("mount");
+        let parent = mount.join(backend);
+        let item = parent.join("item");
+        fs::create_dir_all(&parent)?;
+        if folder {
+            fs::create_dir(&item)?;
+        } else {
+            fs::write(&item, b"data")?;
+        }
+        let _scope = FsQuirks::install(&mount, quirks());
+        let entry = if folder {
+            directory_entry(&item)
+        } else {
+            file_entry(&item)
+        };
+
+        let events = settle(|emit| {
+            LocalOperationProvider.rename(
+                RenameRequest {
+                    id: OperationRequestId(48),
+                    entry,
+                    new_name: typed.to_owned(),
+                },
+                emit,
+            )
+        });
+
+        match refusal {
+            Some(message) => {
+                assert_eq!(failure(&events), message, "{typed:?}");
+                assert_eq!(names(&parent)?, ["item"], "{typed:?}");
+            }
+            None => {
+                assert!(
+                    matches!(events.as_slice(), [OperationEvent::Renamed { .. }]),
+                    "{typed:?}: {events:?}"
+                );
+                assert_eq!(names(&parent)?, [typed], "{typed:?}");
+            }
         }
     }
     Ok(())

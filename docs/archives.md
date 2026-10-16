@@ -203,6 +203,10 @@ attribute.
 
 ## Existing archive names
 
+An archive name that the destination would store as another name is refused
+before anything is written, as other [names the user
+types](filesystem-compatibility.md#folders-names-and-case-aliases) are.
+
 When the requested archive already exists, the creation prompt offers Cancel,
 Keep Both, and Replace. Keep Both publishes the next available numbered name,
 such as `archive (1).zip` or `archive (1).tar.gz`, and selects that new archive.

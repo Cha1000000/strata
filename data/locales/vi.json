@@ -504,6 +504,8 @@
   "Minimize": "Thu nhỏ",
   "Minimize window": "Thu nhỏ cửa sổ",
   "Mirror columns selection": "Phản chiếu vùng chọn cột",
+  "Names in this location can’t end with a space or a period": "Tên tại vị trí này không được kết thúc bằng dấu cách hoặc dấu chấm",
+  "Names in this location can’t start with a space": "Tên tại vị trí này không được bắt đầu bằng dấu cách",
   "Show sizes in Columns view": "Hiển thị kích thước trong chế độ xem cột",
   "Show file sizes and folder item counts when hovering or selecting items in Columns view.": "Hiển thị kích thước tệp và số lượng mục trong thư mục khi di chuột hoặc chọn mục trong chế độ xem cột.",
   "Mode": "Quyền",

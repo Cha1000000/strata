@@ -504,6 +504,8 @@
   "Minimize": "Свернуть",
   "Minimize window": "Свернуть окно",
   "Mirror columns selection": "Следовать за выделением в столбцах",
+  "Names in this location can’t end with a space or a period": "Имя в этом расположении не может заканчиваться пробелом или точкой",
+  "Names in this location can’t start with a space": "Имя в этом расположении не может начинаться с пробела",
   "Show sizes in Columns view": "Показывать размеры в режиме столбцов",
   "Show file sizes and folder item counts when hovering or selecting items in Columns view.": "Показывать размеры файлов и количество элементов в папках при наведении указателя или выборе элементов в режиме столбцов.",
   "Mode": "Права",

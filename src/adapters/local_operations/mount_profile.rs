@@ -564,25 +564,37 @@ pub(super) async fn filesystem_id(
     Ok(info.attribute_string(gio::FILE_ATTRIBUTE_ID_FILESYSTEM))
 }
 
-/// How long a name may be in `dir`, for numbering a name taken there.
-pub(super) fn name_limit(fs: &dyn FsOps, dir: BorrowedFd<'_>) -> NameLimit {
+/// The rules of names in `dir`, with what refusals there taught them.
+pub(super) fn name_rules(fs: &dyn FsOps, dir: BorrowedFd<'_>) -> NameProfile {
     let (key, seen) = known_mount(fs, dir);
     let site = Site::of(key, seen.names, dir);
-    let strictness = mount_capabilities(site.key()).strictness;
-    site.rules.taught(strictness).limit
+    site.rules.taught(mount_capabilities(site.key()).strictness)
 }
 
-/// [`name_limit`] of `folder`, read off the main thread where it is native,
-/// and from its scheme elsewhere.
-pub(super) async fn folder_name_limit(folder: &gio::File) -> NameLimit {
+/// How long a name may be in `dir`, for numbering a name taken there.
+pub(super) fn name_limit(fs: &dyn FsOps, dir: BorrowedFd<'_>) -> NameLimit {
+    name_rules(fs, dir).limit
+}
+
+/// [`name_rules`] of `folder`, read off the main thread where it is native,
+/// and from its scheme elsewhere; `None` where it cannot be opened.
+pub(super) async fn folder_name_rules(folder: &gio::File) -> Option<NameProfile> {
     let Some(path) = folder.path().filter(|_| folder.is_native()) else {
-        return gvfs_profile(folder.uri_scheme().as_deref().unwrap_or_default()).limit;
+        return Some(gvfs_profile(
+            folder.uri_scheme().as_deref().unwrap_or_default(),
+        ));
     };
     gio::spawn_blocking(move || {
-        open_local_parent_directory(&path).map(|dir| name_limit(fs(), dir.as_fd()))
+        open_local_parent_directory(&path).map(|dir| name_rules(fs(), dir.as_fd()))
     })
     .await
     .ok()
     .and_then(Result::ok)
-    .unwrap_or_default()
+}
+
+/// [`name_limit`] of `folder`, as [`folder_name_rules`] reads it.
+pub(super) async fn folder_name_limit(folder: &gio::File) -> NameLimit {
+    folder_name_rules(folder)
+        .await
+        .map_or_else(NameLimit::default, |rules| rules.limit)
 }

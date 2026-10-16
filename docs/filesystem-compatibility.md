@@ -420,6 +420,14 @@ refuses is reported as fixed again; any other failure is listed with the name th
 error. An entry no longer at the name it was saved as, because it was deleted or renamed since, is
 passed over without a report.
 
+Names the user types are never fixed. Renaming an item, creating a file or folder by name, or naming
+a new archive is refused before anything changes where the folder's rules, including any a mount
+has learned from refusals, would store the name as another, and the message names what the location
+cannot hold: the characters, a leading space (MTP) or a trailing space or period, a device name
+Windows reserves, or the length. A rename is held to the length of a file, since Samba's shorter
+limit for folders applies only to the folders it creates. Names Strata chooses itself, such as "new
+folder", are not checked.
+
 ### Hard links
 
 Names of one file within one copied item stay one file where the destination keeps hard links, as

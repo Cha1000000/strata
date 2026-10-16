@@ -504,6 +504,8 @@
   "Minimize": "Minimieren",
   "Minimize window": "Fenster minimieren",
   "Mirror columns selection": "Spaltenauswahl spiegeln",
+  "Names in this location can’t end with a space or a period": "Namen dürfen an diesem Ort nicht mit einem Leerzeichen oder Punkt enden",
+  "Names in this location can’t start with a space": "Namen dürfen an diesem Ort nicht mit einem Leerzeichen beginnen",
   "Show sizes in Columns view": "Größen in der Spaltenansicht anzeigen",
   "Show file sizes and folder item counts when hovering or selecting items in Columns view.": "Dateigrößen und die Anzahl der Ordnereinträge beim Überfahren oder Auswählen von Einträgen in der Spaltenansicht anzeigen.",
   "Mode": "Rechte",

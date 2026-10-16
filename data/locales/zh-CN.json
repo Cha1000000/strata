@@ -504,6 +504,8 @@
   "Minimize": "最小化",
   "Minimize window": "最小化窗口",
   "Mirror columns selection": "分栏跟随选择",
+  "Names in this location can’t end with a space or a period": "此位置的名称不能以空格或句点结尾",
+  "Names in this location can’t start with a space": "此位置的名称不能以空格开头",
   "Show sizes in Columns view": "在分栏视图中显示大小",
   "Show file sizes and folder item counts when hovering or selecting items in Columns view.": "在分栏视图中悬停或选中项目时，显示文件大小和文件夹中的项目数。",
   "Mode": "权限",

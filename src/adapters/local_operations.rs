@@ -14,6 +14,7 @@ mod owed;
 mod placement;
 mod transfer_targets;
 mod trash;
+mod typed_names;
 mod work_queue;
 
 #[cfg(test)]
@@ -6551,6 +6552,17 @@ impl OperationProvider for LocalOperationProvider {
                 .unwrap_or_else(|| {
                     gio::File::for_uri(request.entry.location.uri_value().unwrap_or_default())
                 });
+            if let Some(folder) = file.parent()
+                && let Some(message) =
+                    typed_names::refused_in(&folder, &request.new_name, false).await
+            {
+                emit(OperationEvent::Failed {
+                    request_id: request.id,
+                    message,
+                    password_failure: None,
+                });
+                return;
+            }
             let item = request.entry.location.clone();
             let new_name = request.new_name.clone();
             let affected_locations = item.parent().into_iter().collect();

@@ -2,7 +2,7 @@
 
 use super::{
     await_cancellable, cancellation_handle, cancelled_event, mount_profile::folder_name_limit,
-    naming::numbered_name, validated_child, was_cancelled,
+    naming::numbered_name, typed_names, validated_child, was_cancelled,
 };
 use crate::{
     adapters::{gio_file_for_location, location_for_file, volume::NameLimit},
@@ -50,6 +50,18 @@ pub(super) fn start(
                     return;
                 }
             };
+            // Only typed names are refused; default ones are Strata's own.
+            if !unique_name
+                && let Some(message) =
+                    typed_names::refused_in(&directory, &name, is_directory).await
+            {
+                emit(OperationEvent::Failed {
+                    request_id: id,
+                    message,
+                    password_failure: None,
+                });
+                return;
+            }
             let Some(location) = location_for_file(&file) else {
                 emit(OperationEvent::Failed {
                     request_id: id,

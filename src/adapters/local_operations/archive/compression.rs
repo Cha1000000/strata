@@ -9,7 +9,7 @@ use super::super::{
     DisplacedOriginal, LocalFileIdentity, cannot_replace_safely, copy_engine,
     fs_ops::{Entry, EntryStat, OffMain, fs},
     local_directory_children,
-    mount_profile::name_limit,
+    mount_profile::{name_limit, name_rules},
     naming::{fix::split_extension, numbered_name},
     open_local_child_directory, open_local_parent_directory, original_kept_aside,
     owed::{Deletion, Owed},
@@ -20,6 +20,7 @@ use super::super::{
     },
     placement_reason,
     trash::trash_verified,
+    typed_names,
 };
 use super::{
     ArchiveError, COPY_BUF, archive_failed, check_archive_cancelled, copy_with_big_buf,
@@ -181,6 +182,11 @@ impl Publication {
             open_local_parent_directory(&self.destination)
                 .map_err(|error| self.creation_failed(error))?,
         );
+        if let Some(message) =
+            typed_names::refused(&self.name, &name_rules(fs(), parent.as_fd()), false)
+        {
+            return Err(archive_failed(message));
+        }
         let (mode, strategy) = match conflict {
             TransferConflict::FailIfExists | TransferConflict::Merge => {
                 (default_file_mode(), Strategy::New)

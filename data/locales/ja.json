@@ -504,6 +504,8 @@
   "Minimize": "最小化",
   "Minimize window": "ウィンドウを最小化",
   "Mirror columns selection": "カラムの選択を同期",
+  "Names in this location can’t end with a space or a period": "この場所では名前の末尾にスペースやピリオドは使用できません",
+  "Names in this location can’t start with a space": "この場所では名前の先頭にスペースは使用できません",
   "Show sizes in Columns view": "カラム表示でサイズを表示",
   "Show file sizes and folder item counts when hovering or selecting items in Columns view.": "カラム表示で項目にポインターを合わせるか選択したときに、ファイルサイズとフォルダー内の項目数を表示します。",
   "Mode": "権限",

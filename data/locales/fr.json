@@ -504,6 +504,8 @@
   "Minimize": "Réduire",
   "Minimize window": "Réduire la fenêtre",
   "Mirror columns selection": "Reproduire la sélection des colonnes",
+  "Names in this location can’t end with a space or a period": "Les noms à cet emplacement ne peuvent pas se terminer par un espace ou un point",
+  "Names in this location can’t start with a space": "Les noms à cet emplacement ne peuvent pas commencer par un espace",
   "Show sizes in Columns view": "Afficher les tailles dans la vue en colonnes",
   "Show file sizes and folder item counts when hovering or selecting items in Columns view.": "Afficher la taille des fichiers et le nombre d’éléments des dossiers au survol ou à la sélection d’éléments dans la vue en colonnes.",
   "Mode": "Droits",
