@@ -16,9 +16,9 @@ use super::super::{
     },
     owed::{Deletion, Owed},
     placement::{
-        Displacement, NUMBERED_NAME_ATTEMPTS, PlaceError, displacement_without_trash, exchange,
-        file_creation_error, place_staged, put_back, remove_if_unchanged, reserve_hidden_name,
-        set_aside, set_aside_if_safe,
+        Displacement, NUMBERED_NAME_ATTEMPTS, PlaceError, RenameFailure,
+        displacement_without_trash, exchange, file_creation_error, place_staged, put_back,
+        remove_if_unchanged, reserve_hidden_name, set_aside, set_aside_if_safe,
     },
     placement_reason,
     replacement::{DisplacedOriginal, cannot_replace_safely, original_kept_aside},
@@ -397,8 +397,19 @@ impl Publication {
             identity,
         ) {
             Ok(aside) => aside,
-            Err(PlaceError::Unsupported) => return Err(self.cannot_replace_safely()),
-            Err(error) => return Err(self.creation_failed(placement_reason(error))),
+            Err(RenameFailure::Place(PlaceError::Unsupported)) => {
+                return Err(self.cannot_replace_safely());
+            }
+            Err(RenameFailure::Place(error)) => {
+                return Err(self.creation_failed(placement_reason(error)));
+            }
+            Err(RenameFailure::Stranded { temporary, error }) => {
+                return Err(archive_failed(original_kept_aside(
+                    &self.name,
+                    &temporary,
+                    &error_detail(placement_reason(error)),
+                )));
+            }
         };
         match stage.place(target) {
             Ok(()) => Ok(self.published(Displaced::Aside(DisplacedOriginal {

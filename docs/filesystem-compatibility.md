@@ -83,6 +83,13 @@ Residual limits:
   a destination name just before Strata renames over its placeholder loses its write, and so does
   an item created at the name, even exclusively, after something else removed the placeholder in
   that window; see [The reserved-name step and its risk](#the-reserved-name-step-and-its-risk).
+- Where the operation knows which item it moves (restore, Replace's source and the original it
+  sets aside, putting an original back, a case-only rename), another item found at the source
+  name is refused before anything moves. Another item found at the destination just after the
+  move is left there and reported as unconfirmed: it may be one another program put there, so it
+  is never moved back. An item swapped in at the source name between that check and the rename
+  is therefore left at the destination too; where that is a hidden name Strata chose (an original
+  set aside, a case-only rename's temporary name), the error names it.
 - ext4, ntfs3, NFS and SMB give a freed inode number straight to the next item created. Where no
   birth time is reported (NFSv3, ntfs-3g, exfat-fuse), an item deleted and recreated at the same
   name with the same type passes for the original.

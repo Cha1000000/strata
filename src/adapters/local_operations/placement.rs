@@ -181,15 +181,23 @@ impl<'a> Mount<'a> {
     }
 }
 
-/// With `expected`, an entry found to be another item after it moved is
-/// moved back and reported as `Changed`.
+/// With `expected`, another item at `from` is refused as `Changed` before
+/// anything moves, and another item at `to` once moved stays there,
+/// `Unconfirmed`: nothing proves it came from `from`.
 pub(super) fn place(
     fs: &dyn FsOps,
     from: Entry<'_>,
     to: Entry<'_>,
     expected: Option<LocalFileIdentity>,
 ) -> Result<Placed, PlaceError> {
-    verified(fs, from, to, expected, ladder(fs, from, to, expected))
+    if let Some(expected) = expected
+        && fs
+            .stat(from, false)
+            .is_ok_and(|current| current.identity != expected)
+    {
+        return Err(PlaceError::Changed);
+    }
+    verified(fs, to, expected, ladder(fs, from, to, expected))
 }
 
 /// Places `from`, inside a private stage, at `to`. Nothing else writes the
@@ -217,7 +225,6 @@ pub(super) fn publish_staged(
 
 fn verified(
     fs: &dyn FsOps,
-    from: Entry<'_>,
     to: Entry<'_>,
     expected: Option<LocalFileIdentity>,
     placed: Result<Placed, PlaceError>,
@@ -231,11 +238,7 @@ fn verified(
     }
     match fs.stat(to, false) {
         Ok(current) if current.identity == expected => Ok(placed),
-        Ok(current) => Err(match ladder(fs, to, from, Some(current.identity)) {
-            Ok(_) => PlaceError::Changed,
-            Err(_) => PlaceError::Unconfirmed,
-        }),
-        Err(_) => Err(PlaceError::Unconfirmed),
+        _ => Err(PlaceError::Unconfirmed),
     }
 }
 
@@ -860,14 +863,20 @@ pub(super) fn set_aside(
     entry: Entry<'_>,
     hidden: HiddenName,
     expected: LocalFileIdentity,
-) -> Result<SetAside, PlaceError> {
+) -> Result<SetAside, RenameFailure> {
+    let mut reserved = OsString::new();
     reserve_hidden_name(hidden, |name| {
+        reserved = name.to_os_string();
         move_aside(fs, entry, at(entry.dir, name), expected)
     })
     .map(|(name, identity)| SetAside { name, identity })
     .map_err(|error| match error {
-        PlaceError::InvalidName => PlaceError::Unsupported,
-        error => error,
+        PlaceError::Unconfirmed => RenameFailure::Stranded {
+            temporary: reserved,
+            error,
+        },
+        PlaceError::InvalidName => RenameFailure::Place(PlaceError::Unsupported),
+        error => RenameFailure::Place(error),
     })
 }
 
@@ -1035,24 +1044,19 @@ pub(super) fn rename_in_place(
     let Some(identity) = alias_of(fs, from, to) else {
         return Err(RenameFailure::Place(PlaceError::Exists));
     };
-    let (temporary, _) = reserve_hidden_name(HiddenName::Rename, |name| {
-        place(fs, from, at(from.dir, name), Some(identity))
-    })
-    .map_err(|error| {
-        RenameFailure::Place(match error {
-            PlaceError::InvalidName => PlaceError::Unsupported,
-            error => error,
-        })
-    })?;
-    let parked = at(from.dir, &temporary);
+    let aside = set_aside(fs, from, HiddenName::Rename, identity)?;
+    let parked = at(from.dir, &aside.name);
     // The SMB client keeps answering for the lookup of `to` for about a
     // second; revalidating drops it.
     let _ = fs.stat(to, true);
-    match place(fs, parked, to, Some(identity)) {
+    match place(fs, parked, to, Some(aside.identity)) {
         Ok(_) => Ok(Renamed::CaseOnly),
-        Err(error) => match place(fs, parked, from, Some(identity)) {
+        Err(error) => match place(fs, parked, from, Some(aside.identity)) {
             Ok(_) => Err(RenameFailure::Place(error)),
-            Err(_) => Err(RenameFailure::Stranded { temporary, error }),
+            Err(_) => Err(RenameFailure::Stranded {
+                temporary: aside.name,
+                error,
+            }),
         },
     }
 }

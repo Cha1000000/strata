@@ -13,7 +13,7 @@ use gtk::{gio, glib, prelude::*};
 
 use super::{
     owed::{Deletion, Owed},
-    placement::{Displacement, PlaceError},
+    placement::{Displacement, PlaceError, RenameFailure},
 };
 use std::{
     collections::{HashMap, HashSet},
@@ -412,13 +412,18 @@ pub(super) fn ensure_unchanged(
     }
 }
 
-pub(super) fn set_aside_failure(error: PlaceError, name: &str) -> glib::Error {
-    match error {
-        PlaceError::Unsupported => io_error(cannot_replace_safely(name)),
-        PlaceError::Changed => {
+pub(super) fn set_aside_failure(failure: RenameFailure, name: &str) -> glib::Error {
+    match failure {
+        RenameFailure::Place(PlaceError::Unsupported) => io_error(cannot_replace_safely(name)),
+        RenameFailure::Place(PlaceError::Changed) => {
             translated_io_error("The target changed while the operation was in progress")
         }
-        error => placement_failure(error, name, could_not_replace),
+        RenameFailure::Place(error) => placement_failure(error, name, could_not_replace),
+        RenameFailure::Stranded { temporary, error } => io_error(original_kept_aside(
+            name,
+            &temporary,
+            &crate::services::error_detail(placement_reason(error)),
+        )),
     }
 }
 

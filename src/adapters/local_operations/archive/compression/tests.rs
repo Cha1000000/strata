@@ -675,45 +675,58 @@ fn a_name_taken_during_replacement_keeps_the_original_aside() -> Result<(), Box<
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
         .lock()
         .map_err(|error| error.to_string())?;
-    let root = tempfile::tempdir()?;
-    let archive = root.path().join("existing.zip");
-    fs::write(&archive, b"original")?;
-    let racer_archive = archive.clone();
-    let _quirks = FsQuirks::install(
-        root.path(),
-        Quirks {
-            trash: Trash::Unsupported,
-            fs_type: Some(NFS_SUPER_MAGIC),
-            // The first rename of the name sets the original aside; the second publishes.
-            before: vec![(
-                Op::Rename,
-                "existing.zip",
-                1,
-                Box::new(move || {
-                    let _ = fs::write(&racer_archive, b"racer");
-                }),
-            )],
-            ..Quirks::default()
-        },
-    );
+    // The first rename of the name sets the original aside, the second publishes. A
+    // save over the name just as the original is set aside is set aside instead.
+    for (skip, saves_over) in [(1, false), (0, true)] {
+        let root = tempfile::tempdir()?;
+        let archive = root.path().join("existing.zip");
+        fs::write(&archive, b"original")?;
+        let (racer_archive, saved) = (archive.clone(), root.path().join("saved"));
+        let _quirks = FsQuirks::install(
+            root.path(),
+            Quirks {
+                trash: Trash::Unsupported,
+                fs_type: Some(NFS_SUPER_MAGIC),
+                before: vec![(
+                    Op::Rename,
+                    "existing.zip",
+                    skip,
+                    Box::new(move || {
+                        if saves_over {
+                            let _ = fs::write(&saved, b"racer");
+                            let _ = fs::rename(&saved, &racer_archive);
+                        } else {
+                            let _ = fs::write(&racer_archive, b"racer");
+                        }
+                    }),
+                )],
+                ..Quirks::default()
+            },
+        );
 
-    let (result, _) = publish_replacement(root.path(), TransferConflict::ReplaceExisting);
+        let (result, _) = publish_replacement(root.path(), TransferConflict::ReplaceExisting);
 
-    let Err(ArchiveError::Failed(message)) = result else {
-        return Err(format!("expected the original to be kept aside, got {result:?}").into());
-    };
-    assert_eq!(fs::read(&archive)?, b"racer");
-    let names = names(root.path())?;
-    let [kept] = names
-        .iter()
-        .filter(|name| name.starts_with(".strata-replaced-"))
-        .collect::<Vec<_>>()[..]
-    else {
-        return Err(format!("expected one kept original, found {names:?}").into());
-    };
-    assert!(message.contains(kept.as_str()), "{message}");
-    assert_eq!(fs::read(root.path().join(kept))?, b"original");
-    assert!(stages(root.path(), COMPRESSION_STAGE)?.is_empty());
+        let Err(ArchiveError::Failed(message)) = result else {
+            return Err(format!("expected the original to be kept aside, got {result:?}").into());
+        };
+        let names = names(root.path())?;
+        let [kept] = names
+            .iter()
+            .filter(|name| name.starts_with(".strata-replaced-"))
+            .collect::<Vec<_>>()[..]
+        else {
+            return Err(format!("expected one kept original, found {names:?}").into());
+        };
+        assert!(message.contains(kept.as_str()), "{saves_over}: {message}");
+        if saves_over {
+            assert_eq!(fs::read(root.path().join(kept))?, b"racer");
+            assert_eq!(names, [kept.as_str()]);
+        } else {
+            assert_eq!(fs::read(root.path().join(kept))?, b"original");
+            assert_eq!(fs::read(&archive)?, b"racer");
+        }
+        assert!(stages(root.path(), COMPRESSION_STAGE)?.is_empty());
+    }
     Ok(())
 }
 

@@ -628,38 +628,60 @@ fn a_lost_reply_over_a_placeholder_removes_only_one_proven_untouched() -> Result
 }
 
 #[test]
-fn a_source_substituted_before_it_moves_is_moved_back() -> Result<(), Box<dyn Error>> {
+fn another_item_at_either_name_is_reported_and_never_moved() -> Result<(), Box<dyn Error>> {
+    #[derive(Clone, Copy, Debug)]
+    enum Swap {
+        SourceBeforePlacing,
+        SourceAsItMoves,
+        TargetOnceMoved,
+    }
     // `skip` passes the renames into `target` that precede the one that moves it.
-    for (quirks, folder, skip) in [
-        (Quirks::default(), false, 0),
-        (without_flags(Errno::NOSYS), true, 1),
-        (Quirks::vboxsf(), false, 1),
-        (Quirks::vboxsf(), true, 2),
-    ] {
-        let root = tempfile::tempdir()?;
-        let source = root.path().join("source");
-        make(&source, folder)?;
-        let original = identity(&source);
-        let (raced, moved) = (source.clone(), root.path().join("moved"));
-        let racer: Racer = Box::new(move || {
-            fs::rename(&raced, &moved).expect("move the original away");
-            make(&raced, folder).expect("substitute");
-        });
-        let _scope = FsQuirks::install(
-            root.path(),
-            Quirks {
-                before: vec![(Op::Rename, "target", skip, racer)],
-                ..quirks
-            },
-        );
+    let presets: [(Preset, bool, usize); 4] = [
+        (Quirks::default, false, 0),
+        (|| without_flags(Errno::NOSYS), true, 1),
+        (Quirks::vboxsf, false, 1),
+        (Quirks::vboxsf, true, 2),
+    ];
+    for (quirks, folder, skip) in presets {
+        for swap in [
+            Swap::SourceBeforePlacing,
+            Swap::SourceAsItMoves,
+            Swap::TargetOnceMoved,
+        ] {
+            let root = tempfile::tempdir()?;
+            let source = root.path().join("source");
+            make(&source, folder)?;
+            let original = identity(&source);
+            let swapped = match swap {
+                Swap::TargetOnceMoved => root.path().join("target"),
+                _ => source.clone(),
+            };
+            let (raced, moved) = (swapped, root.path().join("moved"));
+            let mut racer: Racer = Box::new(move || {
+                fs::rename(&raced, &moved).expect("move the item away");
+                make(&raced, folder).expect("substitute");
+            });
+            let mut quirks = quirks();
+            match swap {
+                Swap::SourceBeforePlacing => racer(),
+                Swap::SourceAsItMoves => quirks.before = vec![(Op::Rename, "target", skip, racer)],
+                Swap::TargetOnceMoved => quirks.after = vec![(Op::Rename, "target", skip, racer)],
+            }
+            let scope = FsQuirks::install(root.path(), quirks);
+            let case = format!("folder: {folder}, {swap:?}");
 
-        assert_eq!(
-            place_in(root.path(), "source", "target", Some(original)),
-            Err(PlaceError::Changed),
-            "folder: {folder}"
-        );
-        assert_eq!(names(root.path())?, ["moved", "source"], "folder: {folder}");
-        assert_eq!(identity(&root.path().join("moved")), original);
+            let result = place_in(root.path(), "source", "target", Some(original));
+
+            assert_eq!(identity(&root.path().join("moved")), original, "{case}");
+            if let Swap::SourceBeforePlacing = swap {
+                assert_eq!(result, Err(PlaceError::Changed), "{case}");
+                assert_eq!(names(root.path())?, ["moved", "source"], "{case}");
+                assert_eq!(scope.count(Op::Rename), 0, "{case}");
+            } else {
+                assert_eq!(result, Err(PlaceError::Unconfirmed), "{case}");
+                assert_eq!(names(root.path())?, ["moved", "target"], "{case}");
+            }
+        }
     }
     Ok(())
 }
@@ -716,36 +738,80 @@ fn cross_device_is_reported_without_copying() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn set_aside_refuses_a_substituted_target() -> Result<(), Box<dyn Error>> {
-    let root = tempfile::tempdir()?;
-    let target = root.path().join("target");
-    fs::write(&target, b"original")?;
-    let expected = identity(&target);
-    let (moved, stranger) = (root.path().join("moved"), target.clone());
-    let racer: Racer = Box::new(move || {
-        fs::rename(&stranger, &moved).expect("move original");
-        fs::write(&stranger, b"stranger").expect("substitute");
-    });
-    let _scope = FsQuirks::install(
-        root.path(),
-        Quirks {
-            before: vec![(Op::Rename, "target", 0, racer)],
-            ..Quirks::default()
-        },
-    );
-    let parent = open_local_parent_directory(root.path())?;
+fn set_aside_refuses_a_substituted_item_or_names_where_it_went() -> Result<(), Box<dyn Error>> {
+    #[derive(Clone, Copy, Debug)]
+    enum Swap {
+        BeforeSettingAside,
+        AsItIsSetAside,
+        AsACaseOnlyRenameParksIt,
+    }
+    for swap in [
+        Swap::BeforeSettingAside,
+        Swap::AsItIsSetAside,
+        Swap::AsACaseOnlyRenameParksIt,
+    ] {
+        let root = tempfile::tempdir()?;
+        let (name, kind, parking, mut quirks) = match swap {
+            Swap::AsACaseOnlyRenameParksIt => (
+                "report",
+                HiddenName::Rename,
+                ".strata-rename-*",
+                case_insensitive(Quirks::default()),
+            ),
+            _ => (
+                "target",
+                HiddenName::Replaced,
+                ".strata-replaced-*",
+                Quirks::default(),
+            ),
+        };
+        let item = root.path().join(name);
+        fs::write(&item, b"original")?;
+        let expected = identity(&item);
+        let (moved, stranger) = (root.path().join("moved"), item.clone());
+        let mut racer: Racer = Box::new(move || {
+            fs::rename(&stranger, &moved).expect("move the original away");
+            fs::write(&stranger, b"stranger").expect("substitute");
+        });
+        match swap {
+            Swap::BeforeSettingAside => racer(),
+            _ => quirks.before = vec![(Op::Rename, parking, 0, racer)],
+        }
+        let scope = FsQuirks::install(root.path(), quirks);
+        let parent = open_local_parent_directory(root.path())?;
 
-    let result = set_aside(
-        fs(),
-        Entry::new(&parent, OsStr::new("target")),
-        HiddenName::Replaced,
-        expected,
-    );
+        let result = match swap {
+            Swap::AsACaseOnlyRenameParksIt => rename_in(root.path(), "report", "Report").map(drop),
+            _ => set_aside(fs(), Entry::new(&parent, OsStr::new(name)), kind, expected).map(drop),
+        };
 
-    assert_eq!(result.map(|aside| aside.name), Err(PlaceError::Changed));
-    assert_eq!(fs::read(&target)?, b"stranger");
-    assert_eq!(fs::read(root.path().join("moved"))?, b"original");
-    assert_eq!(names(root.path())?, ["moved", "target"]);
+        assert_eq!(
+            fs::read(root.path().join("moved"))?,
+            b"original",
+            "{swap:?}"
+        );
+        if let Swap::BeforeSettingAside = swap {
+            assert_eq!(result, Err(RenameFailure::Place(PlaceError::Changed)));
+            assert_eq!(scope.count(Op::Rename), 0);
+            assert_eq!(fs::read(&item)?, b"stranger");
+            assert_eq!(names(root.path())?, ["moved", name]);
+            continue;
+        }
+        let left = names(root.path())?;
+        let [hidden, _] = &left[..] else {
+            return Err(format!("{swap:?}: expected two names, found {left:?}").into());
+        };
+        assert!(hidden.starts_with(kind.prefix()), "{swap:?}: {left:?}");
+        assert_eq!(
+            result,
+            Err(RenameFailure::Stranded {
+                temporary: OsString::from(hidden),
+                error: PlaceError::Unconfirmed,
+            }),
+            "{swap:?}"
+        );
+        assert_eq!(fs::read(root.path().join(hidden))?, b"stranger", "{swap:?}");
+    }
     Ok(())
 }
 
