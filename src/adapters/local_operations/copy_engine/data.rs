@@ -5,6 +5,7 @@
 //! cancellation are checked between calls.
 
 use std::{
+    cell::OnceCell,
     os::fd::BorrowedFd,
     sync::{
         OnceLock,
@@ -105,10 +106,19 @@ impl Route {
     pub(super) fn new(
         fs: &dyn FsOps,
         target: &Mount,
+        source_mount: Option<&Mount>,
         source: BorrowedFd<'_>,
         source_stat: &EntryStat,
         parent: &EntryStat,
     ) -> Self {
+        // A folder may hold another mount, so a source whose mount is unknown
+        // asks its own, once.
+        let source_family = OnceCell::new();
+        let source_family = || {
+            *source_family.get_or_init(|| {
+                source_mount.map_or_else(|| Mount::new(fs, source).family, |mount| mount.family)
+            })
+        };
         let target_network = network(target.family);
         // It stops at the reported size, which virtual files leave at 0
         // whatever they hold.
@@ -117,7 +127,7 @@ impl Route {
                 None => source_stat.identity.device == parent.identity.device,
                 Some(target_network) => {
                     has_copy_fixes(target_network)
-                        && network(Mount::new(fs, source).family) == Some(target_network)
+                        && network(source_family()) == Some(target_network)
                 }
             }
             && !COPY_RANGE_MISSING.load(Ordering::Relaxed);
@@ -132,9 +142,7 @@ impl Route {
             } else {
                 64 * MIB
             }),
-            holes: sparse(source_stat)
-                && stores_holes(target.family)
-                && reports_holes(Mount::new(fs, source).family),
+            holes: sparse(source_stat) && stores_holes(target.family) && reports_holes(source_family()),
         }
     }
 }

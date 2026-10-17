@@ -1932,12 +1932,19 @@ impl Copy {
         &self,
         data: &mut Data,
         target_mount: &Mount,
-        (source, source_stat): (BorrowedFd<'_>, &EntryStat),
+        (source, source_stat, source_mount): (BorrowedFd<'_>, &EntryStat, Option<&Mount>),
         target: BorrowedFd<'_>,
         parent: &EntryStat,
         counted: bool,
     ) -> Result<Option<u64>, Failure> {
-        let route = data::Route::new(self.fs, target_mount, source, source_stat, parent);
+        let route = data::Route::new(
+            self.fs,
+            target_mount,
+            source_mount,
+            source,
+            source_stat,
+            parent,
+        );
         let progress = (counted && self.counted).then_some(&*self.progress);
         data.copy(
             self.fs,
@@ -2010,7 +2017,7 @@ impl Copy {
                 let end = self.copy_data(
                     data,
                     target_mount,
-                    (source_fd, &stat),
+                    (source_fd, &stat, source_mount.as_ref()),
                     target,
                     parent,
                     counted,
@@ -2567,7 +2574,7 @@ impl<'a> FileCopy<'a> {
             .copy_data(
                 &mut self.data,
                 &self.target,
-                (tmpfile.as_fd(), tmpfile_stat),
+                (tmpfile.as_fd(), tmpfile_stat, Some(&self.target)),
                 fd.as_fd(),
                 parent,
                 false,
@@ -2708,7 +2715,7 @@ impl<'a> FileCopy<'a> {
             }
         };
         self.create(name, parent, |file, fd| {
-            let from = (source.fd.as_fd(), &source.stat);
+            let from = (source.fd.as_fd(), &source.stat, None);
             file.copy
                 .copy_data(&mut file.data, &file.target, from, fd, parent, false)?;
             Ok(snapshot)
