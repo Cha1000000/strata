@@ -554,15 +554,18 @@ if it is still what the copy read:
   that item is deleted. A fallback that copies out of a stage records the newly created copy's
   identities, not the discarded stage's.
 
-Where the destination keeps inode numbers, its entries must keep the exact device, inode, type and
-available birth time. Where it numbers an evicted entry afresh (FUSE daemons without `use_ino`,
-vfat and exFAT, cifs with `noserverino`), the type and the birth time, where both stats report one,
-stand in for the inode as they do for sources, and a file or symbolic link must also keep its
-recorded size and modification time, and a file its contents where those times cannot tell. The
-kernel's exFAT driver sets a folder's birth time again whenever an entry is renamed into or within
-it, as a merge places entries, so there a folder of the copy is known by its type alone and its
-entries are checked one by one. An entry renumbered after a rename or a cache eviction then still
-proves the copy, and the move deletes its sources.
+Each entry of the copy must keep its device and type, a file or symbolic link its recorded size and
+modification time, and a file its contents where those times cannot tell. Where the destination
+keeps inode numbers, an entry must also keep its inode and available birth time. Where it numbers
+an evicted entry afresh (vfat and exFAT, cifs with `noserverino`, FUSE daemons without `use_ino`),
+the birth time, where both stats report one, stands in for the inode, so an entry renumbered after
+a rename or a cache eviction still proves the copy, and the move deletes its sources. Without a
+birth time (sshfs, exfat-fuse, vboxsf), the inode must still match, as another file of the copy's
+size and time would pass a check of those alone; a copy the kernel renumbered before the check
+keeps its sources, reported like a copy that was moved away. The kernel's exFAT driver sets a
+folder's birth time again whenever an entry is renamed into or within it, as a merge places
+entries, so there a folder of the copy is known by its type alone and its entries are checked one
+by one.
 
 What stays is reported by cause: changed during the move, could not be deleted (with the error, as
 in a read-only folder), a special file or symbolic link the destination cannot store, or an item
@@ -754,10 +757,13 @@ reported.
 - **Relaxed identity.** Where a source has no stable inode numbers and reports no birth time
   (sshfs, exfat-fuse, ntfs-3g), a different file with the same type, size and times put at a source
   name passes for the original, unless it is racily clean and compared. The same goes for a move's
-  copy on such a destination before its sources are deleted: a different file or link of its type,
-  size and modification time, as another copy of the source would have, passes for it. On kernel
-  exFAT and vfat, whose birth times count in 10 ms ticks, a copy replaced within its birth time's
-  tick by a file of its size and modification time passes as well, and the move deletes its source.
+  copy on sshfs, vboxsf and other mounts that keep a name's inode number for whatever the server or
+  another client puts there: a file or link of the copy's type, size and modification time put at
+  its name passes for it. On ntfs-3g, which reports no birth time and can give a freed inode number
+  to a later file, a file of the copy's size and modification time made at its name after the copy
+  was deleted can pass too. On kernel exFAT and vfat, whose birth times count in 10 ms ticks, a
+  copy replaced within its birth time's tick by a file of its size and modification time passes as
+  well, and the move deletes its source.
   A copy recognises its own entries, and a selected folder it is about to read, by the mount's
   rule: by inode number where the mount keeps them, by birth time on vfat and exFAT, and by type
   elsewhere (its claimed files also by being empty), so an entry the kernel renumbered after

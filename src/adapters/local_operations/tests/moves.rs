@@ -2168,9 +2168,10 @@ fn a_copy_replaced_before_its_times_are_settled_keeps_its_source() -> Result<(),
         mount_type: Some(("fuse.rclone", "rw,user_id=1000,group_id=1000")),
         ..Quirks::sshfs()
     };
-    // On FUSE the settled copy is known by type alone: an old source's times
-    // are set again (by name where its owner may neither read nor write it),
-    // a recent one's left as they are.
+    // Another client's file at the copy's name keeps the number the daemon
+    // gave it, so only the copy's written size tells them apart: an old
+    // source's times are set again (by name where its owner may neither read
+    // nor write it), a recent one's left as they are.
     let rows: [(&str, Preset, u64, u32); 3] = [
         ("times set again", Quirks::sshfs, 3600, 0o644),
         ("times set again by name", Quirks::sshfs, 3600, 0o044),
@@ -2187,9 +2188,6 @@ fn a_copy_replaced_before_its_times_are_settled_keeps_its_source() -> Result<(),
         fs::write(&notes, b"notes")?;
         let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?;
         set_times(&notes, now.as_secs() - age, 500_000_000)?;
-        let arrival = root.path().join("arrival");
-        fs::write(&arrival, b"another program's file")?;
-        fs::set_permissions(&arrival, fs::Permissions::from_mode(mode))?;
         let replaced = Arc::new(AtomicBool::new(false));
         let replacing = replaced.clone();
         let staged = destination.clone();
@@ -2197,7 +2195,9 @@ fn a_copy_replaced_before_its_times_are_settled_keeps_its_source() -> Result<(),
             for entry in fs::read_dir(&staged).expect("list the destination") {
                 let copy = entry.expect("an entry").path().join("notes.txt");
                 if copy.exists() {
-                    fs::rename(&arrival, &copy).expect("replace the copy");
+                    fs::write(&copy, b"another program's file").expect("replace the copy");
+                    fs::set_permissions(&copy, fs::Permissions::from_mode(mode))
+                        .expect("set the replacement's mode");
                     replacing.store(true, Ordering::Release);
                     return;
                 }
@@ -2342,7 +2342,7 @@ fn a_special_file_move_keeps_its_source_without_proven_published_ownership()
 }
 
 #[test]
-fn copies_a_mount_numbers_afresh_are_known_by_type_birth_time_size_and_time()
+fn copies_a_mount_numbers_afresh_are_known_by_birth_time_or_else_by_inode_number()
 -> Result<(), Box<dyn Error>> {
     let _serial = serial()?;
     #[derive(Clone, Copy, Debug, PartialEq)]
@@ -2358,15 +2358,19 @@ fn copies_a_mount_numbers_afresh_are_known_by_type_birth_time_size_and_time()
         /// Renamed away, with what the merge placed in it, and another folder
         /// made at its name.
         FolderReplaced,
+        /// Evicted alone, its entries still cached.
+        FolderEvicted,
     }
-    // exFAT and FUSE daemons without `use_ino` number an entry afresh once
-    // the kernel evicts it, here right after the copy is published; on ext4,
-    // which keeps inode numbers, another number is another file. Merging into
-    // a folder on exFAT sets its birth time again. Whether the move deletes
-    // its source.
+    // vfat, exFAT and FUSE daemons without `use_ino` number an entry afresh
+    // once the kernel evicts it, here right after the copy is published; on
+    // ext4, which keeps inode numbers, another number is another file. Only a
+    // birth time proves a renumbered entry, and merging into a folder on exFAT
+    // sets its birth time again. Whether the move deletes its source.
     let (fail, merge) = (TransferConflict::FailIfExists, TransferConflict::Merge);
-    let rows: [(Preset, &str, TransferConflict, Change, bool); 8] = [
-        (Quirks::sshfs, "notes.txt", fail, Change::None, true),
+    let rows: [(Preset, &str, TransferConflict, Change, bool); 10] = [
+        (Quirks::sshfs, "notes.txt", fail, Change::None, false),
+        (Quirks::sshfs, "folder", fail, Change::FolderEvicted, false),
+        (Quirks::vfat, "folder", fail, Change::None, true),
         (Quirks::exfat, "folder", fail, Change::None, true),
         (Quirks::exfat, "folder", fail, Change::Rewritten, false),
         (
@@ -2437,11 +2441,14 @@ fn copies_a_mount_numbers_afresh_are_known_by_type_birth_time_size_and_time()
         };
         let replaced = copied_notes.clone();
         let merged = copy.clone();
+        if change == Change::FolderEvicted {
+            copied.truncate(1);
+        }
         let evicted = Arc::new(AtomicBool::new(false));
         let evicting = evicted.clone();
         let racer: super::fs_quirks::Racer = Box::new(move || {
             match change {
-                Change::None => {}
+                Change::None | Change::FolderEvicted => {}
                 Change::Rewritten => fs::write(&replaced, b"NOTES").expect("rewrite the copy"),
                 Change::ReplacedWithinTheTick | Change::ReplacedAlike => {
                     fs::rename(&arrival, &replaced).expect("replace the copy");
@@ -2568,7 +2575,6 @@ fn copied_links_a_mount_numbers_afresh_are_known_by_their_size_and_time()
             if replaced {
                 fs::rename(&arrival, &replacing).expect("replace the link");
             }
-            super::fs_quirks::renumbered(&copy);
             super::fs_quirks::renumbered(&replacing);
             evicting.store(true, Ordering::Release);
         });

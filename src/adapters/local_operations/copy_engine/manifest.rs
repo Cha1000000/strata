@@ -556,10 +556,9 @@ impl Ownership {
     /// A file rewritten in place, or another one given its inode number and
     /// birth time, shows only in its size or modification time, and within
     /// one tick of a coarse clock only in its contents. Where the mount
-    /// numbers an evicted entry afresh, the type and birth time stand in for
-    /// the inode number, for a file or link only beside its recorded size and
-    /// time, and where renames reset a folder's birth time, a folder's type
-    /// alone.
+    /// numbers an evicted entry afresh, the birth time stands in for the
+    /// inode number where both stats report one, and where renames reset a
+    /// folder's birth time, a folder's type alone.
     fn holds(
         &self,
         fs: &dyn FsOps,
@@ -571,14 +570,17 @@ impl Ownership {
             return false;
         };
         let state = self.states.get(path);
+        let exact = stat.identity == identity;
         let same = if has_state(identity.kind) && state.is_none() {
-            stat.identity == identity
+            exact
         } else {
-            let recorded = state.map(|state| Attributes {
-                size: state.size,
-                mtime: state.mtime,
-            });
-            native_fs::compare(traits, identity, recorded, stat) != Proof::Different
+            match native_fs::compare(traits, identity, None, stat) {
+                Proof::Same => true,
+                Proof::Different => false,
+                Proof::Unproven => {
+                    exact || (identity.kind == FileType::Directory && !traits.folder_births)
+                }
+            }
         };
         same && state.is_none_or(|state| {
             state.holds(stat)
