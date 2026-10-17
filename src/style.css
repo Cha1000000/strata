@@ -7096,7 +7096,7 @@ popover.settings-action-library > contents {
   border-bottom: 2px solid transparent;
   border-radius: 0;
   box-shadow: none;
-  color: @strata_dim_text;
+  color: @strata_text;
   margin: 0 20px 0 0;
   min-height: 36px;
   padding: 0;
@@ -7107,16 +7107,17 @@ popover.settings-action-library > contents {
   font-size: 0.85em;
   font-weight: 600;
   letter-spacing: 1px;
+  opacity: 0.55;
   text-transform: uppercase;
+  transition: opacity 160ms ease-out;
 }
 
-.settings-action-tabs > header > tabs > tab:hover {
-  color: @strata_text;
-  background: alpha(@strata_highlight, 0.25);
+.settings-action-tabs > header > tabs > tab:hover label,
+.settings-action-tabs > header > tabs > tab:checked label {
+  opacity: 1;
 }
 
 .settings-action-tabs > header > tabs > tab:checked {
-  color: @strata_text;
   border-bottom-color: @strata_accent;
 }
 
