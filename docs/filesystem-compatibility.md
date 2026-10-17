@@ -427,12 +427,13 @@ pipes (vfat, exFAT and sshfs with `EPERM`, exfat-fuse with `EIO`, SMB without PO
 with `EOPNOTSUPP`), they are left out and reported, as sockets and device files always are. A
 selected pipe is recreated where the destination allows it. Selected pipes and symlinks are first
 built in private stages so a concurrent arrival at the final name cannot be mistaken for the copy.
-Where publication recreates a symlink, or no placement primitive can publish a pipe, the item is
-created exclusively but has no proven destination identity: a move keeps its source and destructive
-undo retains the copy. A symlink a merge places by recreating it stands for its copy only if it
-points where the staged link did. A failed unprovable creation may also remain rather than risk
-removing an arrival. A selected pipe the destination refuses, a selected socket or device file, and
-a pipe that Replace would stage fail with "it is not a regular file, directory, or symbolic link".
+Where no placement primitive can publish a pipe, the pipe is created exclusively but has no proven
+destination identity: a move keeps its source and destructive undo retains the copy. A symlink that
+publication or a merge places by making it again at its name, as on sshfs, stands for its copy only
+if it points where the staged link did. A failed unprovable creation may also remain rather than
+risk removing an arrival. A selected pipe the destination refuses, a selected socket or device file,
+and a pipe that Replace would stage fail with "it is not a regular file, directory, or symbolic
+link".
 
 ### Symbolic links the destination cannot hold
 

@@ -868,7 +868,11 @@ fn fresh_file(stat: &EntryStat) -> bool {
 
 /// A link the placement made again at its name is another entry, which holds
 /// the copy only with the staged link's target.
-fn made_again(fs: &dyn FsOps, at: Entry<'_>, link: Option<&OsStr>) -> manifest::Ownership {
+pub(super) fn made_again(
+    fs: &dyn FsOps,
+    at: Entry<'_>,
+    link: Option<&OsStr>,
+) -> manifest::Ownership {
     match (fs.stat(at, false), link) {
         (Ok(made), Some(link))
             if made.kind == FileType::Symlink

@@ -2224,14 +2224,15 @@ fn a_special_file_move_keeps_its_source_without_proven_published_ownership()
             paste_move(99, &destination, &source, TransferConflict::FailIfExists);
         pump_until_transfer(&events);
 
+        let row = format!("pipe: {pipe}, can_place: {can_place}, replace: {replace}");
+        assert_eq!(replaced.load(Ordering::Acquire), replace, "{row}");
+        // A link made again at its name holds the copy once it points where
+        // the staged link did.
+        let proven = !pipe && !replace;
         assert_eq!(
-            replaced.load(Ordering::Acquire),
-            replace,
-            "pipe: {pipe}, can_place: {can_place}"
-        );
-        assert!(
             fs::symlink_metadata(&source).is_ok(),
-            "pipe: {pipe}, can_place: {can_place}: {:?}",
+            !proven,
+            "{row}: {:?}",
             events.borrow()
         );
         if replace {
@@ -2244,10 +2245,12 @@ fn a_special_file_move_keeps_its_source_without_proven_published_ownership()
                 0o640
             );
         } else {
-            assert_eq!(
-                reported(&events).kept,
-                [kept(source.clone(), KeptCause::CopyGone)]
-            );
+            let expected = if proven {
+                Vec::new()
+            } else {
+                vec![kept(source.clone(), KeptCause::CopyGone)]
+            };
+            assert_eq!(reported(&events).kept, expected, "{row}");
             if pipe {
                 assert!(
                     fs::symlink_metadata(destination.join("special"))?
@@ -2263,7 +2266,7 @@ fn a_special_file_move_keeps_its_source_without_proven_published_ownership()
         }
         if pipe {
             assert!(fs::symlink_metadata(&source)?.file_type().is_fifo());
-        } else {
+        } else if !proven {
             assert_eq!(fs::read_link(&source)?, PathBuf::from("original-target"));
         }
     }
@@ -2438,14 +2441,17 @@ fn copied_links_a_mount_numbers_afresh_are_known_by_their_size_and_time()
     };
     // The placed link is numbered afresh, and on sshfs, which leaves a
     // link's times as it was made, another link may take its place first.
-    // Without `RENAME_NOREPLACE`, a merge makes the link again at its name.
-    // Whether another link takes its place.
+    // Without `RENAME_NOREPLACE`, a merge and the publication of a selected
+    // link make the link again at its name. Whether another link takes its
+    // place.
     let merge = TransferConflict::Merge;
     let fail = TransferConflict::FailIfExists;
-    let rows: [(Preset, &str, TransferConflict, bool); 8] = [
+    let rows: [(Preset, &str, TransferConflict, bool); 10] = [
         (sshfs_renaming, "link", fail, true),
         (sshfs_renaming, "folder", fail, true),
         (sshfs_renaming, "folder", merge, true),
+        (Quirks::sshfs, "link", fail, true),
+        (Quirks::sshfs, "link", fail, false),
         (Quirks::sshfs, "folder", merge, true),
         (Quirks::sshfs, "folder", merge, false),
         (noserverino, "link", fail, false),
@@ -2496,8 +2502,9 @@ fn copied_links_a_mount_numbers_afresh_are_known_by_their_size_and_time()
             &destination,
             Quirks {
                 tmpfile: Support::Rejected(Errno::OPNOTSUPP),
+                // A link in a staged folder is first made there under its name.
                 after: vec![if made_again {
-                    (Op::Symlink, placed, 1, racer)
+                    (Op::Symlink, placed, usize::from(item == "folder"), racer)
                 } else {
                     (Op::Rename, placed, 0, racer)
                 }],

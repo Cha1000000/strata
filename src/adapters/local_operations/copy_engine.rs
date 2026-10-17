@@ -850,14 +850,17 @@ fn copy_special(
     if link && !copy.names.profiles.holds_links(&site) {
         return Err(Failure::LinkRefused(Errno::OPNOTSUPP));
     }
-    let content = if link {
-        let target = tree::read_link(copy.fs, source.entry())?;
-        if !copy.names.profiles.holds_link_to(&site, &target) {
-            return Err(Failure::LinkRefused(Errno::ILSEQ));
-        }
-        StageContent::Symlink(target)
-    } else {
-        StageContent::Fifo
+    let target = link
+        .then(|| tree::read_link(copy.fs, source.entry()))
+        .transpose()?;
+    if let Some(target) = &target
+        && !copy.names.profiles.holds_link_to(&site, target)
+    {
+        return Err(Failure::LinkRefused(Errno::ILSEQ));
+    }
+    let content = match &target {
+        Some(target) => StageContent::Symlink(target.clone()),
+        None => StageContent::Fifo,
     };
     // These creation syscalls return no descriptor; retain ownership in a private stage.
     let staged =
@@ -911,7 +914,10 @@ fn copy_special(
                 staged.identity,
                 name,
             ) {
-                Ok(placement::Placed::RecreatedSymlink) => Ok((Ownership::unproven(), false)),
+                Ok(placement::Placed::RecreatedSymlink) => Ok((
+                    tree::made_again(copy.fs, Entry::new(&**parent, name), target.as_deref()),
+                    false,
+                )),
                 Ok(_) => Ok((copy.ownership(staged.identity), false)),
                 Err(PlaceError::Unsupported) => {
                     let from = Entry::new(&**parent, &staged.name);
