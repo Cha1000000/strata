@@ -930,46 +930,78 @@ fn index_does_not_descend_past_the_depth_budget() {
 fn index_reports_truncated_when_the_walker_discards_an_inaccessible_directory() {
     use std::os::unix::fs::PermissionsExt;
 
-    let root = unique_fixture_root("inaccessible");
-    fs::create_dir_all(root.join("blocked")).expect("the search fixture should be created");
-    fs::create_dir_all(root.join("visible")).expect("the search fixture should be created");
-    fs::write(root.join("visible/needle.txt"), b"content")
-        .expect("the search fixture file should be written");
-    fs::set_permissions(root.join("blocked"), fs::Permissions::from_mode(0o000))
-        .expect("the fixture directory's permissions should be restrictable");
-    let running_as_root = fs::read_dir(root.join("blocked")).is_ok();
-
-    let (search, events) =
-        index_tree_with_budget(root.clone(), false, usize::MAX, 64, Duration::from_secs(10));
-    search.query("needle");
-    let event = wait_for_results(&events);
-
-    drop(search);
-    let _ = fs::set_permissions(root.join("blocked"), fs::Permissions::from_mode(0o755));
-    fs::remove_dir_all(&root).expect("the search fixture should be removed");
-
-    let Some(SearchEvent::Results {
-        items, coverage, ..
-    }) = event
-    else {
-        panic!("the worker should publish a result for a non-empty query");
-    };
-    assert!(
-        items.iter().any(|item| item.name == "needle.txt"),
-        "entries outside the inaccessible directory should still be indexed"
-    );
-    if !running_as_root {
-        assert_eq!(
-            coverage,
-            super::SearchCoverage {
-                unreadable: true,
-                ..Default::default()
-            }
+    for (label, through_alias, fenced) in [
+        ("unreadable", false, false),
+        ("changed by an operation", false, true),
+        ("changed by an operation under its real name", true, true),
+    ] {
+        let fixture = unique_fixture_root("inaccessible");
+        let real = fixture.join("real");
+        fs::create_dir_all(real.join("blocked")).expect("the search fixture should be created");
+        fs::create_dir_all(real.join("visible")).expect("the search fixture should be created");
+        fs::write(real.join("visible/needle.txt"), b"content")
+            .expect("the search fixture file should be written");
+        fs::write(real.join("blocked/needle-blocked.txt"), b"content")
+            .expect("the search fixture file should be written");
+        std::os::unix::fs::symlink(&real, fixture.join("alias")).expect("the alias");
+        let root = if through_alias {
+            fixture.join("alias")
+        } else {
+            real.clone()
+        };
+        let operation = crate::services::file_activity::begin(
+            crate::services::file_activity::OperationScope::default(),
         );
-        assert_eq!(
-            coverage.message(),
-            "Partial search — some folders could not be read"
+        let fenced_name = if through_alias {
+            real.canonicalize()
+                .expect("the real folder")
+                .join("blocked")
+        } else {
+            real.join("blocked")
+        };
+        let fence = fenced.then(|| operation.fence([fenced_name]));
+        if !fenced {
+            fs::set_permissions(real.join("blocked"), fs::Permissions::from_mode(0o000))
+                .expect("the fixture directory's permissions should be restrictable");
+        }
+        let blocked = fenced || fs::read_dir(real.join("blocked")).is_err();
+
+        let (search, events) =
+            index_tree_with_budget(root.clone(), false, usize::MAX, 64, Duration::from_secs(10));
+        drop(fence);
+        search.query("needle");
+        let event = wait_for_results(&events);
+
+        drop(search);
+        let _ = fs::set_permissions(real.join("blocked"), fs::Permissions::from_mode(0o755));
+        fs::remove_dir_all(&fixture).expect("the search fixture should be removed");
+
+        let Some(SearchEvent::Results {
+            items, coverage, ..
+        }) = event
+        else {
+            panic!("the worker should publish a result for a non-empty query: {label}");
+        };
+        let names: Vec<&str> = items.iter().map(|item| item.name.as_str()).collect();
+        assert!(
+            names.contains(&"needle.txt"),
+            "entries outside the inaccessible directory should still be indexed: {label}"
         );
+        if blocked {
+            assert!(!names.contains(&"needle-blocked.txt"), "{label}");
+            assert_eq!(
+                coverage,
+                super::SearchCoverage {
+                    unreadable: true,
+                    ..Default::default()
+                },
+                "{label}"
+            );
+            assert_eq!(
+                coverage.message(),
+                "Partial search — some folders could not be read"
+            );
+        }
     }
 }
 
