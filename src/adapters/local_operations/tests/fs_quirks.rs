@@ -33,6 +33,7 @@ use super::super::environment::FsEnvironment;
 use super::super::fs_ops::{
     Entry, EntryStat, FolderStamp, FsOps, FsStat, Listed, System, assert_off_main_thread,
 };
+use super::super::native_fs::LocalFileIdentity;
 use crate::adapters::volume::{MountKey, MountSite, MountType, forget_test_mount_capabilities};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -91,6 +92,34 @@ pub(crate) enum Op {
     OpenWrite,
     FileFlags,
     SetLinkTimes,
+}
+
+impl Op {
+    fn changes(self) -> bool {
+        matches!(
+            self,
+            Self::Rename
+                | Self::Exchange
+                | Self::Link
+                | Self::Unlink
+                | Self::Mkdir
+                | Self::Symlink
+                | Self::Create
+                | Self::Trash
+                | Self::LinkFd
+                | Self::Clone
+                | Self::CopyRange
+                | Self::Write
+                | Self::SetLen
+                | Self::ChownFd
+                | Self::ChmodFd
+                | Self::SetTimes
+                | Self::SetXattr
+                | Self::CreateNode
+                | Self::CreateReadonly
+                | Self::SetLinkTimes
+        )
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -177,6 +206,23 @@ impl Silly {
             lingers: Duration::ZERO,
         }
     }
+}
+
+/// How long a client answers plain stats from the times it cached, as NFS does for
+/// `acdirmin` and `acregmin` and SMB for `actimeo`.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct CachedTimes {
+    pub folders: Duration,
+    pub files: Duration,
+}
+
+/// How long listing a folder repeats the names it listed last, as the SMB client lists a
+/// cached directory and sshfs its daemon's cache.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct CachedListing {
+    pub kept_for: Duration,
+    /// Each listing or stamp of the folder keeps the names, as a held SMB directory lease does.
+    pub renewed_by_use: bool,
 }
 
 pub(crate) type Racer = Box<dyn FnMut() + Send>;
@@ -307,10 +353,23 @@ pub(crate) struct Quirks {
     /// filesystem mounted inside another does; scopes otherwise share the
     /// device of the folder they are made in, as bind mounts do.
     pub own_device: bool,
+    /// Folder stamps carry no mount id, as before Linux 5.8.
+    pub no_mount_ids: bool,
     /// A stat that does not force revalidation reports the change time the
     /// last stat of the entry saw, until this long after by the test clock,
     /// as the SMB client answers from its attribute cache (`actimeo`).
     pub cached_change_times: Option<Duration>,
+    /// A folder stamp that does not force revalidation reports the times the last
+    /// revalidation saw, until this long after by the test clock or a change this scope
+    /// made, whose replies the client learns from.
+    pub cached_times: Option<CachedTimes>,
+    /// Every folder stamp, forced or not, reports the times the daemon fetched until this
+    /// long after by the test clock or a change this scope made, as sshfs answers from its
+    /// cache.
+    pub daemon_cache: Option<Duration>,
+    /// Listing a folder repeats the names it listed last, except after a change this scope
+    /// made, which the client sees at once.
+    pub cached_listing: Option<CachedListing>,
     /// Times stamped at or after this instant read as it, as one tick of the coarse clock
     /// stamps them where the kernel has no multigrain timestamps. The tick lasts as long as
     /// the scope.
@@ -377,6 +436,10 @@ impl Quirks {
             silly_rename: Some(Silly {
                 lingers: Duration::from_millis(2),
                 ..Silly::nfs()
+            }),
+            cached_times: Some(CachedTimes {
+                folders: Duration::from_secs(30),
+                files: Duration::from_secs(3),
             }),
             ..Self::default()
         }
@@ -488,6 +551,14 @@ impl Quirks {
                 aside: Aside::Smb,
                 lingers: Duration::from_millis(4),
             }),
+            cached_times: Some(CachedTimes {
+                folders: Duration::from_secs(1),
+                files: Duration::from_secs(1),
+            }),
+            cached_listing: Some(CachedListing {
+                kept_for: Duration::from_secs(46),
+                renewed_by_use: true,
+            }),
             ..Self::default()
         }
     }
@@ -531,6 +602,11 @@ impl Quirks {
             silly_rename: Some(Silly {
                 aside: Aside::Fuse,
                 lingers: Duration::from_millis(70),
+            }),
+            daemon_cache: Some(Duration::from_secs(21)),
+            cached_listing: Some(CachedListing {
+                kept_for: Duration::from_secs(21),
+                renewed_by_use: false,
             }),
             ..Self::default()
         }
@@ -785,6 +861,29 @@ pub(crate) struct Call {
     pub forced: bool,
 }
 
+#[derive(Clone, Copy)]
+struct Seen {
+    modified: (i64, u32),
+    changed: (i64, u32),
+    fetch: Fetch,
+}
+
+#[derive(Clone, Copy)]
+struct Fetch {
+    at: SystemTime,
+    own_changes: u64,
+}
+
+impl Fetch {
+    fn kept(&self, kept_for: Duration, now: Fetch) -> bool {
+        self.own_changes == now.own_changes
+            && now
+                .at
+                .duration_since(self.at)
+                .is_ok_and(|age| age < kept_for)
+    }
+}
+
 struct Scope {
     id: u64,
     root: PathBuf,
@@ -819,6 +918,12 @@ struct State {
     read_only_unseen: HashSet<PathBuf>,
     /// The change time each entry's last stat saw, and when, by device and inode.
     seen_change_times: HashMap<(u64, u64), ((i64, u32), SystemTime)>,
+    /// The times each folder stamp's last revalidation saw, by device and inode.
+    seen_times: HashMap<(u64, u64), Seen>,
+    /// The names each folder listed, by path.
+    listings: HashMap<PathBuf, (Listed, Fetch)>,
+    /// Changes this scope made, which its client sees at once.
+    own_changes: u64,
     unplugged: bool,
     serverino_disabled: bool,
     holds: HashMap<(u64, u64), usize>,
@@ -832,6 +937,15 @@ struct SillyLeftover {
     name: Option<OsString>,
     key: (u64, u64),
     unheld_since: Option<SystemTime>,
+}
+
+impl State {
+    fn fetch(&self) -> Fetch {
+        Fetch {
+            at: clock_for_test(),
+            own_changes: self.own_changes,
+        }
+    }
 }
 
 static SCOPES: Mutex<Vec<Arc<Scope>>> = Mutex::new(Vec::new());
@@ -868,6 +982,9 @@ impl FsQuirks {
                 opened_names: Vec::new(),
                 read_only_unseen: HashSet::new(),
                 seen_change_times: HashMap::new(),
+                seen_times: HashMap::new(),
+                listings: HashMap::new(),
+                own_changes: 0,
                 unplugged: false,
                 serverino_disabled: false,
                 holds: HashMap::new(),
@@ -1066,6 +1183,9 @@ impl Scope {
         let result = perform(self);
         {
             let mut state = self.state();
+            if result.is_ok() && op.changes() {
+                state.own_changes += 1;
+            }
             if let Some((unplug_op, pattern, skip)) = state.quirks.unplugged_after.as_mut()
                 && *unplug_op == op
                 && matches(pattern, names)
@@ -1115,6 +1235,67 @@ impl Scope {
         }
         stat.ctime = seen.0;
         stat
+    }
+
+    fn cached_stamp(&self, mut stamp: FolderStamp, forced: bool) -> FolderStamp {
+        let mut state = self.state();
+        let cached_times = state.quirks.cached_times.map(|times| {
+            if stamp.kind == FileType::Directory {
+                times.folders
+            } else {
+                times.files
+            }
+        });
+        let (kept_for, ignores_force) = match (state.quirks.daemon_cache, cached_times) {
+            (Some(daemon), _) => (daemon, true),
+            (None, Some(kept_for)) => (kept_for, false),
+            (None, None) => return stamp,
+        };
+        let now = state.fetch();
+        let fetched = Seen {
+            modified: stamp.modified,
+            changed: stamp.changed,
+            fetch: now,
+        };
+        let seen = state
+            .seen_times
+            .entry((stamp.device, stamp.inode))
+            .or_insert(fetched);
+        if (forced && !ignores_force) || !seen.fetch.kept(kept_for, now) {
+            *seen = fetched;
+        }
+        (stamp.modified, stamp.changed) = (seen.modified, seen.changed);
+        stamp
+    }
+
+    fn listed(&self, folder: &Path, listing: Listed) -> Listed {
+        let mut state = self.state();
+        let Some(cached) = state.quirks.cached_listing else {
+            return listing;
+        };
+        let now = state.fetch();
+        let entry = state
+            .listings
+            .entry(folder.to_path_buf())
+            .or_insert_with(|| (listing.clone(), now));
+        if !entry.1.kept(cached.kept_for, now) {
+            *entry = (listing, now);
+        } else if cached.renewed_by_use {
+            entry.1.at = now.at;
+        }
+        entry.0.clone()
+    }
+
+    fn used(&self, folder: &Path) {
+        let mut state = self.state();
+        if state
+            .quirks
+            .cached_listing
+            .is_some_and(|cached| cached.renewed_by_use)
+            && let Some((_, seen)) = state.listings.get_mut(folder)
+        {
+            seen.at = clock_for_test();
+        }
     }
 
     fn reported(&self, path: Option<PathBuf>, mut stat: EntryStat) -> EntryStat {
@@ -1179,6 +1360,41 @@ impl Scope {
             stat.size = 0;
         }
         stat
+    }
+
+    fn reported_stamp(&self, path: &Path, stamp: FolderStamp) -> FolderStamp {
+        let real = path.canonicalize().ok();
+        let stat = EntryStat {
+            identity: LocalFileIdentity {
+                device: stamp.device,
+                inode: stamp.inode,
+                kind: stamp.kind,
+                birth: stamp.birth,
+            },
+            kind: stamp.kind,
+            mode: stamp.mode & 0o7777,
+            nlink: 1,
+            size: stamp.size,
+            blocks: 0,
+            atime: stamp.modified,
+            mtime: stamp.modified,
+            ctime: stamp.changed,
+            uid: 0,
+            gid: 0,
+        };
+        if let Some(real) = real.as_deref().filter(|_| stat.is_directory()) {
+            self.used(real);
+        }
+        let stat = self.reported(real, stat);
+        FolderStamp {
+            modified: stat.mtime,
+            changed: stat.ctime,
+            device: stat.identity.device,
+            inode: stat.identity.inode,
+            birth: stat.identity.birth,
+            mount_id: (!self.quirk(|quirks| quirks.no_mount_ids)).then_some(u64::MAX - self.id),
+            ..stamp
+        }
     }
 
     fn mark_written(&self, fd: BorrowedFd<'_>) {
@@ -2560,6 +2776,9 @@ impl FsOps for Scoped {
             listed.extend(chunk);
             ControlFlow::Continue(())
         })?;
+        if let Some(folder) = path_of(dir) {
+            listed = scope.listed(&folder, listed);
+        }
         let size = scope
             .quirk(|quirks| quirks.listing_chunk)
             .unwrap_or(usize::MAX)
@@ -2577,17 +2796,14 @@ impl FsOps for Scoped {
     fn folder_stamp(&self, path: &Path, force_sync: bool) -> Result<FolderStamp, Errno> {
         assert_off_main_thread();
         match scope_for_folder(path) {
-            Some(scope) => scope.run_logged(
-                Op::FolderStamp,
-                &[path.file_name().unwrap_or_default()],
-                force_sync,
-                |scope| {
-                    Ok(FolderStamp {
-                        mount_id: Some(u64::MAX - scope.id),
-                        ..System.folder_stamp(path, force_sync)?
-                    })
-                },
-            ),
+            Some(scope) => scope
+                .run_logged(
+                    Op::FolderStamp,
+                    &[path.file_name().unwrap_or_default()],
+                    force_sync,
+                    |_| System.folder_stamp(path, force_sync),
+                )
+                .map(|stamp| scope.reported_stamp(path, scope.cached_stamp(stamp, force_sync))),
             None => System.folder_stamp(path, force_sync),
         }
     }

@@ -1137,9 +1137,12 @@ reset (exFAT), times stamped within one tick of a coarse clock (kernels without 
 timestamps), single link counts (sshfs), entries renumbered after eviction (never one a descriptor
 holds), SMB's refusal to open two names of one file at once or, during its deferred close, another
 name of a file just written, its stale read-only folders, change times answered from its attribute
-cache, server inode numbers turned off after a collision and creation times Samba makes up, and
-writeback errors that `syncfs` reports. Tests can also pretend to run on another kernel release, freeze the clock
-that the racily clean check, the wait for SMB's deferred close and the emulated attribute cache
+cache, server inode numbers turned off after a collision and creation times Samba makes up, folder
+stamps that plain stats answer from NFS's and SMB's attribute caches and that sshfs answers from
+its daemon's cache even when forced, folder stamps without a mount id (kernels before 5.8),
+listings that repeat a cached directory (SMB, renewed by each use) or the daemon's cache (sshfs),
+and writeback errors that `syncfs` reports. Tests can also pretend to run on another kernel
+release, freeze the clock that the racily clean check, the wait for SMB's deferred close and the emulated attribute cache
 read, and set a paste's batch limits and clock. The seam also asserts that no call runs on the main
 context's thread.
 
