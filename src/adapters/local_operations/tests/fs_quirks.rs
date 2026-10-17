@@ -9,6 +9,7 @@ use std::{
     borrow::Cow,
     collections::{HashMap, HashSet},
     ffi::{OsStr, OsString},
+    ops::ControlFlow,
     os::{
         fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd, RawFd},
         unix::ffi::OsStringExt,
@@ -29,7 +30,9 @@ use rustix::{
 
 use super::super::copy_engine::clock_for_test;
 use super::super::environment::FsEnvironment;
-use super::super::fs_ops::{Entry, EntryStat, FsOps, FsStat, System, assert_off_main_thread};
+use super::super::fs_ops::{
+    Entry, EntryStat, FolderStamp, FsOps, FsStat, Listed, System, assert_off_main_thread,
+};
 use crate::adapters::volume::{MountKey, MountSite, MountType, forget_test_mount_capabilities};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -78,6 +81,9 @@ pub(crate) enum Op {
     DeviceFormat,
     OpenDir,
     List,
+    /// One per `getdents64`, the last one finding no more entries.
+    ListChunks,
+    FolderStamp,
     CreateNode,
     OpenFifo,
     CreateReadonly,
@@ -285,6 +291,7 @@ pub(crate) struct Quirks {
     /// stamps them where the kernel has no multigrain timestamps. The tick lasts as long as
     /// the scope.
     pub coarse_clock: Option<SystemTime>,
+    pub listing_chunk: Option<usize>,
 }
 
 impl Quirks {
@@ -1563,6 +1570,15 @@ pub(crate) fn gio_device(file: &gio::File, device: Option<u64>) -> Option<u64> {
         .or(device)
 }
 
+fn scope_for_folder(path: &Path) -> Option<Arc<Scope>> {
+    let folder = path.canonicalize().ok()?;
+    scopes()
+        .iter()
+        .filter(|scope| folder.starts_with(&scope.root))
+        .max_by_key(|scope| scope.root.as_os_str().len())
+        .cloned()
+}
+
 fn scope_for_path(path: &Path) -> Option<Arc<Scope>> {
     scope_containing(path.parent()?)
 }
@@ -2332,6 +2348,48 @@ impl FsOps for Scoped {
     fn list(&self, dir: BorrowedFd<'_>) -> Result<Vec<(OsString, FileType)>, Errno> {
         assert_off_main_thread();
         on_fd(dir, Op::List, None, |_| System.list(dir))
+    }
+
+    fn list_chunks(
+        &self,
+        dir: BorrowedFd<'_>,
+        each: &mut dyn FnMut(Listed) -> ControlFlow<()>,
+    ) -> Result<(), Errno> {
+        assert_off_main_thread();
+        let Some(scope) = scope_for(dir) else {
+            return System.list_chunks(dir, each);
+        };
+        let name = fd_name(dir);
+        let mut listed = Vec::new();
+        System.list_chunks(dir, &mut |chunk| {
+            listed.extend(chunk);
+            ControlFlow::Continue(())
+        })?;
+        let size = scope
+            .quirk(|quirks| quirks.listing_chunk)
+            .unwrap_or(usize::MAX)
+            .max(1);
+        let mut chunks = listed.chunks(size).map(<[_]>::to_vec);
+        loop {
+            let chunk = chunks.next();
+            scope.run(Op::ListChunks, &[name.as_os_str()], |_| Ok(()))?;
+            if chunk.is_none_or(|chunk| each(chunk).is_break()) {
+                return Ok(());
+            }
+        }
+    }
+
+    fn folder_stamp(&self, path: &Path, force_sync: bool) -> Result<FolderStamp, Errno> {
+        assert_off_main_thread();
+        match scope_for_folder(path) {
+            Some(scope) => scope.run_logged(
+                Op::FolderStamp,
+                &[path.file_name().unwrap_or_default()],
+                force_sync,
+                |_| System.folder_stamp(path, force_sync),
+            ),
+            None => System.folder_stamp(path, force_sync),
+        }
     }
 
     fn create_node(&self, at: Entry<'_>, kind: FileType, mode: Mode) -> Result<(), Errno> {

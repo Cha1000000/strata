@@ -1212,6 +1212,76 @@ fn enumerate_reports_truncated_once_the_entry_budget_is_exceeded() {
 }
 
 #[test]
+fn native_loads_list_through_the_filesystem_seam() -> Result<(), Box<dyn Error>> {
+    use crate::adapters::{FsOp, FsQuirks, Quirks};
+    use rustix::io::Errno;
+
+    for (quirks, listed, stamps, chunks, failure) in [
+        (
+            Quirks {
+                listing_chunk: Some(1),
+                ..Quirks::default()
+            },
+            3,
+            1,
+            4,
+            None,
+        ),
+        (
+            Quirks {
+                fail: vec![(FsOp::ListChunks, "*", 1, Errno::IO)],
+                listing_chunk: Some(1),
+                ..Quirks::default()
+            },
+            0,
+            1,
+            2,
+            Some("A device input/output error occurred"),
+        ),
+        (
+            Quirks {
+                fail: vec![(FsOp::FolderStamp, "*", 0, Errno::ACCESS)],
+                ..Quirks::default()
+            },
+            0,
+            1,
+            0,
+            Some("Permission denied"),
+        ),
+    ] {
+        let root = tempfile::tempdir()?;
+        for name in ["a", "b", "c"] {
+            fs::write(root.path().join(name), b"content")?;
+        }
+        let scope = FsQuirks::install(root.path(), quirks);
+
+        let events = run_enumerate(DirectoryRequest {
+            id: RequestId(1),
+            location: Location::local(root.path()),
+            batch_size: 64,
+            include_metadata: false,
+            max_entries: 100,
+            time_budget: Duration::from_secs(10),
+        });
+
+        let failed = events.iter().find_map(|event| match event {
+            DirectoryEvent::Failed { message, .. } => Some(message.as_str()),
+            _ => None,
+        });
+        assert_eq!(
+            (
+                batched_entry_count(&events),
+                scope.count(FsOp::FolderStamp),
+                scope.count(FsOp::ListChunks),
+                failed,
+            ),
+            (listed, stamps, chunks, failure)
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn enumerate_resolves_can_trash_from_a_child_entry() {
     let root = unique_fixture_root("can-trash");
     fs::create_dir_all(&root).expect("the fixture directory should be created");

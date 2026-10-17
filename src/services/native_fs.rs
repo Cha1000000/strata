@@ -9,21 +9,32 @@ use std::{
     path::Path,
 };
 
+use rustix::fs::FileType;
+
 use crate::model::EntryKind;
 
 const MAX_HIDDEN_FILE_BYTES: u64 = 1024 * 1024;
 
 pub(crate) fn native_kind(file_type: fs::FileType, path: &Path) -> EntryKind {
-    if file_type.is_dir() {
-        return EntryKind::Directory;
+    let file_type = if file_type.is_dir() {
+        FileType::Directory
+    } else if file_type.is_file() {
+        FileType::RegularFile
+    } else if file_type.is_symlink() {
+        FileType::Symlink
+    } else {
+        FileType::Unknown
+    };
+    listed_kind(file_type, path)
+}
+
+pub(crate) fn listed_kind(file_type: FileType, path: &Path) -> EntryKind {
+    match file_type {
+        FileType::Directory => EntryKind::Directory,
+        FileType::RegularFile => EntryKind::File,
+        FileType::Symlink => symlink_kind(path),
+        _ => EntryKind::Other,
     }
-    if file_type.is_file() {
-        return EntryKind::File;
-    }
-    if !file_type.is_symlink() {
-        return EntryKind::Other;
-    }
-    symlink_kind(path)
 }
 
 pub(crate) fn symlink_kind(path: &Path) -> EntryKind {

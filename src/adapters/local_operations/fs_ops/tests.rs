@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: MIT
 
 use std::{
-    ffi::OsStr,
+    collections::BTreeSet,
+    ffi::{OsStr, OsString},
+    ops::ControlFlow,
     os::fd::AsFd,
     panic::{AssertUnwindSafe, catch_unwind},
     sync::mpsc,
@@ -9,7 +11,7 @@ use std::{
     time::Duration,
 };
 
-use rustix::fs::{Mode, OFlags};
+use rustix::fs::{AtFlags, FileType, Mode, OFlags, StatxFlags};
 
 use super::{Entry, FsOps, OffMain, System};
 use crate::util::ui_thread::{self, Exception};
@@ -78,4 +80,85 @@ fn path_walks_through_the_seam_are_refused_on_the_ui_thread() {
     .join()
     .expect("marked thread");
     assert_eq!(ran, Vec::<&str>::new());
+}
+
+#[test]
+fn a_folder_stamp_follows_a_symlink_to_the_folder_and_names_its_mount() {
+    let root = tempfile::tempdir().expect("fixture");
+    let real = root.path().join("real");
+    std::fs::create_dir(&real).expect("fixture folder");
+    std::os::unix::fs::symlink(&real, root.path().join("link")).expect("fixture link");
+    let mount_id = rustix::fs::statx(rustix::fs::CWD, &real, AtFlags::empty(), StatxFlags::MNT_ID)
+        .expect("mount id")
+        .stx_mnt_id;
+
+    let stamp = |path: &std::path::Path, force_sync| {
+        let stamp = System.folder_stamp(path, force_sync).expect("stamp");
+        (
+            stamp.kind,
+            (stamp.device, stamp.inode, stamp.birth),
+            (stamp.modified, stamp.changed),
+            stamp.mount_id,
+        )
+    };
+
+    let through_link = stamp(&root.path().join("link"), false);
+    assert_eq!(through_link, stamp(&real, false));
+    assert_eq!(through_link, stamp(&real, true));
+    assert_eq!(through_link.0, FileType::Directory);
+    assert_eq!(through_link.3, Some(mount_id));
+}
+
+#[test]
+fn a_listing_arrives_one_getdents_buffer_at_a_time() {
+    let root = tempfile::tempdir().expect("fixture");
+    let names: BTreeSet<OsString> = (0..1500)
+        .map(|index| OsString::from(format!("{index:04}-{}", "x".repeat(40))))
+        .collect();
+    for name in &names {
+        std::fs::write(root.path().join(name), b"").expect("fixture file");
+    }
+    std::fs::create_dir(root.path().join("folder")).expect("fixture folder");
+    let folder = rustix::fs::open(
+        root.path(),
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .expect("fixture folder");
+
+    let mut chunks = 0;
+    let mut listed = BTreeSet::new();
+    let mut folders = Vec::new();
+    System
+        .list_chunks(folder.as_fd(), &mut |chunk| {
+            chunks += 1;
+            for (name, kind) in chunk {
+                if kind == FileType::Directory {
+                    folders.push(name);
+                } else {
+                    assert_eq!(kind, FileType::RegularFile);
+                    listed.insert(name);
+                }
+            }
+            ControlFlow::Continue(())
+        })
+        .expect("listing");
+    assert!(chunks > 1, "{chunks} chunks");
+    assert_eq!(listed, names);
+    assert_eq!(folders, [OsString::from("folder")]);
+
+    let folder = rustix::fs::open(
+        root.path(),
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .expect("fixture folder");
+    let mut stopped_after = 0;
+    System
+        .list_chunks(folder.as_fd(), &mut |_| {
+            stopped_after += 1;
+            ControlFlow::Break(())
+        })
+        .expect("listing");
+    assert_eq!(stopped_after, 1);
 }

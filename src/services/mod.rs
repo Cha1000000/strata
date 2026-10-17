@@ -65,7 +65,9 @@ pub use mime_type::{
 };
 pub(crate) use model_preview::ModelRender;
 pub use model_preview::{ModelFormat, ModelPalette};
-pub(crate) use native_fs::{is_hidden_name, native_hidden_names, native_kind, symlink_kind};
+pub(crate) use native_fs::{
+    is_hidden_name, listed_kind, native_hidden_names, native_kind, symlink_kind,
+};
 pub(crate) use navigation_history::NavigationHistory;
 pub use operations::{
     ArchiveFormat, CancelledOperation, CompressRequest, CreateDirectoryRequest, CreateFileRequest,

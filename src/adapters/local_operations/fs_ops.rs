@@ -5,10 +5,13 @@
 
 use std::{
     ffi::{OsStr, OsString},
+    mem::MaybeUninit,
+    ops::ControlFlow,
     os::{
         fd::{AsFd, AsRawFd, BorrowedFd, IntoRawFd, OwnedFd},
         unix::ffi::OsStringExt,
     },
+    path::Path,
 };
 
 use gtk::gio;
@@ -25,6 +28,25 @@ use crate::{adapters::volume::MountKey, services::Attributes};
 
 /// `STATX_MNT_ID_UNIQUE` (Linux 6.8), which rustix does not name yet.
 const STATX_MNT_ID_UNIQUE: u32 = 0x4000;
+
+const LISTING_CHUNK_BYTES: usize = 32 * 1024;
+
+pub(in crate::adapters) type Listed = Vec<(OsString, FileType)>;
+
+#[derive(Clone, Copy, Debug)]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "step 7's load stamp reads the times and identity")
+)]
+pub(in crate::adapters) struct FolderStamp {
+    pub kind: FileType,
+    pub modified: (i64, u32),
+    pub changed: (i64, u32),
+    pub device: u64,
+    pub inode: u64,
+    pub birth: Option<(i64, u32)>,
+    pub mount_id: Option<u64>,
+}
 
 #[derive(Clone, Copy, Debug)]
 pub(super) struct FsStat {
@@ -155,6 +177,13 @@ pub(super) trait FsOps: super::environment::FsEnvironment {
     /// without following a symlink anywhere on the way.
     fn open_dir(&self, at: Entry<'_>) -> Result<OwnedFd, Errno>;
     fn list(&self, dir: BorrowedFd<'_>) -> Result<Vec<(OsString, FileType)>, Errno>;
+    fn list_chunks(
+        &self,
+        dir: BorrowedFd<'_>,
+        each: &mut dyn FnMut(Listed) -> ControlFlow<()>,
+    ) -> Result<(), Errno>;
+    /// Follows symbolic links, as listing the folder does.
+    fn folder_stamp(&self, path: &Path, force_sync: bool) -> Result<FolderStamp, Errno>;
     fn create_node(&self, at: Entry<'_>, kind: FileType, mode: Mode) -> Result<(), Errno>;
     /// Opens the named pipe at `at` for its metadata, which never waits for
     /// a writer.
@@ -183,6 +212,25 @@ pub(super) fn fs() -> &'static dyn FsOps {
     {
         &System
     }
+}
+
+pub(in crate::adapters) fn folder_stamp(
+    path: &Path,
+    force_sync: bool,
+) -> Result<FolderStamp, Errno> {
+    fs().folder_stamp(path, force_sync)
+}
+
+pub(in crate::adapters) fn list_folder(
+    path: &Path,
+    each: &mut dyn FnMut(Listed) -> ControlFlow<()>,
+) -> Result<(), Errno> {
+    let folder = fs().open_path(
+        path.as_os_str(),
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+        Mode::empty(),
+    )?;
+    fs().list_chunks(folder.as_fd(), each)
 }
 
 pub(super) fn assert_off_main_thread() {
@@ -694,6 +742,73 @@ impl FsOps for System {
             }
         }
         Ok(entries)
+    }
+
+    fn list_chunks(
+        &self,
+        dir: BorrowedFd<'_>,
+        each: &mut dyn FnMut(Listed) -> ControlFlow<()>,
+    ) -> Result<(), Errno> {
+        assert_off_main_thread();
+        let mut buffer = vec![MaybeUninit::uninit(); LISTING_CHUNK_BYTES];
+        let mut entries = rustix::fs::RawDir::new(dir, &mut buffer);
+        let mut chunk = Vec::new();
+        while let Some(entry) = entries.next() {
+            let entry = entry?;
+            let name = entry.file_name();
+            if name != c"." && name != c".." {
+                let kind = match entry.file_type() {
+                    FileType::Unknown => {
+                        match rustix::fs::statat(dir, name, AtFlags::SYMLINK_NOFOLLOW) {
+                            Ok(stat) => Some(FileType::from_raw_mode(stat.st_mode)),
+                            Err(Errno::NOENT) => None,
+                            Err(error) => return Err(error),
+                        }
+                    }
+                    kind => Some(kind),
+                };
+                if let Some(kind) = kind {
+                    chunk.push((OsString::from_vec(name.to_bytes().to_vec()), kind));
+                }
+            }
+            if entries.is_buffer_empty()
+                && !chunk.is_empty()
+                && each(std::mem::take(&mut chunk)).is_break()
+            {
+                return Ok(());
+            }
+        }
+        Ok(())
+    }
+
+    fn folder_stamp(&self, path: &Path, force_sync: bool) -> Result<FolderStamp, Errno> {
+        assert_off_main_thread();
+        let sync = if force_sync {
+            AtFlags::STATX_FORCE_SYNC
+        } else {
+            AtFlags::empty()
+        };
+        let mask = StatxFlags::TYPE
+            | StatxFlags::INO
+            | StatxFlags::MTIME
+            | StatxFlags::CTIME
+            | StatxFlags::BTIME
+            | StatxFlags::MNT_ID;
+        let stat = rustix::fs::statx(rustix::fs::CWD, path, sync, mask)?;
+        let reported = StatxFlags::from_bits_retain(stat.stx_mask);
+        Ok(FolderStamp {
+            kind: FileType::from_raw_mode(u32::from(stat.stx_mode)),
+            modified: (stat.stx_mtime.tv_sec, stat.stx_mtime.tv_nsec),
+            changed: (stat.stx_ctime.tv_sec, stat.stx_ctime.tv_nsec),
+            device: rustix::fs::makedev(stat.stx_dev_major, stat.stx_dev_minor),
+            inode: stat.stx_ino,
+            birth: reported
+                .contains(StatxFlags::BTIME)
+                .then_some((stat.stx_btime.tv_sec, stat.stx_btime.tv_nsec)),
+            mount_id: reported
+                .contains(StatxFlags::MNT_ID)
+                .then_some(stat.stx_mnt_id),
+        })
     }
 
     fn create_node(&self, at: Entry<'_>, kind: FileType, mode: Mode) -> Result<(), Errno> {

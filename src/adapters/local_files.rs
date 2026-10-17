@@ -7,6 +7,7 @@ use std::{
     fs,
     future::Future,
     io::ErrorKind,
+    ops::ControlFlow,
     os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
     pin::Pin,
@@ -27,8 +28,8 @@ use crate::{
         DirectoryChange, DirectoryEvent, DirectoryRequest, FileSource, LoadHandle,
         LocationIdentity, LocationValidationError, MetadataOutcome, MetadataRequest,
         MetadataUpdate, RequestId, backend_unavailable_message, bytes_support_named_family,
-        file_activity, is_hidden_name, is_image_path, is_media_path, native_hidden_names,
-        native_kind, sanitize_failure_message, symlink_kind,
+        file_activity, is_hidden_name, is_image_path, is_media_path, listed_kind,
+        native_hidden_names, sanitize_failure_message, symlink_kind,
     },
 };
 
@@ -572,63 +573,58 @@ fn scan_native_directory(
     cancellable: &gio::Cancellable,
     deadline: Instant,
 ) -> NativeEnumeration {
-    let children = match fs::read_dir(path) {
-        Ok(children) => children,
-        Err(error) => return NativeEnumeration::Failed(crate::services::io_error_message(&error)),
+    let failed = |error: rustix::io::Errno| {
+        NativeEnumeration::Failed(crate::services::io_error_message(&error.into()))
     };
+    if let Err(error) = super::local_operations::folder_stamp(path, false) {
+        return failed(error);
+    }
     let hidden_names = native_hidden_names(path);
     let mut entries = Vec::with_capacity(1024);
     let mut truncated = false;
-    for child in children {
-        if cancellable.is_cancelled() {
-            return NativeEnumeration::Cancelled;
-        }
-        if Instant::now() >= deadline {
-            truncated = true;
-            break;
-        }
-        let child = match child {
-            Ok(child) => child,
-            Err(error) => {
-                return NativeEnumeration::Failed(crate::services::io_error_message(&error));
+    let mut cancelled = false;
+    let listed = super::local_operations::list_folder(path, &mut |chunk| {
+        for (native_name, file_type) in chunk {
+            if cancellable.is_cancelled() {
+                cancelled = true;
+                return ControlFlow::Break(());
             }
-        };
-        let native_name = child.file_name();
-        let is_hidden = is_hidden_name(&native_name, &hidden_names);
-        if entries.len() == request.max_entries {
-            truncated = true;
-            break;
-        }
-        let file_type = match child.file_type() {
-            Ok(file_type) => file_type,
-            Err(error) if error.kind() == ErrorKind::NotFound => continue,
-            Err(error) => {
-                return NativeEnumeration::Failed(crate::services::io_error_message(&error));
+            if Instant::now() >= deadline || entries.len() == request.max_entries {
+                truncated = true;
+                return ControlFlow::Break(());
             }
-        };
-        let path = child.path();
-        let kind = native_kind(file_type, &path);
-        let cached_details = cached_icon_details_for_revisit(&path);
-        let mut entry = FileEntry {
-            location: Location::local(path),
-            display_name: native_name.to_string_lossy().into_owned(),
-            thumbnail_path: None,
-            native_name,
-            kind,
-            size: MetadataValue::Unknown,
-            modified_unix_seconds: MetadataValue::Unknown,
-            recent_unix_seconds: MetadataValue::Unknown,
-            mode: MetadataValue::Unknown,
-            image_dimensions: MetadataValue::Unknown,
-            child_count: MetadataValue::Unknown,
-            duration_seconds: MetadataValue::Unknown,
-            is_hidden,
-            recent_uri: None,
-        };
-        if let Some(details) = cached_details {
-            details.apply_to_entry(&mut entry);
+            let is_hidden = is_hidden_name(&native_name, &hidden_names);
+            let path = path.join(&native_name);
+            let kind = listed_kind(file_type, &path);
+            let cached_details = cached_icon_details_for_revisit(&path);
+            let mut entry = FileEntry {
+                location: Location::local(path),
+                display_name: native_name.to_string_lossy().into_owned(),
+                thumbnail_path: None,
+                native_name,
+                kind,
+                size: MetadataValue::Unknown,
+                modified_unix_seconds: MetadataValue::Unknown,
+                recent_unix_seconds: MetadataValue::Unknown,
+                mode: MetadataValue::Unknown,
+                image_dimensions: MetadataValue::Unknown,
+                child_count: MetadataValue::Unknown,
+                duration_seconds: MetadataValue::Unknown,
+                is_hidden,
+                recent_uri: None,
+            };
+            if let Some(details) = cached_details {
+                details.apply_to_entry(&mut entry);
+            }
+            entries.push(entry);
         }
-        entries.push(entry);
+        ControlFlow::Continue(())
+    });
+    if cancelled {
+        return NativeEnumeration::Cancelled;
+    }
+    if let Err(error) = listed {
+        return failed(error);
     }
 
     // `access::can-trash`/`access::can-delete` describe the queried item, not its
