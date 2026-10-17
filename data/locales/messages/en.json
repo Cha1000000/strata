@@ -764,6 +764,7 @@
   "The manifest declares id “%{declared}”, but its folder is named “%{directory}”; they must match": "The manifest declares id “%{declared}”, but its folder is named “%{directory}”; they must match",
   "The merge stopped. Originals that could not be put back are in “%{folder}”: %{error}": "The merge stopped. Originals that could not be put back are in “%{folder}”: %{error}",
   "The move destination has no parent directory": "The move destination has no parent directory",
+  "The move stopped unexpectedly": "The move stopped unexpectedly",
   "The new item has an invalid URI": "The new item has an invalid URI",
   "The original is no longer in Trash": "The original is no longer in Trash",
   "The original location changed and no longer matches the confirmed destination": "The original location changed and no longer matches the confirmed destination",

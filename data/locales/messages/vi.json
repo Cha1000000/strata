@@ -764,6 +764,7 @@
   "The manifest declares id “%{declared}”, but its folder is named “%{directory}”; they must match": "Tệp kê khai khai báo ID “%{declared}”, nhưng thư mục có tên “%{directory}”; hai giá trị phải khớp nhau",
   "The merge stopped. Originals that could not be put back are in “%{folder}”: %{error}": "Đã dừng hợp nhất. Các bản gốc không thể đưa về chỗ cũ nằm trong “%{folder}”: %{error}",
   "The move destination has no parent directory": "Đích di chuyển không có thư mục cha",
+  "The move stopped unexpectedly": "Quá trình di chuyển đã dừng đột ngột",
   "The new item has an invalid URI": "Mục mới có URI không hợp lệ",
   "The original is no longer in Trash": "Bản gốc không còn trong Thùng rác",
   "The original location changed and no longer matches the confirmed destination": "Vị trí ban đầu đã thay đổi và không còn khớp với đích đã xác nhận",

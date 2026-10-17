@@ -764,6 +764,7 @@
   "The manifest declares id “%{declared}”, but its folder is named “%{directory}”; they must match": "El manifiesto declara el ID «%{declared}», pero su carpeta se llama «%{directory}»; deben coincidir",
   "The merge stopped. Originals that could not be put back are in “%{folder}”: %{error}": "La combinación se detuvo. Los originales que no se pudieron devolver a su sitio están en «%{folder}»: %{error}",
   "The move destination has no parent directory": "El destino del movimiento no tiene carpeta superior",
+  "The move stopped unexpectedly": "El traslado se detuvo de forma inesperada",
   "The new item has an invalid URI": "El elemento nuevo tiene un URI no válido",
   "The original is no longer in Trash": "El original ya no está en la papelera",
   "The original location changed and no longer matches the confirmed destination": "La ubicación original cambió y ya no coincide con el destino confirmado",

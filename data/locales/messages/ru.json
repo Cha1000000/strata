@@ -764,6 +764,7 @@
   "The manifest declares id “%{declared}”, but its folder is named “%{directory}”; they must match": "В манифесте указан идентификатор «%{declared}», а папка называется «%{directory}»; они должны совпадать",
   "The merge stopped. Originals that could not be put back are in “%{folder}”: %{error}": "Объединение остановлено. Оригиналы, которые не удалось вернуть на место, находятся в «%{folder}»: %{error}",
   "The move destination has no parent directory": "У места назначения перемещения нет родительской папки",
+  "The move stopped unexpectedly": "Перемещение неожиданно прервалось",
   "The new item has an invalid URI": "У нового элемента недопустимый URI",
   "The original is no longer in Trash": "Оригинала больше нет в корзине",
   "The original location changed and no longer matches the confirmed destination": "Исходное расположение изменилось и больше не совпадает с подтверждённым местом назначения",

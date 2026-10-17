@@ -764,6 +764,7 @@
   "The manifest declares id “%{declared}”, but its folder is named “%{directory}”; they must match": "O manifesto declara o ID “%{declared}”, mas a pasta se chama “%{directory}”; eles devem corresponder",
   "The merge stopped. Originals that could not be put back are in “%{folder}”: %{error}": "A mesclagem foi interrompida. Os originais que não puderam ser devolvidos ao lugar estão em “%{folder}”: %{error}",
   "The move destination has no parent directory": "O destino da movimentação não tem pasta pai",
+  "The move stopped unexpectedly": "A movimentação parou inesperadamente",
   "The new item has an invalid URI": "O novo item tem um URI inválido",
   "The original is no longer in Trash": "O original não está mais na Lixeira",
   "The original location changed and no longer matches the confirmed destination": "O local original mudou e não corresponde mais ao destino confirmado",
