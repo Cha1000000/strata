@@ -50,23 +50,24 @@ impl Package {
             let file = archive
                 .by_index_raw(i)
                 .map_err(|_| "Invalid model package")?;
-            let name = file.name().to_ascii_lowercase();
+            let raw_name = file.name().map_err(|_| "Invalid model package")?;
+            let name = raw_name.to_ascii_lowercase();
             if format == ModelFormat::ThreeMf {
                 if name.ends_with(".model") {
                     model_parts += 1;
                 }
                 if root
                     .as_ref()
-                    .map_or(name == "3d/3dmodel.model", |root| file.name() == root)
+                    .map_or(name == "3d/3dmodel.model", |root| raw_name == *root)
                 {
                     model = Some(i);
                 }
                 if name.ends_with("thumbnail.png")
-                    || thumbnail_parts.iter().any(|part| part == file.name())
+                    || thumbnail_parts.iter().any(|part| *part == raw_name)
                 {
                     thumbnails.push(i);
                 }
-            } else if file.name() == "thumbnails/Thumbnail.png" {
+            } else if raw_name == "thumbnails/Thumbnail.png" {
                 thumbnails.push(i);
             }
         }

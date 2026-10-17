@@ -1288,6 +1288,10 @@ colorchooser button.circular:disabled {
   padding: 12px 16px;
 }
 
+.overlay-notice.status {
+  min-width: 0;
+}
+
 .overlay-notice-heading {
   font-weight: bold;
 }

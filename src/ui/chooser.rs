@@ -44,7 +44,7 @@ use crate::{
 use super::{
     blur::BlurBin,
     browser::{BrowserView, dismiss_modal_layer, modal_layer},
-    browser_modes::BrowserMode,
+    browser_modes::{BrowserMode, ThumbnailResize},
     controls::{
         ModalTone, focus_button, form_check_button, form_entry, form_label, menu_option,
         message_dialog_layout,
@@ -2331,7 +2331,12 @@ fn install_shortcuts(
             return result;
         }
         if let Some(size) = preferences.text_size().for_shortcut(press) {
-            preferences.set_text_size(size);
+            state.view.set_text_size(size);
+            return glib::Propagation::Stop;
+        }
+        if let Some(change) = ThumbnailResize::for_shortcut(press)
+            && state.view.resize_icons_thumbnails(change)
+        {
             return glib::Propagation::Stop;
         }
         let browser = state.view.browser();

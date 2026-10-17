@@ -442,7 +442,7 @@ fn write_zip_members(path: &Path, members: &[FixtureMember<'_>]) -> Result<(), B
                     options = options.unix_permissions(*mode);
                 }
                 if let Some(seconds) = modified {
-                    options.add_extra_data(0x5455, zip_extended_timestamp(*seconds)?, false)?;
+                    options.add_extra_field(0x5455, zip_extended_timestamp(*seconds)?, false)?;
                 }
                 writer.start_file(*name, options)?;
                 writer.write_all(contents)?;
@@ -456,7 +456,7 @@ fn write_zip_members(path: &Path, members: &[FixtureMember<'_>]) -> Result<(), B
                     options = options.unix_permissions(*mode);
                 }
                 if let Some(seconds) = modified {
-                    options.add_extra_data(0x5455, zip_extended_timestamp(*seconds)?, false)?;
+                    options.add_extra_field(0x5455, zip_extended_timestamp(*seconds)?, false)?;
                 }
                 writer.add_directory(*name, options)?;
             }

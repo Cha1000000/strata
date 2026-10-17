@@ -791,7 +791,11 @@ fn copy_member(
         };
         if allowed == 0 {
             let mut probe = [0u8; 1];
-            if reader.read(&mut probe).map_err(archive_read_failed)? == 0 {
+            let probed = match reader.read(&mut probe) {
+                Err(error) if error.kind() == std::io::ErrorKind::FileTooLarge => 1,
+                result => result.map_err(archive_read_failed)?,
+            };
+            if probed == 0 {
                 break;
             }
             return Err(match declared_size {

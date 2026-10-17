@@ -340,6 +340,10 @@ fn default_navigation(mode: BrowserMode) -> Vec<Shortcut> {
                 "Focus the visible sidebar",
             ),
             row(One(BACKSPACE), "Go to the parent folder"),
+            row(
+                Any(&[THUMBNAILS_LARGER, THUMBNAILS_SMALLER, THUMBNAILS_RESET]),
+                "Increase / decrease / reset thumbnail size",
+            ),
         ],
         BrowserMode::List => vec![
             row(Any(&[UP, DOWN]), "Move between file rows"),
@@ -414,6 +418,16 @@ fn tenxer_navigation(mode: BrowserMode, chooser: bool) -> Vec<Shortcut> {
                 "Move spatially between tiles",
             ),
             row(Any(&[BACKSPACE, PARENT_FOLDER]), "Go to the parent folder"),
+            row(
+                Any(&[
+                    TENXER_THUMBNAILS_LARGER,
+                    TENXER_THUMBNAILS_SMALLER,
+                    THUMBNAILS_LARGER,
+                    THUMBNAILS_SMALLER,
+                ]),
+                "Increase / decrease thumbnail size",
+            ),
+            row(One(THUMBNAILS_RESET), "Reset thumbnail size"),
         ],
     };
     // The chooser refuses i, and its own section describes Enter and o.

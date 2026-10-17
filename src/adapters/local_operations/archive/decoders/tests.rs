@@ -2144,7 +2144,7 @@ fn zip_prefers_the_extended_timestamp_over_the_dos_time() -> Result<(), Box<dyn 
         .compression_method(zip::CompressionMethod::Stored)
         .last_modified_time(dos);
     let mut extended = options.into_full_options();
-    extended.add_extra_data(0x5455, zip_extended_timestamp(STORED_TIME)?, false)?;
+    extended.add_extra_field(0x5455, zip_extended_timestamp(STORED_TIME)?, false)?;
     let mut writer = zip::ZipWriter::new(fs::File::create(&archive)?);
     writer.start_file("extended.txt", extended)?;
     writer.write_all(b"extended")?;
@@ -2152,7 +2152,7 @@ fn zip_prefers_the_extended_timestamp_over_the_dos_time() -> Result<(), Box<dyn 
     writer.write_all(b"dos")?;
     // A signed UT time of -1 is before 1970, so the DOS time applies.
     let mut negative = options.into_full_options();
-    negative.add_extra_data(0x5455, [1, 0xff, 0xff, 0xff, 0xff], false)?;
+    negative.add_extra_field(0x5455, [1, 0xff, 0xff, 0xff, 0xff], false)?;
     writer.start_file("negative.txt", negative)?;
     writer.write_all(b"negative")?;
     writer.finish()?;

@@ -34,8 +34,10 @@ mod list_factory;
 mod navigation;
 #[cfg(test)]
 mod tests;
+mod thumbnail_size;
 
 use list_factory::{ListFactory, ListRow, refresh_list_section};
+pub(super) use thumbnail_size::ThumbnailResize;
 
 const LIST_COLUMN_WIDTHS: [i32; 5] = [160, 160, 90, 120, 150];
 const LIST_COLUMN_MIN_WIDTHS: [i32; 5] = [160, 80, 70, 80, 110];
@@ -1420,6 +1422,16 @@ impl ModeViews {
                 None,
             );
         }
+    }
+
+    /// The Icons slider and its folder, while Icons shows.
+    pub(super) fn icons_thumbnail_scale(&self) -> Option<(gtk::Scale, Option<Location>)> {
+        if self.mode != BrowserMode::Icons {
+            return None;
+        }
+        let pane = self.icons_panes.first()?;
+        let scale = pane.thumbnail_scale.clone()?;
+        Some((scale, self.browser.location_at(pane.depth)))
     }
 
     pub fn apply_resolved_icons_size(&mut self, size: i32) {

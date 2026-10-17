@@ -756,7 +756,11 @@ fn read_compressed_entries(
                 } else {
                     CompressedEntry::File(bytes)
                 };
-                assert!(result.insert(PathBuf::from(entry.name()), value).is_none());
+                assert!(
+                    result
+                        .insert(PathBuf::from(&*entry.name().expect("member name")), value)
+                        .is_none()
+                );
             }
         }
         ArchiveFormat::Tar | ArchiveFormat::TarGz => {
@@ -1204,7 +1208,7 @@ fn zip_dos_seconds(time: zip::DateTime) -> Result<i64, Box<dyn Error>> {
 fn zip_extended_time(entry: &zip::read::ZipFile<'_, fs::File>) -> Option<i64> {
     entry.extra_data_fields().find_map(|field| match field {
         zip::ExtraField::ExtendedTimestamp(stamp) => stamp.mod_time().map(i64::from),
-        zip::ExtraField::Ntfs(_) => None,
+        _ => None,
     })
 }
 
@@ -1230,7 +1234,7 @@ fn read_compressed_metadata(
                     mode: entry.unix_mode().map(|mode| mode & 0o7777),
                     modified,
                 };
-                let name = PathBuf::from(entry.name().trim_end_matches('/'));
+                let name = PathBuf::from(entry.name().expect("member name").trim_end_matches('/'));
                 assert!(result.insert(name, metadata).is_none());
             }
         }
@@ -1364,13 +1368,13 @@ fn compression_records_source_times_and_modes_in_every_format() -> Result<(), Bo
                         local.second(),
                     ),
                     "{context}: DOS time of `{}`",
-                    entry.name()
+                    entry.name().expect("member name")
                 );
                 assert_eq!(
                     zip_extended_time(&entry),
                     Some(SOURCE_TIME),
                     "{context}: UT field of `{}`",
-                    entry.name()
+                    entry.name().expect("member name")
                 );
             }
         }

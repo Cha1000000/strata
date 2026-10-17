@@ -68,7 +68,7 @@ unicode-normalization = "0.1.25"
 ureq = { version = "~3.4", features = ["json"] }
 zbus = { version = "5.19.0", default-features = false, features = ["async-io"] }
 zstd = "0.14.0"
-zip = "8.6.0"
+zip = "9.0.4"
 unrar = { version = "0.5.8", optional = true }
 unrar_sys = { version = "0.5.8", optional = true }
 frizbee = "0.13"

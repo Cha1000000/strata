@@ -562,11 +562,11 @@ fn zip_datetime(modified: Option<SystemTime>) -> zip::DateTime {
     }
 }
 
-fn zip_member_options<'k>(
-    base: zip::write::FileOptions<'k, ()>,
+fn zip_member_options<'k, 'n>(
+    base: zip::write::FileOptions<'k, 'n, ()>,
     modified: Option<SystemTime>,
     mode: Option<u32>,
-) -> Result<zip::write::FullFileOptions<'k>, String> {
+) -> Result<zip::write::FullFileOptions<'k, 'n>, String> {
     let mut options = base
         .last_modified_time(zip_datetime(modified))
         .into_full_options();
@@ -581,7 +581,7 @@ fn zip_member_options<'k>(
         let mut field = vec![1];
         field.extend_from_slice(&seconds.to_le_bytes());
         options
-            .add_extra_data(0x5455, field, false)
+            .add_extra_field(0x5455, field, false)
             .map_err(zip_text)?;
     }
     Ok(options)

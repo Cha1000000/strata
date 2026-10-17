@@ -122,6 +122,12 @@ fn archive_read_error(error: std::io::Error, decrypting: bool) -> std::io::Error
             ArchiveError::IncorrectPassword(MAYBE_BAD_PASSWORD.to_owned()),
         );
     }
+    // zip enforces the declared size itself; copy_member reports which member overran.
+    if error.kind() == ErrorKind::InvalidData
+        && error.to_string() == "File is larger than its declared uncompressed size"
+    {
+        return std::io::Error::from(ErrorKind::FileTooLarge);
+    }
     // TAR reports these malformed-header errors as Other, not InvalidData.
     let invalid_tar = error.kind() == ErrorKind::Other
         && matches!(
@@ -195,12 +201,12 @@ fn zip_member_modified(entry: &zip::read::ZipFile<'_, std::fs::File>) -> Option<
         zip::ExtraField::ExtendedTimestamp(stamp) => stamp
             .mod_time()
             .and_then(|seconds| unix_seconds(seconds as i32)),
-        zip::ExtraField::Ntfs(_) => None,
+        _ => None,
     });
     let ntfs = || {
         entry.extra_data_fields().find_map(|field| match field {
             zip::ExtraField::Ntfs(ntfs) => filetime(ntfs.mtime()),
-            zip::ExtraField::ExtendedTimestamp(_) => None,
+            _ => None,
         })
     };
     extended.or_else(ntfs).or_else(|| {
@@ -358,7 +364,7 @@ pub(super) fn extract_zip_from_archive(
             let mut entry = archive
                 .by_index_with_options(index, options)
                 .map_err(zip_error)?;
-            let name = entry.name().to_owned();
+            let name = entry.name().map_err(zip_error)?.into_owned();
             let declared_size = entry.size();
             let directory = entry.is_dir();
             let symlink = !directory && entry.is_symlink();
@@ -387,8 +393,8 @@ pub(super) fn extract_zip_from_archive(
     })();
     session.finish(result, || {
         (next_index..archive.len())
-            .filter_map(|index| archive.name_for_index(index))
-            .map(str::to_owned)
+            .filter_map(|index| archive.name_for_index(index)?.ok())
+            .map(Cow::into_owned)
             .collect()
     })
 }

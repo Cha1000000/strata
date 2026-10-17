@@ -31,6 +31,8 @@ use std::collections::{HashMap, HashSet};
 use std::rc::{Rc, Weak};
 use std::time::Duration;
 
+const SIZE_NOTICE_DURATION: Duration = Duration::from_millis(1200);
+
 pub(in crate::ui) type PlaybackHandoff = Rc<dyn Fn(&Location) -> Option<Duration>>;
 
 mod archive;
@@ -1219,6 +1221,33 @@ impl BrowserView {
             .mode_views
             .borrow_mut()
             .apply_resolved_icons_size(size);
+    }
+
+    /// Resizes Icons thumbnails; false outside Icons.
+    pub(in crate::ui) fn resize_icons_thumbnails(
+        &self,
+        change: super::browser_modes::ThumbnailResize,
+    ) -> bool {
+        // Released first: the slider's change reaches the mode views through preferences.
+        let target = self.state.mode_views.borrow().icons_thumbnail_scale();
+        let Some((scale, location)) = target else {
+            return false;
+        };
+        let size = change.apply(&scale, location.as_ref());
+        self.show_size_notice(&rust_i18n::t!("Thumbnail size: %{size}px", size = size));
+        true
+    }
+
+    pub(in crate::ui) fn set_text_size(&self, size: crate::ui::preferences::TextSize) {
+        super::preferences::PreferenceManager::shared().set_text_size(size);
+        self.show_size_notice(&rust_i18n::t!(
+            "Text size: %{size}px",
+            size = size.root_font_px()
+        ));
+    }
+
+    fn show_size_notice(&self, text: &str) {
+        super::notice::show_status(&self.state.overlay, text, SIZE_NOTICE_DURATION);
     }
 
     pub fn activate_focused(&self) {
