@@ -139,10 +139,7 @@ fn restorable_location(kind: &str, value: &str) -> Option<Location> {
     match kind {
         KIND_PATH => {
             let path = PathBuf::from(value);
-            if !path.is_absolute() || !path.is_dir() {
-                return None;
-            }
-            Some(Location::local(path))
+            path.is_absolute().then(|| Location::local(path))
         }
         KIND_URI => restorable_uri(value),
         _ => None,

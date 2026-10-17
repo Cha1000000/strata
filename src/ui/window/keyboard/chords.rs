@@ -36,6 +36,10 @@ pub(in crate::ui::window) enum GoTarget {
         location: Location,
         validate: bool,
     },
+    Folder {
+        location: Location,
+        missing: String,
+    },
     Missing(String),
 }
 
@@ -88,27 +92,21 @@ pub(in crate::ui::window) fn go_target(press: &KeyPress, pins: &[Location]) -> O
 }
 
 fn config_folder() -> Option<GoTarget> {
-    let path = home_directory().join(".config");
-    Some(if path.is_dir() {
-        GoTarget::Place {
-            location: Location::local(path),
-            validate: false,
-        }
-    } else {
-        GoTarget::Missing(crate::i18n::tr("No .config folder"))
+    Some(GoTarget::Folder {
+        location: Location::local(home_directory().join(".config")),
+        missing: crate::i18n::tr("No .config folder"),
     })
 }
 
 fn user_folder(directory: glib::UserDirectory, missing: &str) -> Option<GoTarget> {
-    Some(
-        match glib::user_special_dir(directory).filter(|path| path.is_dir()) {
-            Some(path) => GoTarget::Place {
-                location: Location::local(path),
-                validate: false,
-            },
-            None => GoTarget::Missing(crate::i18n::tr(missing)),
+    let missing = crate::i18n::tr(missing);
+    Some(match glib::user_special_dir(directory) {
+        Some(path) => GoTarget::Folder {
+            location: Location::local(path),
+            missing,
         },
-    )
+        None => GoTarget::Missing(missing),
+    })
 }
 
 impl Dispatcher {
@@ -191,6 +189,13 @@ impl Dispatcher {
                 } else {
                     browser.navigate_with_selection(location, true);
                 }
+            }
+            GoTarget::Folder { location, missing } => {
+                self.view.keyboard_navigation();
+                let shortcuts = self.shortcuts.clone();
+                super::super::open_checked(browser, location, move || {
+                    shortcuts.show_feedback(&missing);
+                });
             }
             GoTarget::Missing(message) => self.shortcuts.show_feedback(&message),
         }

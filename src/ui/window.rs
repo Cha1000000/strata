@@ -19,11 +19,11 @@ use gtk::{
 use crate::{
     adapters::{
         LocalFileSource, LocalOperationProvider, RevealRequest, location_for_file,
-        mount_can_unplug, volume_can_unplug,
+        mount_can_unplug, mount_lanes, probes, volume_can_unplug,
     },
     app::{Browser, BrowserEvent},
     model::Location,
-    services::sanitize_uri_credentials,
+    services::{LocationValidationError, sanitize_uri_credentials},
 };
 
 use super::{
@@ -320,7 +320,6 @@ pub(super) fn present_target(
     crate::metrics::mark_window_presented();
     if auto_navigate {
         let restore = restore_tabs && location.is_none();
-        let pending_location = location.unwrap_or_else(|| startup_location(&preference_manager));
         let idle_browser = browser.clone();
         glib::idle_add_local_once(move || {
             let started = std::time::Instant::now();
@@ -329,10 +328,14 @@ pub(super) fn present_target(
                     elapsed_ms = started.elapsed().as_millis() as u64,
                     "present tab session restored"
                 );
-            } else if selection.is_empty() {
-                idle_browser.navigate_location(pending_location);
             } else {
-                idle_browser.reveal_locations(pending_location, selection, properties);
+                match location {
+                    Some(location) if !selection.is_empty() => {
+                        idle_browser.reveal_locations(location, selection, properties);
+                    }
+                    Some(location) => idle_browser.navigate_location(location),
+                    None => open_default_folder(&idle_browser.browser(), &preference_manager),
+                }
             }
             tracing::debug!(
                 elapsed_ms = started.elapsed().as_millis() as u64,
@@ -4412,17 +4415,53 @@ pub(crate) fn default_save_folder() -> PathBuf {
     glib::user_special_dir(glib::UserDirectory::Downloads).unwrap_or_else(home_directory)
 }
 
-fn startup_location(manager: &PreferenceManager) -> Location {
-    let saved = manager.default_directory();
-    if let Some(path) = &saved
-        && path.is_dir()
-    {
-        return Location::local(path);
-    }
-    if saved.is_some() {
-        manager.set_default_directory(None);
-    }
-    Location::local(home_directory())
+fn open_checked(browser: &Rc<Browser>, location: Location, absent: impl FnOnce() + 'static) {
+    let Some(path) = location.native_path().map(PathBuf::from) else {
+        browser.navigate_location(location, true);
+        return;
+    };
+    let generation = browser.bump_navigation_generation();
+    let weak = Rc::downgrade(browser);
+    glib::MainContext::default().spawn_local(async move {
+        let gone = glib::future_with_timeout(mount_lanes::STALLED_AFTER, async {
+            match probes::folder(&path).await {
+                Err(LocationValidationError::NotDirectory) => true,
+                Err(LocationValidationError::Missing) => probes::folder_was_deleted(&path).await,
+                _ => false,
+            }
+        })
+        .await
+        .unwrap_or(false);
+        let Some(browser) = weak.upgrade() else {
+            return;
+        };
+        if browser.navigation_generation() != generation {
+            return;
+        }
+        if gone {
+            absent();
+        } else {
+            browser.navigate_location(location, true);
+        }
+    });
+}
+
+fn open_default_folder(browser: &Rc<Browser>, manager: &Rc<PreferenceManager>) {
+    let home = Location::local(home_directory());
+    let Some(saved) = manager.default_directory() else {
+        browser.navigate_location(home, true);
+        return;
+    };
+    let weak = Rc::downgrade(browser);
+    let manager = manager.clone();
+    open_checked(browser, Location::local(&saved), move || {
+        if manager.default_directory().as_ref() == Some(&saved) {
+            manager.set_default_directory(None);
+        }
+        if let Some(browser) = weak.upgrade() {
+            browser.navigate_location(home, true);
+        }
+    });
 }
 
 #[cfg(test)]

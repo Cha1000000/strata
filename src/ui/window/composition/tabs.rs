@@ -31,6 +31,7 @@ struct Tab {
     id: u64,
     content: Rc<WindowContent>,
     focus: RefCell<Option<glib::WeakRef<gtk::Widget>>>,
+    checking: RefCell<Option<Location>>,
 }
 
 pub(in crate::ui::window) struct TabWindow {
@@ -170,8 +171,16 @@ impl TabWindow {
         if self.blocked() {
             return;
         }
-        let location = self.active_browser().browser().active_location();
-        self.add(location.or_else(|| Some(super::super::startup_location(&self.preferences))));
+        match self.active_browser().browser().active_location() {
+            Some(location) => self.add(Some(location)),
+            None => {
+                self.add(None);
+                super::super::open_default_folder(
+                    &self.active_browser().browser(),
+                    &self.preferences,
+                );
+            }
+        }
     }
 
     fn open_in_new_tab(self: &Rc<Self>, location: Location) {
@@ -204,6 +213,7 @@ impl TabWindow {
             id,
             content: content.clone(),
             focus: RefCell::new(None),
+            checking: RefCell::new(None),
         });
         self.stack
             .add_named(&content.overlay, Some(&id.to_string()));
@@ -294,6 +304,16 @@ impl TabWindow {
             window.close();
             return;
         }
+        drop(tabs);
+        self.discard(id);
+    }
+
+    /// Callers make sure another tab remains and no modal blocks selecting it.
+    fn discard(&self, id: u64) {
+        let tabs = self.tabs.borrow();
+        let Some(index) = tabs.iter().position(|tab| tab.id == id) else {
+            return;
+        };
         let tab = tabs[index].clone();
         let next = tabs[if index + 1 < tabs.len() {
             index + 1
@@ -477,7 +497,8 @@ impl TabWindow {
         let mut locations = Vec::with_capacity(tabs.len());
         let mut active = 0;
         for tab in tabs.iter() {
-            let Some(location) = tab.content.browser.browser().active_location() else {
+            let location = tab.content.browser.browser().active_location();
+            let Some(location) = location.or_else(|| tab.checking.borrow().clone()) else {
                 continue;
             };
             if tab.id == self.active.get() {
@@ -511,13 +532,44 @@ impl TabWindow {
             return;
         }
         self.restoring.set(true);
-        self.active_browser()
-            .navigate_location(session.tabs[0].clone());
-        for location in session.tabs.iter().skip(1) {
-            self.add(Some(location.clone()));
+        let active = session.active.min(session.tabs.len() - 1);
+        for (index, location) in session.tabs.into_iter().enumerate() {
+            if index > 0 {
+                self.add(None);
+            }
+            self.reopen(&self.active_tab(), location);
         }
-        self.select_index(session.active.min(session.tabs.len() - 1));
+        self.select_index(active);
         self.restoring.set(false);
+    }
+
+    fn reopen(self: &Rc<Self>, tab: &Tab, location: Location) {
+        if location.native_path().is_none() {
+            tab.content.browser.navigate_location(location);
+            return;
+        }
+        self.strip.label(tab.id, &tab_label(Some(&location)));
+        tab.checking.replace(Some(location.clone()));
+        let weak = Rc::downgrade(self);
+        let id = tab.id;
+        super::super::open_checked(&tab.content.browser.browser(), location, move || {
+            let Some(state) = weak.upgrade() else {
+                return;
+            };
+            let tab = state.tabs.borrow().iter().find(|tab| tab.id == id).cloned();
+            let Some(tab) = tab else {
+                return;
+            };
+            tab.checking.take();
+            if state.tabs.borrow().len() > 1 && !state.blocked() {
+                state.discard(id);
+            } else {
+                super::super::open_default_folder(
+                    &tab.content.browser.browser(),
+                    &state.preferences,
+                );
+            }
+        });
     }
 
     fn handle_key(self: &Rc<Self>, press: &KeyPress) -> glib::Propagation {
