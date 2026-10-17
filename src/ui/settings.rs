@@ -1901,26 +1901,17 @@ fn update_check_row_with(
     let row_status = status.clone();
     let row_pending_download = pending_download.clone();
     button.connect_clicked(move |button| {
-        if update_method == UpdateMethod::Aur && managed_update_available.get() {
-            match launch_aur_update() {
-                Ok(message) => status.set_text(&message),
-                Err(error) => status.set_text(&rust_i18n::t!(
-                    "Couldn’t open AUR update: %{error}",
-                    error = error
-                )),
-            }
-            return;
-        }
-        if update_method == UpdateMethod::Omarchy && managed_update_available.get() {
-            match launch_omarchy_update() {
-                Ok(()) => {
-                    status.set_text(&crate::i18n::tr("Omarchy Update opened in your terminal."))
-                }
-                Err(error) => status.set_text(&rust_i18n::t!(
-                    "Couldn’t open Omarchy Update: %{error}",
-                    error = error
-                )),
-            }
+        if matches!(update_method, UpdateMethod::Aur | UpdateMethod::Omarchy)
+            && managed_update_available.get()
+        {
+            let status = status.clone();
+            glib::MainContext::default().spawn_local(async move {
+                status.set_text(
+                    &launch_managed_update(update_method)
+                        .await
+                        .unwrap_or_else(|error| error),
+                );
+            });
             return;
         }
         if installed.get() {
@@ -2578,35 +2569,28 @@ fn build_update_dialog(
     let application = parent.application();
     let dialog_status = status.clone();
     action.connect_clicked(move |button| {
-        if update_method == UpdateMethod::Aur {
-            if aur_action == "Close" {
-                dismiss_modal_layer(&action_layer, &action_overlay, action_root.as_ref());
-                button.set_sensitive(false);
-                return;
-            }
-            match launch_aur_update() {
-                Ok(_) => {
-                    dismiss_modal_layer(&action_layer, &action_overlay, action_root.as_ref());
-                    button.set_sensitive(false);
-                }
-                Err(error) => status.set_text(&rust_i18n::t!(
-                    "Couldn’t open AUR update: %{error}",
-                    error = error
-                )),
-            }
+        if update_method == UpdateMethod::Aur && aur_action == "Close" {
+            dismiss_modal_layer(&action_layer, &action_overlay, action_root.as_ref());
+            button.set_sensitive(false);
             return;
         }
-        if update_method == UpdateMethod::Omarchy {
-            match launch_omarchy_update() {
-                Ok(()) => {
-                    dismiss_modal_layer(&action_layer, &action_overlay, action_root.as_ref());
-                    button.set_sensitive(false);
+        if matches!(update_method, UpdateMethod::Aur | UpdateMethod::Omarchy) {
+            button.set_sensitive(false);
+            let (layer, overlay, root) = (
+                action_layer.clone(),
+                action_overlay.clone(),
+                action_root.clone(),
+            );
+            let (status, button) = (status.clone(), button.clone());
+            glib::MainContext::default().spawn_local(async move {
+                match launch_managed_update(update_method).await {
+                    Ok(_) => dismiss_modal_layer(&layer, &overlay, root.as_ref()),
+                    Err(error) => {
+                        status.set_text(&error);
+                        button.set_sensitive(true);
+                    }
                 }
-                Err(error) => status.set_text(&rust_i18n::t!(
-                    "Couldn’t open Omarchy Update: %{error}",
-                    error = error
-                )),
-            }
+            });
             return;
         }
         if update_method == UpdateMethod::Pacman {
@@ -2779,17 +2763,44 @@ fn aur_update_command(terminal: &terminal::Terminal, helper: &str, package: &str
     terminal.exec_command(&[helper, "-Syu", package])
 }
 
-fn launch_aur_update() -> Result<String, String> {
+async fn launch_managed_update(method: UpdateMethod) -> Result<String, String> {
+    if method == UpdateMethod::Aur {
+        return launch_aur_update().await.map_err(|error| {
+            rust_i18n::t!("Couldn’t open AUR update: %{error}", error = error).into_owned()
+        });
+    }
+    launch_omarchy_update()
+        .await
+        .map(|()| crate::i18n::tr("Omarchy Update opened in your terminal."))
+        .map_err(|error| {
+            rust_i18n::t!("Couldn’t open Omarchy Update: %{error}", error = error).into_owned()
+        })
+}
+
+async fn launch_aur_update() -> Result<String, String> {
     let managed = InstallSource::detect()
         .managed()
         .ok_or_else(|| crate::i18n::tr("missing package metadata"))?;
-    if let Some((helper, package)) = managed.aur_update_target() {
-        let Some(terminal) = terminal::Terminal::resolve() else {
-            return Err(terminal::no_terminal_message());
-        };
-        return terminal::spawn_reaped(aur_update_command(&terminal, helper, package))
-            .map(|()| crate::i18n::tr("AUR update opened in your terminal."))
-            .map_err(|error| terminal.launch_failure(&error));
+    launch_aur_update_with(managed, || managed.aur_update_target()).await
+}
+
+async fn launch_aur_update_with(
+    managed: &'static ManagedInstall,
+    find_helper: impl FnOnce() -> Option<(&'static str, &'static str)> + Send + 'static,
+) -> Result<String, String> {
+    let target = gio::spawn_blocking(find_helper)
+        .await
+        .map_err(|_| crate::i18n::tr(crate::services::UNEXPECTED_SYSTEM_ERROR))?;
+    if let Some((helper, package)) = target {
+        return terminal::spawn_reaped(move || {
+            let terminal =
+                terminal::Terminal::resolve().ok_or_else(terminal::no_terminal_message)?;
+            aur_update_command(&terminal, helper, package)
+                .spawn()
+                .map_err(|error| terminal.launch_failure(&error))
+        })
+        .await
+        .map(|()| crate::i18n::tr("AUR update opened in your terminal."));
     }
     let package = managed
         .package()
@@ -2804,24 +2815,26 @@ fn omarchy_update_command(terminal: &terminal::Terminal) -> Command {
     terminal.exec_command(&["omarchy", "update"])
 }
 
-fn launch_omarchy_update() -> Result<(), String> {
-    if let Some(command) = terminal::omarchy_presentation_command(
-        std::env::var_os("PATH").as_deref(),
-        "omarchy-update",
-    ) {
-        match terminal::spawn_reaped(command) {
-            Ok(()) => return Ok(()),
-            Err(error) => tracing::warn!(
-                %error,
-                "Omarchy presentation launcher failed to start; falling back to a plain terminal"
-            ),
+async fn launch_omarchy_update() -> Result<(), String> {
+    terminal::spawn_reaped(|| {
+        if let Some(mut command) = terminal::omarchy_presentation_command(
+            std::env::var_os("PATH").as_deref(),
+            "omarchy-update",
+        ) {
+            match command.spawn() {
+                Ok(child) => return Ok(child),
+                Err(error) => tracing::warn!(
+                    %error,
+                    "Omarchy presentation launcher failed to start; falling back to a plain terminal"
+                ),
+            }
         }
-    }
-    let Some(terminal) = terminal::Terminal::resolve() else {
-        return Err(terminal::no_terminal_message());
-    };
-    terminal::spawn_reaped(omarchy_update_command(&terminal))
-        .map_err(|error| terminal.launch_failure(&error))
+        let terminal = terminal::Terminal::resolve().ok_or_else(terminal::no_terminal_message)?;
+        omarchy_update_command(&terminal)
+            .spawn()
+            .map_err(|error| terminal.launch_failure(&error))
+    })
+    .await
 }
 
 fn or_unknown(value: Option<String>) -> String {

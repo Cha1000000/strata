@@ -4,7 +4,7 @@ use gtk::gdk;
 
 use super::super::*;
 use super::{FakeInstaller, GUARD_REJECTION, offered_request, page_text, wait_until};
-use crate::test_support::gtk_test;
+use crate::test_support::{gtk_test, gtk_test_with_env};
 
 #[derive(Clone, Copy, Debug)]
 enum Dismisser {
@@ -93,12 +93,13 @@ fn release() -> ReleaseMetadata {
 }
 
 fn open_dialog(installer: &FakeInstaller) -> (gtk::Window, UpdateDialog) {
-    open_dialog_for(installer, &release())
+    open_dialog_for(installer, &release(), UpdateMethod::InPlace)
 }
 
 fn open_dialog_for(
     installer: &FakeInstaller,
     release: &ReleaseMetadata,
+    update_method: UpdateMethod,
 ) -> (gtk::Window, UpdateDialog) {
     PreferenceManager::shared().set_release_channel(Channel::Stable);
     let overlay = gtk::Overlay::new();
@@ -117,7 +118,7 @@ fn open_dialog_for(
         release,
         offered_request(),
         install_guard(),
-        UpdateMethod::InPlace,
+        update_method,
         installer.launcher(),
     )
     .expect("update dialog");
@@ -405,7 +406,7 @@ fn update_dialog_notes_hide_html_comments() {
                     ..release()
                 };
                 let installer = FakeInstaller::default();
-                let (window, dialog) = open_dialog_for(&installer, &release);
+                let (window, dialog) = open_dialog_for(&installer, &release, UpdateMethod::InPlace);
 
                 let text = page_text(dialog.layer.upcast_ref());
                 assert!(
@@ -415,6 +416,65 @@ fn update_dialog_notes_hide_html_comments() {
                 assert!(!text.contains("<!--"), "comment shown in {text:?}");
                 window.destroy();
             }
+        },
+    );
+}
+
+const NO_TERMINAL: [(&str, &str); 2] =
+    [("PATH", "/nonexistent/strata-test-path"), ("TERMINAL", "")];
+
+#[test]
+fn omarchy_update_without_a_terminal_reports_and_reenables_the_action() {
+    gtk_test_with_env(
+        "ui::settings::tests::update_dialog::omarchy_update_without_a_terminal_reports_and_reenables_the_action",
+        NO_TERMINAL,
+        || {
+            let installer = FakeInstaller::default();
+            let (window, dialog) = open_dialog_for(&installer, &release(), UpdateMethod::Omarchy);
+
+            dialog.action.emit_clicked();
+
+            assert!(!dialog.action.is_sensitive(), "one launch at a time");
+            wait_until("the launch to fail", || {
+                dialog.status.text().contains("No terminal emulator")
+            });
+            let status = dialog.status.text();
+            assert!(
+                status.starts_with("Couldn’t open Omarchy Update"),
+                "{status}"
+            );
+            assert!(dialog.action.is_sensitive(), "the action retries");
+            assert!(dialog.layer.parent().is_some(), "the dialog stays open");
+            assert!(installer.requests().is_empty());
+            window.destroy();
+        },
+    );
+}
+
+#[test]
+fn aur_update_looks_for_its_helper_off_the_ui_thread() {
+    gtk_test_with_env(
+        "ui::settings::tests::update_dialog::aur_update_looks_for_its_helper_off_the_ui_thread",
+        NO_TERMINAL,
+        || {
+            let managed: &'static ManagedInstall = Box::leak(Box::default());
+            let answer = Rc::new(RefCell::new(None));
+            let launched = answer.clone();
+            glib::MainContext::default().spawn_local(async move {
+                let result = launch_aur_update_with(managed, || {
+                    crate::util::ui_thread::assert_off();
+                    Some(("paru", "strata-bin"))
+                })
+                .await;
+                launched.replace(Some(result));
+            });
+
+            wait_until("the AUR launch to answer", || answer.borrow().is_some());
+            let error = answer
+                .take()
+                .expect("an answer")
+                .expect_err("no terminal to open");
+            assert!(error.contains("No terminal emulator"), "{error}");
         },
     );
 }

@@ -150,7 +150,7 @@ pub(crate) fn io_error_message(error: &std::io::Error) -> String {
     }
 }
 
-const UNEXPECTED_SYSTEM_ERROR: &str = "An unexpected system error occurred";
+pub(crate) const UNEXPECTED_SYSTEM_ERROR: &str = "An unexpected system error occurred";
 
 pub(crate) const INVALID_NAME_REASON: &str = "The name isn\u{2019}t valid at this location";
 
