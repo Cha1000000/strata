@@ -331,6 +331,9 @@ fn names_a_fat_target_takes_for_one_are_numbered_and_reported() -> Result<(), Bo
 fn top_level_items_a_destination_takes_for_an_earlier_one_are_numbered_and_reported()
 -> Result<(), Box<dyn Error>> {
     let _serial = serial()?;
+    // Multigrain times, so a move reads its just-written sources only to
+    // copy them, not again to compare them.
+    let _kernel = KernelGuard::set(Some((6, 13, 0)));
     let casefolded = || Quirks {
         case_insensitive: true,
         ..Quirks::ext4()
