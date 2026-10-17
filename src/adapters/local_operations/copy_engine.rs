@@ -44,6 +44,7 @@ use super::{
     },
     fs_ops::{Entry, EntryStat, FsOps, fs},
     io_error,
+    leftovers::{self, Deadline},
     mount_profile::{FolderRules, NamePolicy, Site, known_mount},
     names::{Taken, may_be_refused, numbered_names, stricter_names},
     native_fs::{
@@ -70,7 +71,7 @@ pub(super) use barrier::Barrier;
 use data::Data;
 #[cfg(test)]
 pub(super) use data::set_kernel_for_test;
-pub(super) use manifest::{Manifest, Ownership, Published, Unlinks, sleep};
+pub(super) use manifest::{Manifest, Ownership, Published, Unlinks, now, sleep};
 use manifest::{Placed, Removed};
 #[cfg(test)]
 pub(super) use manifest::{now as clock_for_test, set_clock_for_test, set_placed_entries_for_test};
@@ -669,6 +670,7 @@ async fn following<T: Send + 'static>(
             counters,
             true,
             options,
+            Deadline::default(),
         );
         let value = work(&copy, &source).map_err(|failure| failure.into_error(&source.name));
         let manifest = source.recorded_in.map(|root| {
@@ -715,6 +717,7 @@ pub(super) async fn copy_from_stage(
                 durable,
                 ..Options::default()
             },
+            Deadline::default(),
         );
         let parent = source.parent.clone();
         from_stage(&copy, &source, identity, &parent, &name)
@@ -1248,7 +1251,8 @@ impl Created {
         lock(&self.0).push((path, identity));
     }
 
-    fn remove(&self, fs: &dyn FsOps, root: &Root, mount: &Mount) -> Result<(), glib::Error> {
+    fn remove(&self, copy: &Copy, root: &Root, mount: &Mount) -> Result<(), glib::Error> {
+        let fs = copy.fs;
         let root_entry = Entry::new(&*root.parent, &root.name);
         let dir = match fs.open_dir(root_entry) {
             Ok(dir) => dir,
@@ -1282,22 +1286,31 @@ impl Created {
                     .ok()
                     .map(|fd| (parent, fd));
             }
-            if let Some((_, fd)) = &folder {
-                let flags = if identity.kind == FileType::Directory {
-                    AtFlags::REMOVEDIR
-                } else {
-                    AtFlags::empty()
-                };
-                placement::remove_if_unchanged(fs, Entry::new(fd, name), *identity, flags);
+            let Some((_, fd)) = &folder else {
+                continue;
+            };
+            let entry = Entry::new(fd, name);
+            if identity.kind != FileType::Directory {
+                placement::remove_if_unchanged(fs, entry, *identity, AtFlags::empty());
+                continue;
+            }
+            let unchanged = || {
+                fs.stat(entry, true)
+                    .is_ok_and(|current| current.identity == *identity)
+            };
+            if unchanged() {
+                let _ = copy.remove_folder(entry, &unchanged);
             }
         }
         drop((folder, dir));
-        remove_own(
-            fs,
-            root_entry,
-            |current| mount.may_be(root.identity, current),
-            AtFlags::REMOVEDIR,
-        )
+        let made = |current: &EntryStat| mount.may_be(root.identity, current);
+        let unchanged = || {
+            fs.stat(root_entry, true)
+                .is_ok_and(|current| made(&current))
+        };
+        remove_own(fs, root_entry, made, |at| {
+            copy.remove_folder(at, &unchanged)
+        })
     }
 }
 
@@ -1333,7 +1346,7 @@ fn direct_folder(
         .map(|_| copy.created_ownership(identity, lock(&created.0).clone()))
         .map_err(|failure| {
             let mount = Mount::new(fs, parent.as_fd());
-            let removed = created.remove(fs, &root, &mount);
+            let removed = created.remove(copy, &root, &mount);
             copy.after_cleanup(failure, removed)
         })
 }
@@ -1569,16 +1582,17 @@ pub(super) fn holds_no_links(error: Errno) -> bool {
     error == Errno::NOSYS || is_unsupported(error)
 }
 
-fn remove_own(
+fn remove_own<'a>(
     fs: &dyn FsOps,
-    entry: Entry<'_>,
+    entry: Entry<'a>,
     made: impl FnOnce(&EntryStat) -> bool,
-    flags: AtFlags,
+    remove: impl FnOnce(Entry<'a>) -> Result<(), leftovers::Refused>,
 ) -> Result<(), glib::Error> {
     match fs.stat(entry, true) {
-        Ok(current) if made(&current) => match fs.unlink(entry, flags) {
-            Ok(()) | Err(Errno::NOENT) => Ok(()),
-            Err(error) => Err(io_error(os_error_detail(error))),
+        Ok(current) if made(&current) => match remove(entry) {
+            Ok(()) | Err(leftovers::Refused::Os(Errno::NOENT)) => Ok(()),
+            Err(leftovers::Refused::Changed(_)) => Err(placement_error(PlaceError::Changed)),
+            Err(refused) => Err(io_error(os_error_detail(refused.errno()))),
         },
         Ok(_) => Err(placement_error(PlaceError::Changed)),
         Err(Errno::NOENT) => Ok(()),
@@ -1695,6 +1709,7 @@ struct Copy {
     left: Mutex<Left>,
     copies: Mutex<Vec<Published>>,
     written: Mutex<HashMap<(u64, u64), (LocalFileIdentity, manifest::State)>>,
+    leftovers: Deadline,
 }
 
 impl Copy {
@@ -1705,6 +1720,7 @@ impl Copy {
         progress: Arc<SharedProgress>,
         counted: bool,
         options: Options,
+        leftovers: Deadline,
     ) -> Arc<Self> {
         Arc::new(Self {
             fs,
@@ -1721,6 +1737,7 @@ impl Copy {
             left: Mutex::default(),
             copies: Mutex::default(),
             written: Mutex::default(),
+            leftovers,
         })
     }
 
@@ -1757,7 +1774,16 @@ impl Copy {
                 durable: self.durable,
                 ..Options::default()
             },
+            self.leftovers.clone(),
         )
+    }
+
+    fn remove_folder(
+        &self,
+        at: Entry<'_>,
+        unchanged: &dyn Fn() -> bool,
+    ) -> Result<(), leftovers::Refused> {
+        leftovers::remove_folder(self.fs, at, &self.leftovers, &|| false, unchanged)
     }
 
     /// Forced where the mount caches attributes: a move records the source from this stat.
@@ -1843,6 +1869,7 @@ impl Copy {
             self.progress.clone(),
             self.counted,
             options,
+            self.leftovers.clone(),
         )
     }
 
@@ -2181,6 +2208,7 @@ impl Copy {
             roots,
             Arc::new(AtomicBool::new(false)),
             workers,
+            &self.leftovers,
         )
         .map_err(io_error)
     }
@@ -2273,7 +2301,7 @@ fn open_after_deferred_close(
     };
     let mut wait = deferred_close::Wait::after(deferred);
     loop {
-        match wait.pause(cancelled) {
+        match wait.pause(&|| cancelled.load(Ordering::Acquire)) {
             Pause::Retry => {}
             Pause::Spent => return Err(open_failure(at.name, Errno::INVAL)),
             Pause::Cancelled => return Err(Failure::Cancelled),
@@ -2749,11 +2777,15 @@ impl<'a> FileCopy<'a> {
     }
 
     fn remove_made(&self, name: &OsStr, identity: LocalFileIdentity) -> Result<(), glib::Error> {
+        let fs = self.copy.fs;
         remove_own(
-            self.copy.fs,
+            fs,
             self.at(name),
             |current| current.identity == identity,
-            AtFlags::empty(),
+            |at| {
+                fs.unlink(at, AtFlags::empty())
+                    .map_err(leftovers::Refused::Os)
+            },
         )
     }
 

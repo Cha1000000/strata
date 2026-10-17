@@ -7,7 +7,7 @@ use std::{
 
 use rustix::io::Errno;
 
-use super::fs_quirks::{NameOpens, Op, Support};
+use super::fs_quirks::{NameOpens, Op, Support, hold};
 use super::*;
 use crate::services::{KeptCause, KeptItem, SpecialKind, TransferReport};
 
@@ -1801,6 +1801,65 @@ fn a_source_entry_that_cannot_be_deleted_is_kept_with_the_reason() -> Result<(),
         reported(&events).kept,
         [kept(child, KeptCause::Undeletable(reason))]
     );
+    Ok(())
+}
+
+#[test]
+fn a_moved_folder_goes_once_another_program_closes_its_file_within_the_mount_s_wait()
+-> Result<(), Box<dyn Error>> {
+    let _serial = serial()?;
+    for swapped in [false, true] {
+        let root = tempfile::tempdir()?;
+        let source_dir = root.path().join("source");
+        let folder = source_dir.join("folder");
+        let moved = source_dir.join("folder.moved");
+        fs::create_dir_all(&folder)?;
+        fs::write(folder.join("open.txt"), b"open elsewhere")?;
+        let held = Arc::new(std::sync::Mutex::new(None));
+        let release = held.clone();
+        let (live, aside) = (folder.clone(), moved.clone());
+        let meanwhile: super::fs_quirks::Racer = if swapped {
+            Box::new(move || {
+                fs::rename(&live, &aside).expect("move the folder");
+                fs::create_dir(&live).expect("make another folder");
+            })
+        } else {
+            Box::new(move || drop(release.lock().expect("the hold").take()))
+        };
+        let _source = FsQuirks::install(
+            &source_dir,
+            Quirks {
+                after: vec![(Op::Unlink, "folder", 0, meanwhile)],
+                ..Quirks::nfs42()
+            },
+        );
+        *held.lock().map_err(|_| "the hold")? = Some(hold(&folder.join("open.txt")));
+        let destination = root.path().join("destination");
+        fs::create_dir_all(&destination)?;
+        let _destination = FsQuirks::install(&destination, Quirks::default());
+
+        let (_operation, events) =
+            paste_move(1590, &destination, &folder, TransferConflict::FailIfExists);
+        pump_until_transfer(&events);
+
+        assert!(matches!(
+            terminal_transfer(&events.borrow()),
+            Some(OperationEvent::Pasted { .. })
+        ));
+        assert_eq!(
+            fs::read(destination.join("folder/open.txt"))?,
+            b"open elsewhere"
+        );
+        let report = reported(&events);
+        if swapped {
+            assert_eq!(report.kept, [kept(folder.clone(), KeptCause::Changed)]);
+            assert!(names(&folder)?.is_empty());
+            assert!(moved.is_dir());
+        } else {
+            assert!(!folder.exists());
+            assert!(report.kept.is_empty(), "{:?}", report.kept);
+        }
+    }
     Ok(())
 }
 

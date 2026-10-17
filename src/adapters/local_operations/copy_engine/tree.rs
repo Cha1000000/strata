@@ -41,6 +41,7 @@ use crate::{
             cancelled_local_operation,
             fs_ops::{Entry, EntryStat, FsOps},
             io_error,
+            leftovers::Refused,
             mount_profile::{FolderRules, Site, crosses},
             names::{Key, PlanEntry, Planned, numbered_names, plan_names},
             native_fs::{LocalFileIdentity, compare, os_error_detail},
@@ -1673,14 +1674,17 @@ impl Place {
         } = self;
         drop(opened);
         let stage = Entry::new(&*live, &name);
-        let removed = match fs.stat(stage, false) {
-            Ok(current) if current.identity == identity => {
-                match fs.unlink(stage, AtFlags::REMOVEDIR) {
-                    Ok(()) | Err(Errno::NOENT) => Ok(()),
-                    Err(error) => Err(error),
-                }
+        let unchanged = || {
+            fs.stat(stage, false)
+                .is_ok_and(|current| current.identity == identity)
+        };
+        let removed = if unchanged() {
+            match tree.copy.remove_folder(stage, &unchanged) {
+                Ok(()) | Err(Refused::Os(Errno::NOENT) | Refused::Changed(_)) => Ok(()),
+                Err(refused) => Err(refused.errno()),
             }
-            _ => Ok(()),
+        } else {
+            Ok(())
         };
         tree.settle_stage(identity);
         removed

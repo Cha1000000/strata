@@ -11,6 +11,7 @@ use crate::{
 };
 use gtk::{gio, glib, prelude::*};
 use std::{
+    cell::Cell,
     collections::HashSet,
     ffi::{OsStr, OsString},
     future::Future,
@@ -27,6 +28,7 @@ use super::{
     MAX_LOCAL_IO_WORKERS, await_cancellable, cancelled_event, deletion_error_message,
     deletion_error_summary, deletion_undone_when_cancelled, fs_ops, io_error,
     is_trash_unsupported_failure, join_local_tasks,
+    leftovers::{self, Deadline, Refused},
     native_fs::{
         LocalFileIdentity, local_directory_children, open_local_parent_directory, os_error_detail,
         retry_local_open,
@@ -282,12 +284,14 @@ pub(super) enum LocalDeleteJob {
         expected: Option<LocalFileIdentity>,
         guard: Option<Arc<LocalDeleteGuard>>,
         completion: Option<Arc<Group<LocalDeleteJob>>>,
+        deadline: Deadline,
     },
     RemoveDirectory {
         parent: Arc<OwnedFd>,
         name: OsString,
         handle: Arc<OwnedFd>,
         completion: Option<Arc<Group<LocalDeleteJob>>>,
+        deadline: Deadline,
     },
 }
 
@@ -319,6 +323,7 @@ pub(super) fn process_local_delete_job(queue: &LocalDeleteQueue, job: LocalDelet
             expected,
             guard,
             completion,
+            deadline,
         } => {
             if queue.is_stopped() {
                 return;
@@ -345,7 +350,9 @@ pub(super) fn process_local_delete_job(queue: &LocalDeleteQueue, job: LocalDelet
                 LocalDeleteStep::Directory { handle, children } => {
                     let handle = Arc::new(handle);
                     if children.is_empty() {
-                        remove_local_delete_directory(queue, parent, name, handle, completion);
+                        remove_local_delete_directory(
+                            queue, parent, name, handle, completion, &deadline,
+                        );
                         return;
                     }
                     let guard = Arc::new(LocalDeleteGuard {
@@ -360,6 +367,7 @@ pub(super) fn process_local_delete_job(queue: &LocalDeleteQueue, job: LocalDelet
                             name,
                             handle: handle.clone(),
                             completion,
+                            deadline: deadline.clone(),
                         },
                     );
                     for child in children {
@@ -369,6 +377,7 @@ pub(super) fn process_local_delete_job(queue: &LocalDeleteQueue, job: LocalDelet
                             expected: None,
                             guard: Some(guard.clone()),
                             completion: Some(group.clone()),
+                            deadline: deadline.clone(),
                         });
                     }
                 }
@@ -379,7 +388,8 @@ pub(super) fn process_local_delete_job(queue: &LocalDeleteQueue, job: LocalDelet
             name,
             handle,
             completion,
-        } => remove_local_delete_directory(queue, parent, name, handle, completion),
+            deadline,
+        } => remove_local_delete_directory(queue, parent, name, handle, completion, &deadline),
     }
 }
 
@@ -389,6 +399,7 @@ pub(super) fn remove_local_delete_directory(
     name: OsString,
     handle: Arc<OwnedFd>,
     completion: Option<Arc<Group<LocalDeleteJob>>>,
+    deadline: &Deadline,
 ) {
     if queue.is_stopped() {
         return;
@@ -399,21 +410,26 @@ pub(super) fn remove_local_delete_directory(
         queue.fail(error);
         return;
     }
-    if let Err(error) = fs().unlink(
-        Entry::new(parent.as_ref(), &name),
-        rustix::fs::AtFlags::REMOVEDIR,
-    ) {
-        queue.fail(
+    let changed = Cell::new(None);
+    let unchanged = || {
+        ensure_local_delete_target_unchanged(parent.as_ref(), &name, handle.as_ref())
+            .map_err(|error| changed.set(Some(error)))
+            .is_ok()
+    };
+    let folder = Entry::new(parent.as_ref(), &name);
+    match leftovers::remove_folder(fs(), folder, deadline, &|| queue.is_stopped(), &unchanged) {
+        Ok(()) => queue.complete(completion),
+        Err(Refused::Stopped(_)) => {}
+        Err(Refused::Changed(_)) => queue.fail(changed.take().unwrap_or_default()),
+        Err(refused) => queue.fail(
             rust_i18n::t!(
                 "Could not delete “%{name}”: %{error}",
                 name = name.to_string_lossy(),
-                error = os_error_detail(error)
+                error = os_error_detail(refused.errno())
             )
             .into_owned(),
-        );
-        return;
+        ),
     }
-    queue.complete(completion);
 }
 
 pub(super) fn local_device_is_rotational(fd: impl AsFd) -> Option<bool> {
@@ -487,6 +503,7 @@ pub(super) fn parallel_delete_local_blocking_with_workers(
     roots: Vec<PinnedEntry>,
     cancelled: Arc<AtomicBool>,
     worker_count: usize,
+    deadline: &Deadline,
 ) -> Result<(), String> {
     let worker_count = worker_count.max(1);
     let queue = Arc::new(LocalDeleteQueue::new(cancelled.clone()));
@@ -497,6 +514,7 @@ pub(super) fn parallel_delete_local_blocking_with_workers(
             expected: root.identity,
             guard: None,
             completion: None,
+            deadline: deadline.clone(),
         });
     }
 
@@ -519,17 +537,18 @@ pub(super) fn parallel_delete_local(
     roots: Vec<PinnedEntry>,
     cancellable: gio::Cancellable,
 ) -> Pin<Box<dyn Future<Output = Result<(), glib::Error>>>> {
-    parallel_delete_local_with_worker_count(roots, cancellable, None)
+    parallel_delete_local_with_worker_count(roots, cancellable, None, Deadline::default())
 }
 
 pub(super) fn parallel_delete_local_with_worker_count(
     roots: Vec<PinnedEntry>,
     cancellable: gio::Cancellable,
     worker_count: Option<usize>,
+    deadline: Deadline,
 ) -> Pin<Box<dyn Future<Output = Result<(), glib::Error>>>> {
     parallel_delete_local_with(roots, cancellable, move |roots, cancelled| {
         let worker_count = worker_count.unwrap_or_else(|| local_delete_worker_count(&roots));
-        parallel_delete_local_blocking_with_workers(roots, cancelled, worker_count)
+        parallel_delete_local_blocking_with_workers(roots, cancelled, worker_count, &deadline)
     })
 }
 
@@ -555,6 +574,7 @@ pub(super) fn parallel_delete_local_with(
 }
 
 /// Traverse pinned directories so a renamed component cannot redirect deletion.
+#[cfg(test)]
 pub(super) fn permanently_delete_local(
     parent: OwnedFd,
     name: OsString,
@@ -576,7 +596,13 @@ pub(super) fn permanently_delete_local_path_if_unchanged(
     expected: Option<LocalFileIdentity>,
     cancellable: gio::Cancellable,
 ) -> Pin<Box<dyn Future<Output = Result<(), glib::Error>>>> {
-    permanently_delete_local_path_if_unchanged_with_worker_count(path, expected, cancellable, None)
+    permanently_delete_local_path_if_unchanged_with_worker_count(
+        path,
+        expected,
+        cancellable,
+        None,
+        Deadline::default(),
+    )
 }
 
 pub(super) fn permanently_delete_local_path_if_unchanged_with_worker_count(
@@ -584,6 +610,7 @@ pub(super) fn permanently_delete_local_path_if_unchanged_with_worker_count(
     expected: Option<LocalFileIdentity>,
     cancellable: gio::Cancellable,
     worker_count: Option<usize>,
+    deadline: Deadline,
 ) -> Pin<Box<dyn Future<Output = Result<(), glib::Error>>>> {
     Box::pin(async move {
         let Some(parent_path) = path.parent().map(Path::to_path_buf) else {
@@ -596,20 +623,17 @@ pub(super) fn permanently_delete_local_path_if_unchanged_with_worker_count(
         };
         let parent =
             run_local_delete_step(move || open_local_parent_directory(&parent_path)).await?;
-        if let Some(worker_count) = worker_count {
-            parallel_delete_local_with_worker_count(
-                vec![PinnedEntry {
-                    parent: Arc::new(parent),
-                    name,
-                    identity: expected,
-                }],
-                cancellable,
-                Some(worker_count),
-            )
-            .await
-        } else {
-            permanently_delete_local(parent, name, expected, cancellable).await
-        }
+        parallel_delete_local_with_worker_count(
+            vec![PinnedEntry {
+                parent: Arc::new(parent),
+                name,
+                identity: expected,
+            }],
+            cancellable,
+            worker_count,
+            deadline,
+        )
+        .await
     })
 }
 
@@ -659,6 +683,7 @@ pub(super) fn permanently_delete_maybe_local_with_worker_count(
     directory: bool,
     cancellable: gio::Cancellable,
     worker_count: Option<usize>,
+    deadline: Deadline,
 ) -> Pin<Box<dyn Future<Output = Result<(), glib::Error>>>> {
     if file.is_native()
         && let Some(path) = file.path()
@@ -668,6 +693,7 @@ pub(super) fn permanently_delete_maybe_local_with_worker_count(
             None,
             cancellable,
             worker_count,
+            deadline,
         );
     }
     permanently_delete(file, directory, cancellable)
@@ -814,6 +840,7 @@ pub(super) async fn run_deletion_in(
     let mut completed_count = 0;
     let mut pending_progress_locations = Vec::new();
     let mut cut_off = Vec::new();
+    let deadline = Deadline::default();
 
     for chunk in targets.chunks(batch_size) {
         if cancellable.is_cancelled() {
@@ -841,6 +868,7 @@ pub(super) async fn run_deletion_in(
                 let operation_target = target.clone();
                 let cancellable = cancellable.clone();
                 let environment = environment.clone();
+                let deadline = deadline.clone();
                 let task = context.spawn_local(async move {
                     let file = gio_file_for_location(&operation_target.location);
                     if !permanent {
@@ -870,6 +898,7 @@ pub(super) async fn run_deletion_in(
                             operation_target.is_directory,
                             cancellable.clone(),
                             local_tree_worker_count,
+                            deadline,
                         )
                         .await
                     }

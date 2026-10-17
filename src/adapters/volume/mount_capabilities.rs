@@ -7,7 +7,7 @@
 
 use std::{collections::BTreeMap, ffi::OsStr, sync::Mutex, time::Duration};
 
-use super::{CoarseTimes, Family, FuseFormat, MountNames, Strictness};
+use super::{CoarseTimes, Family, FuseFormat, MountNames, SillyNames, Strictness};
 use crate::services::IdentityTraits;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -45,6 +45,7 @@ pub(crate) struct MountCapabilities {
     pub fuse_format: Option<FuseFormat>,
     pub coarse_times: Option<CoarseTimes>,
     pub deferred_close: Option<Duration>,
+    pub silly_names: Option<SillyNames>,
     pub attribute_cache: Option<Duration>,
     pub cuts_long_names_renamed_over: bool,
     pub names: Option<MountNames>,

@@ -5,9 +5,10 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use rustix::io::Errno;
 
 use super::super::copy_engine::{Destination, Options, copy_local};
-use super::fs_quirks::{Call, NameOpens, Op, Racer, Silly, Support};
+use super::fs_quirks::{Call, NameOpens, Op, OverEmptyDirectory, Racer, Support, hold};
 use super::*;
 use crate::adapters::volume::{MountCapabilities, learn_mount_capability};
+use crate::model::hidden_names::foreign_leftover;
 
 struct Mounts {
     _root: tempfile::TempDir,
@@ -681,40 +682,135 @@ fn a_folder_is_copied_in_place_where_nothing_can_place_it() -> Result<(), Box<dy
     Ok(())
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Interrupted {
+    CloseFails,
+    Cancelled,
+    CloseFailsAndTheTargetIsSwapped,
+}
+
 #[test]
 fn a_failed_copy_in_place_removes_only_what_it_made() -> Result<(), Box<dyn Error>> {
+    use Interrupted::*;
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock()?;
-    let root = tempfile::tempdir()?;
-    let source = root.path().join("source");
-    fs::create_dir_all(source.join("nested"))?;
-    fs::write(source.join("a.txt"), b"a")?;
-    fs::write(source.join("nested/b.txt"), b"b")?;
-    std::os::unix::fs::symlink("a.txt", source.join("link"))?;
-    let destination = root.path().join("destination");
-    fs::create_dir(&destination)?;
-    let target = destination.join("target");
-    let user = target.join("user.txt");
-    let racer: Racer = Box::new(move || fs::write(&user, b"user data").expect("write"));
-    let scope = FsQuirks::install(
-        &destination,
-        Quirks {
-            before: vec![(Op::Close, "*", 0, racer)],
-            fail: vec![(Op::Close, "*", 0, Errno::IO)],
-            silly_rename: Some(Silly::nfs()),
-            ..Quirks::without_folder_placement()
-        },
-    );
-    learn_mount_capability(scope.key(), |capabilities| {
-        capabilities.no_replace = Some(false);
-        capabilities.hard_links = Some(true);
-        capabilities.rename_over_empty_directory = Some(false);
-    });
+    let rows: [(&[&str], Option<&str>, Interrupted); 5] = [
+        (&["a.txt", "nested/b.txt"], None, CloseFails),
+        (&["a.txt"], Some("a.txt"), CloseFails),
+        (&["nested/b.txt"], Some("nested/b.txt"), CloseFails),
+        (&["a.txt"], Some("a.txt"), Cancelled),
+        (&["a.txt"], Some("a.txt"), CloseFailsAndTheTargetIsSwapped),
+    ];
+    for (files, opened_elsewhere, interrupted) in rows {
+        let row = format!("{files:?}, {interrupted:?}");
+        let root = tempfile::tempdir()?;
+        let source = root.path().join("source");
+        fs::create_dir_all(source.join("nested"))?;
+        for file in files {
+            fs::write(source.join(file), b"copied")?;
+        }
+        std::os::unix::fs::symlink("a.txt", source.join("link"))?;
+        let destination = root.path().join("destination");
+        fs::create_dir(&destination)?;
+        let target = destination.join("target");
+        let swapped = destination.join("target.moved");
+        let cancellable = gio::Cancellable::new();
+        let (live, cancel) = (target.clone(), cancellable.clone());
+        let holds = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let held = holds.clone();
+        let racer: Racer = Box::new(move || {
+            match opened_elsewhere {
+                Some(file) => held.lock().expect("the holds").push(hold(&live.join(file))),
+                None => fs::write(live.join("user.txt"), b"user data").expect("write"),
+            }
+            if interrupted == Cancelled {
+                cancel.cancel();
+            }
+        });
+        let closed = opened_elsewhere
+            .and_then(|file| file.rsplit('/').next())
+            .unwrap_or("*");
+        let (live, aside) = (target.clone(), swapped.clone());
+        let meanwhile: (Op, &str, usize, Racer) = match interrupted {
+            CloseFailsAndTheTargetIsSwapped => (
+                Op::Unlink,
+                "target",
+                0,
+                Box::new(move || {
+                    fs::rename(&live, &aside).expect("move the target");
+                    fs::create_dir(&live).expect("make another target");
+                }),
+            ),
+            _ => (
+                Op::Names,
+                "*",
+                0,
+                Box::new(move || holds.lock().expect("the holds").clear()),
+            ),
+        };
+        let scope = FsQuirks::install(
+            &destination,
+            Quirks {
+                before: vec![(Op::Close, closed, 0, racer)],
+                after: vec![meanwhile],
+                fail: if interrupted == Cancelled {
+                    Vec::new()
+                } else {
+                    vec![(Op::Close, "*", 0, Errno::IO)]
+                },
+                rename_over_empty_dir: OverEmptyDirectory::NotEmpty,
+                ..Quirks::nfs3()
+            },
+        );
+        learn_mount_capability(scope.key(), |capabilities| {
+            capabilities.no_replace = Some(false);
+            capabilities.hard_links = Some(true);
+            capabilities.rename_over_empty_directory = Some(false);
+        });
 
-    let result = copy(&source, &target);
+        let result = glib::MainContext::default().block_on(copy_new_recursively(
+            gio::File::for_path(&source),
+            gio::File::for_path(&target),
+            cancellable,
+        ));
 
-    assert!(result.is_err(), "{result:?}");
-    assert_eq!(names(&target)?, ["user.txt"]);
-    assert_eq!(fs::read(target.join("user.txt"))?, b"user data");
+        assert!(result.is_err(), "{row}: {result:?}");
+        let Some(file) = opened_elsewhere else {
+            assert_eq!(names(&target)?, ["user.txt"]);
+            assert_eq!(fs::read(target.join("user.txt"))?, b"user data");
+            continue;
+        };
+        if interrupted == CloseFailsAndTheTargetIsSwapped {
+            assert!(
+                target.is_dir() && names(&target)?.is_empty(),
+                "{row}: {result:?}"
+            );
+            let left = names(&swapped)?;
+            assert!(
+                left.len() == 1 && foreign_leftover(OsStr::new(&left[0])).is_some(),
+                "{row}: {left:?}"
+            );
+            continue;
+        }
+        if interrupted == Cancelled {
+            assert!(
+                result
+                    .as_ref()
+                    .is_err_and(|error| error.matches(gio::IOErrorEnum::Cancelled)),
+                "{row}: {result:?}"
+            );
+        }
+        assert!(!target.exists(), "{row}: {result:?}");
+        let keeping = Path::new(file)
+            .parent()
+            .and_then(Path::file_name)
+            .unwrap_or(OsStr::new("target"));
+        let removals = scope
+            .calls()
+            .into_iter()
+            .filter(|call| call.op == Op::Unlink && call.names == [keeping])
+            .count();
+        assert_eq!(removals, 2, "{row}: {:?}", scope.calls());
+    }
     Ok(())
 }
 

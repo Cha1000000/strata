@@ -874,6 +874,7 @@ fn benchmark_delete_large_directory() -> Result<(), Box<dyn Error>> {
             vec![target_root],
             Arc::new(AtomicBool::new(false)),
             *workers,
+            &Default::default(),
         )
         .map_err(io::Error::other)?;
         let parallel_elapsed = parallel_started.elapsed();
@@ -951,6 +952,7 @@ fn benchmark_parallel_delete_scale() -> Result<(), Box<dyn Error>> {
         vec![target_root],
         Arc::new(AtomicBool::new(false)),
         workers,
+        &Default::default(),
     )
     .map_err(io::Error::other)?;
     let cleanup_elapsed = cleanup_started.elapsed();

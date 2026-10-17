@@ -157,13 +157,6 @@ pub(crate) fn classify(name: &OsStr) -> Option<Leftover> {
     find(&LEFTOVERS, name)
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "folder removal skips other programs' leftovers once its wait lands"
-    )
-)]
 pub(crate) fn foreign_leftover(name: &OsStr) -> Option<ForeignLeftover> {
     find(&FOREIGN_LEFTOVERS, name.as_bytes())
 }

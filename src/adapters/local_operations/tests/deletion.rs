@@ -1,10 +1,11 @@
-use super::fs_quirks::{Op, Trash};
+use super::fs_quirks::{HoldGuard, Op, Racer, Trash, hold};
 use super::*;
 use crate::adapters::local_operations::{
     LocalDeleteJob, LocalDeleteQueue, PinnedEntry, parallel_delete_local_blocking_with_workers,
     parallel_delete_local_with, process_local_delete_job, retry_local_open,
     run_local_delete_workers,
 };
+use crate::{adapters::trash_support::SystemTrash, model::hidden_names::foreign_leftover};
 use std::sync::{Barrier, atomic::Ordering, mpsc};
 
 #[test]
@@ -56,6 +57,7 @@ fn enqueue_root(queue: &Arc<LocalDeleteQueue>, root: PinnedEntry) {
         expected: root.identity,
         guard: None,
         completion: None,
+        deadline: Default::default(),
     });
 }
 
@@ -207,6 +209,7 @@ fn parallel_workers_finish_nested_trees_without_following_symlinks() -> Result<(
             vec![delete_root(&target)?],
             Arc::new(AtomicBool::new(false)),
             workers,
+            &Default::default(),
         )?;
         assert!(!target.exists());
         assert_eq!(fs::read(sentinel)?, b"keep");
@@ -1188,4 +1191,196 @@ fn a_trash_that_moves_nothing_is_retryable_and_records_no_undo() {
             }
         },
     );
+}
+
+const CLOCK_START: Duration = Duration::from_secs(1_800_000_000);
+
+type Holds = Arc<std::sync::Mutex<Vec<HoldGuard>>>;
+
+fn releasing(holds: &Holds) -> Racer {
+    let holds = holds.clone();
+    Box::new(move || holds.lock().expect("the holds").clear())
+}
+
+fn folder_with_an_open_file(path: &Path, holds: &Holds) -> io::Result<()> {
+    fs::create_dir(path)?;
+    fs::write(path.join("open.txt"), b"open elsewhere")?;
+    let held = hold(&path.join("open.txt"));
+    holds
+        .lock()
+        .map_err(|_| io::Error::other("the holds"))?
+        .push(held);
+    Ok(())
+}
+
+fn delete_permanently(folders: &[PathBuf]) -> Vec<OperationEvent> {
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let emitted = events.clone();
+    glib::MainContext::default().block_on(run_deletion_in(
+        Rc::new(SystemTrash),
+        OperationRequestId(1590),
+        folders
+            .iter()
+            .map(|folder| DeletionTarget::from_entry(&directory_entry(folder)))
+            .collect(),
+        true,
+        Rc::new(move |event| emitted.borrow_mut().push(event)),
+        gio::Cancellable::new(),
+    ));
+    events.take()
+}
+
+fn waited_since(start: SystemTime) -> Result<Duration, Box<dyn Error>> {
+    Ok(super::super::copy_engine::clock_for_test().duration_since(start)?)
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Meanwhile {
+    StaysOpen,
+    Closes,
+    ClosesAsTheWaitEnds,
+    IsSwappedForAnEmptyFolder,
+}
+
+const GONE_AFTER_THE_CLOSE: Duration = Duration::from_millis(100);
+
+fn meanwhile_racer(
+    meanwhile: Meanwhile,
+    folder: &Path,
+    holds: &Holds,
+    wait_ends: SystemTime,
+) -> Option<(Op, &'static str, usize, Racer)> {
+    let (holds, folder) = (holds.clone(), folder.to_path_buf());
+    match meanwhile {
+        Meanwhile::StaysOpen => None,
+        Meanwhile::Closes => Some((Op::Unlink, "folder", 0, releasing(&holds))),
+        Meanwhile::ClosesAsTheWaitEnds => Some((
+            Op::Unlink,
+            "folder",
+            1,
+            Box::new(move || {
+                super::super::copy_engine::set_clock_for_test(Some(wait_ends));
+                holds.lock().expect("the holds").clear();
+                let gone = wait_ends + GONE_AFTER_THE_CLOSE;
+                super::super::copy_engine::set_clock_for_test(Some(gone));
+            }),
+        )),
+        Meanwhile::IsSwappedForAnEmptyFolder => Some((
+            Op::Unlink,
+            "folder",
+            0,
+            Box::new(move || {
+                fs::rename(&folder, folder.with_extension("moved")).expect("move the folder");
+                fs::create_dir(&folder).expect("make another folder");
+            }),
+        )),
+    }
+}
+
+#[test]
+fn a_folder_only_leftovers_keep_goes_once_they_do_within_the_mount_s_wait()
+-> Result<(), Box<dyn Error>> {
+    use Meanwhile::*;
+    let _serial = serial()?;
+    let smb = Duration::from_millis(1500);
+    let fuse_and_nfs = Duration::from_secs(2);
+    let renamed = [
+        StaysOpen,
+        Closes,
+        ClosesAsTheWaitEnds,
+        IsSwappedForAnEmptyFolder,
+    ];
+    let rows: [(&str, Preset, Duration, &[Meanwhile]); 6] = [
+        ("nfs3", Quirks::nfs3, fuse_and_nfs, &renamed),
+        ("nfs42", Quirks::nfs42, fuse_and_nfs, &renamed),
+        ("cifs", Quirks::cifs, smb, &renamed),
+        (
+            "cifs-posix",
+            Quirks::cifs_posix,
+            smb,
+            &[StaysOpen, Closes, IsSwappedForAnEmptyFolder],
+        ),
+        ("sshfs", Quirks::sshfs, fuse_and_nfs, &renamed),
+        ("exfat-fuse", Quirks::exfat_fuse, fuse_and_nfs, &renamed),
+    ];
+    for (mount, preset, budget, cases) in rows {
+        for &meanwhile in cases {
+            let row = format!("{mount}, {meanwhile:?}");
+            let start = SystemTime::UNIX_EPOCH + CLOCK_START;
+            let _clock = ClockGuard::set(start);
+            let root = tempfile::tempdir()?;
+            let folder = root.path().join("folder");
+            let holds = Holds::default();
+            let _scope = FsQuirks::install(
+                root.path(),
+                Quirks {
+                    after: meanwhile_racer(meanwhile, &folder, &holds, start + budget)
+                        .into_iter()
+                        .collect(),
+                    ..preset()
+                },
+            );
+            folder_with_an_open_file(&folder, &holds)?;
+
+            let events = delete_permanently(std::slice::from_ref(&folder));
+
+            let waited = waited_since(start)?;
+            let deleted = matches!(events.last(), Some(OperationEvent::Deleted { .. }));
+            let leftovers_only = |folder: &Path| -> Result<bool, Box<dyn Error>> {
+                let left = names(folder)?;
+                Ok(left.len() <= 1
+                    && left
+                        .iter()
+                        .all(|name| foreign_leftover(OsStr::new(name)).is_some()))
+            };
+            match meanwhile {
+                Closes | ClosesAsTheWaitEnds => {
+                    assert!(deleted, "{row}: {events:?}");
+                    assert!(!folder.exists(), "{row}");
+                    if let Closes = meanwhile {
+                        assert!(waited < budget, "{row}: {waited:?}");
+                    }
+                }
+                StaysOpen => {
+                    assert!(!deleted, "{row}: {events:?}");
+                    assert_eq!(waited, budget, "{row}");
+                    assert!(leftovers_only(&folder)?, "{row}");
+                }
+                IsSwappedForAnEmptyFolder => {
+                    assert!(!deleted, "{row}: {events:?}");
+                    assert!(names(&folder)?.is_empty(), "{row}");
+                    assert!(leftovers_only(&folder.with_extension("moved"))?, "{row}");
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn one_wait_for_leftovers_covers_every_folder_of_a_delete() -> Result<(), Box<dyn Error>> {
+    let _serial = serial()?;
+    let start = SystemTime::UNIX_EPOCH + CLOCK_START;
+    let _clock = ClockGuard::set(start);
+    let root = tempfile::tempdir()?;
+    let _scope = FsQuirks::install(root.path(), Quirks::nfs3());
+    let holds = Holds::default();
+    let folders = [root.path().join("first"), root.path().join("second")];
+    for folder in &folders {
+        folder_with_an_open_file(folder, &holds)?;
+    }
+
+    let events = delete_permanently(&folders);
+
+    assert!(
+        matches!(
+            events.last(),
+            Some(OperationEvent::CompletedWithErrors { deleted_locations, .. })
+                if deleted_locations.is_empty()
+        ),
+        "{events:?}"
+    );
+    assert!(folders.iter().all(|folder| folder.is_dir()));
+    assert_eq!(waited_since(start)?, Duration::from_secs(2));
+    Ok(())
 }

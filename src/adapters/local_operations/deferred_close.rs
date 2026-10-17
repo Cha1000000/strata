@@ -1,11 +1,8 @@
 // SPDX-License-Identifier: MIT
 
-use std::{
-    sync::atomic::{AtomicBool, Ordering},
-    time::Duration,
-};
+use std::time::{Duration, SystemTime};
 
-use super::copy_engine::sleep;
+use super::copy_engine::{now, sleep};
 
 /// How long after `closetimeo` the SMB client may take to close the handle.
 const MARGIN: Duration = Duration::from_millis(500);
@@ -23,30 +20,43 @@ pub(super) enum Pause {
 }
 
 pub(super) struct Wait {
-    left: Duration,
+    started: SystemTime,
+    budget: Duration,
     pause: Duration,
 }
 
 impl Wait {
     pub(super) fn after(closetimeo: Duration) -> Self {
+        Self::since(now(), closing(closetimeo))
+    }
+
+    pub(super) fn since(started: SystemTime, budget: Duration) -> Self {
         Self {
-            left: closetimeo.saturating_add(MARGIN).min(LIMIT),
+            started,
+            budget: budget.min(LIMIT),
             pause: FIRST_PAUSE,
         }
     }
 
-    pub(super) fn pause(&mut self, cancelled: &AtomicBool) -> Pause {
-        if self.left.is_zero() {
+    pub(super) fn pause(&mut self, stopped: &dyn Fn() -> bool) -> Pause {
+        // A clock set back ends the wait rather than stretch it.
+        let Ok(spent) = now().duration_since(self.started) else {
+            return Pause::Spent;
+        };
+        let left = self.budget.saturating_sub(spent);
+        if left.is_zero() {
             return Pause::Spent;
         }
-        let waited = self.pause.min(self.left);
-        sleep(waited);
-        self.left -= waited;
+        sleep(self.pause.min(left));
         self.pause = (self.pause * 2).min(LONGEST_PAUSE);
-        if cancelled.load(Ordering::Acquire) {
+        if stopped() {
             Pause::Cancelled
         } else {
             Pause::Retry
         }
     }
+}
+
+pub(super) fn closing(closetimeo: Duration) -> Duration {
+    closetimeo.saturating_add(MARGIN).min(LIMIT)
 }

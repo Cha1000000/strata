@@ -4,7 +4,7 @@ use std::{os::unix::fs::MetadataExt, sync::atomic::Ordering};
 
 use rustix::io::Errno;
 
-use super::fs_quirks::{Op, Racer, Support, Trash};
+use super::fs_quirks::{Op, OverEmptyDirectory, Racer, Support, Trash, hold};
 use super::*;
 use crate::{
     adapters::volume::learn_mount_capability,
@@ -738,6 +738,66 @@ fn a_new_subdirectory_is_reported_as_a_single_created_entry() -> Result<(), Box<
         [target.join("sub")],
         "without Trash, it is recorded whole"
     );
+    Ok(())
+}
+
+#[test]
+fn a_merge_stage_goes_once_another_program_closes_a_file_it_kept_there()
+-> Result<(), Box<dyn Error>> {
+    let _serial = serial()?;
+    let root = tempfile::tempdir()?;
+    let source = root.path().join("source");
+    let target = root.path().join("target");
+    fs::create_dir_all(&source)?;
+    fs::create_dir_all(&target)?;
+    fs::write(source.join("new.txt"), b"new")?;
+    let holds = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (held, live) = (holds.clone(), target.clone());
+    let hold_staged: Racer = Box::new(move || {
+        for stage in fs::read_dir(&live).expect("list the target").flatten() {
+            if stage
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".strata-copy-")
+            {
+                let staged = hold(&stage.path().join("new.txt"));
+                held.lock().expect("the holds").push(staged);
+            }
+        }
+    });
+    let release: Racer = Box::new(move || holds.lock().expect("the holds").clear());
+    let scope = FsQuirks::install(
+        root.path(),
+        without_trash(Quirks {
+            before: vec![(Op::Unlink, "new.txt", 0, hold_staged)],
+            after: vec![(Op::Names, ".strata-copy-*", 0, release)],
+            links: Support::Rejected(Errno::MLINK),
+            rename_over_empty_dir: OverEmptyDirectory::NotEmpty,
+            ..Quirks::nfs3()
+        }),
+    );
+    let (_plans, on_merged) = recorded_plans();
+
+    let result = glib::MainContext::default().block_on(merge_local(
+        gio::File::for_path(&source),
+        gio::File::for_path(&target),
+        false,
+        gio::Cancellable::new(),
+        &on_merged,
+    ));
+
+    assert!(result.is_ok(), "{result:?}");
+    assert_eq!(names(&target)?, ["new.txt"]);
+    assert_eq!(fs::read(target.join("new.txt"))?, b"new");
+    let stage_removals = scope
+        .calls()
+        .into_iter()
+        .filter(|call| {
+            call.op == Op::Unlink
+                && matches!(&call.names[..], [name] if name.to_string_lossy().starts_with(".strata-copy-"))
+        })
+        .count();
+    assert!(stage_removals > 1, "{:?}", scope.calls());
     Ok(())
 }
 

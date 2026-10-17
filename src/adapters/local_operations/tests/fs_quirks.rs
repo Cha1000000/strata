@@ -931,7 +931,6 @@ impl Drop for FsQuirks {
     }
 }
 
-#[expect(dead_code, reason = "the leftover wait's rows hold files")]
 pub(crate) struct HoldGuard {
     scope: Arc<Scope>,
     key: (u64, u64),
@@ -1832,7 +1831,6 @@ pub(crate) fn evict(path: &Path) -> bool {
 }
 
 /// Another program opens the file at `path` and keeps it open until the guard drops.
-#[expect(dead_code, reason = "the leftover wait's rows hold files")]
 pub(crate) fn hold(path: &Path) -> HoldGuard {
     let scope = scope_for_path(path).expect("a scope holding the file");
     let stat = rustix::fs::lstat(path).expect("the held file");

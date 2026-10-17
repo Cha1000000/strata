@@ -12,7 +12,10 @@ use std::{
 };
 
 use super::names::{NameEncoding, NameProfile, NameRules, PrivateUse, Reserved, Strip, byte_limit};
-use crate::services::{IdentityTraits, InodeNumbers};
+use crate::{
+    model::hidden_names::ForeignLeftover,
+    services::{IdentityTraits, InodeNumbers},
+};
 
 /// Parsed without touching mounted filesystems, including unresponsive mounts.
 #[derive(Clone)]
@@ -89,6 +92,21 @@ impl MountType {
         Some(Duration::from_secs(seconds))
     }
 
+    pub(crate) fn silly_names(&self) -> Option<SillyNames> {
+        match family(&self.fs_type) {
+            Family::Nfs | Family::Nfs4 => Some(SillyNames::Renamed(ForeignLeftover::Nfs)),
+            Family::Fuse => Some(SillyNames::Renamed(ForeignLeftover::Fuse)),
+            Family::Smb if self.smb_posix() => Some(SillyNames::Unlisted),
+            Family::Smb => Some(SillyNames::Renamed(ForeignLeftover::Smb)),
+            _ => None,
+        }
+    }
+
+    fn smb_posix(&self) -> bool {
+        let has = |name| self.super_options.split(',').any(|option| option == name);
+        has("posix") || has("unix") && has("posixpaths")
+    }
+
     /// How long the SMB client answers stats from the attributes it cached
     /// for a file (`acregmax`, shown as `actimeo` when folders share it, one
     /// second by default); `None` where nothing is cached.
@@ -155,9 +173,7 @@ impl MountType {
             // udisks mounts ntfs-3g with `windows_names`, which mountinfo hides.
             ("fuseblk", Some("ntfs")) => NameProfile::windows(Reserved::Full, NameEncoding::Utf8),
             ("fuseblk", _) => NameProfile::windows(Reserved::Bare, NameEncoding::Utf8).learning(),
-            ("cifs" | "smb3", _) if has("posix") || has("unix") && has("posixpaths") => {
-                NameProfile::smb_posix(bytes)
-            }
+            ("cifs" | "smb3", _) if self.smb_posix() => NameProfile::smb_posix(bytes),
             ("cifs" | "smb3", _) => NameProfile {
                 encoding: if has("nocase") {
                     NameEncoding::Utf8Bmp
@@ -248,6 +264,12 @@ pub(crate) fn holds_symlinks(fs_type: &str, device_format: Option<&str>) -> Opti
 
 pub(crate) fn max_file_size(fs_type: &str, device_format: Option<&str>) -> Option<u64> {
     (fat_format(fs_type, device_format) == Some(FatFormat::Fat)).then_some(FAT32_MAX_FILE_SIZE)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SillyNames {
+    Renamed(ForeignLeftover),
+    Unlisted,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

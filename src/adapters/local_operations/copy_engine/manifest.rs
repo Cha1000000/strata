@@ -34,6 +34,7 @@ use crate::{
             deletion::bounded_local_worker_count,
             fs_ops::{Entry, EntryStat, FsOps, OffMain},
             io_error,
+            leftovers::{self, Deadline, Refused},
             native_fs::{self, LocalFileIdentity},
             translated_io_error,
             work_queue::{self, Group, Job, WorkQueue},
@@ -45,7 +46,10 @@ use crate::{
 
 /// A transfer's deletions share one, as its items may hold names of one file.
 #[derive(Default)]
-pub(in crate::adapters::local_operations) struct Unlinks(Mutex<HashMap<(u64, u64), Unlinked>>);
+pub(in crate::adapters::local_operations) struct Unlinks {
+    unlinked: Mutex<HashMap<(u64, u64), Unlinked>>,
+    leftovers: Deadline,
+}
 
 #[derive(Default)]
 struct Unlinked {
@@ -1253,7 +1257,7 @@ impl Job for Removal {
                 queue.complete(completion);
             }
             Step::Rmdir(opened, loosened) => {
-                at.rmdir(opened, loosened);
+                at.rmdir(opened, loosened, &|| queue.is_stopped());
                 queue.complete(completion);
             }
         }
@@ -1360,7 +1364,7 @@ impl At {
         let key = (snapshot.identity.device, snapshot.identity.inode);
         // Checking, removing and counting a name of a file with several
         // names must not interleave with another name's check.
-        let mut unlinks = (snapshot.nlink > 1).then(|| lock(&deletion.unlinks.0));
+        let mut unlinks = (snapshot.nlink > 1).then(|| lock(&deletion.unlinks.unlinked));
         let since = unlinks
             .as_ref()
             .and_then(|unlinks| unlinks.get(&key))
@@ -1430,7 +1434,7 @@ impl At {
         }
     }
 
-    fn rmdir(&self, opened: Arc<OwnedFd>, loosened: Option<Loosened>) {
+    fn rmdir(&self, opened: Arc<OwnedFd>, loosened: Option<Loosened>, stopped: &dyn Fn() -> bool) {
         let deletion = &self.deletion;
         if deletion.compare_only {
             return;
@@ -1448,16 +1452,26 @@ impl At {
         };
         let mode = loosened.and_then(Loosened::into_mode);
         drop(opened);
-        match fs.unlink(self.entry_at(), AtFlags::REMOVEDIR) {
+        let leftovers = &deletion.unlinks.leftovers;
+        let unchanged = || {
+            fs.stat(self.entry_at(), false)
+                .is_ok_and(|current| deletion.same(&current, Some(identity)))
+        };
+        match leftovers::remove_folder(fs, self.entry_at(), leftovers, stopped, &unchanged) {
             Ok(()) => return deletion.removed.store(true, Ordering::Release),
-            Err(Errno::NOENT) => return,
+            Err(Refused::Os(Errno::NOENT)) => return,
+            Err(Refused::Changed(_)) => {
+                return deletion.keep(self.path.clone(), KeptCause::Changed);
+            }
+            Err(Refused::Stopped(_)) => {}
             // Entries added meanwhile stay, and so does their folder.
-            Err(Errno::NOTEMPTY | Errno::EXIST) => {
+            Err(Refused::Os(Errno::NOTEMPTY | Errno::EXIST))
+            | Err(Refused::StillOpen(Errno::NOTEMPTY | Errno::EXIST)) => {
                 if deletion.holds_others(self.entry_at(), &self.path) {
                     deletion.keep(self.path.clone(), KeptCause::Changed);
                 }
             }
-            Err(error) => deletion.failed(self.path.clone(), error),
+            Err(refused) => deletion.failed(self.path.clone(), refused.errno()),
         }
         if let Some(mode) = mode
             && let Ok(folder) = fs.open_dir(self.entry_at())

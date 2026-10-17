@@ -61,6 +61,7 @@ fn learn_mount_type(fs: &dyn FsOps, dir: BorrowedFd<'_>, key: MountKey) -> Mount
     let fuse_format = format.and_then(FuseFormat::of);
     let coarse_times = mount_type.and_then(|mount| mount.coarse_times(fuse_format));
     let deferred_close = mount_type.and_then(MountType::deferred_close);
+    let silly_names = mount_type.and_then(MountType::silly_names);
     let attribute_cache = mount_type.and_then(MountType::attribute_cache);
     let cuts_long_names_renamed_over =
         mount_type.is_some_and(|mount| mount.cuts_long_names_renamed_over(format));
@@ -91,6 +92,7 @@ fn learn_mount_type(fs: &dyn FsOps, dir: BorrowedFd<'_>, key: MountKey) -> Mount
             capabilities.fuse_format = fuse_format;
             capabilities.coarse_times = coarse_times;
             capabilities.deferred_close = deferred_close;
+            capabilities.silly_names = silly_names;
             capabilities.attribute_cache = attribute_cache;
             capabilities.cuts_long_names_renamed_over = cuts_long_names_renamed_over;
             capabilities.names = Some(names);
