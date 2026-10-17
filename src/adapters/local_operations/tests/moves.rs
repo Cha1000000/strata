@@ -1868,8 +1868,9 @@ fn a_moved_source_stays_when_its_copy_is_gone_before_the_deletion() -> Result<()
     enum Replaced {
         No,
         Yes,
-        /// Rewritten with as many bytes, as a file that takes the copy's freed
-        /// inode number within its birth time's tick also looks, on ntfs3.
+        /// Rewritten with as many bytes a tick after the source, as a file that
+        /// takes the copy's freed inode number within its birth time's tick
+        /// also looks, on ntfs3.
         InPlace,
         /// So within the tick of a coarse clock that stamped the source too.
         InPlaceWithinTheTick,
@@ -1913,6 +1914,10 @@ fn a_moved_source_stays_when_its_copy_is_gone_before_the_deletion() -> Result<()
         fs::create_dir(&destination)?;
         let source = sources.join("notes.txt");
         fs::write(&source, b"notes")?;
+        if replaced == Replaced::InPlace {
+            let hour_before = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?;
+            set_times(&source, hour_before.as_secs() - 3600, 0)?;
+        }
         if conflict == TransferConflict::ReplaceExisting {
             fs::write(destination.join("notes.txt"), b"old")?;
         }
