@@ -27,9 +27,9 @@ pub use local_operations::LocalOperationProvider;
 pub(crate) use local_operations::probes;
 pub(crate) use local_operations::{
     ARCHIVE_PREVIEW_FAILED_MESSAGE, ARCHIVE_TOO_LARGE_MESSAGE, ARCHIVE_UNSUPPORTED_MESSAGE,
-    INVALID_ARCHIVE, MAX_ARCHIVE_PASSWORD_BYTES, MAYBE_BAD_PASSWORD, PASSWORD_REQUIRED,
-    archive_payload_valid, encode_archive_result, flush_filesystem, list_archive_entries_direct,
-    transfer_targets, typed_name_refusal,
+    ActiveOperation, INVALID_ARCHIVE, MAX_ARCHIVE_PASSWORD_BYTES, MAYBE_BAD_PASSWORD,
+    PASSWORD_REQUIRED, archive_payload_valid, encode_archive_result, flush_filesystem,
+    list_archive_entries_direct, transfer_targets, typed_name_refusal,
 };
 #[cfg(test)]
 pub(crate) use local_operations::{

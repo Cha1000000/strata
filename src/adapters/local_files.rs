@@ -527,7 +527,7 @@ async fn resolve_recent_entry(
     }
 }
 
-fn trash_thumbnail_path(location: &Location, info: &gio::FileInfo) -> Option<PathBuf> {
+pub(super) fn trash_thumbnail_path(location: &Location, info: &gio::FileInfo) -> Option<PathBuf> {
     if !location
         .uri_value()
         .is_some_and(|uri| uri.starts_with("trash:"))

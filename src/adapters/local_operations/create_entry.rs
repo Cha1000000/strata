@@ -1,8 +1,12 @@
 // SPDX-License-Identifier: MIT
 
 use super::{
-    await_cancellable, cancelled_event, mount_profile::folder_name_limit, names::numbered_name,
-    operation_handle, typed_names, validated_child, was_cancelled,
+    await_cancellable, cancelled_event,
+    mount_profile::folder_name_limit,
+    names::numbered_name,
+    operation_handle,
+    release::{self, ActiveOperation},
+    typed_names, validated_child, was_cancelled,
 };
 use crate::{
     adapters::{gio_file_for_location, location_for_file, volume::NameLimit},
@@ -23,6 +27,7 @@ pub(super) fn start(
     let cancellable = gio::Cancellable::new();
     let operation_cancellable = cancellable.clone();
     let _task = glib::MainContext::default().spawn_local(async move {
+        let _operation = ActiveOperation::begin(release::natives([&parent]));
         let directory = gio_file_for_location(&parent);
         let mut suffix = 0u64;
         let mut limit = NameLimit::default();

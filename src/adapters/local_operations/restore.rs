@@ -3,10 +3,13 @@
 use super::{
     fs_ops::{Entry, fs},
     placement::{PlaceError, RenameFailure},
+    release::{self, ActiveOperation},
 };
 use crate::{
     adapters::{
-        gio_file_for_location, location_for_file,
+        gio_file_for_location,
+        local_files::trash_thumbnail_path,
+        location_for_file,
         trash_restore::{RestoreContext, plan_restore_for_location},
         trash_support::trash_with_cleanup,
     },
@@ -431,7 +434,7 @@ pub(super) async fn trashed_entries_for_originals(
     let trash = gio::File::for_uri("trash:///");
     let enumerator = await_cancellable(&trash, cancellable, |trash, cancellable, result| {
         trash.enumerate_children_async(
-            "standard::name,standard::display-name,trash::orig-path,trash::deletion-date",
+            "standard::name,standard::display-name,standard::target-uri,trash::orig-path,trash::deletion-date",
             gio::FileQueryInfoFlags::NOFOLLOW_SYMLINKS,
             glib::Priority::DEFAULT,
             Some(cancellable),
@@ -439,7 +442,7 @@ pub(super) async fn trashed_entries_for_originals(
         );
     })
     .await?;
-    let mut newest = HashMap::<PathBuf, (String, Location, String)>::new();
+    let mut newest = HashMap::<PathBuf, (String, RestoreEntry)>::new();
     loop {
         if cancellable.is_cancelled() {
             return Err(cancelled_local_operation());
@@ -493,7 +496,10 @@ pub(super) async fn trashed_entries_for_originals(
                     continue;
                 }
             }
-            let candidate = (deletion_date, location, info.display_name().to_string());
+            let candidate = (
+                deletion_date,
+                gvfs_trash_entry(location, &info, &original_path),
+            );
             match newest.get(&original_path) {
                 Some(current) if current.0 >= candidate.0 => {}
                 _ => {
@@ -517,20 +523,52 @@ pub(super) async fn trashed_entries_for_originals(
         .iter()
         .filter_map(|location| location.native_path())
         .filter_map(|path| {
-            fallback.remove(path).or_else(|| {
-                newest
-                    .remove(path)
-                    .map(|(_, source, display_name)| RestoreEntry {
-                        source,
-                        display_name,
-                        original_target: None,
-                        trash_info: None,
-                        confirmed_destination: None,
-                        physical_path: None,
-                    })
-            })
+            fallback
+                .remove(path)
+                .or_else(|| newest.remove(path).map(|(_, entry)| entry))
         })
         .collect())
+}
+
+pub(super) fn gvfs_trash_entry(
+    source: Location,
+    info: &gio::FileInfo,
+    original_path: &Path,
+) -> RestoreEntry {
+    RestoreEntry {
+        physical_path: trash_thumbnail_path(&source, info),
+        source,
+        display_name: info.display_name().to_string(),
+        original_target: Some(Location::local(original_path)),
+        trash_info: None,
+        confirmed_destination: None,
+    }
+}
+
+pub(super) async fn release_trashed(
+    entries: &[RestoreEntry],
+    cancellable: &gio::Cancellable,
+) -> ActiveOperation {
+    let roots: Vec<PathBuf> = entries
+        .iter()
+        .filter_map(|entry| {
+            entry
+                .physical_path
+                .clone()
+                .or_else(|| entry.source.native_path().map(Path::to_path_buf))
+        })
+        .collect();
+    let destinations: Vec<PathBuf> = entries
+        .iter()
+        .filter_map(|entry| {
+            restored_destination(entry)
+                .native_path()
+                .map(Path::to_path_buf)
+        })
+        .collect();
+    let operation = ActiveOperation::begin(release::parents(&destinations));
+    operation.release(roots, cancellable).await;
+    operation
 }
 
 pub(super) fn restored_destination(entry: &RestoreEntry) -> Location {

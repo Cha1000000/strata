@@ -48,6 +48,7 @@ mod paste_results;
 mod paths;
 mod placement;
 mod progress;
+mod release;
 mod replacement;
 mod restore_safety;
 mod sync;

@@ -134,6 +134,8 @@ mod mount_profile;
 mod owed;
 mod placement;
 pub(crate) mod probes;
+mod release;
+pub(crate) use release::ActiveOperation;
 mod transfer_targets;
 pub(super) mod trash;
 mod typed_names;
@@ -2899,6 +2901,9 @@ impl OperationProvider for LocalOperationProvider {
             let item = request.entry.location.clone();
             let new_name = request.new_name.clone();
             let affected_locations = item.parent().into_iter().collect();
+            let roots = release::natives([&item]);
+            let operation = ActiveOperation::begin(release::parents(&roots));
+            operation.release(roots, &operation_cancellable).await;
             if operation_cancellable.is_cancelled() {
                 emit(cancelled_event(
                     request.id,
@@ -2990,6 +2995,16 @@ impl OperationProvider for LocalOperationProvider {
             for parent in request.items.iter().filter_map(|item| item.source.parent()) {
                 affected_locations.insert(parent);
             }
+            let moved = if request.move_sources {
+                release::natives(request.items.iter().map(|item| &item.source))
+            } else {
+                Vec::new()
+            };
+            let operation = Rc::new(ActiveOperation::begin(
+                release::natives([&request.destination])
+                    .into_iter()
+                    .chain(release::parents(&moved)),
+            ));
             let sources = request
                 .items
                 .iter()
@@ -3061,6 +3076,23 @@ impl OperationProvider for LocalOperationProvider {
                         .map(|planned| destination.child(&planned.target))
                 })
                 .collect::<Vec<_>>();
+            let targets_of = |conflict: TransferConflict| {
+                request
+                    .items
+                    .iter()
+                    .zip(&targets)
+                    .zip(&duplicate)
+                    .filter(move |((item, _), duplicate)| item.conflict == conflict && !**duplicate)
+                    .filter_map(|((_, target), _)| target.as_ref().and_then(gio::File::path))
+            };
+            operation.include_folders(targets_of(TransferConflict::Merge));
+            let replaced = targets_of(TransferConflict::ReplaceExisting);
+            operation
+                .release(
+                    moved.into_iter().chain(replaced).collect(),
+                    &operation_cancellable,
+                )
+                .await;
             let mut variants =
                 CaseVariants::new(planned.iter().enumerate().filter_map(|(index, planned)| {
                     Some((index, planned.as_ref()?.target.clone()))
@@ -3285,15 +3317,20 @@ impl OperationProvider for LocalOperationProvider {
                         &operation_cancellable,
                         Some(&mut affected_locations),
                         &copying.placed_entries,
-                        progress_merge_hooks(Some(progress.clone()), names.clone(), &|plan| {
-                            emit(OperationEvent::Merged {
-                                request_id: request.id,
-                                source: item.source.clone(),
-                                created: plan.created,
-                                overwritten: plan.overwritten,
-                                placed: plan.placed,
-                            });
-                        }),
+                        progress_merge_hooks(
+                            Some(progress.clone()),
+                            names.clone(),
+                            Some(operation.clone()),
+                            &|plan| {
+                                emit(OperationEvent::Merged {
+                                    request_id: request.id,
+                                    source: item.source.clone(),
+                                    created: plan.created,
+                                    overwritten: plan.overwritten,
+                                    placed: plan.placed,
+                                });
+                            },
+                        ),
                     )
                     .await
                     .map(|owed| (target, owed))
@@ -3551,6 +3588,12 @@ impl OperationProvider for LocalOperationProvider {
                     affected_locations.insert(parent);
                 }
             }
+            let moved = release::natives(request.items.iter().map(|item| &item.record.current));
+            let operation = ActiveOperation::begin(release::parents(&moved).into_iter().chain(
+                release::parents(&release::natives(
+                    request.items.iter().map(|item| &item.record.original),
+                )),
+            ));
             let sources = request
                 .items
                 .iter()
@@ -3587,6 +3630,20 @@ impl OperationProvider for LocalOperationProvider {
                     return;
                 }
             };
+            let replaced = release::natives(
+                request
+                    .items
+                    .iter()
+                    .filter(|item| item.conflict == TransferConflict::ReplaceExisting)
+                    .map(|item| &item.record.original),
+            );
+            let cleaned = release::natives(&request.cleanup_locations);
+            operation
+                .release(
+                    moved.into_iter().chain(replaced).chain(cleaned).collect(),
+                    &operation_cancellable,
+                )
+                .await;
             let names = NamePolicy::new(request.names);
             let progress =
                 TransferProgressTracker::new(request.id, total_bytes, total_files, emit.clone());
@@ -3813,6 +3870,10 @@ impl OperationProvider for LocalOperationProvider {
                     affected_locations.insert(parent);
                 }
             }
+            let roots = release::natives([&current]);
+            let operation =
+                ActiveOperation::begin(release::parents(&release::natives([&current, &original])));
+            operation.release(roots, &operation_cancellable).await;
             let result = if operation_cancellable.is_cancelled() {
                 Err(cancelled_local_operation())
             } else if let (Some(source), Some(target)) =
@@ -3856,6 +3917,13 @@ impl OperationProvider for LocalOperationProvider {
         let cancellable = gio::Cancellable::new();
         let operation_cancellable = cancellable.clone();
         let _task = glib::MainContext::default().spawn_local(async move {
+            let roots: Vec<PathBuf> = request
+                .entries
+                .iter()
+                .filter_map(|entry| entry.local_thumbnail_path().map(Path::to_path_buf))
+                .collect();
+            let operation = ActiveOperation::begin(release::parents(&roots));
+            operation.release(roots, &operation_cancellable).await;
             let targets = request
                 .entries
                 .iter()
@@ -3877,6 +3945,9 @@ impl OperationProvider for LocalOperationProvider {
         let cancellable = gio::Cancellable::new();
         let operation_cancellable = cancellable.clone();
         let _task = glib::MainContext::default().spawn_local(async move {
+            let roots = release::natives(&request.locations);
+            let operation = ActiveOperation::begin(release::parents(&roots));
+            operation.release(roots, &operation_cancellable).await;
             let mut targets = Vec::with_capacity(request.locations.len());
             for location in &request.locations {
                 targets.push(DeletionTarget::probed(location, &operation_cancellable).await);
@@ -3894,6 +3965,9 @@ impl OperationProvider for LocalOperationProvider {
         let cancellable = gio::Cancellable::new();
         let operation_cancellable = cancellable.clone();
         let _task = glib::MainContext::default().spawn_local(async move {
+            let roots = release::natives(request.created.iter().chain(&request.overwritten));
+            let operation = ActiveOperation::begin(release::parents(&roots));
+            operation.release(roots, &operation_cancellable).await;
             run_merge_undo(
                 request.id,
                 (request.created, request.overwritten, request.placed),
@@ -3956,6 +4030,7 @@ impl OperationProvider for LocalOperationProvider {
                     }
                 },
             };
+            let _operation = restore::release_trashed(&entries, &operation_cancellable).await;
             let total = entries.len();
             let mut errors = Vec::new();
             let mut restored_locations = Vec::new();

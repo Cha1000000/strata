@@ -515,6 +515,12 @@ impl MountTable {
         })
     }
 
+    pub(crate) fn non_virtual_mounts(&self) -> impl Iterator<Item = &Path> {
+        self.entries.iter().filter_map(|entry| {
+            (!is_virtual_fs_type(&entry.mount_type.fs_type)).then_some(entry.site.point.as_path())
+        })
+    }
+
     fn innermost(&self, path: &Path) -> Option<&MountEntry> {
         self.entries
             .iter()

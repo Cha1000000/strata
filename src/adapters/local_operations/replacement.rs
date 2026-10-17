@@ -37,6 +37,7 @@ use super::{
     native_fs::{LocalFileIdentity, open_local_parent_directory, os_error_detail},
     native_path, os_io_error, placement, placement_error_kind, placement_failure, placement_reason,
     progress::TransferProgressTracker,
+    release::ActiveOperation,
     run_blocking, translated_io_error, trash, was_cancelled,
 };
 
@@ -1348,14 +1349,29 @@ pub(super) async fn merge_local_with(
 pub(super) fn progress_merge_hooks(
     progress: Option<Rc<TransferProgressTracker>>,
     names: NamePolicy,
+    operation: Option<Rc<ActiveOperation>>,
     on_merged: &dyn Fn(MergePlan),
 ) -> MergeHooks<'_> {
     MergeHooks {
         names: names.clone(),
         copy_into_target: merge_copy(progress, names),
-        stage_overwrite: Rc::new(trash_stage_overwrite),
+        stage_overwrite: releasing_stage_overwrite(operation),
         on_merged,
     }
+}
+
+fn releasing_stage_overwrite(operation: Option<Rc<ActiveOperation>>) -> StageOverwrite {
+    Rc::new(move |location, cancellable| {
+        let operation = operation.clone();
+        Box::pin(async move {
+            if let (Some(operation), Some(path)) = (operation, location.native_path()) {
+                operation
+                    .release(vec![path.to_path_buf()], &cancellable)
+                    .await;
+            }
+            trash_stage_overwrite(location, cancellable).await
+        })
+    })
 }
 
 pub(super) fn merge_copy(
@@ -1452,7 +1468,7 @@ pub(super) async fn merge_local(
         move_source,
         cancellable,
         None,
-        progress_merge_hooks(None, NamePolicy::default(), on_merged),
+        progress_merge_hooks(None, NamePolicy::default(), None, on_merged),
     )
     .await
 }

@@ -26,12 +26,16 @@ pub(crate) use fixtures::write_compression_fixture;
 #[cfg(test)]
 mod tests;
 
-use super::fs_ops::{Entry, folder_stamp, fs};
+use super::{
+    fs_ops::{Entry, folder_stamp, fs},
+    release::ActiveOperation,
+};
 use crate::{
     model::Location,
     services::{
         ArchiveFormat, CancelledOperation, CompressRequest, ExtractRequest, LoadHandle,
-        OperationEvent, OperationRequestId, PasswordFailure, TransferReport, validate_basename,
+        OperationEvent, OperationRequestId, PasswordFailure, TransferConflict, TransferReport,
+        validate_basename,
     },
 };
 use compression::{
@@ -41,7 +45,7 @@ use compression::{
 use decoders::extract_rar;
 use decoders::{extract_7z_from_reader, extract_tar, extract_zip_from_archive};
 use extraction::ArchiveOutcome;
-use gtk::{gio, glib};
+use gtk::{gio, glib, prelude::*};
 use rustix::{
     fs::{AtFlags, FileType, Mode, OFlags},
     io::Errno,
@@ -79,6 +83,8 @@ use std::{
 /// [`Failed`]: OperationEvent::Failed
 /// [`Cancelled`]: OperationEvent::Cancelled
 pub(super) fn compress(request: CompressRequest, emit: Rc<dyn Fn(OperationEvent)>) -> LoadHandle {
+    let cancellable = gio::Cancellable::new();
+    let release_cancellable = cancellable.clone();
     let cancelled = Arc::new(AtomicBool::new(false));
     let task_cancelled = cancelled.clone();
     let work_cancelled = cancelled.clone();
@@ -107,6 +113,12 @@ pub(super) fn compress(request: CompressRequest, emit: Rc<dyn Fn(OperationEvent)
         }
         let archive_name = format!("{}.{}", request.archive_name, request.format.extension());
         let archive_path = dest_dir.join(&archive_name);
+        let operation = ActiveOperation::begin([dest_dir.clone()]);
+        if request.conflict == TransferConflict::ReplaceExisting {
+            operation
+                .release(vec![archive_path.clone()], &release_cancellable)
+                .await;
+        }
         let entries: Vec<std::path::PathBuf> = request
             .entries
             .iter()
@@ -199,6 +211,7 @@ pub(super) fn compress(request: CompressRequest, emit: Rc<dyn Fn(OperationEvent)
     });
     LoadHandle::new(move || {
         cancelled.store(true, Ordering::Relaxed);
+        cancellable.cancel();
     })
 }
 
@@ -225,6 +238,7 @@ pub(super) fn extract(request: ExtractRequest, emit: Rc<dyn Fn(OperationEvent)>)
             });
             return;
         };
+        let _operation = ActiveOperation::begin([dest_dir.clone()]);
         let created_destination = request.created_destination;
         let format = ArchiveFormat::from_extension(&request.entry.display_name);
         let password = request.password.clone();

@@ -1,8 +1,4 @@
 // SPDX-License-Identifier: MIT
-#![cfg_attr(
-    not(test),
-    expect(dead_code, reason = "operations register through the provider wrapper")
-)]
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -22,6 +18,10 @@ use futures_channel::oneshot;
 
 pub(crate) const HELD_FOR_OPERATION: &str = "This item is being changed by a file operation.";
 
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "no operation changes files from a worker yet")
+)]
 const CANCEL_POLL: Duration = Duration::from_millis(20);
 
 #[derive(Debug)]
@@ -337,6 +337,10 @@ impl Activity {
         Fence(id)
     }
 
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "no operation changes files from a worker yet")
+    )]
     pub(crate) fn release_blocking<P: Into<PathBuf>>(
         &self,
         paths: impl IntoIterator<Item = P>,
@@ -368,6 +372,10 @@ impl Drop for Activity {
 pub(crate) struct Fence(u64);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "no operation changes files from a worker yet")
+)]
 pub(crate) enum Drained {
     Released,
     TimedOut,
@@ -414,6 +422,10 @@ impl Fence {
         }
     }
 
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "no operation changes files from a worker yet")
+    )]
     pub(crate) fn wait(&self, budget: Duration, cancelled: &dyn Fn() -> bool) -> Drained {
         crate::util::ui_thread::assert_off();
         let deadline = Instant::now() + budget;
@@ -449,12 +461,20 @@ impl Drop for Fence {
     }
 }
 
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "step 7's checks and step 8's leftovers read it")
+)]
 pub(crate) fn is_changing(path: &Path) -> bool {
     let registry = registry();
     registry.roots.covers(path) || registry.fenced.covers(path)
 }
 
 /// Only `folder` itself: an operation writing into its subfolders lists those.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "step 7's checks and step 8's leftovers read it")
+)]
 pub(crate) fn is_active_in(folder: &Path) -> bool {
     registry().folders.contains(folder)
 }
