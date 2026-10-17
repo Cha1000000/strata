@@ -2793,7 +2793,8 @@ fn files_modified_within_a_tick_of_the_clock_stamping_them_are_compared_before_d
     // keeps the times. How many milliseconds after the tick the copy reads the
     // file, whether it is rewritten as the deletion starts, and whether the
     // deletion reads it again.
-    let rows: [(&str, (u32, u32, u32), Preset, u64, bool, bool); 6] = [
+    type Row = (&'static str, (u32, u32, u32), Preset, u64, bool, bool);
+    let rows: [Row; 6] = [
         ("ext4 before 6.13", (6, 12, 0), Quirks::ext4, 5, true, true),
         (
             "ext4 before 6.13, untouched",
