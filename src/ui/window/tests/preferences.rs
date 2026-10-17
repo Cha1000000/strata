@@ -2592,8 +2592,15 @@ fn folder_customizations_follow_file_operations_performed_in_strata() {
                                 destination: docs.clone(),
                             }]);
                         }
-                        Undo => wait_until(|| open.content.browser.undo_last_operation()),
-                        Redo => wait_until(|| open.content.browser.redo_last_operation()),
+                        Undo | Redo => {
+                            let previous = browser.last_started_operation();
+                            if matches!(operation, Undo) {
+                                wait_until(|| open.content.browser.undo_last_operation());
+                            } else {
+                                wait_until(|| open.content.browser.redo_last_operation());
+                            }
+                            wait_until(|| browser.last_started_operation() != previous);
+                        }
                     }
                     if !matches!(operation, MakeFolder(_) | MakeFile(_) | Customize(_)) {
                         wait_for_operation(&open);

@@ -123,7 +123,7 @@ type UnpinHandler = Rc<dyn Fn(&Location)>;
 type PinStatusHandler = Rc<dyn Fn(&Location) -> PinStatus>;
 type PrintHandler = Rc<dyn Fn(FileEntry)>;
 type PreparingTransfer = (
-    (Location, Vec<Location>, bool),
+    transfer::Preparing,
     gio::Cancellable,
     Weak<FileProgressState>,
 );

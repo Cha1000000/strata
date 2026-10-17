@@ -66,6 +66,13 @@ pub(crate) fn folder_destination_texts(location: &Location) -> (String, String) 
     )
 }
 
+pub(crate) fn trash_destination_texts() -> (String, String) {
+    (
+        crate::i18n::tr("Destination: Trash"),
+        format!("→ {}", crate::i18n::tr("Trash")),
+    )
+}
+
 enum OperationDestination<'a> {
     Folder(&'a Location),
     Trash,
@@ -3550,10 +3557,7 @@ impl Browser {
     fn set_operation_destination(&self, destination: OperationDestination<'_>) {
         let (description, label) = match destination {
             OperationDestination::Folder(location) => folder_destination_texts(location),
-            OperationDestination::Trash => (
-                crate::i18n::tr("Destination: Trash"),
-                format!("→ {}", crate::i18n::tr("Trash")),
-            ),
+            OperationDestination::Trash => trash_destination_texts(),
             OperationDestination::PermanentDeletion => {
                 let text = crate::i18n::tr("Permanent deletion");
                 (text.clone(), text)

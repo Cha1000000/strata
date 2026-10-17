@@ -1,10 +1,5 @@
 // SPDX-License-Identifier: MIT
 
-#![cfg_attr(
-    not(test),
-    expect(dead_code, reason = "step 5's call sites move onto these probes")
-)]
-
 #[cfg(test)]
 mod tests;
 
@@ -35,6 +30,10 @@ use crate::{
 };
 
 #[derive(Debug)]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "callers so far act only on proven absence")
+)]
 pub(crate) enum Presence {
     Absent,
     Present(EntryKind),

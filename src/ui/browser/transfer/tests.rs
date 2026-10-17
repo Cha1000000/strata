@@ -3068,6 +3068,233 @@ fn redo_move_replays_the_undone_transfer() {
     );
 }
 
+fn moved_for_undo(
+    view: &crate::ui::browser::BrowserView,
+    root: &Path,
+    name: &str,
+    make: impl FnOnce(&Path),
+) -> (std::path::PathBuf, std::path::PathBuf) {
+    let (original, current) = (root.join("original"), root.join("current"));
+    std::fs::create_dir_all(&original).expect("original dir");
+    std::fs::create_dir_all(&current).expect("current dir");
+    let (original, current) = (original.join(name), current.join(name));
+    make(&original);
+    view.state.start_transfer(
+        Location::local(current.parent().expect("current dir")),
+        vec![Location::local(&original)],
+        true,
+    );
+    wait_until(
+        || current.symlink_metadata().is_ok() && original.symlink_metadata().is_err(),
+        "the move to complete",
+    );
+    wait_until(
+        || view.browser().pending_undo_move().is_some(),
+        "the move undo to become pending",
+    );
+    (original, current)
+}
+
+#[test]
+fn an_undo_checks_its_items_off_the_ui_thread_and_a_cancelled_check_keeps_it() {
+    crate::test_support::gtk_test(
+        "ui::browser::transfer::tests::an_undo_checks_its_items_off_the_ui_thread_and_a_cancelled_check_keeps_it",
+        || {
+            for cancelled in [false, true] {
+                let row = format!("cancelled {cancelled}");
+                let fixture = tempfile::tempdir().expect("undo fixture");
+                let (view, overlay, window) = conflict_view();
+                let (original, current) =
+                    moved_for_undo(&view, fixture.path(), "notes.txt", |path| {
+                        std::fs::write(path, b"notes").expect("moved file");
+                    });
+                let browser = view.browser();
+                let (release, held) = std::sync::mpsc::channel::<()>();
+                let checked = std::sync::Arc::new(std::sync::Mutex::new(None));
+                let seen = checked.clone();
+                let _scope = crate::adapters::FsQuirks::install(
+                    fixture.path(),
+                    crate::adapters::Quirks {
+                        before: vec![(
+                            crate::adapters::FsOp::Stat,
+                            "notes.txt",
+                            0,
+                            Box::new(move || {
+                                *seen.lock().expect("check thread") =
+                                    Some(crate::util::ui_thread::is_current());
+                                let _released = held.recv();
+                            }),
+                        )],
+                        ..crate::adapters::Quirks::ext4()
+                    },
+                );
+                let started = browser.last_started_operation();
+                let (generation, records) = browser.pending_undo_move().expect("pending undo");
+
+                assert!(view.state.undo_move(generation, records.clone()));
+                wait_until(
+                    || checked.lock().expect("check thread").is_some(),
+                    &format!("{row}: the undo to check its items"),
+                );
+                assert_eq!(
+                    *checked.lock().expect("check thread"),
+                    Some(false),
+                    "{row}: the items are checked off the UI thread"
+                );
+                assert!(
+                    view.state.undo_move(generation, records),
+                    "{row}: a repeated undo is taken while the first one checks"
+                );
+                wait_until(
+                    || {
+                        transfer_row_shown(&overlay, true)
+                            && visible_texts(&overlay)
+                                .iter()
+                                .any(|text| text == "Preparing items…")
+                    },
+                    &format!("{row}: the undo to show it prepares its items"),
+                );
+                assert_eq!(
+                    browser.last_started_operation(),
+                    started,
+                    "{row}: nothing moves while the items are checked"
+                );
+                if cancelled {
+                    click_button(&overlay, "Cancel");
+                    wait_until(
+                        || !transfer_row_shown(&overlay, true),
+                        &format!("{row}: the preparing undo to go away"),
+                    );
+                    release.send(()).expect("held check");
+                    for _ in 0..20 {
+                        glib::MainContext::default().iteration(false);
+                    }
+                    assert!(
+                        current.exists() && !original.exists(),
+                        "{row}: a cancelled undo moves nothing"
+                    );
+                    let (generation, records) = browser
+                        .pending_undo_move()
+                        .expect("a cancelled undo stays in the history");
+                    assert!(view.state.undo_move(generation, records));
+                } else {
+                    release.send(()).expect("held check");
+                }
+                wait_until(
+                    || original.exists() && !current.exists(),
+                    &format!("{row}: the undo to move the item back"),
+                );
+                window.destroy();
+            }
+        },
+    );
+}
+
+#[test]
+fn an_undo_tries_items_it_cannot_rule_out_and_drops_only_items_proven_gone() {
+    crate::test_support::gtk_test(
+        "ui::browser::transfer::tests::an_undo_tries_items_it_cannot_rule_out_and_drops_only_items_proven_gone",
+        || {
+            for (case, make, failed_check, undone) in [
+                (
+                    "a dangling link",
+                    (|path: &Path| {
+                        std::os::unix::fs::symlink("nowhere", path).expect("dangling link")
+                    }) as fn(&Path),
+                    None,
+                    true,
+                ),
+                (
+                    "a check of the item that fails",
+                    |path: &Path| std::fs::write(path, b"notes").expect("moved file"),
+                    Some(0),
+                    true,
+                ),
+                (
+                    "a check of its destination that fails",
+                    |path: &Path| std::fs::write(path, b"notes").expect("moved file"),
+                    Some(1),
+                    true,
+                ),
+                (
+                    "an item deleted since",
+                    |path: &Path| std::fs::write(path, b"notes").expect("moved file"),
+                    None,
+                    false,
+                ),
+            ] {
+                let fixture = tempfile::tempdir().expect("undo fixture");
+                let (view, overlay, window) = conflict_view();
+                let (original, current) = moved_for_undo(&view, fixture.path(), "notes.txt", make);
+                if !undone {
+                    std::fs::remove_file(&current).expect("item deleted since the move");
+                }
+                let checked = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let seen = checked.clone();
+                let _scope = crate::adapters::FsQuirks::install(
+                    fixture.path(),
+                    crate::adapters::Quirks {
+                        before: vec![(
+                            crate::adapters::FsOp::Stat,
+                            "notes.txt",
+                            0,
+                            Box::new(move || seen.store(true, std::sync::atomic::Ordering::SeqCst)),
+                        )],
+                        fail: failed_check
+                            .map(|skipped| {
+                                (
+                                    crate::adapters::FsOp::Stat,
+                                    "notes.txt",
+                                    skipped,
+                                    rustix::io::Errno::IO,
+                                )
+                            })
+                            .into_iter()
+                            .collect(),
+                        ..crate::adapters::Quirks::ext4()
+                    },
+                );
+                let browser = view.browser();
+                let started = browser.last_started_operation();
+                let (generation, records) = browser.pending_undo_move().expect("pending undo");
+
+                assert!(view.state.undo_move(generation, records));
+
+                wait_until(
+                    || checked.load(std::sync::atomic::Ordering::SeqCst),
+                    &format!("{case}: the undo to check the item"),
+                );
+                if undone {
+                    wait_until(
+                        || {
+                            original.symlink_metadata().is_ok()
+                                && current.symlink_metadata().is_err()
+                        },
+                        &format!("{case}: the undo to move the item back"),
+                    );
+                    assert!(
+                        !visible_texts(&overlay)
+                            .iter()
+                            .any(|text| text == "File already exists"),
+                        "{case}: a destination that cannot be ruled out is not replaced"
+                    );
+                } else {
+                    wait_until(
+                        || browser.pending_undo_move().is_none(),
+                        &format!("{case}: the undo to be dropped"),
+                    );
+                    assert_eq!(
+                        browser.last_started_operation(),
+                        started,
+                        "{case}: nothing to move back"
+                    );
+                }
+                window.destroy();
+            }
+        },
+    );
+}
+
 #[test]
 fn drop_open_preference_applies_before_settings_and_live_across_views() {
     crate::test_support::gtk_test(

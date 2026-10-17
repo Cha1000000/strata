@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 
+use crate::adapters::probes::{self, Presence};
 use crate::adapters::{gio_file_for_location, transfer_targets};
 use crate::app::Browser;
 use crate::model::{FileEntry, Location};
@@ -146,6 +147,12 @@ struct ConflictActions {
     focus: ConflictFocus,
 }
 
+#[derive(PartialEq)]
+pub(super) enum Preparing {
+    Transfer(Location, Vec<Location>, bool),
+    Replay { redo: bool, generation: u64 },
+}
+
 #[derive(Clone, Copy)]
 struct GroupReplay {
     had_missing: bool,
@@ -171,8 +178,22 @@ enum TransferDialogCompletion {
     },
 }
 
-fn location_exists(location: &Location) -> bool {
-    gio_file_for_location(location).query_exists(None::<&gio::Cancellable>)
+fn found(locations: Vec<Location>, presence: Vec<Presence>) -> Vec<Location> {
+    locations
+        .into_iter()
+        .zip(presence)
+        .filter(|(_, presence)| !matches!(presence, Presence::Absent))
+        .map(|(location, _)| location)
+        .collect()
+}
+
+fn preparing_row(item: &Location, destination: (String, String)) -> (String, (String, String)) {
+    (item.display_name(), destination)
+}
+
+fn folder_row(item: &Location, destination: &Location) -> (String, (String, String)) {
+    let folder = destination.parent().unwrap_or_else(|| destination.clone());
+    preparing_row(item, crate::app::folder_destination_texts(&folder))
 }
 
 fn transfer_is_noop(source: &Location, destination: &Location, move_sources: bool) -> bool {
@@ -616,7 +637,7 @@ impl ViewState {
         if sources.is_empty() {
             return;
         }
-        let request = (destination.clone(), sources.clone(), move_sources);
+        let request = Preparing::Transfer(destination.clone(), sources.clone(), move_sources);
         if self
             .preparing_transfers
             .borrow()
@@ -626,8 +647,14 @@ impl ViewState {
             return;
         }
         let cancellable = gio::Cancellable::new();
-        let preparation =
-            self.show_transfer_preparation(move_sources, (&destination, &sources), &cancellable);
+        let row = (
+            sources
+                .first()
+                .map(Location::display_name)
+                .unwrap_or_default(),
+            crate::app::folder_destination_texts(&destination),
+        );
+        let preparation = self.show_transfer_preparation(move_sources, row, &cancellable);
         self.preparing_transfers.borrow_mut().push((
             request,
             cancellable.clone(),
@@ -713,22 +740,15 @@ impl ViewState {
     fn show_transfer_preparation(
         &self,
         moving: bool,
-        (destination, sources): (&Location, &[Location]),
+        row: (String, (String, String)),
         cancellable: &gio::Cancellable,
     ) -> Rc<FileProgressState> {
         let progress = Rc::new(FileProgressState::new(&self.overlay));
         let shown = Rc::downgrade(&progress);
         let cancellable = cancellable.clone();
-        let description = sources
-            .first()
-            .map(Location::display_name)
-            .unwrap_or_default();
         progress.show_transfer_preparation(
             moving,
-            (
-                description,
-                crate::app::folder_destination_texts(destination),
-            ),
+            row,
             Rc::new(move || {
                 cancellable.cancel();
                 if let Some(progress) = shown.upgrade() {
@@ -908,6 +928,53 @@ impl ViewState {
         self.replay_move(true, generation, records, false)
     }
 
+    fn check_replay(
+        self: &Rc<Self>,
+        (redo, generation): (bool, u64),
+        row: (String, (String, String)),
+        locations: Vec<Location>,
+        resume: impl FnOnce(&Rc<Self>, Vec<Presence>) + 'static,
+    ) -> bool {
+        let replay = Preparing::Replay { redo, generation };
+        if self
+            .preparing_transfers
+            .borrow()
+            .iter()
+            .any(|(preparing, cancellable, _)| *preparing == replay && !cancellable.is_cancelled())
+        {
+            return true;
+        }
+        let cancellable = gio::Cancellable::new();
+        let preparation = self.show_transfer_preparation(true, row, &cancellable);
+        self.preparing_transfers.borrow_mut().push((
+            replay,
+            cancellable.clone(),
+            Rc::downgrade(&preparation),
+        ));
+        let weak = Rc::downgrade(self);
+        glib::MainContext::default().spawn_local(async move {
+            let presence = probes::presence(&locations, &cancellable).await;
+            let Some(state) = weak.upgrade() else {
+                preparation.dismiss_file_operation_progress();
+                return;
+            };
+            state
+                .preparing_transfers
+                .borrow_mut()
+                .retain(|(_, preparing, _)| *preparing != cancellable);
+            if cancellable.is_cancelled() {
+                preparation.dismiss_file_operation_progress();
+                return;
+            }
+            state.transfer_preparation.replace(Some(preparation));
+            resume(&state, presence);
+            if let Some(preparation) = state.transfer_preparation.take() {
+                preparation.dismiss_file_operation_progress();
+            }
+        });
+        true
+    }
+
     fn replay_existing_locations(
         self: &Rc<Self>,
         redo: bool,
@@ -915,15 +982,24 @@ impl ViewState {
         locations: Vec<Location>,
         dispatch: fn(&Rc<Browser>, u64, Vec<Location>) -> bool,
     ) -> bool {
-        let existing = locations
-            .into_iter()
-            .filter(location_exists)
-            .collect::<Vec<_>>();
-        if existing.is_empty() {
+        let Some(first) = locations.first() else {
             self.browser.discard_pending_replay(redo, generation);
             return false;
-        }
-        dispatch(&self.browser, generation, existing)
+        };
+        let row = preparing_row(first, crate::app::trash_destination_texts());
+        self.check_replay(
+            (redo, generation),
+            row,
+            locations.clone(),
+            move |state, presence| {
+                let existing = found(locations, presence);
+                if existing.is_empty() {
+                    state.browser.discard_pending_replay(redo, generation);
+                } else {
+                    dispatch(&state.browser, generation, existing);
+                }
+            },
+        )
     }
 
     fn replay_move(
@@ -933,47 +1009,64 @@ impl ViewState {
         records: Vec<MoveRecord>,
         grouped: bool,
     ) -> bool {
-        let mut accepted = Vec::new();
-        let mut collisions = Vec::new();
-        let mut missing = 0;
-        for record in records {
-            let (item_at, destination) = if redo {
-                (&record.original, &record.current)
+        let ends = |record: &MoveRecord| {
+            if redo {
+                (record.original.clone(), record.current.clone())
             } else {
-                (&record.current, &record.original)
-            };
-            if !location_exists(item_at) {
-                missing += 1;
-                continue;
+                (record.current.clone(), record.original.clone())
             }
-            if location_exists(destination) {
-                collisions.push(record);
-            } else {
-                accepted.push(UndoMoveItem {
-                    record,
-                    conflict: TransferConflict::FailIfExists,
-                });
-            }
-        }
-        if accepted.is_empty() && collisions.is_empty() {
-            if grouped && !redo && missing > 0 {
-                self.browser.discard_group_keep_folder(redo, generation);
-            } else {
-                self.browser.discard_pending_replay(redo, generation);
-            }
+        };
+        let Some((item, destination)) = records.first().map(ends) else {
+            self.browser.discard_pending_replay(redo, generation);
             return false;
-        }
-        self.resolve_replay_collisions(
-            redo,
-            generation,
-            collisions,
-            accepted,
-            grouped.then_some(GroupReplay {
-                had_missing: missing > 0,
-                skipped: false,
-            }),
-        );
-        true
+        };
+        let locations = records
+            .iter()
+            .flat_map(|record| <[Location; 2]>::from(ends(record)))
+            .collect();
+        self.check_replay(
+            (redo, generation),
+            folder_row(&item, &destination),
+            locations,
+            move |state, presence| {
+                let mut accepted = Vec::new();
+                let mut collisions = Vec::new();
+                let mut missing = 0;
+                for (record, ends) in records.into_iter().zip(presence.as_chunks::<2>().0) {
+                    match ends {
+                        [Presence::Absent, _] => missing += 1,
+                        [_, Presence::Present(_)] => collisions.push(record),
+                        _ => accepted.push(UndoMoveItem {
+                            record,
+                            conflict: TransferConflict::FailIfExists,
+                        }),
+                    }
+                }
+                if accepted.is_empty() && collisions.is_empty() {
+                    if grouped && !redo && missing > 0 {
+                        state.browser.discard_group_keep_folder(redo, generation);
+                    } else {
+                        state.browser.discard_pending_replay(redo, generation);
+                    }
+                    return;
+                }
+                if !collisions.is_empty()
+                    && let Some(preparation) = state.transfer_preparation.take()
+                {
+                    preparation.dismiss_file_operation_progress();
+                }
+                state.resolve_replay_collisions(
+                    redo,
+                    generation,
+                    collisions,
+                    accepted,
+                    grouped.then_some(GroupReplay {
+                        had_missing: missing > 0,
+                        skipped: false,
+                    }),
+                );
+            },
+        )
     }
 
     pub(super) fn undo_copy(self: &Rc<Self>, generation: u64, locations: Vec<Location>) -> bool {
@@ -986,17 +1079,29 @@ impl ViewState {
         created: Vec<Location>,
         overwritten: Vec<Location>,
     ) -> bool {
-        let created = created
-            .into_iter()
-            .filter(location_exists)
-            .collect::<Vec<_>>();
-        // Overwritten entries stay even when the incoming copy is gone: the
-        // staged original may still be sitting in Trash waiting to restore.
-        if created.is_empty() && overwritten.is_empty() {
-            self.browser.discard_pending_replay(false, generation);
-            return false;
-        }
-        self.browser.undo_merge(generation, created, overwritten)
+        let Some(first) = created.first() else {
+            if overwritten.is_empty() {
+                self.browser.discard_pending_replay(false, generation);
+                return false;
+            }
+            return self.browser.undo_merge(generation, created, overwritten);
+        };
+        let row = folder_row(first, first);
+        self.check_replay(
+            (false, generation),
+            row,
+            created.clone(),
+            move |state, presence| {
+                let created = found(created, presence);
+                // Overwritten entries stay even when the incoming copy is gone: the
+                // staged original may still be sitting in Trash waiting to restore.
+                if created.is_empty() && overwritten.is_empty() {
+                    state.browser.discard_pending_replay(false, generation);
+                } else {
+                    state.browser.undo_merge(generation, created, overwritten);
+                }
+            },
+        )
     }
 
     fn resolve_replay_collisions(
