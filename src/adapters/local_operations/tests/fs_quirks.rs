@@ -192,6 +192,7 @@ pub(crate) struct Quirks {
     /// with the errno, as Samba makes it under a longer temporary name.
     pub folder_name_limit: Option<(usize, Errno)>,
     pub symlinks: Support,
+    /// The `statfs` type; `None` reports ext4's, never the host's.
     pub fs_type: Option<FsWord>,
     pub name_max: Option<u32>,
     pub trash: Trash,
@@ -222,6 +223,7 @@ pub(crate) struct Quirks {
     /// Lets the matching call through after skipping the given number of matches, then fails
     /// every later call with `EIO`, as a yanked device does, until [`FsQuirks::replug`].
     pub unplugged_after: Option<(Op, &'static str, usize)>,
+    /// The mountinfo type and super options; `None` reports ext4's, never the host's.
     pub mount_type: Option<(&'static str, &'static str)>,
     pub mount_root: Option<&'static str>,
     pub device_format: Option<&'static str>,
@@ -293,12 +295,15 @@ impl Quirks {
         }
     }
 
-    /// No `RENAME_NOREPLACE`, no hard links, and no rename over an empty folder.
+    /// No `RENAME_NOREPLACE`, no hard links, no rename over an empty folder and no birth times.
     pub(crate) fn vboxsf() -> Self {
         Self {
+            mount_type: Some(("vboxsf", VBOXSF_OPTIONS)),
+            fs_type: Some(0x786f_4256),
             rename_flags: Support::Rejected(Errno::INVAL),
             links: Support::Rejected(Errno::PERM),
             rename_over_empty_dir: OverEmptyDirectory::NotEmpty,
+            no_birth_time: true,
             ..Self::default()
         }
     }
@@ -324,8 +329,8 @@ impl Quirks {
 
     pub(crate) fn ext4() -> Self {
         Self {
-            mount_type: Some(("ext4", "rw")),
-            fs_type: Some(0xEF53),
+            mount_type: Some(EXT4),
+            fs_type: Some(EXT4_SUPER_MAGIC),
             ..Self::default()
         }
     }
@@ -483,6 +488,9 @@ impl Quirks {
 }
 
 const FUSE_SUPER_MAGIC: FsWord = 0x6573_5546;
+const EXT4_SUPER_MAGIC: FsWord = 0xEF53;
+const EXT4: (&str, &str) = ("ext4", "rw");
+const VBOXSF_OPTIONS: &str = "rw,nodev,relatime,iocharset=utf8,uid=1000,gid=1000";
 const VFAT_OPTIONS: &str = concat!(
     "rw,uid=1000,gid=1000,fmask=0022,dmask=0022,codepage=437,iocharset=ascii,",
     "shortname=mixed,showexec,utf8,flush,errors=remount-ro"
@@ -1707,25 +1715,22 @@ impl FsEnvironment for Scoped {
                 .run(Op::MountType, &[], |scope| {
                     let root = scope.quirk(|quirks| quirks.mount_root).unwrap_or("/");
                     let serverino_disabled = scope.state().serverino_disabled;
-                    Ok(scope
-                        .quirk(|quirks| quirks.mount_type)
-                        .map(|(fs_type, super_options)| {
-                            let super_options = super_options
-                                .split(',')
-                                .filter(|option| !serverino_disabled || *option != "serverino")
-                                .collect::<Vec<_>>()
-                                .join(",");
-                            let mount_type = MountType {
-                                fs_type: fs_type.to_owned(),
-                                super_options,
-                            };
-                            let site = MountSite {
-                                point: scope.root.clone(),
-                                root: PathBuf::from(root),
-                            };
-                            (mount_type, site)
-                        })
-                        .or_else(|| System.mount_type(fd)))
+                    let (fs_type, super_options) =
+                        scope.quirk(|quirks| quirks.mount_type).unwrap_or(EXT4);
+                    let super_options = super_options
+                        .split(',')
+                        .filter(|option| !serverino_disabled || *option != "serverino")
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    let mount_type = MountType {
+                        fs_type: fs_type.to_owned(),
+                        super_options,
+                    };
+                    let site = MountSite {
+                        point: scope.root.clone(),
+                        root: PathBuf::from(root),
+                    };
+                    Ok(Some((mount_type, site)))
                 })
                 .ok()
                 .flatten(),
@@ -2003,8 +2008,8 @@ impl FsOps for Scoped {
                 .run(Op::Statfs, &[], |scope| {
                     let system = System.statfs(dir);
                     let (kind, name_max) = scope.quirk(|quirks| (quirks.fs_type, quirks.name_max));
-                    Ok(kind.or(system.map(|stat| stat.kind)).map(|kind| FsStat {
-                        kind,
+                    Ok(Some(FsStat {
+                        kind: kind.unwrap_or(EXT4_SUPER_MAGIC),
                         name_max: name_max.or(system.map(|stat| stat.name_max)).unwrap_or(0),
                     }))
                 })

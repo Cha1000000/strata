@@ -552,12 +552,7 @@ fn a_lost_reply_over_a_placeholder_removes_only_one_proven_untouched() -> Result
     // which libfuse without `use_ino` and vboxsf number as the placeholder it
     // replaced.
     let vboxsf = || Quirks {
-        mount_type: Some((
-            "vboxsf",
-            "rw,nodev,relatime,iocharset=utf8,uid=1000,gid=1000",
-        )),
         lost_renames_keep_inodes: true,
-        no_birth_time: true,
         ..Quirks::vboxsf()
     };
     let rows = [
