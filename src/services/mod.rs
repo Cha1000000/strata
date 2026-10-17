@@ -10,6 +10,7 @@ pub(crate) mod file_providers;
 mod file_source;
 pub(crate) mod image_conversion;
 mod install_source;
+mod item_identity;
 pub(crate) mod jobs;
 mod listeners;
 mod mime_type;
@@ -51,6 +52,7 @@ pub(crate) use file_source::{
 };
 pub use install_source::{InstallSource, ManagedInstall};
 pub(crate) use install_source::{ensure_self_managed, installed_executable};
+pub use item_identity::{Attributes, Evidence, IdentityTraits, InodeNumbers, Proof};
 pub use jobs::{
     ActionEventSink, ActionRunEvent, ActionRunRequest, ActionRunner, CancelHandle,
     InvocationSource, JobId, JobRequest, JobService, JobSnapshot, JobStatus, ScriptProgress,

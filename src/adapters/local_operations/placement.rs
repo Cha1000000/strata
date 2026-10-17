@@ -30,6 +30,7 @@ use crate::{
         mount_capabilities,
     },
     model::hidden_names::HiddenName,
+    services::InodeNumbers,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -124,8 +125,11 @@ impl<'a> Mount<'a> {
 
     /// Whether an inode number still found at a name proves the entry is
     /// the one it was read from, as the mount's type tells.
-    fn stable_inodes(&self) -> bool {
-        mount_profile::known(self.fs, self.dir, self.key()).stable_inodes == Some(true)
+    fn numbers_kept(&self) -> bool {
+        mount_profile::known(self.fs, self.dir, self.key())
+            .identity
+            .numbers
+            == InodeNumbers::Kept
     }
 
     fn learn(&self, learn: impl FnOnce(&mut MountCapabilities)) {
@@ -636,7 +640,7 @@ fn place_directory(
             Err(PlaceError::CrossDevice)
         }
         Err(error) if may_have_lost_reply(error) => {
-            if mount.stable_inodes() && remove_placeholder(fs, to, placeholder) {
+            if mount.numbers_kept() && remove_placeholder(fs, to, placeholder) {
                 Err(PlaceError::Io(error))
             } else {
                 moved_despite_lost_reply(fs, from, to, source, Placed::ReservedDirectory)
@@ -1131,7 +1135,7 @@ fn rename_over_reserved_file(
         Err(error) => error,
     };
     if may_have_lost_reply(error) {
-        if mount.stable_inodes()
+        if mount.numbers_kept()
             && still_reserved() == Ok(true)
             && fs.unlink(to, AtFlags::empty()).is_ok()
         {

@@ -21,7 +21,7 @@ use rustix::{
 };
 
 use super::native_fs::{LocalFileIdentity, retry_local_open};
-use crate::adapters::volume::MountKey;
+use crate::{adapters::volume::MountKey, services::Attributes};
 
 /// `STATX_MNT_ID_UNIQUE` (Linux 6.8), which rustix does not name yet.
 const STATX_MNT_ID_UNIQUE: u32 = 0x4000;
@@ -68,6 +68,13 @@ pub(super) struct EntryStat {
 impl EntryStat {
     pub(super) fn is_directory(&self) -> bool {
         self.kind == FileType::Directory
+    }
+
+    pub(super) fn attributes(&self) -> Attributes {
+        Attributes {
+            size: self.size,
+            mtime: self.mtime,
+        }
     }
 }
 

@@ -14,6 +14,7 @@ use std::{
 use gtk::gio;
 
 use super::names::{NameEncoding, NameProfile, NameRules, PrivateUse, Reserved, Strip, byte_limit};
+use crate::services::{IdentityTraits, InodeNumbers};
 
 /// Parsed without touching mounted filesystems, including unresponsive mounts.
 #[derive(Clone)]
@@ -47,28 +48,32 @@ pub(crate) struct MountType {
 }
 
 impl MountType {
-    /// Whether an entry keeps its inode number: FAT and exFAT, libfuse
-    /// without `use_ino` and cifs without server inode numbers number an
-    /// entry afresh once the kernel has evicted it, and vboxsf keeps a name's
-    /// number for whatever a rename puts there.
-    pub(crate) fn stable_inodes(&self) -> bool {
-        if self.fs_type == "vboxsf" {
-            return false;
-        }
-        match family(&self.fs_type) {
-            Family::Fat | Family::Fuse => false,
-            Family::Smb => !self
-                .super_options
-                .split(',')
-                .any(|option| option == "noserverino"),
-            _ => true,
-        }
-    }
-
-    /// The kernel's exFAT driver stamps a folder's birth time at each rename
+    /// FAT and exFAT, libfuse without `use_ino` and cifs without server inode numbers number an
+    /// entry afresh once the kernel has evicted it, and vboxsf keeps a name's number for whatever
+    /// a rename puts there. The kernel's exFAT driver stamps a folder's birth time at each rename
     /// into or within it.
-    pub(crate) fn renames_reset_folder_births(&self) -> bool {
-        self.fs_type == "exfat"
+    pub(crate) fn identity(&self) -> IdentityTraits {
+        let numbers = match (family(&self.fs_type), self.fs_type.as_str()) {
+            (Family::Fat | Family::Fuse, _) | (_, "vboxsf") => InodeNumbers::Renewed,
+            (Family::Smb, _)
+                if self
+                    .super_options
+                    .split(',')
+                    .any(|option| option == "noserverino") =>
+            {
+                InodeNumbers::Renewed
+            }
+            (
+                Family::Other,
+                "9p" | "virtiofs" | "ecryptfs" | "ceph" | "hfs" | "hfsplus" | "ntfs" | "ramfs",
+            ) => InodeNumbers::Kept,
+            (Family::Other, _) => InodeNumbers::Unknown,
+            _ => InodeNumbers::Kept,
+        };
+        IdentityTraits {
+            numbers,
+            folder_births: self.fs_type != "exfat",
+        }
     }
 
     /// How long the SMB client keeps a closed file's handle open

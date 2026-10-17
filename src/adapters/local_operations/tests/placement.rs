@@ -14,7 +14,10 @@ use super::super::{
 };
 use super::fs_quirks::{Op, OverEmptyDirectory, Racer, Support};
 use super::*;
-use crate::adapters::volume::{MountCapabilities, mount_capabilities};
+use crate::{
+    adapters::volume::{MountCapabilities, mount_capabilities},
+    services::InodeNumbers,
+};
 
 fn without_flags(error: Errno) -> Quirks {
     Quirks {
@@ -555,16 +558,26 @@ fn a_lost_reply_over_a_placeholder_removes_only_one_proven_untouched() -> Result
         lost_renames_keep_inodes: true,
         ..Quirks::vboxsf()
     };
-    let rows = [
-        (Some(Quirks::sshfs as fn() -> Quirks), false),
-        (Some(Quirks::sshfs as fn() -> Quirks), true),
-        (Some(vboxsf as fn() -> Quirks), false),
-        (None, false),
-        (None, true),
+    let folders = || without_flags(Errno::NOSYS);
+    let unknown_type = || Quirks {
+        mount_type: Some(("jfs", "rw")),
+        ..links_refused_for_the_item()
+    };
+    let unread_type = || Quirks {
+        fail: vec![(Op::MountType, "*", 0, Errno::ACCESS)],
+        ..without_flags(Errno::NOSYS)
+    };
+    let rows: [(Preset, bool, InodeNumbers); 7] = [
+        (Quirks::sshfs, false, InodeNumbers::Renewed),
+        (Quirks::sshfs, true, InodeNumbers::Renewed),
+        (vboxsf, false, InodeNumbers::Renewed),
+        (links_refused_for_the_item, false, InodeNumbers::Kept),
+        (folders, true, InodeNumbers::Kept),
+        (unknown_type, false, InodeNumbers::Unknown),
+        (unread_type, true, InodeNumbers::Unknown),
     ];
-    for (unstable, folder) in rows {
+    for (preset, folder, numbers) in rows {
         for performed in [true, false] {
-            let stable = unstable.is_none();
             let root = tempfile::tempdir()?;
             let source = root.path().join("source");
             if folder {
@@ -574,11 +587,7 @@ fn a_lost_reply_over_a_placeholder_removes_only_one_proven_untouched() -> Result
                 fs::write(&source, b"")?;
             }
             let original = identity(&source);
-            let mut quirks = match (unstable, folder) {
-                (Some(preset), _) => preset(),
-                (None, true) => without_flags(Errno::NOSYS),
-                (None, false) => links_refused_for_the_item(),
-            };
+            let mut quirks = preset();
             if performed {
                 quirks.lost_reply.push((Op::Rename, "target", Errno::IO));
             } else {
@@ -591,14 +600,17 @@ fn a_lost_reply_over_a_placeholder_removes_only_one_proven_untouched() -> Result
             );
             let _scope = FsQuirks::install(root.path(), quirks);
 
-            let expected = match (stable, performed) {
-                (false, _) => Err(PlaceError::Unconfirmed),
-                (true, true) => Ok(if folder {
-                    Placed::ReservedDirectory
-                } else {
-                    Placed::OverReservedFile
-                }),
-                (true, false) => Err(PlaceError::Io(Errno::IO)),
+            let placed = if folder {
+                Placed::ReservedDirectory
+            } else {
+                Placed::OverReservedFile
+            };
+            let expected = match (numbers, performed) {
+                (InodeNumbers::Renewed, _) | (InodeNumbers::Unknown, false) => {
+                    Err(PlaceError::Unconfirmed)
+                }
+                (_, true) => Ok(placed),
+                (InodeNumbers::Kept, false) => Err(PlaceError::Io(Errno::IO)),
             };
             assert_eq!(
                 place_in(root.path(), "source", "target", Some(original)),
@@ -609,7 +621,7 @@ fn a_lost_reply_over_a_placeholder_removes_only_one_proven_untouched() -> Result
                 assert_eq!(names(root.path())?, ["target"], "{case}");
                 assert_eq!(identity(&root.path().join("target")), original, "{case}");
             } else {
-                let left: &[&str] = if stable {
+                let left: &[&str] = if numbers == InodeNumbers::Kept {
                     &["source"]
                 } else {
                     &["source", "target"]

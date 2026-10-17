@@ -1062,7 +1062,7 @@ impl Scope {
                 .inodes
                 .entry(path.clone())
                 .or_insert(stat.identity.inode);
-            stat.identity.birth = Some((*state.births.entry(path).or_default(), 0));
+            stat.identity.birth = Some((1 + *state.births.entry(path).or_default(), 0));
         }
         if let Some(tick) = state.quirks.coarse_clock.and_then(timespec) {
             stat.mtime = stat.mtime.min(tick);
@@ -1616,7 +1616,6 @@ fn renumber(path: &Path) -> bool {
 }
 
 /// As [`renumbered`], unless a descriptor of this process holds it, which keeps it from eviction.
-#[expect(dead_code, reason = "the identity rule's eviction rows use it")]
 pub(crate) fn evict(path: &Path) -> bool {
     let held =
         rustix::fs::lstat(path).is_ok_and(|stat| held_by_this_process(stat.st_dev, stat.st_ino));

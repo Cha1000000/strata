@@ -26,7 +26,7 @@ use rustix::{
     io::Errno,
 };
 
-use super::{Failure, Identifies, Mount, lock, restrictive};
+use super::{Failure, Mount, lock, restrictive};
 use crate::{
     adapters::{
         local_operations::{
@@ -34,21 +34,33 @@ use crate::{
             deletion::bounded_local_worker_count,
             fs_ops::{Entry, EntryStat, FsOps, OffMain},
             io_error,
-            native_fs::LocalFileIdentity,
+            native_fs::{self, LocalFileIdentity},
             translated_io_error,
             work_queue::{self, Group, Job, WorkQueue},
         },
         volume::{CoarseTimes, Family},
     },
-    services::KeptCause,
+    services::{Attributes, IdentityTraits, InodeNumbers, KeptCause, Proof},
 };
 
-/// The link count each name deletions removed of a file with several names
-/// had just before, by device and inode. A transfer's deletions share one,
-/// as its items may hold names of one file. Those counts tell which
-/// removals followed a snapshot: the ones at or below its count.
+/// A transfer's deletions share one, as its items may hold names of one file.
 #[derive(Default)]
-pub(in crate::adapters::local_operations) struct Unlinks(Mutex<HashMap<(u64, u64), Vec<u64>>>);
+pub(in crate::adapters::local_operations) struct Unlinks(Mutex<HashMap<(u64, u64), Unlinked>>);
+
+#[derive(Default)]
+struct Unlinked {
+    /// Link counts just before each removal; those at or below a snapshot's count followed it.
+    counts: Vec<u64>,
+    left: Option<(i64, u32)>,
+}
+
+impl Unlinked {
+    fn since(&self, nlink: u64) -> (u64, Option<(i64, u32)>) {
+        let since = self.counts.iter().filter(|&&count| count <= nlink).count() as u64;
+        let latest_followed = self.counts.last().is_some_and(|&count| count <= nlink);
+        (since, self.left.filter(|_| latest_followed))
+    }
+}
 
 /// The time tests pretend it is, which waits move on instead of sleeping.
 #[cfg(test)]
@@ -202,11 +214,20 @@ impl SourceSnapshot {
     }
 
     /// Removing a name changes the ctime and link count of the others.
-    fn holds(&self, current: &EntryStat, stable_inodes: bool, unlinked: u64) -> bool {
-        let same = current.identity.may_be(&self.identity)
-            && current.size == self.size
-            && current.mtime == self.mtime;
-        if !stable_inodes {
+    fn holds(
+        &self,
+        current: &EntryStat,
+        traits: IdentityTraits,
+        (unlinked, left): (u64, Option<(i64, u32)>),
+    ) -> bool {
+        let recorded = Attributes {
+            size: self.size,
+            mtime: self.mtime,
+        };
+        let same = native_fs::compare(traits, self.identity, Some(recorded), current)
+            == Proof::Same
+            && current.attributes() == recorded;
+        if traits.numbers == InodeNumbers::Renewed {
             // Nothing tells which names of a file this deletion removed. Where
             // times are as coarse as FAT's, only a birth time tells a file put
             // in its place apart.
@@ -214,9 +235,11 @@ impl SourceSnapshot {
         }
         // Every change to an entry moves its change time; the identity and
         // link count are defence in depth.
-        same && current.identity == self.identity
-            && current.nlink + unlinked == self.nlink
-            && (current.ctime == self.ctime || unlinked > 0)
+        same && current.nlink + unlinked == self.nlink
+            && match unlinked {
+                0 => current.ctime == self.ctime,
+                _ => left.is_none_or(|left| current.ctime == left),
+            }
     }
 }
 
@@ -542,18 +565,20 @@ impl Ownership {
         fs: &dyn FsOps,
         (at, path): (Entry<'_>, &Path),
         stat: &EntryStat,
-        identifies: Identifies,
+        traits: IdentityTraits,
     ) -> bool {
         let Some(identity) = self.identity_at(path) else {
             return false;
         };
         let state = self.states.get(path);
-        let same = if identifies.inodes || (has_state(identity.kind) && state.is_none()) {
+        let same = if has_state(identity.kind) && state.is_none() {
             stat.identity == identity
-        } else if identity.kind == FileType::Directory && !identifies.folder_births {
-            stat.kind == identity.kind
         } else {
-            stat.identity.may_be(&identity)
+            let recorded = state.map(|state| Attributes {
+                size: state.size,
+                mtime: state.mtime,
+            });
+            native_fs::compare(traits, identity, recorded, stat) != Proof::Different
         };
         same && state.is_none_or(|state| {
             state.holds(stat)
@@ -578,8 +603,8 @@ impl Ownership {
         let Ok(stat) = fs.stat(at, true) else {
             return false;
         };
-        let identifies = Mount::identifies(fs, at.dir);
-        if !self.holds(fs, (at, Path::new("")), &stat, identifies) {
+        let traits = Mount::new(fs, at.dir).identity;
+        if !self.holds(fs, (at, Path::new("")), &stat, traits) {
             return false;
         }
         if self.descendants.is_empty() {
@@ -604,7 +629,7 @@ impl Ownership {
             };
             let at = Entry::new(&dir, name);
             fs.stat(at, true)
-                .is_ok_and(|stat| self.holds(fs, (at, path), &stat, identifies))
+                .is_ok_and(|stat| self.holds(fs, (at, path), &stat, traits))
         })
     }
 }
@@ -994,14 +1019,22 @@ fn walk(
     compare_only: bool,
     own_folders: bool,
 ) -> Removed {
+    let mount = Mount::new(fs, parent.as_fd());
+    let identity = mount.identity;
+    let mut linked = HashMap::new();
+    if identity.numbers != InodeNumbers::Renewed && !compare_only {
+        linked_names(root, Path::new(""), &mut linked);
+    }
     let deletion = Arc::new(Deletion {
         fs,
-        stable_inodes: Mount::identifies(fs, parent.as_fd()).inodes,
+        identity,
+        root: parent.clone(),
+        linked: Mutex::new(linked),
         unlinks,
         kept: Mutex::default(),
         removed: AtomicBool::new(false),
         compare_only,
-        own_folders: own_folders.then(|| Mount::new(fs, parent.as_fd()).family),
+        own_folders: own_folders.then_some(mount.family),
     });
     let steps = deletion.steps(root, Path::new(""));
     let workers = match steps.as_slice() {
@@ -1039,11 +1072,24 @@ fn walk(
     }
 }
 
+fn linked_names(folder: &Folder, path: &Path, names: &mut HashMap<(u64, u64), Vec<PathBuf>>) {
+    for (name, node) in lock(&folder.children).iter() {
+        match node {
+            Node::Entry(snapshot) if snapshot.nlink > 1 => names
+                .entry((snapshot.identity.device, snapshot.identity.inode))
+                .or_default()
+                .push(path.join(name)),
+            Node::Folder(folder) => linked_names(folder, &path.join(name), names),
+            Node::Entry(_) | Node::Kept(_) => {}
+        }
+    }
+}
+
 struct Deletion {
     fs: &'static dyn FsOps,
-    /// FUSE daemons without `use_ino` and cifs without server inode
-    /// numbers number an entry afresh once the kernel evicts it.
-    stable_inodes: bool,
+    identity: IdentityTraits,
+    root: Arc<OwnedFd>,
+    linked: Mutex<HashMap<(u64, u64), Vec<PathBuf>>>,
     unlinks: Arc<Unlinks>,
     kept: Mutex<Vec<(PathBuf, KeptCause)>>,
     removed: AtomicBool,
@@ -1112,11 +1158,25 @@ impl Deletion {
 
     fn same(&self, current: &EntryStat, identity: Option<LocalFileIdentity>) -> bool {
         identity.is_some_and(|identity| {
-            if self.stable_inodes {
-                current.identity == identity
-            } else {
-                current.identity.may_be(&identity)
-            }
+            native_fs::compare(self.identity, identity, None, current) != Proof::Different
+        })
+    }
+
+    fn left_after_removing(
+        &self,
+        (key, path): ((u64, u64), &Path),
+        identity: LocalFileIdentity,
+    ) -> Option<(i64, u32)> {
+        let mut linked = lock(&self.linked);
+        let names = linked.get_mut(&key)?;
+        names.retain(|name| name != path);
+        names.iter().find_map(|name| {
+            let other = Entry {
+                dir: self.root.as_fd(),
+                name: name.as_os_str(),
+            };
+            let stat = self.fs.stat(other, true).ok()?;
+            (stat.identity == identity).then_some(stat.ctime)
         })
     }
 
@@ -1302,12 +1362,7 @@ impl At {
         let since = unlinks
             .as_ref()
             .and_then(|unlinks| unlinks.get(&key))
-            .map_or(0, |counts| {
-                counts
-                    .iter()
-                    .filter(|&&count| count <= snapshot.nlink)
-                    .count() as u64
-            });
+            .map_or((0, None), |unlinked| unlinked.since(snapshot.nlink));
         let current = fs.stat(self.entry_at(), true);
         // Only the file compared may go, not one renamed over its name since;
         // its open descriptor keeps its inode number. Closed before the
@@ -1322,14 +1377,18 @@ impl At {
             && still_ahead
             && current
                 .as_ref()
-                .is_ok_and(|current| snapshot.holds(current, deletion.stable_inodes, since));
+                .is_ok_and(|current| snapshot.holds(current, deletion.identity, since));
         match current {
             Ok(_) if unchanged && deletion.compare_only => {}
             Ok(current) if unchanged => match fs.unlink(self.entry_at(), AtFlags::empty()) {
                 Ok(()) => {
                     deletion.removed.store(true, Ordering::Release);
                     if let Some(unlinks) = &mut unlinks {
-                        unlinks.entry(key).or_default().push(current.nlink);
+                        let left =
+                            deletion.left_after_removing((key, &self.path), snapshot.identity);
+                        let unlinked = unlinks.entry(key).or_default();
+                        unlinked.counts.push(current.nlink);
+                        unlinked.left = left;
                     }
                 }
                 Err(error) => deletion.failed(self.path.clone(), error),

@@ -109,9 +109,10 @@ Residual limits:
   under a second spelling there, as it numbers names that differ only in case before copying.
 - After a lost reply while placing over a placeholder (to the placeholder's `mkdir` or exclusive
   create, or to the rename over it), an empty folder or file Strata created can remain at the
-  destination name. Where inode numbers are stable, a placeholder the rename left in place proves
-  the rename never happened: Strata removes it and reports the error itself. On FUSE the moved
-  item can report the placeholder's number, so nothing is removed there.
+  destination name. Where the mount's type is known to keep inode numbers, a placeholder the rename
+  left in place proves the rename never happened: Strata removes it and reports the error itself.
+  On FUSE and vboxsf the moved item can report the placeholder's number, so nothing is removed
+  there, nor on a mount of another type or one whose type cannot be read.
 
 Renaming a folder in the lower layer of an overlayfs mount without `redirect_dir`, or moving
 across bind mounts or btrfs subvolumes, returns `EXDEV`. Those moves copy, and the copy uses a
@@ -519,7 +520,12 @@ if it is still what the copy read:
   same type, size and modification time and, where inode numbers are stable, the same inode, change
   time and link count. Removing one name of a hard-linked file changes the other names' change time
   and link count, so Strata counts the names it removed itself, across every item of a paste, a
-  restore or an undo, and accepts only those changes.
+  restore or an undo, and accepts only those link counts. Right after removing a name, it reads the
+  file's change time through another name of it in the same item, and the file's later names must
+  show that change time. Before Linux 6.13, a change within the clock tick of that removal shows
+  the same change time. A name in another item (two selected or restored items that share a
+  file) is accepted with any change time once Strata removed one of the file's names, as long as
+  its size and modification time still match.
 - **SMB change times.** The SMB client answers a stat from the attributes it cached for a file
   (`acregmax`, or `actimeo` in the mount's options, one second by default, and longer for a file
   this machine keeps reading), which can hold a change time from before a change reached the
@@ -530,8 +536,8 @@ if it is still what the copy read:
   which cache nothing, the record takes no extra round trip.
 - **Relaxed identity.** FUSE daemons without `use_ino`, vfat and exFAT, and cifs mounted with
   `noserverino` give an entry a new inode number once the kernel evicts it. There, the type and the
-  birth time, where both stats report one, stand in for the inode, and the change time is compared
-  only for files with one link.
+  birth time, where both stats report a non-zero one, stand in for the inode, and the change time is
+  compared only for files with one link.
 - **Racily clean files.** Where timestamps are coarse, as on every filesystem before Linux 6.13, a
   same-size rewrite can leave a file's times as they were. Such files are compared by content; see
   [Racily clean files](#racily-clean-files).
@@ -752,10 +758,10 @@ reported.
   size and modification time, as another copy of the source would have, passes for it. On kernel
   exFAT and vfat, whose birth times count in 10 ms ticks, a copy replaced within its birth time's
   tick by a file of its size and modification time passes as well, and the move deletes its source.
-  A copy recognises its own entries by inode number, and on FUSE its claimed files by type and
-  size. Where the kernel can renumber an evicted entry (FUSE, vfat, exFAT, cifs with
-  `noserverino`), a renumbered entry stops the copy as changed; nothing is deleted, and its hidden
-  stage can be left behind.
+  A copy recognises its own entries, and a selected folder it is about to read, by the mount's
+  rule: by inode number where the mount keeps them, by birth time on vfat and exFAT, and by type
+  elsewhere (its claimed files also by being empty), so an entry the kernel renumbered after
+  eviction does not stop the copy. A hidden stage the kernel renumbered can still be left behind.
 - **Modes that cannot be stored.** On vfat, exFAT, exfat-fuse, ntfs-3g and SMB without POSIX
   extensions, the mount options decide modes, and nothing reports what was lost. On SMB with POSIX
   extensions, a file opened right after `chmod 0444` reports 0755, so any copier copies 0755.

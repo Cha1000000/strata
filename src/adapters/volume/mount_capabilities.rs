@@ -8,6 +8,7 @@
 use std::{collections::BTreeMap, ffi::OsStr, sync::Mutex, time::Duration};
 
 use super::{CoarseTimes, Family, FuseFormat, MountNames, Strictness};
+use crate::services::IdentityTraits;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub(crate) enum MountKey {
@@ -40,8 +41,7 @@ pub(crate) struct MountCapabilities {
     pub refused_xattrs: XattrNamespaces,
     /// From mountinfo, kept here so a mount change drops it with the rest.
     pub family: Option<Family>,
-    pub stable_inodes: Option<bool>,
-    pub renames_reset_folder_births: bool,
+    pub identity: IdentityTraits,
     pub fuse_format: Option<FuseFormat>,
     pub coarse_times: Option<CoarseTimes>,
     pub deferred_close: Option<Duration>,

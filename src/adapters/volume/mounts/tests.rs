@@ -9,6 +9,7 @@ use super::{
 use crate::adapters::volume::names::{
     NameEncoding, NameLimit, NameProfile, NameRules, PrivateUse, Reserved, Strip,
 };
+use crate::services::{IdentityTraits, InodeNumbers};
 
 mod byte_paths;
 
@@ -42,7 +43,7 @@ fn parses_mount_points_and_filesystem_types() {
 }
 
 #[test]
-fn inode_numbers_are_unstable_on_fat_fuse_vboxsf_and_cifs_without_server_inodes() {
+fn only_mount_types_known_to_keep_inode_numbers_are_trusted_to() {
     let table = MountTable::parse(
         "\
 70 22 0:60 / /mnt/a rw - cifs //server/a rw,vers=3.1.1,serverino,cache=strict
@@ -54,15 +55,32 @@ fn inode_numbers_are_unstable_on_fat_fuse_vboxsf_and_cifs_without_server_inodes(
 76 22 8:34 / /mnt/g rw - exfat /dev/sdc3 rw
 77 22 8:35 / /mnt/h rw - msdos /dev/sdc4 rw
 78 22 0:65 / /mnt/i rw - vboxsf share rw,nodev,relatime,iocharset=utf8
+79 22 0:66 / /mnt/j rw - 9p share rw,trans=virtio
+80 22 8:36 / /mnt/k rw - jfs /dev/sdc5 rw
 ",
     );
-    let stable = |id| table.mount_of(id).map(|(mount, _)| mount.stable_inodes());
-    assert_eq!(stable(70), Some(true));
-    assert_eq!(stable(71), Some(false));
-    assert_eq!(stable(72), Some(false));
-    assert_eq!(stable(73), Some(true));
-    for id in 74..=78 {
-        assert_eq!(stable(id), Some(false), "mount {id}");
+    let rows = [
+        (70, InodeNumbers::Kept, true),
+        (71, InodeNumbers::Renewed, true),
+        (72, InodeNumbers::Renewed, true),
+        (73, InodeNumbers::Kept, true),
+        (74, InodeNumbers::Renewed, true),
+        (75, InodeNumbers::Renewed, true),
+        (76, InodeNumbers::Renewed, false),
+        (77, InodeNumbers::Renewed, true),
+        (78, InodeNumbers::Renewed, true),
+        (79, InodeNumbers::Kept, true),
+        (80, InodeNumbers::Unknown, true),
+    ];
+    for (id, numbers, folder_births) in rows {
+        assert_eq!(
+            table.mount_of(id).map(|(mount, _)| mount.identity()),
+            Some(IdentityTraits {
+                numbers,
+                folder_births
+            }),
+            "mount {id}"
+        );
     }
 }
 

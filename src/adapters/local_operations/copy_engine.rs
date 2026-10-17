@@ -46,7 +46,9 @@ use super::{
     io_error,
     mount_profile::{FolderRules, NamePolicy, Site, known_mount},
     names::{Taken, may_be_refused, numbered_names, stricter_names},
-    native_fs::{LocalFileIdentity, open_local_parent_directory, os_error_detail, os_error_text},
+    native_fs::{
+        LocalFileIdentity, compare, open_local_parent_directory, os_error_detail, os_error_text,
+    },
     placement::{self, ENOTSUPP, PlaceError},
     placement_error_kind, placement_reason,
     progress::{Reported, TransferProgressTracker},
@@ -60,8 +62,8 @@ use crate::{
     },
     model::{Location, hidden_names::HiddenName},
     services::{
-        KeptCause, NameMode, PlacedSnapshot, RenameCause, RenamedItem, SkippedItem, SpecialKind,
-        TransferReport,
+        IdentityTraits, KeptCause, NameMode, PlacedSnapshot, Proof, RenameCause, RenamedItem,
+        SkippedItem, SpecialKind, TransferReport,
     },
 };
 pub(super) use barrier::Barrier;
@@ -734,8 +736,8 @@ pub(super) fn unlock_stage(staged: &StagedSibling) {
         .stat_fd(root.as_fd())
         .is_ok_and(|stat| stat.identity == staged.identity)
     {
-        let family = Mount::new(fs, root.as_fd()).family;
-        restrictive::loosen(fs, root.as_fd(), &staged.restrictive, family);
+        let mount = Mount::new(fs, root.as_fd());
+        restrictive::loosen(fs, root.as_fd(), &staged.restrictive, &mount);
     }
 }
 
@@ -1220,7 +1222,7 @@ fn fill(
         return Ok(restrictive);
     }
     let opened = fs.open_dir(Entry::new(&*root.parent, &root.name))?;
-    if !same_entry(&fs.stat_fd(opened.as_fd())?, root.identity, mount.family) {
+    if !mount.may_be(root.identity, &fs.stat_fd(opened.as_fd())?) {
         return Err(Failure::Place(PlaceError::Changed));
     }
     links.make(
@@ -1228,12 +1230,11 @@ fn fill(
         copy,
         opened.as_fd(),
         Path::new(""),
-        mount.family,
+        &mount,
         created.map(|created| &**created),
     )?;
-    let stable = stable_inodes(mount.family);
-    if let Err(error) = restrictive::tighten(fs, opened.as_fd(), &mut restrictive, stable) {
-        restrictive::loosen(fs, opened.as_fd(), &restrictive, mount.family);
+    if let Err(error) = restrictive::tighten(fs, opened.as_fd(), &mut restrictive, mount.identity) {
+        restrictive::loosen(fs, opened.as_fd(), &restrictive, &mount);
         return Err(error.into());
     }
     Ok(restrictive)
@@ -1247,7 +1248,7 @@ impl Created {
         lock(&self.0).push((path, identity));
     }
 
-    fn remove(&self, fs: &dyn FsOps, root: &Root, family: Family) -> Result<(), glib::Error> {
+    fn remove(&self, fs: &dyn FsOps, root: &Root, mount: &Mount) -> Result<(), glib::Error> {
         let root_entry = Entry::new(&*root.parent, &root.name);
         let dir = match fs.open_dir(root_entry) {
             Ok(dir) => dir,
@@ -1257,7 +1258,7 @@ impl Created {
         let opened = fs
             .stat_fd(dir.as_fd())
             .map_err(|error| io_error(os_error_detail(error)))?;
-        if !same_entry(&opened, root.identity, family) {
+        if !mount.may_be(root.identity, &opened) {
             return Err(placement_error(PlaceError::Changed));
         }
         let mut made = std::mem::take(&mut *lock(&self.0));
@@ -1294,7 +1295,7 @@ impl Created {
         remove_own(
             fs,
             root_entry,
-            |current| same_entry(current, root.identity, family),
+            |current| mount.may_be(root.identity, current),
             AtFlags::REMOVEDIR,
         )
     }
@@ -1331,8 +1332,8 @@ fn direct_folder(
     fill(copy, source, expected, &root, workers, Some(&created))
         .map(|_| copy.created_ownership(identity, lock(&created.0).clone()))
         .map_err(|failure| {
-            let family = Mount::new(fs, parent.as_fd()).family;
-            let removed = created.remove(fs, &root, family);
+            let mount = Mount::new(fs, parent.as_fd());
+            let removed = created.remove(fs, &root, &mount);
             copy.after_cleanup(failure, removed)
         })
 }
@@ -1568,20 +1569,6 @@ pub(super) fn holds_no_links(error: Errno) -> bool {
     error == Errno::NOSYS || is_unsupported(error)
 }
 
-/// FUSE daemons without `use_ino` number a node afresh once the kernel has
-/// evicted it.
-fn stable_inodes(family: Family) -> bool {
-    family != Family::Fuse
-}
-
-fn same_entry(current: &EntryStat, identity: LocalFileIdentity, family: Family) -> bool {
-    if stable_inodes(family) {
-        current.identity == identity
-    } else {
-        current.kind == identity.kind
-    }
-}
-
 fn remove_own(
     fs: &dyn FsOps,
     entry: Entry<'_>,
@@ -1599,19 +1586,11 @@ fn remove_own(
     }
 }
 
-/// What tells an entry on a mount from another put at its name, besides its type.
-#[derive(Clone, Copy)]
-struct Identifies {
-    /// Whether an entry keeps its inode number once the kernel evicts it.
-    inodes: bool,
-    /// Whether a folder keeps its birth time when an entry is renamed into or within it.
-    folder_births: bool,
-}
-
 #[derive(Clone, Copy)]
 struct Mount {
     key: MountKey,
     family: Family,
+    identity: IdentityTraits,
     fuse_format: Option<FuseFormat>,
     coarse_times: Option<CoarseTimes>,
     deferred_close: Option<Duration>,
@@ -1629,6 +1608,7 @@ impl Mount {
         Self {
             key,
             family: capabilities.family.unwrap_or(Family::Other),
+            identity: capabilities.identity,
             fuse_format: capabilities.fuse_format,
             coarse_times: capabilities.coarse_times,
             deferred_close: capabilities.deferred_close,
@@ -1643,12 +1623,8 @@ impl Mount {
         self.attribute_cache.is_some()
     }
 
-    fn identifies(fs: &dyn FsOps, dir: BorrowedFd<'_>) -> Identifies {
-        let (_, capabilities) = known_mount(fs, dir);
-        Identifies {
-            inodes: capabilities.stable_inodes.unwrap_or(true),
-            folder_births: !capabilities.renames_reset_folder_births,
-        }
+    fn may_be(&self, recorded: LocalFileIdentity, current: &EntryStat) -> bool {
+        compare(self.identity, recorded, None, current) != Proof::Different
     }
 
     fn capabilities(&self) -> MountCapabilities {
@@ -2131,15 +2107,15 @@ impl Copy {
         entry: Entry<'_>,
         identity: LocalFileIdentity,
         snapshot: &Snapshot,
-        family: Family,
+        mount: &Mount,
     ) -> Result<(), Failure> {
-        let lost = match family {
+        let lost = match mount.family {
             Family::Nfs4 => true,
             Family::Fuse | Family::Smb => match self.fs.stat(entry, true) {
                 Ok(current) if snapshot.times_match(&current) => {
                     // Times moved by less than the check notices stay, so the
                     // copy is known by them from now on.
-                    if same_entry(&current, identity, family) {
+                    if mount.may_be(identity, &current) {
                         self.settle_state(identity, &current);
                     }
                     false
@@ -2164,14 +2140,14 @@ impl Copy {
             opened => opened,
         };
         let reopened = match reopened {
-            Ok(Some((fd, stat))) if same_entry(&stat, identity, family) => fd,
+            Ok(Some((fd, stat))) if mount.may_be(identity, &stat) => fd,
             // Setting times by name needs only ownership.
             Err(Errno::ACCESS) => {
                 return match fs.stat(entry, true) {
-                    Ok(current) if same_entry(&current, identity, family) => {
+                    Ok(current) if mount.may_be(identity, &current) => {
                         snapshot.apply_times_at(fs, entry)?;
                         if let Ok(settled) = fs.stat(entry, true)
-                            && same_entry(&settled, identity, family)
+                            && mount.may_be(identity, &settled)
                         {
                             self.settle_state(identity, &settled);
                         }
@@ -2659,7 +2635,7 @@ impl<'a> FileCopy<'a> {
                     self.at(&stage.name),
                     stage.created.identity,
                     snapshot,
-                    self.target.family,
+                    &self.target,
                 )
             })
             .and_then(|()| self.copy.check_cancelled());
@@ -2761,7 +2737,7 @@ impl<'a> FileCopy<'a> {
             self.copy.sync_written(fd.as_fd(), &self.target)?;
             fs.close(fd)?;
             self.copy
-                .settle_times(target, created.identity, snapshot, self.target.family)
+                .settle_times(target, created.identity, snapshot, &self.target)
         })(fd);
         match filled {
             Ok(()) => Ok(created.identity),
