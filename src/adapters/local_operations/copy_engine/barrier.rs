@@ -11,9 +11,9 @@ use std::{
 };
 
 use gtk::glib;
-use rustix::io::Errno;
+use rustix::{fs::Mode, io::Errno};
 
-use super::{Mount, data::kernel};
+use super::{Mount, data::kernel, stage};
 use crate::adapters::{
     local_operations::{
         fs_ops::{Entry, FsOps, OffMain},
@@ -96,7 +96,8 @@ impl Barrier {
     /// `syncfs` reports only the writeback errors that follow the open of
     /// its descriptor, so this must come before the copy writes. A folder
     /// others may only write into cannot be opened for reading, but any
-    /// folder above it on the same mount serves.
+    /// folder above it on the same mount serves, and so does an unnamed file
+    /// made in it where only the filesystem is flushed.
     pub(super) fn open(fs: &dyn FsOps, path: &Path) -> Result<Self, glib::Error> {
         let could_not_open = |error: Errno| {
             io_error(rust_i18n::t!(
@@ -105,21 +106,19 @@ impl Barrier {
                 error = os_error_detail(error)
             ))
         };
-        let mut key = None;
+        let mut first: Option<(MountKey, Mount, OwnedFd)> = None;
         for folder in path.ancestors() {
             let pinned = open_local_parent_directory(folder).map_err(io_error)?;
             let here = fs.mount_key(pinned.as_fd());
-            match key {
-                None => {
-                    key = Some(here);
-                    // Only flushing a folder or its filesystem reads it.
-                    let plan = Plan::of(&Mount::new(fs, pinned.as_fd()));
-                    if !plan.sync_fs && !plan.sync_dir {
-                        return Ok(Self::opened(fs, pinned, path.to_path_buf()));
-                    }
-                }
-                Some(key) if key != here => break,
-                Some(_) => {}
+            let mount = match &first {
+                Some((key, _, _)) if *key != here => break,
+                Some((_, mount, _)) => *mount,
+                None => Mount::new(fs, pinned.as_fd()),
+            };
+            let plan = Plan::of(&mount);
+            // Only flushing a folder or its filesystem reads it.
+            if !plan.sync_fs && !plan.sync_dir {
+                return Ok(Self::opened(fs, pinned, path.to_path_buf()));
             }
             let opened = fs.open_dir(Entry {
                 dir: pinned.as_fd(),
@@ -130,6 +129,18 @@ impl Barrier {
                 Err(Errno::ACCESS) => {}
                 Err(error) => return Err(could_not_open(error)),
             }
+            if first.is_none() {
+                first = Some((here, mount, pinned));
+            }
+        }
+        // Where no folder of the mount can be read, the destination still
+        // takes an unnamed file, which `syncfs` accepts.
+        if let Some((_, mount, pinned)) = &first
+            && !Plan::of(mount).sync_dir
+            && stage::tmpfile_allowed(mount.family)
+            && let Ok(file) = fs.open_tmpfile(pinned.as_fd(), Mode::from_raw_mode(0o600))
+        {
+            return Ok(Self::opened(fs, file, path.to_path_buf()));
         }
         Err(could_not_open(Errno::ACCESS))
     }

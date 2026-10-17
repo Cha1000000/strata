@@ -1278,10 +1278,12 @@ fn a_replace_on_smb_syncs_its_copy_only_where_the_original_is_deleted() -> Resul
 fn a_barrier_needs_a_readable_folder_only_where_it_flushes_one() -> Result<(), Box<dyn Error>> {
     let _serial = serial()?;
     // The family, whether the unreadable destination is a folder beneath
-    // the mount's root, and whether the move goes ahead.
+    // the mount's root, and whether the move goes ahead: `syncfs` takes an
+    // unnamed file made in an unreadable root, a folder's `fsync` does not.
     let rows = [
         ("ext4", true, true),
-        ("ext4", false, false),
+        ("ext4", false, true),
+        ("vfat", false, false),
         ("cifs", false, true),
     ];
     for (id, (fs_type, beneath, moved)) in (390..).zip(rows) {
@@ -1327,14 +1329,24 @@ fn a_barrier_needs_a_readable_folder_only_where_it_flushes_one() -> Result<(), B
                 events.borrow()
             );
             assert!(!source.exists(), "{row}");
-            let flushed: Vec<_> = scope
-                .calls()
-                .into_iter()
+            let calls = scope.calls();
+            let flushed: Vec<_> = calls
+                .iter()
                 .filter(|call| matches!(call.op, Op::SyncFs | Op::SyncDir))
-                .flat_map(|call| call.names)
+                .map(|call| call.names.clone())
                 .collect();
-            let expected: &[&str] = if fs_type == "ext4" { &["mount"] } else { &[] };
-            assert_eq!(flushed, expected, "{row}");
+            match (fs_type, beneath) {
+                ("ext4", true) => assert_eq!(flushed, [["mount"]], "{row}"),
+                // The unnamed file made in the unreadable root, shown as deleted.
+                ("ext4", false) => assert!(
+                    flushed.len() == 1
+                        && flushed[0]
+                            .iter()
+                            .all(|name| name.to_string_lossy().ends_with("(deleted)")),
+                    "{row}: {flushed:?}"
+                ),
+                _ => assert!(flushed.is_empty(), "{row}"),
+            }
         } else {
             assert!(
                 matches!(terminal_transfer(&events.borrow()),
