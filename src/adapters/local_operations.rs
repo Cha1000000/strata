@@ -976,31 +976,51 @@ pub(crate) fn transfer_source_name(source: &gio::File) -> Option<OsString> {
     crate::model::transfer_file_name(source)
 }
 
+/// Items a copy pastes into their own folder. Each is numbered as it is copied, so it takes no
+/// name in the plan and another item of its name meets the original.
+fn duplicates(sources: &[gio::File], destination: &gio::File, moving: bool) -> Vec<bool> {
+    sources
+        .iter()
+        .map(|source| {
+            !moving
+                && source
+                    .parent()
+                    .is_some_and(|parent| parent.equal(destination))
+        })
+        .collect()
+}
+
 /// A `renamable` item is numbered where an earlier item has its name, and gets the destination's
-/// rules where it is `crossing` too.
+/// rules where it is `crossing` too. A `duplicate` keeps its name.
 fn paste_targets(
     names: &[Option<OsString>],
     rules: &NameProfile,
-    (crossing, renamable): (&[bool], &[bool]),
+    (crossing, renamable, duplicate): (&[bool], &[bool], &[bool]),
     kinds: &[Option<gio::FileType>],
 ) -> Result<Vec<Option<Planned>>, PlaceError> {
-    let entries = names
-        .iter()
-        .zip(kinds)
-        .zip(crossing.iter().zip(renamable))
-        .filter_map(|((name, kind), (crossing, renamable))| {
+    let entries = (0..names.len())
+        .filter(|index| !duplicate[*index])
+        .filter_map(|index| {
             Some(PlanEntry {
-                name: name.as_deref()?,
-                is_directory: *kind == Some(gio::FileType::Directory),
-                fixing: *crossing && *renamable,
-                repeatable: *renamable,
+                name: names[index].as_deref()?,
+                is_directory: kinds[index] == Some(gio::FileType::Directory),
+                fixing: crossing[index] && renamable[index],
+                repeatable: renamable[index],
             })
         })
         .collect::<Vec<_>>();
     let mut planned = plan_names(&entries, rules, Key::Folded)?.into_iter();
     Ok(names
         .iter()
-        .map(|name| name.as_ref().and_then(|_| planned.next()))
+        .zip(duplicate)
+        .map(|(name, duplicate)| match (name, duplicate) {
+            (Some(name), true) => Some(Planned {
+                target: name.clone(),
+                cause: None,
+            }),
+            (Some(_), false) => planned.next(),
+            (None, _) => None,
+        })
         .collect())
 }
 
@@ -1008,7 +1028,7 @@ fn planned_paste(
     items: &[PasteItem],
     sources: &[gio::File],
     rules: &NameProfile,
-    crossing: &[bool],
+    (crossing, duplicate): (&[bool], &[bool]),
     kinds: &[Option<gio::FileType>],
 ) -> Result<Vec<Option<Planned>>, PlaceError> {
     let own = sources.iter().map(transfer_source_name).collect::<Vec<_>>();
@@ -1032,13 +1052,16 @@ fn planned_paste(
                 )
         })
         .collect::<Vec<_>>();
-    let mut planned = paste_targets(&names, rules, (crossing, &renamable), kinds)?;
+    let mut planned = paste_targets(&names, rules, (crossing, &renamable, duplicate), kinds)?;
     // The prompt planned the names it showed from the items' own.
     let prompted = items
         .iter()
         .zip(&own)
         .any(|(item, own)| item.target_name.is_some() && item.target_name != *own)
-        .then(|| paste_targets(&own, rules, (crossing, &vec![true; own.len()]), kinds).ok())
+        .then(|| {
+            let renamable = vec![true; own.len()];
+            paste_targets(&own, rules, (crossing, &renamable, duplicate), kinds).ok()
+        })
         .flatten();
     for (index, item) in items.iter().enumerate() {
         let (Some(shown), Some(planned), Some(name)) =
@@ -2983,7 +3006,14 @@ impl OperationProvider for LocalOperationProvider {
             };
             let rules = names.applied(pasted_into.profile.names, pasted_into.profile.strictness);
             let crossing = pasted_into.fixing(&filesystems);
-            let planned = match planned_paste(&request.items, &sources, &rules, &crossing, &kinds) {
+            let duplicate = duplicates(&sources, &destination, request.move_sources);
+            let planned = match planned_paste(
+                &request.items,
+                &sources,
+                &rules,
+                (&crossing, &duplicate),
+                &kinds,
+            ) {
                 Ok(planned) => planned,
                 Err(error) => {
                     emit(OperationEvent::TransferFailed {

@@ -893,7 +893,9 @@ place since, keeps it taken. In a merge, a planned name equal to an existing ite
 item like any other same-named one. A paste's top-level items from different folders that share a
 name are numbered on every destination, the later one in the paste's order, before anything is
 copied, and reported as names already taken: `notes.txt` from two folders becomes `notes.txt` and
-`notes (1).txt`, also in a move within one filesystem.
+`notes (1).txt`, also in a move within one filesystem. An item copied into its own folder is
+numbered only as it is copied, so a same-named item from another folder meets the original there
+and is asked about like any other conflict.
 The completion report lists every fixed name with the name it was saved as, and says which were
 shortened.
 

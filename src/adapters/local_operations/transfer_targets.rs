@@ -14,6 +14,7 @@ use gtk::{gio, glib, prelude::*};
 use super::{
     MAX_LOCAL_IO_WORKERS, await_cancellable,
     copy_engine::stage::collision_key,
+    duplicates,
     fs_ops::{Entry, fs},
     mount_profile::NamePolicy,
     open_local_parent_directory, paste_targets, placement_reason, run_blocking,
@@ -67,9 +68,14 @@ pub(crate) async fn transfer_targets(
         let crossing = pasted_into.fixing(&filesystems);
         let own_names = sources.iter().map(transfer_source_name).collect::<Vec<_>>();
         let renamable = vec![true; own_names.len()];
-        let planned = paste_targets(&own_names, &rules, (&crossing, &renamable), &kinds).map_err(
-            |error| glib::Error::new(gio::IOErrorEnum::Exists, &placement_reason(error)),
-        )?;
+        let duplicate = duplicates(&sources, &into, move_sources);
+        let planned = paste_targets(
+            &own_names,
+            &rules,
+            (&crossing, &renamable, &duplicate),
+            &kinds,
+        )
+        .map_err(|error| glib::Error::new(gio::IOErrorEnum::Exists, &placement_reason(error)))?;
         let left_out = |index: usize| {
             kinds[index] == Some(gio::FileType::SymbolicLink)
                 && profile.symlinks == Some(false)

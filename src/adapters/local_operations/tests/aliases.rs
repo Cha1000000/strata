@@ -612,6 +612,148 @@ fn identical_top_level_names_from_different_folders_are_numbered_and_reported()
 }
 
 #[test]
+fn an_item_from_another_folder_meets_the_original_of_a_duplicate() -> Result<(), Box<dyn Error>> {
+    use super::super::transfer_targets::{Collision, transfer_targets};
+    let _serial = serial()?;
+    let meets = Some(Collision { mergeable: false });
+    // The mount, the original's name, whether two/'s item comes first, whether it is moved, what
+    // the prompt shows for one/'s and two/'s items, and one/ once two/'s is kept beside it.
+    let rows: [(
+        Preset,
+        &str,
+        bool,
+        bool,
+        [(&str, Option<Collision>); 2],
+        &[(&str, &str)],
+    ); 4] = [
+        (
+            Quirks::ext4,
+            "notes.txt",
+            false,
+            false,
+            [("notes.txt", None), ("notes.txt", meets)],
+            &[
+                ("notes (1).txt", "one"),
+                ("notes (2).txt", "two"),
+                ("notes.txt", "one"),
+            ],
+        ),
+        (
+            Quirks::ext4,
+            "notes.txt",
+            true,
+            false,
+            [("notes.txt", None), ("notes.txt", meets)],
+            &[
+                ("notes (1).txt", "two"),
+                ("notes (2).txt", "one"),
+                ("notes.txt", "one"),
+            ],
+        ),
+        (
+            Quirks::vfat,
+            "NOTES.TXT",
+            false,
+            false,
+            [("NOTES.TXT", None), ("notes.txt", meets)],
+            &[
+                ("NOTES (1).TXT", "one"),
+                ("NOTES.TXT", "one"),
+                ("notes (2).txt", "two"),
+            ],
+        ),
+        // A moved item stays where it is and keeps its name.
+        (
+            Quirks::ext4,
+            "notes.txt",
+            false,
+            true,
+            [("notes.txt", None), ("notes (1).txt", None)],
+            &[("notes (1).txt", "two"), ("notes.txt", "one")],
+        ),
+    ];
+    for (preset, original, two_first, moving, shown, listed) in rows {
+        let context = format!("{original}, two first: {two_first}, moving: {moving}");
+        let root = tempfile::tempdir()?;
+        let (one, two) = (root.path().join("one"), root.path().join("two"));
+        fs::create_dir(&one)?;
+        fs::create_dir(&two)?;
+        fs::write(one.join(original), "one")?;
+        fs::write(two.join("notes.txt"), "two")?;
+        let _scope = FsQuirks::install(root.path(), preset());
+        let mut sources = vec![
+            Location::local(one.join(original)),
+            Location::local(two.join("notes.txt")),
+        ];
+        let mut expected = shown
+            .map(|(name, collision)| (Some(OsString::from(name)), collision))
+            .to_vec();
+        if two_first {
+            sources.reverse();
+            expected.reverse();
+        }
+
+        let targets = glib::MainContext::default().block_on(transfer_targets(
+            &Location::local(&one),
+            &sources,
+            moving,
+            &gio::Cancellable::new(),
+        ))?;
+        assert_eq!(
+            targets
+                .iter()
+                .map(|target| (target.name.clone(), target.collision))
+                .collect::<Vec<_>>(),
+            expected,
+            "{context}"
+        );
+
+        let events = run_paste(PasteRequest {
+            id: OperationRequestId(1530),
+            destination: Location::local(&one),
+            items: sources
+                .into_iter()
+                .zip(targets)
+                .map(|(source, target)| PasteItem {
+                    source,
+                    conflict: if target.collision.is_some() {
+                        TransferConflict::KeepBoth
+                    } else {
+                        TransferConflict::FailIfExists
+                    },
+                    target_name: target.name,
+                })
+                .collect(),
+            move_sources: moving,
+        });
+
+        let held = names(&one)?
+            .into_iter()
+            .map(|name| Ok((fs::read_to_string(one.join(&name))?, name)))
+            .collect::<io::Result<Vec<_>>>()?;
+        let listed = listed
+            .iter()
+            .map(|(name, content)| (content.to_string(), name.to_string()))
+            .collect::<Vec<_>>();
+        assert_eq!(held, listed, "{context}");
+        let numbered = moving.then(|| {
+            (
+                "notes.txt".to_owned(),
+                "notes (1).txt".to_owned(),
+                RenameCause::Taken,
+            )
+        });
+        assert_eq!(
+            renamed_beneath(&one, &followed_report(&events)),
+            Vec::from_iter(numbered),
+            "{context}"
+        );
+        assert_eq!(names(&two)?.is_empty(), moving, "{context}");
+    }
+    Ok(())
+}
+
+#[test]
 fn an_item_already_at_a_top_level_name_is_never_taken_for_one_the_paste_saved()
 -> Result<(), Box<dyn Error>> {
     let _serial = serial()?;

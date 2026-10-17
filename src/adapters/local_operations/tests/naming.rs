@@ -548,9 +548,13 @@ fn pasted_names_fixed_for_fat_are_planned_after_the_names_kept() {
         ),
     ] {
         let crossing = [fat_family; 9];
-        let targets =
-            super::super::paste_targets(&sources, &fat(), (&crossing, &[true; 9]), &kinds)
-                .expect("free names");
+        let targets = super::super::paste_targets(
+            &sources,
+            &fat(),
+            (&crossing, &[true; 9], &[false; 9]),
+            &kinds,
+        )
+        .expect("free names");
         assert_eq!(
             targets,
             expected.map(|(name, cause)| Some(Planned {
@@ -568,7 +572,7 @@ fn transfer_targets_resolve_trash_leaf_names() {
         let planned = super::super::paste_targets(
             &[super::super::transfer_source_name(source)],
             &NameProfile::posix(Some(255)),
-            (&[false], &[true]),
+            (&[false], &[true], &[false]),
             &[None],
         )
         .ok()?
