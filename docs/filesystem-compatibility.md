@@ -1079,15 +1079,15 @@ For copies they also emulate a mount's family and superblock options as mountinf
 device format udev records, refused `O_TMPFILE` and its links, refused clones, a `copy_file_range`
 that ends early, short reads and writes, times reset at close (NFSv4.2 delegations, FUSE writeback
 caches), refused `chown`, foreign groups, extended attributes refused by prefix, injected or listed
-with ACLs first, refused `mknodat` of files and pipes, NFS silly renames, files that report no
-size, reported modes, change times that equal the modification time (FAT), times stamped within one
-tick of a coarse clock (kernels without multigrain timestamps), single link counts (sshfs), entries
-renumbered after eviction, SMB's refusal to open two names of one file at once or,
-during its deferred close, another name of a file just written, its stale read-only folders and
-change times answered from its attribute cache, and writeback errors that `syncfs` reports. Tests
-can also pretend to run on another kernel release, freeze the clock that the racily clean check,
-the wait for SMB's deferred close and SMB's attribute cache read, and set a paste's batch limits
-and clock. The seam also asserts that no call runs on the main context's thread.
+with ACLs first, refused `mknodat` of files and pipes, NFS silly renames, files that report no size,
+reported modes, change times that equal the modification time (FAT), times stamped within one tick
+of a coarse clock (kernels without multigrain timestamps), single link counts (sshfs), entries
+renumbered after eviction, SMB's refusal to open two names of one file at once or, during its
+deferred close, another name of a file just written, its stale read-only folders and change times
+answered from its attribute cache, and writeback errors that `syncfs` reports. Tests can also
+pretend to run on another kernel release, freeze the clock that the racily clean check, the wait for
+SMB's deferred close and SMB's attribute cache read, and set a paste's batch limits and clock. The
+seam also asserts that no call runs on the main context's thread.
 
 For names they emulate the errno each lab mount returned for a name it refuses, names stored or
 listed as others (vfat dropping trailing dots, SMB reading private-use characters back and listing
