@@ -81,7 +81,6 @@ use deletion::bounded_local_worker_count;
 use deletion::ensure_local_delete_target_unchanged;
 #[cfg(test)]
 use deletion::local_delete_worker_count;
-use deletion::local_device_is_rotational;
 use deletion::local_file_identity;
 #[cfg(test)]
 use deletion::open_local_delete_target;
@@ -1171,12 +1170,12 @@ async fn parallel_copy_plans(
         let rotational = destination
             .path()
             .and_then(|path| std::fs::File::open(path).ok())
-            .and_then(|directory| local_device_is_rotational(&directory))
+            .and_then(|directory| fs().rotational(directory.as_fd()))
             .unwrap_or(windows_disk)
             || source_folders.into_iter().any(|folder| {
                 open_local_parent_directory(folder)
                     .ok()
-                    .and_then(local_device_is_rotational)
+                    .and_then(|folder| fs().rotational(folder.as_fd()))
                     == Some(true)
             });
         Some((plans, bounded_local_worker_count(available, rotational)))

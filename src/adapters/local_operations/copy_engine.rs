@@ -40,7 +40,7 @@ use super::{
     deferred_close::{self, Pause},
     deletion::{
         PinnedEntry, bounded_local_worker_count, local_delete_worker_count,
-        local_device_is_rotational, parallel_delete_local_blocking_with_workers,
+        parallel_delete_local_blocking_with_workers,
     },
     fs_ops::{Entry, EntryStat, FsOps, fs},
     io_error,
@@ -1078,7 +1078,7 @@ fn worker_count(source: &Source, target: &OwnedFd) -> usize {
         .unwrap_or(1);
     let rotational = [source.parent.as_fd(), target.as_fd()]
         .into_iter()
-        .any(|fd| local_device_is_rotational(fd) == Some(true));
+        .any(|fd| fs().rotational(fd) == Some(true));
     bounded_local_worker_count(available, rotational)
 }
 

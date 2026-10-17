@@ -10,7 +10,6 @@ use rustix::io::Errno;
 
 use super::fs_quirks::{Call, NameOpens, Op, Racer, Support, TmpfileLink};
 use super::*;
-use crate::adapters::local_operations::{bounded_local_worker_count, local_device_is_rotational};
 use crate::adapters::volume::{XattrNamespace, mount_capabilities};
 
 struct Mounts {
@@ -1108,12 +1107,7 @@ fn selected_names_of_a_linked_file_on_an_smb_share_are_opened_one_at_a_time()
             ..Quirks::default()
         };
         let mounts = mounts(smb, |_| Quirks::default())?;
-        let folder = fs::File::open(&mounts.sources)?;
-        let rotational = thread::spawn(move || local_device_is_rotational(&folder))
-            .join()
-            .map_err(|_| "reading whether the disk is rotational")?;
-        let available = thread::available_parallelism().map_or(1, usize::from);
-        if bounded_local_worker_count(available, rotational == Some(true)) < 2 {
+        if thread::available_parallelism().map_or(1, usize::from) < 2 {
             eprintln!("skipped: the bulk path copies one file at a time on this machine");
             return Ok(());
         }

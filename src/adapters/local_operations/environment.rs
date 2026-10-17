@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 
 use super::{
+    deletion::local_device_is_rotational,
     fs_ops::{System, assert_off_main_thread},
     native_fs::opened_path,
 };
@@ -19,6 +20,7 @@ pub(super) trait FsEnvironment: Send + Sync {
     fn mount_type(&self, fd: BorrowedFd<'_>) -> Option<(MountType, MountSite)>;
     /// udev's `ID_FS_TYPE`, when the device has a database record.
     fn device_format(&self, fd: BorrowedFd<'_>) -> Result<Option<String>, Errno>;
+    fn rotational(&self, fd: BorrowedFd<'_>) -> Option<bool>;
 }
 
 impl FsEnvironment for System {
@@ -104,5 +106,9 @@ impl FsEnvironment for System {
             .lines()
             .find_map(|line| line.strip_prefix("E:ID_FS_TYPE="))
             .map(str::to_owned))
+    }
+
+    fn rotational(&self, fd: BorrowedFd<'_>) -> Option<bool> {
+        local_device_is_rotational(fd)
     }
 }

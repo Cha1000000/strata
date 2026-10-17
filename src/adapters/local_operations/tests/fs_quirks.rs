@@ -222,6 +222,8 @@ pub(crate) struct Quirks {
     pub mount_type: Option<(&'static str, &'static str)>,
     pub mount_root: Option<&'static str>,
     pub device_format: Option<&'static str>,
+    /// Whether the scope's disk spins; the host's disk is never asked.
+    pub rotational: Option<bool>,
     pub tmpfile: Support,
     pub tmpfile_link: TmpfileLink,
     /// The most bytes one read or write moves.
@@ -1685,6 +1687,14 @@ impl FsEnvironment for Scoped {
                     .map(str::to_owned))
             }),
             None => System.device_format(fd),
+        }
+    }
+
+    fn rotational(&self, fd: BorrowedFd<'_>) -> Option<bool> {
+        assert_off_main_thread();
+        match scope_for(fd) {
+            Some(scope) => scope.quirk(|quirks| quirks.rotational),
+            None => System.rotational(fd),
         }
     }
 }

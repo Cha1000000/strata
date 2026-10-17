@@ -31,7 +31,7 @@ use crate::{
     adapters::{
         local_operations::{
             cancelled_local_operation,
-            deletion::{bounded_local_worker_count, local_device_is_rotational},
+            deletion::bounded_local_worker_count,
             fs_ops::{Entry, EntryStat, FsOps, OffMain},
             io_error,
             native_fs::LocalFileIdentity,
@@ -1011,7 +1011,7 @@ fn walk(
             let available = thread::available_parallelism()
                 .map(usize::from)
                 .unwrap_or(1);
-            let rotational = local_device_is_rotational(parent.as_fd()) == Some(true);
+            let rotational = fs.rotational(parent.as_fd()) == Some(true);
             bounded_local_worker_count(available, rotational)
         }
     };
