@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: MIT
 
+#[cfg(test)]
+mod tests;
+
 use rustix::fs::FileType;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -79,5 +82,34 @@ impl Evidence {
             Some(_) => Proof::Different,
             None => Proof::Unproven,
         }
+    }
+}
+
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "Trash, navigation and load stamps record it")
+)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ItemIdentity {
+    pub evidence: Evidence,
+    pub traits: IdentityTraits,
+}
+
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "Trash, navigation and load stamps compare it")
+)]
+impl ItemIdentity {
+    pub fn same(&self, other: &Self) -> bool {
+        let numbers = match (self.traits.numbers, other.traits.numbers) {
+            (InodeNumbers::Kept, InodeNumbers::Kept) => InodeNumbers::Kept,
+            (InodeNumbers::Renewed, _) | (_, InodeNumbers::Renewed) => InodeNumbers::Renewed,
+            _ => InodeNumbers::Unknown,
+        };
+        let traits = IdentityTraits {
+            numbers,
+            folder_births: self.traits.folder_births && other.traits.folder_births,
+        };
+        self.evidence.compare(traits, &other.evidence) == Proof::Same
     }
 }
