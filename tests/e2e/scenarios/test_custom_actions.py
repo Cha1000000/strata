@@ -134,6 +134,33 @@ def test_action_editor_tabs_validate_save_and_reopen(strata):
     strata.dismiss_menu()
 
 
+def test_action_editor_tabs_take_arrow_key_focus(strata):
+    dialog = _open_new_action(strata)
+
+    def control(name, role=None):
+        return strata.wait(lambda: dialog.find(name=name, role=role), name)
+
+    strata.pointer.click(control("Behavior", "page tab"))
+    strata.pointer.click(control("Whole selection", "toggle button"))
+    strata.wait(
+        lambda: control("Whole selection", "toggle button").has_state("focused"),
+        "Whole selection focused",
+    )
+    strata.keyboard.press("Up")
+    strata.keyboard.press("Left")
+    strata.wait(
+        lambda: control("Script", "page tab").has_state("selected"),
+        "Left on the focused tab strip to select Script",
+    )
+    strata.keyboard.press("Down")
+    strata.wait(
+        lambda: (focused := strata.focused_node()) is not None
+        and focused.role != "page tab"
+        and control("Script", "page tab").has_state("selected"),
+        "Down to enter the Script page",
+    )
+
+
 def test_batch_rename_template_confirms_before_renaming_and_opens_jobs(strata):
     editor = _open_new_action(strata)
     strata.pointer.click(editor.find(role="page tab", name="Script"))

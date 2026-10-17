@@ -197,3 +197,61 @@ fn arrows_and_enter_reach_controls_without_stealing_text_or_popover_keys() {
     );
     window.destroy();
 }
+
+#[test]
+#[ignore = "requires a GTK display; run this test alone"]
+fn arrows_reach_a_notebook_tab_and_leave_tab_switching_to_gtk() {
+    gtk::init().expect("GTK display");
+    let root = gtk::Box::new(gtk::Orientation::Vertical, 12);
+    let close = gtk::Button::with_label("Close");
+    close.set_halign(gtk::Align::End);
+    let notebook = gtk::Notebook::new();
+    let mut page_buttons = Vec::new();
+    for title in ["General", "Script"] {
+        let page = gtk::Box::new(gtk::Orientation::Vertical, 12);
+        let button = gtk::Button::with_label(title);
+        button.set_halign(gtk::Align::End);
+        page.append(&button);
+        notebook.append_page(&page, Some(&gtk::Label::new(Some(title))));
+        page_buttons.push(button);
+    }
+    root.append(&close);
+    root.append(&notebook);
+    let window = gtk::Window::builder()
+        .default_width(400)
+        .child(&root)
+        .build();
+    window.present();
+    let context = glib::MainContext::default();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while page_buttons[0].width() == 0 {
+        while context.pending() {
+            context.iteration(false);
+        }
+        assert!(std::time::Instant::now() < deadline);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    let scope = root.upcast_ref::<gtk::Widget>();
+
+    page_buttons[0].grab_focus();
+    assert!(move_focus(scope, gtk::DirectionType::Up));
+    assert!(notebook.has_focus());
+    assert!(!move_focus(scope, gtk::DirectionType::Right));
+    assert!(!move_focus(scope, gtk::DirectionType::Left));
+    assert!(!activate(scope));
+    assert!(move_focus(scope, gtk::DirectionType::Up));
+    assert!(close.has_focus());
+    assert!(move_focus(scope, gtk::DirectionType::Down));
+    assert!(notebook.has_focus());
+    assert!(move_focus(scope, gtk::DirectionType::Down));
+    assert!(page_buttons[0].has_focus());
+
+    notebook.set_show_tabs(false);
+    while context.pending() {
+        context.iteration(false);
+    }
+    page_buttons[0].grab_focus();
+    assert!(move_focus(scope, gtk::DirectionType::Up));
+    assert!(close.has_focus());
+    window.destroy();
+}

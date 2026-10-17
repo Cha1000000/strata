@@ -222,6 +222,9 @@ fn controls(scope: &gtk::Widget, result: &mut Vec<gtk::Widget>) {
     {
         return;
     }
+    if let Some(tab) = scope.downcast_ref::<gtk::Notebook>().and_then(current_tab) {
+        result.push(tab);
+    }
     if scope.is::<gtk::Button>()
         || scope.is::<gtk::MenuButton>()
         || scope.is::<gtk::CheckButton>()
@@ -238,11 +241,35 @@ fn controls(scope: &gtk::Widget, result: &mut Vec<gtk::Widget>) {
     }
 }
 
+/// A notebook's current tab stands in for the notebook, which holds focus while a
+/// tab does.
+fn current_tab(notebook: &gtk::Notebook) -> Option<gtk::Widget> {
+    if !notebook.shows_tabs() {
+        return None;
+    }
+    let page = notebook.nth_page(notebook.current_page())?;
+    notebook
+        .tab_label(&page)?
+        .parent()
+        .filter(gtk::Widget::is_mapped)
+}
+
+fn tab_owner(widget: &gtk::Widget) -> Option<gtk::Notebook> {
+    widget
+        .ancestor(gtk::Notebook::static_type())
+        .and_downcast::<gtk::Notebook>()
+        .filter(|notebook| current_tab(notebook).as_ref() == Some(widget))
+}
+
 fn focused_control(scope: &gtk::Widget) -> Option<(Vec<gtk::Widget>, usize)> {
     let focused = scope.root()?.focus()?;
     if editable(&focused) || in_popover(&focused) {
         return None;
     }
+    let focused = match focused.downcast_ref::<gtk::Notebook>() {
+        Some(notebook) => current_tab(notebook)?,
+        None => focused,
+    };
     let mut candidates = Vec::new();
     controls(scope, &mut candidates);
     let index = candidates
@@ -274,6 +301,14 @@ pub(super) fn move_focus(scope: &gtk::Widget, direction: gtk::DirectionType) -> 
     let Some((controls, current)) = focused_control(scope) else {
         return false;
     };
+    // GTK's own Left and Right move between tabs.
+    if matches!(
+        direction,
+        gtk::DirectionType::Left | gtk::DirectionType::Right
+    ) && tab_owner(&controls[current]).is_some()
+    {
+        return false;
+    }
     if direction == gtk::DirectionType::Down
         && let Some(button) = controls[current].downcast_ref::<gtk::MenuButton>()
     {
@@ -287,6 +322,7 @@ pub(super) fn move_focus(scope: &gtk::Widget, direction: gtk::DirectionType) -> 
     let Some(origin) = bounds[current].as_ref() else {
         return false;
     };
+    let vertical = matches!(direction, gtk::DirectionType::Up | gtk::DirectionType::Down);
     let target = bounds
         .iter()
         .enumerate()
@@ -294,12 +330,26 @@ pub(super) fn move_focus(scope: &gtk::Widget, direction: gtk::DirectionType) -> 
             if index == current {
                 return None;
             }
-            directional_distance(origin, bounds.as_ref()?, direction).map(|score| (index, score))
+            let mut bounds = *bounds.as_ref()?;
+            // The tab strip runs across the whole notebook, so Up and Down treat it as
+            // directly above or below the control they leave.
+            if vertical && tab_owner(&controls[index]).is_some() {
+                bounds = gtk::graphene::Rect::new(
+                    origin.x(),
+                    bounds.y(),
+                    origin.width(),
+                    bounds.height(),
+                );
+            }
+            directional_distance(origin, &bounds, direction).map(|score| (index, score))
         })
         .min_by(|(_, a), (_, b)| a.0.cmp(&b.0).then_with(|| a.1.total_cmp(&b.1)));
     target.is_some_and(|(index, _)| {
-        let moved = controls[index].grab_focus()
-            || controls[index].child_focus(gtk::DirectionType::TabForward);
+        let target = &controls[index];
+        let moved = match tab_owner(target) {
+            Some(notebook) => notebook.grab_focus(),
+            None => target.grab_focus() || target.child_focus(gtk::DirectionType::TabForward),
+        };
         if moved && let Some(window) = scope.root().and_downcast::<gtk::Window>() {
             window.set_focus_visible(true);
         }
