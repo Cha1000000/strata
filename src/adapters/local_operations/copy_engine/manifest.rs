@@ -67,7 +67,7 @@ pub(in crate::adapters::local_operations) fn now() -> SystemTime {
     SystemTime::now()
 }
 
-pub(super) fn sleep(duration: Duration) {
+pub(in crate::adapters::local_operations) fn sleep(duration: Duration) {
     #[cfg(test)]
     if let Some(pretended) = lock(&TEST_NOW).as_mut() {
         *pretended += duration;

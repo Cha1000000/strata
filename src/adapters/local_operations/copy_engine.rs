@@ -37,6 +37,7 @@ use rustix::{
 use super::{
     INVALID_NAME_REASON, Unheld, blocking_join_message, cancelled_local_operation,
     copy_failure_after_cleanup,
+    deferred_close::{self, Pause},
     deletion::{
         PinnedEntry, bounded_local_worker_count, local_delete_worker_count,
         local_device_is_rotational, parallel_delete_local_blocking_with_workers,
@@ -67,7 +68,7 @@ pub(super) use barrier::Barrier;
 use data::Data;
 #[cfg(test)]
 pub(super) use data::set_kernel_for_test;
-pub(super) use manifest::{Manifest, Ownership, Published, Unlinks};
+pub(super) use manifest::{Manifest, Ownership, Published, Unlinks, sleep};
 use manifest::{Placed, Removed};
 #[cfg(test)]
 pub(super) use manifest::{now as clock_for_test, set_clock_for_test, set_placed_entries_for_test};
@@ -2288,13 +2289,6 @@ fn open_file(fs: &dyn FsOps, at: Entry<'_>, cancelled: &AtomicBool) -> Result<Op
     }
 }
 
-/// How long after `closetimeo` the SMB client may take to close the handle.
-const DEFERRED_CLOSE_MARGIN: Duration = Duration::from_millis(500);
-
-/// The longest an open waits for a deferred close, as `closetimeo` may be
-/// set to days.
-const DEFERRED_CLOSE_LIMIT: Duration = Duration::from_secs(10);
-
 /// After this machine writes a file, the SMB client keeps its handle open
 /// for `closetimeo` and refuses an open of another name of the file with
 /// `EINVAL` meanwhile, so the open is tried again until then.
@@ -2306,23 +2300,18 @@ fn open_after_deferred_close(
     let Some(deferred) = Mount::new(fs, at.dir).deferred_close else {
         return Err(open_failure(at.name, Errno::INVAL));
     };
-    let mut left = deferred
-        .saturating_add(DEFERRED_CLOSE_MARGIN)
-        .min(DEFERRED_CLOSE_LIMIT);
-    let mut pause = Duration::from_millis(10);
-    while !left.is_zero() {
-        let waited = pause.min(left);
-        manifest::sleep(waited);
-        left -= waited;
-        if cancelled.load(Ordering::Acquire) {
-            return Err(Failure::Cancelled);
+    let mut wait = deferred_close::Wait::after(deferred);
+    loop {
+        match wait.pause(cancelled) {
+            Pause::Retry => {}
+            Pause::Spent => return Err(open_failure(at.name, Errno::INVAL)),
+            Pause::Cancelled => return Err(Failure::Cancelled),
         }
         match fs.open_source(at, true) {
-            Err(Errno::INVAL) => pause = (pause * 2).min(Duration::from_millis(50)),
+            Err(Errno::INVAL) => {}
             opened => return opened.map_err(|error| open_failure(at.name, error)),
         }
     }
-    Err(open_failure(at.name, Errno::INVAL))
 }
 
 fn open_one_name(

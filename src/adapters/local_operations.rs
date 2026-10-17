@@ -126,6 +126,7 @@ use restore::{NameKept, restore_name};
 
 mod copy_engine;
 mod create_entry;
+mod deferred_close;
 mod environment;
 mod fs_ops;
 mod merge_aside;
