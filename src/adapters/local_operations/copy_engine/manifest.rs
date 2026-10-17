@@ -35,6 +35,7 @@ use crate::{
             fs_ops::{Entry, EntryStat, FsOps, OffMain},
             io_error,
             native_fs::LocalFileIdentity,
+            translated_io_error,
             work_queue::{self, Group, Job, WorkQueue},
         },
         volume::CoarseTimes,
@@ -798,7 +799,9 @@ fn record(
             })
             .is_err()
         {
-            return Err(Failure::Error(io_error("Too many entries to record")));
+            return Err(Failure::Error(translated_io_error(
+                "Too many entries to record",
+            )));
         }
         budget.taken.fetch_add(1, Ordering::Relaxed);
     }
@@ -1140,11 +1143,14 @@ impl Job for Removal {
     }
 
     fn panicked() -> glib::Error {
-        io_error("Delete worker panicked")
+        translated_io_error("The deletion stopped unexpectedly")
     }
 
     fn not_started(error: io::Error) -> glib::Error {
-        io_error(format!("Could not start delete worker: {error}"))
+        io_error(rust_i18n::t!(
+            "Could not start the deletion: %{error}",
+            error = error
+        ))
     }
 }
 

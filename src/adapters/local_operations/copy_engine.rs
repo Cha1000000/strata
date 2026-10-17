@@ -50,7 +50,7 @@ use super::{
     placement_error_kind, placement_reason,
     progress::{Reported, TransferProgressTracker},
     replacement::{StageContent, StagedSibling, placement_error},
-    run_blocking, run_cancellable,
+    run_blocking, run_cancellable, translated_io_error,
 };
 use crate::{
     adapters::volume::{
@@ -236,7 +236,9 @@ pub(super) async fn remove_placed(
     };
     let removed = run_cancellable(cancellable, move |cancelled| {
         let Some(placed) = placed.get::<Placed>() else {
-            return failed(io_error("Unknown placed item record"));
+            return failed(translated_io_error(
+                "The record of the placed item is unreadable",
+            ));
         };
         let Some(folder) = path.parent() else {
             return failed(io_error(crate::i18n::tr("Invalid local filesystem target")));
@@ -269,7 +271,7 @@ pub(super) async fn remove_placed(
         manifest::remove(fs(), parent, &placed.root(), unlinks, cancelled)
     })
     .await;
-    removed.unwrap_or_else(|_| failed(io_error("Delete worker stopped unexpectedly")))
+    removed.unwrap_or_else(|_| failed(translated_io_error("The deletion stopped unexpectedly")))
 }
 
 pub(super) struct Copied {
@@ -410,7 +412,7 @@ pub(super) async fn copy_in_place(
     let (name, ownership) = followed.value?;
     let mut manifest = followed
         .manifest
-        .ok_or_else(|| io_error("Copy worker stopped unexpectedly"))?;
+        .ok_or_else(|| translated_io_error("The copy stopped unexpectedly"))?;
     let (parent, _) = split(&target)?;
     manifest.copied_to(Published::proven(parent, name, ownership));
     Ok((manifest, left_report(&target, followed.left)))
@@ -426,7 +428,7 @@ pub(super) async fn snapshot(
             .map_err(|failure| failure.into_error(&name))
     })
     .await;
-    recorded.map_err(|_| io_error("Copy worker stopped unexpectedly"))?
+    recorded.map_err(|_| translated_io_error("The copy stopped unexpectedly"))?
 }
 
 pub(super) async fn delete_unchanged_sources(
@@ -441,7 +443,7 @@ pub(super) async fn delete_unchanged_sources(
     deleted.unwrap_or_else(|_| {
         (
             Vec::new(),
-            Err(io_error("Delete worker stopped unexpectedly")),
+            Err(translated_io_error("The deletion stopped unexpectedly")),
         )
     })
 }
@@ -459,7 +461,7 @@ pub(super) async fn sync_files(
         Ok(())
     })
     .await;
-    synced.map_err(|_| io_error("Copy worker stopped unexpectedly"))?
+    synced.map_err(|_| translated_io_error("The copy stopped unexpectedly"))?
 }
 
 fn sync_tree(fs: &dyn FsOps, at: Entry<'_>, cancelled: &AtomicBool) -> Result<(), Failure> {
@@ -665,7 +667,7 @@ async fn following<T: Send + 'static>(
     .await;
     let reported = follower.map_or_else(|| shared.reported(), |follower| follower.stop());
     let (value, left, manifest) =
-        copied.map_err(|_| io_error("Copy worker stopped unexpectedly"))?;
+        copied.map_err(|_| translated_io_error("The copy stopped unexpectedly"))?;
     Ok(Followed {
         value,
         reported,
@@ -703,7 +705,7 @@ pub(super) async fn copy_from_stage(
             .map_err(|failure| failure.into_error(&name))
     })
     .await;
-    copied.map_err(|_| io_error("Copy worker stopped unexpectedly"))?
+    copied.map_err(|_| translated_io_error("The copy stopped unexpectedly"))?
 }
 
 pub(super) fn unlock_stage(staged: &StagedSibling) {

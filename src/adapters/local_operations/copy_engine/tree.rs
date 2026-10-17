@@ -46,6 +46,7 @@ use crate::{
             native_fs::{LocalFileIdentity, os_error_detail},
             placement::{self, COPY_PREFIX, PlaceError},
             replacement::{StageContent, StagedSibling},
+            translated_io_error,
             work_queue::{self, Group, Job, WorkQueue},
         },
         volume::{Family, MountKey, NameProfile},
@@ -188,11 +189,14 @@ impl Job for TreeJob {
     }
 
     fn panicked() -> glib::Error {
-        io_error("Copy worker panicked")
+        translated_io_error("The copy stopped unexpectedly")
     }
 
     fn not_started(error: io::Error) -> glib::Error {
-        io_error(format!("Could not start copy worker: {error}"))
+        io_error(rust_i18n::t!(
+            "Could not start the copy: %{error}",
+            error = error
+        ))
     }
 }
 

@@ -263,7 +263,7 @@ pub(super) async fn run_local_delete_step<T: Send + 'static>(
 ) -> Result<T, glib::Error> {
     gio::spawn_blocking(work)
         .await
-        .map_err(|_| io_error("Delete task panicked"))?
+        .map_err(|_| translated_io_error("The deletion stopped unexpectedly"))?
         .map_err(io_error)
 }
 
@@ -553,7 +553,7 @@ pub(super) fn parallel_delete_local_with(
             return Err(cancelled_local_delete());
         }
         let result = run_cancellable(&cancellable, move |cancelled| delete(roots, cancelled)).await;
-        match result.map_err(|_| io_error("Delete task panicked"))? {
+        match result.map_err(|_| translated_io_error("The deletion stopped unexpectedly"))? {
             Ok(()) => Ok(()),
             Err(error) if error == "Delete cancelled" => Err(cancelled_local_delete()),
             Err(error) => Err(io_error(error)),
@@ -890,8 +890,11 @@ pub(super) async fn run_deletion_in(
         let mut chunk_cancelled = false;
         for (target, result) in join_local_tasks(tasks).await {
             completed_count += 1;
-            let result = result
-                .unwrap_or_else(|_| Err(TrashError::permanent(io_error("Delete worker failed"))));
+            let result = result.unwrap_or_else(|_| {
+                Err(TrashError::permanent(translated_io_error(
+                    "The deletion stopped unexpectedly",
+                )))
+            });
             if let (Some(leftovers), Some(path)) =
                 (leftovers.as_mut(), target.location.native_path())
             {
