@@ -2099,7 +2099,13 @@ impl Copy {
             Err(Errno::ACCESS) => {
                 return match fs.stat(entry, true) {
                     Ok(current) if same_entry(&current, identity, family) => {
-                        Ok(snapshot.apply_times_at(fs, entry)?)
+                        snapshot.apply_times_at(fs, entry)?;
+                        if let Ok(settled) = fs.stat(entry, true)
+                            && same_entry(&settled, identity, family)
+                        {
+                            self.record_state(identity, &settled);
+                        }
+                        Ok(())
                     }
                     Err(error) if is_fatal(error) => Err(error.into()),
                     _ => Ok(()),
@@ -2109,6 +2115,8 @@ impl Copy {
             _ => return Ok(()),
         };
         snapshot.apply_times(fs, reopened.as_fd())?;
+        // The copy is known by the times it is left with.
+        self.record_state(identity, &fs.stat_fd(reopened.as_fd())?);
         match fs.close(reopened) {
             Err(error) if is_fatal(error) => Err(error.into()),
             _ => Ok(()),

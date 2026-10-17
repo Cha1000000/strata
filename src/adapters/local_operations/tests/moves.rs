@@ -1989,33 +1989,56 @@ fn a_moved_source_stays_when_its_copy_is_gone_before_the_deletion() -> Result<()
 }
 
 #[test]
-fn a_recent_source_is_deleted_once_a_daemon_stamped_its_copy_again_at_close()
--> Result<(), Box<dyn Error>> {
+fn a_source_is_deleted_once_its_copy_was_stamped_again_at_close() -> Result<(), Box<dyn Error>> {
     let _serial = serial()?;
-    let root = tempfile::tempdir()?;
-    let sources = root.path().join("sources");
-    let destination = root.path().join("destination");
-    fs::create_dir(&sources)?;
-    fs::create_dir(&destination)?;
-    let source = sources.join("notes.txt");
-    fs::write(&source, b"notes")?;
-    let _sources = FsQuirks::install(&sources, Quirks::default());
-    // A FUSE writeback cache stamps the close time, within the 2 s of the
-    // source's that the times check lets stand.
-    let _destination = FsQuirks::install(
-        &destination,
-        Quirks {
-            times_reset_at_close: true,
-            ..Quirks::sshfs()
-        },
-    );
+    // A FUSE writeback cache stamps the close time, within the 2 s of a
+    // recent source's that the times check lets stand. An NFSv4.2 write
+    // delegation stamps any copy, which gets the source's times again after
+    // the close, by name where its owner may neither read nor write it.
+    let fuse_writeback = || Quirks {
+        times_reset_at_close: true,
+        ..Quirks::sshfs()
+    };
+    let rows: [(&str, Preset, bool, Option<u32>, bool); 4] = [
+        ("FUSE writeback cache", fuse_writeback, false, None, true),
+        ("NFSv4.2", Quirks::nfs42, false, None, false),
+        ("NFSv4.2, inside a folder", Quirks::nfs42, true, None, false),
+        ("NFSv4.2, unreadable", Quirks::nfs42, false, Some(0o044), false),
+    ];
+    for (row, preset, in_folder, mode, recent) in rows {
+        let root = tempfile::tempdir()?;
+        let sources = root.path().join("sources");
+        let destination = root.path().join("destination");
+        fs::create_dir_all(sources.join("folder"))?;
+        fs::create_dir(&destination)?;
+        let source = sources.join("folder/notes.txt");
+        fs::write(&source, b"notes")?;
+        if !recent {
+            let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?;
+            set_times(&source, now.as_secs() - 3600, 0)?;
+        }
+        let _sources = FsQuirks::install(
+            &sources,
+            Quirks {
+                reported_mode: mode.map(|mode| ("notes.txt", mode)),
+                ..Quirks::default()
+            },
+        );
+        let _destination = FsQuirks::install(&destination, preset());
+        let (item, moved) = if in_folder {
+            (sources.join("folder"), destination.join("folder/notes.txt"))
+        } else {
+            (source.clone(), destination.join("notes.txt"))
+        };
 
-    let (_operation, events) =
-        paste_move(98, &destination, &source, TransferConflict::FailIfExists);
-    pump_until_transfer(&events);
+        let (_operation, events) =
+            paste_move(98, &destination, &item, TransferConflict::FailIfExists);
+        pump_until_transfer(&events);
 
-    assert_eq!(fs::read(destination.join("notes.txt"))?, b"notes");
-    assert!(!source.exists(), "{:?}", reported(&events).kept);
+        assert!(!item.exists(), "{row}: {:?}", reported(&events).kept);
+        fs::set_permissions(&moved, fs::Permissions::from_mode(0o644))?;
+        assert_eq!(fs::read(moved)?, b"notes", "{row}");
+    }
     Ok(())
 }
 
