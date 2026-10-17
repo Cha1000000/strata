@@ -268,7 +268,7 @@ pub(super) async fn remove_placed(
         if compared.result.is_err() || !compared.kept.is_empty() {
             return compared;
         }
-        manifest::remove(fs(), parent, &placed.root(), unlinks, cancelled)
+        manifest::remove_placed(fs(), parent, &placed.root(), unlinks, cancelled)
     })
     .await;
     removed.unwrap_or_else(|_| failed(translated_io_error("The deletion stopped unexpectedly")))

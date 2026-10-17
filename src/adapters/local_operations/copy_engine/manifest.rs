@@ -26,7 +26,7 @@ use rustix::{
     io::Errno,
 };
 
-use super::{Failure, Identifies, Mount, lock};
+use super::{Failure, Identifies, Mount, lock, restrictive};
 use crate::{
     adapters::{
         local_operations::{
@@ -38,7 +38,7 @@ use crate::{
             translated_io_error,
             work_queue::{self, Group, Job, WorkQueue},
         },
-        volume::CoarseTimes,
+        volume::{CoarseTimes, Family},
     },
     services::KeptCause,
 };
@@ -946,7 +946,20 @@ pub(super) fn remove(
     unlinks: Arc<Unlinks>,
     cancelled: Arc<AtomicBool>,
 ) -> Removed {
-    walk(fs, parent, root, unlinks, cancelled, false)
+    walk(fs, parent, root, unlinks, cancelled, false, false)
+}
+
+/// As [`remove`], for what an operation placed: every folder of the record
+/// is its own, so one it left read-only is opened to its owner while its
+/// entries go, and gets its mode back if it stays.
+pub(super) fn remove_placed(
+    fs: &'static dyn FsOps,
+    parent: Arc<OwnedFd>,
+    root: &Folder,
+    unlinks: Arc<Unlinks>,
+    cancelled: Arc<AtomicBool>,
+) -> Removed {
+    walk(fs, parent, root, unlinks, cancelled, false, true)
 }
 
 /// Keeps what [`remove`] would keep, and folders holding entries added
@@ -958,7 +971,7 @@ pub(super) fn compare(
     unlinks: Arc<Unlinks>,
     cancelled: Arc<AtomicBool>,
 ) -> Removed {
-    walk(fs, parent, root, unlinks, cancelled, true)
+    walk(fs, parent, root, unlinks, cancelled, true, false)
 }
 
 fn walk(
@@ -968,6 +981,7 @@ fn walk(
     unlinks: Arc<Unlinks>,
     cancelled: Arc<AtomicBool>,
     compare_only: bool,
+    own_folders: bool,
 ) -> Removed {
     let deletion = Arc::new(Deletion {
         fs,
@@ -976,6 +990,7 @@ fn walk(
         kept: Mutex::default(),
         removed: AtomicBool::new(false),
         compare_only,
+        own_folders: own_folders.then(|| Mount::new(fs, parent.as_fd()).family),
     });
     let steps = deletion.steps(root, Path::new(""));
     let workers = match steps.as_slice() {
@@ -1022,6 +1037,8 @@ struct Deletion {
     kept: Mutex<Vec<(PathBuf, KeptCause)>>,
     removed: AtomicBool,
     compare_only: bool,
+    /// The mount's family where every folder recorded is the operation's own.
+    own_folders: Option<Family>,
 }
 
 impl Deletion {
@@ -1091,6 +1108,38 @@ impl Deletion {
             }
         })
     }
+
+    fn loosen(&self, at: Entry<'_>, fd: &Arc<OwnedFd>, mode: u32) -> Option<Loosened> {
+        let family = self.own_folders.filter(|_| !self.compare_only)?;
+        (mode & 0o700 != 0o700 && restrictive::open_to_owner(self.fs, at, fd.as_fd(), mode, family))
+            .then(|| Loosened {
+                fs: self.fs,
+                fd: fd.clone(),
+                mode: Some(mode),
+            })
+    }
+}
+
+/// A folder of the operation's own opened to its owner, which gets its mode
+/// back unless it is removed.
+struct Loosened {
+    fs: &'static dyn FsOps,
+    fd: Arc<OwnedFd>,
+    mode: Option<u32>,
+}
+
+impl Loosened {
+    fn into_mode(mut self) -> Option<u32> {
+        self.mode.take()
+    }
+}
+
+impl Drop for Loosened {
+    fn drop(&mut self) {
+        if let Some(mode) = self.mode {
+            let _ = self.fs.chmod_fd(self.fd.as_fd(), mode);
+        }
+    }
 }
 
 struct At {
@@ -1109,7 +1158,7 @@ struct Removal {
 enum Step {
     Folder(Arc<Folder>),
     Entry(SourceSnapshot),
-    Rmdir(Arc<OwnedFd>),
+    Rmdir(Arc<OwnedFd>, Option<Loosened>),
 }
 
 impl Job for Removal {
@@ -1130,8 +1179,8 @@ impl Job for Removal {
                 at.entry(&snapshot, &|| queue.is_stopped());
                 queue.complete(completion);
             }
-            Step::Rmdir(opened) => {
-                at.rmdir(opened);
+            Step::Rmdir(opened, loosened) => {
+                at.rmdir(opened, loosened);
                 queue.complete(completion);
             }
         }
@@ -1173,8 +1222,10 @@ impl At {
                 let added = deletion.compare_only && deletion.added_to(fd.as_fd(), folder)?;
                 Ok((fd, stat, added))
             });
-        let fd = match opened {
-            Ok((fd, current, false)) if deletion.same(&current, folder.identity) => Arc::new(fd),
+        let (fd, mode) = match opened {
+            Ok((fd, current, false)) if deletion.same(&current, folder.identity) => {
+                (Arc::new(fd), current.mode)
+            }
             Ok(_) | Err(Errno::NOTDIR | Errno::LOOP) => {
                 deletion.keep(self.path, KeptCause::Changed);
                 queue.complete(completion);
@@ -1186,10 +1237,11 @@ impl At {
                 return;
             }
         };
+        let loosened = deletion.loosen(self.entry_at(), &fd, mode);
         let steps = deletion.steps(folder, &self.path);
         let rmdir = Removal {
             at: self,
-            step: Step::Rmdir(fd.clone()),
+            step: Step::Rmdir(fd.clone(), loosened),
             completion,
         };
         if steps.is_empty() {
@@ -1306,7 +1358,7 @@ impl At {
         }
     }
 
-    fn rmdir(&self, opened: Arc<OwnedFd>) {
+    fn rmdir(&self, opened: Arc<OwnedFd>, loosened: Option<Loosened>) {
         let deletion = &self.deletion;
         if deletion.compare_only {
             return;
@@ -1317,15 +1369,16 @@ impl At {
         let named = fs
             .stat(self.entry_at(), false)
             .and_then(|named| Ok((named, fs.stat_fd(opened.as_fd())?)));
-        drop(opened);
-        match named {
-            Ok((named, opened)) if named.identity == opened.identity => {}
+        let identity = match named {
+            Ok((named, opened)) if named.identity == opened.identity => opened.identity,
             Ok(_) => return deletion.keep(self.path.clone(), KeptCause::Changed),
             Err(error) => return deletion.failed(self.path.clone(), error),
-        }
+        };
+        let mode = loosened.and_then(Loosened::into_mode);
+        drop(opened);
         match fs.unlink(self.entry_at(), AtFlags::REMOVEDIR) {
-            Ok(()) => deletion.removed.store(true, Ordering::Release),
-            Err(Errno::NOENT) => {}
+            Ok(()) => return deletion.removed.store(true, Ordering::Release),
+            Err(Errno::NOENT) => return,
             // Entries added meanwhile stay, and so does their folder.
             Err(Errno::NOTEMPTY | Errno::EXIST) => {
                 if deletion.holds_others(self.entry_at(), &self.path) {
@@ -1333,6 +1386,14 @@ impl At {
                 }
             }
             Err(error) => deletion.failed(self.path.clone(), error),
+        }
+        if let Some(mode) = mode
+            && let Ok(folder) = fs.open_dir(self.entry_at())
+            && fs
+                .stat_fd(folder.as_fd())
+                .is_ok_and(|current| deletion.same(&current, Some(identity)))
+        {
+            let _ = fs.chmod_fd(folder.as_fd(), mode);
         }
     }
 }

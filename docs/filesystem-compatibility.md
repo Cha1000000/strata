@@ -694,7 +694,9 @@ beside it in the same paste. Where there is no Trash, it deletes them by the sam
 copy merge records what it creates, under the name it was saved as and within the paste's 100,000
 entries, only where an original could not go to the Trash, or where it overwrote nothing and the
 location offers no Trash; a paste with a merge records each item it copies beside it where the
-destination offers no Trash. The undo deletes an item only if all of it is unchanged. An item that
+destination offers no Trash. The undo deletes an item only if all of it is unchanged. A folder of
+the item that the copy left without owner access, such as 0555, gets it while its entries are
+deleted, and its mode back if it stays; the folder the item sits in is never changed. An item that
 changed, or has no record (one on a GVfs location, a GIO copy without native creation provenance,
 an entry whose client-reported identity changed during publication, or one created where the Trash
 worked during the paste), stays whole and fails with "It was kept, as it may have changed since it was copied";

@@ -101,14 +101,24 @@ pub(super) fn loosen(
             dir: root,
             name: beneath(&folder.path),
         };
-        // Without POSIX extensions, the SMB client clears the read-only
-        // attribute it set only once it has seen it set.
-        if family == Family::Smb {
-            let _ = fs.stat(at, true);
-        }
         let stable = stable_inodes(family);
         if let Ok(Some(fd)) = reopen(fs, root, &folder.path, folder.identity, stable) {
-            let _ = fs.chmod_fd(fd.as_fd(), folder.mode | 0o700);
+            open_to_owner(fs, at, fd.as_fd(), folder.mode, family);
         }
     }
+}
+
+pub(super) fn open_to_owner(
+    fs: &dyn FsOps,
+    at: Entry<'_>,
+    fd: BorrowedFd<'_>,
+    mode: u32,
+    family: Family,
+) -> bool {
+    // Without POSIX extensions, the SMB client clears the read-only
+    // attribute it set only once it has seen it set.
+    if family == Family::Smb {
+        let _ = fs.stat(at, true);
+    }
+    fs.chmod_fd(fd, mode | 0o700).is_ok()
 }

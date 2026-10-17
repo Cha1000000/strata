@@ -827,6 +827,111 @@ fn merge_places_a_read_only_incoming_folder() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+#[test]
+fn undoing_a_merge_without_trash_opens_only_its_own_read_only_folders_to_remove_them()
+-> Result<(), Box<dyn Error>> {
+    use std::os::unix::fs::PermissionsExt;
+    #[derive(Clone, Copy, Debug)]
+    enum Undo {
+        Whole,
+        Refilled,
+        Cancelled,
+        IntoLockedTarget,
+    }
+    let _serial = serial()?;
+    let mode = |path: &Path| {
+        fs::metadata(path)
+            .ok()
+            .map(|metadata| metadata.mode() & 0o7777)
+    };
+    let set_mode = |path: &Path, mode| fs::set_permissions(path, fs::Permissions::from_mode(mode));
+    for undo in [
+        Undo::Whole,
+        Undo::Refilled,
+        Undo::Cancelled,
+        Undo::IntoLockedTarget,
+    ] {
+        let root = tempfile::tempdir()?;
+        let source = root.path().join("source");
+        let target = root.path().join("target");
+        fs::create_dir_all(source.join("incoming/inner"))?;
+        fs::create_dir_all(&target)?;
+        fs::write(source.join("incoming/inner/file.txt"), b"new")?;
+        fs::write(target.join("stays.txt"), b"keep me")?;
+        for folder in ["incoming/inner", "incoming"] {
+            set_mode(&source.join(folder), 0o555)?;
+        }
+        let merging = FsQuirks::install(root.path(), without_trash(Quirks::default()));
+        let (plans, on_merged) = recorded_plans();
+        let merged = glib::MainContext::default().block_on(merge_local(
+            gio::File::for_path(&source),
+            gio::File::for_path(&target),
+            false,
+            gio::Cancellable::new(),
+            &on_merged,
+        ));
+        drop(merging);
+        let (incoming, inner) = (target.join("incoming"), target.join("incoming/inner"));
+        let cancellable = gio::Cancellable::new();
+        let (refill, cancel) = (inner.join("theirs.txt"), cancellable.clone());
+        let racer: Racer = Box::new(move || match undo {
+            Undo::Refilled => drop(fs::write(&refill, b"theirs")),
+            _ => cancel.cancel(),
+        });
+        let mut quirks = without_trash(Quirks::default());
+        if let Undo::Refilled | Undo::Cancelled = undo {
+            quirks.before = vec![(Op::Unlink, "file.txt", 0, racer)];
+        }
+        let _undoing = FsQuirks::install(root.path(), quirks);
+        if let Undo::IntoLockedTarget = undo {
+            set_mode(&target, 0o555)?;
+        }
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let emitted = events.clone();
+
+        glib::MainContext::default().block_on(run_merge_undo(
+            OperationRequestId(93),
+            undo_parts(plans.take()),
+            Rc::new(move |event| emitted.borrow_mut().push(event)),
+            cancellable,
+            staged_lookup(HashMap::new()),
+        ));
+
+        let modes = [&target, &incoming, &inner].map(|folder| mode(folder));
+        let left = [&incoming, &inner].map(|folder| names(folder).ok());
+        for folder in [&source.join("incoming"), &source.join("incoming/inner")] {
+            set_mode(folder, 0o755)?;
+        }
+        for folder in [&target, &incoming, &inner] {
+            if folder.is_dir() {
+                set_mode(folder, 0o755)?;
+            }
+        }
+        let row = format!("{undo:?}: {:?}", events.borrow());
+        assert!(merged.is_ok(), "{row}: {merged:?}");
+        let theirs = || Some(vec!["theirs.txt".to_owned()]);
+        let (expected_modes, expected_left) = match undo {
+            Undo::Whole => ([Some(0o755), None, None], [None, None]),
+            Undo::Refilled => (
+                [Some(0o755), Some(0o555), Some(0o555)],
+                [Some(vec!["inner".to_owned()]), theirs()],
+            ),
+            Undo::Cancelled => (
+                [Some(0o755), Some(0o555), Some(0o555)],
+                [Some(vec!["inner".to_owned()]), Some(Vec::new())],
+            ),
+            Undo::IntoLockedTarget => ([Some(0o555), Some(0o555), None], [Some(Vec::new()), None]),
+        };
+        assert_eq!(modes, expected_modes, "{row}");
+        assert_eq!(left, expected_left, "{row}");
+        if let Undo::Whole = undo {
+            assert!(restored(&events.borrow()).is_some(), "{row}");
+        }
+        assert!(names(&target)?.contains(&"stays.txt".to_owned()), "{row}");
+    }
+    Ok(())
+}
+
 fn visible_names(folder: &Path) -> io::Result<Vec<String>> {
     Ok(names(folder)?
         .into_iter()
