@@ -2386,7 +2386,12 @@ impl FsOps for Scoped {
                 Op::FolderStamp,
                 &[path.file_name().unwrap_or_default()],
                 force_sync,
-                |_| System.folder_stamp(path, force_sync),
+                |scope| {
+                    Ok(FolderStamp {
+                        mount_id: Some(u64::MAX - scope.id),
+                        ..System.folder_stamp(path, force_sync)?
+                    })
+                },
             ),
             None => System.folder_stamp(path, force_sync),
         }

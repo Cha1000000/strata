@@ -34,6 +34,7 @@ pub(super) trait Source: Send + 'static {
 }
 
 struct State {
+    generation: u64,
     text: Vec<u8>,
     table: MountTable,
     asked: Vec<oneshot::Sender<MountTable>>,
@@ -51,6 +52,7 @@ impl Watcher {
         let text = source.read();
         let watcher = Arc::new(Self {
             state: Mutex::new(State {
+                generation: 1,
                 table: MountTable::parse(&text),
                 text,
                 asked: Vec::new(),
@@ -87,6 +89,7 @@ impl Watcher {
                 let table = MountTable::parse(&text);
                 {
                     let mut state = self.state();
+                    state.generation += 1;
                     state.table = table.clone();
                     state.text = text;
                 }
@@ -109,6 +112,10 @@ impl Watcher {
 
     pub(super) fn latest(&self) -> MountTable {
         self.state().table.clone()
+    }
+
+    fn generation(&self) -> u64 {
+        self.state().generation
     }
 
     pub(super) async fn fresh(&self) -> MountTable {
@@ -220,6 +227,7 @@ static WATCHER: OnceLock<Option<Arc<Watcher>>> = OnceLock::new();
 fn watcher() -> Option<&'static Watcher> {
     WATCHER
         .get_or_init(|| {
+            #[cfg(not(test))]
             crate::util::ui_thread::assert_off();
             match Mountinfo::open() {
                 Ok(source) => Some(Watcher::start(source, forget_mount_capabilities)),
@@ -243,6 +251,10 @@ pub(crate) fn latest() -> MountTable {
         return table;
     }
     watcher().map_or_else(|| MountTable::parse(b""), Watcher::latest)
+}
+
+pub(crate) fn generation() -> u64 {
+    watcher().map_or(0, Watcher::generation)
 }
 
 pub(crate) async fn fresh() -> MountTable {

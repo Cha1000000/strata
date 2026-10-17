@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 
 mod mount_capabilities;
+pub(crate) mod mount_lanes;
 mod mount_snapshot;
 pub(crate) mod mount_watch;
 mod mounts;

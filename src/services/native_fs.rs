@@ -5,7 +5,7 @@ use std::{
     ffi::{OsStr, OsString},
     fs,
     io::Read,
-    os::unix::ffi::OsStringExt,
+    os::unix::{ffi::OsStringExt, fs::MetadataExt},
     path::Path,
 };
 
@@ -38,11 +38,19 @@ pub(crate) fn listed_kind(file_type: FileType, path: &Path) -> EntryKind {
 }
 
 pub(crate) fn symlink_kind(path: &Path) -> EntryKind {
-    match fs::metadata(path) {
-        Ok(metadata) if metadata.is_dir() => EntryKind::DirectorySymbolicLink,
-        Ok(metadata) if metadata.is_file() => EntryKind::FileSymbolicLink,
-        Ok(_) => EntryKind::Other,
-        Err(_) => EntryKind::SymbolicLink,
+    link_target_kind(
+        fs::metadata(path)
+            .ok()
+            .map(|metadata| FileType::from_raw_mode(metadata.mode())),
+    )
+}
+
+pub(crate) fn link_target_kind(target: Option<FileType>) -> EntryKind {
+    match target {
+        Some(FileType::Directory) => EntryKind::DirectorySymbolicLink,
+        Some(FileType::RegularFile) => EntryKind::FileSymbolicLink,
+        Some(_) => EntryKind::Other,
+        None => EntryKind::SymbolicLink,
     }
 }
 

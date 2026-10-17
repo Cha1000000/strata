@@ -40,6 +40,8 @@ pub(in crate::adapters) type Listed = Vec<(OsString, FileType)>;
 )]
 pub(in crate::adapters) struct FolderStamp {
     pub kind: FileType,
+    pub mode: u32,
+    pub size: u64,
     pub modified: (i64, u32),
     pub changed: (i64, u32),
     pub device: u64,
@@ -789,6 +791,8 @@ impl FsOps for System {
             AtFlags::empty()
         };
         let mask = StatxFlags::TYPE
+            | StatxFlags::MODE
+            | StatxFlags::SIZE
             | StatxFlags::INO
             | StatxFlags::MTIME
             | StatxFlags::CTIME
@@ -798,6 +802,8 @@ impl FsOps for System {
         let reported = StatxFlags::from_bits_retain(stat.stx_mask);
         Ok(FolderStamp {
             kind: FileType::from_raw_mode(u32::from(stat.stx_mode)),
+            mode: u32::from(stat.stx_mode),
+            size: stat.stx_size,
             modified: (stat.stx_mtime.tv_sec, stat.stx_mtime.tv_nsec),
             changed: (stat.stx_ctime.tv_sec, stat.stx_ctime.tv_nsec),
             device: rustix::fs::makedev(stat.stx_dev_major, stat.stx_dev_minor),

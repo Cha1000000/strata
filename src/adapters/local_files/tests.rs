@@ -1281,6 +1281,270 @@ fn native_loads_list_through_the_filesystem_seam() -> Result<(), Box<dyn Error>>
     Ok(())
 }
 
+#[derive(Clone, Default)]
+struct Gate(std::sync::Arc<(std::sync::Mutex<(bool, bool)>, std::sync::Condvar)>);
+
+impl Gate {
+    fn racer(&self) -> Box<dyn FnMut() + Send> {
+        let gate = self.clone();
+        Box::new(move || {
+            let (state, changed) = &*gate.0;
+            let mut state = state.lock().expect("gate");
+            state.0 = true;
+            changed.notify_all();
+            while !state.1 {
+                state = changed.wait(state).expect("gate");
+            }
+        })
+    }
+
+    fn reached(&self) -> bool {
+        self.0.0.lock().expect("gate").0
+    }
+
+    fn release(&self) {
+        self.0.0.lock().expect("gate").1 = true;
+        self.0.1.notify_all();
+    }
+}
+
+impl Drop for Gate {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
+fn load_into(
+    events: &Rc<RefCell<Vec<DirectoryEvent>>>,
+    root: &Path,
+    id: u64,
+) -> crate::services::LoadHandle {
+    let events = events.clone();
+    LocalFileSource.enumerate(
+        DirectoryRequest {
+            id: RequestId(id),
+            location: Location::local(root),
+            batch_size: 64,
+            include_metadata: false,
+            max_entries: 100,
+            time_budget: Duration::from_secs(30),
+        },
+        Rc::new(move |event| events.borrow_mut().push(event)),
+    )
+}
+
+fn outcome_of(events: &Rc<RefCell<Vec<DirectoryEvent>>>, id: u64) -> Option<Result<usize, String>> {
+    let events = events.borrow();
+    let listed = events
+        .iter()
+        .filter_map(|event| match event {
+            DirectoryEvent::Batch {
+                request_id,
+                entries,
+            } if request_id.0 == id => Some(entries.len()),
+            _ => None,
+        })
+        .sum();
+    events.iter().find_map(|event| match event {
+        DirectoryEvent::Finished { request_id, .. } if request_id.0 == id => Some(Ok(listed)),
+        DirectoryEvent::Failed {
+            request_id,
+            message,
+        } if request_id.0 == id => Some(Err(message.clone())),
+        _ => None,
+    })
+}
+
+#[test]
+fn repeated_loads_of_a_stuck_folder_share_one_call_and_then_time_out() -> Result<(), Box<dyn Error>>
+{
+    use crate::adapters::{FsOp, FsQuirks, Quirks, mount_lanes};
+
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let root = tempfile::tempdir()?;
+    fs::write(root.path().join("file"), b"content")?;
+    let gate = Gate::default();
+    let scope = FsQuirks::install(
+        root.path(),
+        Quirks {
+            before: vec![(FsOp::FolderStamp, "*", 0, gate.racer())],
+            ..Quirks::default()
+        },
+    );
+    let events = Rc::new(RefCell::new(Vec::new()));
+
+    let first = load_into(&events, root.path(), 1);
+    drain_until(|| gate.reached());
+    let second = load_into(&events, root.path(), 2);
+    drain_until(|| {
+        mount_lanes::responsiveness(root.path()) == mount_lanes::Responsiveness::Stalled
+    });
+    assert_eq!(scope.count(FsOp::FolderStamp), 1);
+    let third = load_into(&events, root.path(), 3);
+    drain_until(|| outcome_of(&events, 3).is_some());
+    assert_eq!(
+        outcome_of(&events, 3),
+        Some(Err("The operation timed out".to_owned()))
+    );
+    assert_eq!(
+        (outcome_of(&events, 1), outcome_of(&events, 2)),
+        (None, None)
+    );
+
+    gate.release();
+    drain_until(|| outcome_of(&events, 1).is_some() && outcome_of(&events, 2).is_some());
+    assert_eq!(
+        (outcome_of(&events, 1), outcome_of(&events, 2)),
+        (Some(Ok(1)), Some(Ok(1)))
+    );
+    assert_eq!(scope.count(FsOp::FolderStamp), 1);
+    assert_eq!(
+        mount_lanes::responsiveness(root.path()),
+        mount_lanes::Responsiveness::Answering
+    );
+    drop((first, second, third));
+    Ok(())
+}
+
+#[test]
+fn a_slow_listing_that_keeps_answering_never_stalls_its_mount() -> Result<(), Box<dyn Error>> {
+    use crate::adapters::{FsOp, FsQuirks, Quirks};
+
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let root = tempfile::tempdir()?;
+    for name in ["a", "b", "c", "d", "e"] {
+        fs::write(root.path().join(name), b"content")?;
+    }
+    let slow_chunk = || -> Box<dyn FnMut() + Send> {
+        Box::new(|| std::thread::sleep(Duration::from_millis(700)))
+    };
+    let _scope = FsQuirks::install(
+        root.path(),
+        Quirks {
+            listing_chunk: Some(1),
+            before: (0..5)
+                .map(|_| (FsOp::ListChunks, "*", 0, slow_chunk()))
+                .collect(),
+            ..Quirks::default()
+        },
+    );
+    let events = Rc::new(RefCell::new(Vec::new()));
+
+    let started = Instant::now();
+    let first = load_into(&events, root.path(), 1);
+    drain_until(|| started.elapsed() >= Duration::from_millis(2500));
+    let second = load_into(&events, root.path(), 2);
+    drain_until(|| outcome_of(&events, 1).is_some() && outcome_of(&events, 2).is_some());
+
+    assert_eq!(
+        (outcome_of(&events, 1), outcome_of(&events, 2)),
+        (Some(Ok(5)), Some(Ok(5)))
+    );
+    drop((first, second));
+    Ok(())
+}
+
+#[test]
+fn a_load_asked_for_while_the_folder_is_being_read_lists_it_afresh() -> Result<(), Box<dyn Error>> {
+    use crate::adapters::{FsOp, FsQuirks, Quirks};
+
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    for names in [&["a", "b"][..], &[]] {
+        let root = tempfile::tempdir()?;
+        for name in names {
+            fs::write(root.path().join(name), b"content")?;
+        }
+        let gate = Gate::default();
+        let scope = FsQuirks::install(
+            root.path(),
+            Quirks {
+                listing_chunk: Some(1),
+                before: vec![(FsOp::ListChunks, "*", 0, gate.racer())],
+                ..Quirks::default()
+            },
+        );
+        let events = Rc::new(RefCell::new(Vec::new()));
+
+        let first = load_into(&events, root.path(), 1);
+        drain_until(|| gate.reached());
+        fs::write(root.path().join("c"), b"content")?;
+        let second = load_into(&events, root.path(), 2);
+        for _ in 0..50 {
+            glib::MainContext::default().iteration(false);
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert_eq!(scope.count(FsOp::FolderStamp), 1, "one call at a time");
+
+        gate.release();
+        drain_until(|| outcome_of(&events, 1).is_some() && outcome_of(&events, 2).is_some());
+        assert_eq!(
+            (outcome_of(&events, 1), outcome_of(&events, 2)),
+            (Some(Ok(names.len())), Some(Ok(names.len() + 1))),
+            "{names:?}"
+        );
+        assert_eq!(scope.count(FsOp::FolderStamp), 2);
+        drop((first, second));
+    }
+    Ok(())
+}
+
+#[test]
+fn a_link_whose_target_stops_answering_trips_only_that_link() -> Result<(), Box<dyn Error>> {
+    use crate::adapters::{FsOp, FsQuirks, Quirks, mount_lanes};
+
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let root = tempfile::tempdir()?;
+    let sibling = root.path().join("sibling");
+    fs::create_dir(root.path().join("target"))?;
+    fs::create_dir(&sibling)?;
+    fs::write(sibling.join("file"), b"content")?;
+    std::os::unix::fs::symlink(root.path().join("target"), root.path().join("nas"))?;
+    let gate = Gate::default();
+    let _scope = FsQuirks::install(
+        root.path(),
+        Quirks {
+            before: vec![(FsOp::FolderStamp, "nas", 0, gate.racer())],
+            ..Quirks::default()
+        },
+    );
+    let events = Rc::new(RefCell::new(Vec::new()));
+
+    let warm = load_into(&events, &sibling, 1);
+    drain_until(|| outcome_of(&events, 1).is_some());
+    let parked = load_into(&events, root.path(), 2);
+    drain_until(|| gate.reached());
+    let reached = Instant::now();
+    drain_until(|| reached.elapsed() > mount_lanes::STALLED_AFTER + Duration::from_millis(200));
+    let again = load_into(&events, &sibling, 3);
+    drain_until(|| outcome_of(&events, 3).is_some());
+
+    assert_eq!(
+        (
+            outcome_of(&events, 3),
+            mount_lanes::responsiveness(&sibling),
+            mount_lanes::responsiveness(&root.path().join("nas"))
+        ),
+        (
+            Some(Ok(1)),
+            mount_lanes::Responsiveness::Answering,
+            mount_lanes::Responsiveness::Stalled
+        )
+    );
+    gate.release();
+    drain_until(|| outcome_of(&events, 2).is_some());
+    assert_eq!(outcome_of(&events, 2), Some(Ok(3)));
+    drop((warm, parked, again));
+    Ok(())
+}
+
 #[test]
 fn enumerate_resolves_can_trash_from_a_child_entry() {
     let root = unique_fixture_root("can-trash");
@@ -1524,7 +1788,8 @@ fn cancelled_native_scan_returns_no_partial_result() {
             &root,
             &request,
             &cancellable,
-            Instant::now() + Duration::from_secs(10)
+            Instant::now() + Duration::from_secs(10),
+            &Progress::unlaned(),
         ),
         NativeEnumeration::Cancelled
     ));

@@ -13,22 +13,28 @@ use std::{
     pin::Pin,
     rc::Rc,
     sync::{
-        Mutex, OnceLock,
+        Arc, Mutex, OnceLock,
         atomic::{AtomicUsize, Ordering},
     },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use gtk::{gio, glib, prelude::*};
+use rustix::fs::FileType;
 
+use super::local_operations::FolderStamp;
 use crate::{
-    adapters::{gio_file_for_location, location_for_file},
+    adapters::{
+        gio_file_for_location, location_for_file,
+        mount_lanes::{self, Progress, Unanswered},
+        mount_watch,
+    },
     model::{EntryKind, FileEntry, Location, MetadataValue},
     services::{
         DirectoryChange, DirectoryEvent, DirectoryRequest, FileSource, LoadHandle,
         LocationIdentity, LocationValidationError, MetadataOutcome, MetadataRequest,
         MetadataUpdate, RequestId, backend_unavailable_message, bytes_support_named_family,
-        file_activity, is_hidden_name, is_image_path, is_media_path, listed_kind,
+        file_activity, is_hidden_name, is_image_path, is_media_path, link_target_kind, listed_kind,
         native_hidden_names, sanitize_failure_message, symlink_kind,
     },
 };
@@ -61,6 +67,16 @@ impl IconDetailsFingerprint {
             changed_seconds: metadata.ctime(),
             changed_nanoseconds: metadata.ctime_nsec(),
         })
+    }
+
+    fn of(target: &FolderStamp) -> Self {
+        Self {
+            size: target.size,
+            modified_seconds: target.modified.0,
+            modified_nanoseconds: i64::from(target.modified.1),
+            changed_seconds: target.changed.0,
+            changed_nanoseconds: i64::from(target.changed.1),
+        }
     }
 }
 
@@ -174,12 +190,15 @@ fn cached_icon_details(path: &Path, fingerprint: IconDetailsFingerprint) -> Opti
 
 static CACHE_HAS_ENTRIES: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+fn revisits(path: &Path) -> bool {
+    CACHE_HAS_ENTRIES.load(std::sync::atomic::Ordering::Acquire)
+        && icon_details_cache()
+            .lock()
+            .is_ok_and(|cache| cache.entries.contains_key(path))
+}
+
 fn cached_icon_details_for_revisit(path: &Path) -> Option<IconDetails> {
-    if !CACHE_HAS_ENTRIES.load(std::sync::atomic::Ordering::Acquire) {
-        return None;
-    }
-    let was_cached = icon_details_cache().lock().ok()?.entries.contains_key(path);
-    if !was_cached {
+    if !revisits(path) {
         return None;
     }
     cached_icon_details(path, IconDetailsFingerprint::read(path)?)
@@ -216,6 +235,7 @@ enum PendingMonitorChange {
 
 type PendingMonitorKey = Option<Location>;
 
+#[derive(Clone)]
 enum NativeEnumeration {
     Complete {
         entries: Vec<FileEntry>,
@@ -543,15 +563,18 @@ fn unix_seconds(time: SystemTime) -> Option<i64> {
     }
 }
 
-fn fill_native_entry_metadata(entry: &mut FileEntry) {
+fn fill_native_entry_metadata(entry: &mut FileEntry) -> std::io::Result<()> {
     let Some(path) = entry.location.native_path() else {
-        return;
+        return Ok(());
     };
-    let Ok(metadata) = fs::metadata(path) else {
-        entry.size = MetadataValue::Unknown;
-        entry.modified_unix_seconds = MetadataValue::Unknown;
-        entry.mode = MetadataValue::Unknown;
-        return;
+    let metadata = match fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) => {
+            entry.size = MetadataValue::Unknown;
+            entry.modified_unix_seconds = MetadataValue::Unknown;
+            entry.mode = MetadataValue::Unknown;
+            return Err(error);
+        }
     };
     entry.size = if metadata.is_dir() {
         MetadataValue::Unknown
@@ -565,6 +588,74 @@ fn fill_native_entry_metadata(entry: &mut FileEntry) {
         .map(MetadataValue::Known)
         .unwrap_or(MetadataValue::Unavailable);
     entry.mode = MetadataValue::Known(metadata.mode());
+    Ok(())
+}
+
+fn fill_followed_metadata(entry: &mut FileEntry, target: &FolderStamp) {
+    entry.size = if target.kind == FileType::Directory {
+        MetadataValue::Unknown
+    } else {
+        MetadataValue::Known(target.size)
+    };
+    entry.modified_unix_seconds = MetadataValue::Known(target.modified.0);
+    entry.mode = MetadataValue::Known(target.mode);
+}
+
+fn native_entry(
+    path: PathBuf,
+    native_name: OsString,
+    file_type: FileType,
+    is_hidden: bool,
+    mounted: Option<u64>,
+    include_metadata: bool,
+    progress: &Progress,
+) -> (FileEntry, bool) {
+    let link = file_type == FileType::Symlink;
+    let leads_elsewhere = link || mounted.is_some();
+    let revisit = leads_elsewhere && revisits(&path);
+    let target = (leads_elsewhere && (link || revisit || include_metadata))
+        .then(|| {
+            progress.reach(&path, mounted, || {
+                super::local_operations::folder_stamp(&path, false)
+            })
+        })
+        .flatten()
+        .and_then(Result::ok);
+    let kind = if link {
+        link_target_kind(target.as_ref().map(|target| target.kind))
+    } else {
+        listed_kind(file_type, &path)
+    };
+    let cached_details = match (leads_elsewhere, &target) {
+        (false, _) => cached_icon_details_for_revisit(&path),
+        (true, Some(target)) if revisit => {
+            cached_icon_details(&path, IconDetailsFingerprint::of(target))
+        }
+        (true, _) => None,
+    };
+    let mut entry = FileEntry {
+        location: Location::local(path),
+        display_name: native_name.to_string_lossy().into_owned(),
+        thumbnail_path: None,
+        native_name,
+        kind,
+        size: MetadataValue::Unknown,
+        modified_unix_seconds: MetadataValue::Unknown,
+        recent_unix_seconds: MetadataValue::Unknown,
+        mode: MetadataValue::Unknown,
+        image_dimensions: MetadataValue::Unknown,
+        child_count: MetadataValue::Unknown,
+        duration_seconds: MetadataValue::Unknown,
+        is_hidden,
+        recent_uri: None,
+    };
+    if let Some(details) = cached_details {
+        details.apply_to_entry(&mut entry);
+    }
+    if let Some(target) = target.as_ref().filter(|_| include_metadata) {
+        fill_followed_metadata(&mut entry, target);
+    }
+    (entry, leads_elsewhere)
 }
 
 fn scan_native_directory(
@@ -572,18 +663,34 @@ fn scan_native_directory(
     request: &DirectoryRequest,
     cancellable: &gio::Cancellable,
     deadline: Instant,
+    progress: &Progress,
 ) -> NativeEnumeration {
     let failed = |error: rustix::io::Errno| {
         NativeEnumeration::Failed(crate::services::io_error_message(&error.into()))
     };
-    if let Err(error) = super::local_operations::folder_stamp(path, false) {
-        return failed(error);
+    let stamp = super::local_operations::folder_stamp(path, false);
+    progress.answered(&stamp);
+    match stamp {
+        Ok(stamp) => {
+            if let Some(id) = stamp.mount_id {
+                progress.learn(id);
+            }
+        }
+        Err(error) => return failed(error),
     }
+    let mounted: HashMap<OsString, u64> = mount_watch::latest()
+        .points()
+        .filter(|(_, point)| point.parent() == Some(path))
+        .filter_map(|(id, point)| Some((point.file_name()?.to_owned(), id)))
+        .collect();
     let hidden_names = native_hidden_names(path);
     let mut entries = Vec::with_capacity(1024);
+    let mut followed = Vec::with_capacity(1024);
     let mut truncated = false;
     let mut cancelled = false;
+    progress.begin_reading();
     let listed = super::local_operations::list_folder(path, &mut |chunk| {
+        progress.beat();
         for (native_name, file_type) in chunk {
             if cancellable.is_cancelled() {
                 cancelled = true;
@@ -594,29 +701,18 @@ fn scan_native_directory(
                 return ControlFlow::Break(());
             }
             let is_hidden = is_hidden_name(&native_name, &hidden_names);
-            let path = path.join(&native_name);
-            let kind = listed_kind(file_type, &path);
-            let cached_details = cached_icon_details_for_revisit(&path);
-            let mut entry = FileEntry {
-                location: Location::local(path),
-                display_name: native_name.to_string_lossy().into_owned(),
-                thumbnail_path: None,
+            let mounted = mounted.get(&native_name).copied();
+            let (entry, leads_elsewhere) = native_entry(
+                path.join(&native_name),
                 native_name,
-                kind,
-                size: MetadataValue::Unknown,
-                modified_unix_seconds: MetadataValue::Unknown,
-                recent_unix_seconds: MetadataValue::Unknown,
-                mode: MetadataValue::Unknown,
-                image_dimensions: MetadataValue::Unknown,
-                child_count: MetadataValue::Unknown,
-                duration_seconds: MetadataValue::Unknown,
+                file_type,
                 is_hidden,
-                recent_uri: None,
-            };
-            if let Some(details) = cached_details {
-                details.apply_to_entry(&mut entry);
-            }
+                mounted,
+                request.include_metadata,
+                progress,
+            );
             entries.push(entry);
+            followed.push(leads_elsewhere);
         }
         ControlFlow::Continue(())
     });
@@ -632,15 +728,18 @@ fn scan_native_directory(
     // (such as `$HOME`) does not incorrectly hide Trash/delete for the entries it
     // contains. Query the entry itself: a symlink is trashed as a link, and its
     // target may be slow or unreachable to stat.
-    let probed_capabilities = entries.first().and_then(|entry| {
-        gio::File::for_path(entry.location.native_path()?)
-            .query_info(
+    let probed_capabilities = entries
+        .iter()
+        .find(|entry| !mounted.contains_key(&entry.native_name))
+        .and_then(|entry| {
+            let probed = gio::File::for_path(entry.location.native_path()?).query_info(
                 "access::can-trash,access::can-delete",
                 gio::FileQueryInfoFlags::NOFOLLOW_SYMLINKS,
                 Some(cancellable),
-            )
-            .ok()
-    });
+            );
+            progress.answered(&probed);
+            probed.ok()
+        });
     let can_trash = match probed_capabilities.as_ref().and_then(info_can_trash) {
         Some(true) if super::trash_support::unsupported_reason_for_directory(path).is_some() => {
             Some(false)
@@ -654,14 +753,18 @@ fn scan_native_directory(
         let width = metadata_fill_width().min(entries.len());
         let chunk = entries.len().div_ceil(width);
         std::thread::scope(|scope| {
-            for piece in entries.chunks_mut(chunk) {
+            for (piece, followed) in entries.chunks_mut(chunk).zip(followed.chunks(chunk)) {
                 let cancellable = cancellable.clone();
                 scope.spawn(move || {
-                    for entry in piece {
+                    for (entry, _) in piece
+                        .iter_mut()
+                        .zip(followed)
+                        .filter(|(_, followed)| !**followed)
+                    {
                         if cancellable.is_cancelled() || Instant::now() >= deadline {
                             break;
                         }
-                        fill_native_entry_metadata(entry);
+                        progress.answered(&fill_native_entry_metadata(entry));
                     }
                 });
             }
@@ -690,20 +793,37 @@ fn enumerate_native(
     path: PathBuf,
 ) -> LoadHandle {
     let request_id = request.id;
-    let cancellable = gio::Cancellable::new();
-    let cancel = cancellable.clone();
     let task = glib::MainContext::default().spawn_local(async move {
         let deadline = started + request.time_budget;
-        let outcome = gio::spawn_blocking(move || {
-            scan_native_directory(&path, &request, &cancellable, deadline)
+        let listing = format!(
+            "listing with metadata {} up to {}",
+            request.include_metadata, request.max_entries
+        );
+        let folder = path.clone();
+        let outcome = mount_lanes::run_joined(&folder, listing, move |progress, cancellable| {
+            scan_native_directory(&path, &request, cancellable, deadline, progress)
         })
         .await;
-        let Ok(outcome) = outcome else {
-            emit(DirectoryEvent::Failed {
-                request_id,
-                message: "Native directory worker failed".to_owned(),
-            });
-            return;
+        let outcome = match outcome {
+            Ok(outcome) => Arc::try_unwrap(outcome).unwrap_or_else(|shared| (*shared).clone()),
+            Err(Unanswered::TimedOut | Unanswered::Skipped) => {
+                tracing::warn!(
+                    request_id = request_id.0,
+                    "directory load refused: the mount stopped answering"
+                );
+                emit(DirectoryEvent::Failed {
+                    request_id,
+                    message: crate::services::io_error_message(&ErrorKind::TimedOut.into()),
+                });
+                return;
+            }
+            Err(Unanswered::Failed) => {
+                emit(DirectoryEvent::Failed {
+                    request_id,
+                    message: "Native directory worker failed".to_owned(),
+                });
+                return;
+            }
         };
         match outcome {
             NativeEnumeration::Complete {
@@ -771,7 +891,6 @@ fn enumerate_native(
     });
     LoadHandle::new(move || {
         tracing::debug!(request_id = request_id.0, "directory load cancelled");
-        cancel.cancel();
         task.abort();
     })
 }

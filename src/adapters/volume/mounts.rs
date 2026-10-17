@@ -433,6 +433,12 @@ impl MountTable {
             .map(MountEntry::parts)
     }
 
+    pub(crate) fn points(&self) -> impl Iterator<Item = (u64, &Path)> {
+        self.entries
+            .iter()
+            .map(|entry| (entry.id, entry.site.point.as_path()))
+    }
+
     pub(crate) fn mount_at(&self, path: &Path) -> Option<(&MountType, &MountSite)> {
         self.innermost(path).map(MountEntry::parts)
     }
