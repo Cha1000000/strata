@@ -3403,6 +3403,71 @@ fn transfer_row_shown(overlay: &gtk::Overlay, moving: bool) -> bool {
 }
 
 #[test]
+fn closing_the_view_while_a_transfer_prepares_dismisses_its_row_and_copies_nothing() {
+    crate::test_support::gtk_test(
+        "ui::browser::transfer::tests::closing_the_view_while_a_transfer_prepares_dismisses_its_row_and_copies_nothing",
+        || {
+            for moving in [false, true] {
+                let fixture = tempfile::tempdir().expect("slow fixture");
+                let source = fixture.path().join("source/notes.txt");
+                let disk = fixture.path().join("disk");
+                std::fs::create_dir_all(&disk).expect("disk dir");
+                std::fs::create_dir_all(fixture.path().join("source")).expect("source dir");
+                std::fs::write(&source, b"notes").expect("source file");
+                let (release, held) = std::sync::mpsc::channel::<()>();
+                let answered = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let looked_up = answered.clone();
+                let _disk = crate::adapters::FsQuirks::install(
+                    &disk,
+                    crate::adapters::Quirks {
+                        before: vec![(
+                            crate::adapters::FsOp::Stat,
+                            "notes.txt",
+                            0,
+                            Box::new(move || {
+                                let _released = held.recv();
+                                looked_up.store(true, std::sync::atomic::Ordering::SeqCst);
+                            }),
+                        )],
+                        ..crate::adapters::Quirks::ext4()
+                    },
+                );
+                let (view, overlay, window) = conflict_view();
+                view.state.start_transfer(
+                    Location::local(&disk),
+                    vec![Location::local(&source)],
+                    moving,
+                );
+                wait_until(
+                    || transfer_row_shown(&overlay, moving),
+                    &format!("moving {moving}: the transfer to show it prepares its items"),
+                );
+
+                view.dispose_file_progress();
+
+                assert!(
+                    !transfer_row_shown(&overlay, moving),
+                    "moving {moving}: a closed view keeps showing its preparing transfer"
+                );
+                release.send(()).expect("held listing");
+                wait_until(
+                    || answered.load(std::sync::atomic::Ordering::SeqCst),
+                    &format!("moving {moving}: the destination to answer"),
+                );
+                for _ in 0..20 {
+                    glib::MainContext::default().iteration(false);
+                }
+                assert!(
+                    !disk.join("notes.txt").exists() && source.exists(),
+                    "moving {moving}: a transfer whose view closed while it prepared went on"
+                );
+                window.destroy();
+            }
+        },
+    );
+}
+
+#[test]
 fn a_destination_slow_to_answer_shows_the_transfer_preparing_where_its_row_will_be() {
     crate::test_support::gtk_test(
         "ui::browser::transfer::tests::a_destination_slow_to_answer_shows_the_transfer_preparing_where_its_row_will_be",

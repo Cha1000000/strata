@@ -582,16 +582,18 @@ impl ViewState {
             .preparing_transfers
             .borrow()
             .iter()
-            .any(|(preparing, cancellable)| *preparing == request && !cancellable.is_cancelled())
+            .any(|(preparing, cancellable, _)| *preparing == request && !cancellable.is_cancelled())
         {
             return;
         }
         let cancellable = gio::Cancellable::new();
-        self.preparing_transfers
-            .borrow_mut()
-            .push((request, cancellable.clone()));
         let preparation =
             self.show_transfer_preparation(move_sources, (&destination, &sources), &cancellable);
+        self.preparing_transfers.borrow_mut().push((
+            request,
+            cancellable.clone(),
+            Rc::downgrade(&preparation),
+        ));
         let weak = Rc::downgrade(self);
         glib::MainContext::default().spawn_local(async move {
             let targets =
@@ -603,7 +605,7 @@ impl ViewState {
             state
                 .preparing_transfers
                 .borrow_mut()
-                .retain(|(_, preparing)| *preparing != cancellable);
+                .retain(|(_, preparing, _)| *preparing != cancellable);
             if cancellable.is_cancelled() {
                 preparation.dismiss_file_operation_progress();
                 return;

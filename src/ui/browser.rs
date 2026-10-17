@@ -120,7 +120,11 @@ type PinHandler = Rc<dyn Fn(Location, String)>;
 type UnpinHandler = Rc<dyn Fn(&Location)>;
 type PinStatusHandler = Rc<dyn Fn(&Location) -> PinStatus>;
 type PrintHandler = Rc<dyn Fn(FileEntry)>;
-type PreparingTransfer = ((Location, Vec<Location>, bool), gio::Cancellable);
+type PreparingTransfer = (
+    (Location, Vec<Location>, bool),
+    gio::Cancellable,
+    Weak<FileProgressState>,
+);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum PinStatus {

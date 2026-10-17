@@ -5,7 +5,7 @@ use std::{
     rc::Rc,
 };
 
-use gtk::glib;
+use gtk::{gio::prelude::CancellableExt, glib};
 
 use crate::{
     app::BrowserEvent,
@@ -85,6 +85,15 @@ impl Drop for FileProgressState {
 impl crate::ui::browser::BrowserView {
     pub(in crate::ui) fn dispose_file_progress(&self) {
         self.state.file_progress().dismiss_file_operation_progress();
+        for (_, cancellable, preparation) in self.state.preparing_transfers.take() {
+            cancellable.cancel();
+            if let Some(preparation) = preparation.upgrade() {
+                preparation.dismiss_file_operation_progress();
+            }
+        }
+        if let Some(preparation) = self.state.transfer_preparation.take() {
+            preparation.dismiss_file_operation_progress();
+        }
         for background in self.state.background_file_progress.take().into_values() {
             background.progress.dismiss_file_operation_progress();
         }
