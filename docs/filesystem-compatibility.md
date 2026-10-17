@@ -913,8 +913,8 @@ Where a folder from another filesystem would be merged into a destination whose 
 characters, the prompt also says that items whose names change overwrite items with the new names.
 Where the destination is slow to answer, the transfer shows "Preparing items…" with Cancel and no
 item count yet, docked for a copy as its progress will be, and its progress then takes that row's
-place at once; the same paste repeated meanwhile is ignored. The prompt asks nothing of a selected link the
-destination is known not to hold, which the paste leaves out.
+place at once; the same paste repeated meanwhile is ignored. The prompt asks nothing of a selected
+link the destination is known not to hold, which the paste leaves out.
 
 ### Names a mount refuses anyway
 
@@ -1153,11 +1153,11 @@ symlinks, FIFOs or Unix permissions cannot exist on vfat, a racer keyed to a ste
 takes (an `O_TMPFILE` link, a hole, a `syncfs`, an exchange) never runs, and a time with a fraction
 of a second is rounded away on vfat, exfat-fuse and sshfs. Those three report the modification
 time as the change time, so tests that land the SMB client's deferred closes fail there after two
-seconds. A fixture's name can be one the mount
-refuses (`a:b` on vfat), and a preset can expect a name stored that the real mount refuses, folds
-or lists as another (Samba's 8.3 aliases, long SMB folder names). On NFS a file renamed over while
-open reads as `.nfsXXXX`, and on casefolded folders `/proc` shows files the test process created as
-`name (deleted)`, so quirk patterns by name miss them. The container has no udev database, so
+seconds. A fixture's name can be one the mount refuses (`a:b` on vfat), and a preset can expect a
+name stored that the real mount refuses, folds or lists as another (Samba's 8.3 aliases, long SMB
+folder names). On NFS a file renamed over while open reads as `.nfsXXXX`, and on casefolded
+folders `/proc` shows files the test process created as `name (deleted)`, so quirk patterns by
+name miss them. The container has no udev database, so
 exfat-fuse and ntfs-3g are not recognised there: they keep their per-file syncs, and get the name
 rules of a `fuseblk` device udev cannot tell, which learn from refusals (ntfs-3g refuses device
 names). Read failures against a run of the same filter on `origin/main`.
