@@ -201,6 +201,9 @@ pub(crate) struct Quirks {
     pub reused_inodes: Option<&'static str>,
     /// As on NFSv3, ntfs-3g and exfat-fuse.
     pub no_birth_time: bool,
+    /// The birth time reports the earlier of the modification and change times, as Samba makes
+    /// one up for a file whose DOS attributes it does not store.
+    pub made_up_births: bool,
     /// The change time reports the modification time, as on FAT and exFAT,
     /// which store none.
     pub ctime_is_mtime: bool,
@@ -755,6 +758,7 @@ struct State {
     /// The change time each entry's last stat saw, and when, by device and inode.
     seen_change_times: HashMap<(u64, u64), ((i64, u32), SystemTime)>,
     unplugged: bool,
+    serverino_disabled: bool,
 }
 
 static SCOPES: Mutex<Vec<Arc<Scope>>> = Mutex::new(Vec::new());
@@ -792,6 +796,7 @@ impl FsQuirks {
                 read_only_unseen: HashSet::new(),
                 seen_change_times: HashMap::new(),
                 unplugged: false,
+                serverino_disabled: false,
             }),
         });
         scopes().push(scope.clone());
@@ -1055,6 +1060,9 @@ impl Scope {
             stat.mtime = stat.mtime.min(tick);
             stat.ctime = stat.ctime.min(tick);
             stat.identity.birth = stat.identity.birth.map(|birth| birth.min(tick));
+        }
+        if state.quirks.made_up_births {
+            stat.identity.birth = Some(stat.mtime.min(stat.ctime));
         }
         if state.quirks.no_birth_time {
             stat.identity.birth = None;
@@ -1457,18 +1465,18 @@ impl Scope {
 
 fn open_in_this_process(entry: Entry<'_>) -> Option<u64> {
     let stat = System.stat(entry, false).ok()?;
-    if stat.kind != FileType::RegularFile {
-        return None;
-    }
-    let held = std::fs::read_dir("/proc/self/fd")
-        .ok()?
-        .filter_map(Result::ok)
-        .any(|fd| {
-            rustix::fs::stat(fd.path()).is_ok_and(|open| {
-                open.st_dev == stat.identity.device && open.st_ino == stat.identity.inode
-            })
-        });
-    held.then_some(stat.identity.inode)
+    (stat.kind == FileType::RegularFile
+        && held_by_this_process(stat.identity.device, stat.identity.inode))
+    .then_some(stat.identity.inode)
+}
+
+fn held_by_this_process(device: u64, inode: u64) -> bool {
+    std::fs::read_dir("/proc/self/fd").is_ok_and(|fds| {
+        fds.filter_map(Result::ok).any(|fd| {
+            rustix::fs::stat(fd.path())
+                .is_ok_and(|open| (open.st_dev, open.st_ino) == (device, inode))
+        })
+    })
 }
 
 fn path_of(dir: BorrowedFd<'_>) -> Option<PathBuf> {
@@ -1548,10 +1556,14 @@ pub(crate) fn gio_device(file: &gio::File, device: Option<u64>) -> Option<u64> {
 }
 
 fn scope_for_path(path: &Path) -> Option<Arc<Scope>> {
-    let parent = path.parent()?.canonicalize().ok()?;
+    scope_containing(path.parent()?)
+}
+
+fn scope_containing(path: &Path) -> Option<Arc<Scope>> {
+    let path = path.canonicalize().ok()?;
     scopes()
         .iter()
-        .filter(|scope| parent.starts_with(&scope.root))
+        .filter(|scope| path.starts_with(&scope.root))
         .max_by_key(|scope| scope.root.as_os_str().len())
         .cloned()
 }
@@ -1581,12 +1593,49 @@ pub(crate) fn skips_malformed_name_on_fuse(root: &Path, name: &OsStr) -> bool {
 /// unlinked, as libfuse without `use_ino` and cifs without server inode
 /// numbers do once the kernel evicts an entry.
 pub(crate) fn renumbered(path: &Path) {
+    renumber(path);
+}
+
+fn renumber(path: &Path) -> bool {
     let (Some(scope), Some(name)) = (scope_for_path(path), path.file_name()) else {
-        return;
+        return false;
     };
-    if let Some(parent) = path.parent().and_then(|parent| parent.canonicalize().ok()) {
+    let parent = path.parent().and_then(|parent| parent.canonicalize().ok());
+    parent.is_some_and(|parent| {
         scope.state().renumbered.insert(parent.join(name));
+        true
+    })
+}
+
+/// As [`renumbered`], unless a descriptor of this process holds it, which keeps it from eviction.
+#[expect(dead_code, reason = "the identity rule's eviction rows use it")]
+pub(crate) fn evict(path: &Path) -> bool {
+    let held =
+        rustix::fs::lstat(path).is_ok_and(|stat| held_by_this_process(stat.st_dev, stat.st_ino));
+    !held && renumber(path)
+}
+
+/// As the cifs client turns server inode numbers off after a collision, with no mount-table event.
+#[expect(dead_code, reason = "the SMB identity rows use it")]
+pub(crate) fn autodisable_serverino(path: &Path) -> bool {
+    let Some(scope) = scope_containing(path) else {
+        return false;
+    };
+    scope.state().serverino_disabled = true;
+    let mut folders = vec![scope.root.clone()];
+    while let Some(folder) = folders.pop() {
+        for entry in std::fs::read_dir(&folder).into_iter().flatten().flatten() {
+            if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                folders.push(entry.path());
+            }
+            let held = rustix::fs::lstat(entry.path())
+                .is_ok_and(|stat| held_by_this_process(stat.st_dev, stat.st_ino));
+            if !held {
+                scope.state().renumbered.insert(entry.path());
+            }
+        }
     }
+    true
 }
 
 fn same_scope(left: &Option<Arc<Scope>>, right: &Option<Arc<Scope>>) -> bool {
@@ -1657,12 +1706,18 @@ impl FsEnvironment for Scoped {
             Some(scope) => scope
                 .run(Op::MountType, &[], |scope| {
                     let root = scope.quirk(|quirks| quirks.mount_root).unwrap_or("/");
+                    let serverino_disabled = scope.state().serverino_disabled;
                     Ok(scope
                         .quirk(|quirks| quirks.mount_type)
                         .map(|(fs_type, super_options)| {
+                            let super_options = super_options
+                                .split(',')
+                                .filter(|option| !serverino_disabled || *option != "serverino")
+                                .collect::<Vec<_>>()
+                                .join(",");
                             let mount_type = MountType {
                                 fs_type: fs_type.to_owned(),
-                                super_options: super_options.to_owned(),
+                                super_options,
                             };
                             let site = MountSite {
                                 point: scope.root.clone(),

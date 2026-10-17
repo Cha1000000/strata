@@ -1122,10 +1122,11 @@ caches), refused `chown`, foreign groups, extended attributes refused by prefix,
 with ACLs first, refused `mknodat` of files and pipes, NFS silly renames, files that report no size,
 reported modes, change times that equal the modification time (FAT), folder birth times that renames
 reset (exFAT), times stamped within one tick of a coarse clock (kernels without multigrain
-timestamps), single link counts (sshfs), entries renumbered after eviction, SMB's refusal to open
-two names of one file at once or, during its deferred close, another name of a file just written,
-its stale read-only folders and change times answered from its attribute cache, and writeback errors
-that `syncfs` reports. Tests can also pretend to run on another kernel release, freeze the clock
+timestamps), single link counts (sshfs), entries renumbered after eviction (never one a descriptor
+holds), SMB's refusal to open two names of one file at once or, during its deferred close, another
+name of a file just written, its stale read-only folders, change times answered from its attribute
+cache, server inode numbers turned off after a collision and creation times Samba makes up, and
+writeback errors that `syncfs` reports. Tests can also pretend to run on another kernel release, freeze the clock
 that the racily clean check, the wait for SMB's deferred close and the emulated attribute cache
 read, and set a paste's batch limits and clock. The seam also asserts that no call runs on the main
 context's thread.
