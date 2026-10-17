@@ -1331,6 +1331,22 @@ fn wait_for_a_later_change_time(probe: &Path, than: &fs::Metadata) {
     fs::remove_file(probe).expect("remove the probe");
 }
 
+/// Where inode numbers are not trusted, a file born within one birth-time tick
+/// of `than` passes for it.
+fn wait_for_a_later_birth_time(probe: &Path, than: &fs::Metadata) {
+    let Ok(born) = than.created() else {
+        return;
+    };
+    loop {
+        fs::write(probe, b"probe").expect("write the probe");
+        let stamped = fs::metadata(probe).expect("stat the probe");
+        fs::remove_file(probe).expect("remove the probe");
+        if stamped.created().is_ok_and(|later| later > born) {
+            break;
+        }
+    }
+}
+
 #[test]
 fn a_file_rewritten_as_it_is_read_is_copied_again_whole() -> Result<(), Box<dyn Error>> {
     let _serial = serial()?;
@@ -2354,6 +2370,9 @@ fn copies_a_mount_numbers_afresh_are_known_by_type_birth_time_size_and_time()
             for file in [&notes, &arrival] {
                 set_times(file, hour_before.as_secs() - 3600, 0)?;
             }
+        }
+        if matches!(change, Change::ReplacedAlike) {
+            wait_for_a_later_birth_time(&root.path().join("probe"), &fs::metadata(&arrival)?);
         }
         let copied_notes = if item == "folder" {
             copy.join("notes.txt")
