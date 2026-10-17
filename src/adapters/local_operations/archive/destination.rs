@@ -27,7 +27,7 @@ use super::super::{
     mount_profile::{FolderRules, NamePolicy, Site},
     names::{
         fix::{Fixed, fix_name},
-        numbered_name, stricter_names,
+        numbered_name, stricter_names, with_number,
     },
     placement::{NUMBERED_NAME_ATTEMPTS, PlaceError, creation_error, place, reserve_hidden_name},
     placement_reason,
@@ -175,18 +175,6 @@ fn no_available_name(name: &OsStr) -> String {
         name = name.to_string_lossy()
     )
     .into_owned()
-}
-
-/// Appends ` ({index})` to a directory name, or inserts it before a file's
-/// extension, cutting the stem to `limit`: `pkg-1.2.3 (2)`, `readme (2).txt`.
-fn suffixed_name(name: &OsStr, index: u64, is_directory: bool, limit: NameLimit) -> OsString {
-    let path = Path::new(name);
-    let stem = match path.extension() {
-        Some(_) if !is_directory => path.file_stem().unwrap_or(name),
-        _ => name,
-    };
-    let extension = OsStr::from_bytes(&name.as_bytes()[stem.len()..]);
-    numbered_name(stem, index, extension, limit, is_directory)
 }
 
 pub(super) fn archive_stem(archive_name: &str) -> &str {
@@ -382,7 +370,7 @@ impl ExtractionDestination {
             let candidate = if index == 1 {
                 leaf.to_owned()
             } else {
-                suffixed_name(leaf, index, is_directory, self.name_limit())
+                with_number(leaf, index, is_directory, self.name_limit())
             };
             match place_without_replacing(&staging.root, root.as_os_str(), &self.root, &candidate) {
                 Ok(()) => return Ok(candidate),
@@ -1002,7 +990,7 @@ impl ExtractNameResolver {
             let candidate = if index == 1 {
                 base.to_os_string()
             } else {
-                suffixed_name(base, index, is_directory, limit)
+                with_number(base, index, is_directory, limit)
             };
             match self.taken.get(&(folder, candidate.clone())) {
                 Some(owner) if is_directory && owner == name => {
