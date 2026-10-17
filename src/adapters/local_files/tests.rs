@@ -1268,10 +1268,15 @@ fn native_loads_list_through_the_filesystem_seam() -> Result<(), Box<dyn Error>>
             DirectoryEvent::Failed { message, .. } => Some(message.as_str()),
             _ => None,
         });
+        let revalidated_stamps = scope
+            .calls()
+            .iter()
+            .filter(|call| call.op == FsOp::FolderStamp && call.forced)
+            .count();
         assert_eq!(
             (
                 batched_entry_count(&events),
-                scope.count(FsOp::FolderStamp),
+                revalidated_stamps,
                 scope.count(FsOp::ListChunks),
                 failed,
             ),

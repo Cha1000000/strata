@@ -659,7 +659,7 @@ fn scan_native_directory(
     let failed = |error: rustix::io::Errno| {
         NativeEnumeration::Failed(crate::services::io_error_message(&error.into()))
     };
-    let stamp = super::local_operations::folder_stamp(path, false);
+    let stamp = super::local_operations::folder_stamp(path, true);
     progress.answered(&stamp);
     match stamp {
         Ok(stamp) => {
