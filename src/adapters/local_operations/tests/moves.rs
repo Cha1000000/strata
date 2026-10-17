@@ -2701,6 +2701,9 @@ fn files_read_within_a_coarse_time_tick_are_compared_before_their_move_deletes_t
 #[test]
 fn files_on_a_coarse_mount_inside_a_moved_folder_are_compared() -> Result<(), Box<dyn Error>> {
     let _serial = serial()?;
+    // Multigrain times on the outer mount, so outer.txt, dated around the
+    // frozen clock, is never compared and waited for.
+    let _kernel = KernelGuard::set(Some((6, 13, 0)));
     let root = tempfile::tempdir()?;
     let source_dir = root.path().join("source");
     let folder = source_dir.join("folder");
