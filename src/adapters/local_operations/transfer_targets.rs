@@ -20,11 +20,15 @@ use super::{
     open_local_parent_directory, paste_targets, placement_reason, run_blocking,
     transfer_source_name, was_cancelled,
 };
-use crate::{adapters::gio_file_for_location, model::Location, services::NameMode};
+use crate::{
+    adapters::gio_file_for_location,
+    model::Location,
+    services::{NameMode, ShownName},
+};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct TransferTarget {
-    pub name: Option<OsString>,
+    pub name: Option<ShownName>,
     pub collision: Option<Collision>,
     pub fixes_inside: bool,
 }
@@ -102,7 +106,10 @@ pub(crate) async fn transfer_targets(
             .into_iter()
             .enumerate()
             .map(|(index, planned)| TransferTarget {
-                name: planned.map(|planned| planned.target),
+                name: planned.map(|planned| ShownName {
+                    name: planned.target,
+                    cause: planned.cause,
+                }),
                 collision: None,
                 fixes_inside: folders[index] && crossing[index] && rules.changes_characters(),
             })

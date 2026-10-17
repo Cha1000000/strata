@@ -67,7 +67,14 @@ pub struct PasteItem {
     pub source: Location,
     pub conflict: TransferConflict,
     /// What the conflict prompt showed, which the paste uses as it is; `None` lets it plan one.
-    pub target_name: Option<OsString>,
+    pub target_name: Option<ShownName>,
+}
+
+/// A name the conflict prompt showed for an item, and why it is not the item's own.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ShownName {
+    pub name: OsString,
+    pub cause: Option<RenameCause>,
 }
 
 /// A completed move: where an item started and where it ended up.

@@ -2,10 +2,11 @@
 
 use super::*;
 use crate::model::{FileEntry, Location};
-use crate::services::{DropCommit, TransferKind};
+use crate::services::{DropCommit, RenameCause, TransferKind};
 use std::{
     cell::{Cell, RefCell},
     collections::HashSet,
+    ffi::OsString,
     path::Path,
 };
 
@@ -3159,7 +3160,10 @@ fn a_conflict_prompt_says_which_name_the_item_takes_and_what_a_merge_overwrites(
         conflict_explanation(
             &TransferCollision {
                 source: Location::local(format!("/home/user/{source}")),
-                target_name: Some(OsString::from(target)),
+                target_name: Some(ShownName {
+                    name: OsString::from(target),
+                    cause: (source != target).then_some(RenameCause::Invalid),
+                }),
                 mergeable: true,
                 fixes_inside,
             },

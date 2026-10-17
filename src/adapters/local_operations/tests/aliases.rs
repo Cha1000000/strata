@@ -695,7 +695,10 @@ fn an_item_from_another_folder_meets_the_original_of_a_duplicate() -> Result<(),
         assert_eq!(
             targets
                 .iter()
-                .map(|target| (target.name.clone(), target.collision))
+                .map(|target| {
+                    let name = target.name.as_ref().map(|shown| shown.name.clone());
+                    (name, target.collision)
+                })
                 .collect::<Vec<_>>(),
             expected,
             "{context}"
@@ -767,7 +770,7 @@ fn same_named_items_from_three_folders_all_land_whatever_their_order_and_choice(
     // The folders whose notes.txt are pasted into one/, as selected; the choice for the item that
     // meets one/notes.txt, None skipping it; whether the request lists the items as selected
     // instead of as the browser does, the ones asked about last; and one/ after the paste.
-    let rows: [(&[&str], Option<TransferConflict>, bool, &[(&str, &str)]); 10] = [
+    let rows: [(&[&str], Option<TransferConflict>, bool, &[(&str, &str)]); 11] = [
         (
             &["two", "three"],
             Some(keep_both),
@@ -777,6 +780,12 @@ fn same_named_items_from_three_folders_all_land_whatever_their_order_and_choice(
                 ("notes (2).txt", "two"),
                 ("notes.txt", "one"),
             ],
+        ),
+        (
+            &["two", "three"],
+            None,
+            false,
+            &[("notes (1).txt", "three"), ("notes.txt", "one")],
         ),
         (
             &["one", "two", "three"],
@@ -912,6 +921,15 @@ fn same_named_items_from_three_folders_all_land_whatever_their_order_and_choice(
             .map(|(name, content)| (name.to_string(), content.to_string()))
             .collect::<Vec<_>>();
         assert_eq!(held, listed, "{context}");
+        assert_eq!(
+            renamed_beneath(&one, &followed_report(&events.borrow())),
+            [(
+                "notes.txt".to_owned(),
+                "notes (1).txt".to_owned(),
+                RenameCause::Taken
+            )],
+            "{context}"
+        );
     }
     Ok(())
 }

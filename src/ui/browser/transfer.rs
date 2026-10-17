@@ -4,7 +4,7 @@ use crate::adapters::{gio_file_for_location, transfer_targets};
 use crate::app::Browser;
 use crate::model::{FileEntry, Location};
 use crate::services::{
-    DropCommit, MoveRecord, PasteItem, TransferConflict, UndoMoveItem, VolumeRelation,
+    DropCommit, MoveRecord, PasteItem, ShownName, TransferConflict, UndoMoveItem, VolumeRelation,
     transferable_drop_sources,
 };
 use crate::ui::browser::ViewState;
@@ -23,7 +23,6 @@ use crate::ui::keys::{
 use crate::ui::modal::{ModalHost, dismiss_modal_layer, modal_layer, show_error_dialog};
 use gtk::prelude::*;
 use gtk::{gio, glib};
-use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::Duration;
@@ -47,7 +46,7 @@ enum ConflictChoice {
 struct TransferCollision {
     source: Location,
     /// The name the paste gives the item, which the item already there has.
-    target_name: Option<OsString>,
+    target_name: Option<ShownName>,
     /// Both colliding items are directories, so their contents can be merged.
     mergeable: bool,
     fixes_inside: bool,
@@ -144,7 +143,8 @@ fn conflict_explanation(
     let own_name = collision.source.file_name();
     let target_name = collision
         .target_name
-        .clone()
+        .as_ref()
+        .map(|shown| shown.name.clone())
         .or_else(|| own_name.clone())
         .unwrap_or_default();
     let name = shown_name(&target_name);

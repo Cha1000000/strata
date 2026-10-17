@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 
 use super::*;
+use crate::services::ShownName;
 
 #[test]
 fn transfers_into_the_same_location_or_a_descendant_are_noops() {
@@ -812,6 +813,7 @@ fn the_prompt_sees_the_name_a_paste_gives_each_item_and_what_has_it() -> Result<
     use super::super::transfer_targets::{
         Collision, LOOKUPS_WITHOUT_LISTING, TransferTarget, transfer_targets,
     };
+    use crate::services::RenameCause;
     let _serial = serial()?;
     let file = Some(Collision { mergeable: false });
     let folder = Some(Collision { mergeable: true });
@@ -880,16 +882,22 @@ fn the_prompt_sees_the_name_a_paste_gives_each_item_and_what_has_it() -> Result<
 
         let expected = rows
             .iter()
-            .map(|(_, vfat, ext4, fixes_inside)| {
+            .map(|(item, vfat, ext4, fixes_inside)| {
                 let (name, collision) = if on_vfat { *vfat } else { *ext4 };
                 TransferTarget {
-                    name: Some(OsString::from(name)),
+                    name: Some(ShownName {
+                        name: OsString::from(name),
+                        cause: (name != *item).then_some(RenameCause::Invalid),
+                    }),
                     collision,
                     fixes_inside: on_vfat && *fixes_inside,
                 }
             })
             .chain(pads.iter().map(|pad| TransferTarget {
-                name: Some(OsString::from(pad)),
+                name: Some(ShownName {
+                    name: OsString::from(pad),
+                    cause: None,
+                }),
                 collision: None,
                 fixes_inside: false,
             }))
@@ -951,7 +959,10 @@ fn a_paste_gives_an_item_the_name_its_prompt_showed() -> Result<(), Box<dyn Erro
             items: vec![PasteItem {
                 source: Location::local(source.join(item)),
                 conflict,
-                target_name: Some(OsString::from(shown)),
+                target_name: Some(ShownName {
+                    name: OsString::from(shown),
+                    cause: None,
+                }),
             }],
             move_sources: moving,
         });
@@ -991,7 +1002,10 @@ fn a_paste_fails_an_item_whose_shown_name_is_not_one_plain_name() -> Result<(), 
                 items: vec![PasteItem {
                     source: Location::local(source.join("item")),
                     conflict: TransferConflict::FailIfExists,
-                    target_name: Some(OsString::from(shown)),
+                    target_name: Some(ShownName {
+                        name: OsString::from(shown),
+                        cause: None,
+                    }),
                 }],
                 move_sources: false,
             },

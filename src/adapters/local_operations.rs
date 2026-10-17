@@ -1059,7 +1059,7 @@ fn planned_paste(
         .iter()
         .zip(&own)
         .map(|(item, own)| match &item.target_name {
-            Some(shown) => plain_name(shown).then(|| shown.clone()),
+            Some(shown) => plain_name(&shown.name).then(|| shown.name.clone()),
             None => own.clone(),
         })
         .collect::<Vec<_>>();
@@ -1076,16 +1076,6 @@ fn planned_paste(
         })
         .collect::<Vec<_>>();
     let mut planned = paste_targets(&names, rules, (crossing, &renamable, duplicate), kinds)?;
-    // The prompt planned the names it showed from the items' own.
-    let prompted = items
-        .iter()
-        .zip(&own)
-        .any(|(item, own)| item.target_name.is_some() && item.target_name != *own)
-        .then(|| {
-            let renamable = vec![true; own.len()];
-            paste_targets(&own, rules, (crossing, &renamable, duplicate), kinds).ok()
-        })
-        .flatten();
     for (index, item) in items.iter().enumerate() {
         let (Some(shown), Some(planned), Some(name)) =
             (&item.target_name, &mut planned[index], &own[index])
@@ -1093,12 +1083,9 @@ fn planned_paste(
             continue;
         };
         let is_directory = kinds[index] == Some(gio::FileType::Directory);
-        planned.cause = (name != shown).then(|| {
-            prompted
-                .as_ref()
-                .and_then(|prompted| prompted[index].as_ref())
-                .filter(|prompted| prompted.target == *shown)
-                .and_then(|prompted| prompted.cause)
+        planned.cause = (*name != shown.name).then(|| {
+            shown
+                .cause
                 .or_else(|| fix_name(name, rules, is_directory).cause)
                 .unwrap_or(RenameCause::Alias)
         });
