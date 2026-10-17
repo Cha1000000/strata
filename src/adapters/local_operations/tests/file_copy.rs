@@ -84,49 +84,26 @@ fn xattrs_set(calls: &[Call]) -> Vec<OsString> {
 #[test]
 fn a_file_being_copied_is_invisible_until_complete() -> Result<(), Box<dyn Error>> {
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock()?;
-    let seen = Arc::new(Mutex::new(None));
-    let mounts = mounts(Quirks::default(), |destination| Quirks {
-        before: vec![(Op::Write, "*", 0, list_into(destination, &seen))],
-        ..Quirks::default()
-    })?;
-    let contents = patterned(2 * 1024 * 1024);
-    let source = mounts.source(&contents)?;
-
-    copy(&source, &mounts.target())?;
-
-    let seen = seen
-        .lock()
-        .map_err(|error| error.to_string())?
-        .take()
-        .ok_or("the copy wrote nothing")?;
-    assert!(seen.iter().all(|name| name.starts_with('.')), "{seen:?}");
-    if mount_capabilities(mounts.destination_scope.key()).tmpfile == Some(true) {
-        assert!(seen.is_empty(), "{seen:?}");
-    }
-    assert_eq!(fs::read(mounts.target())?, contents);
-    Ok(())
-}
-
-#[test]
-fn files_use_a_hidden_stage_where_tmpfiles_are_unavailable() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock()?;
-    for (case, preset, probed) in [
+    for (case, preset, probed, staged) in [
+        ("tmpfiles", Quirks::default as Preset, true, false),
         (
             "tmpfiles refused",
-            (|| Quirks {
+            || Quirks {
                 tmpfile: Support::Rejected(Errno::OPNOTSUPP),
                 ..Quirks::ext4()
-            }) as Preset,
+            },
+            true,
             true,
         ),
-        ("NFS", Quirks::nfs42, false),
+        ("NFS", Quirks::nfs42, false, true),
     ] {
         let seen = Arc::new(Mutex::new(None));
         let mounts = mounts(Quirks::default(), |destination| Quirks {
             before: vec![(Op::Write, "*", 0, list_into(destination, &seen))],
             ..preset()
         })?;
-        let source = mounts.source(b"contents")?;
+        let contents = patterned(2 * 1024 * 1024);
+        let source = mounts.source(&contents)?;
 
         copy(&source, &mounts.target())?;
 
@@ -135,17 +112,25 @@ fn files_use_a_hidden_stage_where_tmpfiles_are_unavailable() -> Result<(), Box<d
             .map_err(|error| error.to_string())?
             .take()
             .ok_or("the copy wrote nothing")?;
-        assert!(
-            matches!(seen.as_slice(), [stage] if stage.starts_with(".strata-copy-")),
-            "{case}: {seen:?}"
-        );
+        if staged {
+            assert!(
+                matches!(seen.as_slice(), [stage] if stage.starts_with(".strata-copy-")),
+                "{case}: {seen:?}"
+            );
+        } else {
+            assert!(seen.is_empty(), "{case}: {seen:?}");
+        }
         let scope = &mounts.destination_scope;
         assert_eq!(scope.count(Op::OpenTmpfile), usize::from(probed), "{case}");
         if probed {
-            assert_eq!(mount_capabilities(scope.key()).tmpfile, Some(false));
+            assert_eq!(
+                mount_capabilities(scope.key()).tmpfile,
+                Some(!staged),
+                "{case}"
+            );
         }
         assert_eq!(names(&mounts.destination)?, ["target.bin"], "{case}");
-        assert_eq!(fs::read(mounts.target())?, b"contents");
+        assert_eq!(fs::read(mounts.target())?, contents, "{case}");
     }
     Ok(())
 }
