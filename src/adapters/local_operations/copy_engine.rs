@@ -414,6 +414,7 @@ pub(super) async fn copy_in_place(
         ..options
     };
     let workers = options.workers;
+    let copied_into = parent.clone();
     let followed = following(
         Item::Pinned(source, name),
         options,
@@ -429,8 +430,7 @@ pub(super) async fn copy_in_place(
     let mut manifest = followed
         .manifest
         .ok_or_else(|| translated_io_error("The copy stopped unexpectedly"))?;
-    let (parent, _) = split(&target)?;
-    manifest.copied_to(Published::proven(parent, name, ownership));
+    manifest.copied_to(Published::proven(copied_into, name, ownership));
     Ok((manifest, left_report(&target, followed.left)))
 }
 

@@ -363,6 +363,7 @@ pub(crate) fn set_mountinfo_for_isolated_test(mountinfo: Option<String>) {
 
 impl MountTable {
     pub(crate) fn current() -> Self {
+        crate::util::ui_thread::assert_off();
         #[cfg(test)]
         if let Some(mountinfo) = MOUNTINFO_FOR_TEST
             .lock()

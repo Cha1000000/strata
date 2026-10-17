@@ -223,6 +223,7 @@ pub(crate) fn gtk_test_with_env(
         }
         crate::assets::prepare().expect("bundled assets");
         crate::assets::register_icon_theme();
+        crate::util::ui_thread::mark();
         run();
         return;
     }

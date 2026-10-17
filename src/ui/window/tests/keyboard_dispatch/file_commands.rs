@@ -1546,10 +1546,15 @@ fn a_mount_that_refused_trash_confirms_up_front_until_reload() {
             let (id, permanent, _) = held.delete_requests.borrow()[0];
             assert!(!permanent, "the first Delete tries Trash");
             // The adapter records the refusal before it reports the failure.
-            crate::adapters::trash_support::record_unsupported(
+            let mount = {
+                let _allowed =
+                    crate::util::ui_thread::allow(crate::util::ui_thread::Exception::TestSetup);
                 crate::adapters::MountTable::current()
                     .mount_for(&directory)
-                    .expect("fixture mount"),
+                    .expect("fixture mount")
+            };
+            crate::adapters::trash_support::record_unsupported(
+                mount,
                 crate::adapters::trash_support::UnsupportedReason::FuseRefused,
             );
             held.emit(

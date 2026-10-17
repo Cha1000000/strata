@@ -21,6 +21,7 @@ use super::gio_file_for_location;
 use crate::{
     model::Location,
     services::{VolumeIdentity, VolumeRelation, volume_relation},
+    util::ui_thread::{self, Exception},
 };
 
 #[cfg(test)]
@@ -56,6 +57,7 @@ pub(crate) struct DropVolumeQuery {
 
 impl DropVolumeQuery {
     pub(crate) fn new(dest: &Location, sources: &[Location]) -> Self {
+        let _allowed = ui_thread::allow(Exception::MountTable);
         Self::with_mounts(dest, sources, &MountTable::current())
     }
 
@@ -150,7 +152,11 @@ pub(crate) fn lookup_drop_volumes(
     query: &DropVolumeQuery,
     on_ready: impl FnOnce(DropVolumeLookup) + 'static,
 ) -> DropVolumes {
-    lookup_drop_volumes_with_mounts(query, &MountTable::current(), on_ready)
+    let mounts = {
+        let _allowed = ui_thread::allow(Exception::MountTable);
+        MountTable::current()
+    };
+    lookup_drop_volumes_with_mounts(query, &mounts, on_ready)
 }
 
 fn lookup_drop_volumes_with_mounts(

@@ -245,6 +245,7 @@ pub(crate) struct HeldFile {
 }
 
 pub(crate) fn open(path: &Path) -> io::Result<HeldFile> {
+    crate::util::ui_thread::assert_off();
     let hold = hold_real(path)?;
     Ok(HeldFile {
         file: File::open(path)?,
@@ -414,6 +415,7 @@ impl Fence {
     }
 
     pub(crate) fn wait(&self, budget: Duration, cancelled: &dyn Fn() -> bool) -> Drained {
+        crate::util::ui_thread::assert_off();
         let deadline = Instant::now() + budget;
         loop {
             if cancelled() {

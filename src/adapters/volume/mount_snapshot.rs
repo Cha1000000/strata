@@ -5,6 +5,7 @@ use std::{cell::RefCell, path::PathBuf};
 use gtk::{gio, prelude::*};
 
 use super::{MountTable, mount_capabilities::forget_mount_capabilities, mount_is_removable};
+use crate::util::ui_thread::Exception;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct RemovableRoot {
@@ -81,6 +82,7 @@ fn read_mounts() -> MountSnapshot {
             })
         })
         .collect();
+    let _allowed = crate::util::ui_thread::allow(Exception::MountTable);
     MountSnapshot {
         table: MountTable::current(),
         removable,

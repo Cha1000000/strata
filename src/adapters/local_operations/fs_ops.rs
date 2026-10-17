@@ -11,7 +11,7 @@ use std::{
     },
 };
 
-use gtk::{gio, glib};
+use gtk::gio;
 
 use rustix::{
     fs::{
@@ -186,14 +186,11 @@ pub(super) fn fs() -> &'static dyn FsOps {
 }
 
 pub(super) fn assert_off_main_thread() {
-    debug_assert!(
-        !glib::MainContext::default().is_owner(),
-        "filesystem calls must not run on the main thread"
-    );
+    crate::util::ui_thread::assert_off();
 }
 
 pub(super) fn drop_off_main_thread<T: Send + 'static>(held: T) {
-    if glib::MainContext::default().is_owner() {
+    if crate::util::ui_thread::is_current() {
         drop(gio::spawn_blocking(move || drop(held)));
     }
 }
@@ -333,6 +330,7 @@ impl FsOps for System {
         mode: Mode,
         resolve: Option<ResolveFlags>,
     ) -> Result<OwnedFd, Errno> {
+        assert_off_main_thread();
         match resolve {
             Some(resolve) => rustix::fs::openat2(at.dir, at.name, flags, mode, resolve),
             None => rustix::fs::openat(at.dir, at.name, flags, mode),
@@ -340,6 +338,7 @@ impl FsOps for System {
     }
 
     fn open_path(&self, path: &OsStr, flags: OFlags, mode: Mode) -> Result<OwnedFd, Errno> {
+        assert_off_main_thread();
         rustix::fs::open(path, flags, mode)
     }
 
@@ -348,6 +347,7 @@ impl FsOps for System {
     }
 
     fn stat_vfs(&self, fd: BorrowedFd<'_>) -> Result<rustix::fs::StatVfs, Errno> {
+        assert_off_main_thread();
         rustix::fs::fstatvfs(fd)
     }
     fn rename(&self, from: Entry<'_>, to: Entry<'_>, flags: RenameFlags) -> Result<(), Errno> {
@@ -758,3 +758,6 @@ impl FsOps for System {
         )
     }
 }
+
+#[cfg(test)]
+mod tests;
