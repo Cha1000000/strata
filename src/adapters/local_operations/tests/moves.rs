@@ -2003,7 +2003,13 @@ fn a_source_is_deleted_once_its_copy_was_stamped_again_at_close() -> Result<(), 
         ("FUSE writeback cache", fuse_writeback, false, None, true),
         ("NFSv4.2", Quirks::nfs42, false, None, false),
         ("NFSv4.2, inside a folder", Quirks::nfs42, true, None, false),
-        ("NFSv4.2, unreadable", Quirks::nfs42, false, Some(0o044), false),
+        (
+            "NFSv4.2, unreadable",
+            Quirks::nfs42,
+            false,
+            Some(0o044),
+            false,
+        ),
     ];
     for (row, preset, in_folder, mode, recent) in rows {
         let root = tempfile::tempdir()?;
