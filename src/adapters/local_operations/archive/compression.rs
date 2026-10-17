@@ -16,9 +16,9 @@ use super::super::{
     },
     owed::{Deletion, Owed},
     placement::{
-        COMPRESSION_STAGE_PREFIX, Displacement, NUMBERED_NAME_ATTEMPTS, PlaceError,
-        REPLACED_PREFIX, displacement_without_trash, exchange, file_creation_error, place_staged,
-        put_back, remove_if_unchanged, reserve_hidden_name, set_aside, set_aside_if_safe,
+        Displacement, NUMBERED_NAME_ATTEMPTS, PlaceError, displacement_without_trash, exchange,
+        file_creation_error, place_staged, put_back, remove_if_unchanged, reserve_hidden_name,
+        set_aside, set_aside_if_safe,
     },
     placement_reason,
     replacement::{DisplacedOriginal, cannot_replace_safely, original_kept_aside},
@@ -29,8 +29,9 @@ use super::{
     ArchiveError, COPY_BUF, archive_failed, check_archive_cancelled, copy_with_big_buf,
     decoders::FILE_ATTRIBUTE_UNIX_EXTENSION, destination::process_umask,
 };
-use crate::services::{
-    PlacedSnapshot, ReplacedOriginal, TransferConflict, TrashedOriginal, error_detail,
+use crate::{
+    model::hidden_names::HiddenName,
+    services::{PlacedSnapshot, ReplacedOriginal, TransferConflict, TrashedOriginal, error_detail},
 };
 use gtk::{gio, glib};
 use rustix::fs::AtFlags;
@@ -205,7 +206,7 @@ impl Publication {
             },
         };
 
-        let (name, file) = reserve_hidden_name(COMPRESSION_STAGE_PREFIX, |name| {
+        let (name, file) = reserve_hidden_name(HiddenName::Compression, |name| {
             fs().create_exclusive(
                 Entry::new(&*parent, name),
                 rustix::fs::Mode::from_raw_mode(0o600),
@@ -392,7 +393,7 @@ impl Publication {
         let aside = match set_aside(
             fs(),
             Entry::new(&*stage.parent, target),
-            REPLACED_PREFIX,
+            HiddenName::Replaced,
             identity,
         ) {
             Ok(aside) => aside,

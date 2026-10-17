@@ -6,14 +6,14 @@ use crate::{
         gio_file_for_location, location_for_file,
         trash_support::{TrashError, trash_with_cleanup},
     },
-    model::Location,
+    model::{Location, hidden_names::HiddenName},
     services::{PlacedSnapshot, ReplacedOriginal, TransferReport, TrashedOriginal},
 };
 use gtk::{gio, glib, prelude::*};
 
 use super::{
     owed::{Deletion, Owed},
-    placement::{Displacement, PlaceError, REPLACED_PREFIX},
+    placement::{Displacement, PlaceError},
 };
 use std::{
     collections::{HashMap, HashSet},
@@ -57,10 +57,10 @@ pub(super) struct StagedSibling {
 impl StagedSibling {
     pub(super) fn create(
         parent: Arc<OwnedFd>,
-        prefix: &str,
+        hidden: HiddenName,
         content: StageContent,
     ) -> Result<Self, PlaceError> {
-        let (name, identity) = placement::reserve_hidden_name(prefix, |name| {
+        let (name, identity) = placement::reserve_hidden_name(hidden, |name| {
             let entry = Entry::new(&*parent, name);
             let made = match &content {
                 StageContent::Directory => {
@@ -484,7 +484,7 @@ pub(super) fn place_source(
         Err(error) => return Err(error.error),
     }
     let name = plan.target_display();
-    let aside = placement::set_aside(fs(), target, REPLACED_PREFIX, plan.target.identity)
+    let aside = placement::set_aside(fs(), target, HiddenName::Replaced, plan.target.identity)
         .map_err(|error| set_aside_failure(error, &name))?;
     let error = match placement::place(fs(), source, target, expected) {
         Ok(_) => return Ok(SourcePlaced::SetAside(aside)),
@@ -710,7 +710,7 @@ pub(super) async fn set_aside_and_publish(
         placement::set_aside(
             fs(),
             Entry::new(&*parent, &step_plan.target_name),
-            REPLACED_PREFIX,
+            HiddenName::Replaced,
             step_plan.target.identity,
         )
         .map_err(|error| set_aside_failure(error, &step_name))

@@ -29,15 +29,13 @@ use super::super::{
         fix::{Fixed, fix_name},
         numbered_name, stricter_names,
     },
-    placement::{
-        EXTRACTION_STAGE_PREFIX, NUMBERED_NAME_ATTEMPTS, PlaceError, creation_error, place,
-        reserve_hidden_name,
-    },
+    placement::{NUMBERED_NAME_ATTEMPTS, PlaceError, creation_error, place, reserve_hidden_name},
     placement_reason,
 };
 use super::{ArchiveError, extraction::MemberMetadata};
 use crate::{
     adapters::volume::{NameLimit, Strictness},
+    model::hidden_names::HiddenName,
     services::{NameMode, RenameCause, error_detail},
 };
 
@@ -268,7 +266,7 @@ impl ExtractionDestination {
     }
 
     pub(super) fn create_staging(&self) -> Result<(OsString, Self), String> {
-        let (name, ()) = reserve_hidden_name(EXTRACTION_STAGE_PREFIX, |name| {
+        let (name, ()) = reserve_hidden_name(HiddenName::Extraction, |name| {
             fs().mkdir(
                 Entry::new(&self.root, name),
                 rustix::fs::Mode::from_raw_mode(0o777),

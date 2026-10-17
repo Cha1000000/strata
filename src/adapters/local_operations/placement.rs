@@ -13,7 +13,6 @@ use std::{
     os::fd::{AsFd, BorrowedFd},
 };
 
-use gtk::glib;
 use rustix::{
     fs::{AtFlags, FileType, Mode, RenameFlags},
     io::Errno,
@@ -25,9 +24,12 @@ use super::{
     names::fix::units,
     native_fs::LocalFileIdentity,
 };
-use crate::adapters::volume::{
-    LONGEST_NAME_NTFS_3G_RENAMES_OVER, MountCapabilities, MountKey, learn_mount_capability,
-    mount_capabilities,
+use crate::{
+    adapters::volume::{
+        LONGEST_NAME_NTFS_3G_RENAMES_OVER, MountCapabilities, MountKey, learn_mount_capability,
+        mount_capabilities,
+    },
+    model::hidden_names::HiddenName,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -69,19 +71,6 @@ impl PlaceError {
 /// The kernel's own "not supported", which NFS lets reach userspace.
 pub(super) const ENOTSUPP: Errno = Errno::from_raw_os_error(524);
 
-// Hidden sibling names. These may hold the user's only copy of an item after a
-// crash, so they must never be swept: originals set aside before a replace or
-// merge, an item mid case-only rename, and stages, which hold the swapped-out
-// original after an EXCHANGE.
-pub(super) const REPLACED_PREFIX: &str = ".strata-replaced-";
-pub(super) const MERGE_PREFIX: &str = ".strata-merge-";
-const RENAME_PREFIX: &str = ".strata-rename-";
-pub(super) const STAGE_PREFIX: &str = ".strata-replacement-";
-pub(super) const COMPRESSION_STAGE_PREFIX: &str = ".strata-compression-";
-// Only Strata's own scratch data, which may be swept.
-pub(super) const EXTRACTION_STAGE_PREFIX: &str = ".strata-extraction-";
-pub(super) const COPY_PREFIX: &str = ".strata-copy-";
-const PROBE_PREFIX: &str = ".strata-probe-";
 const NAME_ATTEMPTS: usize = 8;
 /// Bounds "name (n)" numbering, so a fault reported as `Exists` cannot loop forever.
 pub(super) const NUMBERED_NAME_ATTEMPTS: u64 = 10_000;
@@ -683,11 +672,6 @@ pub(super) fn contains(
     None
 }
 
-pub(super) fn hidden_names(prefix: &str) -> impl Iterator<Item = OsString> + '_ {
-    (0..NAME_ATTEMPTS)
-        .map(move |_| OsString::from(format!("{prefix}{}", glib::uuid_string_random())))
-}
-
 /// The entry at a fresh hidden name that this process's own create, whose
 /// reply was lost, left there: nobody else knows the name yet, so an entry
 /// as fresh as a create leaves it is that create's.
@@ -703,10 +687,10 @@ pub(super) fn left_by_lost_reply(
 }
 
 pub(super) fn reserve_hidden_name<T>(
-    prefix: &str,
+    hidden: HiddenName,
     mut attempt: impl FnMut(&OsStr) -> Result<T, PlaceError>,
 ) -> Result<(OsString, T), PlaceError> {
-    for name in hidden_names(prefix) {
+    for name in std::iter::repeat_with(|| hidden.fresh()).take(NAME_ATTEMPTS) {
         match attempt(&name) {
             Err(PlaceError::Exists) => continue,
             result => return result.map(|value| (name, value)),
@@ -750,7 +734,7 @@ pub(super) fn probe(
     folders: bool,
 ) -> Result<Probed, Errno> {
     let mut probed = Probed::default();
-    let created = reserve_hidden_name(PROBE_PREFIX, |name| {
+    let created = reserve_hidden_name(HiddenName::Probe, |name| {
         drop(
             fs.create_exclusive(at(dir, name), Mode::from_raw_mode(0o600))
                 .map_err(file_creation_error)?,
@@ -766,7 +750,7 @@ pub(super) fn probe(
     };
 
     if renames
-        && let Ok((renamed, supported)) = reserve_hidden_name(PROBE_PREFIX, |name| {
+        && let Ok((renamed, supported)) = reserve_hidden_name(HiddenName::Probe, |name| {
             match fs.rename(at(dir, &current), at(dir, name), RenameFlags::NOREPLACE) {
                 Ok(()) => Ok(Some(true)),
                 Err(Errno::EXIST) => Err(PlaceError::Exists),
@@ -782,7 +766,7 @@ pub(super) fn probe(
     }
 
     if links
-        && let Ok((linked, supported)) = reserve_hidden_name(PROBE_PREFIX, |name| {
+        && let Ok((linked, supported)) = reserve_hidden_name(HiddenName::Probe, |name| {
             match fs.link(at(dir, &current), at(dir, name)) {
                 Ok(()) => Ok(Some(true)),
                 Err(Errno::EXIST) => Err(PlaceError::Exists),
@@ -819,8 +803,8 @@ fn probe_folders(fs: &dyn FsOps, dir: BorrowedFd<'_>) -> Option<bool> {
             .map(|stat| stat.identity)
             .map_err(PlaceError::Io)
     };
-    let (moved, moved_identity) = reserve_hidden_name(PROBE_PREFIX, mkdir).ok()?;
-    let Ok((target, target_identity)) = reserve_hidden_name(PROBE_PREFIX, mkdir) else {
+    let (moved, moved_identity) = reserve_hidden_name(HiddenName::Probe, mkdir).ok()?;
+    let Ok((target, target_identity)) = reserve_hidden_name(HiddenName::Probe, mkdir) else {
         remove_placeholder(fs, at(dir, &moved), moved_identity);
         return None;
     };
@@ -874,10 +858,10 @@ pub(super) fn move_aside(
 pub(super) fn set_aside(
     fs: &dyn FsOps,
     entry: Entry<'_>,
-    prefix: &str,
+    hidden: HiddenName,
     expected: LocalFileIdentity,
 ) -> Result<SetAside, PlaceError> {
-    reserve_hidden_name(prefix, |name| {
+    reserve_hidden_name(hidden, |name| {
         move_aside(fs, entry, at(entry.dir, name), expected)
     })
     .map(|(name, identity)| SetAside { name, identity })
@@ -1051,7 +1035,7 @@ pub(super) fn rename_in_place(
     let Some(identity) = alias_of(fs, from, to) else {
         return Err(RenameFailure::Place(PlaceError::Exists));
     };
-    let (temporary, _) = reserve_hidden_name(RENAME_PREFIX, |name| {
+    let (temporary, _) = reserve_hidden_name(HiddenName::Rename, |name| {
         place(fs, from, at(from.dir, name), Some(identity))
     })
     .map_err(|error| {

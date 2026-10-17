@@ -44,13 +44,14 @@ use crate::{
             mount_profile::{FolderRules, Site, crosses},
             names::{Key, PlanEntry, Planned, numbered_names, plan_names},
             native_fs::{LocalFileIdentity, os_error_detail},
-            placement::{self, COPY_PREFIX, PlaceError},
+            placement::{self, PlaceError},
             replacement::{StageContent, StagedSibling},
             translated_io_error,
             work_queue::{self, Group, Job, WorkQueue},
         },
         volume::{Family, MountKey, NameProfile},
     },
+    model::hidden_names::HiddenName,
     services::{KeptCause, RenameCause, SpecialKind},
 };
 
@@ -1409,7 +1410,8 @@ impl Live {
     ) -> Result<(), Failure> {
         let fs = tree.copy.fs;
         tree.copy.check_cancelled()?;
-        let staged = StagedSibling::create(self.dir.clone(), COPY_PREFIX, StageContent::Directory)?;
+        let staged =
+            StagedSibling::create(self.dir.clone(), HiddenName::Copy, StageContent::Directory)?;
         let (name, identity) = (staged.name.clone(), staged.identity);
         lock(&tree.stages).push(staged);
         let dir = fs.open_dir(Entry::new(&*self.dir, &name))?;

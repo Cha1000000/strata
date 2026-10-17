@@ -738,7 +738,7 @@ fn set_aside_refuses_a_substituted_target() -> Result<(), Box<dyn Error>> {
     let result = set_aside(
         fs(),
         Entry::new(&parent, OsStr::new("target")),
-        ".strata-replaced-",
+        HiddenName::Replaced,
         expected,
     );
 

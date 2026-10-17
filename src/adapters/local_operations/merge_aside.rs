@@ -23,9 +23,10 @@ use super::{
     fs_ops::{Entry, drop_off_main_thread, fs},
     io_error,
     native_fs::{LocalFileIdentity, open_local_parent_directory, retry_local_open},
-    placement::{self, Feasibility, MERGE_PREFIX, PlaceError},
+    placement::{self, Feasibility, PlaceError},
     placement_reason, run_blocking, was_cancelled,
 };
+use crate::model::hidden_names::HiddenName;
 
 struct Folder {
     name: OsString,
@@ -90,7 +91,7 @@ fn open_beneath(dir: &OwnedFd, relative: &Path) -> Result<OwnedFd, PlaceError> {
 }
 
 fn create_folder(target: &OwnedFd) -> Result<Folder, PlaceError> {
-    let (name, identity) = placement::reserve_hidden_name(MERGE_PREFIX, |name| {
+    let (name, identity) = placement::reserve_hidden_name(HiddenName::Merge, |name| {
         let entry = Entry::new(target, name);
         fs().mkdir(entry, Mode::from_raw_mode(0o700))
             .map_err(placement::creation_error)?;

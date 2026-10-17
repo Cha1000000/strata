@@ -46,7 +46,7 @@ use super::{
     mount_profile::{FolderRules, NamePolicy, Site, known_mount},
     names::{Taken, may_be_refused, numbered_names, stricter_names},
     native_fs::{LocalFileIdentity, open_local_parent_directory, os_error_detail, os_error_text},
-    placement::{self, COPY_PREFIX, ENOTSUPP, PlaceError, STAGE_PREFIX},
+    placement::{self, ENOTSUPP, PlaceError},
     placement_error_kind, placement_reason,
     progress::{Reported, TransferProgressTracker},
     replacement::{StageContent, StagedSibling, placement_error},
@@ -57,7 +57,7 @@ use crate::{
         CoarseTimes, Family, FuseFormat, MountCapabilities, MountKey, MountNames, NameLimit,
         learn_mount_capability, mount_capabilities,
     },
-    model::Location,
+    model::{Location, hidden_names::HiddenName},
     services::{
         KeptCause, NameMode, PlacedSnapshot, RenameCause, RenamedItem, SkippedItem, SpecialKind,
         TransferReport,
@@ -831,7 +831,14 @@ fn copy_new(
                     direct_folder(copy, source, stat.identity, parent, name, workers)
                 });
             }
-            let staged = stage_folder(copy, source, stat.identity, parent, COPY_PREFIX, workers)?;
+            let staged = stage_folder(
+                copy,
+                source,
+                stat.identity,
+                parent,
+                HiddenName::Copy,
+                workers,
+            )?;
             publish_folder(copy, staged, name, taken, workers)
         }
         _ => Err(Failure::NotCopyable),
@@ -866,8 +873,8 @@ fn copy_special(
     };
     // These creation syscalls return no descriptor; retain ownership in a private stage.
     let staged =
-        StagedSibling::create(parent.clone(), COPY_PREFIX, content).map_err(
-            |error| match error {
+        StagedSibling::create(parent.clone(), HiddenName::Copy, content).map_err(|error| {
+            match error {
                 PlaceError::Io(error)
                     if stat.kind == FileType::Fifo && tree::refuses_node(FileType::Fifo, error) =>
                 {
@@ -884,8 +891,8 @@ fn copy_special(
                     refused
                 }
                 error => error.into(),
-            },
-        )?;
+            }
+        })?;
     let prepared = (|| {
         let at = Entry::new(&**parent, &staged.name);
         if stat.kind == FileType::Fifo {
@@ -1005,19 +1012,22 @@ fn copy_stage(
             if !copy.names.profiles.holds_link_to(&site, &link) {
                 return Err(Failure::LinkRefused(Errno::ILSEQ));
             }
-            let staged =
-                match StagedSibling::create(parent, STAGE_PREFIX, StageContent::Symlink(link)) {
-                    // The stage's name is valid everywhere, unlike the target.
-                    Err(PlaceError::Io(error))
-                        if tree::refuses_node(FileType::Symlink, error)
-                            || matches!(error, Errno::INVAL | Errno::ILSEQ) =>
-                    {
-                        let refused = Failure::LinkRefused(error);
-                        copy.refused_link(&site, &refused);
-                        return Err(refused);
-                    }
-                    staged => staged?,
-                };
+            let staged = match StagedSibling::create(
+                parent,
+                HiddenName::Replacement,
+                StageContent::Symlink(link),
+            ) {
+                // The stage's name is valid everywhere, unlike the target.
+                Err(PlaceError::Io(error))
+                    if tree::refuses_node(FileType::Symlink, error)
+                        || matches!(error, Errno::INVAL | Errno::ILSEQ) =>
+                {
+                    let refused = Failure::LinkRefused(error);
+                    copy.refused_link(&site, &refused);
+                    return Err(refused);
+                }
+                staged => staged?,
+            };
             // sshfs sets a link's times on what it points to.
             if Mount::new(copy.fs, staged.parent.as_fd()).family != Family::Fuse {
                 let link = Entry::new(&*staged.parent, &staged.name);
@@ -1035,7 +1045,14 @@ fn copy_stage(
         }
         FileType::Directory => {
             let workers = workers.unwrap_or_else(|| worker_count(source, &parent));
-            stage_folder(copy, source, stat.identity, &parent, STAGE_PREFIX, workers)
+            stage_folder(
+                copy,
+                source,
+                stat.identity,
+                &parent,
+                HiddenName::Replacement,
+                workers,
+            )
         }
         _ => Err(Failure::NotCopyable),
     }
@@ -1056,11 +1073,11 @@ fn stage_folder(
     source: &Source,
     expected: LocalFileIdentity,
     parent: &Arc<OwnedFd>,
-    prefix: &str,
+    hidden: HiddenName,
     workers: usize,
 ) -> Result<StagedSibling, Failure> {
     copy.check_cancelled()?;
-    let mut staged = StagedSibling::create(parent.clone(), prefix, StageContent::Directory)?;
+    let mut staged = StagedSibling::create(parent.clone(), hidden, StageContent::Directory)?;
     let root = Root {
         parent: parent.clone(),
         name: staged.name.clone(),
@@ -2349,10 +2366,10 @@ enum FileTarget<'a> {
 }
 
 impl FileTarget<'_> {
-    fn stage_prefix(self) -> &'static str {
+    fn stage_name(self) -> HiddenName {
         match self {
-            Self::Final(..) => COPY_PREFIX,
-            Self::Hidden => STAGE_PREFIX,
+            Self::Final(..) => HiddenName::Copy,
+            Self::Hidden => HiddenName::Replacement,
         }
     }
 }
@@ -2498,7 +2515,7 @@ impl<'a> FileCopy<'a> {
                     _ => Errno::EXIST,
                 })
             }
-            FileTarget::Hidden => placement::reserve_hidden_name(STAGE_PREFIX, |name| {
+            FileTarget::Hidden => placement::reserve_hidden_name(HiddenName::Replacement, |name| {
                 link_tmpfile(fs, tmpfile, self.at(name)).map_err(|error| {
                     match placement::file_creation_error(error) {
                         PlaceError::Exists => PlaceError::Exists,
@@ -2623,7 +2640,7 @@ impl<'a> FileCopy<'a> {
 
     fn create_stage(&self, target: FileTarget<'_>) -> Result<(OwnedFd, Stage), Failure> {
         let (name, (fd, created)) =
-            stage::create_file(self.copy.fs, self.dir, target.stage_prefix())?;
+            stage::create_file(self.copy.fs, self.dir, target.stage_name())?;
         Ok((fd, Stage { name, created }))
     }
 

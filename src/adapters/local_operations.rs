@@ -175,7 +175,7 @@ use gtk::{gio, glib, prelude::*};
 use fs_ops::{Entry, fs};
 use mount_profile::{FolderNames, NamePolicy};
 use owed::{Deletion, Done, Owed, Settling};
-use placement::{COPY_PREFIX, PlaceError, RenameFailure};
+use placement::{PlaceError, RenameFailure};
 
 use crate::{
     adapters::{
@@ -184,7 +184,7 @@ use crate::{
         trash_support::{TrashError, TrashFailure, trash_with_cleanup},
         volume::{MountTable, NameProfile},
     },
-    model::Location,
+    model::{Location, hidden_names::HiddenName},
     services::{
         CancelledOperation, CompressRequest, CreateDirectoryRequest, CreateFileRequest,
         DeleteRequest, ExtractRequest, KeptCause, KeptItem, LoadHandle, NameMode, OperationEvent,
@@ -1794,7 +1794,7 @@ async fn create_remote_file_stage(
     let parent = target
         .parent()
         .ok_or_else(|| translated_io_error("The destination has no parent directory"))?;
-    let stage = parent.child(format!("{COPY_PREFIX}{}", glib::uuid_string_random()));
+    let stage = parent.child(HiddenName::Copy.fresh());
     let stream = match await_cancellable(&stage, cancellable, |stage, cancellable, result| {
         stage.create_async(
             gio::FileCreateFlags::PRIVATE,
