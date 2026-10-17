@@ -1517,6 +1517,238 @@ fn a_link_whose_target_stops_answering_trips_only_that_link() -> Result<(), Box<
     Ok(())
 }
 
+fn listing_request(path: &Path, max_entries: usize) -> DirectoryRequest {
+    DirectoryRequest {
+        id: RequestId(1),
+        location: Location::local(path),
+        batch_size: 64,
+        include_metadata: false,
+        max_entries,
+        time_budget: Duration::from_secs(10),
+    }
+}
+
+fn load_stamp(events: &[DirectoryEvent]) -> Option<DirectoryStamp> {
+    events.iter().find_map(|event| match event {
+        DirectoryEvent::Stamp { request_id, stamp } if *request_id == RequestId(1) => {
+            Some(stamp.clone())
+        }
+        _ => None,
+    })
+}
+
+fn names_digest(events: &[DirectoryEvent]) -> Option<u64> {
+    events.iter().find_map(|event| match event {
+        DirectoryEvent::ListingDigest {
+            request_id,
+            names_digest,
+        } if *request_id == RequestId(1) => Some(*names_digest),
+        _ => None,
+    })
+}
+
+fn probed_stamp(path: &Path) -> StampAnswer {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .expect("the async test lock should not be poisoned");
+    let answer = Rc::new(RefCell::new(None));
+    let slot = answer.clone();
+    let _probe = LocalFileSource.probe_stamp(
+        Location::local(path),
+        Rc::new(move |stamp| {
+            slot.replace(Some(stamp));
+        }),
+    );
+    drain_until(|| answer.borrow().is_some());
+    answer.take().expect("answered")
+}
+
+fn stamp_of(answer: StampAnswer) -> DirectoryStamp {
+    match answer {
+        StampAnswer::Stamp(stamp) => stamp,
+        other => panic!("no stamp: {other:?}"),
+    }
+}
+
+/// Waits until a change made now gets a later change time than `than`, which a kernel without
+/// multigrain timestamps can stamp within the same tick.
+fn wait_past(probe: &Path, than: &DirectoryStamp) {
+    let than = than.changed.expect("a native change time");
+    loop {
+        fs::write(probe, b"probe").expect("write the probe");
+        let stamped = fs::metadata(probe).expect("stat the probe");
+        fs::remove_file(probe).expect("remove the probe");
+        if (stamped.ctime(), stamped.ctime_nsec() as u32) > than {
+            break;
+        }
+    }
+}
+
+#[test]
+fn a_load_reports_its_stamp_first_and_a_digest_of_its_names_last() -> Result<(), Box<dyn Error>> {
+    use crate::adapters::{FsOp, FsQuirks, Quirks};
+
+    let root = tempfile::tempdir()?;
+    let folder = root.path().join("folder");
+    fs::create_dir(&folder)?;
+    for name in ["a", "b"] {
+        fs::write(folder.join(name), b"content")?;
+    }
+    let gate = Gate::default();
+    let _scope = FsQuirks::install(
+        &folder,
+        Quirks {
+            before: vec![(FsOp::ListChunks, "*", 0, gate.racer())],
+            ..Quirks::ext4()
+        },
+    );
+
+    let events = Rc::new(RefCell::new(Vec::new()));
+    {
+        let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+            .lock()
+            .map_err(|error| error.to_string())?;
+        let _load = load_into(&events, &folder, 1);
+        drain_until(|| gate.reached() && load_stamp(&events.borrow()).is_some());
+        assert_eq!(outcome_of(&events, 1), None);
+        gate.release();
+        drain_until(|| outcome_of(&events, 1).is_some());
+    }
+    let first = events.take();
+    let again = run_enumerate(listing_request(&folder, 100));
+    fs::rename(folder.join("b"), folder.join("c"))?;
+    let renamed = run_enumerate(listing_request(&folder, 100));
+    let truncated = run_enumerate(listing_request(&folder, 1));
+
+    assert!(matches!(first.first(), Some(DirectoryEvent::Stamp { .. })));
+    assert!(matches!(
+        &first[first.len() - 2..],
+        [
+            DirectoryEvent::ListingDigest { .. },
+            DirectoryEvent::Finished { .. }
+        ]
+    ));
+    let stamp = load_stamp(&first).ok_or("no stamp")?;
+    assert_eq!(
+        stamp.identity.map(|identity| identity.evidence.kind),
+        Some(rustix::fs::FileType::Directory)
+    );
+    assert_eq!(names_digest(&again), names_digest(&first));
+    assert_ne!(names_digest(&renamed), names_digest(&first));
+    assert!(load_stamp(&truncated).is_some());
+    assert_eq!(names_digest(&truncated), None);
+    Ok(())
+}
+
+#[test]
+fn a_check_sees_a_change_the_attribute_cache_hides() -> Result<(), Box<dyn Error>> {
+    use crate::adapters::{FsQuirks, Quirks};
+
+    for checked_by_a_load in [false, true] {
+        let root = tempfile::tempdir()?;
+        let share = root.path().join("share");
+        fs::create_dir(&share)?;
+        let _scope = FsQuirks::install(&share, Quirks::nfs42());
+        let check = || match checked_by_a_load {
+            true => load_stamp(&run_enumerate(listing_request(&share, 100))).ok_or("no stamp"),
+            false => Ok(stamp_of(probed_stamp(&share))),
+        };
+
+        let baseline = check()?;
+        wait_past(&root.path().join("probe"), &baseline);
+        fs::write(share.join("added elsewhere"), b"content")?;
+        let cached = super::super::local_operations::folder_stamp(&share, false)
+            .map_err(|error| error.to_string())?;
+        let checked = check()?;
+
+        assert_eq!(
+            (cached.modified, Some(cached.changed)),
+            (baseline.modified, baseline.changed),
+            "a plain stat answers from the cache"
+        );
+        assert!(
+            checked.moved_since(&baseline),
+            "checked by a load: {checked_by_a_load}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn a_stamp_classifies_the_folder_by_its_mount_not_its_path() -> Result<(), Box<dyn Error>> {
+    use crate::{
+        adapters::{FsQuirks, Quirks},
+        services::InodeNumbers,
+    };
+
+    for no_mount_ids in [false, true] {
+        let root = tempfile::tempdir()?;
+        let (home, nas) = (root.path().join("home"), root.path().join("nas"));
+        fs::create_dir_all(home.join("documents"))?;
+        fs::create_dir_all(nas.join("music"))?;
+        std::os::unix::fs::symlink(nas.join("music"), home.join("music"))?;
+        let _home = FsQuirks::install(
+            &home,
+            Quirks {
+                no_mount_ids,
+                ..Quirks::ext4()
+            },
+        );
+        let _nas = FsQuirks::install(
+            &nas,
+            Quirks {
+                no_mount_ids,
+                ..Quirks::nfs42()
+            },
+        );
+
+        let stamp = |path: &Path| load_stamp(&run_enumerate(listing_request(path, 100)));
+        let (documents, linked, music) = (
+            stamp(&home.join("documents")).ok_or("no stamp")?,
+            stamp(&home.join("music")).ok_or("no stamp")?,
+            stamp(&nas.join("music")).ok_or("no stamp")?,
+        );
+
+        assert_eq!(
+            (
+                documents.outside_writers,
+                linked.outside_writers,
+                music.outside_writers,
+                linked.identity.map(|identity| identity.traits.numbers),
+            ),
+            (false, true, true, Some(InodeNumbers::Kept)),
+            "no mount ids: {no_mount_ids}"
+        );
+        assert!(music.mount.is_some(), "no mount ids: {no_mount_ids}");
+        assert_eq!(linked.mount, music.mount, "no mount ids: {no_mount_ids}");
+        assert_ne!(
+            linked.mount, documents.mount,
+            "no mount ids: {no_mount_ids}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn a_folder_put_back_to_its_old_time_still_reads_as_changed() -> Result<(), Box<dyn Error>> {
+    let root = tempfile::tempdir()?;
+    let folder = root.path().join("folder");
+    fs::create_dir(&folder)?;
+
+    let baseline = stamp_of(probed_stamp(&folder));
+    wait_past(&root.path().join("probe"), &baseline);
+    fs::write(folder.join("added"), b"content")?;
+    let (seconds, nanoseconds) = baseline.modified;
+    fs::File::open(&folder)?.set_modified(
+        SystemTime::UNIX_EPOCH + Duration::new(u64::try_from(seconds)?, nanoseconds),
+    )?;
+    let after = stamp_of(probed_stamp(&folder));
+
+    assert_eq!(after.modified, baseline.modified);
+    assert!(after.moved_since(&baseline));
+    Ok(())
+}
+
 #[test]
 fn enumerate_resolves_can_trash_from_a_child_entry() {
     let root = unique_fixture_root("can-trash");
@@ -1762,6 +1994,7 @@ fn cancelled_native_scan_returns_no_partial_result() {
             &cancellable,
             Instant::now() + Duration::from_secs(10),
             &Progress::unlaned(),
+            oneshot::channel().0,
         ),
         NativeEnumeration::Cancelled
     ));

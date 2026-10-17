@@ -85,10 +85,6 @@ impl Evidence {
     }
 }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "Trash, navigation and load stamps record it")
-)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ItemIdentity {
     pub evidence: Evidence,
@@ -101,6 +97,10 @@ pub struct ItemIdentity {
 )]
 impl ItemIdentity {
     pub fn same(&self, other: &Self) -> bool {
+        self.proof(other) == Proof::Same
+    }
+
+    pub fn proof(&self, other: &Self) -> Proof {
         let numbers = match (self.traits.numbers, other.traits.numbers) {
             (InodeNumbers::Kept, InodeNumbers::Kept) => InodeNumbers::Kept,
             (InodeNumbers::Renewed, _) | (_, InodeNumbers::Renewed) => InodeNumbers::Renewed,
@@ -110,6 +110,6 @@ impl ItemIdentity {
             numbers,
             folder_births: self.traits.folder_births && other.traits.folder_births,
         };
-        self.evidence.compare(traits, &other.evidence) == Proof::Same
+        self.evidence.compare(traits, &other.evidence)
     }
 }

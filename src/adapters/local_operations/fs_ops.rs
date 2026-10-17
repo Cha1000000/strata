@@ -12,6 +12,7 @@ use std::{
         unix::ffi::OsStringExt,
     },
     path::Path,
+    time::Duration,
 };
 
 use gtk::gio;
@@ -25,7 +26,10 @@ use rustix::{
 };
 
 use super::native_fs::{LocalFileIdentity, retry_local_open};
-use crate::{adapters::volume::MountKey, services::Attributes};
+use crate::{
+    adapters::volume::MountKey,
+    services::{Attributes, IdentityTraits},
+};
 
 /// `STATX_MNT_ID_UNIQUE` (Linux 6.8), which rustix does not name yet.
 const STATX_MNT_ID_UNIQUE: u32 = 0x4000;
@@ -35,10 +39,6 @@ const LISTING_CHUNK_BYTES: usize = 32 * 1024;
 pub(in crate::adapters) type Listed = Vec<(OsString, FileType)>;
 
 #[derive(Clone, Copy, Debug)]
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "step 7's load stamp reads the times and identity")
-)]
 pub(in crate::adapters) struct FolderStamp {
     pub kind: FileType,
     pub mode: u32,
@@ -223,6 +223,23 @@ pub(in crate::adapters) fn folder_stamp(
     force_sync: bool,
 ) -> Result<FolderStamp, Errno> {
     fs().folder_stamp(path, force_sync)
+}
+
+pub(in crate::adapters) struct StampMount {
+    pub id: u64,
+    pub identity: IdentityTraits,
+    pub outside_writers: bool,
+    pub coarse_window: Option<Duration>,
+}
+
+pub(in crate::adapters) fn stamp_mount(path: &Path, stamp: &FolderStamp) -> Option<StampMount> {
+    let (id, mount_type) = fs().folder_mount(path, stamp.mount_id)?;
+    Some(StampMount {
+        id,
+        identity: mount_type.identity(),
+        outside_writers: mount_type.outside_writers(),
+        coarse_window: mount_type.coarse_times(None).map(|coarse| coarse.window),
+    })
 }
 
 pub(in crate::adapters) fn list_folder(

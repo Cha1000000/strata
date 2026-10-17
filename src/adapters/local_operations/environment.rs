@@ -8,16 +8,20 @@ use super::{
 use crate::adapters::volume::{MountSite, MountTable, MountType, mount_watch};
 use gtk::{gio, glib, prelude::*};
 use rustix::{
-    fs::{AtFlags, StatxFlags},
+    fs::{AtFlags, Mode, OFlags, StatxFlags},
     io::Errno,
 };
-use std::{os::fd::BorrowedFd, path::Path};
+use std::{
+    os::fd::{AsFd, BorrowedFd},
+    path::Path,
+};
 
 pub(super) trait FsEnvironment: Send + Sync {
     fn can_trash(&self, path: &Path) -> bool;
     /// GLib's own result: `Ok(false)` is a failure without an error (GLib #4060).
     fn trash(&self, path: &Path, cancellable: &gio::Cancellable) -> Result<bool, glib::Error>;
     fn mount_type(&self, fd: BorrowedFd<'_>) -> Option<(MountType, MountSite)>;
+    fn folder_mount(&self, path: &Path, id: Option<u64>) -> Option<(u64, MountType)>;
     /// udev's `ID_FS_TYPE`, when the device has a database record.
     fn device_format(&self, fd: BorrowedFd<'_>) -> Result<Option<String>, Errno>;
     fn rotational(&self, fd: BorrowedFd<'_>) -> Option<bool>;
@@ -63,8 +67,6 @@ impl FsEnvironment for System {
 
     fn mount_type(&self, fd: BorrowedFd<'_>) -> Option<(MountType, MountSite)> {
         assert_off_main_thread();
-        let owned =
-            |(mount_type, site): (&MountType, &MountSite)| (mount_type.clone(), site.clone());
         match rustix::fs::statx(
             fd,
             "",
@@ -74,17 +76,29 @@ impl FsEnvironment for System {
             Ok(stat)
                 if StatxFlags::from_bits_retain(stat.stx_mask).contains(StatxFlags::MNT_ID) =>
             {
-                let id = stat.stx_mnt_id;
-                mount_watch::latest()
-                    .mount_of(id)
-                    .map(owned)
-                    .or_else(|| MountTable::current().mount_of(id).map(owned))
+                mount_of(stat.stx_mnt_id)
             }
             // Before Linux 5.8.
             _ => MountTable::current()
                 .mount_at(&opened_path(fd).ok()?)
-                .map(owned),
+                .map(|(mount_type, site)| (mount_type.clone(), site.clone())),
         }
+    }
+
+    fn folder_mount(&self, path: &Path, id: Option<u64>) -> Option<(u64, MountType)> {
+        assert_off_main_thread();
+        let id = match id {
+            Some(id) => id,
+            // Before Linux 5.8.
+            None => {
+                let folder =
+                    rustix::fs::open(path, OFlags::PATH | OFlags::CLOEXEC, Mode::empty()).ok()?;
+                let real = opened_path(folder.as_fd()).ok()?;
+                let at = |table: &MountTable| table.mount_for(&real).map(|mount| mount.mount_id);
+                at(&mount_watch::latest()).or_else(|| at(&MountTable::current()))?
+            }
+        };
+        mount_of(id).map(|(mount_type, _)| (id, mount_type))
     }
 
     fn device_format(&self, fd: BorrowedFd<'_>) -> Result<Option<String>, Errno> {
@@ -117,6 +131,14 @@ impl FsEnvironment for System {
     fn rotational(&self, fd: BorrowedFd<'_>) -> Option<bool> {
         local_device_is_rotational(fd)
     }
+}
+
+fn mount_of(id: u64) -> Option<(MountType, MountSite)> {
+    let owned = |(mount_type, site): (&MountType, &MountSite)| (mount_type.clone(), site.clone());
+    mount_watch::latest()
+        .mount_of(id)
+        .map(owned)
+        .or_else(|| MountTable::current().mount_of(id).map(owned))
 }
 
 #[cfg(test)]

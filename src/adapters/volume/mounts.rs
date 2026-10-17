@@ -281,6 +281,17 @@ pub(crate) struct CoarseTimes {
     pub stamped_here: bool,
 }
 
+impl CoarseTimes {
+    /// A time with no fraction of a second may come from a filesystem as coarse as FAT's that the
+    /// mount does not show, such as one a server shares.
+    pub(crate) fn whole_second(nanoseconds: u32) -> Option<Self> {
+        (nanoseconds == 0).then_some(Self {
+            window: Duration::from_secs(2),
+            stamped_here: false,
+        })
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum FuseFormat {
     Ntfs,

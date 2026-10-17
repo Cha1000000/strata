@@ -10,6 +10,7 @@ use std::{
     time::{Duration, SystemTime},
 };
 
+use super::{ItemIdentity, Proof};
 use crate::model::{
     FileEntry, GIO_URI_BUILD_FLAGS, GIO_URI_PARSE_FLAGS, Location, MetadataValue,
     uri_contains_credentials,
@@ -391,11 +392,73 @@ pub enum DirectoryChange {
     Rescan,
 }
 
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub enum MountToken {
+    Native(u64),
+    Remote(String),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct DirectoryStamp {
+    pub modified: (i64, u32),
+    pub changed: Option<(i64, u32)>,
+    pub identity: Option<ItemIdentity>,
+    pub mount: Option<MountToken>,
+    pub outside_writers: bool,
+    /// How long after a change another change may leave the stamp as it was.
+    pub coarse_window: Option<Duration>,
+    pub read_at: SystemTime,
+}
+
+impl DirectoryStamp {
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "the monitor's gap check compares stamps")
+    )]
+    pub fn moved_since(&self, baseline: &Self) -> bool {
+        self.modified != baseline.modified
+            || self.changed != baseline.changed
+            || match (&self.identity, &baseline.identity) {
+                (Some(identity), Some(baseline)) => identity.proof(baseline) == Proof::Different,
+                (None, None) => false,
+                _ => true,
+            }
+    }
+}
+
+#[derive(Clone, Debug)]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the monitor's gap check reads stamps")
+)]
+pub enum StampAnswer {
+    Stamp(DirectoryStamp),
+    Missing,
+    Inaccessible,
+    Unreachable,
+    Unresponsive,
+    Unsupported,
+}
+
 #[derive(Clone, Debug)]
 pub enum DirectoryEvent {
+    /// Comes before the first batch.
+    Stamp {
+        #[cfg_attr(not(test), expect(dead_code, reason = "browsers record the stamps"))]
+        request_id: RequestId,
+        #[cfg_attr(not(test), expect(dead_code, reason = "browsers record the stamps"))]
+        stamp: DirectoryStamp,
+    },
     Batch {
         request_id: RequestId,
         entries: Vec<FileEntry>,
+    },
+    /// Order-independent, just before `Finished` of a load that was not truncated.
+    ListingDigest {
+        #[cfg_attr(not(test), expect(dead_code, reason = "step 7 compares listings"))]
+        request_id: RequestId,
+        #[cfg_attr(not(test), expect(dead_code, reason = "step 7 compares listings"))]
+        names_digest: u64,
     },
     Finished {
         request_id: RequestId,
@@ -571,6 +634,15 @@ pub trait FileSource {
         _notify: Rc<dyn Fn(DirectoryChange)>,
     ) -> Option<LoadHandle> {
         None
+    }
+
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "the monitor's gap check calls it")
+    )]
+    fn probe_stamp(&self, _location: Location, emit: Rc<dyn Fn(StampAnswer)>) -> LoadHandle {
+        emit(StampAnswer::Unsupported);
+        LoadHandle::new(|| {})
     }
 
     /// Identifies the folder at `location` across renames. Emits `None` when the provider

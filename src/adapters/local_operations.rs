@@ -152,7 +152,7 @@ pub(crate) use archive::{
 
 #[cfg(test)]
 pub(crate) use archive::write_compression_fixture;
-pub(in crate::adapters) use fs_ops::{FolderStamp, folder_stamp, list_folder};
+pub(in crate::adapters) use fs_ops::{FolderStamp, folder_stamp, list_folder, stamp_mount};
 #[cfg(test)]
 pub(crate) use tests::fs_quirks::{FsQuirks, Op as FsOp, Quirks};
 pub(crate) use transfer_targets::transfer_targets;

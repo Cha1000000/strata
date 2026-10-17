@@ -1397,6 +1397,30 @@ impl Scope {
         }
     }
 
+    fn mount(&self) -> Option<(MountType, MountSite)> {
+        self.run(Op::MountType, &[], |scope| {
+            let root = scope.quirk(|quirks| quirks.mount_root).unwrap_or("/");
+            let serverino_disabled = scope.state().serverino_disabled;
+            let (fs_type, super_options) = scope.quirk(|quirks| quirks.mount_type).unwrap_or(EXT4);
+            let super_options = super_options
+                .split(',')
+                .filter(|option| !serverino_disabled || *option != "serverino")
+                .collect::<Vec<_>>()
+                .join(",");
+            let mount_type = MountType {
+                fs_type: fs_type.to_owned(),
+                super_options,
+            };
+            let site = MountSite {
+                point: scope.root.clone(),
+                root: PathBuf::from(root),
+            };
+            Ok(Some((mount_type, site)))
+        })
+        .ok()
+        .flatten()
+    }
+
     fn mark_written(&self, fd: BorrowedFd<'_>) {
         if self.quirk(|quirks| quirks.times_reset_at_close)
             && let Ok(stat) = System.stat_fd(fd)
@@ -2144,30 +2168,25 @@ impl FsEnvironment for Scoped {
     fn mount_type(&self, fd: BorrowedFd<'_>) -> Option<(MountType, MountSite)> {
         assert_off_main_thread();
         match scope_for(fd) {
-            Some(scope) => scope
-                .run(Op::MountType, &[], |scope| {
-                    let root = scope.quirk(|quirks| quirks.mount_root).unwrap_or("/");
-                    let serverino_disabled = scope.state().serverino_disabled;
-                    let (fs_type, super_options) =
-                        scope.quirk(|quirks| quirks.mount_type).unwrap_or(EXT4);
-                    let super_options = super_options
-                        .split(',')
-                        .filter(|option| !serverino_disabled || *option != "serverino")
-                        .collect::<Vec<_>>()
-                        .join(",");
-                    let mount_type = MountType {
-                        fs_type: fs_type.to_owned(),
-                        super_options,
-                    };
-                    let site = MountSite {
-                        point: scope.root.clone(),
-                        root: PathBuf::from(root),
-                    };
-                    Ok(Some((mount_type, site)))
-                })
-                .ok()
-                .flatten(),
+            Some(scope) => scope.mount(),
             None => System.mount_type(fd),
+        }
+    }
+
+    fn folder_mount(&self, path: &Path, id: Option<u64>) -> Option<(u64, MountType)> {
+        assert_off_main_thread();
+        let scope = match id {
+            Some(id) => scopes()
+                .iter()
+                .find(|scope| u64::MAX - scope.id == id)
+                .cloned(),
+            None => scope_containing(path),
+        };
+        match scope {
+            Some(scope) => scope
+                .mount()
+                .map(|(mount_type, _)| (u64::MAX - scope.id, mount_type)),
+            None => System.folder_mount(path, id),
         }
     }
 

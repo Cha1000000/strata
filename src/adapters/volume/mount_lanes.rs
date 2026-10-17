@@ -512,6 +512,22 @@ pub(crate) fn run<T: Send + 'static>(
     Box::pin(async move { worker.await.map_err(|_| Unanswered::Failed) })
 }
 
+pub(crate) fn authority(uri: &str) -> String {
+    match glib::Uri::parse(uri, glib::UriFlags::NONE) {
+        Ok(parsed) => format!(
+            "{}://{}@{}:{}",
+            parsed.scheme(),
+            parsed.userinfo().unwrap_or_default(),
+            parsed.host().unwrap_or_default(),
+            parsed.port()
+        ),
+        Err(_) => uri
+            .split_once(':')
+            .map_or(uri, |(scheme, _)| scheme)
+            .to_owned(),
+    }
+}
+
 /// GVfs backends that stop answering keep GIO's asynchronous calls waiting forever.
 pub(crate) async fn run_remote<T: Outcome>(
     authority: String,

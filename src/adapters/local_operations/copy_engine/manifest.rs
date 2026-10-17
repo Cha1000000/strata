@@ -138,17 +138,9 @@ pub(super) struct Unsettled {
 
 pub(super) fn unsettled(stat: &EntryStat, mount: &Mount, started: SystemTime) -> Option<Unsettled> {
     let (seconds, nanoseconds) = stat.mtime;
-    // A time with no fraction of a second may come from a filesystem as
-    // coarse as FAT's that the mount does not show, such as one a server
-    // shares.
     let coarse = mount
         .coarse_times
-        .or_else(|| {
-            (nanoseconds == 0).then_some(CoarseTimes {
-                window: Duration::from_secs(2),
-                stamped_here: false,
-            })
-        })
+        .or_else(|| CoarseTimes::whole_second(nanoseconds))
         .or_else(|| mount.family.coarse_clock(super::data::kernel()))?;
     let modified =
         UNIX_EPOCH.checked_add(Duration::new(u64::try_from(seconds).ok()?, nanoseconds))?;

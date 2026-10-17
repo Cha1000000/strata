@@ -209,22 +209,6 @@ fn names_in(
         .collect()
 }
 
-fn authority(uri: &str) -> String {
-    match glib::Uri::parse(uri, glib::UriFlags::NONE) {
-        Ok(parsed) => format!(
-            "{}://{}@{}:{}",
-            parsed.scheme(),
-            parsed.userinfo().unwrap_or_default(),
-            parsed.host().unwrap_or_default(),
-            parsed.port()
-        ),
-        Err(_) => uri
-            .split_once(':')
-            .map_or(uri, |(scheme, _)| scheme)
-            .to_owned(),
-    }
-}
-
 async fn remote_presence(location: &Location, cancellable: &gio::Cancellable) -> Presence {
     let Some(uri) = location.uri_value() else {
         return Presence::Unknown(io::ErrorKind::InvalidInput.into());
@@ -238,7 +222,7 @@ async fn remote_presence(location: &Location, cancellable: &gio::Cancellable) ->
         ),
         cancellable.clone(),
     );
-    match mount_lanes::run_remote(authority(uri), Class::Interactive, query).await {
+    match mount_lanes::run_remote(mount_lanes::authority(uri), Class::Interactive, query).await {
         Err(refused) => Presence::Unknown(unanswered(refused)),
         Ok(Err(_)) => Presence::Unknown(io::ErrorKind::Interrupted.into()),
         Ok(Ok(Ok(info))) => Presence::Present(gio_kind(info.file_type())),

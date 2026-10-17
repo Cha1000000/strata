@@ -26,18 +26,21 @@ use super::local_operations::FolderStamp;
 use crate::{
     adapters::{
         gio_file_for_location, location_for_file,
-        mount_lanes::{self, Progress, Unanswered},
+        mount_lanes::{self, Class, Progress, Unanswered},
         mount_watch,
+        volume::CoarseTimes,
     },
     model::{EntryKind, FileEntry, Location, MetadataValue},
     services::{
-        DirectoryChange, DirectoryEvent, DirectoryRequest, FileSource, LoadHandle,
-        LocationIdentity, LocationValidationError, MetadataOutcome, MetadataRequest,
-        MetadataUpdate, RequestId, backend_unavailable_message, bytes_support_named_family,
-        file_activity, is_hidden_name, is_image_path, is_media_path, link_target_kind, listed_kind,
-        native_hidden_names, sanitize_failure_message, symlink_kind,
+        DirectoryChange, DirectoryEvent, DirectoryRequest, DirectoryStamp, Evidence, FileSource,
+        IdentityTraits, ItemIdentity, LoadHandle, LocationIdentity, LocationValidationError,
+        MetadataOutcome, MetadataRequest, MetadataUpdate, MountToken, RequestId, StampAnswer,
+        backend_unavailable_message, bytes_support_named_family, file_activity, is_hidden_name,
+        is_image_path, is_media_path, link_target_kind, listed_kind, native_hidden_names,
+        sanitize_failure_message, symlink_kind,
     },
 };
+use futures_channel::oneshot;
 
 mod camera_photos;
 
@@ -45,6 +48,8 @@ const LIST_ATTRIBUTES: &str = "standard::display-name,standard::name,standard::t
 const FULL_ATTRIBUTES: &str = "standard::display-name,standard::name,standard::type,standard::is-hidden,standard::is-symlink,standard::size,standard::target-uri,time::modified,unix::mode,access::can-trash,access::can-delete";
 const RECENT_ATTRIBUTES: &str = "standard::display-name,standard::name,standard::type,standard::is-hidden,standard::target-uri,recent::modified";
 const METADATA_ATTRIBUTES: &str = "standard::type,standard::size,time::modified,unix::mode";
+const STAMP_ATTRIBUTES: &str =
+    "standard::type,time::modified,time::modified-usec,time::changed,time::changed-usec";
 const MAX_PENDING_MONITOR_CHANGES: usize = 4_096;
 const MAX_ICON_DETAILS_CACHE_ENTRIES: usize = 10_000;
 
@@ -238,8 +243,10 @@ type PendingMonitorKey = Option<Location>;
 #[derive(Clone)]
 enum NativeEnumeration {
     Complete {
+        stamp: Box<DirectoryStamp>,
         entries: Vec<FileEntry>,
         truncated: bool,
+        names_digest: u64,
         metadata_complete: bool,
         can_trash: Option<bool>,
         can_delete: Option<bool>,
@@ -294,6 +301,99 @@ fn uri_validation_result(
         gio::FileType::Mountable => Err(LocationValidationError::Mountable(location.clone())),
         _ => Err(LocationValidationError::NotDirectory),
     }
+}
+
+fn directory_stamp(path: &Path, stamp: &FolderStamp, read_at: SystemTime) -> DirectoryStamp {
+    let mount = super::local_operations::stamp_mount(path, stamp);
+    DirectoryStamp {
+        modified: stamp.modified,
+        changed: Some(stamp.changed),
+        identity: Some(ItemIdentity {
+            evidence: Evidence {
+                device: stamp.device,
+                inode: stamp.inode,
+                kind: stamp.kind,
+                birth: stamp.birth,
+                attributes: None,
+            },
+            traits: mount
+                .as_ref()
+                .map_or_else(IdentityTraits::default, |mount| mount.identity),
+        }),
+        mount: stamp
+            .mount_id
+            .or(mount.as_ref().map(|mount| mount.id))
+            .map(MountToken::Native),
+        outside_writers: mount.as_ref().is_some_and(|mount| mount.outside_writers),
+        coarse_window: mount
+            .and_then(|mount| mount.coarse_window)
+            .or_else(|| CoarseTimes::whole_second(stamp.modified.1).map(|coarse| coarse.window)),
+        read_at,
+    }
+}
+
+fn remote_stamp(uri: &str, info: &gio::FileInfo, read_at: SystemTime) -> DirectoryStamp {
+    let time = |seconds: &str, microseconds: &str| {
+        info.has_attribute(seconds).then(|| {
+            (
+                i64::try_from(info.attribute_uint64(seconds)).unwrap_or(i64::MAX),
+                info.attribute_uint32(microseconds).saturating_mul(1000),
+            )
+        })
+    };
+    let modified = time("time::modified", "time::modified-usec").unwrap_or_default();
+    let scheme = glib::Uri::parse_scheme(uri).unwrap_or_default();
+    DirectoryStamp {
+        modified,
+        changed: time("time::changed", "time::changed-usec"),
+        identity: None,
+        mount: Some(MountToken::Remote(mount_lanes::authority(uri))),
+        outside_writers: !matches!(scheme.as_str(), "admin" | "mtp" | "gphoto2"),
+        coarse_window: CoarseTimes::whole_second(modified.1).map(|coarse| coarse.window),
+        read_at,
+    }
+}
+
+fn stamped_remotely(location: &Location) -> bool {
+    location.uri_value().is_some_and(|uri| {
+        !location.is_recent_location()
+            && !location.is_camera_photo_root()
+            && glib::Uri::parse_scheme(uri).is_some_and(|scheme| scheme != "trash")
+    })
+}
+
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the monitor's gap check calls it")
+)]
+fn stamp_failure(error: rustix::io::Errno) -> StampAnswer {
+    use rustix::io::Errno;
+    match error {
+        Errno::NOENT | Errno::NOTDIR | Errno::STALE => StampAnswer::Missing,
+        Errno::ACCESS | Errno::PERM => StampAnswer::Inaccessible,
+        _ => StampAnswer::Unreachable,
+    }
+}
+
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the monitor's gap check calls it")
+)]
+fn remote_stamp_failure(error: &glib::Error) -> StampAnswer {
+    if error.matches(gio::IOErrorEnum::NotFound) || error.matches(gio::IOErrorEnum::NotDirectory) {
+        StampAnswer::Missing
+    } else if error.matches(gio::IOErrorEnum::PermissionDenied) {
+        StampAnswer::Inaccessible
+    } else {
+        StampAnswer::Unreachable
+    }
+}
+
+fn name_hash(name: &OsStr) -> u64 {
+    use std::hash::{DefaultHasher, Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    name.as_encoded_bytes().hash(&mut hasher);
+    hasher.finish()
 }
 
 fn remote_directory_failure(request_id: RequestId, error: &glib::Error) -> DirectoryEvent {
@@ -655,20 +755,24 @@ fn scan_native_directory(
     cancellable: &gio::Cancellable,
     deadline: Instant,
     progress: &Progress,
+    stamped: oneshot::Sender<DirectoryStamp>,
 ) -> NativeEnumeration {
     let failed = |error: rustix::io::Errno| {
         NativeEnumeration::Failed(crate::services::io_error_message(&error.into()))
     };
+    let read_at = SystemTime::now();
     let stamp = super::local_operations::folder_stamp(path, true);
     progress.answered(&stamp);
-    match stamp {
+    let stamp = match stamp {
         Ok(stamp) => {
             if let Some(id) = stamp.mount_id {
                 progress.learn(id);
             }
+            directory_stamp(path, &stamp, read_at)
         }
         Err(error) => return failed(error),
-    }
+    };
+    let _ = stamped.send(stamp.clone());
     let mounted: HashMap<OsString, u64> = mount_watch::latest()
         .points()
         .filter(|(_, point)| point.parent() == Some(path))
@@ -679,6 +783,7 @@ fn scan_native_directory(
     let mut followed = Vec::with_capacity(1024);
     let mut truncated = false;
     let mut cancelled = false;
+    let mut names_digest = 0u64;
     progress.begin_reading();
     let listed = super::local_operations::list_folder(path, &mut |chunk| {
         progress.beat();
@@ -691,6 +796,7 @@ fn scan_native_directory(
                 truncated = true;
                 return ControlFlow::Break(());
             }
+            names_digest = names_digest.wrapping_add(name_hash(&native_name));
             let is_hidden = is_hidden_name(&native_name, &hidden_names);
             let mounted = mounted.get(&native_name).copied();
             let (entry, leads_elsewhere) = native_entry(
@@ -769,8 +875,10 @@ fn scan_native_directory(
     }
 
     NativeEnumeration::Complete {
+        stamp: Box::new(stamp),
         entries,
         truncated,
+        names_digest,
         metadata_complete,
         can_trash,
         can_delete,
@@ -791,10 +899,26 @@ fn enumerate_native(
             request.include_metadata, request.max_entries
         );
         let folder = path.clone();
-        let outcome = mount_lanes::run_joined(&folder, listing, move |progress, cancellable| {
-            scan_native_directory(&path, &request, cancellable, deadline, progress)
+        let (stamped, stamp) = oneshot::channel();
+        let work = mount_lanes::run_joined(&folder, listing, move |progress, cancellable| {
+            scan_native_directory(&path, &request, cancellable, deadline, progress, stamped)
+        });
+        let mut work = std::pin::pin!(work);
+        let early = futures_lite::future::or(async { Err(stamp.await) }, async {
+            Ok(work.as_mut().await)
         })
         .await;
+        let mut stamp_sent = false;
+        let outcome = match early {
+            Ok(outcome) => outcome,
+            Err(stamp) => {
+                if let Ok(stamp) = stamp {
+                    emit(DirectoryEvent::Stamp { request_id, stamp });
+                    stamp_sent = true;
+                }
+                work.await
+            }
+        };
         let outcome = match outcome {
             Ok(outcome) => Arc::try_unwrap(outcome).unwrap_or_else(|shared| (*shared).clone()),
             Err(Unanswered::TimedOut | Unanswered::Skipped) => {
@@ -818,12 +942,20 @@ fn enumerate_native(
         };
         match outcome {
             NativeEnumeration::Complete {
+                stamp,
                 entries,
                 truncated,
+                names_digest,
                 metadata_complete,
                 can_trash,
                 can_delete,
             } => {
+                if !stamp_sent {
+                    emit(DirectoryEvent::Stamp {
+                        request_id,
+                        stamp: *stamp,
+                    });
+                }
                 let total_entries = entries.len();
                 if !entries.is_empty() {
                     tracing::info!(
@@ -862,6 +994,10 @@ fn enumerate_native(
                         elapsed_ms = started.elapsed().as_millis() as u64,
                         "directory load finished"
                     );
+                    emit(DirectoryEvent::ListingDigest {
+                        request_id,
+                        names_digest,
+                    });
                 }
                 emit(DirectoryEvent::Finished {
                     request_id,
@@ -1268,6 +1404,34 @@ impl FileSource for LocalFileSource {
                 finish_truncated(0, "time budget", can_trash, can_delete);
                 return;
             }
+            if stamped_remotely(&location) {
+                let read_at = SystemTime::now();
+                match glib::future_with_timeout(
+                    remaining,
+                    directory.query_info_future(
+                        STAMP_ATTRIBUTES,
+                        gio::FileQueryInfoFlags::NONE,
+                        glib::Priority::LOW,
+                    ),
+                )
+                .await
+                {
+                    Ok(Ok(info)) => emit(DirectoryEvent::Stamp {
+                        request_id,
+                        stamp: remote_stamp(
+                            location.uri_value().unwrap_or_default(),
+                            &info,
+                            read_at,
+                        ),
+                    }),
+                    Ok(Err(_)) => {}
+                    Err(_) => {
+                        finish_truncated(0, "time budget", can_trash, can_delete);
+                        return;
+                    }
+                }
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
             let attributes = if request.include_metadata {
                 FULL_ATTRIBUTES
             } else {
@@ -1301,6 +1465,7 @@ impl FileSource for LocalFileSource {
             };
 
             let mut total_entries = 0usize;
+            let mut names_digest = 0u64;
             let mut first_batch = true;
             loop {
                 let remaining = deadline.saturating_duration_since(Instant::now());
@@ -1322,6 +1487,10 @@ impl FileSource for LocalFileSource {
                             elapsed_ms = started.elapsed().as_millis() as u64,
                             "directory load finished"
                         );
+                        emit(DirectoryEvent::ListingDigest {
+                            request_id,
+                            names_digest,
+                        });
                         emit(DirectoryEvent::Finished {
                             request_id,
                             truncated: false,
@@ -1347,6 +1516,9 @@ impl FileSource for LocalFileSource {
                         let entry_budget_exhausted = entries.len() > remaining_capacity;
                         entries.truncate(remaining_capacity);
                         total_entries += entries.len();
+                        names_digest = entries.iter().fold(names_digest, |digest, entry| {
+                            digest.wrapping_add(name_hash(&entry.native_name))
+                        });
                         if first_batch {
                             tracing::info!(
                                 request_id = request_id.0,
@@ -1602,6 +1774,69 @@ impl FileSource for LocalFileSource {
             pending.borrow_mut().clear();
             let _cancelled = monitor.cancel();
         }))
+    }
+
+    fn probe_stamp(&self, location: Location, emit: Rc<dyn Fn(StampAnswer)>) -> LoadHandle {
+        if let Some(path) = location.native_path().map(Path::to_path_buf) {
+            let task = glib::MainContext::default().spawn_local(async move {
+                let folder = path.clone();
+                let stamp = mount_lanes::run_joined(
+                    &path,
+                    "change stamp".to_owned(),
+                    move |progress, _| {
+                        progress.begin_reading();
+                        let read_at = SystemTime::now();
+                        let stamp = super::local_operations::folder_stamp(&folder, true);
+                        progress.answered(&stamp);
+                        stamp.map(|stamp| {
+                            if let Some(id) = stamp.mount_id {
+                                progress.learn(id);
+                            }
+                            directory_stamp(&folder, &stamp, read_at)
+                        })
+                    },
+                )
+                .await;
+                emit(match stamp.as_deref() {
+                    Ok(Ok(stamp)) => StampAnswer::Stamp(stamp.clone()),
+                    Ok(Err(error)) => stamp_failure(*error),
+                    Err(Unanswered::Failed) => StampAnswer::Unreachable,
+                    Err(Unanswered::TimedOut | Unanswered::Skipped) => StampAnswer::Unresponsive,
+                });
+            });
+            return LoadHandle::new(move || task.abort());
+        }
+        if !stamped_remotely(&location) {
+            emit(StampAnswer::Unsupported);
+            return LoadHandle::new(|| {});
+        }
+        let uri = location.uri_value().unwrap_or_default().to_owned();
+        let task = glib::MainContext::default().spawn_local(async move {
+            let read_at = SystemTime::now();
+            let query = gio::File::for_uri(&uri).query_info_future(
+                STAMP_ATTRIBUTES,
+                gio::FileQueryInfoFlags::NONE,
+                glib::Priority::LOW,
+            );
+            emit(
+                match mount_lanes::run_remote(
+                    mount_lanes::authority(&uri),
+                    Class::Interactive,
+                    query,
+                )
+                .await
+                {
+                    Ok(Ok(info)) if info.file_type() == gio::FileType::Directory => {
+                        StampAnswer::Stamp(remote_stamp(&uri, &info, read_at))
+                    }
+                    Ok(Ok(_)) => StampAnswer::Missing,
+                    Ok(Err(error)) => remote_stamp_failure(&error),
+                    Err(Unanswered::Failed) => StampAnswer::Unreachable,
+                    Err(Unanswered::TimedOut | Unanswered::Skipped) => StampAnswer::Unresponsive,
+                },
+            );
+        });
+        LoadHandle::new(move || task.abort())
     }
 
     fn query_location_identity(
