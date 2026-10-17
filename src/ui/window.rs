@@ -62,8 +62,11 @@ mod sidebar_drop_feedback;
 mod unlock_argument;
 mod volume_password;
 
+#[cfg(test)]
+pub(super) use devices::offer_removable_destinations_for_test;
 pub(super) use devices::{
-    RemovableDestination, removable_destinations, resolve_removable_destination,
+    RemovableDestination, RemovableWatch, removable_destination_root, removable_destinations,
+    resolve_removable_destination, watch_removable_destinations,
 };
 pub(in crate::ui) use keyboard::{ChooserKeys, ChooserPolicy, edit_focused_text};
 

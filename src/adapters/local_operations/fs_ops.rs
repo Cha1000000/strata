@@ -18,7 +18,8 @@ use gtk::gio;
 
 use rustix::{
     fs::{
-        AtFlags, FileType, FsWord, Mode, OFlags, RenameFlags, ResolveFlags, SeekFrom, StatxFlags,
+        Access, AtFlags, FileType, FsWord, Mode, OFlags, RenameFlags, ResolveFlags, SeekFrom,
+        StatxFlags,
     },
     io::Errno,
 };
@@ -186,6 +187,7 @@ pub(super) trait FsOps: super::environment::FsEnvironment {
     ) -> Result<(), Errno>;
     /// Follows symbolic links, as listing the folder does.
     fn folder_stamp(&self, path: &Path, force_sync: bool) -> Result<FolderStamp, Errno>;
+    fn access(&self, path: &Path, access: Access) -> Result<(), Errno>;
     fn create_node(&self, at: Entry<'_>, kind: FileType, mode: Mode) -> Result<(), Errno>;
     /// Opens the named pipe at `at` for its metadata, which never waits for
     /// a writer.
@@ -815,6 +817,11 @@ impl FsOps for System {
                 .contains(StatxFlags::MNT_ID)
                 .then_some(stat.stx_mnt_id),
         })
+    }
+
+    fn access(&self, path: &Path, access: Access) -> Result<(), Errno> {
+        assert_off_main_thread();
+        rustix::fs::access(path, access)
     }
 
     fn create_node(&self, at: Entry<'_>, kind: FileType, mode: Mode) -> Result<(), Errno> {

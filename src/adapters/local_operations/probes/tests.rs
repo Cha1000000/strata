@@ -8,7 +8,7 @@ use std::{
 use gtk::{gio, glib};
 use rustix::io::Errno;
 
-use super::{Presence, child_folders, folder, folder_was_deleted, presence};
+use super::{Presence, child_folders, folder, folder_was_deleted, presence, writable_folder};
 use crate::{
     adapters::{
         local_operations::tests::fs_quirks::{FsQuirks, Op, Quirks},
@@ -101,6 +101,37 @@ fn a_folder_checks_out_once_it_can_be_listed() -> Result<(), Box<dyn std::error:
         ("locked", Err(LocationValidationError::Inaccessible)),
     ] {
         assert_eq!(answer(folder(&root.path().join(name))), expected, "{name}");
+    }
+    Ok(())
+}
+
+#[test]
+fn a_writable_folder_is_named_by_its_real_path() -> Result<(), Box<dyn std::error::Error>> {
+    let root = tempfile::tempdir()?;
+    fs::create_dir(root.path().join("folder"))?;
+    fs::create_dir(root.path().join("read-only"))?;
+    fs::write(root.path().join("file"), b"content")?;
+    std::os::unix::fs::symlink(root.path().join("folder"), root.path().join("link"))?;
+    let _scope = FsQuirks::install(
+        root.path(),
+        Quirks {
+            fail: vec![(Op::Access, "read-only", 0, Errno::ROFS)],
+            ..Quirks::default()
+        },
+    );
+    let folder = root.path().canonicalize()?.join("folder");
+    for (name, expected) in [
+        ("folder", Some(&folder)),
+        ("link", Some(&folder)),
+        ("read-only", None),
+        ("file", None),
+        ("missing", None),
+    ] {
+        assert_eq!(
+            answer(writable_folder(&root.path().join(name))),
+            Ok(expected.cloned()),
+            "{name}"
+        );
     }
     Ok(())
 }

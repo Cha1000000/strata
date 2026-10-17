@@ -1448,6 +1448,82 @@ fn send_to_fast_copy_shows_transient_success() {
 }
 
 #[test]
+fn send_to_checks_the_device_root_off_the_ui_thread_before_copying() {
+    crate::test_support::gtk_test(
+        "ui::browser::transfer::tests::send_to_checks_the_device_root_off_the_ui_thread_before_copying",
+        || {
+            let SendToToastFixture {
+                _tempdir,
+                view,
+                window,
+                events,
+                source_dir,
+                device,
+                ..
+            } = open_send_to_toast_browser("send-to check fixture", &["a.txt"]);
+            std::fs::create_dir(device.join("Photos")).expect("recent folder");
+            let device_id = "volume:toast-device";
+            for (recent, copied) in [
+                (None, device.join("a.txt")),
+                (Some("Photos"), device.join("Photos/a.txt")),
+            ] {
+                let parked = crate::test_support::parked::Parked::default();
+                let _device = crate::adapters::FsQuirks::install(
+                    &device,
+                    crate::adapters::Quirks {
+                        before: vec![(crate::adapters::FsOp::Access, "*", 0, parked.racer())],
+                        ..crate::adapters::Quirks::default()
+                    },
+                );
+                let device_root = device.clone();
+                let resolve = move |id: &str| (id == device_id).then(|| device_root.clone());
+                let sources = vec![Location::local(source_dir.join("a.txt"))];
+                match recent {
+                    None => view
+                        .state
+                        .send_to_removable_device_with_resolver(device_id, sources, resolve),
+                    Some(recent) => view.state.send_to_recent_destination_with_resolver(
+                        device_id,
+                        Path::new(recent),
+                        sources,
+                        resolve,
+                    ),
+                }
+                wait_until(|| parked.reached(), "the device check");
+                assert_eq!(parked.reached_on_ui_thread(), Some(false), "{recent:?}");
+                assert!(
+                    events.borrow().iter().all(|event| !matches!(
+                        event,
+                        crate::app::BrowserEvent::TransferStarted { .. }
+                    )),
+                    "nothing is copied before the device answers: {recent:?}"
+                );
+                parked.release();
+                wait_until(
+                    || {
+                        copied.exists()
+                            && events.borrow().iter().any(|event| {
+                                matches!(event, crate::app::BrowserEvent::TransferFinished { .. })
+                            })
+                    },
+                    "the copy once the device answered",
+                );
+                events.borrow_mut().clear();
+            }
+            assert_eq!(
+                crate::ui::preferences::PreferenceManager::shared()
+                    .send_to_recent_destinations(device_id)
+                    .first()
+                    .map(PathBuf::as_path),
+                Some(Path::new("Photos"))
+            );
+            view.browser().clear_observer();
+            window.destroy();
+        },
+    );
+}
+
+#[test]
 fn send_to_plural_copy_shows_item_count() {
     crate::test_support::gtk_test(
         "ui::browser::transfer::tests::send_to_plural_copy_shows_item_count",
@@ -1621,8 +1697,11 @@ fn send_to_failure_shows_no_toast() {
                 device,
             } = open_send_to_toast_browser("send-to failure fixture", &["a.txt"]);
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&device, std::fs::Permissions::from_mode(0o555))
-                .expect("read-only device");
+            std::fs::set_permissions(
+                source_dir.join("a.txt"),
+                std::fs::Permissions::from_mode(0o000),
+            )
+            .expect("unreadable source");
             let device_root = device.clone();
             view.state.send_to_removable_device_with_resolver(
                 "volume:toast-device",
@@ -1651,8 +1730,6 @@ fn send_to_failure_shows_no_toast() {
                     .all(|event| !matches!(event, crate::app::BrowserEvent::TransferCompleted)),
                 "no successful completion was reported"
             );
-            std::fs::set_permissions(&device, std::fs::Permissions::from_mode(0o755))
-                .expect("writable device for cleanup");
             view.browser().clear_observer();
             window.destroy();
         },

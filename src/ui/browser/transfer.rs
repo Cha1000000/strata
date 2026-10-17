@@ -57,6 +57,57 @@ pub(super) struct SendToTransferContext {
     pub(super) device_name: String,
 }
 
+struct SendToRoot {
+    device_id: String,
+    root: PathBuf,
+    relative: Option<PathBuf>,
+}
+
+impl SendToRoot {
+    fn unavailable(&self) -> String {
+        crate::i18n::tr(if self.relative.is_some() {
+            "The removable device or folder is no longer available."
+        } else {
+            "The removable device is no longer available."
+        })
+    }
+
+    async fn destination(self) -> Result<Location, String> {
+        let unavailable = self.unavailable();
+        let Ok(Some(current_root)) = crate::adapters::probes::writable_folder(&self.root).await
+        else {
+            return Err(unavailable);
+        };
+        let Some(relative) = self.relative else {
+            return Ok(Location::local(current_root));
+        };
+        let inside = gio::spawn_blocking(move || {
+            let destination = crate::ui::browser::destination::canonical_directory_within(
+                &current_root,
+                &current_root.join(&relative),
+            )?;
+            let inside = destination.strip_prefix(&current_root).ok()?.to_owned();
+            crate::ui::preferences::is_valid_send_to_relative_path(&inside).then_some((
+                destination,
+                inside,
+                relative,
+            ))
+        })
+        .await
+        .ok()
+        .flatten();
+        let Some((destination, inside, relative)) = inside else {
+            return Err(unavailable);
+        };
+        crate::ui::preferences::PreferenceManager::shared().remember_send_to_destination(
+            &self.device_id,
+            &inside,
+            Some(&relative),
+        );
+        Ok(Location::local(destination))
+    }
+}
+
 #[derive(Clone)]
 pub(super) struct PendingSendToCompletion {
     pub(super) device_name: String,
@@ -361,7 +412,7 @@ impl ViewState {
         self.send_to_removable_device_with_resolver(
             &id,
             sources,
-            crate::ui::resolve_removable_destination,
+            crate::ui::removable_destination_root,
         );
     }
 
@@ -371,7 +422,7 @@ impl ViewState {
         sources: Vec<Location>,
         resolve: impl FnOnce(&str) -> Option<PathBuf>,
     ) {
-        let Some(destination) = resolve(id) else {
+        let Some(root) = resolve(id) else {
             show_error_dialog(
                 &self.overlay,
                 &crate::i18n::tr("Destination unavailable"),
@@ -379,11 +430,13 @@ impl ViewState {
             );
             return;
         };
-        let device_name = send_to_display_name(id, &destination);
-        self.send_to(
-            Location::local(destination),
+        self.send_to_device(
+            SendToRoot {
+                device_id: id.to_owned(),
+                root,
+                relative: None,
+            },
             sources,
-            SendToTransferContext { device_name },
         );
     }
 
@@ -397,7 +450,7 @@ impl ViewState {
             &id,
             &relative,
             sources,
-            crate::ui::resolve_removable_destination,
+            crate::ui::removable_destination_root,
         );
     }
 
@@ -408,17 +461,9 @@ impl ViewState {
         sources: Vec<Location>,
         resolve: impl FnOnce(&str) -> Option<PathBuf>,
     ) {
-        if !crate::ui::preferences::is_valid_send_to_relative_path(relative) {
-            show_error_dialog(
-                &self.overlay,
-                &crate::i18n::tr("Destination unavailable"),
-                &crate::i18n::tr("The removable device or folder is no longer available."),
-            );
-            return;
-        }
-        let Some(current_root) = resolve(id)
-            .and_then(|root| crate::ui::browser::destination::canonical_existing_directory(&root))
-        else {
+        let root = resolve(id)
+            .filter(|_| crate::ui::preferences::is_valid_send_to_relative_path(relative));
+        let Some(root) = root else {
             show_error_dialog(
                 &self.overlay,
                 &crate::i18n::tr("Destination unavailable"),
@@ -426,43 +471,30 @@ impl ViewState {
             );
             return;
         };
-        let Some(destination) = crate::ui::browser::destination::canonical_directory_within(
-            &current_root,
-            &current_root.join(relative),
-        ) else {
-            show_error_dialog(
-                &self.overlay,
-                &crate::i18n::tr("Destination unavailable"),
-                &crate::i18n::tr("The removable device or folder is no longer available."),
-            );
-            return;
-        };
-        let Ok(relative_destination) = destination.strip_prefix(&current_root) else {
-            show_error_dialog(
-                &self.overlay,
-                &crate::i18n::tr("Destination unavailable"),
-                &crate::i18n::tr("The removable device or folder is no longer available."),
-            );
-            return;
-        };
-        if !crate::ui::preferences::is_valid_send_to_relative_path(relative_destination) {
-            show_error_dialog(
-                &self.overlay,
-                &crate::i18n::tr("Destination unavailable"),
-                &crate::i18n::tr("The removable device or folder is no longer available."),
-            );
-            return;
-        }
-        crate::ui::preferences::PreferenceManager::shared().remember_send_to_destination(
-            id,
-            relative_destination,
-            Some(relative),
-        );
-        let device_name = send_to_display_name(id, &current_root);
-        self.send_to(
-            Location::local(destination),
+        self.send_to_device(
+            SendToRoot {
+                device_id: id.to_owned(),
+                root,
+                relative: Some(relative.to_owned()),
+            },
             sources,
-            SendToTransferContext { device_name },
+        );
+    }
+
+    fn send_to_device(self: &Rc<Self>, device: SendToRoot, sources: Vec<Location>) {
+        let destination = Location::local(match &device.relative {
+            Some(relative) => device.root.join(relative),
+            None => device.root.clone(),
+        });
+        let device_name = send_to_display_name(&device.device_id, &device.root);
+        self.transfer_replaces_cursor.set(false);
+        self.begin_transfer(
+            destination,
+            sources,
+            false,
+            false,
+            (Some(SendToTransferContext { device_name }), Some(device)),
+            ConflictFocus::Replace,
         );
     }
 
@@ -535,7 +567,7 @@ impl ViewState {
             sources,
             move_sources,
             false,
-            None,
+            (None, None),
             ConflictFocus::KeepBoth,
         );
     }
@@ -552,7 +584,14 @@ impl ViewState {
         focus: ConflictFocus,
     ) {
         self.transfer_replaces_cursor.set(false);
-        self.begin_transfer(destination, sources, move_sources, reveal, send_to, focus);
+        self.begin_transfer(
+            destination,
+            sources,
+            move_sources,
+            reveal,
+            (send_to, None),
+            focus,
+        );
     }
 
     fn begin_transfer(
@@ -561,7 +600,7 @@ impl ViewState {
         sources: Vec<Location>,
         move_sources: bool,
         reveal: bool,
-        send_to: Option<SendToTransferContext>,
+        (send_to, device): (Option<SendToTransferContext>, Option<SendToRoot>),
         focus: ConflictFocus,
     ) {
         if is_trash_location(&destination)
@@ -596,8 +635,24 @@ impl ViewState {
         ));
         let weak = Rc::downgrade(self);
         glib::MainContext::default().spawn_local(async move {
-            let targets =
-                transfer_targets(&destination, &sources, move_sources, &cancellable).await;
+            let prepared = match device {
+                Some(device) => device.destination().await,
+                None => Ok(destination),
+            };
+            let prepared = match prepared {
+                Ok(destination) => {
+                    transfer_targets(&destination, &sources, move_sources, &cancellable)
+                        .await
+                        .map(|targets| (destination, targets))
+                        .map_err(|error| {
+                            (
+                                crate::i18n::tr("Unable to transfer"),
+                                error.message().to_owned(),
+                            )
+                        })
+                }
+                Err(unavailable) => Err((crate::i18n::tr("Destination unavailable"), unavailable)),
+            };
             let Some(state) = weak.upgrade() else {
                 preparation.dismiss_file_operation_progress();
                 return;
@@ -610,15 +665,11 @@ impl ViewState {
                 preparation.dismiss_file_operation_progress();
                 return;
             }
-            let targets = match targets {
-                Ok(targets) => targets,
-                Err(error) => {
+            let (destination, targets) = match prepared {
+                Ok(prepared) => prepared,
+                Err((title, message)) => {
                     preparation.dismiss_file_operation_progress();
-                    show_error_dialog(
-                        &state.overlay,
-                        &crate::i18n::tr("Unable to transfer"),
-                        error.message(),
-                    );
+                    show_error_dialog(&state.overlay, &title, &message);
                     return;
                 }
             };

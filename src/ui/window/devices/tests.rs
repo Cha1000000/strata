@@ -68,8 +68,6 @@ fn removable_mount_policy_excludes_unsafe_roots_and_fixed_storage() {
         shadowed: false,
         native_root: true,
         removable: true,
-        writable: true,
-        existing_directory: true,
     };
     assert!(removable_mount_is_eligible(eligible));
 
@@ -92,20 +90,6 @@ fn removable_mount_policy_excludes_unsafe_roots_and_fixed_storage() {
             "fixed storage",
             RemovableMountFacts {
                 removable: false,
-                ..eligible
-            },
-        ),
-        (
-            "read-only root",
-            RemovableMountFacts {
-                writable: false,
-                ..eligible
-            },
-        ),
-        (
-            "missing root",
-            RemovableMountFacts {
-                existing_directory: false,
                 ..eligible
             },
         ),
@@ -467,4 +451,80 @@ fn mount_paths_decode_kernel_escapes_without_losing_native_bytes() {
     );
     assert_eq!(mount_path(br"/mnt/bad\04"), None);
     assert_eq!(mount_path(br"/mnt/bad\999"), None);
+}
+
+#[test]
+fn a_device_check_refused_while_its_mount_stalls_never_hides_the_device() {
+    crate::test_support::gtk_test(
+        "ui::window::devices::tests::a_device_check_refused_while_its_mount_stalls_never_hides_the_device",
+        || {
+            let device = tempfile::tempdir().expect("device fixture");
+            let root = |name: &str| {
+                let root = device.path().join(name);
+                std::fs::create_dir_all(&root).expect("device root");
+                root
+            };
+            let (slow, steady, late) = (root("slow"), root("steady"), root("late"));
+            let parked = crate::test_support::parked::Parked::default();
+            let _device = crate::adapters::FsQuirks::install(
+                device.path(),
+                crate::adapters::Quirks {
+                    before: vec![(crate::adapters::FsOp::Access, "slow", 0, parked.racer())],
+                    ..crate::adapters::Quirks::default()
+                },
+            );
+            let offer = |roots: &[&PathBuf]| {
+                crate::ui::offer_removable_destinations_for_test(
+                    roots
+                        .iter()
+                        .map(|root| {
+                            let name = root.file_name().expect("name").to_string_lossy();
+                            RemovableDestination {
+                                id: format!("volume:{name}"),
+                                name: name.into_owned(),
+                                root: (*root).clone(),
+                            }
+                        })
+                        .collect(),
+                );
+            };
+            let shown = || {
+                removable_destinations()
+                    .into_iter()
+                    .map(|destination| destination.name)
+                    .collect::<Vec<_>>()
+            };
+            let settle = |what: &str, until: &dyn Fn() -> bool| {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                while !until() {
+                    assert!(std::time::Instant::now() < deadline, "{what}");
+                    gtk::glib::MainContext::default().iteration(false);
+                    std::thread::sleep(std::time::Duration::from_millis(2));
+                }
+            };
+
+            offer(&[&steady, &late]);
+            settle("both devices checked", &|| shown() == ["late", "steady"]);
+            offer(&[&slow, &steady]);
+            settle("the slow check parked", &|| parked.reached());
+            let parked_at = std::time::Instant::now();
+            settle("the mount stalls", &|| {
+                parked_at.elapsed()
+                    > crate::adapters::mount_lanes::STALLED_AFTER
+                        + std::time::Duration::from_millis(300)
+            });
+            offer(&[&slow, &steady, &late]);
+            let offered_at = std::time::Instant::now();
+            settle("the refused checks land", &|| {
+                offered_at.elapsed() > std::time::Duration::from_millis(200)
+            });
+            assert_eq!(shown(), ["steady"]);
+
+            parked.release();
+            settle(
+                "the parked check's answer and a re-check after a refusal show every device",
+                &|| shown() == ["late", "slow", "steady"],
+            );
+        },
+    );
 }

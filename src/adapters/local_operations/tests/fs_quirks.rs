@@ -24,7 +24,7 @@ use std::{
 
 use gtk::{gio, glib, prelude::FileExt};
 use rustix::{
-    fs::{AtFlags, FileType, FsWord, Mode, OFlags, RenameFlags, ResolveFlags},
+    fs::{Access, AtFlags, FileType, FsWord, Mode, OFlags, RenameFlags, ResolveFlags},
     io::Errno,
 };
 
@@ -84,6 +84,7 @@ pub(crate) enum Op {
     /// One per `getdents64`, the last one finding no more entries.
     ListChunks,
     FolderStamp,
+    Access,
     CreateNode,
     OpenFifo,
     CreateReadonly,
@@ -2588,6 +2589,16 @@ impl FsOps for Scoped {
                 },
             ),
             None => System.folder_stamp(path, force_sync),
+        }
+    }
+
+    fn access(&self, path: &Path, access: Access) -> Result<(), Errno> {
+        assert_off_main_thread();
+        match scope_for_folder(path) {
+            Some(scope) => scope.run(Op::Access, &[path.file_name().unwrap_or_default()], |_| {
+                System.access(path, access)
+            }),
+            None => System.access(path, access),
         }
     }
 

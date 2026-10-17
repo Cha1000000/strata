@@ -22,7 +22,6 @@ use crate::ui::modal::{
     ModalHost, close_on_escape, dismiss_modal_layer, dismiss_modal_layer_then, modal_layer,
     show_error_dialog,
 };
-use crate::util::ui_thread::{self, Exception};
 use gtk::gdk::ModifierType as Modifiers;
 use gtk::prelude::*;
 use gtk::{gio, glib};
@@ -121,20 +120,9 @@ pub(super) enum DeletionReach {
 
 /// A mixed selection uses the stronger local warning.
 pub(super) fn deletion_reach(entries: &[FileEntry]) -> DeletionReach {
-    deletion_reach_with(entries, || {
-        let _allowed = ui_thread::allow(Exception::MountTable);
-        crate::adapters::MountTable::current()
-    })
-}
-
-fn deletion_reach_with(
-    entries: &[FileEntry],
-    mounts: impl Fn() -> crate::adapters::MountTable,
-) -> DeletionReach {
-    let table = std::cell::OnceCell::new();
+    let mounts = crate::adapters::mount_watch::latest();
     let remote = |location: &Location| match location.native_path() {
         Some(path) => {
-            let mounts = table.get_or_init(&mounts);
             mounts.is_network_path(path)
                 && !mounts
                     .fs_type_for(path)

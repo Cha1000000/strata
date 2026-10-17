@@ -20,7 +20,7 @@ use std::{
 
 use gtk::{gio, glib, prelude::*};
 use rustix::{
-    fs::{FileType, Mode, OFlags},
+    fs::{Access, FileType, Mode, OFlags},
     io::Errno,
 };
 
@@ -279,6 +279,28 @@ pub(crate) async fn folder(path: &Path) -> Result<(), LocationValidationError> {
         },
         Arc::unwrap_or_clone,
     )
+}
+
+pub(crate) async fn writable_folder(path: &Path) -> Result<Option<PathBuf>, Unanswered> {
+    let folder = path.to_owned();
+    mount_lanes::run_joined(path, "writable folder".to_owned(), move |progress, _| {
+        progress.begin_reading();
+        let stamp = folder_stamp(&folder, false);
+        progress.answered(&stamp);
+        let stamp = stamp.ok()?;
+        if let Some(id) = stamp.mount_id {
+            progress.learn(id);
+        }
+        if stamp.kind != FileType::Directory {
+            return None;
+        }
+        let writable = fs().access(&folder, Access::WRITE_OK);
+        progress.answered(&writable);
+        writable.ok()?;
+        folder.canonicalize().ok()
+    })
+    .await
+    .map(Arc::unwrap_or_clone)
 }
 
 /// Any doubt keeps the folder.

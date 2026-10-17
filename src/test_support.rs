@@ -3,6 +3,7 @@
 #![cfg(test)]
 
 pub(crate) mod operations;
+pub(crate) mod parked;
 mod tests;
 
 use std::{

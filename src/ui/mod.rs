@@ -62,8 +62,11 @@ mod window;
 pub(crate) use chooser::{cancel_chooser, present_chooser};
 pub(crate) use settings::schedule_rollback_cleanup;
 pub(crate) use window::default_save_folder;
+#[cfg(test)]
+pub(in crate::ui) use window::offer_removable_destinations_for_test;
 pub(in crate::ui) use window::{
-    RemovableDestination, removable_destinations, resolve_removable_destination,
+    RemovableDestination, RemovableWatch, removable_destination_root, removable_destinations,
+    resolve_removable_destination, watch_removable_destinations,
 };
 pub use window::{UnlockTarget, present, present_open, present_reveal, present_unlock};
 

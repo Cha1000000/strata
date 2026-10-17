@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: MIT
 
 use std::{
-    collections::HashMap,
+    cell::{Cell, OnceCell, RefCell},
+    collections::{HashMap, HashSet},
     os::unix::ffi::OsStringExt,
     path::{Path, PathBuf},
+    rc::{Rc, Weak},
 };
 
 use gtk::{gio, prelude::*};
@@ -129,16 +131,10 @@ struct RemovableMountFacts {
     shadowed: bool,
     native_root: bool,
     removable: bool,
-    writable: bool,
-    existing_directory: bool,
 }
 
 fn removable_mount_is_eligible(facts: RemovableMountFacts) -> bool {
-    !facts.shadowed
-        && facts.native_root
-        && facts.removable
-        && facts.writable
-        && facts.existing_directory
+    !facts.shadowed && facts.native_root && facts.removable
 }
 
 fn send_to_device_identity(
@@ -208,15 +204,12 @@ fn root_is_writable_directory(root: &gio::File) -> bool {
     })
 }
 
-fn destination_for_mount(mount: &gio::Mount) -> Option<RemovableDestination> {
-    let root_file = mount.root();
-    let root = root_file.path()?;
+fn candidate_for_mount(mount: &gio::Mount) -> Option<RemovableDestination> {
+    let root = mount.root().path();
     let facts = RemovableMountFacts {
         shadowed: mount.is_shadowed(),
-        native_root: true,
+        native_root: root.is_some(),
         removable: crate::adapters::mount_is_removable(mount),
-        writable: root_is_writable_directory(&root_file),
-        existing_directory: root.is_dir(),
     };
     if !removable_mount_is_eligible(facts) {
         return None;
@@ -224,7 +217,7 @@ fn destination_for_mount(mount: &gio::Mount) -> Option<RemovableDestination> {
     Some(RemovableDestination {
         id: send_to_mount_identity(mount)?,
         name: mount.name().to_string(),
-        root,
+        root: root?,
     })
 }
 
@@ -250,17 +243,224 @@ fn sort_removable_destinations(destinations: &mut [RemovableDestination]) {
     });
 }
 
+type Watcher = (u64, Weak<dyn Fn()>);
+
+#[derive(Default)]
+struct RemovableCache {
+    candidates: RefCell<Vec<RemovableDestination>>,
+    writable: RefCell<HashMap<PathBuf, (u64, bool)>>,
+    unanswered: RefCell<HashSet<PathBuf>>,
+    destinations: RefCell<Vec<RemovableDestination>>,
+    generation: Cell<u64>,
+    refresh_queued: Cell<bool>,
+    watchers: RefCell<Vec<Watcher>>,
+    next_watcher: Cell<u64>,
+    monitor: OnceCell<gio::VolumeMonitor>,
+    #[cfg(test)]
+    offered_for_test: RefCell<Option<Vec<RemovableDestination>>>,
+}
+
+thread_local! {
+    static REMOVABLE: RemovableCache = RemovableCache::default();
+}
+
+pub(in crate::ui) struct RemovableWatch {
+    id: u64,
+    _changed: Rc<dyn Fn()>,
+}
+
+impl Drop for RemovableWatch {
+    fn drop(&mut self) {
+        REMOVABLE.with(|cache| {
+            cache.watchers.borrow_mut().retain(|(id, _)| *id != self.id);
+        });
+    }
+}
+
+pub(in crate::ui) fn watch_removable_destinations(changed: impl Fn() + 'static) -> RemovableWatch {
+    start_removable_destinations();
+    let changed: Rc<dyn Fn()> = Rc::new(changed);
+    let id = REMOVABLE.with(|cache| {
+        let id = cache.next_watcher.get() + 1;
+        cache.next_watcher.set(id);
+        cache
+            .watchers
+            .borrow_mut()
+            .push((id, Rc::downgrade(&changed)));
+        id
+    });
+    RemovableWatch {
+        id,
+        _changed: changed,
+    }
+}
+
 pub(in crate::ui) fn removable_destinations() -> Vec<RemovableDestination> {
-    let monitor = gio::VolumeMonitor::get();
-    let mut destinations = without_ambiguous_destinations(
-        monitor
-            .mounts()
+    start_removable_destinations();
+    probe_unanswered_roots();
+    REMOVABLE.with(|cache| cache.destinations.borrow().clone())
+}
+
+pub(in crate::ui) fn removable_destination_root(id: &str) -> Option<PathBuf> {
+    removable_destinations()
+        .into_iter()
+        .find(|destination| destination.id == id)
+        .map(|destination| destination.root)
+}
+
+fn start_removable_destinations() {
+    let started = REMOVABLE.with(|cache| {
+        if cache.monitor.get().is_some() {
+            return false;
+        }
+        let monitor = gio::VolumeMonitor::get();
+        monitor.connect_mount_added(|_, _| queue_removable_refresh());
+        monitor.connect_mount_removed(|_, _| queue_removable_refresh());
+        monitor.connect_mount_changed(|_, _| queue_removable_refresh());
+        monitor.connect_volume_added(|_, _| queue_removable_refresh());
+        monitor.connect_volume_removed(|_, _| queue_removable_refresh());
+        monitor.connect_volume_changed(|_, _| queue_removable_refresh());
+        monitor.connect_drive_connected(|_, _| queue_removable_refresh());
+        monitor.connect_drive_disconnected(|_, _| queue_removable_refresh());
+        monitor.connect_drive_changed(|_, _| queue_removable_refresh());
+        cache.monitor.set(monitor).is_ok()
+    });
+    if started {
+        queue_removable_refresh();
+    }
+}
+
+fn queue_removable_refresh() {
+    if REMOVABLE.with(|cache| cache.refresh_queued.replace(true)) {
+        return;
+    }
+    gtk::glib::idle_add_local_once(|| {
+        REMOVABLE.with(|cache| cache.refresh_queued.set(false));
+        refresh_removable_destinations();
+    });
+}
+
+fn removable_candidates() -> Vec<RemovableDestination> {
+    #[cfg(test)]
+    if let Some(offered) = REMOVABLE.with(|cache| cache.offered_for_test.borrow().clone()) {
+        return offered;
+    }
+    gio::VolumeMonitor::get()
+        .mounts()
+        .iter()
+        .filter_map(candidate_for_mount)
+        .collect()
+}
+
+fn next_generation(cache: &RemovableCache) -> u64 {
+    let generation = cache.generation.get() + 1;
+    cache.generation.set(generation);
+    generation
+}
+
+fn refresh_removable_destinations() {
+    let candidates = removable_candidates();
+    let roots: HashSet<PathBuf> = candidates
+        .iter()
+        .map(|candidate| candidate.root.clone())
+        .collect();
+    let generation = REMOVABLE.with(|cache| {
+        cache
+            .writable
+            .borrow_mut()
+            .retain(|root, _| roots.contains(root));
+        cache.unanswered.borrow_mut().clear();
+        cache.candidates.replace(candidates);
+        next_generation(cache)
+    });
+    publish_removable_destinations();
+    for root in roots {
+        probe_removable_root(root, generation);
+    }
+}
+
+fn probe_unanswered_roots() {
+    let roots = REMOVABLE.with(|cache| cache.unanswered.take());
+    if roots.is_empty() {
+        return;
+    }
+    let generation = REMOVABLE.with(next_generation);
+    for root in roots {
+        probe_removable_root(root, generation);
+    }
+}
+
+fn probe_removable_root(root: PathBuf, generation: u64) {
+    gtk::glib::MainContext::default().spawn_local(async move {
+        let answer = crate::adapters::probes::writable_folder(&root).await;
+        let learned = REMOVABLE.with(|cache| {
+            let offered = cache
+                .candidates
+                .borrow()
+                .iter()
+                .any(|candidate| candidate.root == root);
+            if !offered {
+                return false;
+            }
+            let Ok(folder) = answer else {
+                cache.unanswered.borrow_mut().insert(root);
+                return false;
+            };
+            let mut known = cache.writable.borrow_mut();
+            if known
+                .get(&root)
+                .is_some_and(|(checked, _)| *checked > generation)
+            {
+                return false;
+            }
+            cache.unanswered.borrow_mut().remove(&root);
+            known.insert(root, (generation, folder.is_some()));
+            true
+        });
+        if learned {
+            publish_removable_destinations();
+        }
+    });
+}
+
+fn publish_removable_destinations() {
+    let watchers = REMOVABLE.with(|cache| {
+        let writable = cache.writable.borrow();
+        let mut destinations = without_ambiguous_destinations(
+            cache
+                .candidates
+                .borrow()
+                .iter()
+                .filter(|candidate| {
+                    writable
+                        .get(&candidate.root)
+                        .is_some_and(|(_, writable)| *writable)
+                })
+                .cloned()
+                .collect(),
+        );
+        sort_removable_destinations(&mut destinations);
+        if *cache.destinations.borrow() == destinations {
+            return Vec::new();
+        }
+        cache.destinations.replace(destinations);
+        cache
+            .watchers
+            .borrow()
             .iter()
-            .filter_map(destination_for_mount)
-            .collect(),
-    );
-    sort_removable_destinations(&mut destinations);
-    destinations
+            .filter_map(|(_, changed)| changed.upgrade())
+            .collect()
+    });
+    for changed in watchers {
+        changed();
+    }
+}
+
+#[cfg(test)]
+pub(in crate::ui) fn offer_removable_destinations_for_test(offered: Vec<RemovableDestination>) {
+    REMOVABLE.with(|cache| cache.offered_for_test.replace(Some(offered)));
+    start_removable_destinations();
+    queue_removable_refresh();
 }
 
 pub(in crate::ui) fn resolve_removable_destination(id: &str) -> Option<PathBuf> {

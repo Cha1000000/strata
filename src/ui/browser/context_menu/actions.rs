@@ -38,8 +38,7 @@ pub(super) struct ActionMenuSection {
     dispatch: super::commands::MenuDispatch,
     _commands: super::commands::CommandMenus,
     navigation: Rc<super::keyboard::NativeMenuNavigation>,
-    monitor: gio::VolumeMonitor,
-    monitor_handlers: RefCell<Vec<gtk::glib::SignalHandlerId>>,
+    removable_watch: RefCell<Option<crate::ui::RemovableWatch>>,
     refresh_pending: Cell<bool>,
     selection: RefCell<Option<SelectionMenuContext>>,
     pressed_inside: Rc<Cell<bool>>,
@@ -52,22 +51,8 @@ struct SelectionMenuContext {
     parent: Option<PathBuf>,
 }
 
-fn refresh_on_change<T>(
-    menu: &Rc<ActionMenuSection>,
-) -> impl Fn(&gio::VolumeMonitor, &T) + 'static {
-    let menu = Rc::downgrade(menu);
-    move |_, _| {
-        if let Some(menu) = menu.upgrade() {
-            menu.schedule_removable_refresh();
-        }
-    }
-}
-
 impl Drop for ActionMenuSection {
     fn drop(&mut self) {
-        for handler in self.monitor_handlers.get_mut().drain(..) {
-            self.monitor.disconnect(handler);
-        }
         release_popover(&self.popover);
     }
 }
@@ -238,25 +223,19 @@ impl ActionMenuSection {
             dispatch,
             _commands: commands,
             navigation,
-            monitor: gio::VolumeMonitor::get(),
-            monitor_handlers: RefCell::new(Vec::new()),
+            removable_watch: RefCell::new(None),
             refresh_pending: Cell::new(false),
             selection: RefCell::new(None),
             pressed_inside,
         });
-        let monitor = &menu.monitor;
         if menu.transfer_sections.is_some() {
-            menu.monitor_handlers.replace(vec![
-                monitor.connect_mount_added(refresh_on_change(&menu)),
-                monitor.connect_mount_removed(refresh_on_change(&menu)),
-                monitor.connect_mount_changed(refresh_on_change(&menu)),
-                monitor.connect_volume_added(refresh_on_change(&menu)),
-                monitor.connect_volume_removed(refresh_on_change(&menu)),
-                monitor.connect_volume_changed(refresh_on_change(&menu)),
-                monitor.connect_drive_connected(refresh_on_change(&menu)),
-                monitor.connect_drive_disconnected(refresh_on_change(&menu)),
-                monitor.connect_drive_changed(refresh_on_change(&menu)),
-            ]);
+            let weak = Rc::downgrade(&menu);
+            menu.removable_watch
+                .replace(Some(crate::ui::watch_removable_destinations(move || {
+                    if let Some(menu) = weak.upgrade() {
+                        menu.schedule_removable_refresh();
+                    }
+                })));
         }
         menu
     }
