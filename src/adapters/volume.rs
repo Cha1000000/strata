@@ -2,6 +2,7 @@
 
 mod mount_capabilities;
 mod mount_snapshot;
+pub(crate) mod mount_watch;
 mod mounts;
 mod names;
 #[cfg(test)]
@@ -30,9 +31,7 @@ pub(crate) use mount_capabilities::{
     MountCapabilities, MountKey, XattrNamespace, learn_mount_capability, mount_capabilities,
     teach_mount_capability,
 };
-pub(crate) use mount_snapshot::{
-    RemovableRoot, invalidate_mount_snapshot, watch_operation_mounts, with_mount_snapshot,
-};
+pub(crate) use mount_snapshot::{RemovableRoot, invalidate_mount_snapshot, with_mount_snapshot};
 #[cfg(test)]
 pub(crate) use mounts::FAT32_MAX_FILE_SIZE;
 #[cfg(test)]

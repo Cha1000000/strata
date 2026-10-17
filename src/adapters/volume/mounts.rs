@@ -11,8 +11,6 @@ use std::{
     time::Duration,
 };
 
-use gtk::gio;
-
 use super::names::{NameEncoding, NameProfile, NameRules, PrivateUse, Reserved, Strip, byte_limit};
 use crate::services::{IdentityTraits, InodeNumbers};
 
@@ -216,6 +214,10 @@ impl MountType {
     pub(crate) fn is_gvfs_bridge(&self) -> bool {
         self.fs_type == "fuse.gvfsd-fuse"
     }
+
+    pub(crate) fn outside_writers(&self) -> bool {
+        self.fs_type != "fuseblk" && is_remote_fs_type(&self.fs_type)
+    }
 }
 
 pub(crate) const FAT32_MAX_FILE_SIZE: u64 = u32::MAX as u64;
@@ -361,25 +363,23 @@ pub(crate) fn set_mountinfo_for_isolated_test(mountinfo: Option<String>) {
         .unwrap_or_else(std::sync::PoisonError::into_inner) = mountinfo;
 }
 
+#[cfg(test)]
+pub(super) fn mountinfo_for_test() -> Option<String> {
+    MOUNTINFO_FOR_TEST
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+}
+
 impl MountTable {
     pub(crate) fn current() -> Self {
         crate::util::ui_thread::assert_off();
         #[cfg(test)]
-        if let Some(mountinfo) = MOUNTINFO_FOR_TEST
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
-        {
+        if let Some(mountinfo) = mountinfo_for_test() {
             return Self::parse(mountinfo);
         }
         std::fs::read("/proc/self/mountinfo")
             .map(Self::parse)
-            .unwrap_or_else(|_| Self::parse(b""))
-    }
-
-    pub(crate) async fn load() -> Self {
-        gio::spawn_blocking(Self::current)
-            .await
             .unwrap_or_else(|_| Self::parse(b""))
     }
 
@@ -453,8 +453,8 @@ impl MountTable {
     /// Remote filesystems other than FUSE drivers for local block devices,
     /// such as ntfs-3g and exfat-fuse on a USB drive.
     pub(crate) fn is_network_path(&self, path: &Path) -> bool {
-        self.fs_type_for(path)
-            .is_some_and(|fs_type| fs_type != "fuseblk" && is_remote_fs_type(fs_type))
+        self.innermost(path)
+            .is_some_and(|entry| entry.mount_type.outside_writers())
     }
 
     pub(crate) fn has_mount_inside(&self, directory: &Path) -> bool {

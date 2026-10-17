@@ -5,7 +5,7 @@ use super::{
     fs_ops::{System, assert_off_main_thread},
     native_fs::opened_path,
 };
-use crate::adapters::volume::{MountSite, MountTable, MountType};
+use crate::adapters::volume::{MountSite, MountTable, MountType, mount_watch};
 use gtk::{gio, glib, prelude::*};
 use rustix::{
     fs::{AtFlags, StatxFlags},
@@ -63,8 +63,9 @@ impl FsEnvironment for System {
 
     fn mount_type(&self, fd: BorrowedFd<'_>) -> Option<(MountType, MountSite)> {
         assert_off_main_thread();
-        let mounts = MountTable::current();
-        let (mount_type, site) = match rustix::fs::statx(
+        let owned =
+            |(mount_type, site): (&MountType, &MountSite)| (mount_type.clone(), site.clone());
+        match rustix::fs::statx(
             fd,
             "",
             AtFlags::EMPTY_PATH | AtFlags::STATX_DONT_SYNC,
@@ -73,12 +74,17 @@ impl FsEnvironment for System {
             Ok(stat)
                 if StatxFlags::from_bits_retain(stat.stx_mask).contains(StatxFlags::MNT_ID) =>
             {
-                mounts.mount_of(stat.stx_mnt_id)
+                let id = stat.stx_mnt_id;
+                mount_watch::latest()
+                    .mount_of(id)
+                    .map(owned)
+                    .or_else(|| MountTable::current().mount_of(id).map(owned))
             }
             // Before Linux 5.8.
-            _ => mounts.mount_at(&opened_path(fd).ok()?),
-        }?;
-        Some((mount_type.clone(), site.clone()))
+            _ => MountTable::current()
+                .mount_at(&opened_path(fd).ok()?)
+                .map(owned),
+        }
     }
 
     fn device_format(&self, fd: BorrowedFd<'_>) -> Result<Option<String>, Errno> {
@@ -112,3 +118,6 @@ impl FsEnvironment for System {
         local_device_is_rotational(fd)
     }
 }
+
+#[cfg(test)]
+mod tests;

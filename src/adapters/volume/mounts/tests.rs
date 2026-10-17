@@ -3,8 +3,8 @@
 use std::{path::Path, time::Duration};
 
 use super::{
-    FAT32_MAX_FILE_SIZE, MountKey, MountTable, holds_symlinks, is_remote_fs_type, max_file_size,
-    unescape,
+    FAT32_MAX_FILE_SIZE, MountKey, MountTable, MountType, holds_symlinks, is_remote_fs_type,
+    max_file_size, unescape,
 };
 use crate::adapters::volume::names::{
     NameEncoding, NameLimit, NameProfile, NameRules, PrivateUse, Reserved, Strip,
@@ -241,21 +241,40 @@ fn fuse_drivers_for_local_drives_are_not_network_shares() {
 }
 
 #[test]
-fn network_and_fuse_filesystems_are_remote() {
-    for fs_type in [
-        "nfs",
-        "nfs4",
-        "cifs",
-        "smb3",
-        "fuse.sshfs",
-        "fuse.gvfsd-fuse",
-        "fuse",
-        "9p",
+fn network_and_fuse_filesystems_are_remote_and_written_from_elsewhere() {
+    for (fs_type, remote, outside_writers) in [
+        ("nfs", true, true),
+        ("nfs4", true, true),
+        ("cifs", true, true),
+        ("smb3", true, true),
+        ("fuse.sshfs", true, true),
+        ("fuse.gvfsd-fuse", true, true),
+        ("fuse", true, true),
+        ("9p", true, true),
+        ("virtiofs", true, true),
+        ("vboxsf", true, true),
+        ("ceph", true, true),
+        ("gfs2", true, true),
+        ("fuse.mergerfs", true, true),
+        ("fuse.gocryptfs", true, true),
+        ("fuseblk", true, false),
+        ("ext4", false, false),
+        ("btrfs", false, false),
+        ("xfs", false, false),
+        ("tmpfs", false, false),
+        ("vfat", false, false),
+        ("exfat", false, false),
+        ("overlay", false, false),
     ] {
-        assert!(is_remote_fs_type(fs_type), "{fs_type} should be remote");
-    }
-    for fs_type in ["ext4", "btrfs", "xfs", "tmpfs", "vfat", "exfat", "overlay"] {
-        assert!(!is_remote_fs_type(fs_type), "{fs_type} should be local");
+        let mount = MountType {
+            fs_type: fs_type.to_owned(),
+            super_options: String::new(),
+        };
+        assert_eq!(
+            (is_remote_fs_type(fs_type), mount.outside_writers()),
+            (remote, outside_writers),
+            "{fs_type}"
+        );
     }
 }
 

@@ -182,7 +182,7 @@ use crate::{
         gio_file_for_location, location_for_file,
         trash_restore::RestoreContext,
         trash_support::{TrashError, TrashFailure, trash_with_cleanup},
-        volume::{MountTable, NameProfile},
+        volume::{NameProfile, mount_watch},
     },
     model::{Location, hidden_names::HiddenName},
     services::{
@@ -501,7 +501,7 @@ async fn removable_roots_for_paths(paths: &[PathBuf]) -> Vec<PathBuf> {
     if let Some(hints) = removable_hints_for_test() {
         return removable_sync_roots(&destinations, &hints);
     }
-    let table = MountTable::load().await;
+    let table = mount_watch::fresh().await;
     let mounts = gio::VolumeMonitor::get().mounts();
     let mut hints = Vec::new();
     for path in paths {
@@ -2819,8 +2819,6 @@ fn item_error(name: &str, error: impl std::fmt::Display) -> String {
 }
 
 fn operation_handle(cancellable: gio::Cancellable) -> LoadHandle {
-    // Install invalidation before the queued operation can learn mount capabilities.
-    super::volume::watch_operation_mounts();
     LoadHandle::new(move || cancellable.cancel())
 }
 
@@ -4065,12 +4063,10 @@ impl OperationProvider for LocalOperationProvider {
     }
 
     fn compress(&self, request: CompressRequest, emit: Rc<dyn Fn(OperationEvent)>) -> LoadHandle {
-        super::volume::watch_operation_mounts();
         archive::compress(request, emit)
     }
 
     fn extract(&self, request: ExtractRequest, emit: Rc<dyn Fn(OperationEvent)>) -> LoadHandle {
-        super::volume::watch_operation_mounts();
         archive::extract(request, emit)
     }
 }

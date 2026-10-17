@@ -12,6 +12,7 @@ thread_local! {
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum Exception {
     MountTable,
+    Startup,
     #[cfg(test)]
     TestSetup,
 }

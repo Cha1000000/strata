@@ -192,6 +192,7 @@ fn main() -> gtk::glib::ExitCode {
                 return restart_for_gtk_environment(&arguments, false);
             }
             restart_with_local_vfs_if_gvfs_is_unresponsive();
+            adapters::mount_watch::start();
             util::ui_thread::mark();
             return portal::run();
         }
@@ -296,6 +297,7 @@ fn main() -> gtk::glib::ExitCode {
             }
         }
     });
+    adapters::mount_watch::start();
     util::ui_thread::mark();
     application.run()
 }

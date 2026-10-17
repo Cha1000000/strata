@@ -157,7 +157,7 @@ pub(crate) fn verified_with_cleanup(
     path: &Path,
     attempt: impl FnOnce() -> Result<(), glib::Error>,
 ) -> Result<(), TrashError> {
-    let mounts = MountTable::current();
+    let mounts = super::volume::mount_watch::latest();
     let home = glib::home_dir();
     let mount = path
         .parent()
@@ -384,7 +384,8 @@ pub(crate) fn unsupported_reason_for_directory(directory: &Path) -> Option<Unsup
         return None;
     }
     let directory = std::fs::canonicalize(directory).ok()?;
-    unsupported_reason_in(&MountTable::current(), &directory).map(|(_, reason)| reason)
+    unsupported_reason_in(&super::volume::mount_watch::latest(), &directory)
+        .map(|(_, reason)| reason)
 }
 
 pub(super) fn unsupported_reason_in(
