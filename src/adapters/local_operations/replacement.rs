@@ -144,6 +144,7 @@ pub(super) async fn publish_staged_without_replace(
             cleanup,
         ));
     };
+    let staged = OffMain::new(staged);
     let parent = staged.parent.clone();
     let (stage_name, name) = (staged.name.clone(), target_name.clone());
     let recorded = staged.identity;
@@ -154,7 +155,7 @@ pub(super) async fn publish_staged_without_replace(
     let placed = match step {
         Ok(step) => step,
         Err(error) => {
-            let cleanup = discard_incomplete_staged(staged).await;
+            let cleanup = discard_incomplete_staged(staged.into_inner()).await;
             return Err(copy_failure_after_cleanup(
                 io_error(blocking_join_message(error)),
                 cleanup,
@@ -172,7 +173,7 @@ pub(super) async fn publish_staged_without_replace(
         Err(PlaceError::Unconfirmed) => return Err(placement_error(PlaceError::Unconfirmed)),
         Err(error) => Err(placement_error(error)),
     };
-    let cleanup = discard_incomplete_staged(staged).await;
+    let cleanup = discard_incomplete_staged(staged.into_inner()).await;
     match result {
         Ok(ownership) => cleanup.map(|()| ownership).map_err(|error| {
             io_error(rust_i18n::t!(
