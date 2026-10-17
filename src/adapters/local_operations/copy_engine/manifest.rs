@@ -362,7 +362,8 @@ impl Manifest {
 pub(super) struct State {
     size: u64,
     mtime: (i64, u32),
-    /// What the copy wrote, where its source is compared by content.
+    /// What the copy wrote, where its times cannot tell another file put in
+    /// its place.
     contents: Option<digest::Digest>,
 }
 

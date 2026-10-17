@@ -2035,8 +2035,8 @@ impl Copy {
         );
     }
 
-    /// A copy whose source a move compares by content is compared too, as
-    /// another file can take its place within the same tick.
+    /// A copy digested as it was written is compared by content before its
+    /// source is deleted, as within a tick another file can take its place.
     fn wrote(&self, identity: LocalFileIdentity, read: &manifest::Read) {
         let Some(copied) = read.copied else {
             return;
