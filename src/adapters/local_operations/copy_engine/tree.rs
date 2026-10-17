@@ -680,6 +680,7 @@ impl Made {
                     let made = fs.stat(Entry::new(dir, &name), false)?;
                     tree.made(&path, made.identity);
                     names.made(&name, made.identity);
+                    copy.record_state(made.identity, &made);
                 }
                 self.record(name, &link);
                 queue.complete(Some(group.clone()));

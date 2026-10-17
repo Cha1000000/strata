@@ -524,21 +524,22 @@ if it is still what the copy read:
   entries, or another folder put at its name, stays.
 - **The copy itself.** The move carries the identities of the entries it created, rather than
   adopting whatever is at a destination name afterwards, and the size and modification time it
-  left each file with, as a stat reports them after the close and after times a close reset (NFSv4
-  write delegations, FUSE writeback caches) are set again. Before deleting sources it checks the
-  published root and copied descendants; a merge also checks every merged ancestor and the actual
-  numbered placement names. If any of these entries is missing, has another identity, or is a file
-  of another size or modification time, as one rewritten in place or another file given its freed
-  inode number within its birth time's tick (as on ntfs3), nothing of that item is deleted. A
-  fallback that copies out of a stage records the newly created copy's identities, not the discarded
-  stage's.
+  left each file and symbolic link with, as a stat reports them after the close and after times a
+  close reset (NFSv4 write delegations, FUSE writeback caches) are set again. Before deleting
+  sources it checks the published root and copied descendants; a merge also checks every merged
+  ancestor and the actual numbered placement names. If any of these entries is missing, has another
+  identity, or is a file or link of another size or modification time, as one rewritten in place or
+  another file given its freed inode number within its birth time's tick (as on ntfs3), nothing of
+  that item is deleted. A fallback that copies out of a stage records the newly created copy's
+  identities, not the discarded stage's.
 
 Where the destination keeps inode numbers, its entries must keep the exact device, inode, type and
 available birth time. Where it numbers an evicted entry afresh (FUSE daemons without `use_ino`,
 vfat and exFAT, cifs with `noserverino`), the type and the birth time, where both stats report one,
-stand in for the inode as they do for sources, and a file must also keep its recorded size and
-modification time, and its contents where those times cannot tell. An entry renumbered after a
-rename or a cache eviction then still proves the copy, and the move deletes its sources.
+stand in for the inode as they do for sources, and a file or symbolic link must also keep its
+recorded size and modification time, and a file its contents where those times cannot tell. An
+entry renumbered after a rename or a cache eviction then still proves the copy, and the move deletes
+its sources.
 
 What stays is reported by cause: changed during the move, could not be deleted (with the error, as
 in a read-only folder), a special file or symbolic link the destination cannot store, or an item
@@ -725,11 +726,12 @@ reported.
 - **Relaxed identity.** Where a source has no stable inode numbers and reports no birth time
   (sshfs, exfat-fuse, ntfs-3g), a different file with the same type, size and times put at a source
   name passes for the original, unless it is racily clean and compared. The same goes for a move's
-  copy on such a destination before its sources are deleted: a different file of its type, size and
-  modification time, as another copy of the source would have, passes for it. A copy recognises its
-  own entries by inode number, and on FUSE its claimed files by type and size. Where the kernel can
-  renumber an evicted entry (FUSE, vfat, exFAT, cifs with `noserverino`), a renumbered entry stops
-  the copy as changed; nothing is deleted, and its hidden stage can be left behind.
+  copy on such a destination before its sources are deleted: a different file or link of its type,
+  size and modification time, as another copy of the source would have, passes for it. A copy
+  recognises its own entries by inode number, and on FUSE its claimed files by type and size. Where
+  the kernel can renumber an evicted entry (FUSE, vfat, exFAT, cifs with `noserverino`), a
+  renumbered entry stops the copy as changed; nothing is deleted, and its hidden stage can be left
+  behind.
 - **Modes that cannot be stored.** On vfat, exFAT, exfat-fuse, ntfs-3g and SMB without POSIX
   extensions, the mount options decide modes, and nothing reports what was lost. On SMB with POSIX
   extensions, a file opened right after `chmod 0444` reports 0755, so any copier copies 0755.

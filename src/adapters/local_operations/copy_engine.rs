@@ -886,8 +886,13 @@ fn copy_special(
         if stat.kind == FileType::Fifo {
             let parent_stat = copy.fs.stat_fd(parent.as_fd())?;
             tree::finish_pipe(copy, stat, (at, staged.identity), &parent_stat, &mount)?;
-        } else if mount.family != Family::Fuse {
-            best_effort(copy.fs.set_link_times(at, stat.atime, stat.mtime))?;
+        } else {
+            if mount.family != Family::Fuse {
+                best_effort(copy.fs.set_link_times(at, stat.atime, stat.mtime))?;
+            }
+            if copy.recording {
+                copy.record_state(staged.identity, &copy.fs.stat(at, false)?);
+            }
         }
         copy.check_cancelled()
     })();
@@ -907,7 +912,7 @@ fn copy_special(
                 name,
             ) {
                 Ok(placement::Placed::RecreatedSymlink) => Ok((Ownership::unproven(), false)),
-                Ok(_) => Ok((Ownership::new(staged.identity), false)),
+                Ok(_) => Ok((copy.ownership(staged.identity), false)),
                 Err(PlaceError::Unsupported) => {
                     let from = Entry::new(&**parent, &staged.name);
                     let to = Entry::new(&**parent, name);

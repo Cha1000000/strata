@@ -2357,6 +2357,97 @@ fn copies_a_mount_numbers_afresh_are_known_by_type_birth_time_size_and_time()
 }
 
 #[test]
+fn copied_links_a_mount_numbers_afresh_are_known_by_their_size_and_time()
+-> Result<(), Box<dyn Error>> {
+    let _serial = serial()?;
+    let noserverino = || Quirks {
+        mount_type: Some(("cifs", "rw,noserverino")),
+        ..Quirks::default()
+    };
+    // The placed link is numbered afresh, and on sshfs, which leaves a
+    // link's times as it was made, another link may take its place first.
+    // Whether it does.
+    let merge = TransferConflict::Merge;
+    let fail = TransferConflict::FailIfExists;
+    let rows: [(Preset, &str, TransferConflict, bool); 6] = [
+        (Quirks::sshfs, "link", fail, true),
+        (Quirks::sshfs, "folder", fail, true),
+        (Quirks::sshfs, "folder", merge, true),
+        (noserverino, "link", fail, false),
+        (noserverino, "folder", fail, false),
+        (noserverino, "folder", merge, false),
+    ];
+    for (preset, item, conflict, replaced) in rows {
+        let row = format!("{:?}, {item}, {conflict:?}, replaced: {replaced}", preset().mount_type);
+        let root = tempfile::tempdir()?;
+        let sources = root.path().join("sources");
+        let destination = root.path().join("destination");
+        fs::create_dir(&sources)?;
+        fs::create_dir(&destination)?;
+        let source = sources.join(item);
+        let copy = destination.join(item);
+        let (link, copied) = if item == "folder" {
+            fs::create_dir(&source)?;
+            (source.join("link"), copy.join("link"))
+        } else {
+            (source.clone(), copy.clone())
+        };
+        let placed = if conflict == merge {
+            fs::create_dir(&copy)?;
+            "link"
+        } else {
+            item
+        };
+        std::os::unix::fs::symlink("original-target", &link)?;
+        let arrival = root.path().join("arrival");
+        std::os::unix::fs::symlink("another-target", &arrival)?;
+        let evicted = Arc::new(AtomicBool::new(false));
+        let evicting = evicted.clone();
+        let replacing = copied.clone();
+        let racer: super::fs_quirks::Racer = Box::new(move || {
+            if replaced {
+                fs::rename(&arrival, &replacing).expect("replace the link");
+            }
+            super::fs_quirks::renumbered(&copy);
+            super::fs_quirks::renumbered(&replacing);
+            evicting.store(true, Ordering::Release);
+        });
+        let _sources = FsQuirks::install(&sources, Quirks::ext4());
+        let _destination = FsQuirks::install(
+            &destination,
+            Quirks {
+                rename_flags: Support::Supported,
+                tmpfile: Support::Rejected(Errno::OPNOTSUPP),
+                after: vec![(Op::Rename, placed, 0, racer)],
+                ..preset()
+            },
+        );
+
+        let (_operation, events) = paste_move(98, &destination, &source, conflict);
+        pump_until_transfer(&events);
+
+        assert!(evicted.load(Ordering::Acquire), "{row}");
+        let original = Some(PathBuf::from("original-target"));
+        if replaced {
+            assert_eq!(fs::read_link(&link).ok(), original, "{row}");
+            assert_eq!(
+                reported(&events).kept,
+                [kept(source, KeptCause::CopyGone)],
+                "{row}"
+            );
+        } else {
+            assert!(
+                fs::symlink_metadata(&source).is_err(),
+                "{row}: {:?}",
+                reported(&events).kept
+            );
+            assert_eq!(fs::read_link(&copied).ok(), original, "{row}");
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn a_replacing_move_keeps_the_actual_copy_out_identity() -> Result<(), Box<dyn Error>> {
     let _serial = serial()?;
     let root = tempfile::tempdir()?;

@@ -358,6 +358,11 @@ impl Manifest {
     }
 }
 
+/// A link's size is the length of its target.
+fn has_state(kind: FileType) -> bool {
+    matches!(kind, FileType::RegularFile | FileType::Symlink)
+}
+
 #[derive(Clone, Copy, Debug)]
 pub(super) struct State {
     size: u64,
@@ -441,7 +446,7 @@ impl Ownership {
 
     pub(super) fn of(stat: &EntryStat) -> Self {
         let mut owned = Self::new(stat.identity);
-        if stat.kind == FileType::RegularFile {
+        if has_state(stat.kind) {
             owned.states.insert(PathBuf::new(), State::of(stat));
         }
         owned
@@ -478,7 +483,7 @@ impl Ownership {
             let stat = fs.stat(at, false)?;
             let path = path.join(&name);
             self.descendants.insert(path.clone(), stat.identity);
-            if stat.kind == FileType::RegularFile {
+            if has_state(stat.kind) {
                 self.states.insert(path.clone(), State::of(&stat));
             }
             if stat.is_directory() {
@@ -528,7 +533,8 @@ impl Ownership {
     /// birth time, shows only in its size or modification time, and within
     /// one tick of a coarse clock only in its contents. Where the mount
     /// numbers an evicted entry afresh, the type and birth time stand in for
-    /// the inode number, for a file only beside its recorded size and time.
+    /// the inode number, for a file or link only beside its recorded size and
+    /// time.
     fn holds(
         &self,
         fs: &dyn FsOps,
@@ -540,7 +546,7 @@ impl Ownership {
             return false;
         };
         let state = self.states.get(path);
-        let same = if stable_inodes || (identity.kind == FileType::RegularFile && state.is_none()) {
+        let same = if stable_inodes || (has_state(identity.kind) && state.is_none()) {
             stat.identity == identity
         } else {
             stat.identity.may_be(&identity)
