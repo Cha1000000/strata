@@ -102,7 +102,9 @@ Residual limits:
   under a second spelling there, as it numbers names that differ only in case before copying.
 - After a lost reply while placing over a placeholder (to the placeholder's `mkdir` or exclusive
   create, or to the rename over it), an empty folder or file Strata created can remain at the
-  destination name.
+  destination name. Where inode numbers are stable, a placeholder the rename left in place proves
+  the rename never happened: Strata removes it and reports the error itself. On FUSE the moved
+  item can report the placeholder's number, so nothing is removed there.
 
 Renaming a folder in the lower layer of an overlayfs mount without `redirect_dir`, or moving
 across bind mounts or btrfs subvolumes, returns `EXDEV`. Those moves copy, and the copy uses a

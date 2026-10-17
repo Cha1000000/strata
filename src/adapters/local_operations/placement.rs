@@ -132,6 +132,12 @@ impl<'a> Mount<'a> {
         mount_capabilities(self.key())
     }
 
+    /// Whether an inode number still found at a name proves the entry is
+    /// the one it was read from, as the mount's type tells.
+    fn stable_inodes(&self) -> bool {
+        mount_profile::known(self.fs, self.dir, self.key()).stable_inodes == Some(true)
+    }
+
     fn learn(&self, learn: impl FnOnce(&mut MountCapabilities)) {
         learn_mount_capability(self.key(), learn);
     }
@@ -338,7 +344,7 @@ fn fallback(
             if directory {
                 rename_folder_after_check(fs, from, to, &source)
             } else if mount.renames_over(to.name) {
-                rename_over_reserved_file(fs, from, to, &source)
+                rename_over_reserved_file(fs, &mount, from, to, &source)
             } else {
                 Err(PlaceError::Unsupported)
             }
@@ -637,7 +643,11 @@ fn place_directory(
             Err(PlaceError::CrossDevice)
         }
         Err(error) if may_have_lost_reply(error) => {
-            moved_despite_lost_reply(fs, from, to, source, Placed::ReservedDirectory)
+            if mount.stable_inodes() && remove_placeholder(fs, to, placeholder) {
+                Err(PlaceError::Io(error))
+            } else {
+                moved_despite_lost_reply(fs, from, to, source, Placed::ReservedDirectory)
+            }
         }
         Err(error) => {
             remove_placeholder(fs, to, placeholder);
@@ -1107,6 +1117,7 @@ fn same_ignoring_case(left: &OsStr, right: &OsStr) -> bool {
 
 fn rename_over_reserved_file(
     fs: &dyn FsOps,
+    mount: &Mount<'_>,
     from: Entry<'_>,
     to: Entry<'_>,
     source: &EntryStat,
@@ -1132,6 +1143,12 @@ fn rename_over_reserved_file(
         Err(error) => error,
     };
     if may_have_lost_reply(error) {
+        if mount.stable_inodes()
+            && still_reserved() == Ok(true)
+            && fs.unlink(to, AtFlags::empty()).is_ok()
+        {
+            return Err(PlaceError::Io(error));
+        }
         return moved_despite_lost_reply(fs, from, to, source, Placed::OverReservedFile);
     }
     let removed = still_reserved() == Ok(true) && fs.unlink(to, AtFlags::empty()).is_ok();
@@ -1146,7 +1163,9 @@ fn rename_over_reserved_file(
 
 /// Decides a rename whose reply may have been lost without removing anything:
 /// libfuse without `use_ino` keeps a name's inode number then, so a
-/// placeholder's number at `to` can belong to the moved item.
+/// placeholder's number at `to` can belong to the moved item. Where numbers
+/// are stable, a placeholder still in place proves the rename never happened,
+/// and the rungs remove it before coming here.
 fn moved_despite_lost_reply(
     fs: &dyn FsOps,
     from: Entry<'_>,
