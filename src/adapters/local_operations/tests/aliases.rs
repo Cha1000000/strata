@@ -761,7 +761,7 @@ fn same_named_items_from_three_folders_all_land_whatever_their_order_and_choice(
         TransferConflict::KeepBoth,
         TransferConflict::ReplaceExisting,
     );
-    let three_one_two = [
+    let three_one_two = vec![
         ("notes (1).txt", "three"),
         ("notes (2).txt", "one"),
         ("notes (3).txt", "two"),
@@ -770,66 +770,66 @@ fn same_named_items_from_three_folders_all_land_whatever_their_order_and_choice(
     // The folders whose notes.txt are pasted into one/, as selected; the choice for the item that
     // meets one/notes.txt, None skipping it; whether the request lists the items as selected
     // instead of as the browser does, the ones asked about last; and one/ after the paste.
-    let rows: [(&[&str], Option<TransferConflict>, bool, &[(&str, &str)]); 11] = [
+    let rows = [
         (
-            &["two", "three"],
+            vec!["two", "three"],
             Some(keep_both),
             false,
-            &[
+            vec![
                 ("notes (1).txt", "three"),
                 ("notes (2).txt", "two"),
                 ("notes.txt", "one"),
             ],
         ),
         (
-            &["two", "three"],
+            vec!["two", "three"],
             None,
             false,
-            &[("notes (1).txt", "three"), ("notes.txt", "one")],
+            vec![("notes (1).txt", "three"), ("notes.txt", "one")],
         ),
         (
-            &["one", "two", "three"],
+            vec!["one", "two", "three"],
             Some(keep_both),
             false,
-            &three_one_two,
+            three_one_two.clone(),
         ),
         (
-            &["one", "two", "three"],
+            vec!["one", "two", "three"],
             None,
             false,
-            &[
+            vec![
                 ("notes (1).txt", "three"),
                 ("notes (2).txt", "one"),
                 ("notes.txt", "one"),
             ],
         ),
         (
-            &["two", "three", "one"],
+            vec!["two", "three", "one"],
             Some(keep_both),
             false,
-            &three_one_two,
+            three_one_two.clone(),
         ),
         (
-            &["one", "two", "three"],
+            vec!["one", "two", "three"],
             Some(replace),
             false,
-            &[
+            vec![
                 ("notes (1).txt", "three"),
                 ("notes (2).txt", "one"),
                 ("notes.txt", "two"),
             ],
         ),
         (
-            &["two", "one", "three"],
+            vec!["two", "one", "three"],
             Some(keep_both),
             false,
-            &three_one_two,
+            three_one_two.clone(),
         ),
         (
-            &["one", "three", "two"],
+            vec!["one", "three", "two"],
             Some(keep_both),
             false,
-            &[
+            vec![
                 ("notes (1).txt", "two"),
                 ("notes (2).txt", "one"),
                 ("notes (3).txt", "three"),
@@ -837,26 +837,26 @@ fn same_named_items_from_three_folders_all_land_whatever_their_order_and_choice(
             ],
         ),
         (
-            &["two", "three"],
+            vec!["two", "three"],
             Some(keep_both),
             true,
-            &[
+            vec![
                 ("notes (1).txt", "three"),
                 ("notes (2).txt", "two"),
                 ("notes.txt", "one"),
             ],
         ),
         (
-            &["one", "two", "three"],
+            vec!["one", "two", "three"],
             Some(keep_both),
             true,
-            &three_one_two,
+            three_one_two.clone(),
         ),
         (
-            &["two", "three", "one"],
+            vec!["two", "three", "one"],
             Some(keep_both),
             true,
-            &three_one_two,
+            three_one_two.clone(),
         ),
     ];
     for (selected, choice, as_selected, listed) in rows {
