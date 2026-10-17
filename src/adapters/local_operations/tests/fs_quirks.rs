@@ -213,7 +213,8 @@ pub(crate) struct Quirks {
     pub fail: Vec<(Op, &'static str, usize, Errno)>,
     /// Runs once, before the matching call after skipping the given number of matches.
     pub before: Vec<(Op, &'static str, usize, Racer)>,
-    /// Runs once, after the matching call after skipping the given number of matches.
+    /// Runs once, after the matching call after skipping the given number of matches, whether
+    /// or not the call succeeded.
     pub after: Vec<(Op, &'static str, usize, Racer)>,
     pub mount_type: Option<(&'static str, &'static str)>,
     pub mount_root: Option<&'static str>,
@@ -1660,6 +1661,20 @@ impl FsEnvironment for Scoped {
     }
 }
 
+/// Links as on Linux 6.10 and later, where `AT_EMPTY_PATH` needs no privilege, whatever the
+/// host kernel runs: `ProcOnly` and `Unavailable` quirks stand for the older kernels. Tests
+/// otherwise count a failed plain link and a `/proc` retry on some hosts and one call on others.
+fn link_fd_as_since_linux_6_10(
+    fd: BorrowedFd<'_>,
+    to: Entry<'_>,
+    through_proc: bool,
+) -> Result<(), Errno> {
+    match System.link_fd(fd, to, through_proc) {
+        Err(Errno::NOENT) if !through_proc => System.link_fd(fd, to, true),
+        result => result,
+    }
+}
+
 impl FsOps for Scoped {
     fn open_at(
         &self,
@@ -1969,7 +1984,7 @@ impl FsOps for Scoped {
             return Err(Errno::XDEV);
         }
         let Some(scope) = target else {
-            return System.link_fd(fd, to, through_proc);
+            return link_fd_as_since_linux_6_10(fd, to, through_proc);
         };
         scope.run(Op::LinkFd, &[to.name], |scope| {
             scope.creating(to, |to| {
@@ -1982,7 +1997,7 @@ impl FsOps for Scoped {
                     (TmpfileLink::ProcOnly, false) | (TmpfileLink::Unavailable, _) => {
                         Err(Errno::NOENT)
                     }
-                    _ => System.link_fd(fd, to, through_proc),
+                    _ => link_fd_as_since_linux_6_10(fd, to, through_proc),
                 }
             })
         })

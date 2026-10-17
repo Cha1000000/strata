@@ -225,7 +225,20 @@ fn a_name_taken_just_before_the_link_is_left_alone() -> Result<(), Box<dyn Error
     let error = copy(&source, &target).expect_err("the name is taken");
 
     assert!(error.matches(gio::IOErrorEnum::Exists), "{error}");
-    assert_eq!(scope.count(Op::LinkFd), 1);
+    // Before Linux 6.10 the `AT_EMPTY_PATH` link fails before the name is
+    // looked at and the `/proc` form follows; neither may try another name.
+    let links: Vec<_> = scope
+        .calls()
+        .into_iter()
+        .filter(|call| call.op == Op::LinkFd)
+        .collect();
+    assert!(!links.is_empty());
+    assert!(
+        links
+            .iter()
+            .all(|call| call.names == [OsString::from("target.txt")]),
+        "{links:?}"
+    );
     assert_eq!(fs::read(&target)?, b"theirs");
     assert_eq!(names(root.path())?, ["source.txt", "target.txt"]);
     Ok(())
