@@ -23,7 +23,7 @@ use crate::{
     },
     app::{Browser, BrowserEvent},
     model::Location,
-    services::{LocationValidationError, sanitize_uri_credentials},
+    services::LocationValidationError,
 };
 
 use super::{
@@ -1812,62 +1812,88 @@ impl SidebarState {
     }
 
     fn pin_location(self: &Rc<Self>, location: Location, name: String) {
-        self.update_pinned_places(|places| {
-            if pin_status(places, &location) != PinStatus::Available {
-                return false;
-            }
-            places.push((location, name));
-            true
-        });
+        self.update_pinned_places(
+            move |places| {
+                if pin_status(places, &location) != PinStatus::Available {
+                    return false;
+                }
+                places.push((location.clone(), name.clone()));
+                true
+            },
+            |_| {},
+        );
     }
 
     fn unpin_location(self: &Rc<Self>, location: &Location) {
-        self.update_pinned_places(|places| remove_pinned_place(places, location));
+        let location = location.clone();
+        self.update_pinned_places(move |places| remove_pinned_place(places, &location), |_| {});
     }
 
-    fn pin_folders_into(self: &Rc<Self>, folders: &[(Location, String)], gap: PinGap<'_>) -> bool {
-        self.update_pinned_places(|places| {
-            pin_gap_index(places, gap).is_some_and(|index| pin_locations_at(places, folders, index))
-        })
+    fn pin_folders_into(
+        self: &Rc<Self>,
+        folders: &[(Location, String)],
+        (after, before): PinGap<'_>,
+        done: impl FnOnce(bool) + 'static,
+    ) {
+        let folders = folders.to_vec();
+        let (after, before) = (after.cloned(), before.cloned());
+        self.update_pinned_places(
+            move |places| {
+                pin_gap_index(places, (after.as_ref(), before.as_ref()))
+                    .is_some_and(|index| pin_locations_at(places, &folders, index))
+            },
+            done,
+        );
     }
 
-    fn reorder_pinned_into(self: &Rc<Self>, source: &Location, gap: PinGap<'_>) -> bool {
-        self.update_pinned_places(|places| {
-            let Some(source) = places.iter().position(|(location, _)| location == source) else {
-                return false;
-            };
-            pin_gap_index(places, gap).is_some_and(|index| move_pinned_place(places, source, index))
-        })
+    fn reorder_pinned_into(
+        self: &Rc<Self>,
+        source: &Location,
+        (after, before): PinGap<'_>,
+        done: impl FnOnce(bool) + 'static,
+    ) {
+        let source = source.clone();
+        let (after, before) = (after.cloned(), before.cloned());
+        self.update_pinned_places(
+            move |places| {
+                let Some(source) = places.iter().position(|(location, _)| *location == source)
+                else {
+                    return false;
+                };
+                pin_gap_index(places, (after.as_ref(), before.as_ref()))
+                    .is_some_and(|index| move_pinned_place(places, source, index))
+            },
+            done,
+        );
     }
 
     fn update_pinned_places(
         self: &Rc<Self>,
-        change: impl FnOnce(&mut Vec<(Location, String)>) -> bool,
-    ) -> bool {
+        change: impl Fn(&mut Vec<(Location, String)>) -> bool + Send + 'static,
+        done: impl FnOnce(bool) + 'static,
+    ) {
         // Merge into the shared file, never this window's stale snapshot.
-        let mut changed = false;
-        let result = load_pinned_places().and_then(|mut places| {
-            changed = change(&mut places);
-            if changed {
-                save_pinned_places(&places)?;
+        let edit = move |contents: &[u8]| {
+            let mut places = crate::adapters::bookmarks::parse_pinned_places(contents);
+            change(&mut places)
+                .then(|| crate::adapters::bookmarks::serialize_pinned_places(&places).into_bytes())
+        };
+        let weak = Rc::downgrade(self);
+        glib::MainContext::default().spawn_local(async move {
+            match crate::adapters::bookmarks::update(edit).await {
+                Ok(changed) => done(changed),
+                Err(error) => {
+                    if let Some(state) = weak.upgrade() {
+                        show_error_dialog(
+                            &state.view.widget(),
+                            &crate::i18n::tr("Unable to update pinned folders"),
+                            &crate::services::io_error_message(&error),
+                        );
+                    }
+                    done(false);
+                }
             }
-            Ok(places)
         });
-        match result {
-            Ok(places) => {
-                self.pinned_places.replace(places);
-                self.rebuild();
-                changed
-            }
-            Err(error) => {
-                show_error_dialog(
-                    &self.view.widget(),
-                    &crate::i18n::tr("Unable to update pinned folders"),
-                    &crate::services::io_error_message(&error),
-                );
-                false
-            }
-        }
     }
     fn event_changes_active_place(event: &BrowserEvent) -> bool {
         matches!(
@@ -2298,16 +2324,19 @@ impl SidebarState {
                 _ => return,
             }
         };
-        self.update_pinned_places(|places| {
-            let position =
-                |location: &Location| places.iter().position(|(pinned, _)| pinned == location);
-            match (position(&source), position(&target)) {
-                (Some(source), Some(target)) => {
-                    reorder_pinned_places(places, source, target, after)
+        self.update_pinned_places(
+            move |places| {
+                let position =
+                    |location: &Location| places.iter().position(|(pinned, _)| pinned == location);
+                match (position(&source), position(&target)) {
+                    (Some(source), Some(target)) => {
+                        reorder_pinned_places(places, source, target, after)
+                    }
+                    _ => false,
                 }
-                _ => false,
-            }
-        });
+            },
+            |_| {},
+        );
     }
 
     fn append_separator(&self) {
@@ -4340,79 +4369,6 @@ fn navigate_to_gio_file(browser: &Rc<Browser>, file: &gio::File) {
     if let Some(location) = location_for_file(file) {
         browser.navigate(location);
     }
-}
-
-fn pinned_places_path() -> PathBuf {
-    crate::adapters::bookmarks::pinned_places_path()
-}
-
-fn load_pinned_places() -> std::io::Result<Vec<(Location, String)>> {
-    match std::fs::read(pinned_places_path()) {
-        Ok(contents) => Ok(parse_pinned_places(&contents)),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
-        Err(error) => Err(error),
-    }
-}
-
-/// GTK bookmarks may contain non-UTF-8 labels.
-fn parse_pinned_places(contents: &[u8]) -> Vec<(Location, String)> {
-    let mut places = Vec::new();
-    for line in contents.split(|byte| *byte == b'\n') {
-        let line = line.strip_suffix(b"\r").unwrap_or(line);
-        let (uri, label) = match line.iter().position(|byte| *byte == b' ') {
-            Some(space) => (&line[..space], Some(&line[space + 1..])),
-            None => (line, None),
-        };
-        if uri.is_empty() {
-            continue;
-        }
-        let Ok(uri) = std::str::from_utf8(uri) else {
-            continue;
-        };
-        let file = gio::File::for_uri(uri);
-        let Some(location) = location_for_file(&file) else {
-            continue;
-        };
-        if places
-            .iter()
-            .any(|(existing, _): &(Location, String)| existing == &location)
-        {
-            continue;
-        }
-        let name = label
-            .filter(|label| !label.is_empty())
-            .map(|label| String::from_utf8_lossy(label).into_owned())
-            .unwrap_or_else(|| location.display_name());
-        places.push((location, name));
-    }
-    places
-}
-
-fn save_pinned_places(places: &[(Location, String)]) -> std::io::Result<()> {
-    let path = pinned_places_path();
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let contents = serialize_pinned_places(places);
-    crate::storage::atomic_write_config(&path, contents.as_bytes())
-}
-
-fn serialize_pinned_places(places: &[(Location, String)]) -> String {
-    let mut contents = String::new();
-    for (location, name) in places {
-        let uri = location
-            .native_path()
-            .map(gio::File::for_path)
-            .map(|file| file.uri().to_string())
-            .or_else(|| location.uri_value().map(str::to_owned));
-        let Some(uri) = uri.and_then(|uri| sanitize_uri_credentials(&uri).ok().map(|(uri, _)| uri))
-        else {
-            continue;
-        };
-        let label = name.replace(['\n', '\r'], " ");
-        contents.push_str(&format!("{uri} {label}\n"));
-    }
-    contents
 }
 
 pub(crate) fn home_directory() -> PathBuf {

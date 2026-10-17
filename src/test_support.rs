@@ -202,6 +202,23 @@ pub(crate) fn texture_has_visible_pixels(texture: &gtk::gdk::Texture) -> bool {
         .any(|pixel| u32::from_ne_bytes(*pixel) >> 24 != 0)
 }
 
+pub(crate) fn save_pins(pins: &[(crate::model::Location, String)]) {
+    let path = crate::adapters::bookmarks::pinned_places_path();
+    std::fs::create_dir_all(path.parent().expect("bookmarks directory"))
+        .expect("bookmarks directory");
+    std::fs::write(
+        path,
+        crate::adapters::bookmarks::serialize_pinned_places(pins),
+    )
+    .expect("pins");
+}
+
+pub(crate) fn saved_pins() -> Vec<(crate::model::Location, String)> {
+    let contents =
+        std::fs::read(crate::adapters::bookmarks::pinned_places_path()).unwrap_or_default();
+    crate::adapters::bookmarks::parse_pinned_places(&contents)
+}
+
 /// GTK initialization is thread-affine; each UI test gets a process and disposable preferences.
 pub(crate) fn gtk_test(name: &str, run: impl FnOnce()) {
     gtk_test_with_env(name, std::iter::empty::<(&str, &std::ffi::OsStr)>(), run);

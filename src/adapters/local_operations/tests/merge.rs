@@ -1917,6 +1917,7 @@ fn check_merge_undo_restores_staged_originals_and_removes_created() -> Result<()
     assert!(!staged_path.exists(), "the staged copy left the fake trash");
     assert_eq!(fs::read(&stays)?, b"keep me");
     assert!(target.exists(), "the destination folder itself survives");
+    crate::storage::writer::settle();
     assert_eq!(
         fs::read_to_string(bookmarks)?,
         format!("{}{}", pin(&shared), pin(&stays))

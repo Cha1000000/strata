@@ -4,7 +4,6 @@ use std::{
     cell::{Cell, RefCell},
     collections::HashMap,
     fs, io,
-    os::unix::fs::MetadataExt,
     path::{Component, Path, PathBuf},
     rc::Rc,
     time::Duration,
@@ -17,6 +16,7 @@ use crate::{
     model::{FolderColorValue, SortDirection, SortKey, ViewPreferences},
     sandbox::MediaPreviewBackend,
     services::{Channel, CrossVolumeDropStrategy, SearchLimits},
+    storage::{FileStamp, file_stamp},
 };
 
 use super::icons_cell::{MAX_ICONS_THUMBNAIL_SIZE, MIN_ICONS_THUMBNAIL_SIZE};
@@ -1825,20 +1825,6 @@ impl PreferenceManager {
             self.save_notices.write_failed(&path, &error);
         }
     }
-}
-
-type FileStamp = (u64, i64, i64, u64);
-
-/// Tells this process's last write or read of a file apart from another
-/// process's later write.
-fn file_stamp(path: &Path) -> Option<FileStamp> {
-    let metadata = fs::metadata(path).ok()?;
-    Some((
-        metadata.ino(),
-        metadata.mtime(),
-        metadata.mtime_nsec(),
-        metadata.len(),
-    ))
 }
 
 fn read_state_file(path: &Path) -> io::Result<Option<String>> {

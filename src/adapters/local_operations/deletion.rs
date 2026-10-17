@@ -824,6 +824,7 @@ pub(super) async fn run_deletion_in(
             .filter_map(|target| target.location.native_path().map(Path::to_owned));
         Some(LeftoverWatch::observe(environment.as_ref(), paths).await)
     };
+    let mut deleted_pins = crate::adapters::bookmarks::DeletedPins::default();
     let mut errors = Vec::new();
     let mut deleted_locations = Vec::new();
     let mut failed_locations = Vec::new();
@@ -950,9 +951,7 @@ pub(super) async fn run_deletion_in(
                     failed_locations.push(target.location.clone());
                 }
                 Ok(identity) => {
-                    crate::adapters::bookmarks::deletion_completed(std::slice::from_ref(
-                        &target.location,
-                    ));
+                    deleted_pins.push(target.location.clone());
                     if let Some(identity) = identity {
                         emit(OperationEvent::ItemTrashed {
                             request_id,

@@ -746,6 +746,7 @@ pub(super) async fn run_merge_undo(
             affected_locations.insert(parent);
         }
     }
+    let mut deleted_pins = crate::adapters::bookmarks::DeletedPins::default();
     let context = RestoreContext::current().await;
     let unlinks = Arc::default();
     let mut completed_locations = Vec::new();
@@ -912,7 +913,7 @@ pub(super) async fn run_merge_undo(
             }
             Ok(()) => {
                 if found {
-                    crate::adapters::bookmarks::deletion_completed(std::slice::from_ref(location));
+                    deleted_pins.push(location.clone());
                 }
                 if let Some(identity) = trashed_identity {
                     emit(OperationEvent::ItemTrashed {

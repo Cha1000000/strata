@@ -425,11 +425,17 @@ versus validated navigation; file drops still exclude virtual locations. Typed d
 signals share a weak rebuild callback and retain their disconnect handles. Standard,
 pinned, and device rows are separate rendering stages, with the chooser's local-only
 filter preserved. Initial construction builds static places; device rows retain their
-existing deferred rebuild timing. Bookmark storage, Trash, and media-release policies
-remain in `window.rs` rather than changing alongside assembly. Bookmark mutations
-read the shared GTK file before applying changes and adopt them only after a
-successful save. This preserves sequential external edits, not simultaneous writes;
-other windows are refreshed on their next bookmark action, not by a live monitor.
+existing deferred rebuild timing. Trash and media-release policies remain in
+`window.rs` rather than changing alongside assembly. Bookmark storage lives in
+`adapters/bookmarks.rs`: every pin, unpin, reorder and deletion cleanup is one job on
+the background settings writer (`storage::writer`) that reads the shared GTK file,
+applies the change and saves it, checking just before its rename that no other program
+changed the file since the read and starting over, at most twice, if one did. Every
+open sidebar then adopts the pins the file holds. A symlinked bookmarks file is written
+through to its target under the same ownership rules as `settings.toml`. Only the first
+sidebar reads the file before the first window shows; later windows start from the
+last adopted pins and re-read the file in the background. Outside edits are picked up
+by the next update or new window, not by a live monitor.
 
 `ui/window/pinned_drop.rs` owns folder pinning through dedicated gaps between pinned
 rows, including an empty section. Existing pins reorder through the same gaps and

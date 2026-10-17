@@ -246,18 +246,28 @@ fn pinning_merges_latest_bookmarks_and_persists_aliases_in_selection_order() {
     crate::test_support::gtk_test(
         "ui::window::tests::sidebar::pinning_merges_latest_bookmarks_and_persists_aliases_in_selection_order",
         || {
-            use super::super::{load_pinned_places, save_pinned_places};
+            use crate::{
+                storage::writer,
+                test_support::{save_pins, saved_pins},
+            };
+            use std::{cell::Cell, rc::Rc};
+            fn finished(start: impl FnOnce(Rc<Cell<Option<bool>>>)) -> bool {
+                let outcome = Rc::new(Cell::new(None));
+                start(outcome.clone());
+                writer::settle();
+                outcome.get().expect("pin edit finished")
+            }
             PreferenceManager::seed_saved_preferences_for_test();
             let initial = vec![
                 (Location::uri("sftp://host/anchor"), "Anchor".to_owned()),
                 (Location::local("/pinned/last"), "Last".to_owned()),
             ];
-            save_pinned_places(&initial).expect("seed bookmarks");
+            save_pins(&initial);
             let view = browser_for_window();
             let sidebar = build_sidebar(view.clone(), PreferenceManager::shared(), false);
             let mut external = initial.clone();
             external.insert(0, (Location::local("/external/pin"), "External".to_owned()));
-            save_pinned_places(&external).expect("external edit");
+            save_pins(&external);
             let folders = [
                 (Location::local("/mount/folder"), "Mounted".to_owned()),
                 (Location::local("/aliases/folder"), "Alias".to_owned()),
@@ -265,39 +275,57 @@ fn pinning_merges_latest_bookmarks_and_persists_aliases_in_selection_order() {
                 (Location::local("/mount/folder"), "Mounted".to_owned()),
             ];
             let locations = folders.clone().map(|(location, _)| location);
-            assert!(
-                sidebar
-                    .state
-                    .pin_folders_into(&folders, (None, Some(&initial[0].0)))
-            );
+            let held = writer::hold();
+            let outcome = Rc::new(Cell::new(None));
+            let reported = outcome.clone();
+            sidebar
+                .state
+                .pin_folders_into(&folders, (None, Some(&initial[0].0)), move |changed| {
+                    reported.set(Some(changed));
+                });
+            for _ in 0..20 {
+                gtk::glib::MainContext::default().iteration(false);
+            }
+            assert_eq!(outcome.get(), None);
+            assert_eq!(saved_pins(), external);
+            assert_eq!(*sidebar.state.pinned_places.borrow(), initial);
+            drop(held);
+            writer::settle();
+            assert_eq!(outcome.get(), Some(true));
             external.splice(1..1, folders[..2].iter().cloned());
-            assert_eq!(load_pinned_places().expect("saved pins"), external);
+            assert_eq!(saved_pins(), external);
             assert_eq!(*sidebar.state.pinned_places.borrow(), external);
-            assert!(
-                !sidebar
-                    .state
-                    .pin_folders_into(&folders, (Some(&initial[1].0), None))
-            );
-            assert_eq!(load_pinned_places().expect("unchanged pins"), external);
+            assert!(!finished(|outcome| {
+                sidebar.state.pin_folders_into(
+                    &folders,
+                    (Some(&initial[1].0), None),
+                    move |changed| outcome.set(Some(changed)),
+                );
+            }));
+            assert_eq!(saved_pins(), external);
             let later = (Location::local("/external/later"), "Later".to_owned());
             external.insert(0, later);
-            save_pinned_places(&external).expect("another external edit");
-            assert!(
-                sidebar
-                    .state
-                    .reorder_pinned_into(&locations[0], (Some(&initial[0].0), Some(&initial[1].0)))
-            );
+            save_pins(&external);
+            assert!(finished(|outcome| {
+                sidebar.state.reorder_pinned_into(
+                    &locations[0],
+                    (Some(&initial[0].0), Some(&initial[1].0)),
+                    move |changed| outcome.set(Some(changed)),
+                );
+            }));
             let moved = external.remove(2);
             external.insert(4, moved);
-            assert_eq!(load_pinned_places().expect("reordered pins"), external);
+            assert_eq!(saved_pins(), external);
             external.retain(|(location, _)| location != &locations[0]);
-            save_pinned_places(&external).expect("external unpin");
-            assert!(
-                !sidebar
-                    .state
-                    .reorder_pinned_into(&locations[0], (Some(&initial[1].0), None))
-            );
-            assert_eq!(load_pinned_places().expect("no resurrected pin"), external);
+            save_pins(&external);
+            assert!(!finished(|outcome| {
+                sidebar.state.reorder_pinned_into(
+                    &locations[0],
+                    (Some(&initial[1].0), None),
+                    move |changed| outcome.set(Some(changed)),
+                );
+            }));
+            assert_eq!(saved_pins(), external);
             view.browser().clear_observer();
             sidebar.disconnect();
         },

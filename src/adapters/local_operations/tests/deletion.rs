@@ -473,6 +473,7 @@ fn provider_cleans_only_confirmed_pins_on_failure_and_cancellation() {
                 }) {
                     context.iteration(true);
                 }
+                crate::storage::writer::settle();
                 assert_eq!(
                     fs::read_to_string(&bookmarks).expect("remaining pins"),
                     pin(&second)
@@ -657,17 +658,11 @@ fn deleting_browser_can_drop_after_a_confirmed_deletion_without_losing_pin_clean
             let weak = Rc::downgrade(&browser);
             let owner = Rc::new(RefCell::new(Some(browser.clone())));
             let release = owner.clone();
-            let expected = pin(&second);
-            let saved = bookmarks.clone();
             browser.observe(move |event| {
                 if matches!(
                     event,
                     crate::app::BrowserEvent::DeletionProgress { completed: 1, .. }
                 ) {
-                    assert_eq!(
-                        fs::read_to_string(&saved).expect("pins before callback"),
-                        expected
-                    );
                     release
                         .borrow_mut()
                         .take()
@@ -692,6 +687,7 @@ fn deleting_browser_can_drop_after_a_confirmed_deletion_without_losing_pin_clean
             }
             assert!(!first.exists());
             assert!(second.exists());
+            crate::storage::writer::settle();
             assert_eq!(
                 fs::read_to_string(bookmarks).expect("saved pins"),
                 pin(&second)
@@ -733,6 +729,7 @@ fn bookmark_cleanup_failure_preserves_the_successful_deletion_outcome() {
             {
                 glib::MainContext::default().iteration(true);
             }
+            crate::storage::writer::settle();
             assert!(!gone.exists());
             assert_eq!(*failures.borrow(), [true]);
             assert!(

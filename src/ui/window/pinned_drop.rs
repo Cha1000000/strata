@@ -318,24 +318,24 @@ pub(super) fn append_gap(
         let reorder = reorder_source(drop).is_some();
         let drop = drop.clone();
         validation.on_ready(move |locations| {
-            let success = match (locations, state.upgrade(), widget.upgrade()) {
+            let finish = move |success: bool| {
+                drop.finish(if success {
+                    action
+                } else {
+                    gdk::DragAction::empty()
+                });
+            };
+            match (locations, state.upgrade(), widget.upgrade()) {
                 (Some(locations), Some(state), Some(widget)) if widget.root().is_some() => {
                     let gap = (after.as_ref(), before.as_ref());
-                    if reorder {
-                        locations
-                            .first()
-                            .is_some_and(|(source, _)| state.reorder_pinned_into(source, gap))
-                    } else {
-                        state.pin_folders_into(&locations, gap)
+                    match (reorder, locations.first()) {
+                        (true, Some((source, _))) => state.reorder_pinned_into(source, gap, finish),
+                        (true, None) => finish(false),
+                        (false, _) => state.pin_folders_into(&locations, gap, finish),
                     }
                 }
-                _ => false,
-            };
-            drop.finish(if success {
-                action
-            } else {
-                gdk::DragAction::empty()
-            });
+                _ => finish(false),
+            }
         });
         true
     });

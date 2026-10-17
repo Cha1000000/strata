@@ -14,8 +14,8 @@ use crate::{
 
 use super::{
     RailPolicy, RecentAvailability, SIDEBAR_WIDTH, SidebarState, SidebarView, TrashContents,
-    event_changes_trash_contents, install_sidebar_file_drop, load_pinned_places,
-    resolve_place_order, select_sidebar_row,
+    event_changes_trash_contents, install_sidebar_file_drop, resolve_place_order,
+    select_sidebar_row,
 };
 
 pub(in crate::ui) fn build_sidebar(
@@ -176,7 +176,7 @@ impl SidebarState {
             preference_manager,
             place_order: RefCell::new(place_order),
             places_visibility: RefCell::new(places_visibility),
-            pinned_places: Rc::new(RefCell::new(load_pinned_places().unwrap_or_default())),
+            pinned_places: Rc::new(RefCell::new(crate::adapters::bookmarks::current())),
             place_rows: RefCell::new(Vec::new()),
             trash_contents: Cell::new(TrashContents::Unknown),
             trash_menu_rows: RefCell::new(None),

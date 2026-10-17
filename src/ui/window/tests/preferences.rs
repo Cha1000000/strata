@@ -37,8 +37,7 @@ fn sidebar_folder_customization_loads_and_updates_across_windows() {
                 (Location::local(&home), icons::HOME),
                 (Location::local(&downloads), icons::DOWNLOADS),
             ];
-            super::super::save_pinned_places(&[(location.clone(), "Custom folder".into())])
-                .expect("save pin");
+            crate::test_support::save_pins(&[(location.clone(), "Custom folder".into())]);
             let mut settings = String::from("[folder_colors]\n");
             for (location, _) in &cases {
                 settings.push_str(&format!("\"{}\" = \"red\"\n", location.display_path()));

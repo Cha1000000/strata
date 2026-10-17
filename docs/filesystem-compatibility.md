@@ -31,7 +31,7 @@ one is deleted.
 - **Show only complete copies.** A copy appears under its final name once it is complete, except
   on mounts where nothing can be placed; see [Publishing a copy](#publishing-a-copy).
 - **Keep transfer work off the interface thread.** Native copying, placement, and paste/restore/delete
-  planning run on workers. Some existing archive-name, undo and redo replay, and bookmark checks
+  planning run on workers. Some existing archive-name, undo and redo replay checks
   remain synchronous; removing those calls is tracked in [#1590](https://github.com/lgse/strata/issues/1590).
   An unresponsive mount can still block the window through those remaining checks.
 - **Move metadata, not data.** Renames never copy file contents. Moves within one filesystem
