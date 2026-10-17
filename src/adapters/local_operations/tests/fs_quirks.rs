@@ -216,6 +216,9 @@ pub(crate) struct Quirks {
     /// Runs once, after the matching call after skipping the given number of matches, whether
     /// or not the call succeeded.
     pub after: Vec<(Op, &'static str, usize, Racer)>,
+    /// Lets the matching call through after skipping the given number of matches, then fails
+    /// every later call with `EIO`, as a yanked device does, until [`FsQuirks::replug`].
+    pub unplugged_after: Option<(Op, &'static str, usize)>,
     pub mount_type: Option<(&'static str, &'static str)>,
     pub mount_root: Option<&'static str>,
     pub device_format: Option<&'static str>,
@@ -749,6 +752,7 @@ struct State {
     read_only_unseen: HashSet<PathBuf>,
     /// The change time each entry's last stat saw, and when, by device and inode.
     seen_change_times: HashMap<(u64, u64), ((i64, u32), SystemTime)>,
+    unplugged: bool,
 }
 
 static SCOPES: Mutex<Vec<Arc<Scope>>> = Mutex::new(Vec::new());
@@ -785,6 +789,7 @@ impl FsQuirks {
                 opened_names: Vec::new(),
                 read_only_unseen: HashSet::new(),
                 seen_change_times: HashMap::new(),
+                unplugged: false,
             }),
         });
         scopes().push(scope.clone());
@@ -824,6 +829,10 @@ impl FsQuirks {
 
     pub(crate) fn clear_calls(&self) {
         self.scope.state().calls.clear();
+    }
+
+    pub(crate) fn replug(&self) {
+        self.scope.state().unplugged = false;
     }
 
     pub(crate) fn used_name(&self, pattern: &str) -> bool {
@@ -917,6 +926,9 @@ impl Scope {
                 names: names.iter().map(|name| name.to_os_string()).collect(),
                 forced,
             });
+            if state.unplugged {
+                return Err(Errno::IO);
+            }
             take_racer(&mut state.quirks.before, op, names)
         };
         if let Some(mut racer) = racer {
@@ -945,6 +957,20 @@ impl Scope {
             return Err(errno);
         }
         let result = perform(self);
+        {
+            let mut state = self.state();
+            if let Some((unplug_op, pattern, skip)) = state.quirks.unplugged_after.as_mut()
+                && *unplug_op == op
+                && matches(pattern, names)
+            {
+                if *skip == 0 {
+                    state.quirks.unplugged_after = None;
+                    state.unplugged = true;
+                } else {
+                    *skip -= 1;
+                }
+            }
+        }
         let racer = take_racer(&mut self.state().quirks.after, op, names);
         if let Some(mut racer) = racer {
             racer();
@@ -1602,7 +1628,7 @@ impl FsEnvironment for Scoped {
         };
         let name = path.file_name().unwrap_or_default();
         let mut outcome = Ok(true);
-        let _ = scope.run(Op::Trash, &[name], |scope| {
+        let ran = scope.run(Op::Trash, &[name], |scope| {
             outcome = match scope.quirk(|quirks| quirks.trash) {
                 Trash::Supported => System.trash(path, cancellable),
                 Trash::Unsupported | Trash::Refused => Err(glib::Error::new(
@@ -1618,6 +1644,10 @@ impl FsEnvironment for Scoped {
             };
             Ok(())
         });
+        if let Err(errno) = ran {
+            let code = gio::io_error_from_errno(errno.raw_os_error());
+            return Err(glib::Error::new(code, &errno.to_string()));
+        }
         outcome
     }
 

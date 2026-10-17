@@ -39,6 +39,7 @@ mod deletion;
 mod file_copy;
 mod folder_copy;
 pub(super) mod fs_quirks;
+mod leftovers;
 mod merge;
 mod moves;
 mod naming;
