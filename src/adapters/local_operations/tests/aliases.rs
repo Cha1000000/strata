@@ -638,8 +638,8 @@ fn an_item_from_another_folder_meets_the_original_of_a_duplicate() -> Result<(),
             false,
             [("notes.txt", None), ("notes.txt", meets)],
             vec![
-                ("notes (1).txt", "two"),
-                ("notes (2).txt", "one"),
+                ("notes (1).txt", "one"),
+                ("notes (2).txt", "two"),
                 ("notes.txt", "one"),
             ],
         ),
@@ -745,6 +745,145 @@ fn an_item_from_another_folder_meets_the_original_of_a_duplicate() -> Result<(),
             "{context}"
         );
         assert_eq!(names(&two)?.is_empty(), moving, "{context}");
+    }
+    Ok(())
+}
+
+#[test]
+fn same_named_items_from_three_folders_all_land_whatever_their_order_and_choice()
+-> Result<(), Box<dyn Error>> {
+    use super::super::transfer_targets::transfer_targets;
+    let _serial = serial()?;
+    let (keep_both, replace) = (TransferConflict::KeepBoth, TransferConflict::ReplaceExisting);
+    let three_one_two = [
+        ("notes (1).txt", "three"),
+        ("notes (2).txt", "one"),
+        ("notes (3).txt", "two"),
+        ("notes.txt", "one"),
+    ];
+    // The folders whose notes.txt are pasted into one/, as selected; the choice for the item that
+    // meets one/notes.txt, None skipping it; whether the request lists the items as selected
+    // instead of as the browser does, the ones asked about last; and one/ after the paste.
+    let rows: [(&[&str], Option<TransferConflict>, bool, &[(&str, &str)]); 10] = [
+        (
+            &["two", "three"],
+            Some(keep_both),
+            false,
+            &[
+                ("notes (1).txt", "three"),
+                ("notes (2).txt", "two"),
+                ("notes.txt", "one"),
+            ],
+        ),
+        (&["one", "two", "three"], Some(keep_both), false, &three_one_two),
+        (
+            &["one", "two", "three"],
+            None,
+            false,
+            &[
+                ("notes (1).txt", "three"),
+                ("notes (2).txt", "one"),
+                ("notes.txt", "one"),
+            ],
+        ),
+        (&["two", "three", "one"], Some(keep_both), false, &three_one_two),
+        (
+            &["one", "two", "three"],
+            Some(replace),
+            false,
+            &[
+                ("notes (1).txt", "three"),
+                ("notes (2).txt", "one"),
+                ("notes.txt", "two"),
+            ],
+        ),
+        (&["two", "one", "three"], Some(keep_both), false, &three_one_two),
+        (
+            &["one", "three", "two"],
+            Some(keep_both),
+            false,
+            &[
+                ("notes (1).txt", "two"),
+                ("notes (2).txt", "one"),
+                ("notes (3).txt", "three"),
+                ("notes.txt", "one"),
+            ],
+        ),
+        (
+            &["two", "three"],
+            Some(keep_both),
+            true,
+            &[
+                ("notes (1).txt", "three"),
+                ("notes (2).txt", "two"),
+                ("notes.txt", "one"),
+            ],
+        ),
+        (&["one", "two", "three"], Some(keep_both), true, &three_one_two),
+        (&["two", "three", "one"], Some(keep_both), true, &three_one_two),
+    ];
+    for (selected, choice, as_selected, listed) in rows {
+        let context = format!("{selected:?}, {choice:?}, as selected: {as_selected}");
+        let root = tempfile::tempdir()?;
+        for folder in ["one", "two", "three"] {
+            fs::create_dir(root.path().join(folder))?;
+            fs::write(root.path().join(folder).join("notes.txt"), folder)?;
+        }
+        let one = root.path().join("one");
+        let sources = selected
+            .iter()
+            .map(|folder| Location::local(root.path().join(folder).join("notes.txt")))
+            .collect::<Vec<_>>();
+        let targets = glib::MainContext::default().block_on(transfer_targets(
+            &Location::local(&one),
+            &sources,
+            false,
+            &gio::Cancellable::new(),
+        ))?;
+        let mut items = sources
+            .into_iter()
+            .zip(targets)
+            .filter_map(|(source, target)| {
+                let conflict = match target.collision {
+                    Some(_) => choice?,
+                    None => TransferConflict::FailIfExists,
+                };
+                Some(PasteItem {
+                    source,
+                    conflict,
+                    target_name: target.name,
+                })
+            })
+            .collect::<Vec<_>>();
+        if !as_selected {
+            items.sort_by_key(|item| item.conflict != TransferConflict::FailIfExists);
+        }
+
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let emitted = events.clone();
+        let _operation = LocalOperationProvider.paste(
+            PasteRequest {
+                id: OperationRequestId(1530),
+                destination: Location::local(&one),
+                items,
+                move_sources: false,
+            },
+            Rc::new(move |event| emitted.borrow_mut().push(event)),
+        );
+        drive_until_transfer_settles(&events);
+
+        let held = names(&one)?
+            .into_iter()
+            .map(|name| {
+                let content = fs::read_to_string(one.join(&name))?;
+                Ok((name, content))
+            })
+            .collect::<io::Result<Vec<_>>>()?;
+        let listed = listed
+            .iter()
+            .map(|(name, content)| (name.to_string(), content.to_string()))
+            .collect::<Vec<_>>();
+        assert_eq!(held, listed, "{context}");
     }
     Ok(())
 }

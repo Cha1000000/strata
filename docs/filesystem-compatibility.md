@@ -895,7 +895,9 @@ name are numbered on every destination, the later one in the paste's order, befo
 copied, and reported as names already taken: `notes.txt` from two folders becomes `notes.txt` and
 `notes (1).txt`, also in a move within one filesystem. An item copied into its own folder is
 numbered only as it is copied, so a same-named item from another folder meets the original there
-and is asked about like any other conflict.
+and is asked about like any other conflict. A paste copies the items whose names it planned first,
+then duplicates, then the items a conflict was resolved for, so no item numbered as it is copied
+takes a planned name, and a duplicate is copied before Replace can remove its original.
 The completion report lists every fixed name with the name it was saved as, and says which were
 shortened.
 

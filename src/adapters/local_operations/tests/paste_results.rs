@@ -207,7 +207,7 @@ fn an_item_replaced_without_trash_is_left_out_of_the_paste_undo() -> Result<(), 
             OperationEvent::Merged { .. } | OperationEvent::ItemTrashed { .. }
         )));
         let expected_moves = if move_sources {
-            ["replace.txt", "new.txt"]
+            ["new.txt", "replace.txt"]
                 .map(|name| {
                     (
                         Location::local(sources.join(name)),

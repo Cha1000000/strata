@@ -54,7 +54,6 @@ fn each_transfer_item_keeps_its_own_conflict_decision() -> Result<(), Box<dyn Er
     fs::write(sources.join("late.txt"), b"new late item")?;
     fs::write(destination.join("replace.txt"), b"old replacement")?;
     fs::write(destination.join("late.txt"), b"late arrival")?;
-    let replaced = TrashedOriginal::at_path(&destination.join("replace.txt")).ok_or("identity")?;
 
     let events = Rc::new(RefCell::new(Vec::new()));
     let emitted = events.clone();
@@ -90,31 +89,22 @@ fn each_transfer_item_keeps_its_own_conflict_decision() -> Result<(), Box<dyn Er
         glib::MainContext::default().iteration(true);
     }
 
+    // Items without a conflict go first, so the late arrival stops the paste before Replace.
     assert!(matches!(
         events.borrow().last(),
         Some(OperationEvent::TransferFailed {
             completed_locations,
             ..
-        }) if completed_locations == &[Location::local(sources.join("replace.txt"))]
+        }) if completed_locations.is_empty()
     ));
-    assert_eq!(
-        item_moves(&events.borrow()),
-        [(
-            Location::local(sources.join("replace.txt")),
-            Location::local(destination.join("replace.txt"))
-        )]
-    );
-    assert_eq!(
-        trashed_items(&events.borrow()),
-        [(Location::local(destination.join("replace.txt")), replaced)],
-        "the replaced item went to Trash"
-    );
+    assert!(item_moves(&events.borrow()).is_empty());
+    assert!(trashed_items(&events.borrow()).is_empty());
     assert_eq!(
         fs::read(destination.join("replace.txt"))?,
-        b"new replacement"
+        b"old replacement"
     );
     assert_eq!(fs::read(destination.join("late.txt"))?, b"late arrival");
-    assert!(!sources.join("replace.txt").exists());
+    assert!(sources.join("replace.txt").exists());
     assert!(sources.join("late.txt").exists());
     fs::remove_dir_all(root)?;
     Ok(())

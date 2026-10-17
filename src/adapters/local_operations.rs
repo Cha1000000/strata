@@ -990,6 +990,29 @@ fn duplicates(sources: &[gio::File], destination: &gio::File, moving: bool) -> V
         .collect()
 }
 
+/// Items whose names the plan gives are copied first, then duplicates, then the conflicts the
+/// prompt resolved, so an item numbered as it is copied never takes a planned name and a duplicate
+/// is copied before Replace can remove its original.
+fn in_copy_order(mut request: PasteRequest, destination: &gio::File) -> PasteRequest {
+    let sources = request
+        .items
+        .iter()
+        .map(|item| gio_file_for_location(&item.source))
+        .collect::<Vec<_>>();
+    let duplicate = duplicates(&sources, destination, request.move_sources);
+    let mut ranked = std::mem::take(&mut request.items)
+        .into_iter()
+        .zip(duplicate)
+        .collect::<Vec<_>>();
+    ranked.sort_by_key(|(item, duplicate)| match (*duplicate, item.conflict) {
+        (false, TransferConflict::FailIfExists) => 0,
+        (true, _) => 1,
+        (false, _) => 2,
+    });
+    request.items = ranked.into_iter().map(|(item, _)| item).collect();
+    request
+}
+
 /// A `renamable` item is numbered where an earlier item has its name, and gets the destination's
 /// rules where it is `crossing` too. A `duplicate` keeps its name.
 fn paste_targets(
@@ -2957,6 +2980,7 @@ impl OperationProvider for LocalOperationProvider {
         let operation_cancellable = cancellable.clone();
         let _task = glib::MainContext::default().spawn_local(async move {
             let destination = gio_file_for_location(&request.destination);
+            let request = in_copy_order(request, &destination);
             let mut affected_locations = HashSet::from([request.destination.clone()]);
             for parent in request.items.iter().filter_map(|item| item.source.parent()) {
                 affected_locations.insert(parent);
