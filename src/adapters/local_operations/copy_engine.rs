@@ -2039,6 +2039,15 @@ impl Copy {
         );
     }
 
+    fn settle_state(&self, identity: LocalFileIdentity, stat: &EntryStat) {
+        if let Some((known, state)) =
+            lock(&self.written).get_mut(&(identity.device, identity.inode))
+            && *known == identity
+        {
+            state.settle(stat);
+        }
+    }
+
     /// A copy digested as it was written is compared by content before its
     /// source is deleted, as within a tick another file can take its place.
     fn wrote(&self, identity: LocalFileIdentity, read: &manifest::Read) {
@@ -2070,7 +2079,7 @@ impl Copy {
                     // Times moved by less than the check notices stay, so the
                     // copy is known by them from now on.
                     if same_entry(&current, identity, family) {
-                        self.record_state(identity, &current);
+                        self.settle_state(identity, &current);
                     }
                     false
                 }
@@ -2103,7 +2112,7 @@ impl Copy {
                         if let Ok(settled) = fs.stat(entry, true)
                             && same_entry(&settled, identity, family)
                         {
-                            self.record_state(identity, &settled);
+                            self.settle_state(identity, &settled);
                         }
                         Ok(())
                     }
@@ -2116,7 +2125,7 @@ impl Copy {
         };
         snapshot.apply_times(fs, reopened.as_fd())?;
         // The copy is known by the times it is left with.
-        self.record_state(identity, &fs.stat_fd(reopened.as_fd())?);
+        self.settle_state(identity, &fs.stat_fd(reopened.as_fd())?);
         match fs.close(reopened) {
             Err(error) if is_fatal(error) => Err(error.into()),
             _ => Ok(()),

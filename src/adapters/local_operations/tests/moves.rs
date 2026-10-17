@@ -2049,6 +2049,74 @@ fn a_source_is_deleted_once_its_copy_was_stamped_again_at_close() -> Result<(), 
 }
 
 #[test]
+fn a_copy_replaced_before_its_times_are_settled_keeps_its_source() -> Result<(), Box<dyn Error>> {
+    let _serial = serial()?;
+    // Outside sshfs's 3 s window, so the copy of a recent source is not
+    // compared by content.
+    let fuse_daemon = || Quirks {
+        mount_type: Some(("fuse.rclone", "rw,user_id=1000,group_id=1000")),
+        ..Quirks::sshfs()
+    };
+    // FUSE knows the copy settled after its close by type alone: an old
+    // source's times are set again on what is there, by name where its
+    // owner may neither read nor write it, and a recent one's let stand.
+    let rows: [(&str, Preset, u64, u32); 3] = [
+        ("times set again", Quirks::sshfs, 3600, 0o644),
+        ("times set again by name", Quirks::sshfs, 3600, 0o044),
+        ("times let stand", fuse_daemon, 1, 0o644),
+    ];
+    for (row, preset, age, mode) in rows {
+        let root = tempfile::tempdir()?;
+        let sources = root.path().join("sources");
+        let destination = root.path().join("destination");
+        let source = sources.join("folder");
+        fs::create_dir_all(&source)?;
+        fs::create_dir(&destination)?;
+        let notes = source.join("notes.txt");
+        fs::write(&notes, b"notes")?;
+        let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?;
+        set_times(&notes, now.as_secs() - age, 500_000_000)?;
+        let arrival = root.path().join("arrival");
+        fs::write(&arrival, b"another program's file")?;
+        fs::set_permissions(&arrival, fs::Permissions::from_mode(mode))?;
+        let replaced = Arc::new(AtomicBool::new(false));
+        let replacing = replaced.clone();
+        let staged = destination.clone();
+        let racer: super::fs_quirks::Racer = Box::new(move || {
+            for entry in fs::read_dir(&staged).expect("list the destination") {
+                let copy = entry.expect("an entry").path().join("notes.txt");
+                if copy.exists() {
+                    fs::rename(&arrival, &copy).expect("replace the copy");
+                    replacing.store(true, Ordering::Release);
+                    return;
+                }
+            }
+        });
+        let _sources = FsQuirks::install(&sources, Quirks::ext4());
+        let _destination = FsQuirks::install(
+            &destination,
+            Quirks {
+                after: vec![(Op::Close, "notes.txt", 0, racer)],
+                ..preset()
+            },
+        );
+
+        let (_operation, events) =
+            paste_move(98, &destination, &source, TransferConflict::FailIfExists);
+        pump_until_transfer(&events);
+
+        assert!(replaced.load(Ordering::Acquire), "{row}");
+        assert_eq!(fs::read(&notes).ok(), Some(b"notes".to_vec()), "{row}");
+        assert_eq!(
+            reported(&events).kept,
+            [kept(source, KeptCause::CopyGone)],
+            "{row}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn a_special_file_move_keeps_its_source_without_proven_published_ownership()
 -> Result<(), Box<dyn Error>> {
     let _serial = serial()?;

@@ -386,6 +386,14 @@ impl State {
     fn holds(&self, stat: &EntryStat) -> bool {
         self.size == stat.size && self.mtime == stat.mtime
     }
+
+    /// Where only the type tells the copy, a file of another size put in its
+    /// place keeps the state the copy was written with.
+    pub(super) fn settle(&mut self, stat: &EntryStat) {
+        if self.size == stat.size {
+            self.mtime = stat.mtime;
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
