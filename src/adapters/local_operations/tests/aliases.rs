@@ -618,45 +618,38 @@ fn an_item_from_another_folder_meets_the_original_of_a_duplicate() -> Result<(),
     let meets = Some(Collision { mergeable: false });
     // The mount, the original's name, whether two/'s item comes first, whether it is moved, what
     // the prompt shows for one/'s and two/'s items, and one/ once two/'s is kept beside it.
-    let rows: [(
-        Preset,
-        &str,
-        bool,
-        bool,
-        [(&str, Option<Collision>); 2],
-        &[(&str, &str)],
-    ); 4] = [
+    let rows = [
         (
-            Quirks::ext4,
+            Quirks::ext4(),
             "notes.txt",
             false,
             false,
             [("notes.txt", None), ("notes.txt", meets)],
-            &[
+            vec![
                 ("notes (1).txt", "one"),
                 ("notes (2).txt", "two"),
                 ("notes.txt", "one"),
             ],
         ),
         (
-            Quirks::ext4,
+            Quirks::ext4(),
             "notes.txt",
             true,
             false,
             [("notes.txt", None), ("notes.txt", meets)],
-            &[
+            vec![
                 ("notes (1).txt", "two"),
                 ("notes (2).txt", "one"),
                 ("notes.txt", "one"),
             ],
         ),
         (
-            Quirks::vfat,
+            Quirks::vfat(),
             "NOTES.TXT",
             false,
             false,
             [("NOTES.TXT", None), ("notes.txt", meets)],
-            &[
+            vec![
                 ("NOTES (1).TXT", "one"),
                 ("NOTES.TXT", "one"),
                 ("notes (2).txt", "two"),
@@ -664,15 +657,15 @@ fn an_item_from_another_folder_meets_the_original_of_a_duplicate() -> Result<(),
         ),
         // A moved item stays where it is and keeps its name.
         (
-            Quirks::ext4,
+            Quirks::ext4(),
             "notes.txt",
             false,
             true,
             [("notes.txt", None), ("notes (1).txt", None)],
-            &[("notes (1).txt", "two"), ("notes.txt", "one")],
+            vec![("notes (1).txt", "two"), ("notes.txt", "one")],
         ),
     ];
-    for (preset, original, two_first, moving, shown, listed) in rows {
+    for (quirks, original, two_first, moving, shown, listed) in rows {
         let context = format!("{original}, two first: {two_first}, moving: {moving}");
         let root = tempfile::tempdir()?;
         let (one, two) = (root.path().join("one"), root.path().join("two"));
@@ -680,7 +673,7 @@ fn an_item_from_another_folder_meets_the_original_of_a_duplicate() -> Result<(),
         fs::create_dir(&two)?;
         fs::write(one.join(original), "one")?;
         fs::write(two.join("notes.txt"), "two")?;
-        let _scope = FsQuirks::install(root.path(), preset());
+        let _scope = FsQuirks::install(root.path(), quirks);
         let mut sources = vec![
             Location::local(one.join(original)),
             Location::local(two.join("notes.txt")),
@@ -729,11 +722,14 @@ fn an_item_from_another_folder_meets_the_original_of_a_duplicate() -> Result<(),
 
         let held = names(&one)?
             .into_iter()
-            .map(|name| Ok((fs::read_to_string(one.join(&name))?, name)))
+            .map(|name| {
+                let content = fs::read_to_string(one.join(&name))?;
+                Ok((name, content))
+            })
             .collect::<io::Result<Vec<_>>>()?;
         let listed = listed
-            .iter()
-            .map(|(name, content)| (content.to_string(), name.to_string()))
+            .into_iter()
+            .map(|(name, content)| (name.to_owned(), content.to_owned()))
             .collect::<Vec<_>>();
         assert_eq!(held, listed, "{context}");
         let numbered = moving.then(|| {
