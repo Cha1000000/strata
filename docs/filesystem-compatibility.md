@@ -305,7 +305,7 @@ copy whose source still exists, and is safe to delete; nothing removes it automa
 | Step | When | Gives way to the next step |
 | --- | --- | --- |
 | `FICLONE`, one call | the file is not empty and the destination has not refused clones; on SMB only on kernels with the client's December 2023 fixes | on the errnos that mean it did nothing; `EOPNOTSUPP` and `ENOTTY` are remembered for the mount |
-| `copy_file_range`, in chunks | the file reports a size, and both ends are on one device, or in one network family (NFS, SMB or FUSE) on a kernel with that family's fixes: NFS from 5.9, FUSE from 5.8, SMB from 6.7, 6.6.7 or 6.1.73 | on the errnos that mean "unsupported", from the current offset; `ENOSYS` is remembered for the process |
+| `copy_file_range`, in chunks | the file reports a size, and both ends are on one device, or in one network family (NFS, SMB or FUSE) on a kernel with that family's fixes: NFS from 5.9, FUSE from 5.8, SMB from 6.7, 6.6.7 or 6.1.73 | on the errnos that mean "unsupported", from the current offset; `ENOSYS` is remembered for the mount |
 | `pread` and `pwrite` | always | — |
 
 - Chunks start at 1 MiB, double while a call takes under 100 ms, up to 64 MiB, and halve when one

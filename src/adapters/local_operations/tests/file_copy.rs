@@ -304,6 +304,117 @@ fn a_folder_removed_before_the_link_leaves_tmpfiles_in_use() -> Result<(), Box<d
 }
 
 #[test]
+fn what_a_mount_learns_of_its_copy_support_stays_with_that_mount() -> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock()?;
+    for (case, learner, learned) in [
+        (
+            "AT_EMPTY_PATH refused",
+            (|| Quirks {
+                tmpfile_link: TmpfileLink::ProcOnly,
+                ..Quirks::default()
+            }) as Preset,
+            [(Op::OpenTmpfile, 1), (Op::LinkFd, 1)],
+        ),
+        (
+            "no form of link",
+            || Quirks {
+                tmpfile_link: TmpfileLink::Unavailable,
+                ..Quirks::default()
+            },
+            [(Op::OpenTmpfile, 0), (Op::LinkFd, 0)],
+        ),
+        (
+            "copy_file_range missing",
+            || Quirks {
+                fail: vec![(Op::CopyRange, "*", 0, Errno::NOSYS)],
+                ..Quirks::default()
+            },
+            [(Op::CopyRange, 0), (Op::LinkFd, 1)],
+        ),
+    ] {
+        let without_clones = |quirks: Quirks| Quirks {
+            reflink: Support::Rejected(Errno::OPNOTSUPP),
+            ..quirks
+        };
+        let (learning, bystanding) = (tempfile::tempdir()?, tempfile::tempdir()?);
+        let learner_scope = FsQuirks::install(learning.path(), without_clones(learner()));
+        let bystander_scope =
+            FsQuirks::install(bystanding.path(), without_clones(Quirks::default()));
+        for folder in [learning.path(), bystanding.path()] {
+            fs::write(folder.join("source.bin"), b"contents")?;
+        }
+        copy(
+            &learning.path().join("source.bin"),
+            &learning.path().join("first.bin"),
+        )?;
+        copy(
+            &bystanding.path().join("source.bin"),
+            &bystanding.path().join("target.bin"),
+        )?;
+        learner_scope.clear_calls();
+        drop(FsQuirks::install(
+            tempfile::tempdir()?.path(),
+            Quirks::default(),
+        ));
+        copy(
+            &learning.path().join("source.bin"),
+            &learning.path().join("second.bin"),
+        )?;
+
+        for (op, count) in learned {
+            assert_eq!(learner_scope.count(op), count, "{case}: {op:?}");
+        }
+        assert_eq!(bystander_scope.count(Op::OpenTmpfile), 1, "{case}");
+        assert_eq!(bystander_scope.count(Op::LinkFd), 1, "{case}");
+        assert!(bystander_scope.count(Op::CopyRange) > 0, "{case}");
+        assert!(!bystander_scope.used_name(".strata-copy-*"), "{case}");
+        assert_eq!(fs::read(learning.path().join("second.bin"))?, b"contents");
+        assert_eq!(fs::read(bystanding.path().join("target.bin"))?, b"contents");
+    }
+    Ok(())
+}
+
+#[test]
+fn a_mount_found_unable_to_link_tmpfiles_stays_so_while_another_copy_opens_one()
+-> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock()?;
+    let folder = tempfile::tempdir()?;
+    let source = folder.path().join("source.bin");
+    fs::write(&source, b"contents")?;
+    let alongside = |name: &str| -> Racer {
+        let (source, target) = (source.clone(), folder.path().join(name));
+        Box::new(move || {
+            glib::MainContext::new()
+                .block_on(copy_new_recursively(
+                    gio::File::for_path(&source),
+                    gio::File::for_path(&target),
+                    gio::Cancellable::new(),
+                ))
+                .expect("the copy alongside");
+        })
+    };
+    let scope = FsQuirks::install(
+        folder.path(),
+        Quirks {
+            tmpfile_link: TmpfileLink::Unavailable,
+            before: vec![
+                (Op::OpenTmpfile, "*", 0, alongside("first.bin")),
+                (Op::LinkFd, "second.bin", 0, alongside("third.bin")),
+            ],
+            ..Quirks::default()
+        },
+    );
+
+    copy(&source, &folder.path().join("second.bin"))?;
+
+    assert_eq!(scope.count(Op::OpenTmpfile), 2);
+    for name in ["first.bin", "second.bin", "third.bin"] {
+        assert_eq!(fs::read(folder.path().join(name))?, b"contents", "{name}");
+    }
+    Ok(())
+}
+
+#[test]
 fn running_out_of_space_leaves_nothing_behind() -> Result<(), Box<dyn Error>> {
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock()?;
     for (case, preset) in [

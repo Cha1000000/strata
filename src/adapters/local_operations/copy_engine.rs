@@ -22,7 +22,7 @@ use std::{
     rc::Rc,
     sync::{
         Arc, Condvar, Mutex, MutexGuard,
-        atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
     thread,
     time::Duration,
@@ -1660,47 +1660,42 @@ impl Mount {
     }
 }
 
-const TMPFILE_LINK_UNKNOWN: u8 = 0;
-const TMPFILE_LINK_EMPTY_PATH: u8 = 1;
-const TMPFILE_LINK_PROC: u8 = 2;
-const TMPFILE_LINK_UNAVAILABLE: u8 = 3;
-
-/// How this process links unnamed files: `AT_EMPTY_PATH` needs Linux 6.10
-/// unprivileged, and the `/proc` form needs `/proc`.
-static TMPFILE_LINK: AtomicU8 = AtomicU8::new(TMPFILE_LINK_UNKNOWN);
-
-#[cfg(test)]
-pub(super) fn forget_learned_copy_support() {
-    TMPFILE_LINK.store(TMPFILE_LINK_UNKNOWN, Ordering::Relaxed);
-    data::forget_learned();
-}
-
-fn link_tmpfile(fs: &dyn FsOps, fd: BorrowedFd<'_>, to: Entry<'_>) -> Result<(), Errno> {
-    let known = TMPFILE_LINK.load(Ordering::Relaxed);
-    if known != TMPFILE_LINK_PROC {
+fn link_tmpfile(
+    fs: &dyn FsOps,
+    mount: &Mount,
+    fd: BorrowedFd<'_>,
+    to: Entry<'_>,
+) -> Result<(), Errno> {
+    let through_proc = mount.capabilities().tmpfile_link_through_proc;
+    if through_proc != Some(true) {
         match fs.link_fd(fd, to, false) {
             Ok(()) => {
-                TMPFILE_LINK.store(TMPFILE_LINK_EMPTY_PATH, Ordering::Relaxed);
+                if through_proc.is_none() {
+                    mount
+                        .learn(|capabilities| capabilities.tmpfile_link_through_proc = Some(false));
+                }
                 return Ok(());
             }
             // Once the plain form has worked, ENOENT is about the folder.
-            Err(Errno::NOENT) if known == TMPFILE_LINK_UNKNOWN => {}
+            Err(Errno::NOENT) if through_proc.is_none() => {}
             Err(error) => return Err(error),
         }
     }
     match fs.link_fd(fd, to, true) {
         Ok(()) => {
-            TMPFILE_LINK.store(TMPFILE_LINK_PROC, Ordering::Relaxed);
+            if through_proc.is_none() {
+                mount.learn(|capabilities| capabilities.tmpfile_link_through_proc = Some(true));
+            }
             Ok(())
         }
         // Unless the folder itself was removed meanwhile, or the mount may
         // refuse the name, as SMB and exfat-fuse do with `ENOENT`.
         Err(Errno::NOENT)
-            if known == TMPFILE_LINK_UNKNOWN
+            if through_proc.is_none()
                 && !may_be_refused(to.name)
                 && fs.stat_fd(to.dir).is_ok_and(|folder| folder.nlink > 0) =>
         {
-            TMPFILE_LINK.store(TMPFILE_LINK_UNAVAILABLE, Ordering::Relaxed);
+            mount.learn(|capabilities| capabilities.tmpfile = Some(false));
             Err(Errno::NOENT)
         }
         Err(error) => Err(error),
@@ -2432,12 +2427,12 @@ impl<'a> FileCopy<'a> {
         let mut tmpfile = None;
         if stage::tmpfile_allowed(self.target.family)
             && self.target.capabilities().tmpfile != Some(false)
-            && TMPFILE_LINK.load(Ordering::Relaxed) != TMPFILE_LINK_UNAVAILABLE
         {
             match fs.open_tmpfile(self.dir, Mode::from_raw_mode(0o600)) {
                 Ok(fd) => {
-                    self.target
-                        .learn(|capabilities| capabilities.tmpfile = Some(true));
+                    self.target.learn(|capabilities| {
+                        capabilities.tmpfile.get_or_insert(true);
+                    });
                     tmpfile = Some(fd);
                 }
                 // Before Linux 3.11 the flag reads as O_DIRECTORY.
@@ -2504,7 +2499,7 @@ impl<'a> FileCopy<'a> {
             FileTarget::Final(name, taken) => {
                 first_free(self.copy, self.dir, (name, taken, false), |name| {
                     let to = self.at(name);
-                    link_tmpfile(fs, tmpfile, to).map_err(|error| {
+                    link_tmpfile(fs, &self.target, tmpfile, to).map_err(|error| {
                         match placement::file_creation_error(error) {
                             PlaceError::Exists => Failure::Place(PlaceError::Exists),
                             _ => creation_failure(fs, to, error),
@@ -2518,7 +2513,7 @@ impl<'a> FileCopy<'a> {
                 })
             }
             FileTarget::Hidden => placement::reserve_hidden_name(HiddenName::Replacement, |name| {
-                link_tmpfile(fs, tmpfile, self.at(name)).map_err(|error| {
+                link_tmpfile(fs, &self.target, tmpfile, self.at(name)).map_err(|error| {
                     match placement::file_creation_error(error) {
                         PlaceError::Exists => PlaceError::Exists,
                         _ => PlaceError::Io(error),

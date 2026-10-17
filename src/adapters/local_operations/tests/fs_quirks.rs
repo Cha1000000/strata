@@ -27,7 +27,7 @@ use rustix::{
     io::Errno,
 };
 
-use super::super::copy_engine::{clock_for_test, forget_learned_copy_support};
+use super::super::copy_engine::clock_for_test;
 use super::super::environment::FsEnvironment;
 use super::super::fs_ops::{Entry, EntryStat, FsOps, FsStat, System, assert_off_main_thread};
 use crate::adapters::volume::{MountKey, MountSite, MountType, forget_test_mount_capabilities};
@@ -793,7 +793,6 @@ impl FsQuirks {
             }),
         });
         scopes().push(scope.clone());
-        forget_learned_copy_support();
         Self { scope }
     }
 
@@ -847,7 +846,6 @@ impl Drop for FsQuirks {
     fn drop(&mut self) {
         scopes().retain(|scope| !Arc::ptr_eq(scope, &self.scope));
         forget_test_mount_capabilities(self.scope.id);
-        forget_learned_copy_support();
     }
 }
 
