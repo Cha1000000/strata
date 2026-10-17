@@ -48,18 +48,13 @@ pub(super) fn names_never_collide(family: Family) -> bool {
 
 /// Which of a folder's names a filesystem that compares names loosely may
 /// take for another of them. Every name is, where one cannot be folded or
-/// looks like a FAT short name (`PROGRA~1`), which may alias any long name.
+/// is shaped like a short name (`PROGRA~1`), which may alias any long name.
 pub(super) fn colliding(names: &[&OsStr]) -> Vec<bool> {
-    let short_name = |name: &&OsStr| {
-        name.as_encoded_bytes()
-            .windows(2)
-            .any(|pair| pair[0] == b'~' && pair[1].is_ascii_digit())
-    };
     let keys = names
         .iter()
         .map(|name| fold(name))
         .collect::<Option<Vec<_>>>();
-    let Some(keys) = keys.filter(|_| !names.iter().any(short_name)) else {
+    let Some(keys) = keys.filter(|_| !names.iter().any(|name| short_name(name))) else {
         return vec![true; names.len()];
     };
     let mut counts = HashMap::<&str, usize>::new();
@@ -67,6 +62,28 @@ pub(super) fn colliding(names: &[&OsStr]) -> Vec<bool> {
         *counts.entry(key).or_default() += 1;
     }
     keys.iter().map(|key| counts[key.as_str()] > 1).collect()
+}
+
+/// `BASE~N` of at most eight characters, then at most three of extension:
+/// the only shape FAT and Windows generate for a long name, in any case.
+fn short_name(name: &OsStr) -> bool {
+    let name = name.as_encoded_bytes();
+    let (base, extension) = match name.iter().position(|&byte| byte == b'.') {
+        Some(dot) => (&name[..dot], &name[dot + 1..]),
+        None => (name, &name[name.len()..]),
+    };
+    let numbered = base
+        .iter()
+        .rposition(|&byte| byte == b'~')
+        .is_some_and(|tilde| {
+            tilde > 0 && tilde + 1 < base.len() && base[tilde + 1..].iter().all(u8::is_ascii_digit)
+        });
+    numbered
+        && name.is_ascii()
+        && !name.contains(&b' ')
+        && base.len() <= 8
+        && extension.len() <= 3
+        && !extension.contains(&b'.')
 }
 
 pub(in crate::adapters::local_operations) fn collision_key(name: &OsStr) -> OsString {

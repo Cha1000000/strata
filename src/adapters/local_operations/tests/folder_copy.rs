@@ -304,6 +304,12 @@ fn only_names_that_may_collide_are_claimed() -> Result<(), Box<dyn Error>> {
             &["PROGRA~1", "Program Files"],
             &["PROGRA~1", "Program Files"],
         ),
+        (&["notes~2.txt", "other.txt"], &["notes~2.txt", "other.txt"]),
+        // A `~N` outside the short-name shape stands for nothing.
+        (
+            &["Report v2~1 (draft).pdf", "foo~1bar.tar.gz", "data.bin"],
+            &[],
+        ),
     ] {
         let mounts = mounts(Quirks::nfs3())?;
         let source = mounts.sources.join("source");
