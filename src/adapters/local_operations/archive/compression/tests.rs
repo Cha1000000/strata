@@ -43,6 +43,7 @@ struct HeldWriter {
     held: Arc<AtomicBool>,
     released: Arc<AtomicBool>,
     ended: Arc<AtomicBool>,
+    spawned: std::cell::Cell<bool>,
 }
 
 impl HeldWriter {
@@ -67,6 +68,7 @@ impl HeldWriter {
         compression: impl Future<Output = T> + 'static,
     ) -> glib::JoinHandle<T> {
         let ended = self.ended.clone();
+        self.spawned.set(true);
         glib::MainContext::default().spawn_local(async move {
             let compressed = compression.await;
             ended.store(true, Ordering::Release);
@@ -105,6 +107,15 @@ impl HeldWriter {
 impl Drop for HeldWriter {
     fn drop(&mut self) {
         self.release();
+        // The spawned task belongs to this thread: run it to its end here, or the
+        // next test to iterate the default context finalizes it on another thread.
+        let context = glib::MainContext::default();
+        let deadline = Instant::now() + HOLD_LIMIT;
+        while self.spawned.get() && !self.ended.load(Ordering::Acquire) && Instant::now() < deadline
+        {
+            context.iteration(false);
+            std::thread::yield_now();
+        }
     }
 }
 
