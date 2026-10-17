@@ -735,11 +735,13 @@ reported.
   (sshfs, exfat-fuse, ntfs-3g), a different file with the same type, size and times put at a source
   name passes for the original, unless it is racily clean and compared. The same goes for a move's
   copy on such a destination before its sources are deleted: a different file or link of its type,
-  size and modification time, as another copy of the source would have, passes for it. A copy
-  recognises its own entries by inode number, and on FUSE its claimed files by type and size. Where
-  the kernel can renumber an evicted entry (FUSE, vfat, exFAT, cifs with `noserverino`), a
-  renumbered entry stops the copy as changed; nothing is deleted, and its hidden stage can be left
-  behind.
+  size and modification time, as another copy of the source would have, passes for it. On kernel
+  exFAT and vfat, whose birth times count in 10 ms ticks, a copy replaced within its birth time's
+  tick by a file of its size and modification time passes as well, and the move deletes its source.
+  A copy recognises its own entries by inode number, and on FUSE its claimed files by type and
+  size. Where the kernel can renumber an evicted entry (FUSE, vfat, exFAT, cifs with
+  `noserverino`), a renumbered entry stops the copy as changed; nothing is deleted, and its hidden
+  stage can be left behind.
 - **Modes that cannot be stored.** On vfat, exFAT, exfat-fuse, ntfs-3g and SMB without POSIX
   extensions, the mount options decide modes, and nothing reports what was lost. On SMB with POSIX
   extensions, a file opened right after `chmod 0444` reports 0755, so any copier copies 0755.
