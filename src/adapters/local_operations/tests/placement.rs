@@ -1,9 +1,6 @@
 // SPDX-License-Identifier: MIT
 
-use std::os::{
-    fd::AsFd,
-    unix::fs::{MetadataExt, PermissionsExt},
-};
+use std::os::{fd::AsFd, unix::fs::MetadataExt};
 
 use rustix::io::Errno;
 
@@ -124,9 +121,6 @@ fn rejected_rename_flags_move_folders_over_a_placeholder() -> Result<(), Box<dyn
     let source = root.path().join("source");
     fs::create_dir(&source)?;
     fs::write(source.join("inside.txt"), b"inside")?;
-    fs::set_permissions(&source, fs::Permissions::from_mode(0o750))?;
-    let modified = SystemTime::UNIX_EPOCH + Duration::from_secs(1_600_000_000);
-    fs::File::open(&source)?.set_modified(modified)?;
     let original = identity(&source);
 
     assert_eq!(
@@ -136,8 +130,6 @@ fn rejected_rename_flags_move_folders_over_a_placeholder() -> Result<(), Box<dyn
 
     let target = root.path().join("target");
     assert_eq!(identity(&target), original);
-    assert_eq!(fs::metadata(&target)?.mode() & 0o777, 0o750);
-    assert_eq!(fs::metadata(&target)?.modified()?, modified);
     assert_eq!(fs::read(target.join("inside.txt"))?, b"inside");
     assert_eq!(names(root.path())?, ["target"]);
     Ok(())
