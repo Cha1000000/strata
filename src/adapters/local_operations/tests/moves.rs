@@ -2370,8 +2370,12 @@ fn copies_a_mount_numbers_afresh_are_known_by_type_birth_time_size_and_time()
                 set_times(file, hour_before.as_secs() - 3600, 0)?;
             }
         }
-        if matches!(change, Change::ReplacedAlike) {
-            wait_for_a_later_birth_time(&root.path().join("probe"), &fs::metadata(&arrival)?);
+        // What replaces the copy must be born in a later tick than what it stands in for.
+        let probe = root.path().join("probe");
+        match change {
+            Change::ReplacedAlike => wait_for_a_later_birth_time(&probe, &fs::metadata(&arrival)?),
+            Change::FolderReplaced => wait_for_a_later_birth_time(&probe, &fs::metadata(&copy)?),
+            _ => {}
         }
         let copied_notes = if item == "folder" {
             copy.join("notes.txt")
