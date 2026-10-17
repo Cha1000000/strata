@@ -33,8 +33,8 @@ Strata publishes the folder:
   without its extension, such as `photos/` for `photos.zip`. If that name is
   taken, the folder becomes `photos (1)/`, `photos (2)/` and so on. Entries
   inside the folder keep the archive's names, even when the destination
-  already has an entry with the same name; only duplicates within the archive
-  are renamed.
+  already has an entry with the same name; only duplicates within the archive,
+  and names the destination cannot store (below), are renamed.
 - If extraction fails or is cancelled after writing a file, everything written
   so far stays in the archive-named folder, even if it is a single entry. The
   error message ends with ``Extracted entries remain in `<folder>`.``, and the
@@ -50,10 +50,33 @@ Strata publishes the folder:
   other, with the reason and the folder that keeps the output, and no password
   prompt opens.
 
-Publication never replaces an existing entry. If the filesystem lacks atomic
-no-replace directory renames, folder publication fails and the error names the
-hidden staging folder holding the output. Single files can use a no-clobber
-hard-link/unlink fallback when supported.
+Member names follow the rules of the destination's mount, as the names a copy
+brings there do (see [Names](filesystem-compatibility.md#names)):
+characters it cannot store become `_`, trailing dots and spaces are dropped,
+device names Windows reserves get `_`, and names too long for it are shortened.
+So does the name of the folder named after the archive. A member whose name the
+destination still refuses, a symbolic link included, is made under stricter
+rules, as a copy is, and reported with the name it took. A member gets the next
+number where an earlier member with another name took its name, or where the
+destination takes its name for another's, so `10_00/` after `10:00/` on a USB
+stick becomes `10_00 (2)/`, and different folders of the archive never merge.
+Numbers follow archive order, and each member lands in the folder its own folder
+became. The completion report lists every name the destination changed, with the
+name it was saved as, and every symbolic link left out, where the extraction left them;
+after a failure or cancellation, it lists those inside the folder that keeps the
+output.
+
+Publication never replaces an existing entry. Where the filesystem lacks
+atomic no-replace renames, a file is published through a hard link and a
+folder is moved whole over an empty placeholder Strata has just created. Where
+a file cannot be hard-linked, as on sshfs and vboxsf, it is renamed over an
+empty file Strata has just created and checked, and where hard links are
+unusable, a folder that cannot be moved over a placeholder is renamed once its
+name is found free, as is a folder whose name ntfs-3g would cut.
+That step has one narrow window, described in
+[The reserved-name step and its risk](filesystem-compatibility.md#the-reserved-name-step-and-its-risk).
+Where none of these can place an entry, the error says so and names the hidden
+staging folder holding the output.
 
 Partial output from any other failed attempt stays in its own folder, so a
 retry never merges into it. An archive with several top-level entries is
@@ -73,13 +96,13 @@ kept as described above, but their contents are unverified.
 Symbolic links are recreated with their stored targets, including absolute
 targets and targets outside the archive, and are never followed by later
 members: a member under a link name fails instead of writing through the link.
-TAR names and hard-link targets retain their native bytes. Hard links become
-links to the member of that name extracted earlier from the same archive,
-following any conflict rename. A hard link to a member that
-was not extracted, or that appears later, fails the extraction. FIFOs and
-device nodes are refused. An existing symlink at a member's name, such as an
-earlier link member with the same name, is skipped like a file: the member is
-renamed to `name (2)`.
+TAR names and hard-link targets retain their native bytes where the destination
+stores them. Hard links become links to the member of that name extracted
+earlier from the same archive, following any conflict rename or fixed name. A
+hard link to a member that was not extracted, or that appears later, fails the
+extraction. FIFOs and device nodes are refused. An existing symlink at a
+member's name, such as an earlier link member with the same name, is skipped
+like a file: the member is renamed to `name (2)`.
 
 Each member gets its stored permission bits, masked by the umask, with setuid,
 setgid and sticky bits removed, and its stored modification time. ZIP times
@@ -95,9 +118,13 @@ restored. RAR archives restore permissions and times, but their link members
 still extract as regular files.
 
 On filesystems that cannot store Unix permissions or times, such as FAT and
-exFAT, those are skipped without an error, as `tar` and `unzip` do. Links
-cannot be skipped: an archive with links fails there, naming the member, and
-keeps the output written so far.
+exFAT, those are skipped without an error, as `tar` and `unzip` do. Symbolic
+links the destination cannot hold are left out and reported, as a copy leaves
+them out (see [Symbolic links the destination cannot
+hold](filesystem-compatibility.md#symbolic-links-the-destination-cannot-hold)),
+and so is a hard link to one; the extraction goes on. A symbolic link's own time
+is best effort, and is never set on FUSE mounts, where daemons such as sshfs
+apply it to the target.
 
 ## Extraction targets
 
@@ -145,7 +172,9 @@ bytes, including any already-compressed members. The all-compressed fast path
 still emits a valid gzip header, DEFLATE stream, checksum and trailer, not raw
 TAR or concatenated per-file gzip streams. It trades a little size overhead,
 including uncompressed TAR metadata/padding, for avoiding recompression. TAR
-retains its existing sparse-file and symlink handling. Choose ZIP or 7Z when
+retains its existing symlink handling but stores sparse files in full, because
+the tar crate's sparse detection takes a file that reports no allocated blocks,
+such as a small file on ntfs3, for one made only of holes. Choose ZIP or 7Z when
 per-member compression selection matters for mixed inputs.
 
 ## Classification and limits
@@ -175,13 +204,33 @@ attribute.
 
 ## Existing archive names
 
+An archive name that the destination would store as another name is refused
+before anything is written, as other [names the user
+types](filesystem-compatibility.md#names-the-user-types) are.
+
 When the requested archive already exists, the creation prompt offers Cancel,
 Keep Both, and Replace. Keep Both publishes the next available numbered name,
 such as `archive (1).zip` or `archive (1).tar.gz`, and selects that new archive.
 It skips existing files, directories, and symlinks, including names that appear
-while encoding is running. The completed staging file is retried atomically at
-publication; the sources are not compressed again for each collision. Replace
-retains its existing overwrite behavior.
+while encoding is running. The completed staging file is retried at each name
+at publication, never replacing anything apart from the narrow window of the
+[reserved-name step](filesystem-compatibility.md#the-reserved-name-step-and-its-risk);
+the sources are not compressed again for each collision.
+
+Replace moves the existing archive to Trash where the location supports it,
+and Undo restores it. Elsewhere, the original is swapped out atomically on
+filesystems known to support that, or moved to a hidden sibling, and it is
+deleted only after the new archive is in place and
+[flushed to the drive](filesystem-compatibility.md#durability). Such a
+replacement has no Undo, because the original no longer exists.
+If none of these is safe at the location, or the existing archive is replaced
+by another item while the new one is encoded, nothing is replaced; the refusal
+comes before encoding when possible.
+
+On filesystems without no-replace renames where a file cannot be hard-linked,
+such as sshfs and vboxsf, the new archive and a set-aside original are placed
+with the
+[reserved-name step](filesystem-compatibility.md#the-reserved-name-step-and-its-risk).
 
 ## Feedback and cancellation
 

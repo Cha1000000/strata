@@ -132,7 +132,6 @@ fn isolated_trash_supports_read_copy_move_restore_and_delete() {
             gio::File::for_path(&copied),
             false,
             gio::Cancellable::new(),
-            None,
         ))
         .expect("recursive copy out of Trash");
     assert_eq!(
@@ -144,8 +143,10 @@ fn isolated_trash_supports_read_copy_move_restore_and_delete() {
             .block_on(move_local(
                 child.clone(),
                 gio::File::for_path(home.join("child.txt")),
+                Taken::Fail,
                 gio::Cancellable::new(),
-                None
+                None,
+                NamePolicy::default(),
             ))
             .is_err()
     );
@@ -154,8 +155,10 @@ fn isolated_trash_supports_read_copy_move_restore_and_delete() {
         .block_on(move_local(
             trash.clone(),
             gio::File::for_path(&moved),
+            Taken::Fail,
             gio::Cancellable::new(),
             None,
+            NamePolicy::default(),
         ))
         .expect("move whole item out of Trash");
     assert_eq!(

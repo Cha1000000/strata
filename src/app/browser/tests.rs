@@ -601,11 +601,13 @@ type UndoMergeRecord = (
     Vec<Location>,
     Vec<Location>,
     HashMap<Location, TrashedOriginal>,
+    HashMap<Location, crate::services::PlacedSnapshot>,
 );
 
 thread_local! {
     static UNDO_MOVE_REQUESTS: RefCell<Vec<Vec<MoveRecord>>> = const { RefCell::new(Vec::new()) };
     static UNDO_MOVE_CLEANUPS: RefCell<Vec<Vec<Location>>> = const { RefCell::new(Vec::new()) };
+    static UNDO_MOVE_NAMES: RefCell<Vec<NameMode>> = const { RefCell::new(Vec::new()) };
     static UNDO_COPY_REQUESTS: RefCell<Vec<Vec<Location>>> = const { RefCell::new(Vec::new()) };
     static UNDO_MERGE_REQUESTS: RefCell<Vec<UndoMergeRecord>> =
         const { RefCell::new(Vec::new()) };
@@ -714,6 +716,7 @@ impl OperationProvider for ImmediateOperationProvider {
     }
 
     fn undo_move(&self, request: UndoMoveRequest, emit: Rc<dyn Fn(OperationEvent)>) -> LoadHandle {
+        UNDO_MOVE_NAMES.with(|names| names.borrow_mut().push(request.names));
         UNDO_MOVE_CLEANUPS.with(|requests| {
             requests
                 .borrow_mut()
@@ -782,6 +785,7 @@ impl OperationProvider for ImmediateOperationProvider {
                 request.created.clone(),
                 request.overwritten.clone(),
                 request.originals.clone(),
+                request.placed.clone(),
             ));
         });
         emit(OperationEvent::Restored {
@@ -830,6 +834,7 @@ impl OperationProvider for ImmediateOperationProvider {
             archive_name: request.archive_name,
             archive,
             original: None,
+            placed: None,
         });
         LoadHandle::new(|| {})
     }
@@ -1091,6 +1096,7 @@ struct ScriptedSource {
     missing: RefCell<HashSet<Location>>,
     unreachable: RefCell<HashSet<Location>>,
     identities: FolderIdentities,
+    watched: bool,
 }
 
 impl ScriptedSource {
@@ -1106,6 +1112,7 @@ impl ScriptedSource {
             missing: RefCell::new(HashSet::new()),
             unreachable: RefCell::new(HashSet::new()),
             identities: FolderIdentities::default(),
+            watched: false,
         }
     }
 
@@ -1295,7 +1302,7 @@ impl FileSource for ScriptedSource {
         _include_hidden: bool,
         _notify: Rc<dyn Fn(DirectoryChange)>,
     ) -> Option<LoadHandle> {
-        None
+        self.watched.then(|| LoadHandle::new(|| {}))
     }
 }
 

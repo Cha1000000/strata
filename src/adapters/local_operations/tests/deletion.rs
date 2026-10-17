@@ -1,26 +1,59 @@
+use super::fs_quirks::{Op, Trash};
 use super::*;
 use crate::adapters::local_operations::{
-    LocalDeleteJob, LocalDeleteQueue, LocalDeleteRoot, parallel_delete_local_blocking_with_workers,
+    LocalDeleteJob, LocalDeleteQueue, PinnedEntry, parallel_delete_local_blocking_with_workers,
     parallel_delete_local_with, process_local_delete_job, retry_local_open,
     run_local_delete_workers,
 };
 use std::sync::{Barrier, atomic::Ordering, mpsc};
 
-fn delete_root(path: &Path) -> Result<LocalDeleteRoot, Box<dyn Error>> {
-    Ok(LocalDeleteRoot {
+#[test]
+fn permanent_deletion_reports_injected_unlink_failures_without_removing_the_item()
+-> Result<(), Box<dyn Error>> {
+    let _serial = serial()?;
+    for directory in [false, true] {
+        let root = tempfile::tempdir()?;
+        let path = root.path().join("item");
+        if directory {
+            fs::create_dir(&path)?;
+        } else {
+            fs::write(&path, b"keep")?;
+        }
+        let quirks = FsQuirks::install(
+            root.path(),
+            Quirks {
+                fail: vec![(Op::Unlink, "item", 0, rustix::io::Errno::IO)],
+                ..Quirks::default()
+            },
+        );
+        let result = glib::MainContext::default().block_on(
+            permanently_delete_local_path_if_unchanged(path.clone(), None, gio::Cancellable::new()),
+        );
+        assert!(result.is_err());
+        assert!(path.exists());
+        assert_eq!(quirks.count(Op::Unlink), 1);
+        if !directory {
+            assert_eq!(fs::read(&path)?, b"keep");
+        }
+    }
+    Ok(())
+}
+
+fn delete_root(path: &Path) -> Result<PinnedEntry, Box<dyn Error>> {
+    Ok(PinnedEntry {
         parent: Arc::new(super::super::open_local_parent_directory(
             path.parent().ok_or("no parent")?,
         )?),
         name: path.file_name().ok_or("no name")?.to_owned(),
-        expected: None,
+        identity: None,
     })
 }
 
-fn enqueue_root(queue: &Arc<LocalDeleteQueue>, root: LocalDeleteRoot) {
+fn enqueue_root(queue: &Arc<LocalDeleteQueue>, root: PinnedEntry) {
     queue.enqueue(LocalDeleteJob::Entry {
         parent: root.parent,
         name: root.name,
-        expected: root.expected,
+        expected: root.identity,
         guard: None,
         completion: None,
     });
@@ -62,9 +95,7 @@ fn permanent_delete_stops_if_an_open_directory_is_moved() -> Result<(), Box<dyn 
 
 #[test]
 fn cancellation_after_enumeration_stops_and_joins_workers() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let target = root.path().join("target");
     fs::create_dir(&target)?;
@@ -243,9 +274,7 @@ fn deletion_error_summaries_are_bounded_and_report_the_failure_count() {
 
 #[test]
 fn large_deletion_progress_reports_every_completed_location() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let mut entries = Vec::new();
     let mut expected = HashSet::new();
@@ -340,9 +369,7 @@ fn a_refused_trash_is_retryable_and_remembered_only_on_fuse() -> Result<(), Box<
     use crate::adapters::trash_support::{
         tests::RefusingMount, tests::leftover_trash, unsupported_reason_in,
     };
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     for (fs_type, unsupported) in [("fuse.sshfs", true), ("ext4", false)] {
         let root = tempfile::tempdir()?;
         let doomed = root.path().join("doomed.txt");
@@ -463,9 +490,7 @@ fn provider_cleans_only_confirmed_pins_on_failure_and_cancellation() {
 #[test]
 fn cancelling_between_deletions_reports_completed_and_unattempted_items()
 -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let unique = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)?
         .as_nanos();
@@ -518,6 +543,95 @@ fn cancelling_between_deletions_reports_completed_and_unattempted_items()
     assert!(second.exists());
 
     fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn a_cancelled_delete_counts_only_what_it_left_whole_as_not_attempted() -> Result<(), Box<dyn Error>>
+{
+    let _serial = serial()?;
+    for (row, permanent, cut_is_folder) in [
+        ("to Trash", false, false),
+        ("a file permanently", true, false),
+        ("a folder permanently", true, true),
+    ] {
+        let root = tempfile::tempdir()?;
+        let [denied, cut, rest] =
+            ["denied.txt", "cut", "rest.txt"].map(|name| root.path().join(name));
+        let (cut_entry, cut_inside) = if cut_is_folder {
+            fs::create_dir(&cut)?;
+            (directory_entry(&cut), cut.join("inside.txt"))
+        } else {
+            (file_entry(&cut), cut.clone())
+        };
+        for item in [&denied, &cut_inside, &rest] {
+            fs::write(item, b"kept")?;
+        }
+        let cancellable = gio::Cancellable::new();
+        let cancel = cancellable.clone();
+        let cancel: super::fs_quirks::Racer = Box::new(move || cancel.cancel());
+        let cancel_at = if !permanent {
+            Quirks {
+                before: vec![(Op::Trash, "cut", 0, cancel)],
+                ..Quirks::default()
+            }
+        } else {
+            let checked = if cut_is_folder { "inside.txt" } else { "cut" };
+            Quirks {
+                after: vec![(Op::Stat, checked, 0, cancel)],
+                ..Quirks::default()
+            }
+        };
+        let _scope = FsQuirks::install(
+            root.path(),
+            Quirks {
+                fail: vec![(Op::Stat, "denied.txt", 0, rustix::io::Errno::ACCESS)],
+                ..cancel_at
+            },
+        );
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let emitted = events.clone();
+
+        glib::MainContext::default().block_on(super::super::run_deletion(
+            OperationRequestId(1615),
+            [file_entry(&denied), cut_entry, file_entry(&rest)]
+                .iter()
+                .map(super::super::DeletionTarget::from_entry)
+                .collect(),
+            permanent,
+            Rc::new(move |event| emitted.borrow_mut().push(event)),
+            cancellable,
+        ));
+
+        let events = events.borrow();
+        let Some(OperationEvent::Cancelled { result, .. }) = events.last() else {
+            panic!("{row}: expected a cancel, got {events:?}");
+        };
+        assert!(result.completed.is_empty(), "{row}");
+        if permanent {
+            assert!(
+                !cut_inside.exists(),
+                "{row}: the cancel landed before the delete"
+            );
+            assert_eq!(
+                result.failed,
+                [Location::local(&denied), Location::local(&cut)],
+                "{row}"
+            );
+            assert_eq!(result.not_attempted, [Location::local(&rest)], "{row}");
+        } else {
+            assert_eq!(fs::read(&cut_inside)?, b"kept", "{row}");
+            assert_eq!(result.failed, [Location::local(&denied)], "{row}");
+            assert_eq!(
+                result.not_attempted,
+                [Location::local(&cut), Location::local(&rest)],
+                "{row}"
+            );
+        }
+        for item in [&denied, &rest] {
+            assert_eq!(fs::read(item)?, b"kept", "{row}");
+        }
+    }
     Ok(())
 }
 
@@ -632,9 +746,7 @@ fn bookmark_cleanup_failure_preserves_the_successful_deletion_outcome() {
 #[test]
 fn permanent_delete_removes_a_symlink_standing_in_for_a_directory_without_following_it()
 -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let unique = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)?
         .as_nanos();
@@ -681,9 +793,7 @@ fn permanent_delete_removes_a_symlink_standing_in_for_a_directory_without_follow
 #[test]
 fn permanent_delete_does_not_follow_a_symlink_nested_inside_the_tree() -> Result<(), Box<dyn Error>>
 {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let unique = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)?
         .as_nanos();
@@ -729,9 +839,7 @@ fn permanent_delete_does_not_follow_a_symlink_nested_inside_the_tree() -> Result
 
 #[test]
 fn permanent_delete_accepts_a_symlink_in_the_parent_path() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let actual_parent = root.path().join("actual");
     let linked_parent = root.path().join("linked");
@@ -779,9 +887,7 @@ fn permanent_delete_accepts_a_symlink_in_the_parent_path() -> Result<(), Box<dyn
 #[test]
 fn permanent_delete_keeps_the_open_parent_when_its_alias_is_retargeted()
 -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let actual = root.path().join("actual");
     let outside = root.path().join("outside");
@@ -812,9 +918,7 @@ fn permanent_delete_keeps_the_open_parent_when_its_alias_is_retargeted()
 #[test]
 fn permanent_delete_revalidates_identity_after_a_parent_alias_changes() -> Result<(), Box<dyn Error>>
 {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let actual = root.path().join("actual");
     let outside = root.path().join("outside");
@@ -847,9 +951,7 @@ fn permanent_delete_revalidates_identity_after_a_parent_alias_changes() -> Resul
 #[test]
 fn permanent_delete_of_a_symlink_through_an_alias_keeps_its_referent() -> Result<(), Box<dyn Error>>
 {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let actual = root.path().join("actual");
     let alias = root.path().join("alias");
@@ -872,9 +974,7 @@ fn permanent_delete_of_a_symlink_through_an_alias_keeps_its_referent() -> Result
 
 #[test]
 fn an_already_cancelled_recursive_delete_preserves_the_root() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let _serial = serial()?;
     let unique = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)?
         .as_nanos();
@@ -888,10 +988,10 @@ fn an_already_cancelled_recursive_delete_preserves_the_root() -> Result<(), Box<
     let cancellable = gio::Cancellable::new();
     cancellable.cancel();
     let parent = super::open_local_parent_directory(root.parent().ok_or("no parent")?)?;
-    let delete_root = super::LocalDeleteRoot {
+    let delete_root = super::PinnedEntry {
         parent: Arc::new(parent),
         name: root.file_name().ok_or("no name")?.to_owned(),
-        expected: None,
+        identity: None,
     };
     let context = glib::MainContext::default();
     let error = context
@@ -944,6 +1044,147 @@ fn trashing_reports_each_items_identity_and_a_permanent_delete_reports_none() {
                         vec![(Location::local(&folder), identity)]
                     }
                 );
+            }
+        },
+    );
+}
+
+#[test]
+fn verified_trash_learns_fuse_refusals_and_cleans_leftovers_on_both_worker_routes() {
+    const NAME: &str = "adapters::local_operations::tests::deletion::verified_trash_learns_fuse_refusals_and_cleans_leftovers_on_both_worker_routes";
+    crate::test_support::gtk_test(NAME, || {
+        use crate::adapters::trash_support::{self, TrashFailure, UnsupportedReason};
+        let Some((_home, volume)) = crate::test_support::distinct_device_dirs(NAME) else {
+            return;
+        };
+        for synchronous in [false, true] {
+            for trash in [
+                Trash::FalseWithoutError,
+                Trash::SucceedsWithoutMoving,
+                Trash::ProtocolRefused,
+            ] {
+                let root = tempfile::TempDir::new_in(volume.path()).expect("root");
+                let folder = root.path().join("folder");
+                fs::create_dir(&folder).expect("folder");
+                fs::write(folder.join("keep"), b"keep").expect("contents");
+                let leftovers = crate::adapters::trash_support::tests::leftover_trash(root.path());
+                let created = leftovers.clone();
+                let _quirks = FsQuirks::install(
+                    root.path(),
+                    Quirks {
+                        trash,
+                        before: vec![(
+                            Op::Trash,
+                            "folder",
+                            0,
+                            Box::new(move || {
+                                fs::create_dir_all(created.join("files")).expect("files");
+                                fs::create_dir_all(created.join("info")).expect("info");
+                            }),
+                        )],
+                        ..Quirks::default()
+                    },
+                );
+                crate::adapters::volume::set_mountinfo_for_isolated_test(Some(format!(
+                    "9001 1 0:91 / {} rw - fuse.sshfs fixture rw\n",
+                    root.path().display()
+                )));
+                let context = glib::MainContext::default();
+                let result = if synchronous {
+                    let path = folder.clone();
+                    context
+                        .block_on(super::super::run_blocking(move || {
+                            let parent =
+                                open_local_parent_directory(path.parent().expect("parent"))
+                                    .expect("open");
+                            let at =
+                                super::super::Entry::new(&parent, path.file_name().expect("name"));
+                            let identity =
+                                super::super::fs().stat(at, false).expect("stat").identity;
+                            Ok(super::super::trash::trash_verified(
+                                at,
+                                &path,
+                                identity,
+                                &gio::Cancellable::new(),
+                            ))
+                        }))
+                        .expect("worker")
+                } else {
+                    context
+                        .block_on(trash_support::trash_with_cleanup(
+                            &gio::File::for_path(&folder),
+                            &gio::Cancellable::new(),
+                        ))
+                        .map(drop)
+                };
+                let expected = if matches!(trash, Trash::ProtocolRefused) {
+                    UnsupportedReason::FuseRefused
+                } else {
+                    UnsupportedReason::Reported
+                };
+                assert_eq!(
+                    result.expect_err("not moved").failure,
+                    TrashFailure::Unsupported(expected)
+                );
+                assert_eq!(
+                    trash_support::unsupported_reason_for(&folder).map(|(_, reason)| reason),
+                    Some(expected)
+                );
+                assert!(!leftovers.exists(), "{synchronous:?} {trash:?}");
+                assert_eq!(fs::read(folder.join("keep")).expect("kept"), b"keep");
+                trash_support::forget_all();
+                crate::adapters::volume::set_mountinfo_for_isolated_test(None);
+            }
+        }
+    });
+}
+
+#[test]
+fn a_trash_that_moves_nothing_is_retryable_and_records_no_undo() {
+    crate::test_support::gtk_test(
+        "adapters::local_operations::tests::deletion::a_trash_that_moves_nothing_is_retryable_and_records_no_undo",
+        || {
+            for trash in [Trash::FalseWithoutError, Trash::SucceedsWithoutMoving] {
+                let root = tempfile::tempdir().expect("root");
+                let folder = root.path().join("folder");
+                fs::create_dir(&folder).expect("folder");
+                let _quirks = FsQuirks::install(
+                    root.path(),
+                    Quirks {
+                        trash,
+                        ..Quirks::default()
+                    },
+                );
+                let events = Rc::new(RefCell::new(Vec::new()));
+                let emitted = events.clone();
+                let _operation = LocalOperationProvider.delete(
+                    DeleteRequest {
+                        id: OperationRequestId(4060),
+                        entries: vec![directory_entry(&folder)],
+                        permanent: false,
+                    },
+                    Rc::new(move |event| emitted.borrow_mut().push(event)),
+                );
+                wait_for_operation(&events, |event| {
+                    matches!(
+                        event,
+                        OperationEvent::Deleted { .. } | OperationEvent::CompletedWithErrors { .. }
+                    )
+                });
+
+                let events = events.borrow();
+                assert!(
+                    matches!(
+                        events.last(),
+                        Some(OperationEvent::CompletedWithErrors { deleted_locations, retryable_locations, .. })
+                            if deleted_locations.is_empty()
+                                && retryable_locations == &[Location::local(&folder)]
+                    ),
+                    "{trash:?}: {:?}",
+                    events.last()
+                );
+                assert!(trashed_items(&events).is_empty());
+                assert!(folder.is_dir());
             }
         },
     );

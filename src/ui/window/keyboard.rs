@@ -12,6 +12,7 @@ use crate::{
     services::NavigationHistory,
     ui::{
         browser::BrowserView,
+        browser_modes::ThumbnailResize,
         keys::{self, Binding, KeyPress, SHORTCUT_MODIFIERS, TEXT_EDITING, bindings::*},
         modal::is_closing_layer,
         preview::PreviewDrawer,
@@ -77,6 +78,7 @@ pub(super) fn install_on(
     keys.set_propagation_phase(gtk::PropagationPhase::Capture);
     let weak_browser = Rc::downgrade(&parts.view.browser());
     let preferences = parts.type_to_search.preferences.clone();
+    let wheel_view = parts.view.downgrade();
     let dispatcher = Rc::new(Dispatcher::bind(window, sidebar, parts, None));
     submit_prompt_on_activate(&dispatcher, weak_browser.clone());
     let key_root = root.as_ref().downgrade();
@@ -99,22 +101,26 @@ pub(super) fn install_on(
     });
     window.add_controller(keys.clone());
 
-    // Ctrl+wheel mirrors the Ctrl +/- text-size shortcut. Capture phase so
-    // scrolled windows cannot consume it first; the PDF preview's own zoom is
-    // left alone by passing through scrolls inside its scroll container.
-    // DISCRETE is avoided: it swallows sub-step smooth deltas before they
-    // reach descendant scrolled windows, killing touchpad scrolling.
-    let wheel = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::VERTICAL);
+    // Ctrl+wheel mirrors the Ctrl +/- text-size shortcut, and Ctrl+Shift+wheel
+    // the Ctrl+Alt +/- thumbnail one. Capture phase so scrolled windows cannot
+    // consume it first; the PDF preview's own zoom is left alone by passing
+    // through scrolls inside its scroll container. DISCRETE is avoided: it
+    // swallows sub-step smooth deltas before they reach descendant scrolled
+    // windows, killing touchpad scrolling.
+    let wheel = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::BOTH_AXES);
     wheel.set_propagation_phase(gtk::PropagationPhase::Capture);
-    let zoom = Rc::new(TextZoomScroll::default());
+    let zoom = Rc::new(WheelZoom::default());
     let wheel_root = root.as_ref().downgrade();
-    wheel.connect_scroll(move |controller, _, dy| {
+    wheel.connect_scroll(move |controller, dx, dy| {
         if !wheel_root
             .upgrade()
             .is_some_and(|root| root.is_mapped() && root.can_target())
         {
             return Propagation::Proceed;
         }
+        let Some(view) = wheel_view.upgrade() else {
+            return Propagation::Proceed;
+        };
         let modifiers = controller.current_event_state();
         // Scroll events carry no position, so ask the seat where the pointer is.
         let target = controller
@@ -128,7 +134,14 @@ pub(super) fn install_on(
                 let (dx, dy) = native.surface_transform();
                 native.pick(x - dx, y - dy, gtk::PickFlags::DEFAULT)
             });
-        zoom.handle(&preferences, modifiers, controller.unit(), target, dy)
+        zoom.handle(
+            &preferences,
+            &view,
+            modifiers,
+            controller.unit(),
+            target,
+            (dx, dy),
+        )
     });
     window.add_controller(wheel.clone());
     let controllers = vec![keys.upcast(), wheel.upcast()];
@@ -411,17 +424,19 @@ fn clear_find_on_mode_exit(
     );
 }
 
-/// Accumulates fractional scroll deltas into whole text-size steps so smooth
-/// devices zoom in the same increments as wheel clicks. Resets when the input
-/// reverses direction, changes units, or is not claimed for zooming.
+/// Accumulates fractional Ctrl+wheel deltas into whole steps so smooth devices
+/// zoom in the same increments as wheel clicks: interface text, or Icons
+/// thumbnails with Shift. Resets when the input reverses direction, changes
+/// units or target, or is not claimed for zooming.
 #[derive(Default)]
-pub(super) struct TextZoomScroll {
+pub(super) struct WheelZoom {
     pending: Cell<f64>,
     direction: Cell<i8>,
     unit: Cell<Option<gtk::gdk::ScrollUnit>>,
+    thumbnails: Cell<bool>,
 }
 
-impl TextZoomScroll {
+impl WheelZoom {
     /// Surface-unit deltas arrive in pixels; 10 px make one wheel step, the
     /// same mapping GTK's discrete conversion uses.
     const SURFACE_PIXELS_PER_STEP: f64 = 10.0;
@@ -431,7 +446,7 @@ impl TextZoomScroll {
         self.direction.set(0);
     }
 
-    pub(super) fn accumulate(&self, unit: gtk::gdk::ScrollUnit, dy: f64) -> i32 {
+    fn accumulate(&self, unit: gtk::gdk::ScrollUnit, dy: f64) -> i32 {
         let direction = dy.signum() as i8;
         let unit_changed = self.unit.replace(Some(unit)) != Some(unit);
         let direction_changed = direction != 0 && self.direction.replace(direction) != direction;
@@ -449,45 +464,42 @@ impl TextZoomScroll {
         steps
     }
 
-    fn handle(
+    pub(super) fn handle(
         &self,
         preferences: &crate::ui::preferences::PreferenceManager,
+        view: &BrowserView,
         modifiers: Modifiers,
         unit: gtk::gdk::ScrollUnit,
         target: Option<gtk::Widget>,
-        dy: f64,
+        (dx, dy): (f64, f64),
     ) -> Propagation {
+        let thumbnails = modifiers.contains(Modifiers::SHIFT_MASK);
+        // Some systems turn Shift+wheel into horizontal scrolling.
+        let delta = if thumbnails && dy == 0.0 { dx } else { dy };
+        if delta == 0.0 {
+            return Propagation::Proceed;
+        }
         if !modifiers.contains(Modifiers::CONTROL_MASK)
             || modifiers.intersects(Modifiers::ALT_MASK | Modifiers::SUPER_MASK)
-            || dy == 0.0
             || target.as_ref().is_some_and(inside_pdf_scroll)
+            || (thumbnails && view.view_mode() != crate::ui::browser_modes::BrowserMode::Icons)
         {
             self.reset();
             return Propagation::Proceed;
         }
-        let steps = self.accumulate(unit, dy);
-        if steps == 0 {
-            return Propagation::Stop;
+        if self.thumbnails.replace(thumbnails) != thumbnails {
+            self.reset();
         }
-        handle_text_zoom_scroll(preferences, modifiers, target, f64::from(steps))
+        let steps = self.accumulate(unit, delta);
+        if steps != 0 {
+            if thumbnails {
+                view.resize_icons_thumbnails(ThumbnailResize::Step(-steps));
+            } else {
+                view.set_text_size(preferences.text_size().stepped(-steps));
+            }
+        }
+        Propagation::Stop
     }
-}
-
-pub(super) fn handle_text_zoom_scroll(
-    preferences: &crate::ui::preferences::PreferenceManager,
-    modifiers: Modifiers,
-    target: Option<gtk::Widget>,
-    dy: f64,
-) -> Propagation {
-    if !modifiers.contains(Modifiers::CONTROL_MASK)
-        || modifiers.intersects(Modifiers::ALT_MASK | Modifiers::SUPER_MASK)
-        || dy == 0.0
-        || target.as_ref().is_some_and(inside_pdf_scroll)
-    {
-        return Propagation::Proceed;
-    }
-    preferences.set_text_size(preferences.text_size().stepped(-dy as i32));
-    Propagation::Stop
 }
 
 /// Window commands that 10xer mode leaves unbound, so the file list swallows them.
@@ -542,6 +554,8 @@ struct Dispatcher {
     shortcuts: ShortcutFooter,
     history: Rc<NavigationHistory>,
     rename_target: Rc<RefCell<Option<crate::model::FileEntry>>>,
+    /// Only the latest typed name submitted may act after its check.
+    typed_name_revision: Rc<Cell<u64>>,
     /// Cursor and fill changes must not retarget an open prompt.
     destination_targets: Rc<RefCell<Vec<crate::model::FileEntry>>>,
     destination_revision: Rc<Cell<u64>>,
@@ -599,6 +613,7 @@ impl Dispatcher {
             shortcuts: parts.shortcuts,
             history: parts.history,
             rename_target: Rc::default(),
+            typed_name_revision: Rc::default(),
             destination_targets: Rc::default(),
             destination_revision: Rc::default(),
             destinations: crate::ui::folder_picker::FolderPicker::default(),
@@ -627,9 +642,11 @@ impl Dispatcher {
             open_with_on_destroy.invalidate();
         });
         let rename_target = dispatcher.rename_target.clone();
+        let typed_name_revision = dispatcher.typed_name_revision.clone();
         let destination_targets = dispatcher.destination_targets.clone();
         let destinations = dispatcher.destinations.clone();
         dispatcher.shortcuts.connect_prompt_reset(move || {
+            typed_name_revision.set(typed_name_revision.get().wrapping_add(1));
             drop(rename_target.take());
             drop(destination_targets.take());
             destinations.cancel();
@@ -680,8 +697,14 @@ impl Dispatcher {
             // first, then resize, matching Ctrl+, opening Settings.
             self.shortcuts.cancel_chord();
             if !self.preview.reset_pdf_zoom(press) {
-                preferences.set_text_size(size);
+                self.view.set_text_size(size);
             }
+            return Propagation::Stop;
+        }
+        if let Some(change) = ThumbnailResize::for_shortcut(press)
+            && self.view.resize_icons_thumbnails(change)
+        {
+            self.shortcuts.cancel_chord();
             return Propagation::Stop;
         }
         if let Some(result) = self.input_owner(browser, press) {

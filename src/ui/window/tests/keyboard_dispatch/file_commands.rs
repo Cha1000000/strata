@@ -296,7 +296,7 @@ fn tenxer_paste_focuses_the_preferred_conflict_choice() {
             enter_folder(&fixture, "dest");
             plain(&fixture, Key::p);
             wait_until(|| modal_visible(&fixture.overlay));
-            wait_focused_button(&fixture, "Replace");
+            wait_focused_button(&fixture, "Keep Both");
             close_modal(&fixture);
             assert!(directory.join("b.txt").exists(), "cancel keeps the source");
             assert_eq!(contents(&destination.join("b.txt")), "existing");
@@ -589,7 +589,7 @@ fn tenxer_create_prompt_makes_exact_files_and_folders() {
 
             for name in ["new.txt", "  spaced  ", "日本語 ✓"] {
                 submit(name);
-                assert_eq!(fixture.shortcuts.open_prompt_kind(), None);
+                wait_until(|| fixture.shortcuts.open_prompt_kind().is_none());
                 wait_until(|| directory.join(name).is_file());
                 assert_eq!(contents(&directory.join(name)), "");
             }
@@ -599,14 +599,18 @@ fn tenxer_create_prompt_makes_exact_files_and_folders() {
             std::fs::write(directory.join("new.txt"), "keep").expect("existing contents");
             std::os::unix::fs::symlink(directory.join("missing"), directory.join("link"))
                 .expect("dangling link");
-            for name in ["new.txt", "folder/", "folder", "link", "link/"] {
+            let too_long = "x".repeat(300);
+            let refusals = ["new.txt", "folder/", "folder", "link", "link/"]
+                .map(|name| {
+                    let bare = name.trim_end_matches('/');
+                    (name, format!("\u{201c}{bare}\u{201d} already exists"))
+                })
+                .into_iter()
+                .chain([(too_long.as_str(), "The name is too long".to_owned())]);
+            for (name, hint) in refusals {
                 submit(name);
-                let bare = name.trim_end_matches('/');
+                wait_until(|| fixture.shortcuts.prompt_hint().as_ref() == Some(&hint));
                 assert_eq!(fixture.shortcuts.open_prompt_kind(), Some(Prompt::Create));
-                assert_eq!(
-                    fixture.shortcuts.prompt_hint(),
-                    Some(format!("\u{201c}{bare}\u{201d} already exists"))
-                );
                 assert_eq!(
                     fixture.shortcuts.prompt_text(),
                     name,
@@ -647,8 +651,8 @@ fn tenxer_create_prompt_makes_exact_files_and_folders() {
                 assert_eq!(fixture.shortcuts.open_prompt_kind(), None);
             }
             assert_eq!(
-                fixture.view.create_typed_entry("nul\0name"),
-                Err(CreateRefusal::Invalid(
+                fixture.view.prepare_typed_entry("nul\0name").err(),
+                Some(CreateRefusal::Invalid(
                     "Names cannot contain NUL characters"
                 ))
             );

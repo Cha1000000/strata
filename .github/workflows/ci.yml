@@ -90,6 +90,7 @@ jobs:
           IMAGE: ${{ steps.environment.outputs.environment_image }}
         run: |
           docker run --rm --user "$(id -u):$(id -g)" \
+            --tmpfs /tmp:rw,exec,nosuid,nodev,size=2g,mode=1777 \
             --mount "type=bind,source=$PWD,target=/workspace" \
             --mount "type=bind,source=$PWD/target/quality-container/accounts-$(id -u)-$(id -g)/passwd,target=/etc/passwd,readonly" \
             --mount "type=bind,source=$PWD/target/quality-container/accounts-$(id -u)-$(id -g)/group,target=/etc/group,readonly" \

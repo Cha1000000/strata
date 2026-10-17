@@ -15,11 +15,11 @@ use crate::{
         ArchiveFormat, CompressRequest, CreateDirectoryRequest, CreateFileRequest, DeleteRequest,
         DirectoryChange, DirectoryRequest, ExtractRequest, FileSource, LoadHandle,
         LocationIdentity, LocationValidationError, MetadataOutcome, MetadataRequest, MoveRecord,
-        OperationEvent, OperationProvider, OperationRequestId, PasswordFailure, PasteItem,
-        PasteRequest, RenameRecord, RenameRequest, RequestId, RestoreRequest, RestoreSource,
-        RestoreTrashItem, TransferConflict, TrashedOriginal, UndoCopyRequest, UndoMergeRequest,
-        UndoMoveItem, UndoMoveRequest, UndoRenameRequest, validate_basename,
-        validate_uri_credentials,
+        NameMode, OperationEvent, OperationProvider, OperationRequestId, PasswordFailure,
+        PasteItem, PasteRequest, PlacedSnapshot, RenameRecord, RenameRequest, RenamedItem,
+        RequestId, RestoreRequest, RestoreSource, RestoreTrashItem, TransferConflict,
+        TransferReport, TrashedOriginal, UndoCopyRequest, UndoMergeRequest, UndoMoveItem,
+        UndoMoveRequest, UndoRenameRequest, validate_basename, validate_uri_credentials,
     },
 };
 
@@ -57,6 +57,14 @@ const REMOTE_DIRECTORY_BATCH_SIZE: usize = 128;
 /// nearly all of it.
 const PEEK_MAX_ENTRIES: usize = 64;
 const PEEK_TIME_BUDGET: Duration = Duration::from_secs(3);
+
+pub(crate) fn folder_destination_texts(location: &Location) -> (String, String) {
+    let path = location.display_path();
+    (
+        rust_i18n::t!("Destination: %{path}", path = path).into_owned(),
+        format!("→ {path}"),
+    )
+}
 
 enum OperationDestination<'a> {
     Folder(&'a Location),
@@ -256,6 +264,11 @@ pub enum BrowserEvent {
     TransferFinished {
         moved_locations: Vec<Location>,
     },
+    /// Only after a clean completion; a stop or errors carry the report in
+    /// their outcome event.
+    ItemsReported {
+        report: TransferReport,
+    },
     /// Only for remembered folders; the default sort is left unchanged.
     FolderSortChosen {
         location: Location,
@@ -303,6 +316,7 @@ pub enum BrowserEvent {
     OperationFailed {
         message: String,
         password_failure: Option<PasswordFailure>,
+        report: TransferReport,
     },
     OperationCompletedWithErrors {
         message: String,
@@ -311,12 +325,14 @@ pub enum BrowserEvent {
         /// doesn't support Trash. Always empty for a restore failure.
         retryable_locations: Vec<Location>,
         has_non_retryable_failures: bool,
+        report: TransferReport,
     },
     OperationCancelled {
         completed: usize,
         failed: usize,
         not_attempted: usize,
         affected_locations: HashSet<Location>,
+        report: TransferReport,
     },
     OperationRefreshRequired {
         depths: Vec<usize>,
@@ -364,12 +380,15 @@ pub enum UndoEntry {
     Trash(Vec<Location>),
     Move(Vec<MoveRecord>),
     Copy(Vec<Location>),
-    /// `created` paths get trashed; `overwritten` paths lose the incoming
-    /// copy and get their staged original restored from Trash.
+    /// `created` paths are trashed, or deleted where Trash is unavailable;
+    /// `overwritten` paths lose the incoming copy and get their staged
+    /// original back from Trash. Either is touched only while it still
+    /// matches its `placed` snapshot.
     Merge {
         created: Vec<Location>,
         overwritten: Vec<Location>,
         originals: HashMap<Location, TrashedOriginal>,
+        placed: HashMap<Location, PlacedSnapshot>,
     },
     Rename(RenameRecord),
     Group {
@@ -401,6 +420,7 @@ impl UndoEntry {
                 created: Vec::new(),
                 overwritten: Vec::new(),
                 originals: HashMap::new(),
+                placed: HashMap::new(),
             },
             Self::Rename(record) => Self::Rename(record.clone()),
             Self::Group { folder, .. } => Self::Group {
@@ -451,11 +471,13 @@ fn complete_undo_item(
                 created,
                 overwritten,
                 originals,
+                placed,
             },
             UndoEntry::Merge {
                 created: done_created,
                 overwritten: done_overwritten,
                 originals: done_originals,
+                placed: done_placed,
             },
         ) => {
             if let Some(index) = created.iter().position(|candidate| candidate == location) {
@@ -470,6 +492,9 @@ fn complete_undo_item(
             if let Some(original) = originals.remove(location) {
                 done_originals.insert(location.clone(), original);
             }
+            if let Some(snapshot) = placed.remove(location) {
+                done_placed.insert(location.clone(), snapshot);
+            }
         }
         _ => {}
     }
@@ -482,7 +507,80 @@ fn complete_undo_item(
 struct MergeUndoState {
     sources: HashSet<Location>,
     created: Vec<Location>,
-    overwritten: Vec<Location>,
+    /// `None` once its incoming copy was saved under another name.
+    overwritten: Vec<Option<Location>>,
+    created_at: HashMap<Location, Vec<usize>>,
+    overwritten_at: HashMap<Location, Vec<usize>>,
+    placed: HashMap<Location, PlacedSnapshot>,
+}
+
+impl MergeUndoState {
+    fn merged(
+        &mut self,
+        source: Location,
+        created: Vec<Location>,
+        overwritten: Vec<Location>,
+        placed: HashMap<Location, PlacedSnapshot>,
+    ) {
+        self.sources.insert(source);
+        for location in created {
+            self.create(location);
+        }
+        for location in overwritten {
+            self.overwritten_at
+                .entry(location.clone())
+                .or_default()
+                .push(self.overwritten.len());
+            self.overwritten.push(Some(location));
+        }
+        self.placed.extend(placed);
+    }
+
+    fn create(&mut self, location: Location) {
+        self.created_at
+            .entry(location.clone())
+            .or_default()
+            .push(self.created.len());
+        self.created.push(location);
+    }
+
+    /// An overwritten original stays in Trash when its copy landed under
+    /// another name, since another item now holds that name. Renames apply in
+    /// reported order and are not chained: a record under a planned name
+    /// follows only the rename that starts at that name.
+    fn rename(&mut self, renamed: &[RenamedItem]) {
+        for item in renamed {
+            if let Some(positions) = self.created_at.remove(&item.requested) {
+                for &position in &positions {
+                    self.created[position] = item.saved_as.clone();
+                }
+                self.created_at
+                    .entry(item.saved_as.clone())
+                    .or_default()
+                    .extend(positions);
+            }
+            let first = self
+                .overwritten_at
+                .get_mut(&item.requested)
+                .filter(|positions| !positions.is_empty())
+                .map(|positions| positions.remove(0));
+            if let Some(position) = first {
+                self.overwritten[position] = None;
+                self.create(item.saved_as.clone());
+            }
+        }
+    }
+
+    fn into_records(
+        self,
+    ) -> (
+        Vec<Location>,
+        Vec<Location>,
+        HashMap<Location, PlacedSnapshot>,
+    ) {
+        let overwritten = self.overwritten.into_iter().flatten().collect();
+        (self.created, overwritten, self.placed)
+    }
 }
 
 struct PendingUndo {
@@ -598,6 +696,7 @@ impl UndoState {
                                     .file_name()
                                     .and_then(|name| folder.child(&name))
                                     .unwrap_or_else(|| moved.current.clone()),
+                                renamed: Vec::new(),
                             })
                             .collect(),
                         folder,
@@ -797,13 +896,24 @@ fn retain_replay_merge_items(
                 created: kept_created,
                 overwritten: kept_overwritten,
                 originals,
+                placed,
             } = &mut pending.entry
         {
             kept_created.retain(|location| created.contains(location));
             kept_overwritten.retain(|location| overwritten.contains(location));
             originals.retain(|location, _| overwritten.contains(location));
+            retain_merge_records(placed, created, overwritten);
         }
     });
+}
+
+fn retain_merge_records(
+    placed: &mut HashMap<Location, PlacedSnapshot>,
+    created: &[Location],
+    overwritten: &[Location],
+) {
+    let undone: HashSet<&Location> = created.iter().chain(overwritten).collect();
+    placed.retain(|location, _| undone.contains(location));
 }
 
 fn undo_move_parents(items: &[UndoMoveItem]) -> HashSet<Location> {
@@ -814,19 +924,51 @@ fn undo_move_parents(items: &[UndoMoveItem]) -> HashSet<Location> {
         .collect()
 }
 
-/// Pairs each moved source with where the transfer left it. Items that never
-/// left their own directory carry no undo.
-fn move_records(sources: &[Location], destination: &Location) -> Vec<MoveRecord> {
-    sources
+fn moved_target(
+    source: &Location,
+    destination: &Location,
+    moved_to: &HashMap<Location, Location>,
+) -> Option<Location> {
+    moved_to
+        .get(source)
+        .cloned()
+        .or_else(|| source.transfer_target(destination))
+}
+
+/// Items that never left their own directory carry no undo.
+fn move_records(
+    sources: &[Location],
+    destination: &Location,
+    moved_to: &HashMap<Location, Location>,
+    renamed: &[RenamedItem],
+) -> Vec<MoveRecord> {
+    let mut records = sources
         .iter()
         .filter_map(|source| {
-            let current = source.transfer_target(destination)?;
+            let current = moved_target(source, destination, moved_to)?;
             (&current != source).then(|| MoveRecord {
                 original: source.clone(),
                 current,
+                renamed: Vec::new(),
             })
         })
-        .collect()
+        .collect::<Vec<_>>();
+    let moved = records
+        .iter()
+        .enumerate()
+        .map(|(index, record)| (record.current.clone(), index))
+        .collect::<HashMap<_, _>>();
+    for item in renamed {
+        let mut folder = item.saved_as.parent();
+        while let Some(location) = folder {
+            if let Some(&index) = moved.get(&location) {
+                records[index].renamed.push(item.clone());
+                break;
+            }
+            folder = location.parent();
+        }
+    }
+    records
 }
 
 #[cfg(test)]
@@ -979,6 +1121,10 @@ pub struct Browser {
     transfer_reveal: Cell<bool>,
     created_locations: RefCell<Vec<Location>>,
     merged_undo: RefCell<MergeUndoState>,
+    /// Where each moved item landed; Keep Both and fixed names can differ
+    /// from the source name.
+    moved_items: RefCell<HashMap<Location, Location>>,
+    transfer_report: RefCell<TransferReport>,
     undo_claim: RefCell<Option<(u64, UndoEntry)>>,
     redo_claim: RefCell<Option<(u64, UndoEntry)>>,
     next_request: Cell<u64>,
@@ -1055,6 +1201,8 @@ impl Browser {
             transfer_reveal: Cell::new(true),
             created_locations: RefCell::new(Vec::new()),
             merged_undo: RefCell::new(MergeUndoState::default()),
+            moved_items: RefCell::new(HashMap::new()),
+            transfer_report: RefCell::new(TransferReport::default()),
             undo_claim: RefCell::new(None),
             redo_claim: RefCell::new(None),
             next_request: Cell::new(1),
@@ -1387,6 +1535,19 @@ impl Browser {
         }
         self.refresh_column_revealing(depth, targets);
         false
+    }
+
+    pub fn reveal_reloaded_locations(
+        self: &Rc<Self>,
+        directory: &Location,
+        targets: Vec<Location>,
+    ) {
+        let _update = self.navigation_update();
+        let Some(depth) = self.open_depth(directory) else {
+            return;
+        };
+        self.activate_reveal_depth(depth);
+        self.refresh_column_revealing(depth, targets);
     }
 
     /// The caller must retry missing targets as monitor updates arrive.
@@ -2449,6 +2610,7 @@ impl Browser {
             self.emit(BrowserEvent::OperationFailed {
                 message: crate::i18n::tr(message),
                 password_failure: None,
+                report: TransferReport::default(),
             });
             return;
         }
@@ -2456,6 +2618,7 @@ impl Browser {
             self.emit(BrowserEvent::OperationFailed {
                 message: crate::i18n::tr("File operations are unavailable"),
                 password_failure: None,
+                report: TransferReport::default(),
             });
             return;
         };
@@ -2495,6 +2658,7 @@ impl Browser {
             self.emit(BrowserEvent::OperationFailed {
                 message: crate::i18n::tr(message),
                 password_failure: None,
+                report: TransferReport::default(),
             });
             return;
         }
@@ -2502,6 +2666,7 @@ impl Browser {
             self.emit(BrowserEvent::OperationFailed {
                 message: crate::i18n::tr("File operations are unavailable"),
                 password_failure: None,
+                report: TransferReport::default(),
             });
             return;
         };
@@ -2556,6 +2721,7 @@ impl Browser {
             self.emit(BrowserEvent::OperationFailed {
                 message: crate::i18n::tr("File operations are unavailable"),
                 password_failure: None,
+                report: TransferReport::default(),
             });
             return;
         };
@@ -2629,6 +2795,7 @@ impl Browser {
             self.emit(BrowserEvent::OperationFailed {
                 message: crate::i18n::tr("File operations are unavailable"),
                 password_failure: None,
+                report: TransferReport::default(),
             });
             return;
         };
@@ -2666,6 +2833,7 @@ impl Browser {
             self.emit(BrowserEvent::OperationFailed {
                 message: crate::i18n::tr("File operations are unavailable"),
                 password_failure: None,
+                report: TransferReport::default(),
             });
             return;
         };
@@ -2925,6 +3093,7 @@ impl Browser {
                 id: request_id,
                 items,
                 cleanup_locations: vec![folder],
+                names: NameMode::Keep,
             },
             self.operation_callback(request_id, false, refresh_locations),
         );
@@ -2964,6 +3133,7 @@ impl Browser {
             UndoMoveRequest {
                 id: request_id,
                 cleanup_locations: Vec::new(),
+                names: if redo { NameMode::Fix } else { NameMode::Keep },
                 items: items
                     .into_iter()
                     .map(|item| {
@@ -2972,6 +3142,7 @@ impl Browser {
                                 record: MoveRecord {
                                     original: item.record.current,
                                     current: item.record.original,
+                                    renamed: Vec::new(),
                                 },
                                 conflict: item.conflict,
                             }
@@ -3204,7 +3375,12 @@ impl Browser {
         let Some((generation, entry)) = claim_pending_undo(Some(generation)) else {
             return false;
         };
-        let UndoEntry::Merge { mut originals, .. } = entry else {
+        let UndoEntry::Merge {
+            mut originals,
+            mut placed,
+            ..
+        } = entry
+        else {
             finish_undo(generation, false);
             return false;
         };
@@ -3214,6 +3390,7 @@ impl Browser {
         };
         retain_replay_merge_items(false, generation, &created, &overwritten);
         originals.retain(|location, _| overwritten.contains(location));
+        retain_merge_records(&mut placed, &created, &overwritten);
         let total = created.len() + overwritten.len();
         let refresh_locations = created
             .iter()
@@ -3228,6 +3405,7 @@ impl Browser {
                 created: created.clone(),
                 overwritten: overwritten.clone(),
                 originals: originals.clone(),
+                placed: placed.clone(),
             },
         )));
         self.emit(BrowserEvent::RestorationStarted { total });
@@ -3237,6 +3415,7 @@ impl Browser {
                 created,
                 overwritten,
                 originals,
+                placed,
             },
             self.operation_callback(request_id, false, refresh_locations),
         );
@@ -3295,6 +3474,7 @@ impl Browser {
             self.emit(BrowserEvent::OperationFailed {
                 message: crate::i18n::tr("File operations are unavailable"),
                 password_failure: None,
+                report: TransferReport::default(),
             });
             return;
         };
@@ -3332,6 +3512,7 @@ impl Browser {
             self.emit(BrowserEvent::OperationFailed {
                 message: crate::i18n::tr("File operations are unavailable"),
                 password_failure: None,
+                report: TransferReport::default(),
             });
             return;
         };
@@ -3364,13 +3545,7 @@ impl Browser {
 
     fn set_operation_destination(&self, destination: OperationDestination<'_>) {
         let (description, label) = match destination {
-            OperationDestination::Folder(location) => {
-                let path = location.display_path();
-                (
-                    rust_i18n::t!("Destination: %{path}", path = path).into_owned(),
-                    format!("→ {path}"),
-                )
-            }
+            OperationDestination::Folder(location) => folder_destination_texts(location),
             OperationDestination::Trash => (
                 crate::i18n::tr("Destination: Trash"),
                 format!("→ {}", crate::i18n::tr("Trash")),
@@ -3437,6 +3612,8 @@ impl Browser {
         self.transfer_destination.replace(None);
         self.created_locations.borrow_mut().clear();
         *self.merged_undo.borrow_mut() = MergeUndoState::default();
+        self.moved_items.take();
+        self.transfer_report.take();
         self.deletion_operation.set(false);
         self.deletion_permanent.set(false);
         self.deferred_file_operation_changes.borrow_mut().clear();
@@ -4366,26 +4543,27 @@ impl Browser {
         self: &Rc<Self>,
         locations: impl IntoIterator<Item = &'a Location>,
     ) {
-        let locations: Vec<_> = locations.into_iter().collect();
-        let depths = {
-            let state = self.state.borrow();
-            let mut depths = Vec::new();
-            let mut depth = 0;
-            while let Some(open_location) = state.location_at(depth) {
-                if locations.iter().any(|location| {
-                    &open_location == *location
-                        || (open_location.is_recent_root() && location.is_recent_root())
-                        || open_location.contains_camera_photo_location(location)
-                }) {
-                    depths.push(depth);
-                }
-                depth += 1;
-            }
-            depths
-        };
-        for depth in depths {
+        for depth in self.depths_showing(locations) {
             self.refresh_column(depth);
         }
+    }
+
+    fn depths_showing<'a>(&self, locations: impl IntoIterator<Item = &'a Location>) -> Vec<usize> {
+        let locations: Vec<_> = locations.into_iter().collect();
+        let state = self.state.borrow();
+        let mut depths = Vec::new();
+        let mut depth = 0;
+        while let Some(open_location) = state.location_at(depth) {
+            if locations.iter().any(|location| {
+                &open_location == *location
+                    || (open_location.is_recent_root() && location.is_recent_root())
+                    || open_location.contains_camera_photo_location(location)
+            }) {
+                depths.push(depth);
+            }
+            depth += 1;
+        }
+        depths
     }
 
     pub(crate) fn refresh_after_cancellation(self: &Rc<Self>, roots: &HashSet<Location>) {
@@ -4421,7 +4599,9 @@ impl Browser {
         }
     }
 
-    fn remove_deleted_locations(self: &Rc<Self>, locations: &[Location]) {
+    /// A Recent or camera view in `rescanning` reloads once the operation
+    /// ends, so a bulk removal leaves it to that reload.
+    fn remove_deleted_locations(self: &Rc<Self>, locations: &[Location], rescanning: &[usize]) {
         let open_locations = {
             let state = self.state.borrow();
             let mut open = Vec::new();
@@ -4432,22 +4612,30 @@ impl Browser {
             }
             open
         };
-        for (depth, watched) in open_locations {
-            if locations.len() > MAX_INCREMENTAL_OPERATION_UPDATES
-                && (watched.is_recent_root() || watched.is_camera_photo_root())
-            {
-                self.refresh_column(depth);
-                continue;
+        let mut by_folder = HashMap::<_, Vec<_>>::new();
+        for location in locations {
+            if let Some(parent) = deletion_parent_location(location) {
+                by_folder.entry(parent).or_default().push(location.clone());
             }
-            let removed = locations
-                .iter()
-                .filter(|location| {
-                    deletion_parent_location(location).is_some_and(|parent| parent == watched)
-                        || watched.is_recent_root()
-                        || watched.contains_camera_photo_location(location)
-                })
-                .cloned()
-                .collect::<Vec<_>>();
+        }
+        for (depth, watched) in open_locations {
+            let removed = if watched.is_recent_root() || watched.is_camera_photo_root() {
+                if locations.len() > MAX_INCREMENTAL_OPERATION_UPDATES {
+                    if !rescanning.contains(&depth) {
+                        self.refresh_column(depth);
+                    }
+                    continue;
+                }
+                locations
+                    .iter()
+                    .filter(|location| {
+                        watched.is_recent_root() || watched.contains_camera_photo_location(location)
+                    })
+                    .cloned()
+                    .collect()
+            } else {
+                by_folder.get(&watched).cloned().unwrap_or_default()
+            };
             if removed.is_empty() {
                 continue;
             }
@@ -4644,23 +4832,8 @@ impl Browser {
 }
 
 fn location_or_ancestor_is_affected(location: &Location, roots: &HashSet<Location>) -> bool {
-    let mut current = Some(location.clone());
-    while let Some(loc) = current {
-        if roots.contains(&loc) {
-            return true;
-        }
-        current = loc.parent();
-    }
-    for root in roots {
-        let mut curr = root.parent();
-        while let Some(p) = curr {
-            if &p == location {
-                return true;
-            }
-            curr = p.parent();
-        }
-    }
-    false
+    std::iter::successors(Some(location.clone()), Location::parent)
+        .any(|folder| roots.contains(&folder))
 }
 
 fn deletion_parent_location(location: &Location) -> Option<Location> {

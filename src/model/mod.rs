@@ -284,23 +284,29 @@ impl Location {
         destination.child(&self.file_name()?)
     }
 
+    /// `to` may be of the other kind, as in a move between a share and a local disk.
     pub fn rebase(&self, from: &Self, to: &Self) -> Option<Self> {
-        match (&self.kind, &from.kind, &to.kind) {
-            (LocationKind::Native(path), LocationKind::Native(from), LocationKind::Native(to)) => {
-                rebase_path(path, from, to).map(Self::local)
-            }
-            (LocationKind::Uri(uri), LocationKind::Uri(from), LocationKind::Uri(to)) => {
-                let file = gio::File::for_uri(uri);
-                let from = gio::File::for_uri(from);
-                let to = gio::File::for_uri(to);
-                let relocated = if file.equal(&from) {
-                    to
-                } else {
-                    to.resolve_relative_path(from.relative_path(&file)?)
-                };
-                Some(Self::uri(relocated.uri()))
-            }
-            _ => None,
+        if let (LocationKind::Native(path), LocationKind::Native(from), LocationKind::Native(to)) =
+            (&self.kind, &from.kind, &to.kind)
+        {
+            return rebase_path(path, from, to).map(Self::local);
+        }
+        let (file, from, target) = (self.gio_file(), from.gio_file(), to.gio_file());
+        let relocated = if file.equal(&from) {
+            target
+        } else {
+            target.resolve_relative_path(from.relative_path(&file)?)
+        };
+        match to.kind {
+            LocationKind::Native(_) => relocated.path().map(Self::local),
+            LocationKind::Uri(_) => Some(Self::uri(relocated.uri())),
+        }
+    }
+
+    fn gio_file(&self) -> gio::File {
+        match &self.kind {
+            LocationKind::Native(path) => gio::File::for_path(path),
+            LocationKind::Uri(uri) => gio::File::for_uri(uri),
         }
     }
 

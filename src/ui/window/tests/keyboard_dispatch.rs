@@ -28,6 +28,7 @@ mod pane_focus;
 mod place_chords;
 mod preview_ownership;
 mod reload_cursor;
+mod thumbnail_size;
 mod video_clips;
 
 use crate::ui::{

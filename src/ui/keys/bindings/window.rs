@@ -33,6 +33,9 @@ catalog! {
         TEXT_LARGER: Binding = Binding::ctrl(Key::plus);
         TEXT_SMALLER: Binding = Binding::ctrl(Key::minus);
         TEXT_RESET: Binding = Binding::ctrl(Key::_0);
+        THUMBNAILS_LARGER: Binding = Binding::ctrl_alt(Key::plus);
+        THUMBNAILS_SMALLER: Binding = Binding::ctrl_alt(Key::minus);
+        THUMBNAILS_RESET: Binding = Binding::ctrl_alt(Key::_0);
         SIDEBAR_FOCUS: Binding = Binding::ctrl_shift(Key::b);
 
         SETTINGS: Binding = Binding::ctrl(Key::comma);
@@ -70,5 +73,6 @@ catalog! {
         FILTER_SLASH: Binding = Binding::plain(Key::slash);
         /// US keyboards type **+** with Shift+=; the reference shows only Ctrl++.
         TEXT_LARGER_EQUAL: Binding = Binding::ctrl(Key::equal);
+        THUMBNAILS_LARGER_EQUAL: Binding = Binding::ctrl_alt(Key::equal);
     }
 }

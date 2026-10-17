@@ -148,6 +148,15 @@ follows later default changes. Every open column, tab, and window showing the sa
 folder updates live. View mode, density, hidden files, grouping, folders first, and
 List column widths stay application-wide.
 
+In Icons, **Ctrl+Alt++** (or **Ctrl+Alt+=**) and **Ctrl+Alt+−**, **Ctrl+Shift+wheel**,
+and in 10xer mode **+** / **−** on the listing step the thumbnail size through 32,
+36, 40, 44, 48, 56, 64, 72, 80, 96, 112, 128, 144, 160, 192, 224, and 256 px; a size
+between two steps moves to the nearer one in that direction. **Ctrl+Alt+0** resets
+it: a remembered folder follows the default again, any other folder returns to the
+default, and with per-folder settings off the default returns to 64 px. These
+change the size exactly as the slider does and change no size in Columns or List.
+Each change briefly shows the new size in the bottom-right corner.
+
 A pane's sort menu shows **Make this the default sort** when its sort differs from
 the default and **Reset to default sort** when the folder has its own sort; the
 thumbnail popover has the matching size actions. Making a value the default leaves
@@ -229,7 +238,10 @@ immediately across windows, file views, settings, menus, dialogs, and text
 previews; opening Settings is not required to initialize it. **Appearance** also
 has decrease/increase controls and a size button that resets to the default.
 Use **Ctrl++** (or **Ctrl+=**), **Ctrl+−**, and **Ctrl+0** to increase, decrease,
-and reset, including while an inline editor or Settings is open.
+and reset, including while an inline editor or Settings is open; **Ctrl+wheel**
+does the same. Each briefly shows the new size in the bottom-right corner; changes
+made in Settings do not. **Ctrl+Shift+wheel** resizes Icons thumbnails instead (see
+[Per-folder sort and thumbnail size](#per-folder-sort-and-thumbnail-size)).
 Over a PDF preview, **Ctrl+wheel** zooms the pages instead. With the PDF page
 focused, **Ctrl+0** resets page zoom without changing the saved text size.
 

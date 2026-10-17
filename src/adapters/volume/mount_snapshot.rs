@@ -4,7 +4,7 @@ use std::{cell::RefCell, path::PathBuf};
 
 use gtk::{gio, prelude::*};
 
-use super::{MountTable, mount_is_removable};
+use super::{MountTable, mount_capabilities::forget_mount_capabilities, mount_is_removable};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct RemovableRoot {
@@ -28,6 +28,12 @@ thread_local! {
     static MOUNTS: RefCell<Option<MountCache>> = const { RefCell::new(None) };
 }
 
+pub(crate) fn watch_operation_mounts() {
+    MOUNTS.with(|cache| {
+        cache.borrow_mut().get_or_insert_with(watch_mounts);
+    });
+}
+
 pub(crate) fn with_mount_snapshot<T>(read: impl FnOnce(&MountSnapshot) -> T) -> T {
     MOUNTS.with(|cache| {
         let mut cache = cache.borrow_mut();
@@ -39,6 +45,7 @@ pub(crate) fn with_mount_snapshot<T>(read: impl FnOnce(&MountSnapshot) -> T) -> 
 /// GIO announces a mount from an idle callback, which can run after Strata
 /// already opens a drive it just mounted, so that path calls this as well.
 pub(crate) fn invalidate_mount_snapshot() {
+    forget_mount_capabilities();
     MOUNTS.with(|cache| {
         if let Ok(mut cache) = cache.try_borrow_mut()
             && let Some(cache) = cache.as_mut()

@@ -2,9 +2,11 @@
 
 use super::*;
 use crate::model::{FileEntry, Location};
-use crate::services::{DropCommit, TransferKind};
+use crate::services::{DropCommit, RenameCause, TransferKind};
 use std::{
     cell::{Cell, RefCell},
+    collections::HashSet,
+    ffi::OsString,
     path::Path,
 };
 
@@ -43,7 +45,10 @@ fn has_visible_button(overlay: &gtk::Overlay, label: &str) -> bool {
     visible_texts(overlay).iter().any(|text| text == label)
 }
 
-fn button_with_label(overlay: &gtk::Overlay, label: &str) -> Option<gtk::Button> {
+fn visible_widget<W: IsA<gtk::Widget>>(
+    overlay: &gtk::Overlay,
+    matches: impl Fn(&W) -> bool,
+) -> Option<W> {
     let mut stack = Vec::new();
     let mut child = overlay.first_child();
     while let Some(widget) = child {
@@ -51,11 +56,11 @@ fn button_with_label(overlay: &gtk::Overlay, label: &str) -> Option<gtk::Button>
         child = widget.next_sibling();
     }
     while let Some(widget) = stack.pop() {
-        if let Some(button) = widget.downcast_ref::<gtk::Button>()
-            && button.label().as_deref() == Some(label)
-            && button.is_visible()
+        if let Some(found) = widget.downcast_ref::<W>()
+            && found.is_visible()
+            && matches(found)
         {
-            return Some(button.clone());
+            return Some(found.clone());
         }
         let mut descendant = widget.first_child();
         while let Some(next) = descendant {
@@ -64,6 +69,19 @@ fn button_with_label(overlay: &gtk::Overlay, label: &str) -> Option<gtk::Button>
         }
     }
     None
+}
+
+fn button_with_label(overlay: &gtk::Overlay, label: &str) -> Option<gtk::Button> {
+    visible_widget(overlay, |button: &gtk::Button| {
+        button.label().as_deref() == Some(label)
+    })
+}
+
+fn check_button_with_label(overlay: &gtk::Overlay, label: &str) -> gtk::CheckButton {
+    visible_widget(overlay, |button: &gtk::CheckButton| {
+        button.label().as_deref() == Some(label)
+    })
+    .unwrap_or_else(|| panic!("visible {label:?} check button not found"))
 }
 
 fn click_button(overlay: &gtk::Overlay, label: &str) {
@@ -288,85 +306,6 @@ fn duplicate_transfer_uses_the_selected_entries_parent() {
 }
 
 #[test]
-fn transfer_collisions_detect_existing_destination_items() -> Result<(), Box<dyn std::error::Error>>
-{
-    let root = std::env::temp_dir().join(format!("strata-collision-test-{}", std::process::id()));
-    let _ignored = std::fs::remove_dir_all(&root);
-    let source_dir = root.join("source");
-    let destination = root.join("destination");
-    std::fs::create_dir_all(&source_dir)?;
-    std::fs::create_dir_all(&destination)?;
-    let source = source_dir.join("photo.jpg");
-    std::fs::write(&source, b"new")?;
-
-    assert!(
-        transfer_collision(&Location::local(&source), &Location::local(&destination)).is_none()
-    );
-    assert!(transfer_collision(&Location::local(&source), &Location::local(&source_dir)).is_none());
-    let trash_source = Location::uri("trash:///%5Cmnt%5CData%5C.Trash-1000%5Cfiles%5Cphoto.jpg");
-    assert!(transfer_collision(&trash_source, &Location::local(&destination)).is_none());
-    std::fs::write(destination.join("photo.jpg"), b"old")?;
-    let trash_collision = transfer_collision(&trash_source, &Location::local(&destination))
-        .expect("an external trash file collision");
-    assert!(!trash_collision.mergeable);
-    let collision = transfer_collision(&Location::local(&source), &Location::local(&destination))
-        .expect("a file collision");
-    assert!(!collision.mergeable, "a file collision cannot merge");
-
-    std::fs::remove_dir_all(root)?;
-    Ok(())
-}
-
-#[test]
-fn collision_candidates_include_case_only_name_matches() -> Result<(), Box<dyn std::error::Error>> {
-    let destination = tempfile::tempdir()?;
-    std::fs::write(destination.path().join("photo.jpg"), b"old")?;
-
-    let candidates = destination_name_candidates(destination.path()).expect("directory listing");
-
-    assert!(candidates.contains(&destination_name_key(std::ffi::OsStr::new("PHOTO.JPG"))));
-    Ok(())
-}
-
-#[test]
-fn transfer_collisions_mark_folder_pairs_as_mergeable() -> Result<(), Box<dyn std::error::Error>> {
-    let root = std::env::temp_dir().join(format!("strata-mergeable-test-{}", std::process::id()));
-    let _ignored = std::fs::remove_dir_all(&root);
-    let source_dir = root.join("source");
-    let destination = root.join("destination");
-    std::fs::create_dir_all(source_dir.join("folder"))?;
-    std::fs::create_dir_all(&destination)?;
-    std::fs::write(source_dir.join("file.txt"), b"new")?;
-
-    let folder = transfer_collision(
-        &Location::local(source_dir.join("folder")),
-        &Location::local(&destination),
-    );
-    assert!(
-        folder.is_none(),
-        "no collision until the destination exists"
-    );
-
-    std::fs::create_dir_all(destination.join("folder"))?;
-    std::fs::write(destination.join("file.txt"), b"old")?;
-    let folder = transfer_collision(
-        &Location::local(source_dir.join("folder")),
-        &Location::local(&destination),
-    )
-    .expect("a folder collision");
-    assert!(folder.mergeable, "two folders can merge");
-    let file = transfer_collision(
-        &Location::local(source_dir.join("file.txt")),
-        &Location::local(&destination),
-    )
-    .expect("a file collision");
-    assert!(!file.mergeable);
-
-    std::fs::remove_dir_all(root)?;
-    Ok(())
-}
-
-#[test]
 fn start_transfer_skips_noops_before_emitting_progress() {
     crate::test_support::gtk_test(
         "ui::browser::transfer::tests::start_transfer_skips_noops_before_emitting_progress",
@@ -419,6 +358,7 @@ fn start_transfer_skips_noops_before_emitting_progress() {
                     vec![source, Location::local(&other_path)],
                     moving,
                 );
+                wait_until(|| !started.borrow().is_empty(), "the transfer to start");
                 assert_eq!(*started.borrow(), vec![(1, moving)]);
                 let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
                 while !finished.get() {
@@ -1277,6 +1217,114 @@ fn extract_to_focused_enter_extracts_destination() {
     );
 }
 
+#[test]
+fn an_extraction_reloads_its_folder_only_without_a_monitor() {
+    use crate::services::{DirectoryChange, OperationEvent};
+
+    crate::test_support::gtk_test(
+        "ui::browser::transfer::tests::an_extraction_reloads_its_folder_only_without_a_monitor",
+        || {
+            for (row, watched, active_elsewhere) in [
+                ("watched", true, false),
+                ("unwatched", false, false),
+                ("unwatched, another folder active", false, true),
+            ] {
+                let fixture = tempfile::tempdir().expect("extraction fixture");
+                let archive = fixture.path().join("bundle.tar");
+                std::fs::write(&archive, b"archive").expect("archive");
+                let other = fixture.path().join("other");
+                std::fs::create_dir(&other).expect("other folder");
+                let extracted = fixture.path().join("bundle");
+                let folder = Location::local(fixture.path());
+                let source = Folders::new(if watched {
+                    Location::local(&extracted)
+                } else {
+                    folder.clone()
+                });
+                let view = crate::ui::browser::BrowserView::new(
+                    source.clone(),
+                    crate::ui::browser::PeekBehavior::default(),
+                );
+                let operations =
+                    Rc::new(crate::test_support::operations::HeldOperations::default());
+                view.browser().set_operation_provider(operations.clone());
+                let listed = |depth| {
+                    view.browser()
+                        .with_column_entries(depth, |entries| {
+                            entries
+                                .iter()
+                                .map(|entry| entry.display_name.clone())
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default()
+                };
+                view.navigate_location(folder.clone());
+                wait_until(|| listed(0).len() == 2, "the archive's folder");
+                if active_elsewhere {
+                    view.browser().descend(0, Location::local(&other));
+                    view.browser().set_active_column(1);
+                }
+                let loads = (
+                    source.loads(&folder),
+                    source.loads(&Location::local(&other)),
+                );
+
+                view.state.extract_entry(transfer_entry(&archive));
+                let id = view
+                    .browser()
+                    .last_started_operation()
+                    .expect("extraction started");
+                std::fs::create_dir(&extracted).expect("extracted folder");
+                if watched {
+                    let notify = source
+                        .monitors
+                        .borrow()
+                        .iter()
+                        .find(|(location, _)| *location == folder)
+                        .map(|(_, notify)| notify.clone())
+                        .expect("the folder's monitor");
+                    notify(DirectoryChange::Upsert(FileEntry {
+                        kind: crate::model::EntryKind::Directory,
+                        ..transfer_entry(&extracted)
+                    }));
+                }
+                operations.emit(
+                    id,
+                    OperationEvent::Extracted {
+                        request_id: id,
+                        first_name: Some("bundle".to_owned()),
+                        created: vec![Location::local(&extracted)],
+                    },
+                );
+
+                let selected = || {
+                    view.browser()
+                        .selected_entries()
+                        .into_iter()
+                        .map(|entry| entry.location)
+                        .collect::<Vec<_>>()
+                };
+                wait_until(
+                    || {
+                        listed(0).contains(&"bundle".to_owned())
+                            && (active_elsewhere || selected() == [Location::local(&extracted)])
+                    },
+                    &format!("{row}: the extracted folder to be listed"),
+                );
+                assert_eq!(
+                    (
+                        source.loads(&folder) - loads.0,
+                        source.loads(&Location::local(&other)) - loads.1
+                    ),
+                    (usize::from(!watched), 0),
+                    "{row}: only the extraction's folder without a monitor reloads"
+                );
+                view.browser().clear_observer();
+            }
+        },
+    );
+}
+
 fn send_to_toast_labels(overlay: &gtk::Overlay) -> Vec<String> {
     let mut labels = Vec::new();
     let mut stack = Vec::new();
@@ -1820,12 +1868,303 @@ fn cancelling_an_operation_keeps_the_live_local_listing_visible() {
                     failed: 0,
                     not_attempted: 1,
                     affected_locations: std::collections::HashSet::from([root]),
+                    report: Default::default(),
                 });
 
             assert_eq!(view.browser().column_request_id(0), Some(request));
             let snapshot = view.browser().column_snapshot(0).expect("visible listing");
             assert!(!snapshot.loading);
             assert_eq!(snapshot.count, 1);
+        },
+    );
+}
+
+type Notify = Rc<dyn Fn(crate::services::DirectoryChange)>;
+
+struct Folders {
+    unwatched: Location,
+    loads: RefCell<Vec<Location>>,
+    monitors: RefCell<Vec<(Location, Notify)>>,
+}
+
+impl Folders {
+    fn new(unwatched: Location) -> Rc<Self> {
+        Rc::new(Self {
+            unwatched,
+            loads: RefCell::default(),
+            monitors: RefCell::default(),
+        })
+    }
+
+    fn loads(&self, location: &Location) -> usize {
+        self.loads
+            .borrow()
+            .iter()
+            .filter(|loaded| *loaded == location)
+            .count()
+    }
+}
+
+impl crate::services::FileSource for Folders {
+    fn validate_location(
+        &self,
+        location: &Location,
+    ) -> Result<(), crate::services::LocationValidationError> {
+        crate::adapters::LocalFileSource.validate_location(location)
+    }
+
+    fn validate_location_async(
+        &self,
+        location: Location,
+        emit: Rc<dyn Fn(Result<(), crate::services::LocationValidationError>)>,
+    ) -> crate::services::LoadHandle {
+        crate::adapters::LocalFileSource.validate_location_async(location, emit)
+    }
+
+    fn enumerate(
+        &self,
+        request: crate::services::DirectoryRequest,
+        emit: Rc<dyn Fn(crate::services::DirectoryEvent)>,
+    ) -> crate::services::LoadHandle {
+        self.loads.borrow_mut().push(request.location.clone());
+        crate::adapters::LocalFileSource.enumerate(request, emit)
+    }
+
+    fn watch(
+        &self,
+        location: Location,
+        _: bool,
+        notify: Notify,
+    ) -> Option<crate::services::LoadHandle> {
+        (location != self.unwatched).then(|| {
+            self.monitors.borrow_mut().push((location, notify));
+            crate::services::LoadHandle::new(|| {})
+        })
+    }
+}
+
+#[test]
+fn a_cancelled_transfer_reloads_its_unwatched_destination_while_a_watched_folder_rescans() {
+    use crate::services::{CancelledOperation, DirectoryChange, OperationEvent};
+
+    crate::test_support::gtk_test(
+        "ui::browser::transfer::tests::a_cancelled_transfer_reloads_its_unwatched_destination_while_a_watched_folder_rescans",
+        || {
+            // The view docks a copy in the background and keeps a move in the foreground.
+            for moving in [false, true] {
+                let row = if moving { "move" } else { "copy" };
+                let fixture = tempfile::tempdir().expect("cancelled transfer fixture");
+                let item = fixture.path().join("item.txt");
+                std::fs::write(&item, b"item").expect("transferred item");
+                let destination_path = fixture.path().join("destination");
+                std::fs::create_dir(&destination_path).expect("destination folder");
+                let target = destination_path.join("item.txt");
+                let root = Location::local(fixture.path());
+                let destination = Location::local(&destination_path);
+                let source = Folders::new(destination.clone());
+                let view = crate::ui::browser::BrowserView::new(
+                    source.clone(),
+                    crate::ui::browser::PeekBehavior::default(),
+                );
+                let operations =
+                    Rc::new(crate::test_support::operations::HeldOperations::default());
+                view.browser().set_operation_provider(operations.clone());
+                let names = |depth| {
+                    let mut names = view
+                        .browser()
+                        .with_column_entries(depth, |entries| {
+                            entries
+                                .iter()
+                                .map(|entry| entry.display_name.clone())
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default();
+                    names.sort();
+                    names
+                };
+                let loads = |location: &Location| source.loads(location);
+                view.navigate_location(root.clone());
+                wait_until(|| names(0).len() == 2, "the watched folder's listing");
+                view.browser().descend(0, destination.clone());
+                wait_until(
+                    || {
+                        view.browser()
+                            .column_snapshot(1)
+                            .is_some_and(|snapshot| !snapshot.loading)
+                    },
+                    "the destination's listing",
+                );
+                let loaded = (loads(&root), loads(&destination));
+
+                view.browser().transfer(
+                    destination.clone(),
+                    vec![PasteItem {
+                        source: Location::local(&item),
+                        conflict: TransferConflict::FailIfExists,
+                        target_name: None,
+                    }],
+                    moving,
+                    false,
+                );
+                let id = view
+                    .browser()
+                    .last_started_operation()
+                    .expect("transfer started");
+                assert_eq!(view.browser().has_foreground_operation(), moving, "{row}");
+                if moving {
+                    std::fs::rename(&item, &target).expect("moved item");
+                } else {
+                    std::fs::copy(&item, &target).expect("copied item");
+                }
+                let rescan = source
+                    .monitors
+                    .borrow()
+                    .iter()
+                    .find(|(watched, _)| *watched == root)
+                    .map(|(_, notify)| notify.clone())
+                    .expect("the watched folder's monitor");
+                rescan(DirectoryChange::Rescan);
+                view.browser().cancel_operation(id);
+                operations.emit(
+                    id,
+                    OperationEvent::Cancelled {
+                        request_id: id,
+                        result: CancelledOperation {
+                            completed: vec![Location::local(&item)],
+                            failed: Vec::new(),
+                            not_attempted: Vec::new(),
+                            affected_locations: HashSet::from([
+                                root.clone(),
+                                destination.clone(),
+                                Location::local(&item),
+                                Location::local(&target),
+                            ]),
+                        },
+                    },
+                );
+
+                wait_until(
+                    || names(1) == ["item.txt"],
+                    &format!("{row}: the destination to list what the transfer placed"),
+                );
+                let listed = if moving {
+                    vec!["destination"]
+                } else {
+                    vec!["destination", "item.txt"]
+                };
+                wait_until(
+                    || names(0) == listed,
+                    &format!("{row}: the watched folder's rescan"),
+                );
+                assert_eq!(
+                    (loads(&root), loads(&destination)),
+                    (loaded.0 + 1, loaded.1 + 1),
+                    "{row}: each folder reloads once"
+                );
+                view.browser().clear_observer();
+            }
+        },
+    );
+}
+
+#[test]
+fn a_completed_transfer_reloads_its_unwatched_destination_once() {
+    use crate::services::OperationEvent;
+
+    crate::test_support::gtk_test(
+        "ui::browser::transfer::tests::a_completed_transfer_reloads_its_unwatched_destination_once",
+        || {
+            // The view docks a copy in the background and keeps a move in the foreground.
+            for moving in [false, true] {
+                let row = if moving { "move" } else { "copy" };
+                let fixture = tempfile::tempdir().expect("completed transfer fixture");
+                let item = fixture.path().join("item.txt");
+                std::fs::write(&item, b"new item").expect("transferred item");
+                let destination_path = fixture.path().join("destination");
+                std::fs::create_dir(&destination_path).expect("destination folder");
+                let target = destination_path.join("item.txt");
+                std::fs::write(&target, b"old").expect("replaced item");
+                let root = Location::local(fixture.path());
+                let destination = Location::local(&destination_path);
+                let source = Folders::new(destination.clone());
+                let view = crate::ui::browser::BrowserView::new(
+                    source.clone(),
+                    crate::ui::browser::PeekBehavior::default(),
+                );
+                let operations =
+                    Rc::new(crate::test_support::operations::HeldOperations::default());
+                view.browser().set_operation_provider(operations.clone());
+                let loaded = |depth| {
+                    view.browser()
+                        .column_snapshot(depth)
+                        .is_some_and(|snapshot| !snapshot.loading && snapshot.count > 0)
+                };
+                view.navigate_location(root.clone());
+                wait_until(|| loaded(0), "the watched folder's listing");
+                view.browser().descend(0, destination.clone());
+                wait_until(|| loaded(1), "the destination's listing");
+                let loads = source.loads(&destination);
+
+                view.browser().transfer(
+                    destination.clone(),
+                    vec![PasteItem {
+                        source: Location::local(&item),
+                        conflict: TransferConflict::ReplaceExisting,
+                        target_name: None,
+                    }],
+                    moving,
+                    true,
+                );
+                let id = view
+                    .browser()
+                    .last_started_operation()
+                    .expect("transfer started");
+                assert_eq!(view.browser().has_foreground_operation(), moving, "{row}");
+                if moving {
+                    std::fs::rename(&item, &target).expect("moved item");
+                } else {
+                    std::fs::copy(&item, &target).expect("copied item");
+                }
+                operations.emit(
+                    id,
+                    OperationEvent::TransferProgress {
+                        request_id: id,
+                        completed_items: 1,
+                        completed_files: 1,
+                        total_files: Some(1),
+                        current_file: None,
+                        transferred_bytes: 8,
+                        total_bytes: Some(8),
+                        created_location: (!moving).then(|| Location::local(&target)),
+                    },
+                );
+                operations.emit(
+                    id,
+                    OperationEvent::Pasted {
+                        request_id: id,
+                        locations: vec![Location::local(&item)],
+                    },
+                );
+
+                wait_until(
+                    || {
+                        loaded(1)
+                            && view
+                                .browser()
+                                .selected_entries()
+                                .into_iter()
+                                .map(|entry| entry.location)
+                                .eq([Location::local(&target)])
+                    },
+                    &format!("{row}: the destination to reveal the replaced item"),
+                );
+                assert_eq!(
+                    source.loads(&destination),
+                    loads + 1,
+                    "{row}: the destination reloads once"
+                );
+                view.browser().clear_observer();
+            }
         },
     );
 }
@@ -2505,6 +2844,10 @@ fn background_move_without_reveal_restores_the_source_column() {
                 vec![Location::local(&source)],
                 DropCommit::Move,
             );
+            wait_until(
+                || view.state.drop_active_depths.get().is_some(),
+                "the move to start",
+            );
             assert_eq!(view.state.drop_active_depths.get(), Some((2, 0)));
 
             wait_until(
@@ -2806,6 +3149,439 @@ fn conflict_dialog_verifies_theme_following() {
                 "the conflict dialog must re-theme when the active theme changes"
             );
             window.destroy();
+        },
+    );
+}
+
+#[test]
+fn a_conflict_prompt_says_which_name_the_item_takes_and_what_a_merge_overwrites() {
+    let destination = Location::local("/media/stick");
+    let explanation = |source: &str, target: &str, fixes_inside, merge| {
+        conflict_explanation(
+            &TransferCollision {
+                source: Location::local(format!("/home/user/{source}")),
+                target_name: Some(ShownName {
+                    name: OsString::from(target),
+                    cause: (source != target).then_some(RenameCause::Invalid),
+                }),
+                mergeable: true,
+                fixes_inside,
+            },
+            &destination,
+            merge,
+        )
+    };
+    let saved_as = rust_i18n::t!(
+        "“%{name}” will be saved as “%{new_name}” in this location.",
+        name = "a:b",
+        new_name = "a_b"
+    );
+    for merge in [false, true] {
+        let as_named = explanation("a_b", "a_b", false, merge);
+        assert!(!as_named.contains("a:b"), "{as_named}");
+        assert_eq!(
+            explanation("a:b", "a_b", false, merge),
+            crate::i18n::join_sentences(&saved_as, &as_named)
+        );
+    }
+    let replacing = explanation("folder", "folder", true, false);
+    assert_eq!(replacing, explanation("folder", "folder", false, false));
+    let merging = explanation("folder", "folder", false, true);
+    assert_eq!(
+        explanation("folder", "folder", true, true),
+        crate::i18n::join_sentences(
+            &merging,
+            &crate::i18n::tr(
+                "Items whose names change to suit this location overwrite items with the new name."
+            )
+        )
+    );
+}
+
+fn conflict_view() -> (crate::ui::browser::BrowserView, gtk::Overlay, gtk::Window) {
+    let view = crate::ui::browser::BrowserView::new(
+        Rc::new(crate::adapters::LocalFileSource),
+        crate::ui::browser::PeekBehavior::default(),
+    );
+    view.set_operation_provider(Rc::new(crate::adapters::LocalOperationProvider));
+    let browser_widget = view.widget();
+    let root = crate::ui::blur::BlurBin::new(&browser_widget);
+    let overlay = gtk::Overlay::new();
+    overlay.set_child(Some(&root));
+    let window = gtk::Window::builder().child(&overlay).build();
+    window.present();
+    (view, overlay, window)
+}
+
+struct FatPaste {
+    sources: &'static [&'static str],
+    files: &'static [(&'static str, &'static str)],
+    disk: &'static [(&'static str, &'static str)],
+    prompt: (&'static str, &'static str),
+    choice: (&'static str, bool),
+    holds: &'static [(&'static str, &'static str)],
+}
+
+#[test]
+fn a_paste_onto_fat_asks_about_fixed_names_and_uses_the_names_it_planned() {
+    crate::test_support::gtk_test(
+        "ui::browser::transfer::tests::a_paste_onto_fat_asks_about_fixed_names_and_uses_the_names_it_planned",
+        || {
+            let rows = [
+                FatPaste {
+                    sources: &["a:b"],
+                    files: &[("a:b", "incoming")],
+                    disk: &[("a_b", "old")],
+                    prompt: ("a:b", "a_b"),
+                    choice: ("Replace", false),
+                    holds: &[("a_b", "incoming")],
+                },
+                FatPaste {
+                    sources: &["a:b", "c:d"],
+                    files: &[("a:b", "first"), ("c:d", "second")],
+                    disk: &[("a_b", "old"), ("c_d", "old")],
+                    prompt: ("a:b", "a_b"),
+                    choice: ("Replace", true),
+                    holds: &[("a_b", "first"), ("c_d", "second")],
+                },
+                FatPaste {
+                    sources: &["a:b", "a?b"],
+                    files: &[("a:b", "first"), ("a?b", "second")],
+                    disk: &[("a_b", "old")],
+                    prompt: ("a:b", "a_b"),
+                    choice: ("Skip", false),
+                    holds: &[("a_b", "old"), ("a_b (1)", "second")],
+                },
+                FatPaste {
+                    sources: &["x:y"],
+                    files: &[("x:y/new.txt", "new")],
+                    disk: &[("x_y/old.txt", "old")],
+                    prompt: ("x:y", "x_y"),
+                    choice: ("Merge", false),
+                    holds: &[("x_y/new.txt", "new"), ("x_y/old.txt", "old")],
+                },
+            ];
+            for row in rows {
+                let fixture = tempfile::tempdir().expect("conflict fixture");
+                let source = fixture.path().join("source");
+                let disk = fixture.path().join("disk");
+                for (root, files) in [(&source, row.files), (&disk, row.disk)] {
+                    for (path, contents) in files {
+                        let path = root.join(path);
+                        std::fs::create_dir_all(path.parent().expect("parent"))
+                            .expect("fixture folder");
+                        std::fs::write(path, contents).expect("fixture file");
+                    }
+                }
+                let _disk =
+                    crate::adapters::FsQuirks::install(&disk, crate::adapters::Quirks::vfat());
+                let (view, overlay, window) = conflict_view();
+
+                view.state.start_transfer(
+                    Location::local(&disk),
+                    row.sources
+                        .iter()
+                        .map(|name| Location::local(source.join(name)))
+                        .collect(),
+                    false,
+                );
+
+                assert!(
+                    wait_for_modal_layer(&overlay),
+                    "conflict dialog modal did not appear"
+                );
+                let (name, new_name) = row.prompt;
+                assert!(
+                    visible_texts(&overlay)
+                        .iter()
+                        .any(|text| text.contains(name) && text.contains(new_name)),
+                    "the prompt names the item and the name it takes: {:?}",
+                    visible_texts(&overlay)
+                );
+                let (choice, apply_to_all) = row.choice;
+                if apply_to_all {
+                    check_button_with_label(&overlay, "Apply to All").set_active(true);
+                }
+                click_button(&overlay, choice);
+                wait_until(
+                    || {
+                        row.holds.iter().all(|(path, contents)| {
+                            std::fs::read(disk.join(path))
+                                .is_ok_and(|held| held == contents.as_bytes())
+                        })
+                    },
+                    &format!("{choice} to give each item the name its prompt planned"),
+                );
+                let mut listed = std::fs::read_dir(&disk)
+                    .expect("disk listing")
+                    .map(|entry| entry.expect("disk entry").file_name())
+                    .collect::<Vec<_>>();
+                listed.sort();
+                let mut expected = row
+                    .holds
+                    .iter()
+                    .map(|(path, _)| path.split('/').next().expect("top-level name").into())
+                    .collect::<Vec<std::ffi::OsString>>();
+                expected.dedup();
+                assert_eq!(listed, expected, "{choice}: nothing else lands beside them");
+                window.destroy();
+            }
+        },
+    );
+}
+
+#[test]
+fn keeping_both_on_a_move_puts_the_item_beside_the_other_and_undo_moves_it_back() {
+    crate::test_support::gtk_test(
+        "ui::browser::transfer::tests::keeping_both_on_a_move_puts_the_item_beside_the_other_and_undo_moves_it_back",
+        || {
+            let fixture = tempfile::tempdir().expect("move fixture");
+            let original = fixture.path().join("original");
+            let current = fixture.path().join("current");
+            std::fs::create_dir_all(&original).expect("original dir");
+            std::fs::create_dir_all(&current).expect("current dir");
+            std::fs::write(original.join("todo.txt"), b"moved").expect("moved file");
+            std::fs::write(current.join("todo.txt"), b"existing").expect("existing file");
+            let (view, overlay, window) = conflict_view();
+
+            view.state.start_transfer(
+                Location::local(&current),
+                vec![Location::local(original.join("todo.txt"))],
+                true,
+            );
+            assert!(
+                wait_for_modal_layer(&overlay),
+                "conflict dialog modal did not appear"
+            );
+            click_button(&overlay, "Keep Both");
+            let kept = current.join("todo (1).txt");
+            wait_until(
+                || {
+                    std::fs::read(&kept).is_ok_and(|contents| contents == b"moved")
+                        && !original.join("todo.txt").exists()
+                },
+                "the move beside the existing item",
+            );
+
+            let browser = view.browser();
+            wait_until(
+                || browser.pending_undo_move().is_some(),
+                "the move undo to become pending",
+            );
+            let (generation, records) = browser.pending_undo_move().expect("pending move undo");
+            assert!(view.state.undo_move(generation, records));
+            wait_until(
+                || {
+                    std::fs::read(original.join("todo.txt"))
+                        .is_ok_and(|contents| contents == b"moved")
+                        && !kept.exists()
+                },
+                "the undo to move the item back",
+            );
+            assert_eq!(
+                std::fs::read(current.join("todo.txt")).expect("existing file"),
+                b"existing"
+            );
+            window.destroy();
+        },
+    );
+}
+
+fn transfer_row_shown(overlay: &gtk::Overlay, moving: bool) -> bool {
+    if moving {
+        visible_widget(overlay, |layer: &gtk::Box| {
+            layer.has_css_class("app-modal-layer") && !layer.has_css_class("dismissing")
+        })
+        .is_some()
+    } else {
+        find_widget_with_class(overlay, "app-modal-layer").is_none()
+            && visible_widget(overlay, |card: &gtk::Box| {
+                card.has_css_class("file-operation-card")
+            })
+            .is_some()
+    }
+}
+
+#[test]
+fn closing_the_view_while_a_transfer_prepares_dismisses_its_row_and_copies_nothing() {
+    crate::test_support::gtk_test(
+        "ui::browser::transfer::tests::closing_the_view_while_a_transfer_prepares_dismisses_its_row_and_copies_nothing",
+        || {
+            for moving in [false, true] {
+                let fixture = tempfile::tempdir().expect("slow fixture");
+                let source = fixture.path().join("source/notes.txt");
+                let disk = fixture.path().join("disk");
+                std::fs::create_dir_all(&disk).expect("disk dir");
+                std::fs::create_dir_all(fixture.path().join("source")).expect("source dir");
+                std::fs::write(&source, b"notes").expect("source file");
+                let (release, held) = std::sync::mpsc::channel::<()>();
+                let answered = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let looked_up = answered.clone();
+                let _disk = crate::adapters::FsQuirks::install(
+                    &disk,
+                    crate::adapters::Quirks {
+                        before: vec![(
+                            crate::adapters::FsOp::Stat,
+                            "notes.txt",
+                            0,
+                            Box::new(move || {
+                                let _released = held.recv();
+                                looked_up.store(true, std::sync::atomic::Ordering::SeqCst);
+                            }),
+                        )],
+                        ..crate::adapters::Quirks::ext4()
+                    },
+                );
+                let (view, overlay, window) = conflict_view();
+                view.state.start_transfer(
+                    Location::local(&disk),
+                    vec![Location::local(&source)],
+                    moving,
+                );
+                wait_until(
+                    || transfer_row_shown(&overlay, moving),
+                    &format!("moving {moving}: the transfer to show it prepares its items"),
+                );
+
+                view.dispose_file_progress();
+
+                assert!(
+                    !transfer_row_shown(&overlay, moving),
+                    "moving {moving}: a closed view keeps showing its preparing transfer"
+                );
+                release.send(()).expect("held listing");
+                wait_until(
+                    || answered.load(std::sync::atomic::Ordering::SeqCst),
+                    &format!("moving {moving}: the destination to answer"),
+                );
+                for _ in 0..20 {
+                    glib::MainContext::default().iteration(false);
+                }
+                assert!(
+                    !disk.join("notes.txt").exists() && source.exists(),
+                    "moving {moving}: a transfer whose view closed while it prepared went on"
+                );
+                window.destroy();
+            }
+        },
+    );
+}
+
+#[test]
+fn a_destination_slow_to_answer_shows_the_transfer_preparing_where_its_row_will_be() {
+    crate::test_support::gtk_test(
+        "ui::browser::transfer::tests::a_destination_slow_to_answer_shows_the_transfer_preparing_where_its_row_will_be",
+        || {
+            for (moving, cancelled) in [(false, true), (true, true), (false, false), (true, false)]
+            {
+                let row = format!("moving {moving}, cancelled {cancelled}");
+                let fixture = tempfile::tempdir().expect("slow fixture");
+                let source = fixture.path().join("source/notes.txt");
+                let disk = fixture.path().join("disk");
+                std::fs::create_dir_all(&disk).expect("disk dir");
+                std::fs::create_dir_all(fixture.path().join("source")).expect("source dir");
+                std::fs::write(&source, b"notes").expect("source file");
+                let (release, held) = std::sync::mpsc::channel::<()>();
+                let answered = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let looked_up = answered.clone();
+                let _disk = crate::adapters::FsQuirks::install(
+                    &disk,
+                    crate::adapters::Quirks {
+                        before: vec![(
+                            crate::adapters::FsOp::Stat,
+                            "notes.txt",
+                            0,
+                            Box::new(move || {
+                                let _released = held.recv();
+                                looked_up.store(true, std::sync::atomic::Ordering::SeqCst);
+                            }),
+                        )],
+                        ..crate::adapters::Quirks::ext4()
+                    },
+                );
+                let (view, overlay, window) = conflict_view();
+                let started = Rc::new(RefCell::new(Vec::new()));
+                let observed = started.clone();
+                let shown_on = overlay.clone();
+                view.browser().observe(move |event| {
+                    if matches!(
+                        operation_event(event),
+                        crate::app::BrowserEvent::TransferStarted { .. }
+                    ) {
+                        observed
+                            .borrow_mut()
+                            .push(transfer_row_shown(&shown_on, moving));
+                    }
+                });
+                let paste = || {
+                    view.state.start_transfer(
+                        Location::local(&disk),
+                        vec![Location::local(&source)],
+                        moving,
+                    )
+                };
+
+                paste();
+                wait_until(
+                    || transfer_row_shown(&overlay, moving),
+                    &format!("{row}: the transfer to show it prepares its items"),
+                );
+                assert!(
+                    visible_texts(&overlay).contains(&"notes.txt".to_owned()) || moving,
+                    "{row}: the docked row names the item"
+                );
+                let shown = visible_texts(&overlay);
+                assert!(
+                    shown.iter().any(|text| text == "Preparing items…")
+                        && !shown.iter().any(|text| text == "0/0"),
+                    "{row}: the transfer says it prepares its items, with no count: {shown:?}"
+                );
+                paste();
+                if cancelled {
+                    if moving {
+                        click_button(&overlay, "Cancel");
+                    } else {
+                        visible_widget(&overlay, |button: &gtk::Button| {
+                            button.has_css_class("progress-cancel")
+                        })
+                        .expect("the docked row's cancel")
+                        .emit_clicked();
+                    }
+                    wait_until(
+                        || !transfer_row_shown(&overlay, moving),
+                        &format!("{row}: the preparing transfer to go away"),
+                    );
+                    paste();
+                } else {
+                    release.send(()).expect("held listing");
+                }
+                wait_until(
+                    || {
+                        std::fs::read(disk.join("notes.txt"))
+                            .is_ok_and(|contents| contents == b"notes")
+                            && source.exists() != moving
+                    },
+                    &format!("{row}: the transfer"),
+                );
+                if cancelled {
+                    release.send(()).expect("held listing");
+                }
+                wait_until(
+                    || answered.load(std::sync::atomic::Ordering::SeqCst),
+                    &format!("{row}: the destination to answer"),
+                );
+                for _ in 0..20 {
+                    glib::MainContext::default().iteration(false);
+                }
+                assert_eq!(
+                    *started.borrow(),
+                    [!cancelled],
+                    "{row}: one transfer started, which took the place of the row that \
+                     showed it preparing unless that was cancelled"
+                );
+                view.browser().clear_observer();
+                window.destroy();
+            }
         },
     );
 }

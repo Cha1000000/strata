@@ -137,23 +137,25 @@ fn tenxer_footer_rename_changes_only_the_focused_item_on_enter() {
             submit_rename(&fixture, "a.txt");
             assert_eq!(fixture.shortcuts.open_prompt_kind(), None);
             submit_rename(&fixture, "renamed.txt");
-            assert_eq!(fixture.shortcuts.open_prompt_kind(), None);
+            wait_until(|| fixture.shortcuts.open_prompt_kind().is_none());
             wait_until(|| directory.join("renamed.txt").is_file());
             assert!(!directory.join("a.txt").exists());
             assert_eq!(contents(&directory.join("renamed.txt")), "preview");
             assert!(directory.join("c.txt").is_file(), "the fill is not renamed");
             wait_until(|| focused_name(&browser) == "renamed.txt");
 
+            let too_long = "x".repeat(300);
             for (text, hint) in [
                 ("", "Enter a name"),
                 ("  ", "Enter a name"),
                 ("..", "That name is reserved"),
                 ("nested/name", "Names cannot contain /"),
                 ("b.txt", "\u{201c}b.txt\u{201d} already exists"),
+                (&too_long, "The name is too long"),
             ] {
                 submit_rename(&fixture, text);
+                wait_until(|| fixture.shortcuts.prompt_hint().as_deref() == Some(hint));
                 assert_eq!(fixture.shortcuts.open_prompt_kind(), Some(Prompt::Rename));
-                assert_eq!(fixture.shortcuts.prompt_hint().as_deref(), Some(hint));
                 assert_eq!(
                     fixture.shortcuts.prompt_text(),
                     text,
@@ -185,12 +187,6 @@ fn tenxer_footer_rename_changes_only_the_focused_item_on_enter() {
             assert_eq!(contents(&directory.join("folder.d/inside.txt")), "kept");
 
             move_to_named(&fixture, &browser, "b.txt");
-            submit_rename(&fixture, &"x".repeat(300));
-            wait_until(|| modal_visible(&fixture.overlay));
-            assert!(click_class(&fixture.overlay, "action-dialog-close"));
-            wait_until(|| !modal_visible(&fixture.overlay));
-            assert_eq!(contents(&directory.join("b.txt")), "preview");
-
             let writable = std::fs::metadata(&directory)
                 .expect("fixture")
                 .permissions();
@@ -207,6 +203,45 @@ fn tenxer_footer_rename_changes_only_the_focused_item_on_enter() {
                 assert!(!directory.join("denied.txt").exists());
             }
             std::fs::set_permissions(&directory, writable).expect("restore fixture");
+        },
+    );
+}
+
+#[test]
+fn typed_rename_passes_a_same_item_name_to_the_operation() {
+    crate::test_support::gtk_test(
+        "ui::window::tests::keyboard_dispatch::file_verbs::typed_rename_passes_a_same_item_name_to_the_operation",
+        || {
+            let fixture = KeyboardFixture::new();
+            enable_tenxer(&fixture);
+            let directory = fixture._directory.path().to_path_buf();
+            let browser = fixture.view.browser();
+            std::fs::hard_link(directory.join("a.txt"), directory.join("link.txt"))
+                .expect("hard link");
+            refresh(&fixture, "link.txt");
+            move_to_named(&fixture, &browser, "a.txt");
+
+            submit_rename(&fixture, "later.txt");
+            plain(&fixture, Key::Escape);
+            open_rename(&fixture, Key::r);
+            fixture.shortcuts.prompt().set_text("later.txt");
+            pump(200);
+            assert!(
+                !directory.join("later.txt").exists(),
+                "a dismissed request must not submit the reopened prompt"
+            );
+            assert_eq!(fixture.shortcuts.open_prompt_kind(), Some(Prompt::Rename));
+            plain(&fixture, Key::Escape);
+
+            // The same item under another name is not refused by the prompt;
+            // the operation itself refuses a separate hard link.
+            submit_rename(&fixture, "link.txt");
+            wait_until(|| modal_visible(&fixture.overlay));
+            assert_eq!(fixture.shortcuts.open_prompt_kind(), None);
+            assert!(click_class(&fixture.overlay, "action-dialog-close"));
+            wait_until(|| !modal_visible(&fixture.overlay));
+            assert_eq!(contents(&directory.join("a.txt")), "preview");
+            assert_eq!(contents(&directory.join("link.txt")), "preview");
         },
     );
 }

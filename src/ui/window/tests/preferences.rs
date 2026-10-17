@@ -2545,6 +2545,7 @@ fn folder_customizations_follow_file_operations_performed_in_strata() {
                         vec![PasteItem {
                             source: Location::local(&docs),
                             conflict,
+                            target_name: None,
                         }],
                         move_sources,
                         false,

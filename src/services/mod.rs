@@ -45,8 +45,8 @@ pub use file_source::{
     validate_uri_credentials,
 };
 pub(crate) use file_source::{
-    error_detail, gio_error_detail, gio_error_message, io_error_detail, io_error_message,
-    sanitize_failure_message,
+    INVALID_NAME_REASON, error_detail, gio_error_detail, gio_error_message, io_error_detail,
+    io_error_message, sanitize_failure_message,
 };
 pub use install_source::{InstallSource, ManagedInstall};
 pub(crate) use install_source::{ensure_self_managed, installed_executable};
@@ -66,11 +66,12 @@ pub(crate) use native_fs::{is_hidden_name, native_hidden_names, native_kind, sym
 pub(crate) use navigation_history::NavigationHistory;
 pub use operations::{
     ArchiveFormat, CancelledOperation, CompressRequest, CreateDirectoryRequest, CreateFileRequest,
-    DeleteRequest, ExtractRequest, MoveRecord, OperationEvent, OperationProvider,
-    OperationRequestId, PasswordFailure, PasteItem, PasteRequest, RenameRecord, RenameRequest,
-    RestoreRequest, RestoreSource, RestoreTrashItem, TransferConflict, TrashedOriginal,
-    UndoCopyRequest, UndoMergeRequest, UndoMoveItem, UndoMoveRequest, UndoRenameRequest,
-    validate_basename,
+    DeleteRequest, ExtractRequest, KeptCause, KeptItem, MoveRecord, NameMode, OperationEvent,
+    OperationProvider, OperationRequestId, PasswordFailure, PasteItem, PasteRequest,
+    PlacedSnapshot, RenameCause, RenameRecord, RenameRequest, RenamedItem, ReplacedOriginal,
+    RestoreRequest, RestoreSource, RestoreTrashItem, ShownName, SkippedItem, SpecialKind,
+    TransferConflict, TransferReport, TrashedOriginal, UndoCopyRequest, UndoMergeRequest,
+    UndoMoveItem, UndoMoveRequest, UndoRenameRequest, validate_basename,
 };
 pub(crate) use path_match::{PathMatcher, PathQuery};
 pub use preview::{

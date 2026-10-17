@@ -665,6 +665,7 @@ fn operations_in_inactive_tabs_prevent_tab_and_window_closure() {
                 vec![PasteItem {
                     source: Location::local(root.path().join("source")),
                     conflict: TransferConflict::FailIfExists,
+                    target_name: None,
                 }],
                 false,
                 false,

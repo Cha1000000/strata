@@ -100,6 +100,7 @@ impl Fixture {
             vec![PasteItem {
                 source: Location::local(self.temp.path().join(name)),
                 conflict: TransferConflict::FailIfExists,
+                target_name: None,
             }],
             moving,
             false,
@@ -375,6 +376,7 @@ fn docked_copy_archive_and_deletion_update_and_cancel_independently() {
                     archive_name: "bundle.zip".into(),
                     archive: Location::local(fixture.temp.path().join("bundle.zip")),
                     original: None,
+                    placed: None,
                 },
             );
             assert!(
@@ -510,6 +512,7 @@ fn archive_activity_is_retained_before_display_and_while_a_large_member_is_runni
                     archive_name: "bundle.zip".into(),
                     archive: Location::local(fixture.temp.path().join("bundle.zip")),
                     original: None,
+                    placed: None,
                 },
             );
         },

@@ -741,6 +741,13 @@ fn builtins() -> Vec<Theme> {
                 .collect()
         })
         .unwrap_or_default();
+    for theme in &mut themes {
+        // Dim text carries the same contrast floors as body text, and the lift
+        // stops at the first passing step, so it stays dimmer than text.
+        let tokens = &mut theme.tokens;
+        let dim = omarchy::readable(&tokens.dim_text, &[&tokens.background], &tokens.text, 4.5);
+        tokens.dim_text = omarchy::readable(&dim, &[&tokens.surface], &tokens.text, 3.0);
+    }
     themes.sort_by_key(|theme| theme.tokens.name.to_lowercase());
     themes
 }

@@ -712,19 +712,9 @@ impl ViewState {
             }
             BrowserEvent::TransferStarted { total, moving } => {
                 let browser = self.browser.clone();
-                self.show_file_operation_progress(
+                self.show_transfer_progress(
                     *total,
-                    if *moving {
-                        crate::assets::icons::FOLDER
-                    } else {
-                        crate::assets::icons::COPY
-                    },
-                    if *moving {
-                        "Moving items"
-                    } else {
-                        "Copying items"
-                    },
-                    "Cancelling will not undo completed changes",
+                    *moving,
                     super::progress::file_operation_cancel(browser),
                 );
                 self.update_transfer_progress(0, 0, None, 0, None);
@@ -774,6 +764,15 @@ impl ViewState {
                 }
                 self.dismiss_file_operation_progress();
                 self.prune_stale_search_results();
+            }
+            BrowserEvent::ItemsReported { report } => {
+                let report = report.clone();
+                let weak = Rc::downgrade(self);
+                self.dismiss_file_operation_progress_then(move || {
+                    if let Some(state) = weak.upgrade() {
+                        state.show_transfer_report(&report);
+                    }
+                });
             }
             BrowserEvent::FolderSortChosen {
                 location,
@@ -889,6 +888,7 @@ impl ViewState {
             BrowserEvent::OperationFailed {
                 message,
                 password_failure,
+                report,
             } => {
                 self.suppress_scroll_after_drop.set(false);
                 self.drop_active_depths.set(None);
@@ -897,9 +897,8 @@ impl ViewState {
                 self.finished_send_to_completion.take();
                 self.pending_archive_destination.take();
                 let retry = self.pending_extract_retry.take();
-                // Only a password retry still follows an Extract to destination.
                 let navigate_after_extract = self.pending_navigate.take();
-                let message = message.clone();
+                let message = super::transfer_report::outcome_detail(message.clone(), report);
                 let password_failure = *password_failure;
                 let weak = Rc::downgrade(self);
                 self.dismiss_file_operation_progress_then(move || {
@@ -929,6 +928,7 @@ impl ViewState {
                 message,
                 retryable_locations,
                 has_non_retryable_failures,
+                report,
             } => {
                 self.suppress_scroll_after_drop.set(false);
                 self.drop_active_depths.set(None);
@@ -939,7 +939,7 @@ impl ViewState {
                     self.pending_delete_entries.take(),
                     retryable_locations,
                 );
-                let message = message.clone();
+                let message = super::transfer_report::outcome_detail(message.clone(), report);
                 let has_non_retryable_failures = *has_non_retryable_failures;
                 let weak = Rc::downgrade(self);
                 self.dismiss_file_operation_progress_then(move || {
@@ -972,6 +972,7 @@ impl ViewState {
                 failed,
                 not_attempted,
                 affected_locations,
+                report,
             } => {
                 self.suppress_scroll_after_drop.set(false);
                 self.drop_active_depths.set(None);
@@ -980,10 +981,13 @@ impl ViewState {
                 self.pending_send_to_completion.take();
                 self.finished_send_to_completion.take();
                 let affected_locations = affected_locations.clone();
-                let message = super::progress::cancelled_operation_summary(
-                    *completed,
-                    *failed,
-                    *not_attempted,
+                let message = super::transfer_report::outcome_detail(
+                    super::progress::cancelled_operation_summary(
+                        *completed,
+                        *failed,
+                        *not_attempted,
+                    ),
+                    report,
                 );
                 let weak = Rc::downgrade(self);
                 self.dismiss_file_operation_progress_then(move || {
@@ -1076,10 +1080,7 @@ impl ViewState {
             }
             BrowserEvent::ArchiveCompleted { select_name, .. } => {
                 self.pending_extract_retry.replace(None);
-                let extracted_elsewhere = self
-                    .extract_destination
-                    .take()
-                    .is_some_and(|destination| self.browser.active_location() != Some(destination));
+                let extract_destination = self.extract_destination.take();
                 if select_name.is_empty() {
                     self.pending_archive_destination.take();
                 }
@@ -1137,11 +1138,9 @@ impl ViewState {
                     self.dismiss_file_operation_progress_then(move || {
                         if let Some(state) = weak.upgrade()
                             && state.browser.navigation_generation() == navigation_generation
+                            && !select_name.is_empty()
                         {
-                            if !select_name.is_empty() && !extracted_elsewhere {
-                                state.pending_select.borrow_mut().push(select_name);
-                            }
-                            state.browser.reload_active();
+                            state.show_archive_result(extract_destination, select_name);
                         }
                     });
                 }
@@ -1206,6 +1205,26 @@ impl ViewState {
         }
     }
 
+    /// Only a folder without a monitor needs a reload to list the result.
+    fn show_archive_result(self: &Rc<Self>, destination: Option<Location>, name: String) {
+        let active = self.browser.active_location();
+        let Some(folder) = destination.or_else(|| active.clone()) else {
+            return;
+        };
+        let Some(depth) = self.browser.open_depth(&folder) else {
+            return;
+        };
+        if active.as_ref() == Some(&folder) {
+            self.pending_archive_destination.replace(Some(folder));
+            self.pending_select.borrow_mut().push(name);
+        }
+        if self.browser.column_has_monitor(depth) {
+            self.reveal_pending_archive_at(depth);
+        } else {
+            self.browser.retry_column(depth);
+        }
+    }
+
     fn reveal_pending_archive_at(self: &Rc<Self>, depth: usize) {
         if self
             .pending_archive_destination
@@ -1234,10 +1253,13 @@ impl ViewState {
         if locations.len() > MAX_BULK_REVEAL_SELECTION {
             locations.truncate(1);
         }
-        if let Some(depth) = self.browser.open_depth(&destination)
-            && self.browser.column_has_monitor(depth)
-        {
+        if let Some(depth) = self.browser.open_depth(&destination) {
             self.prepare_reveal(&destination);
+            if !self.browser.column_has_monitor(depth) {
+                self.browser
+                    .reveal_reloaded_locations(&destination, locations);
+                return;
+            }
             if self
                 .browser
                 .reveal_monitored_locations(destination.clone(), &locations)

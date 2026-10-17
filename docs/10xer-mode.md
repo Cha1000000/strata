@@ -75,6 +75,7 @@ sidebar. In Icons, **h** / **j** / **k** / **l** and arrows move among tiles.
 | **i** | On a file: toggle the preview drawer without moving focus into it. On a directory: in Columns, open the next Miller column without moving focus into it (mirroring usually has already); in List and Icons, toggle the folder-peek popover. |
 | **J** / **K** | Scroll the open preview without taking focus |
 | **<** / **>** | While the open preview shows audio or video: move to the previous / next file of the same type and keep playing, without taking focus |
+| **+** / **=** / **−** | Icons: larger / smaller thumbnails, the same steps as **Ctrl+Alt++** / **Ctrl+Alt+−** |
 
 In Columns, the saved **Mirror columns selection** preference (on by default)
 applies to the cursor: shortly after **j** / **k** / arrows land on a directory,
@@ -373,7 +374,7 @@ clears its marks.
 **Ctrl+V** (see [keyboard navigation](keyboard-navigation.md#input-precedence)),
 and pasting never changes pointer or keyboard ownership. Focusing a conflict
 button does not choose it: nothing changes until you accept, and Cancel or
-**Esc** leaves both items untouched. Keep Both is offered only for copies.
+**Esc** leaves both items untouched.
 
 **d** / **Delete** show a **Move to Trash?** confirmation with its confirm button
 focused; pressing **d** again confirms it, so **d d** trashes. **D** / **Shift+Delete**, and **d** inside Trash, show the permanent
@@ -388,8 +389,10 @@ the usual operation dialogs, and **Ctrl+Z** undoes what the default map can undo
 the typed name in the keyboard-focused folder; spaces and Unicode are kept. A
 trailing `/` makes a folder instead and is removed before the name is checked. An
 empty name, `.`, `..`, or a name containing `/` keeps the prompt open with the
-reason, and so does a name already taken (including by a broken link), so you
-can fix it. Nothing is renumbered, replaced, or followed. **Esc**, focus leaving
+reason, and so does a name already taken (including by a broken link) or one the
+location would store as another (see [Names the user
+types](filesystem-compatibility.md#names-the-user-types)), so you can
+fix it. Nothing is renumbered, replaced, or followed. **Esc**, focus leaving
 the prompt, a clicked row, another prompt, leaving the mode, or closing the
 window discard the name. **Ctrl+Shift+N** still adds a numbered **new folder**
 and renames it in place. Trash and Recent flash `Can’t create items here`.
@@ -400,9 +403,10 @@ open-path marker. The current name is filled in with a file's stem (or a
 folder's whole name) selected, as inline rename selects it. The item is fixed
 when the prompt opens; **Up** / **Down** do not move the cursor while it is open.
 **Enter** renames the item to exactly the typed name and keeps its contents; an
-unchanged name does nothing. An invalid name or one already taken keeps the
-prompt open with the reason, and nothing is replaced. Permission errors and
-filesystem limits leave the original name and show the usual rename error.
+unchanged name does nothing. An invalid name, one already taken, or one the
+location would store as another keeps the prompt open with the reason, and
+nothing is replaced. Permission errors leave the original name and show the
+usual rename error.
 **Esc**, focus leaving the prompt, a clicked row (which keeps its selection),
 another prompt, leaving the mode, or closing the window discard the typed name.
 Trash items flash `Can’t rename items here`. The context menu's **Rename** and a
@@ -718,6 +722,7 @@ These GUI conventions stay available alongside the Yazi verbs:
 | **Alt+Enter** | Properties |
 | **Menu** / **Shift+F10** | Context menu |
 | **Ctrl++** / **Ctrl+−** / **Ctrl+0** | Text size |
+| **Ctrl+Alt++** / **Ctrl+Alt+−** / **Ctrl+Alt+0** | Icons thumbnail size |
 
 Context-menu shortcut hints follow this map (**x** cut, **y** yank, **p** paste,
 **d** / **D** trash / delete, **r** rename, **M** / **C** move / copy to, **R**

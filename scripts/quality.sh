@@ -27,7 +27,9 @@ fi
 if [[ "$group_id" != 0 ]]; then
   printf 'strata-quality:x:%s:\n' "$group_id" >> "$accounts/group"
 fi
-options=(--rm --platform=linux/amd64 --user "$user_id:$group_id" --shm-size=512m)
+# Tests need O_TMPFILE in their temporary folders, which an overlay /tmp may refuse.
+options=(--rm --platform=linux/amd64 --user "$user_id:$group_id" --shm-size=512m
+  --tmpfs /tmp:rw,exec,nosuid,nodev,size=2g,mode=1777)
 if [[ "$(basename "$engine")" == podman ]]; then
   options+=(--userns=keep-id --passwd=false)
 fi

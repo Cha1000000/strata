@@ -19,7 +19,8 @@ use std::{
 
 use gtk::{gio, glib, prelude::*};
 
-use super::volume::{MountKey, MountTable, is_fuse_fs_type};
+use super::volume::{MountTable, TrashMountKey as MountKey, is_fuse_fs_type};
+use crate::services::TrashedOriginal;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum TrashFailure {
@@ -80,7 +81,7 @@ pub(crate) trait TrashEnvironment {
         &self,
         file: &gio::File,
         cancellable: &gio::Cancellable,
-    ) -> Pin<Box<dyn Future<Output = Result<(), glib::Error>>>>;
+    ) -> Pin<Box<dyn Future<Output = Result<Option<TrashedOriginal>, glib::Error>>>>;
 }
 
 pub(crate) struct SystemTrash;
@@ -98,21 +99,12 @@ impl TrashEnvironment for SystemTrash {
         &self,
         file: &gio::File,
         cancellable: &gio::Cancellable,
-    ) -> Pin<Box<dyn Future<Output = Result<(), glib::Error>>>> {
+    ) -> Pin<Box<dyn Future<Output = Result<Option<TrashedOriginal>, glib::Error>>>> {
         let file = file.clone();
         let cancellable = cancellable.clone();
-        Box::pin(async move {
-            super::local_operations::await_cancellable(
-                &file,
-                &cancellable,
-                |file, cancellable, result| {
-                    file.trash_async(glib::Priority::DEFAULT, Some(cancellable), move |output| {
-                        result.resolve(output)
-                    });
-                },
-            )
-            .await
-        })
+        Box::pin(
+            async move { super::local_operations::trash::trash_entry(&file, &cancellable).await },
+        )
     }
 }
 
@@ -121,7 +113,7 @@ impl TrashEnvironment for SystemTrash {
 pub(crate) async fn trash_with_cleanup(
     file: &gio::File,
     cancellable: &gio::Cancellable,
-) -> Result<(), TrashError> {
+) -> Result<Option<TrashedOriginal>, TrashError> {
     trash_with_cleanup_in(&SystemTrash, file, cancellable).await
 }
 
@@ -129,7 +121,7 @@ pub(crate) async fn trash_with_cleanup_in(
     environment: &dyn TrashEnvironment,
     file: &gio::File,
     cancellable: &gio::Cancellable,
-) -> Result<(), TrashError> {
+) -> Result<Option<TrashedOriginal>, TrashError> {
     let mut leftovers = LeftoverWatch::observe(environment, native_path(file)).await;
     let result = attempt(environment, file, cancellable).await;
     if let Some(path) = native_path(file) {
@@ -144,13 +136,57 @@ pub(crate) async fn attempt(
     environment: &dyn TrashEnvironment,
     file: &gio::File,
     cancellable: &gio::Cancellable,
-) -> Result<(), TrashError> {
-    let Err(error) = environment.trash(file, cancellable).await else {
-        return Ok(());
+) -> Result<Option<TrashedOriginal>, TrashError> {
+    let error = match environment.trash(file, cancellable).await {
+        Ok(identity) => return Ok(identity),
+        Err(error) => error,
     };
     let (failure, mount) = classify(environment, file, &error).await;
     if let (TrashFailure::Unsupported(reason), Some(mount)) = (failure, mount) {
         record_unsupported(mount, reason);
+    }
+    Err(TrashError { failure, error })
+}
+
+/// Blocking counterpart of [`trash_with_cleanup`] for worker threads.
+pub(crate) fn verified_with_cleanup(
+    path: &Path,
+    attempt: impl FnOnce() -> Result<(), glib::Error>,
+) -> Result<(), TrashError> {
+    let mounts = MountTable::current();
+    let home = glib::home_dir();
+    let mount = path
+        .parent()
+        .and_then(|parent| resolved_mount(&mounts, parent))
+        .filter(|mount| is_fuse_fs_type(&mount.fs_type))
+        .filter(|_| {
+            let parent_device = path
+                .parent()
+                .and_then(|parent| std::fs::metadata(parent).ok())
+                .map(|metadata| metadata.dev());
+            let home_device = std::fs::metadata(&home).ok().map(|metadata| metadata.dev());
+            parent_device.is_some() && parent_device != home_device
+        });
+    let snapshot = mount
+        .as_ref()
+        .map(|mount| TrashDirSnapshot::take(&mount.mount_point));
+    let error = match attempt() {
+        Ok(()) => return Ok(()),
+        Err(error) => error,
+    };
+    let facts = mount
+        .as_ref()
+        .map(|mount| FuseFacts::gather(path, &mount.mount_point, &home));
+    let failure = decide(
+        &error,
+        mount.as_ref().map(|mount| mount.fs_type.as_str()),
+        facts,
+    );
+    if let (TrashFailure::Unsupported(reason), Some(mount)) = (failure, mount) {
+        record_unsupported(mount, reason);
+        if let Some(snapshot) = snapshot {
+            snapshot.remove_created();
+        }
     }
     Err(TrashError { failure, error })
 }

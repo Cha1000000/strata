@@ -4,6 +4,13 @@
 import pytest
 
 
+def open_rename_directory(strata):
+    strata.keyboard.press("F5")
+    strata.select_entry_with_keyboard("rename-target")
+    strata.keyboard.press("Return")
+    strata.wait_for_directory("rename-target")
+
+
 def wait_for_visible_commit(strata, name):
     def visible():
         pane = strata.pane("rename-target")
@@ -37,9 +44,7 @@ def begin_long_directory_rename(strata, kind, new, mode="Columns"):
             (path / "marker").write_text("body\n")
         else:
             path.write_text("body\n")
-    strata.keyboard.press("F5")
-    strata.entry("rename-target")
-    strata.open_directory("rename-target")
+    open_rename_directory(strata)
     strata.keyboard.press("Home")
     strata.keyboard.press("End")
     original = "m-entry-079"
@@ -180,9 +185,7 @@ def test_already_visible_created_item_preserves_scroll(strata, mode):
     strata.fixture.path("rename-target").mkdir()
     for name in ["a-anchor"] + [f"z-entry-{index:03d}" for index in range(80)]:
         strata.fixture.path("rename-target/" + name).write_text("body\n")
-    strata.keyboard.press("F5")
-    strata.entry("rename-target")
-    strata.open_directory("rename-target")
+    open_rename_directory(strata)
     strata.keyboard.press("Home")
     strata.wait_for_selection(["a-anchor"], "rename-target")
     anchor = strata.entry("a-anchor", "rename-target").find(role="panel")

@@ -64,6 +64,9 @@ class QualityRunnerTests(unittest.TestCase):
         self.assertIn("STRATA_QUALITY_TASK", args)
         self.assertIn("STRATA_QUALITY_SHARD", args)
         self.assertTrue(any(arg.startswith("STRATA_QUALITY_COMMIT=") for arg in args))
+        tmp = args[args.index("--tmpfs") + 1].split(":", 1)
+        self.assertEqual(tmp[0], "/tmp")
+        self.assertIn("exec", tmp[1].split(","))
         self.assertEqual(args[-1], "test")
 
     def test_workflow_matrix_and_required_gate_match_the_plan(self):

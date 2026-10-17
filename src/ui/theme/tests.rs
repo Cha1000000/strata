@@ -55,10 +55,15 @@ fn bundled_catalog_is_valid_unique_and_alphabetical() {
     }
 }
 
+type TextColor = (&'static str, fn(&ThemeTokens) -> &str);
 type ContrastFloor = (&'static str, fn(&ThemeTokens) -> &str, f64);
 
 #[test]
-fn bundled_themes_keep_body_text_readable() {
+fn bundled_themes_keep_text_readable() {
+    let colors: [TextColor; 2] = [
+        ("text", |tokens| &tokens.text),
+        ("dim text", |tokens| &tokens.dim_text),
+    ];
     let floors: [ContrastFloor; 2] = [
         ("background", |tokens| &tokens.background, 4.5),
         ("surface", |tokens| &tokens.surface, 3.0),
@@ -67,13 +72,15 @@ fn bundled_themes_keep_body_text_readable() {
     assert!(!themes.is_empty());
     let mut failures = Vec::new();
     for theme in &themes {
-        for (role, color, floor) in floors {
-            let ratio = contrast(&theme.tokens.text, color(&theme.tokens));
-            if ratio < floor {
-                failures.push(format!(
-                    "{} text on {role} is {ratio:.2}:1, below the {floor}:1 floor",
-                    theme.id
-                ));
+        for (name, color) in colors {
+            for (role, background, floor) in floors {
+                let ratio = contrast(color(&theme.tokens), background(&theme.tokens));
+                if ratio < floor {
+                    failures.push(format!(
+                        "{} {name} on {role} is {ratio:.2}:1, below the {floor}:1 floor",
+                        theme.id
+                    ));
+                }
             }
         }
     }

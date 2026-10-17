@@ -7,10 +7,10 @@ use std::{
     error::Error,
     ffi::OsString,
     fs,
-    io::ErrorKind,
+    io::{ErrorKind, Write},
     os::unix::{
         ffi::{OsStrExt, OsStringExt},
-        fs::PermissionsExt,
+        fs::{OpenOptionsExt, PermissionsExt},
     },
     process::Command,
     time::{Instant, SystemTime},
@@ -400,15 +400,46 @@ fn large_monitor_bursts_collapse_to_one_rescan() {
 
 #[test]
 fn conflicting_move_events_fall_back_to_a_rescan() {
-    let change = merge_pending_change(
-        PendingMonitorChange::Move {
-            from: Location::local("/fixture/old"),
-            to: Location::local("/fixture/new"),
-        },
-        PendingMonitorChange::Remove(Location::local("/fixture/new")),
-    );
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .expect("main context lock");
+    for recreate_source in [false, true] {
+        let from = Location::local("/fixture/old");
+        let to = Location::local("/fixture/new");
+        let mut pending = HashMap::new();
+        queue_monitor_change(
+            &mut pending,
+            Some(to.clone()),
+            PendingMonitorChange::Move {
+                from: from.clone(),
+                to: to.clone(),
+            },
+        );
+        if recreate_source {
+            queue_monitor_change(
+                &mut pending,
+                Some(from.clone()),
+                PendingMonitorChange::Upsert(from),
+            );
+        } else {
+            queue_monitor_change(
+                &mut pending,
+                Some(to.clone()),
+                PendingMonitorChange::Remove(to),
+            );
+        }
+        let changes = Rc::new(RefCell::new(Vec::new()));
+        let observed = changes.clone();
+        let notify: Rc<dyn Fn(DirectoryChange)> =
+            Rc::new(move |change| observed.borrow_mut().push(change));
 
-    assert!(matches!(change, PendingMonitorChange::Rescan));
+        flush_monitor_changes(&RefCell::new(pending), &notify, &Rc::new(Cell::new(false)));
+
+        assert!(
+            matches!(changes.borrow().as_slice(), [DirectoryChange::Rescan]),
+            "recreate source: {recreate_source}"
+        );
+    }
 }
 
 #[test]
@@ -472,6 +503,127 @@ fn a_directory_reporting_changes_against_itself_is_not_its_own_child() {
         ),
         Some(child)
     );
+}
+
+#[test]
+fn change_events_for_unnamed_temporary_files_are_ignored() -> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let directory = unique_fixture_root("monitor-unnamed");
+    fs::create_dir_all(&directory)?;
+    let listed = directory.join("#1234");
+    let arrived = directory.join("#5678");
+    fs::write(&listed, b"a")?;
+    let changes: Rc<RefCell<Vec<DirectoryChange>>> = Rc::default();
+    let collected = changes.clone();
+    let handle = LocalFileSource
+        .watch(
+            Location::local(&directory),
+            false,
+            Rc::new(move |change| collected.borrow_mut().push(change)),
+        )
+        .expect("the native location should be monitored");
+    let write_unnamed = || -> Result<Location, Box<dyn Error>> {
+        let mut file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .mode(0o600)
+            .custom_flags(libc::O_TMPFILE)
+            .open(&directory)?;
+        file.write_all(b"never linked")?;
+        file.set_permissions(fs::Permissions::from_mode(0o644))?;
+        Ok(Location::local(
+            directory.join(format!("#{}", file.metadata()?.ino())),
+        ))
+    };
+    let upserted = |path: &Path, size: u64| {
+        let location = Location::local(path);
+        let changes = changes.clone();
+        move || {
+            changes.borrow().iter().any(|change| {
+                matches!(change, DirectoryChange::Upsert(entry)
+                    if entry.location == location && entry.size == MetadataValue::Known(size))
+            })
+        }
+    };
+
+    let mut unnamed = vec![write_unnamed()?];
+    fs::write(&listed, b"updated")?;
+    drain_until(upserted(&listed, 7));
+    unnamed.push(write_unnamed()?);
+    fs::write(&arrived, b"")?;
+    drain_until(upserted(&arrived, 0));
+    fs::write(&arrived, b"grown")?;
+    drain_until(upserted(&arrived, 5));
+    let settled = Instant::now() + Duration::from_millis(300);
+    drain_until(|| Instant::now() >= settled);
+    drop(handle);
+    fs::remove_dir_all(&directory)?;
+
+    let changes = changes.borrow();
+    assert!(
+        changes.iter().all(|change| match change {
+            DirectoryChange::Upsert(entry) => !unnamed.contains(&entry.location),
+            DirectoryChange::Remove(location) => !unnamed.contains(location),
+            DirectoryChange::Move { .. } | DirectoryChange::Rescan => false,
+        }),
+        "only the named files should be queried: {changes:?}"
+    );
+    Ok(())
+}
+
+#[test]
+fn a_file_linked_into_place_is_queried_once() -> Result<(), Box<dyn Error>> {
+    use std::os::fd::AsRawFd;
+
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let directory = unique_fixture_root("monitor-linked");
+    fs::create_dir_all(&directory)?;
+    let changes: Rc<RefCell<Vec<DirectoryChange>>> = Rc::default();
+    let collected = changes.clone();
+    let handle = LocalFileSource
+        .watch(
+            Location::local(&directory),
+            false,
+            Rc::new(move |change| collected.borrow_mut().push(change)),
+        )
+        .expect("the native location should be monitored");
+    let linked = Location::local(directory.join("linked.txt"));
+    let queries = || {
+        changes
+            .borrow()
+            .iter()
+            .filter(|change| matches!(change, DirectoryChange::Upsert(entry) if entry.location == linked))
+            .count()
+    };
+
+    let mut file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .mode(0o600)
+        .custom_flags(libc::O_TMPFILE)
+        .open(&directory)?;
+    file.write_all(b"contents")?;
+    rustix::fs::linkat(
+        rustix::fs::CWD,
+        format!("/proc/self/fd/{}", file.as_raw_fd()),
+        rustix::fs::CWD,
+        directory.join("linked.txt"),
+        rustix::fs::AtFlags::SYMLINK_FOLLOW,
+    )?;
+    drop(file);
+    drain_until(|| queries() > 0);
+    // GLib sends the linked name's changes-done hint two seconds later.
+    let settled = Instant::now() + Duration::from_millis(2_500);
+    drain_until(|| Instant::now() >= settled);
+    drop(handle);
+    fs::remove_dir_all(&directory)?;
+
+    assert_eq!(queries(), 1, "{:?}", changes.borrow());
+    Ok(())
 }
 
 #[test]
@@ -2068,7 +2220,7 @@ fn drain_until(done: impl Fn() -> bool) {
     }
     assert!(
         done(),
-        "the removal task did not complete within the deadline"
+        "the awaited event did not arrive within the deadline"
     );
 }
 

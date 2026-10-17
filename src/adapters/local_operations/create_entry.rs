@@ -1,15 +1,16 @@
 // SPDX-License-Identifier: MIT
 
 use super::{
-    await_cancellable, cancellation_handle, cancelled_event, validated_child, was_cancelled,
+    await_cancellable, cancelled_event, mount_profile::folder_name_limit, names::numbered_name,
+    operation_handle, typed_names, validated_child, was_cancelled,
 };
 use crate::{
-    adapters::{gio_file_for_location, location_for_file},
+    adapters::{gio_file_for_location, location_for_file, volume::NameLimit},
     model::Location,
     services::{LoadHandle, OperationEvent, OperationRequestId},
 };
 use gtk::{gio, glib, prelude::*};
-use std::{collections::HashSet, rc::Rc};
+use std::{collections::HashSet, ffi::OsStr, rc::Rc};
 
 pub(super) fn start(
     id: OperationRequestId,
@@ -24,11 +25,19 @@ pub(super) fn start(
     let _task = glib::MainContext::default().spawn_local(async move {
         let directory = gio_file_for_location(&parent);
         let mut suffix = 0u64;
+        let mut limit = NameLimit::default();
         loop {
             let candidate = if suffix == 0 {
                 name.clone()
             } else {
-                format!("{name} ({suffix})")
+                let numbered = numbered_name(
+                    OsStr::new(&name),
+                    suffix,
+                    OsStr::new(""),
+                    limit,
+                    is_directory,
+                );
+                numbered.to_string_lossy().into_owned()
             };
             let file = match validated_child(&directory, &candidate) {
                 Ok(file) => file,
@@ -41,6 +50,18 @@ pub(super) fn start(
                     return;
                 }
             };
+            // Only typed names are refused; default ones are Strata's own.
+            if !unique_name
+                && let Some(message) =
+                    typed_names::refused_in(&directory, &name, is_directory).await
+            {
+                emit(OperationEvent::Failed {
+                    request_id: id,
+                    message,
+                    password_failure: None,
+                });
+                return;
+            }
             let Some(location) = location_for_file(&file) else {
                 emit(OperationEvent::Failed {
                     request_id: id,
@@ -114,14 +135,15 @@ pub(super) fn start(
                 }
                 // Retry only a collision from atomic creation, never a preflight exists() check.
                 Err(error)
-                    if unique_name
-                        && error.matches(gio::IOErrorEnum::Exists)
-                        && suffix < u64::MAX =>
+                    if unique_name && name_taken(&error, is_directory) && suffix < u64::MAX =>
                 {
+                    if suffix == 0 {
+                        limit = folder_name_limit(&directory).await;
+                    }
                     suffix += 1;
                     continue;
                 }
-                Err(error) if error.matches(gio::IOErrorEnum::Exists) => {
+                Err(error) if name_taken(&error, is_directory) => {
                     emit(OperationEvent::Failed {
                         request_id: id,
                         message: rust_i18n::t!("“%{name}” already exists", name = candidate)
@@ -147,7 +169,14 @@ pub(super) fn start(
             break;
         }
     });
-    cancellation_handle(cancellable)
+    operation_handle(cancellable)
+}
+
+/// SMB with POSIX extensions fails an exclusive file create over a folder
+/// with `EISDIR`, which GIO reports as `IsDirectory`.
+pub(super) fn name_taken(error: &glib::Error, is_directory: bool) -> bool {
+    error.matches(gio::IOErrorEnum::Exists)
+        || (!is_directory && error.matches(gio::IOErrorEnum::IsDirectory))
 }
 
 fn creation_failed(name: &str, error: &glib::Error) -> String {
