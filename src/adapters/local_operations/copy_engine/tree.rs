@@ -866,6 +866,20 @@ fn fresh_file(stat: &EntryStat) -> bool {
     stat.kind == FileType::RegularFile && stat.size == 0 && stat.nlink == 1
 }
 
+/// A link the placement made again at its name is another entry, which holds
+/// the copy only with the staged link's target.
+fn made_again(fs: &dyn FsOps, at: Entry<'_>, link: Option<&OsStr>) -> manifest::Ownership {
+    match (fs.stat(at, false), link) {
+        (Ok(made), Some(link))
+            if made.kind == FileType::Symlink
+                && fs.readlink(at).is_ok_and(|current| current == link) =>
+        {
+            manifest::Ownership::of(&made)
+        }
+        _ => manifest::Ownership::unproven(),
+    }
+}
+
 pub(super) fn read_link(fs: &dyn FsOps, at: Entry<'_>) -> Result<OsString, Failure> {
     fs.readlink(at).map_err(|error| match error {
         Errno::INVAL => Failure::Changed,
@@ -1589,6 +1603,9 @@ impl Place {
         let staged = Entry::new(&*self.stage, name);
         let identity = fs.stat(staged, false)?.identity;
         let ownership = manifest::Ownership::capture(fs, staged, identity)?;
+        let link = (identity.kind == FileType::Symlink)
+            .then(|| read_link(fs, staged))
+            .transpose()?;
         let path = self.path.join(name);
         make_numbered(
             copy,
@@ -1599,6 +1616,9 @@ impl Place {
             |candidate| {
                 let target = Entry::new(&*self.live, candidate);
                 match placement::place_staged(fs, staged, target, identity) {
+                    Ok(placement::Placed::RecreatedSymlink) => {
+                        Ok(made_again(fs, target, link.as_deref()))
+                    }
                     Ok(_) => Ok(ownership.clone()),
                     Err(PlaceError::Unsupported) => self.copy_out(copy, name, identity, candidate),
                     Err(error) => Err(error.into()),

@@ -2407,22 +2407,30 @@ fn copied_links_a_mount_numbers_afresh_are_known_by_their_size_and_time()
         mount_type: Some(("cifs", "rw,noserverino")),
         ..Quirks::default()
     };
+    let sshfs_renaming = || Quirks {
+        rename_flags: Support::Supported,
+        ..Quirks::sshfs()
+    };
     // The placed link is numbered afresh, and on sshfs, which leaves a
     // link's times as it was made, another link may take its place first.
-    // Whether it does.
+    // Without `RENAME_NOREPLACE`, a merge makes the link again at its name.
+    // Whether another link takes its place.
     let merge = TransferConflict::Merge;
     let fail = TransferConflict::FailIfExists;
-    let rows: [(Preset, &str, TransferConflict, bool); 6] = [
-        (Quirks::sshfs, "link", fail, true),
-        (Quirks::sshfs, "folder", fail, true),
+    let rows: [(Preset, &str, TransferConflict, bool); 8] = [
+        (sshfs_renaming, "link", fail, true),
+        (sshfs_renaming, "folder", fail, true),
+        (sshfs_renaming, "folder", merge, true),
         (Quirks::sshfs, "folder", merge, true),
+        (Quirks::sshfs, "folder", merge, false),
         (noserverino, "link", fail, false),
         (noserverino, "folder", fail, false),
         (noserverino, "folder", merge, false),
     ];
     for (preset, item, conflict, replaced) in rows {
+        let made_again = matches!(preset().rename_flags, Support::Rejected(_));
         let row = format!(
-            "{:?}, {item}, {conflict:?}, replaced: {replaced}",
+            "{:?}, {item}, {conflict:?}, made again: {made_again}, replaced: {replaced}",
             preset().mount_type
         );
         let root = tempfile::tempdir()?;
@@ -2462,9 +2470,12 @@ fn copied_links_a_mount_numbers_afresh_are_known_by_their_size_and_time()
         let _destination = FsQuirks::install(
             &destination,
             Quirks {
-                rename_flags: Support::Supported,
                 tmpfile: Support::Rejected(Errno::OPNOTSUPP),
-                after: vec![(Op::Rename, placed, 0, racer)],
+                after: vec![if made_again {
+                    (Op::Symlink, placed, 1, racer)
+                } else {
+                    (Op::Rename, placed, 0, racer)
+                }],
                 ..preset()
             },
         );
