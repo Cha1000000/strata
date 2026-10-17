@@ -180,7 +180,7 @@ fn no_available_name(name: &OsStr) -> String {
 }
 
 /// Appends ` ({index})` to a directory name, or inserts it before a file's
-/// extension: `pkg-1.2.3 (2)`, `readme (2).txt`.
+/// extension, cutting the stem to `limit`: `pkg-1.2.3 (2)`, `readme (2).txt`.
 fn suffixed_name(name: &OsStr, index: u64, is_directory: bool, limit: NameLimit) -> OsString {
     let path = Path::new(name);
     let stem = match path.extension() {

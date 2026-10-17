@@ -45,7 +45,7 @@ enum ConflictChoice {
 #[derive(Clone)]
 struct TransferCollision {
     source: Location,
-    /// The name the paste gives the item, which the item already there has.
+    /// The name the paste will use, already held by the colliding item.
     target_name: Option<ShownName>,
     /// Both colliding items are directories, so their contents can be merged.
     mergeable: bool,

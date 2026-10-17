@@ -264,8 +264,8 @@ pub enum BrowserEvent {
     TransferFinished {
         moved_locations: Vec<Location>,
     },
-    /// The report of an operation that stopped or completed with errors goes
-    /// with that outcome instead.
+    /// Only after a clean completion; a stop or errors carry the report in
+    /// their outcome event.
     ItemsReported {
         report: TransferReport,
     },
@@ -380,10 +380,10 @@ pub enum UndoEntry {
     Trash(Vec<Location>),
     Move(Vec<MoveRecord>),
     Copy(Vec<Location>),
-    /// `created` paths get trashed, or without Trash deleted as far as they
-    /// are still as `placed` records; `overwritten` paths lose the incoming
-    /// copy, as far as it is still as `placed` records, and get their
-    /// staged original restored from Trash.
+    /// `created` paths are trashed, or deleted where Trash is unavailable;
+    /// `overwritten` paths lose the incoming copy and get their staged
+    /// original back from Trash. Either is touched only while it still
+    /// matches its `placed` snapshot.
     Merge {
         created: Vec<Location>,
         overwritten: Vec<Location>,
@@ -544,10 +544,10 @@ impl MergeUndoState {
         self.created.push(location);
     }
 
-    /// An overwritten original stays in Trash when its incoming copy was saved
-    /// elsewhere, as another item has its name. Entries apply as reported, not
-    /// followed: what a merge recorded under a name it planned moves with the
-    /// entry that starts there, never with the fix that led to it.
+    /// An overwritten original stays in Trash when its copy landed under
+    /// another name, since another item now holds that name. Renames apply in
+    /// reported order and are not chained: a record under a planned name
+    /// follows only the rename that starts at that name.
     fn rename(&mut self, renamed: &[RenamedItem]) {
         for item in renamed {
             if let Some(positions) = self.created_at.remove(&item.requested) {
@@ -1121,8 +1121,8 @@ pub struct Browser {
     transfer_reveal: Cell<bool>,
     created_locations: RefCell<Vec<Location>>,
     merged_undo: RefCell<MergeUndoState>,
-    /// Where each moved item went, which Keep Both or FAT names may make
-    /// differ from its name.
+    /// Where each moved item landed; Keep Both and fixed names can differ
+    /// from the source name.
     moved_items: RefCell<HashMap<Location, Location>>,
     transfer_report: RefCell<TransferReport>,
     undo_claim: RefCell<Option<(u64, UndoEntry)>>,

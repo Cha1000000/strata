@@ -138,7 +138,8 @@ impl ViewState {
             .show_file_operation_progress(total, icon, title, subtitle, on_cancel);
     }
 
-    /// At once where the preparing row was on screen, so the transfer never leaves the screen.
+    /// Presents at once when the preparing row is already on screen, so the transfer never
+    /// flickers out.
     pub(in crate::ui::browser) fn show_transfer_progress(
         self: &Rc<Self>,
         total: usize,
@@ -266,7 +267,7 @@ impl ViewState {
         request_id: OperationRequestId,
         event: &BrowserEvent,
     ) {
-        // It follows the event that finished the operation.
+        // Arrives after the finishing event removed the job, so it must not need the job.
         if let BrowserEvent::ItemsReported { report } = event {
             self.show_transfer_report(report);
             return;

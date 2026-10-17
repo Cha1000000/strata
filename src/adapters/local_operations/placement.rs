@@ -56,7 +56,8 @@ pub(super) enum PlaceError {
 
 impl PlaceError {
     /// Whether the destination refused the name itself. `EINVAL` from a
-    /// rename may mean its flags, so only what the probe mapped counts.
+    /// rename may mean its flags, so only `EINVAL` from a flagless call or
+    /// mapped by the probe counts.
     pub(super) fn refuses_name(self) -> bool {
         matches!(
             self,
@@ -957,8 +958,8 @@ pub(super) fn can_set_aside(
     })
 }
 
-/// Atomically swaps two entries. `Ok(false)` means the filesystem rejected
-/// the flag, which is remembered for the mount.
+/// `Ok(false)`: the filesystem rejected the flag, which is remembered for
+/// the mount.
 pub(super) fn exchange(fs: &dyn FsOps, from: Entry<'_>, to: Entry<'_>) -> Result<bool, PlaceError> {
     match fs.rename(from, to, RenameFlags::EXCHANGE) {
         Ok(()) => Ok(true),
@@ -985,7 +986,6 @@ const EXCHANGE_FILESYSTEMS: [u32; 8] = [
     0x4D44,      // vfat
 ];
 
-/// Reads the filesystem type afresh on every call; it is never cached.
 pub(super) fn exchange_allowed(fs: &dyn FsOps, dir: BorrowedFd<'_>) -> bool {
     fs.statfs(dir)
         .is_some_and(|stat| EXCHANGE_FILESYSTEMS.contains(&(stat.kind as u32)))

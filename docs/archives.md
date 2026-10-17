@@ -61,8 +61,8 @@ number where an earlier member with another name took its name, or where the
 destination takes its name for another's, so `10_00/` after `10:00/` on a USB
 stick becomes `10_00 (2)/`, and different folders of the archive never merge.
 Numbers follow archive order, and each member lands in the folder its own folder
-became. The completion report lists every name that changed, with the name it
-was saved as, and every symbolic link left out, where the extraction left them;
+became. The completion report lists every name the destination changed, with the
+name it was saved as, and every symbolic link left out, where the extraction left them;
 after a failure or cancellation, it lists those inside the folder that keeps the
 output.
 

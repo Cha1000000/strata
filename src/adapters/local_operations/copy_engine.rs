@@ -1758,7 +1758,7 @@ impl Copy {
         )
     }
 
-    /// A move records an entry from this stat, or from descriptors opened after it.
+    /// Forced where the mount caches attributes: a move records the source from this stat.
     fn source_stat(&self, at: Entry<'_>) -> Result<EntryStat, Errno> {
         let forced = self.recording && Mount::new(self.fs, at.dir).caches_attributes();
         self.fs.stat(at, forced)

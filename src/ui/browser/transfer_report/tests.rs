@@ -366,7 +366,7 @@ fn a_report_after_a_transfer_shows_its_notice_or_dialog() {
                 let overlay = view.overlay();
                 let window = gtk::Window::builder().child(&overlay).build();
                 window.present();
-                // The notice a Send to that finished quickly shows.
+                // A Send to notice already on screen must survive the report.
                 let sent = "Copied to USB";
                 crate::ui::notice::show_notice(&overlay, None, sent, NOTICE_DURATION);
                 let event = BrowserEvent::ItemsReported { report };

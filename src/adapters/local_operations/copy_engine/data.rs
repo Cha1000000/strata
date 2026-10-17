@@ -260,7 +260,7 @@ impl Data {
         let mut offset = 0;
         if route.holes {
             match self.copy_data_ranges(ends, route, size, &mut progress)? {
-                // On past the size, which the source may have outgrown.
+                // Then whatever the source gained past `size`.
                 Walked::Done => {
                     self.read_write(ends, size, Until::End(size), &mut progress, None)?;
                     return Ok(None);
@@ -346,7 +346,7 @@ impl Data {
                 until,
             ) {
                 (Ranged::Done, Until::At(end)) => return Ok(end),
-                // On past the size, which the source may have outgrown.
+                // Then whatever the source gained past `size`.
                 (Ranged::Done, Until::End(size)) => offset = size,
                 (Ranged::From(copied), _) => offset = copied,
             }

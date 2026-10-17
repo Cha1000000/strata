@@ -47,7 +47,6 @@ struct HeldWriter {
 }
 
 impl HeldWriter {
-    /// For the writer: marks it held and waits for the release.
     fn hold(&self) -> impl Fn() -> Result<(), String> + Send + 'static {
         let (held, released) = (self.held.clone(), self.released.clone());
         move || {
@@ -76,7 +75,7 @@ impl HeldWriter {
         })
     }
 
-    /// Fails instead of waiting on when the compression ends before its writer is held.
+    /// Fails fast if the compression ends before its writer ran.
     fn wait_until_held<T: Debug + 'static>(
         &self,
         task: &mut glib::JoinHandle<T>,

@@ -770,7 +770,6 @@ struct Listing<'a> {
 }
 
 impl<'a> Listing<'a> {
-    /// Placed records always take forced stats.
     fn of(fs: &dyn FsOps, dir: BorrowedFd<'a>, placed: bool) -> Self {
         let forced = placed || Mount::new(fs, dir).caches_attributes();
         Self { dir, forced }

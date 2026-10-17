@@ -135,7 +135,7 @@ pub(crate) fn write_compression_fixture(
     format: ArchiveFormat,
     password: Option<&str>,
 ) -> Result<usize, String> {
-    // GTK fixtures share encoders whose filesystem operations require a worker.
+    // The filesystem seam asserts it runs off the main thread.
     if gtk::glib::MainContext::default().is_owner() {
         return std::thread::scope(|scope| {
             scope

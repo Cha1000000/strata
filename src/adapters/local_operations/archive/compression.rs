@@ -58,14 +58,6 @@ use std::{
 /// possible, otherwise it is exchanged or set aside and deleted once the new
 /// archive is on disk. [`KeepBoth`] numbers the name without encoding again.
 /// The published mode is the replaced file's, or `0o666` masked by the umask.
-///
-/// # Errors
-///
-/// - [`Cancelled`] if `cancelled` is set before publication starts
-/// - [`Failed`] if staging, encoding or publication fails, or no safe way to
-///   replace the existing archive exists
-///
-/// [`Cancelled`]: ArchiveError::Cancelled
 /// [`Failed`]: ArchiveError::Failed
 /// [`KeepBoth`]: TransferConflict::KeepBoth
 pub(super) async fn write_staged_archive<F>(

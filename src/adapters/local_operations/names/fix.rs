@@ -26,7 +26,7 @@ pub(in crate::adapters::local_operations) struct Fixed<'a> {
     pub cause: Option<RenameCause>,
 }
 
-/// A fixed name is fixed to itself.
+/// Idempotent: fixing a fixed name changes nothing.
 pub(in crate::adapters::local_operations) fn fix_name<'a>(
     name: &'a OsStr,
     profile: &NameProfile,

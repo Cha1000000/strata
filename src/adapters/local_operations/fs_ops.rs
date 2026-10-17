@@ -72,8 +72,7 @@ impl EntryStat {
 }
 
 pub(super) trait FsOps: super::environment::FsEnvironment {
-    // Raw opens preserve each caller's retry, resolution and thread policies.
-    // Some restore descriptor setup still runs before worker dispatch.
+    // Not asserted off the main thread: restore opens descriptors before dispatching to a worker.
     fn open_at(
         &self,
         at: Entry<'_>,

@@ -956,7 +956,7 @@ fn a_move_through_gio_keeps_the_links_it_leaves_out_at_the_source() -> Result<()
         remote_copy,
     ))?;
 
-    // GIO would have made them, as the stand-in's own filesystem holds links.
+    // GIO alone would have made the links, as the stand-in's own filesystem holds them.
     assert_eq!(names(&stand_in.join("folder"))?, ["notes.txt", "sub"]);
     assert_eq!(names(&stand_in.join("folder/sub"))?, ["b.txt"]);
     assert_eq!(names(&folder)?, ["link", "sub"]);
@@ -1938,9 +1938,8 @@ fn a_moved_source_stays_when_its_copy_is_gone_before_the_deletion() -> Result<()
     enum Replaced {
         No,
         Yes,
-        /// Rewritten with as many bytes a tick after the source, as a file that
-        /// takes the copy's freed inode number within its birth time's tick
-        /// also looks, on ntfs3.
+        /// Same size, written a tick after the source: how a file reusing the
+        /// copy's inode within its birth tick looks on ntfs3.
         InPlace,
         /// So within the tick of a coarse clock that stamped the source too.
         InPlaceWithinTheTick,
@@ -2116,9 +2115,9 @@ fn a_copy_replaced_before_its_times_are_settled_keeps_its_source() -> Result<(),
         mount_type: Some(("fuse.rclone", "rw,user_id=1000,group_id=1000")),
         ..Quirks::sshfs()
     };
-    // FUSE knows the copy settled after its close by type alone: an old
-    // source's times are set again on what is there, by name where its
-    // owner may neither read nor write it, and a recent one's let stand.
+    // On FUSE the settled copy is known by type alone: an old source's times
+    // are set again (by name where its owner may neither read nor write it),
+    // a recent one's left as they are.
     let rows: [(&str, Preset, u64, u32); 3] = [
         ("times set again", Quirks::sshfs, 3600, 0o644),
         ("times set again by name", Quirks::sshfs, 3600, 0o044),
@@ -2338,8 +2337,8 @@ fn copies_a_mount_numbers_afresh_are_known_by_type_birth_time_size_and_time()
         // Before the kernel's coarse clock, which may run a tick behind.
         let tick = SystemTime::now() - Duration::from_secs(1);
         let _clock = within_the_tick.then(|| ClockGuard::set(tick));
-        // Multigrain times at the source, so only the destination's call for
-        // a comparison of contents.
+        // Multigrain source times: only the destination can call for a
+        // comparison of contents.
         let _kernel = KernelGuard::set(Some((6, 13, 0)));
         let coarse_clock = within_the_tick.then_some(tick);
         let root = tempfile::tempdir()?;

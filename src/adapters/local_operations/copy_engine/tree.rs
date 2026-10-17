@@ -1164,7 +1164,6 @@ impl File {
             if let Some(created) = &tree.created {
                 lock(&created.0).retain(|(made, _)| made != &path);
             }
-            // It kept changing while it was read.
             if let Some(folder) = &self.recorded_in {
                 folder.keep(&self.name, KeptCause::Changed);
             }

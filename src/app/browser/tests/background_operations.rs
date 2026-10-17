@@ -396,8 +396,7 @@ fn reported(events: &[BrowserEvent]) -> Vec<(usize, &crate::services::TransferRe
 #[test]
 fn a_transfer_reports_its_items_once_after_it_ends() {
     type Terminal = fn(OperationRequestId) -> OperationEvent;
-    // Whether the outcome the event ends in carries the report, given whether
-    // the operation runs in the background.
+    // Whether the ending's outcome carries the report, by whether it runs in the background.
     type Carries = fn(bool) -> bool;
     let terminals: [(Terminal, Carries); 7] = [
         (

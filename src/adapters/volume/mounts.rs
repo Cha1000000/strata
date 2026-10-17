@@ -65,8 +65,8 @@ impl MountType {
         }
     }
 
-    /// Whether a rename into or within a folder sets the folder's birth time
-    /// to the rename's, as the kernel's exFAT driver does.
+    /// The kernel's exFAT driver stamps a folder's birth time at each rename
+    /// into or within it.
     pub(crate) fn renames_reset_folder_births(&self) -> bool {
         self.fs_type == "exfat"
     }

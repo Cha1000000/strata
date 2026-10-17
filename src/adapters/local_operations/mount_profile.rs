@@ -187,7 +187,7 @@ impl Profiles {
         MountProfile::of(seen, &site, self.taught(&site))
     }
 
-    /// A GVfs bridge backend is seen from then on as it is now.
+    /// Pins a GVfs bridge backend's capabilities for the rest of the operation.
     pub(super) fn site(
         &self,
         key: MountKey,

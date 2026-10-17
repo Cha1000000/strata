@@ -89,8 +89,7 @@ pub(super) struct FileProgressView {
     last_transfer_render: Cell<Option<Instant>>,
 }
 
-/// Completed and total files, else items, with their count kind; `None` while the transfer
-/// is still preparing its items.
+/// `None` while the transfer still prepares its items.
 fn transfer_count(
     completed_items: usize,
     total_items: usize,
@@ -243,8 +242,8 @@ impl FileProgressState {
         self.file_progress_view.borrow().is_some()
     }
 
-    /// Shown only where finding where the items go outlasts the usual delay, where the transfer's
-    /// own row will be.
+    /// Appears only if the conflict check outlasts the usual progress delay, where the transfer's
+    /// own row will take over.
     pub(super) fn show_transfer_preparation(
         self: &Rc<Self>,
         moving: bool,
