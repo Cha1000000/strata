@@ -646,7 +646,8 @@ pub(super) fn snapshot(
     cancelled: &AtomicBool,
 ) -> Result<Manifest, Failure> {
     let root = Folder::root();
-    record(fs, parent.as_fd(), name, &root, cancelled, None, None)?;
+    let listing = Listing::of(fs, parent.as_fd(), false);
+    record(fs, listing, name, &root, cancelled, None, None)?;
     Ok(Manifest {
         parent: OffMain::new(parent),
         root,
@@ -702,7 +703,8 @@ pub(super) fn placed(
         left,
         taken: AtomicUsize::new(0),
     };
-    let recorded = record(fs, dir, name, &root, cancelled, Some(&budget), None)
+    let listing = Listing::of(fs, dir, true);
+    let recorded = record(fs, listing, name, &root, cancelled, Some(&budget), None)
         .and_then(|()| root.take().pop().ok_or(Failure::Changed));
     match recorded {
         Ok((name, node)) => Ok(Placed { name, node }),
@@ -727,7 +729,7 @@ pub(super) fn placed_proven(
     };
     let recorded = record(
         fs,
-        dir,
+        Listing::of(fs, dir, true),
         name,
         &root,
         cancelled,
@@ -757,11 +759,25 @@ pub(super) fn of(parent: Arc<OwnedFd>, root: Arc<Folder>) -> Manifest {
     }
 }
 
+#[derive(Clone, Copy)]
+struct Listing<'a> {
+    dir: BorrowedFd<'a>,
+    forced: bool,
+}
+
+impl<'a> Listing<'a> {
+    /// Placed records always take forced stats.
+    fn of(fs: &dyn FsOps, dir: BorrowedFd<'a>, placed: bool) -> Self {
+        let forced = placed || Mount::new(fs, dir).caches_attributes();
+        Self { dir, forced }
+    }
+}
+
 /// With `placed`, a file within a tick of its mount's coarse times is digested, for a deletion
 /// to compare.
 fn record(
     fs: &dyn FsOps,
-    dir: BorrowedFd<'_>,
+    listing: Listing<'_>,
     name: &OsStr,
     folder: &Folder,
     cancelled: &AtomicBool,
@@ -783,9 +799,11 @@ fn record(
         }
         budget.taken.fetch_add(1, Ordering::Relaxed);
     }
-    let at = Entry { dir, name };
-    let forced = placed.is_some() || Mount::new(fs, dir).caches_attributes();
-    let stat = fs.stat(at, forced)?;
+    let at = Entry {
+        dir: listing.dir,
+        name,
+    };
+    let stat = fs.stat(at, listing.forced)?;
     if ownership.is_some_and(|(owned, path)| !owned.unchanged(path, &stat)) {
         return Err(Failure::Changed);
     }
@@ -802,11 +820,12 @@ fn record(
         return Err(Failure::Changed);
     }
     let recorded = folder.folder(name, stat.identity);
+    let children = Listing::of(fs, opened.as_fd(), placed.is_some());
     for (child, _) in fs.list(opened.as_fd())? {
         let child_path = ownership.map(|(_, path)| path.join(&child));
         record(
             fs,
-            opened.as_fd(),
+            children,
             &child,
             &recorded,
             cancelled,
