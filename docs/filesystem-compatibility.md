@@ -249,8 +249,10 @@ only delete the remaining copy. A replacing move keeps its Undo, which moves the
 
 Merge moves the files it overwrites to Trash. Without Trash, it sets them aside, never by
 exchange: the originals go into one hidden `.strata-merge-<id>` folder inside the merge target, are
-put back if the merge fails, and are removed once it succeeds and is flushed to disk. An original
-whose name the merge left free, because the incoming item was a special file the destination
+put back if the merge fails or is cancelled, and are removed once it succeeds and is flushed to
+disk. To put an original back over a copy the merge already placed at its name, the merge deletes
+that copy while it is still as placed; anything else at the name stays, and the original stays in
+the folder, which the error names. An original whose name the merge left free, because the incoming item was a special file the destination
 cannot store or a source that a merging move kept, is put back instead. It refuses to set a file
 aside where Replace would. How the incoming items are placed is described under
 [Merges](#merges).
@@ -494,7 +496,8 @@ with the placement routine:
 Placed folders then get their exact modes, and the empty stage is removed. Nothing is written into
 a live folder except by an exclusive rename, or an exclusive create where nothing can be placed, so
 a stopped merge leaves no partial file under a real name. Items already placed stay, and only they
-are reported. Undoing a merge removes items under the names they were saved as. Each merged folder
+are reported, except a copy over an original set aside without Trash, which gives way to the
+original. Undoing a merge removes items under the names they were saved as. Each merged folder
 is opened without following symlinks and pinned, so a folder swapped for a link is not followed,
 while mount points inside the target are.
 

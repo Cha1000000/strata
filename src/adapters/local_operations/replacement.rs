@@ -1161,7 +1161,7 @@ pub(super) async fn merge_owing(
                 overwritten: trashed,
                 ..MergePlan::default()
             });
-            return Err(merge_aside::abandon(aside, error).await);
+            return Err(merge_aside::abandon(aside, error, HashMap::new()).await);
         }
     }
     let written: Vec<PathBuf> = plan
@@ -1178,13 +1178,19 @@ pub(super) async fn merge_owing(
         }
         _ => false,
     };
+    let records = !move_source && (!trashed.is_empty() || records_created);
     let placing = target_path
         .as_ref()
-        .filter(|_| !move_source && (!trashed.is_empty() || records_created))
+        .filter(|_| records || aside.is_some())
         .map(|root| {
             let path = |location: &Location| location.native_path().map(Path::to_path_buf);
             let created = plan.created.iter().filter(|_| records_created);
-            let wanted: HashSet<_> = trashed.iter().chain(created).filter_map(path).collect();
+            let wanted: HashSet<_> = trashed
+                .iter()
+                .chain(created)
+                .filter(|_| records)
+                .filter_map(path)
+                .collect();
             let unwanted = records_created.then(|| {
                 plan.overwritten
                     .iter()
@@ -1192,7 +1198,17 @@ pub(super) async fn merge_owing(
                     .filter(|path| !wanted.contains(path))
                     .collect()
             });
-            copy_engine::Placing::new(root.clone(), wanted, unwanted, placed_entries.clone())
+            let aside = aside
+                .as_ref()
+                .map(merge_aside::MergeAside::paths)
+                .unwrap_or_default();
+            copy_engine::Placing::new(
+                root.clone(),
+                wanted,
+                unwanted,
+                aside,
+                placed_entries.clone(),
+            )
         });
     (hooks.on_merged)(MergePlan {
         created: plan.created,
@@ -1203,7 +1219,7 @@ pub(super) async fn merge_owing(
     if let Some(path) = native_path(&target).filter(|_| move_source || aside.is_some()) {
         match copy_engine::barrier(path).await {
             Ok(barrier) => owed.barrier = Some(barrier),
-            Err(error) => return Err(merge_aside::abandon(aside, error).await),
+            Err(error) => return Err(merge_aside::abandon(aside, error, HashMap::new()).await),
         }
     }
     let copying = MergeCopy {
@@ -1213,6 +1229,10 @@ pub(super) async fn merge_owing(
     };
     let copied =
         (hooks.copy_into_target)(source.clone(), target, copying, cancellable.clone()).await;
+    let over_aside = placing
+        .as_ref()
+        .map(|placing| placing.over_aside())
+        .unwrap_or_default();
     if let Some(placing) = placing {
         let placed: HashMap<_, _> = placing
             .take()
@@ -1228,7 +1248,7 @@ pub(super) async fn merge_owing(
     }
     let copied = match copied {
         Ok(copied) => copied,
-        Err(error) => return Err(merge_aside::abandon(aside, error).await),
+        Err(error) => return Err(merge_aside::abandon(aside, error, over_aside).await),
     };
     if native_path(&source).is_none()
         && owed
@@ -1237,7 +1257,7 @@ pub(super) async fn merge_owing(
             .is_some_and(copy_engine::Barrier::syncs_each_file)
         && let Err(error) = copy_engine::sync_files(written, cancellable).await
     {
-        return Err(merge_aside::abandon(aside, error).await);
+        return Err(merge_aside::abandon(aside, error, over_aside).await);
     }
     owed.nested = copied.nested;
     if let Some(aside) = merge_aside::finish(aside).await? {

@@ -120,24 +120,30 @@ pub(super) struct Placing {
     root: PathBuf,
     wanted: HashSet<PathBuf>,
     unwanted: Option<HashSet<PathBuf>>,
+    aside: HashSet<PathBuf>,
     placed: Mutex<Vec<(PathBuf, Placed)>>,
+    over_aside: Mutex<HashMap<PathBuf, Ownership>>,
     left: Arc<AtomicUsize>,
 }
 
 impl Placing {
     /// Beneath `root`, `wanted` are the paths undo reverts; where the merge records all it
-    /// creates, `unwanted` are the overwritten paths undo leaves.
+    /// creates, `unwanted` are the overwritten paths undo leaves. `aside` are the paths of
+    /// originals set aside, for a stopped merge to tell its own copies there.
     pub(super) fn new(
         root: PathBuf,
         wanted: HashSet<PathBuf>,
         unwanted: Option<HashSet<PathBuf>>,
+        aside: HashSet<PathBuf>,
         left: Arc<AtomicUsize>,
     ) -> Arc<Self> {
         Arc::new(Self {
             root,
             wanted,
             unwanted,
+            aside,
             placed: Mutex::default(),
+            over_aside: Mutex::default(),
             left,
         })
     }
@@ -155,6 +161,9 @@ impl Placing {
         cancelled: &AtomicBool,
     ) {
         let path = self.root.join(path);
+        if self.aside.contains(&path) {
+            lock(&self.over_aside).insert(path.clone(), ownership.clone());
+        }
         let wanted = match &self.unwanted {
             Some(unwanted) => !unwanted.contains(&path),
             None => self.wants(&path),
@@ -178,6 +187,10 @@ impl Placing {
                 tracing::warn!(?path, error = %failure.into_error(at.1), "could not record a placed item")
             }
         }
+    }
+
+    pub(super) fn over_aside(&self) -> HashMap<PathBuf, Ownership> {
+        std::mem::take(&mut *lock(&self.over_aside))
     }
 
     pub(super) fn take(&self) -> Vec<(PathBuf, PlacedSnapshot)> {

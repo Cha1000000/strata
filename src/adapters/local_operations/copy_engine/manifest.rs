@@ -563,6 +563,17 @@ impl Ownership {
         })
     }
 
+    pub(in crate::adapters::local_operations) fn discard(
+        &self,
+        fs: &dyn FsOps,
+        at: Entry<'_>,
+    ) -> bool {
+        self.identity
+            .is_some_and(|identity| identity.kind != FileType::Directory)
+            && self.stays(fs, at)
+            && matches!(fs.unlink(at, AtFlags::empty()), Ok(()) | Err(Errno::NOENT))
+    }
+
     pub(super) fn stays(&self, fs: &dyn FsOps, at: Entry<'_>) -> bool {
         let Ok(stat) = fs.stat(at, true) else {
             return false;

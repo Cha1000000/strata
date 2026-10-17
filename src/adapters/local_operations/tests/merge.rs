@@ -2101,6 +2101,140 @@ fn a_merge_a_cancel_cuts_off_counts_as_failed_as_it_keeps_what_it_placed()
 }
 
 #[test]
+fn a_merge_without_trash_cancelled_after_it_placed_a_copy_puts_the_original_back()
+-> Result<(), Box<dyn Error>> {
+    #[derive(Clone, Copy, Debug)]
+    enum Copied {
+        AsPlaced,
+        Rewritten,
+        RenamedOver,
+    }
+    let _serial = serial()?;
+    for move_sources in [false, true] {
+        for copy in [Copied::AsPlaced, Copied::Rewritten, Copied::RenamedOver] {
+            let root = tempfile::tempdir()?;
+            let sources = root.path().join("sources");
+            let destination = root.path().join("destination");
+            write_files(
+                &sources.join("run"),
+                &[("a.txt", "new a"), ("b.txt", "new b"), ("c.txt", "new c")],
+            )?;
+            write_files(
+                &destination.join("run"),
+                &[("a.txt", "old a"), ("b.txt", "old b")],
+            )?;
+            let cancel = CancelFromMain::default();
+            let mut cancels = cancel.racer();
+            let (placed, theirs) = (destination.join("run/a.txt"), root.path().join("theirs"));
+            let racer: Racer = Box::new(move || {
+                match copy {
+                    Copied::AsPlaced => {}
+                    Copied::Rewritten => fs::write(&placed, b"theirs, longer").expect("rewrite"),
+                    Copied::RenamedOver => {
+                        fs::write(&theirs, b"theirs, longer").expect("write theirs");
+                        fs::rename(&theirs, &placed).expect("rename theirs over the copy");
+                    }
+                }
+                cancels();
+            });
+            let _sources = FsQuirks::install(&sources, Quirks::default());
+            let _destination = FsQuirks::install(
+                &destination,
+                without_trash(Quirks {
+                    // The first rename of `a.txt` sets the original aside, the second places the copy.
+                    after: vec![(Op::Rename, "a.txt", 1, racer)],
+                    ..Quirks::default()
+                }),
+            );
+            let events = Rc::new(RefCell::new(Vec::new()));
+            let emitted = events.clone();
+            let mut operation = Some(LocalOperationProvider.paste(
+                PasteRequest {
+                    id: OperationRequestId(1729),
+                    destination: Location::local(&destination),
+                    items: vec![PasteItem {
+                        source: Location::local(sources.join("run")),
+                        conflict: TransferConflict::Merge,
+                        target_name: None,
+                    }],
+                    move_sources,
+                },
+                Rc::new(move |event| emitted.borrow_mut().push(event)),
+            ));
+
+            let context = glib::MainContext::default();
+            let deadline = Instant::now() + Duration::from_secs(20);
+            while !events.borrow().iter().any(|event| {
+                matches!(
+                    event,
+                    OperationEvent::Cancelled { .. }
+                        | OperationEvent::Pasted { .. }
+                        | OperationEvent::TransferFailed { .. }
+                )
+            }) {
+                assert!(Instant::now() < deadline, "the merge never ended");
+                cancel.serve(|| drop(operation.take()));
+                context.iteration(false);
+                thread::sleep(Duration::from_millis(1));
+            }
+
+            let row = format!("moving: {move_sources}, {copy:?}");
+            let events = events.borrow();
+            assert!(cancel.served(), "{row}");
+            assert_eq!(fs::read(destination.join("run/b.txt"))?, b"old b", "{row}");
+            if let Copied::AsPlaced = copy {
+                let Some(OperationEvent::Cancelled { result, .. }) = events.last() else {
+                    panic!("{row}: expected a cancel, got {events:?}");
+                };
+                assert!(result.completed.is_empty(), "{row}");
+                assert_eq!(
+                    result.failed,
+                    [Location::local(sources.join("run"))],
+                    "{row}"
+                );
+                assert_eq!(fs::read(destination.join("run/a.txt"))?, b"old a", "{row}");
+                assert_eq!(
+                    names(&destination.join("run"))?,
+                    ["a.txt", "b.txt"],
+                    "{row}"
+                );
+            } else {
+                let Some(OperationEvent::TransferFailed { message, .. }) = events.last() else {
+                    panic!("{row}: expected the merge to stop, got {events:?}");
+                };
+                let left = names(&destination.join("run"))?;
+                let [folder, a, b] = &left[..] else {
+                    panic!(
+                        "{row}: expected the merge folder beside a.txt and b.txt, found {left:?}"
+                    );
+                };
+                assert!(folder.starts_with(".strata-merge-"), "{row}: {left:?}");
+                assert_eq!([a.as_str(), b.as_str()], ["a.txt", "b.txt"], "{row}");
+                assert!(message.contains(folder.as_str()), "{row}: {message}");
+                assert_eq!(
+                    fs::read(destination.join("run/a.txt"))?,
+                    b"theirs, longer",
+                    "{row}"
+                );
+                assert_eq!(
+                    fs::read(destination.join("run").join(folder).join("a.txt"))?,
+                    b"old a",
+                    "{row}"
+                );
+            }
+            for (name, contents) in [("a.txt", "new a"), ("b.txt", "new b"), ("c.txt", "new c")] {
+                assert_eq!(
+                    fs::read(sources.join("run").join(name))?,
+                    contents.as_bytes(),
+                    "{row}"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn a_merge_undo_cut_off_counts_an_item_as_not_attempted_only_when_it_left_it_whole()
 -> Result<(), Box<dyn Error>> {
     let _serial = serial()?;
