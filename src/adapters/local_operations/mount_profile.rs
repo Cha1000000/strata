@@ -54,6 +54,7 @@ fn learn_mount_type(fs: &dyn FsOps, dir: BorrowedFd<'_>, key: MountKey) -> Mount
     let mount_type = mount.as_ref().map(|(mount_type, _)| mount_type);
     let family = mount_type.map_or(Family::Other, |mount| family(&mount.fs_type));
     let stable = mount_type.is_none_or(MountType::stable_inodes);
+    let folder_births_reset = mount_type.is_some_and(MountType::renames_reset_folder_births);
     let device_format = mount_type
         .filter(|mount| mount.fs_type == "fuseblk")
         .and_then(|_| fs.device_format(dir).ok().flatten());
@@ -88,6 +89,7 @@ fn learn_mount_type(fs: &dyn FsOps, dir: BorrowedFd<'_>, key: MountKey) -> Mount
         if capabilities.family.is_none() {
             capabilities.family = Some(family);
             capabilities.stable_inodes = Some(stable);
+            capabilities.renames_reset_folder_births = folder_births_reset;
             capabilities.fuse_format = fuse_format;
             capabilities.coarse_times = coarse_times;
             capabilities.deferred_close = deferred_close;

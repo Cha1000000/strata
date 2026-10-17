@@ -2282,25 +2282,39 @@ fn copies_a_mount_numbers_afresh_are_known_by_type_birth_time_size_and_time()
         /// Replaced by another file of its size within the tick that stamped
         /// the source.
         ReplacedWithinTheTick,
+        /// Replaced by another file of its size and modification time.
+        ReplacedAlike,
+        /// Renamed away, with what the merge placed in it, and another folder
+        /// made at its name.
+        FolderReplaced,
     }
     // exFAT and FUSE daemons without `use_ino` number an entry afresh once
     // the kernel evicts it, here right after the copy is published; on ext4,
-    // which keeps inode numbers, another number is another file. Whether the
-    // move deletes its source.
-    let rows: [(Preset, &str, Change, bool); 5] = [
-        (Quirks::sshfs, "notes.txt", Change::None, true),
-        (Quirks::exfat, "folder", Change::None, true),
-        (Quirks::exfat, "folder", Change::Rewritten, false),
+    // which keeps inode numbers, another number is another file. Merging into
+    // a folder on exFAT sets its birth time again. Whether the move deletes
+    // its source.
+    let (fail, merge) = (TransferConflict::FailIfExists, TransferConflict::Merge);
+    let rows: [(Preset, &str, TransferConflict, Change, bool); 8] = [
+        (Quirks::sshfs, "notes.txt", fail, Change::None, true),
+        (Quirks::exfat, "folder", fail, Change::None, true),
+        (Quirks::exfat, "folder", fail, Change::Rewritten, false),
         (
             Quirks::exfat_fuse,
             "folder",
+            fail,
             Change::ReplacedWithinTheTick,
             false,
         ),
-        (Quirks::ext4, "notes.txt", Change::None, false),
+        (Quirks::ext4, "notes.txt", fail, Change::None, false),
+        (Quirks::exfat, "folder", merge, Change::None, true),
+        (Quirks::exfat, "folder", merge, Change::ReplacedAlike, false),
+        (Quirks::vfat, "folder", merge, Change::FolderReplaced, false),
     ];
-    for (preset, item, change, deleted) in rows {
-        let row = format!("{:?}, {item}, {change:?}", preset().mount_type);
+    for (preset, item, conflict, change, deleted) in rows {
+        let row = format!(
+            "{:?}, {item}, {conflict:?}, {change:?}",
+            preset().mount_type
+        );
         let within_the_tick = change == Change::ReplacedWithinTheTick;
         // Before the kernel's coarse clock, which may run a tick behind.
         let tick = SystemTime::now() - Duration::from_secs(1);
@@ -2325,27 +2339,38 @@ fn copies_a_mount_numbers_afresh_are_known_by_type_birth_time_size_and_time()
         } else {
             source.clone()
         };
-        fs::write(&notes, b"notes")?;
-        if change == Change::Rewritten {
-            let hour_before = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?;
-            set_times(&notes, hour_before.as_secs() - 3600, 0)?;
+        if conflict == merge {
+            fs::create_dir(&copy)?;
+            fs::write(copy.join("stays.txt"), b"stays")?;
         }
+        fs::write(&notes, b"notes")?;
         let arrival = root.path().join("arrival");
         fs::write(&arrival, b"other")?;
+        if matches!(change, Change::Rewritten | Change::ReplacedAlike) {
+            let hour_before = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?;
+            for file in [&notes, &arrival] {
+                set_times(file, hour_before.as_secs() - 3600, 0)?;
+            }
+        }
         let copied_notes = if item == "folder" {
             copy.join("notes.txt")
         } else {
             copy.clone()
         };
         let replaced = copied_notes.clone();
+        let merged = copy.clone();
         let evicted = Arc::new(AtomicBool::new(false));
         let evicting = evicted.clone();
         let racer: super::fs_quirks::Racer = Box::new(move || {
             match change {
                 Change::None => {}
                 Change::Rewritten => fs::write(&replaced, b"NOTES").expect("rewrite the copy"),
-                Change::ReplacedWithinTheTick => {
+                Change::ReplacedWithinTheTick | Change::ReplacedAlike => {
                     fs::rename(&arrival, &replaced).expect("replace the copy");
+                }
+                Change::FolderReplaced => {
+                    fs::rename(&merged, merged.with_file_name("old")).expect("rename it away");
+                    fs::create_dir(&merged).expect("make another folder");
                 }
             }
             for path in &copied {
@@ -2353,6 +2378,7 @@ fn copies_a_mount_numbers_afresh_are_known_by_type_birth_time_size_and_time()
             }
             evicting.store(true, Ordering::Release);
         });
+        let placed_last = if conflict == merge { "sub" } else { item };
         let _sources = FsQuirks::install(
             &sources,
             Quirks {
@@ -2366,13 +2392,12 @@ fn copies_a_mount_numbers_afresh_are_known_by_type_birth_time_size_and_time()
                 rename_flags: Support::Supported,
                 tmpfile: Support::Rejected(Errno::OPNOTSUPP),
                 coarse_clock,
-                after: vec![(Op::Rename, item, 0, racer)],
+                after: vec![(Op::Rename, placed_last, 0, racer)],
                 ..preset()
             },
         );
 
-        let (_operation, events) =
-            paste_move(98, &destination, &source, TransferConflict::FailIfExists);
+        let (_operation, events) = paste_move(98, &destination, &source, conflict);
         pump_until_transfer(&events);
 
         assert!(

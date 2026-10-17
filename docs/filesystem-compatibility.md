@@ -539,9 +539,11 @@ Where the destination keeps inode numbers, its entries must keep the exact devic
 available birth time. Where it numbers an evicted entry afresh (FUSE daemons without `use_ino`,
 vfat and exFAT, cifs with `noserverino`), the type and the birth time, where both stats report one,
 stand in for the inode as they do for sources, and a file or symbolic link must also keep its
-recorded size and modification time, and a file its contents where those times cannot tell. An
-entry renumbered after a rename or a cache eviction then still proves the copy, and the move deletes
-its sources.
+recorded size and modification time, and a file its contents where those times cannot tell. The
+kernel's exFAT driver sets a folder's birth time again whenever an entry is renamed into or within
+it, as a merge places entries, so there a folder of the copy is known by its type alone and its
+entries are checked one by one. An entry renumbered after a rename or a cache eviction then still
+proves the copy, and the move deletes its sources.
 
 What stays is reported by cause: changed during the move, could not be deleted (with the error, as
 in a read-only folder), a special file or symbolic link the destination cannot store, or an item
@@ -723,8 +725,11 @@ reported.
   by content; without that, a same-size rewrite within one tick would pass. On NFS, SMB and FUSE
   mounts other than sshfs, a server or daemon whose clock runs more than 100 ms behind ours can
   still hide a same-size rewrite of a file it stamped within one of its ticks.
-- **exFAT folders.** The kernel's exFAT driver changes a folder's birth time whenever an entry is
-  renamed into it, so a move then keeps that whole folder instead of only the changed entry.
+- **exFAT folders.** The kernel's exFAT driver sets a folder's birth time again whenever an entry
+  is renamed into or within it. A move from exFAT keeps a whole source folder another program did
+  that to, instead of only the changed entry. A move onto exFAT knows the folders of its copy by
+  their type alone, so where another program renames a merged folder away and makes another at its
+  name, the move still deletes its sources, whose copies stay in the renamed folder.
 - **Relaxed identity.** Where a source has no stable inode numbers and reports no birth time
   (sshfs, exfat-fuse, ntfs-3g), a different file with the same type, size and times put at a source
   name passes for the original, unless it is racily clean and compared. The same goes for a move's
@@ -1094,14 +1099,15 @@ device format udev records, refused `O_TMPFILE` and its links, refused clones, a
 that ends early, short reads and writes, times reset at close (NFSv4.2 delegations, FUSE writeback
 caches), refused `chown`, foreign groups, extended attributes refused by prefix, injected or listed
 with ACLs first, refused `mknodat` of files and pipes, NFS silly renames, files that report no size,
-reported modes, change times that equal the modification time (FAT), times stamped within one tick
-of a coarse clock (kernels without multigrain timestamps), single link counts (sshfs), entries
-renumbered after eviction, SMB's refusal to open two names of one file at once or, during its
-deferred close, another name of a file just written, its stale read-only folders and change times
-answered from its attribute cache, and writeback errors that `syncfs` reports. Tests can also
-pretend to run on another kernel release, freeze the clock that the racily clean check, the wait for
-SMB's deferred close and the emulated attribute cache read, and set a paste's batch limits and
-clock. The seam also asserts that no call runs on the main context's thread.
+reported modes, change times that equal the modification time (FAT), folder birth times that renames
+reset (exFAT), times stamped within one tick of a coarse clock (kernels without multigrain
+timestamps), single link counts (sshfs), entries renumbered after eviction, SMB's refusal to open
+two names of one file at once or, during its deferred close, another name of a file just written,
+its stale read-only folders and change times answered from its attribute cache, and writeback errors
+that `syncfs` reports. Tests can also pretend to run on another kernel release, freeze the clock
+that the racily clean check, the wait for SMB's deferred close and the emulated attribute cache
+read, and set a paste's batch limits and clock. The seam also asserts that no call runs on the main
+context's thread.
 
 For names they emulate the errno each lab mount returned for a name it refuses, names stored or
 listed as others (vfat dropping trailing dots, SMB reading private-use characters back and listing

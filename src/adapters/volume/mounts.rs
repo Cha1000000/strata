@@ -61,6 +61,12 @@ impl MountType {
         }
     }
 
+    /// Whether a rename into or within a folder sets the folder's birth time
+    /// to the rename's, as the kernel's exFAT driver does.
+    pub(crate) fn renames_reset_folder_births(&self) -> bool {
+        self.fs_type == "exfat"
+    }
+
     /// How long the SMB client keeps a closed file's handle open
     /// (`closetimeo`, one second by default).
     pub(crate) fn deferred_close(&self) -> Option<Duration> {

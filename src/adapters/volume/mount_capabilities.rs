@@ -37,6 +37,7 @@ pub(crate) struct MountCapabilities {
     /// From mountinfo, kept here so a mount change drops it with the rest.
     pub family: Option<Family>,
     pub stable_inodes: Option<bool>,
+    pub renames_reset_folder_births: bool,
     pub fuse_format: Option<FuseFormat>,
     pub coarse_times: Option<CoarseTimes>,
     pub deferred_close: Option<Duration>,

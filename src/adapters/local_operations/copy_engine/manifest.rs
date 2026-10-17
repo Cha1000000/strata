@@ -26,7 +26,7 @@ use rustix::{
     io::Errno,
 };
 
-use super::{Failure, Mount, lock};
+use super::{Failure, Identifies, Mount, lock};
 use crate::{
     adapters::{
         local_operations::{
@@ -534,20 +534,23 @@ impl Ownership {
     /// one tick of a coarse clock only in its contents. Where the mount
     /// numbers an evicted entry afresh, the type and birth time stand in for
     /// the inode number, for a file or link only beside its recorded size and
-    /// time.
+    /// time, and where renames reset a folder's birth time, a folder's type
+    /// alone.
     fn holds(
         &self,
         fs: &dyn FsOps,
         (at, path): (Entry<'_>, &Path),
         stat: &EntryStat,
-        stable_inodes: bool,
+        identifies: Identifies,
     ) -> bool {
         let Some(identity) = self.identity_at(path) else {
             return false;
         };
         let state = self.states.get(path);
-        let same = if stable_inodes || (has_state(identity.kind) && state.is_none()) {
+        let same = if identifies.inodes || (has_state(identity.kind) && state.is_none()) {
             stat.identity == identity
+        } else if identity.kind == FileType::Directory && !identifies.folder_births {
+            stat.kind == identity.kind
         } else {
             stat.identity.may_be(&identity)
         };
@@ -563,8 +566,8 @@ impl Ownership {
         let Ok(stat) = fs.stat(at, true) else {
             return false;
         };
-        let stable_inodes = Mount::keeps_inode_numbers(fs, at.dir);
-        if !self.holds(fs, (at, Path::new("")), &stat, stable_inodes) {
+        let identifies = Mount::identifies(fs, at.dir);
+        if !self.holds(fs, (at, Path::new("")), &stat, identifies) {
             return false;
         }
         if self.descendants.is_empty() {
@@ -589,7 +592,7 @@ impl Ownership {
             };
             let at = Entry::new(&dir, name);
             fs.stat(at, true)
-                .is_ok_and(|stat| self.holds(fs, (at, path), &stat, stable_inodes))
+                .is_ok_and(|stat| self.holds(fs, (at, path), &stat, identifies))
         })
     }
 }
@@ -966,7 +969,7 @@ fn walk(
 ) -> Removed {
     let deletion = Arc::new(Deletion {
         fs,
-        stable_inodes: Mount::keeps_inode_numbers(fs, parent.as_fd()),
+        stable_inodes: Mount::identifies(fs, parent.as_fd()).inodes,
         unlinks,
         kept: Mutex::default(),
         removed: AtomicBool::new(false),

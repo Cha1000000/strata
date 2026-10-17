@@ -204,6 +204,9 @@ pub(crate) struct Quirks {
     /// The change time reports the modification time, as on FAT and exFAT,
     /// which store none.
     pub ctime_is_mtime: bool,
+    /// A rename into or within a folder sets the folder's birth time to the
+    /// rename's, as the kernel's exFAT driver does.
+    pub renames_reset_folder_births: bool,
     /// Performs the call, then reports this errno once.
     pub lost_reply: Vec<(Op, &'static str, Errno)>,
     /// Fails the matching call after skipping the given number of matches, once.
@@ -364,6 +367,7 @@ impl Quirks {
             mount_type: Some(("exfat", EXFAT_OPTIONS)),
             fs_type: Some(0x2011_bab0),
             invalid_name: Some(exfat_refuses),
+            renames_reset_folder_births: true,
             ..Self::vfat()
         }
     }
@@ -725,6 +729,8 @@ struct State {
     calls: Vec<Call>,
     inodes: HashMap<PathBuf, u64>,
     births: HashMap<PathBuf, i64>,
+    /// The birth time of each folder a rename reset, by device and inode.
+    reset_births: HashMap<(u64, u64), (i64, u32)>,
     /// Real and reported inode number per name a hard link added, or a lost
     /// rename reply left reporting its old number.
     link_names: HashMap<PathBuf, (u64, u64)>,
@@ -767,6 +773,7 @@ impl FsQuirks {
                 calls: Vec::new(),
                 inodes: HashMap::new(),
                 births: HashMap::new(),
+                reset_births: HashMap::new(),
                 link_names: HashMap::new(),
                 links_made: 0,
                 stale: HashMap::new(),
@@ -977,10 +984,14 @@ impl Scope {
     }
 
     fn reported(&self, path: Option<PathBuf>, mut stat: EntryStat) -> EntryStat {
+        let key = (stat.identity.device, stat.identity.inode);
         if let Some(device) = path.as_deref().and_then(own_device) {
             stat.identity.device = device;
         }
         let mut state = self.state();
+        if let Some(&birth) = state.reset_births.get(&key).filter(|_| stat.is_directory()) {
+            stat.identity.birth = Some(birth);
+        }
         if let Some(&(inode, reported)) = path.as_ref().and_then(|path| state.link_names.get(path))
             && inode == stat.identity.inode
         {
@@ -1342,6 +1353,13 @@ impl Scope {
     }
 
     fn renamed(&self, from: Entry<'_>, to: Entry<'_>, flags: RenameFlags) {
+        if self.quirk(|quirks| quirks.renames_reset_folder_births)
+            && let (Ok(folder), Some(now)) = (System.stat_fd(to.dir), timespec(SystemTime::now()))
+        {
+            self.state()
+                .reset_births
+                .insert((folder.identity.device, folder.identity.inode), now);
+        }
         let (Some(from), Some(to)) = (
             path_of(from.dir).map(|dir| dir.join(from.name)),
             path_of(to.dir).map(|dir| dir.join(to.name)),

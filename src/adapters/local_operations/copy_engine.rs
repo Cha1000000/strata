@@ -1560,6 +1560,15 @@ fn remove_own(
     }
 }
 
+/// What tells an entry on a mount from another put at its name, besides its type.
+#[derive(Clone, Copy)]
+struct Identifies {
+    /// Whether an entry keeps its inode number once the kernel evicts it.
+    inodes: bool,
+    /// Whether a folder keeps its birth time when an entry is renamed into or within it.
+    folder_births: bool,
+}
+
 #[derive(Clone, Copy)]
 struct Mount {
     key: MountKey,
@@ -1595,8 +1604,12 @@ impl Mount {
         self.attribute_cache.is_some()
     }
 
-    fn keeps_inode_numbers(fs: &dyn FsOps, dir: BorrowedFd<'_>) -> bool {
-        known_mount(fs, dir).1.stable_inodes.unwrap_or(true)
+    fn identifies(fs: &dyn FsOps, dir: BorrowedFd<'_>) -> Identifies {
+        let (_, capabilities) = known_mount(fs, dir);
+        Identifies {
+            inodes: capabilities.stable_inodes.unwrap_or(true),
+            folder_births: !capabilities.renames_reset_folder_births,
+        }
     }
 
     fn capabilities(&self) -> MountCapabilities {
