@@ -285,7 +285,7 @@ impl MergeAside {
             let aside = Entry::new(&*moved.aside_parent, &moved.name);
             match placement::place(fs(), aside, original, Some(moved.identity)) {
                 Ok(_) => false,
-                Err(PlaceError::Exists) => true,
+                // `Exists` too: a name taken since the check was not replaced by the merge.
                 Err(error) => {
                     failure = failure.and(Err(error));
                     true

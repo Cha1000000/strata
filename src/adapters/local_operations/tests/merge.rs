@@ -3642,7 +3642,12 @@ fn without_trash_an_original_the_merge_left_nothing_in_place_of_stays() -> Resul
     let rewrite = |path: PathBuf, contents: &'static [u8]| -> Racer {
         Box::new(move || fs::write(&path, contents).expect("rewrite the source"))
     };
-    for row in ["left out", "kept at its source", "put back fails"] {
+    for row in [
+        "left out",
+        "kept at its source",
+        "put back fails",
+        "name taken meanwhile",
+    ] {
         let root = tempfile::tempdir()?;
         let source = root.path().join("source");
         let target = root.path().join("target");
@@ -3664,12 +3669,15 @@ fn without_trash_an_original_the_merge_left_nothing_in_place_of_stays() -> Resul
         if row == "put back fails" {
             target_quirks.fail = vec![(Op::Rename, "x", 1, Errno::IO)];
         }
+        if row == "name taken meanwhile" {
+            target_quirks.before = vec![(Op::Rename, "x", 1, rewrite(target.join("x"), b"theirs"))];
+        }
         let _source = FsQuirks::install(&source, source_quirks);
         let _target = FsQuirks::install(&target, target_quirks);
 
         let (result, _) = merge_through_trash(&source, &target, moving, real_copy());
 
-        if row == "put back fails" {
+        if matches!(row, "put back fails" | "name taken meanwhile") {
             let aside = aside_folder(&target)?.ok_or("the original stays aside")?;
             assert!(result.is_err(), "{row}");
             assert_eq!(
@@ -3677,6 +3685,9 @@ fn without_trash_an_original_the_merge_left_nothing_in_place_of_stays() -> Resul
                 b"original",
                 "{row}"
             );
+            if row == "name taken meanwhile" {
+                assert_eq!(fs::read(target.join("x"))?, b"theirs", "{row}");
+            }
             continue;
         }
         assert!(result.is_ok(), "{row}: {result:?}");
