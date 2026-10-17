@@ -5,7 +5,7 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use rustix::io::Errno;
 
 use super::super::copy_engine::{Destination, Options, copy_local};
-use super::fs_quirks::{Call, NameOpens, Op, Racer, Support};
+use super::fs_quirks::{Call, NameOpens, Op, Racer, Silly, Support};
 use super::*;
 use crate::adapters::volume::{MountCapabilities, learn_mount_capability};
 
@@ -700,7 +700,7 @@ fn a_failed_copy_in_place_removes_only_what_it_made() -> Result<(), Box<dyn Erro
         Quirks {
             before: vec![(Op::Close, "*", 0, racer)],
             fail: vec![(Op::Close, "*", 0, Errno::IO)],
-            silly_rename: true,
+            silly_rename: Some(Silly::nfs()),
             ..Quirks::without_folder_placement()
         },
     );

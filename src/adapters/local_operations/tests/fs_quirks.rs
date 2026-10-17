@@ -155,6 +155,29 @@ pub(crate) enum NameOpens {
     OneAtATime,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Aside {
+    Nfs,
+    Smb,
+    Fuse,
+    Unlisted(Errno),
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Silly {
+    pub aside: Aside,
+    pub lingers: Duration,
+}
+
+impl Silly {
+    pub(crate) fn nfs() -> Self {
+        Self {
+            aside: Aside::Nfs,
+            lingers: Duration::ZERO,
+        }
+    }
+}
+
 pub(crate) type Racer = Box<dyn FnMut() + Send>;
 pub(crate) type Preset = fn() -> Quirks;
 
@@ -253,9 +276,9 @@ pub(crate) struct Quirks {
     pub node_create: Support,
     /// `mknodat` of a named pipe, which FAT, exFAT and SMB refuse.
     pub fifos: Support,
-    /// Unlinking a file this process holds open renames it to `.nfs*`
-    /// instead, as the NFS client does until the last close.
-    pub silly_rename: bool,
+    /// Unlinking a file a [`HoldGuard`] or a descriptor of this process holds puts it aside
+    /// instead, as network and FUSE clients do until the last close.
+    pub silly_rename: Option<Silly>,
     /// Files report a size of 0 whatever they hold, so `copy_file_range`
     /// copies nothing from them, as virtual files on FUSE (lxcfs) do.
     pub virtual_sizes: bool,
@@ -350,6 +373,10 @@ impl Quirks {
             fs_type: Some(0x6969),
             rename_flags: Support::Rejected(Errno::INVAL),
             times_reset_at_close: true,
+            silly_rename: Some(Silly {
+                lingers: Duration::from_millis(2),
+                ..Silly::nfs()
+            }),
             ..Self::default()
         }
     }
@@ -360,6 +387,7 @@ impl Quirks {
             times_reset_at_close: false,
             xattrs_refused: vec![("", Errno::OPNOTSUPP)],
             no_birth_time: true,
+            silly_rename: Some(Silly::nfs()),
             ..Self::nfs42()
         }
     }
@@ -404,6 +432,7 @@ impl Quirks {
             symlinks: Support::Rejected(Errno::NOSYS),
             case_insensitive: true,
             no_birth_time: true,
+            silly_rename: Some(FUSEBLK_SILLY),
             ..Self::default()
         }
     }
@@ -436,6 +465,7 @@ impl Quirks {
             invalid_name: Some(ntfs_3g_refuses),
             no_birth_time: true,
             cut_rename_over_names: true,
+            silly_rename: Some(FUSEBLK_SILLY),
             ..Self::default()
         }
     }
@@ -453,6 +483,10 @@ impl Quirks {
             symlinks: Support::Rejected(Errno::OPNOTSUPP),
             case_insensitive: true,
             cached_change_times: Some(Duration::from_secs(1)),
+            silly_rename: Some(Silly {
+                aside: Aside::Smb,
+                lingers: Duration::from_millis(4),
+            }),
             ..Self::default()
         }
     }
@@ -472,6 +506,10 @@ impl Quirks {
             stored_as: Some(question_marks),
             symlinks: Support::Supported,
             case_insensitive: false,
+            silly_rename: Some(Silly {
+                aside: Aside::Unlisted(Errno::ACCESS),
+                lingers: Duration::from_millis(1),
+            }),
             ..Self::cifs()
         }
     }
@@ -489,12 +527,20 @@ impl Quirks {
             single_link_count: true,
             lost_renames_keep_inodes: true,
             no_birth_time: true,
+            silly_rename: Some(Silly {
+                aside: Aside::Fuse,
+                lingers: Duration::from_millis(70),
+            }),
             ..Self::default()
         }
     }
 }
 
 const FUSE_SUPER_MAGIC: FsWord = 0x6573_5546;
+const FUSEBLK_SILLY: Silly = Silly {
+    aside: Aside::Fuse,
+    lingers: Duration::ZERO,
+};
 const EXT4_SUPER_MAGIC: FsWord = 0xEF53;
 const EXT4: (&str, &str) = ("ext4", "rw");
 const VBOXSF_OPTIONS: &str = "rw,nodev,relatime,iocharset=utf8,uid=1000,gid=1000";
@@ -774,6 +820,17 @@ struct State {
     seen_change_times: HashMap<(u64, u64), ((i64, u32), SystemTime)>,
     unplugged: bool,
     serverino_disabled: bool,
+    holds: HashMap<(u64, u64), usize>,
+    leftovers: Vec<SillyLeftover>,
+    silly_renames: u64,
+}
+
+struct SillyLeftover {
+    folder: PathBuf,
+    folder_key: (u64, u64),
+    name: Option<OsString>,
+    key: (u64, u64),
+    unheld_since: Option<SystemTime>,
 }
 
 static SCOPES: Mutex<Vec<Arc<Scope>>> = Mutex::new(Vec::new());
@@ -812,6 +869,9 @@ impl FsQuirks {
                 seen_change_times: HashMap::new(),
                 unplugged: false,
                 serverino_disabled: false,
+                holds: HashMap::new(),
+                leftovers: Vec::new(),
+                silly_renames: 0,
             }),
         });
         scopes().push(scope.clone());
@@ -868,6 +928,32 @@ impl Drop for FsQuirks {
     fn drop(&mut self) {
         scopes().retain(|scope| !Arc::ptr_eq(scope, &self.scope));
         forget_test_mount_capabilities(self.scope.id);
+    }
+}
+
+#[expect(dead_code, reason = "the leftover wait's rows hold files")]
+pub(crate) struct HoldGuard {
+    scope: Arc<Scope>,
+    key: (u64, u64),
+}
+
+impl Drop for HoldGuard {
+    fn drop(&mut self) {
+        let mut state = self.scope.state();
+        let Some(count) = state.holds.get_mut(&self.key) else {
+            return;
+        };
+        *count -= 1;
+        if *count > 0 {
+            return;
+        }
+        state.holds.remove(&self.key);
+        let now = clock_for_test();
+        for leftover in &mut state.leftovers {
+            if leftover.key == self.key {
+                leftover.unheld_since.get_or_insert(now);
+            }
+        }
     }
 }
 
@@ -976,6 +1062,7 @@ impl Scope {
         if let Some(errno) = fault {
             return Err(errno);
         }
+        self.reap();
         let result = perform(self);
         {
             let mut state = self.state();
@@ -1478,20 +1565,126 @@ impl Scope {
     }
 }
 
-fn open_in_this_process(entry: Entry<'_>) -> Option<u64> {
-    let stat = System.stat(entry, false).ok()?;
-    (stat.kind == FileType::RegularFile
-        && held_by_this_process(stat.identity.device, stat.identity.inode))
-    .then_some(stat.identity.inode)
+fn held_by_this_process(device: u64, inode: u64) -> bool {
+    refers_to(device, inode, true)
 }
 
-fn held_by_this_process(device: u64, inode: u64) -> bool {
+fn refers_to(device: u64, inode: u64, o_path: bool) -> bool {
+    let path_only = |fd: &std::fs::DirEntry| {
+        let info = format!("/proc/self/fdinfo/{}", fd.file_name().to_string_lossy());
+        std::fs::read_to_string(info)
+            .ok()
+            .and_then(|info| {
+                let flags = info.lines().find_map(|line| line.strip_prefix("flags:"))?;
+                u32::from_str_radix(flags.trim(), 8).ok()
+            })
+            .is_some_and(|flags| flags & OFlags::PATH.bits() != 0)
+    };
     std::fs::read_dir("/proc/self/fd").is_ok_and(|fds| {
         fds.filter_map(Result::ok).any(|fd| {
-            rustix::fs::stat(fd.path())
-                .is_ok_and(|open| (open.st_dev, open.st_ino) == (device, inode))
+            (o_path || !path_only(&fd))
+                && rustix::fs::stat(fd.path())
+                    .is_ok_and(|open| (open.st_dev, open.st_ino) == (device, inode))
         })
     })
+}
+
+impl Aside {
+    fn held_here(self, (device, inode): (u64, u64)) -> bool {
+        refers_to(device, inode, matches!(self, Self::Nfs))
+    }
+
+    fn name(self, inode: u64, count: u64) -> Option<OsString> {
+        let name = match self {
+            Self::Nfs => format!(".nfs{inode:016x}{count:08x}"),
+            Self::Smb => format!(".__smbfile_silly{count:x}"),
+            Self::Fuse => format!(".fuse_hidden{:08x}{:08x}", inode as u32, count as u32),
+            Self::Unlisted(_) => return None,
+        };
+        Some(OsString::from(name))
+    }
+}
+
+impl Scope {
+    fn reap(&self) {
+        let mut state = self.state();
+        let Some(silly) = state.quirks.silly_rename else {
+            return;
+        };
+        let now = clock_for_test();
+        let State {
+            holds, leftovers, ..
+        } = &mut *state;
+        leftovers.retain_mut(|leftover| {
+            if holds.contains_key(&leftover.key) || silly.aside.held_here(leftover.key) {
+                leftover.unheld_since = None;
+                return true;
+            }
+            let since = *leftover.unheld_since.get_or_insert(now);
+            if now.duration_since(since).unwrap_or_default() < silly.lingers {
+                return true;
+            }
+            if let Some(name) = &leftover.name {
+                let _ = std::fs::remove_file(leftover.folder.join(name));
+            }
+            false
+        });
+    }
+
+    fn unlink_held(&self, at: Entry<'_>, flags: AtFlags) -> Option<Result<(), Errno>> {
+        let silly = self.quirk(|quirks| quirks.silly_rename)?;
+        let folder = path_of(at.dir)?;
+        if flags.contains(AtFlags::REMOVEDIR) {
+            let Aside::Unlisted(errno) = silly.aside else {
+                return None;
+            };
+            let target = System.stat(at, false).ok()?.identity;
+            let held_below = self
+                .state()
+                .leftovers
+                .iter()
+                .any(|leftover| leftover.folder_key == (target.device, target.inode));
+            return held_below.then_some(Err(errno));
+        }
+        let stat = System
+            .stat(at, false)
+            .ok()
+            .filter(|stat| stat.kind == FileType::RegularFile)?;
+        let key = (stat.identity.device, stat.identity.inode);
+        let folder_key = System.stat_fd(at.dir).ok()?.identity;
+        let mut state = self.state();
+        let leftover = state.leftovers.iter().position(|leftover| {
+            leftover.folder == folder && leftover.name.as_deref() == Some(at.name)
+        });
+        match (leftover, silly.aside) {
+            (Some(_), Aside::Nfs) => return Some(Err(Errno::BUSY)),
+            (Some(_), Aside::Smb) => return Some(Err(Errno::NOENT)),
+            (Some(_), _) => {}
+            (None, aside) if !state.holds.contains_key(&key) && !aside.held_here(key) => {
+                return None;
+            }
+            (None, _) => {}
+        }
+        state.silly_renames += 1;
+        let name = silly.aside.name(key.1, state.silly_renames);
+        let unlinked = match &name {
+            Some(name) => System.rename(at, Entry { dir: at.dir, name }, RenameFlags::NOREPLACE),
+            None => System.unlink(at, AtFlags::empty()),
+        };
+        if unlinked.is_ok() {
+            match leftover {
+                Some(index) => state.leftovers[index].name = name,
+                None => state.leftovers.push(SillyLeftover {
+                    folder,
+                    folder_key: (folder_key.device, folder_key.inode),
+                    name,
+                    key,
+                    unheld_since: None,
+                }),
+            }
+        }
+        Some(unlinked)
+    }
 }
 
 fn path_of(dir: BorrowedFd<'_>) -> Option<PathBuf> {
@@ -1636,6 +1829,16 @@ pub(crate) fn evict(path: &Path) -> bool {
     let held =
         rustix::fs::lstat(path).is_ok_and(|stat| held_by_this_process(stat.st_dev, stat.st_ino));
     !held && renumber(path)
+}
+
+/// Another program opens the file at `path` and keeps it open until the guard drops.
+#[expect(dead_code, reason = "the leftover wait's rows hold files")]
+pub(crate) fn hold(path: &Path) -> HoldGuard {
+    let scope = scope_for_path(path).expect("a scope holding the file");
+    let stat = rustix::fs::lstat(path).expect("the held file");
+    let key = (stat.st_dev, stat.st_ino);
+    *scope.state().holds.entry(key).or_default() += 1;
+    HoldGuard { scope, key }
 }
 
 /// As the cifs client turns server inode numbers off after a collision, with no mount-table event.
@@ -1889,15 +2092,8 @@ impl FsOps for Scoped {
         assert_off_main_thread();
         match scope_for(at.dir) {
             Some(scope) => scope.run(Op::Unlink, &[at.name], |scope| {
-                if scope.quirk(|quirks| quirks.silly_rename)
-                    && let Some(inode) = open_in_this_process(at)
-                {
-                    let aside = OsString::from(format!(".nfs{inode:016x}"));
-                    let aside = Entry {
-                        dir: at.dir,
-                        name: &aside,
-                    };
-                    return System.rename(at, aside, RenameFlags::NOREPLACE);
+                if let Some(unlinked) = scope.unlink_held(at, flags) {
+                    return unlinked;
                 }
                 scope.resolved(at, |at| System.unlink(at, flags))?;
                 scope.unlinked(at);
