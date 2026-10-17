@@ -495,7 +495,7 @@ impl WheelZoom {
             if thumbnails {
                 view.resize_icons_thumbnails(ThumbnailResize::Step(-steps));
             } else {
-                preferences.set_text_size(preferences.text_size().stepped(-steps));
+                view.set_text_size(preferences.text_size().stepped(-steps));
             }
         }
         Propagation::Stop
@@ -692,7 +692,7 @@ impl Dispatcher {
             // first, then resize, matching Ctrl+, opening Settings.
             self.shortcuts.cancel_chord();
             if !self.preview.reset_pdf_zoom(press) {
-                preferences.set_text_size(size);
+                self.view.set_text_size(size);
             }
             return Propagation::Stop;
         }

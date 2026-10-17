@@ -12,6 +12,21 @@ pub(super) fn show_notice(
     text: &str,
     duration: Duration,
 ) {
+    show(overlay, true, heading, text, duration);
+}
+
+/// A notice without the success check, for reporting a value as it changes.
+pub(super) fn show_status(overlay: &gtk::Overlay, text: &str, duration: Duration) {
+    show(overlay, false, None, text, duration);
+}
+
+fn show(
+    overlay: &gtk::Overlay,
+    check: bool,
+    heading: Option<&str>,
+    text: &str,
+    duration: Duration,
+) {
     let overlay = &super::modal::window_overlay(overlay).unwrap_or_else(|| overlay.clone());
     let (dock, list) = super::progress_dock::dock(overlay);
     let mut child = list.first_child();
@@ -24,10 +39,14 @@ pub(super) fn show_notice(
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     row.add_css_class(NOTICE_CLASS);
     row.set_can_target(false);
-    let icon = crate::assets::primary_icon(crate::assets::icons::CHECK, 16);
-    icon.set_valign(gtk::Align::Start);
-    icon.set_can_target(false);
-    row.append(&icon);
+    if check {
+        let icon = crate::assets::primary_icon(crate::assets::icons::CHECK, 16);
+        icon.set_valign(gtk::Align::Start);
+        icon.set_can_target(false);
+        row.append(&icon);
+    } else {
+        row.add_css_class("status");
+    }
     let column = gtk::Box::new(gtk::Orientation::Vertical, 2);
     if let Some(heading) = heading {
         let heading = gtk::Label::new(Some(heading));

@@ -2331,7 +2331,7 @@ fn install_shortcuts(
             return result;
         }
         if let Some(size) = preferences.text_size().for_shortcut(press) {
-            preferences.set_text_size(size);
+            state.view.set_text_size(size);
             return glib::Propagation::Stop;
         }
         if let Some(change) = ThumbnailResize::for_shortcut(press)

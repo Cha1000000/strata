@@ -10,6 +10,14 @@ fn thumbnail_size(fixture: &KeyboardFixture) -> i32 {
         .round() as i32
 }
 
+fn size_notice(fixture: &KeyboardFixture) -> Option<String> {
+    widget_with_class(fixture.window.upcast_ref(), "overlay-notice")?
+        .first_child()?
+        .first_child()
+        .and_downcast::<gtk::Label>()
+        .map(|label| label.text().into())
+}
+
 fn wheel(
     fixture: &KeyboardFixture,
     zoom: &keyboard::WheelZoom,
@@ -46,6 +54,10 @@ fn thumbnail_shortcuts_and_shift_wheel_step_icons_sizes_and_leave_other_views_al
                 assert!(fixture.press(key, control_alt), "Ctrl+Alt+{key:?}");
                 assert_eq!(thumbnail_size(&fixture), expected, "Ctrl+Alt+{key:?}");
                 assert_eq!(
+                    size_notice(&fixture),
+                    Some(format!("Thumbnail size: {expected}px"))
+                );
+                assert_eq!(
                     preferences.icons_thumbnail_size(),
                     expected,
                     "without folder settings the size is the default"
@@ -69,6 +81,10 @@ fn thumbnail_shortcuts_and_shift_wheel_step_icons_sizes_and_leave_other_views_al
                 64,
                 "reset makes the folder follow the default again"
             );
+            assert_eq!(
+                size_notice(&fixture).as_deref(),
+                Some("Thumbnail size: 64px")
+            );
 
             let zoom = keyboard::WheelZoom::default();
             let text_size = preferences.text_size().root_font_px();
@@ -89,6 +105,10 @@ fn thumbnail_shortcuts_and_shift_wheel_step_icons_sizes_and_leave_other_views_al
             wheel(&fixture, &zoom, ModifierType::CONTROL_MASK, (0.0, -1.0));
             assert_eq!(preferences.text_size().root_font_px(), text_size + 1);
             assert_eq!(thumbnail_size(&fixture), 72, "Ctrl+wheel resizes text only");
+            assert_eq!(
+                size_notice(&fixture),
+                Some(format!("Text size: {}px", text_size + 1))
+            );
 
             preferences.set_tenxer_mode(true);
             focus_files(&fixture);

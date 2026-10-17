@@ -155,6 +155,7 @@ between two steps moves to the nearer one in that direction. **Ctrl+Alt+0** rese
 it: a remembered folder follows the default again, any other folder returns to the
 default, and with per-folder settings off the default returns to 64 px. These
 change the size exactly as the slider does and change no size in Columns or List.
+Each change briefly shows the new size in the bottom-right corner.
 
 A pane's sort menu shows **Make this the default sort** when its sort differs from
 the default and **Reset to default sort** when the folder has its own sort; the
@@ -238,7 +239,8 @@ previews; opening Settings is not required to initialize it. **Appearance** also
 has decrease/increase controls and a size button that resets to the default.
 Use **Ctrl++** (or **Ctrl+=**), **Ctrl+−**, and **Ctrl+0** to increase, decrease,
 and reset, including while an inline editor or Settings is open; **Ctrl+wheel**
-does the same. **Ctrl+Shift+wheel** resizes Icons thumbnails instead (see
+does the same. Each briefly shows the new size in the bottom-right corner; changes
+made in Settings do not. **Ctrl+Shift+wheel** resizes Icons thumbnails instead (see
 [Per-folder sort and thumbnail size](#per-folder-sort-and-thumbnail-size)).
 Over a PDF preview, **Ctrl+wheel** zooms the pages instead. With the PDF page
 focused, **Ctrl+0** resets page zoom without changing the saved text size.

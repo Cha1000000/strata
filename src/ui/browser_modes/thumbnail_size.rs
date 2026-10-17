@@ -58,8 +58,9 @@ impl ThumbnailResize {
         }
     }
 
-    /// Moves the slider, which saves the size the way dragging it does.
-    pub(in crate::ui) fn apply(self, scale: &gtk::Scale, location: Option<&Location>) {
+    /// Moves the slider, which saves the size the way dragging it does, and
+    /// returns the size it lands on.
+    pub(in crate::ui) fn apply(self, scale: &gtk::Scale, location: Option<&Location>) -> i32 {
         let size = match self {
             Self::Step(steps) => stepped(scale.value().round() as i32, steps),
             Self::Reset => {
@@ -68,7 +69,7 @@ impl ThumbnailResize {
                 {
                     // Preferences move the slider to the size the folder now follows.
                     preferences.reset_folder_icons_size(location);
-                    return;
+                    return preferences.icons_size_for(Some(location));
                 }
                 if preferences.remember_folder_views() {
                     preferences.icons_thumbnail_size()
@@ -78,6 +79,7 @@ impl ThumbnailResize {
             }
         };
         scale.set_value(f64::from(size));
+        size
     }
 }
 
