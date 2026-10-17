@@ -497,9 +497,10 @@ if it is still what the copy read:
 
 - **Torn files.** A file that changes while it is read is copied once more: a stat after the copy
   shows another size or other times, or the copy's own reads found the file's end away from its
-  size, which is all a rewrite within one tick of a coarse clock may leave. If it changes again, its
-  copy is removed and the source is kept. A selected file then fails with "changed while it was
-  being copied", and nothing is published.
+  size, which is all a rewrite within one tick of a coarse clock may leave. A file that reports a
+  size of 0 before and after, as virtual files on FUSE do, is not held to its end. If it changes
+  again, its copy is removed and the source is kept. A selected file then fails with "changed while
+  it was being copied", and nothing is published.
 - **The check.** A forced stat (`AT_STATX_FORCE_SYNC`, which revalidates NFS and SMB) must show the
   same type, size and modification time and, where inode numbers are stable, the same inode, change
   time and link count. Removing one name of a hard-linked file changes the other names' change time

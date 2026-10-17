@@ -2007,8 +2007,10 @@ impl Copy {
             }
             let read = self.fs.stat_fd(source_fd)?;
             // A rewrite within one tick of a coarse clock keeps the times, not
-            // always the size the copy read up to.
-            if !manifest::changed(&stat, &read) && end.is_none_or(|end| end == read.size) {
+            // always the size the copy read up to. Virtual files report none.
+            let whole =
+                end.is_none_or(|end| end == read.size || (stat.size == 0 && read.size == 0));
+            if !manifest::changed(&stat, &read) && whole {
                 let read = manifest::Read {
                     stat: read,
                     contents: digest

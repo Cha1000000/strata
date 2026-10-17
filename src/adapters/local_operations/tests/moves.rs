@@ -1391,6 +1391,49 @@ fn a_file_rewritten_as_it_is_read_is_copied_again_whole() -> Result<(), Box<dyn 
 }
 
 #[test]
+fn a_file_that_reports_no_size_is_moved_whole() -> Result<(), Box<dyn Error>> {
+    let _serial = serial()?;
+    for in_folder in [false, true] {
+        let root = tempfile::tempdir()?;
+        let folder = root.path().join("source/folder");
+        fs::create_dir_all(&folder)?;
+        let file = folder.join("cpuinfo");
+        fs::write(&file, b"processor : 0\n")?;
+        let hour_before = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)?
+            .as_secs()
+            - 3600;
+        set_times(&file, hour_before, 0)?;
+        let quirks = Quirks {
+            mount_type: Some(("fuse.lxcfs", "rw")),
+            virtual_sizes: true,
+            ..Quirks::default()
+        };
+
+        let item = if in_folder { &folder } else { &file };
+        let (moved, report, _) = move_across_volumes(item, quirks)?;
+
+        assert_eq!(
+            report,
+            TransferReport::default(),
+            "in a folder: {in_folder}"
+        );
+        assert!(!file.exists(), "in a folder: {in_folder}");
+        let moved = if in_folder {
+            moved.join("cpuinfo")
+        } else {
+            moved
+        };
+        assert_eq!(
+            fs::read(moved)?,
+            b"processor : 0\n",
+            "in a folder: {in_folder}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn moves_off_mounts_without_stable_inodes_keep_only_what_changed() -> Result<(), Box<dyn Error>> {
     let _serial = serial()?;
     let root = tempfile::tempdir()?;
