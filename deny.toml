@@ -2,7 +2,11 @@
 all-features = true
 
 [advisories]
-ignore = []
+ignore = [
+  { id = "RUSTSEC-2026-0367", reason = "zip extract is never called; remove when calamine and docx-rs move to zip 9" },
+  { id = "RUSTSEC-2026-0368", reason = "zip extract is never called; remove when calamine and docx-rs move to zip 9" },
+  { id = "RUSTSEC-2026-0369", reason = "zip extract is never called; remove when calamine and docx-rs move to zip 9" },
+]
 
 [licenses]
 confidence-threshold = 0.8
