@@ -209,7 +209,7 @@ pub(super) fn open_local_delete_target<Fd: AsFd>(
         fs().unlink(Entry::new(parent, name), rustix::fs::AtFlags::empty())
             .map_err(|error| {
                 rust_i18n::t!(
-                    "Could not delete %{name}: %{error}",
+                    "Could not delete “%{name}”: %{error}",
                     name = name.to_string_lossy(),
                     error = os_error_detail(error)
                 )
@@ -411,7 +411,7 @@ pub(super) fn remove_local_delete_directory(
     ) {
         queue.fail(
             rust_i18n::t!(
-                "Could not delete %{name}: %{error}",
+                "Could not delete “%{name}”: %{error}",
                 name = name.to_string_lossy(),
                 error = os_error_detail(error)
             )

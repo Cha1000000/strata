@@ -243,7 +243,7 @@
   "Could not create the archive in %{folder}: %{error}": "Không thể tạo tệp nén trong %{folder}: %{error}",
   "Could not create the extraction staging folder: %{error}": "Không thể tạo thư mục tạm để giải nén: %{error}",
   "Could not create “%{name}”: %{error}": "Không thể tạo “%{name}”: %{error}",
-  "Could not delete %{name}: %{error}": "Không thể xóa %{name}: %{error}",
+  "Could not delete “%{name}”: %{error}": "Không thể xóa “%{name}”: %{error}",
   "Could not determine the install directory": "Không thể xác định thư mục cài đặt",
   "Could not download signed update metadata: %{error}": "Không thể tải xuống siêu dữ liệu cập nhật đã ký: %{error}",
   "Could not download the file: %{error}": "Không thể tải tệp xuống: %{error}",

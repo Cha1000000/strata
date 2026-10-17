@@ -243,7 +243,7 @@
   "Could not create the archive in %{folder}: %{error}": "Could not create the archive in %{folder}: %{error}",
   "Could not create the extraction staging folder: %{error}": "Could not create the extraction staging folder: %{error}",
   "Could not create “%{name}”: %{error}": "Could not create “%{name}”: %{error}",
-  "Could not delete %{name}: %{error}": "Could not delete %{name}: %{error}",
+  "Could not delete “%{name}”: %{error}": "Could not delete “%{name}”: %{error}",
   "Could not determine the install directory": "Could not determine the install directory",
   "Could not download signed update metadata: %{error}": "Could not download signed update metadata: %{error}",
   "Could not download the file: %{error}": "Could not download the file: %{error}",

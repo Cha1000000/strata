@@ -243,7 +243,7 @@
   "Could not create the archive in %{folder}: %{error}": "%{folder}にアーカイブを作成できませんでした: %{error}",
   "Could not create the extraction staging folder: %{error}": "展開用の一時フォルダーを作成できませんでした: %{error}",
   "Could not create “%{name}”: %{error}": "「%{name}」を作成できませんでした: %{error}",
-  "Could not delete %{name}: %{error}": "%{name}を削除できませんでした: %{error}",
+  "Could not delete “%{name}”: %{error}": "「%{name}」を削除できませんでした: %{error}",
   "Could not determine the install directory": "インストール先フォルダーを特定できませんでした",
   "Could not download signed update metadata: %{error}": "署名済みの更新メタデータをダウンロードできませんでした: %{error}",
   "Could not download the file: %{error}": "ファイルをダウンロードできませんでした: %{error}",

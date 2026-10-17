@@ -243,7 +243,7 @@
   "Could not create the archive in %{folder}: %{error}": "无法在 %{folder} 中创建压缩文件：%{error}",
   "Could not create the extraction staging folder: %{error}": "无法创建解压临时文件夹：%{error}",
   "Could not create “%{name}”: %{error}": "无法创建“%{name}”：%{error}",
-  "Could not delete %{name}: %{error}": "无法删除 %{name}：%{error}",
+  "Could not delete “%{name}”: %{error}": "无法删除“%{name}”：%{error}",
   "Could not determine the install directory": "无法确定安装目录",
   "Could not download signed update metadata: %{error}": "无法下载已签名的更新元数据：%{error}",
   "Could not download the file: %{error}": "无法下载文件：%{error}",

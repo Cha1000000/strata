@@ -243,7 +243,7 @@
   "Could not create the archive in %{folder}: %{error}": "Не удалось создать архив в %{folder}: %{error}",
   "Could not create the extraction staging folder: %{error}": "Не удалось создать временную папку для извлечения: %{error}",
   "Could not create “%{name}”: %{error}": "Не удалось создать «%{name}»: %{error}",
-  "Could not delete %{name}: %{error}": "Не удалось удалить %{name}: %{error}",
+  "Could not delete “%{name}”: %{error}": "Не удалось удалить «%{name}»: %{error}",
   "Could not determine the install directory": "Не удалось определить папку установки",
   "Could not download signed update metadata: %{error}": "Не удалось загрузить подписанные метаданные обновления: %{error}",
   "Could not download the file: %{error}": "Не удалось загрузить файл: %{error}",

@@ -2889,7 +2889,7 @@ fn undoing_a_replace_deletes_what_it_placed_only_if_all_of_it_is_unchanged()
                 Errno::ACCESS.raw_os_error(),
             ));
             let error = rust_i18n::t!(
-                "Could not delete %{name}: %{error}",
+                "Could not delete “%{name}”: %{error}",
                 name = "a.txt",
                 error = denied
             );

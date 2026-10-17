@@ -243,7 +243,7 @@
   "Could not create the archive in %{folder}: %{error}": "Das Archiv konnte nicht in %{folder} erstellt werden: %{error}",
   "Could not create the extraction staging folder: %{error}": "Der temporäre Entpackordner konnte nicht erstellt werden: %{error}",
   "Could not create “%{name}”: %{error}": "„%{name}“ konnte nicht erstellt werden: %{error}",
-  "Could not delete %{name}: %{error}": "%{name} konnte nicht gelöscht werden: %{error}",
+  "Could not delete “%{name}”: %{error}": "„%{name}“ konnte nicht gelöscht werden: %{error}",
   "Could not determine the install directory": "Installationsordner konnte nicht ermittelt werden",
   "Could not download signed update metadata: %{error}": "Signierte Update-Metadaten konnten nicht heruntergeladen werden: %{error}",
   "Could not download the file: %{error}": "Die Datei konnte nicht heruntergeladen werden: %{error}",
