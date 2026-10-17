@@ -2421,7 +2421,10 @@ fn copied_links_a_mount_numbers_afresh_are_known_by_their_size_and_time()
         (noserverino, "folder", merge, false),
     ];
     for (preset, item, conflict, replaced) in rows {
-        let row = format!("{:?}, {item}, {conflict:?}, replaced: {replaced}", preset().mount_type);
+        let row = format!(
+            "{:?}, {item}, {conflict:?}, replaced: {replaced}",
+            preset().mount_type
+        );
         let root = tempfile::tempdir()?;
         let sources = root.path().join("sources");
         let destination = root.path().join("destination");
