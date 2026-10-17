@@ -6,8 +6,10 @@ mod tests;
 use std::{
     any::Any,
     collections::HashMap,
+    future::Future,
     io,
     path::{Path, PathBuf},
+    pin::Pin,
     sync::{
         Arc, LazyLock, Mutex, MutexGuard, PoisonError,
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -75,6 +77,12 @@ impl<T> Outcome for io::Result<T> {
     }
 }
 
+impl<T: Outcome> Outcome for Result<T, gio::Cancelled> {
+    fn made_progress(&self) -> bool {
+        self.as_ref().is_ok_and(Outcome::made_progress)
+    }
+}
+
 impl<T> Outcome for Result<T, glib::Error> {
     fn made_progress(&self) -> bool {
         self.as_ref().err().is_none_or(|error| {
@@ -93,11 +101,12 @@ impl<T> Outcome for Result<T, glib::Error> {
 enum LaneKey {
     Mount(u64),
     Path { mount: Option<u64>, prefix: PathBuf },
+    Remote(String),
 }
 
 struct Target<'a> {
     key: LaneKey,
-    path: &'a Path,
+    path: Option<&'a Path>,
     lexical: Option<u64>,
 }
 
@@ -107,8 +116,10 @@ impl LaneKey {
             || match self {
                 Self::Mount(id) => target.lexical == Some(*id),
                 Self::Path { mount, prefix } => {
-                    *mount == target.lexical && target.path.starts_with(prefix)
+                    *mount == target.lexical
+                        && target.path.is_some_and(|path| path.starts_with(prefix))
                 }
+                Self::Remote(_) => false,
             }
     }
 
@@ -118,7 +129,7 @@ impl LaneKey {
             | Self::Path {
                 mount: Some(id), ..
             } => gone(*id),
-            Self::Path { mount: None, .. } => false,
+            Self::Path { mount: None, .. } | Self::Remote(_) => false,
         }
     }
 }
@@ -205,7 +216,7 @@ impl Lanes {
         let lexical = mounts.mount_for(path).map(|mount| mount.mount_id);
         Target {
             key: self.key_for(path, lexical),
-            path,
+            path: Some(path),
             lexical,
         }
     }
@@ -305,7 +316,7 @@ impl Lanes {
     fn enter(&mut self, ticket: u64, path: &Path, lexical: Option<u64>, now: Instant) -> bool {
         let target = Target {
             key: self.key_for(path, lexical),
-            path,
+            path: Some(path),
             lexical,
         };
         let Ok(probe) = self.verdict(&target, Class::Interactive, now, Some(ticket)) else {
@@ -448,6 +459,74 @@ impl Progress {
         self.last_beat.store(0, Ordering::Relaxed);
         Some(answer)
     }
+}
+
+pub(crate) struct Admitted {
+    progress: Progress,
+}
+
+impl Admitted {
+    pub(crate) fn progress(&self) -> &Progress {
+        &self.progress
+    }
+}
+
+impl Drop for Admitted {
+    fn drop(&mut self) {
+        if let Some(ticket) = self.progress.ticket {
+            lanes().finish(ticket, Instant::now());
+        }
+    }
+}
+
+fn admitted(lanes: &mut Lanes, target: Target<'_>, class: Class) -> Result<Admitted, Unanswered> {
+    let now = Instant::now();
+    let probe = lanes.verdict(&target, class, now, None)?;
+    let path = target.path.unwrap_or(Path::new(""));
+    let ticket = lanes.admit(probe.unwrap_or(target.key), now);
+    Ok(Admitted {
+        progress: Progress::new(ticket, path, target.lexical, Arc::default()),
+    })
+}
+
+pub(crate) fn admit(path: &Path, class: Class) -> Result<Admitted, Unanswered> {
+    let (mut lanes, mounts) = lanes_following_mounts();
+    let target = lanes.target(path, &mounts);
+    admitted(&mut lanes, target, class)
+}
+
+#[expect(
+    dead_code,
+    reason = "step 4's release and step 7's checks run through it"
+)]
+pub(crate) fn run<T: Send + 'static>(
+    path: &Path,
+    class: Class,
+    work: impl FnOnce(&Progress) -> T + Send + 'static,
+) -> Pin<Box<dyn Future<Output = Result<T, Unanswered>>>> {
+    let admitted = match admit(path, class) {
+        Ok(admitted) => admitted,
+        Err(refused) => return Box::pin(std::future::ready(Err(refused))),
+    };
+    let worker = gio::spawn_blocking(move || work(admitted.progress()));
+    Box::pin(async move { worker.await.map_err(|_| Unanswered::Failed) })
+}
+
+/// GVfs backends that stop answering keep GIO's asynchronous calls waiting forever.
+pub(crate) async fn run_remote<T: Outcome>(
+    authority: String,
+    class: Class,
+    call: impl Future<Output = T>,
+) -> Result<T, Unanswered> {
+    let target = Target {
+        key: LaneKey::Remote(authority),
+        path: None,
+        lexical: None,
+    };
+    let admitted = admitted(&mut lanes(), target, class)?;
+    let answer = call.await;
+    admitted.progress().answered(&answer);
+    Ok(answer)
 }
 
 type Shared = Arc<dyn Any + Send + Sync>;

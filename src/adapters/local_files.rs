@@ -272,15 +272,6 @@ trait RecentEnumerationSource {
     ) -> RecentEnumerationFuture<Result<Option<Vec<RecentEntryResolution>>, RecentSourceError>>;
 }
 
-fn map_validation_error(error: std::io::Error) -> LocationValidationError {
-    match error.kind() {
-        ErrorKind::NotFound => LocationValidationError::Missing,
-        ErrorKind::PermissionDenied => LocationValidationError::Inaccessible,
-        ErrorKind::NotADirectory => LocationValidationError::NotDirectory,
-        _ => LocationValidationError::Unavailable(crate::services::io_error_detail(&error)),
-    }
-}
-
 fn uri_validation_result(
     location: &Location,
     result: Result<gio::FileInfo, glib::Error>,
@@ -1186,13 +1177,13 @@ pub(crate) fn recent_remove_entries(
 impl FileSource for LocalFileSource {
     fn validate_location(&self, location: &Location) -> Result<(), LocationValidationError> {
         if let Some(path) = location.native_path() {
-            let metadata = std::fs::metadata(path).map_err(map_validation_error)?;
+            let metadata = std::fs::metadata(path).map_err(LocationValidationError::from)?;
             if !metadata.is_dir() {
                 return Err(LocationValidationError::NotDirectory);
             }
             return std::fs::read_dir(path)
                 .map(|_| ())
-                .map_err(map_validation_error);
+                .map_err(LocationValidationError::from);
         }
 
         let file = gio::File::for_uri(

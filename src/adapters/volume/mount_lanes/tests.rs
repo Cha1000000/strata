@@ -5,7 +5,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use super::{Class, Lanes, Responsiveness, Target, Unanswered};
+use super::{Class, LaneKey, Lanes, Responsiveness, Target, Unanswered};
 use crate::adapters::volume::MountTable;
 
 const MOUNTS: &str = "\
@@ -313,4 +313,40 @@ fn a_mount_table_change_forgets_only_mounts_it_moved() {
     let _arrived = bench.call("/mnt/new/x", 7.0);
     assert!(bench.answers("/srv/data", 9.5), "the root mount");
     assert!(!bench.answers("/mnt/new/x", 9.5));
+}
+
+#[test]
+fn a_gvfs_backend_that_stops_answering_trips_only_its_authority() {
+    let mut bench = Bench::new();
+    let ask = |bench: &mut Bench, authority: &str, seconds: f64| {
+        let now = bench.at(seconds);
+        let target = Target {
+            key: LaneKey::Remote(authority.to_owned()),
+            path: None,
+            lexical: None,
+        };
+        let probe = bench
+            .lanes
+            .verdict(&target, Class::Interactive, now, None)?;
+        Ok::<_, Unanswered>(bench.lanes.admit(probe.unwrap_or(target.key), now))
+    };
+    let stuck = ask(&mut bench, "smb://@nas:-1", 0.0).expect("an answering backend");
+    let waiting = ask(&mut bench, "smb://@nas:-1", 1.9).expect("an answering backend");
+
+    assert_eq!(
+        ask(&mut bench, "smb://@nas:-1", 2.0),
+        Err(Unanswered::TimedOut)
+    );
+    assert!(ask(&mut bench, "sftp://@server:-1", 2.0).is_ok());
+    assert!(bench.answers("/mnt/nas", 2.0));
+
+    bench.fail(stuck, 2.5);
+    bench.fail(waiting, 2.5);
+    let probe = ask(&mut bench, "smb://@nas:-1", 2.6).expect("the call that finds out");
+    assert_eq!(
+        ask(&mut bench, "smb://@nas:-1", 2.7),
+        Err(Unanswered::TimedOut)
+    );
+    bench.answer(probe, 2.8);
+    assert!(ask(&mut bench, "smb://@nas:-1", 2.9).is_ok());
 }

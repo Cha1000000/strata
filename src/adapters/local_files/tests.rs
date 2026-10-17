@@ -469,7 +469,7 @@ fn uri_monitor_changes_keep_their_uri_locations() {
 fn permission_errors_are_reported_as_inaccessible() {
     let error = std::io::Error::from(ErrorKind::PermissionDenied);
     assert_eq!(
-        map_validation_error(error),
+        LocationValidationError::from(error),
         LocationValidationError::Inaccessible
     );
 }

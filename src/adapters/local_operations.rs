@@ -132,6 +132,7 @@ mod merge_aside;
 mod mount_profile;
 mod owed;
 mod placement;
+pub(crate) mod probes;
 mod transfer_targets;
 pub(super) mod trash;
 mod typed_names;
