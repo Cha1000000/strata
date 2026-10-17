@@ -25,7 +25,7 @@ use gtk::{gio, glib, prelude::*};
 use crate::test_support::ASYNC_MAIN_CONTEXT_DEFAULT;
 use fs_quirks::{FsQuirks, Preset, Quirks};
 
-fn serial() -> Result<std::sync::MutexGuard<'static, ()>, String> {
+fn serial() -> Result<crate::test_support::MainContextGuard<'static>, String> {
     ASYNC_MAIN_CONTEXT_DEFAULT
         .lock()
         .map_err(|error| error.to_string())
