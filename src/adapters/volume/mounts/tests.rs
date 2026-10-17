@@ -42,7 +42,7 @@ fn parses_mount_points_and_filesystem_types() {
 }
 
 #[test]
-fn inode_numbers_are_unstable_on_fat_fuse_and_cifs_without_server_inodes() {
+fn inode_numbers_are_unstable_on_fat_fuse_vboxsf_and_cifs_without_server_inodes() {
     let table = MountTable::parse(
         "\
 70 22 0:60 / /mnt/a rw - cifs //server/a rw,vers=3.1.1,serverino,cache=strict
@@ -53,6 +53,7 @@ fn inode_numbers_are_unstable_on_fat_fuse_and_cifs_without_server_inodes() {
 75 22 8:33 / /mnt/f rw - vfat /dev/sdc2 rw,flush
 76 22 8:34 / /mnt/g rw - exfat /dev/sdc3 rw
 77 22 8:35 / /mnt/h rw - msdos /dev/sdc4 rw
+78 22 0:65 / /mnt/i rw - vboxsf share rw,nodev,relatime,iocharset=utf8
 ",
     );
     let stable = |id| table.mount_of(id).map(|(mount, _)| mount.stable_inodes());
@@ -60,7 +61,7 @@ fn inode_numbers_are_unstable_on_fat_fuse_and_cifs_without_server_inodes() {
     assert_eq!(stable(71), Some(false));
     assert_eq!(stable(72), Some(false));
     assert_eq!(stable(73), Some(true));
-    for id in 74..=77 {
+    for id in 74..=78 {
         assert_eq!(stable(id), Some(false), "mount {id}");
     }
 }
