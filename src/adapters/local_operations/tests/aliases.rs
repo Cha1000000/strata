@@ -754,7 +754,10 @@ fn same_named_items_from_three_folders_all_land_whatever_their_order_and_choice(
 -> Result<(), Box<dyn Error>> {
     use super::super::transfer_targets::transfer_targets;
     let _serial = serial()?;
-    let (keep_both, replace) = (TransferConflict::KeepBoth, TransferConflict::ReplaceExisting);
+    let (keep_both, replace) = (
+        TransferConflict::KeepBoth,
+        TransferConflict::ReplaceExisting,
+    );
     let three_one_two = [
         ("notes (1).txt", "three"),
         ("notes (2).txt", "one"),
@@ -775,7 +778,12 @@ fn same_named_items_from_three_folders_all_land_whatever_their_order_and_choice(
                 ("notes.txt", "one"),
             ],
         ),
-        (&["one", "two", "three"], Some(keep_both), false, &three_one_two),
+        (
+            &["one", "two", "three"],
+            Some(keep_both),
+            false,
+            &three_one_two,
+        ),
         (
             &["one", "two", "three"],
             None,
@@ -786,7 +794,12 @@ fn same_named_items_from_three_folders_all_land_whatever_their_order_and_choice(
                 ("notes.txt", "one"),
             ],
         ),
-        (&["two", "three", "one"], Some(keep_both), false, &three_one_two),
+        (
+            &["two", "three", "one"],
+            Some(keep_both),
+            false,
+            &three_one_two,
+        ),
         (
             &["one", "two", "three"],
             Some(replace),
@@ -797,7 +810,12 @@ fn same_named_items_from_three_folders_all_land_whatever_their_order_and_choice(
                 ("notes.txt", "two"),
             ],
         ),
-        (&["two", "one", "three"], Some(keep_both), false, &three_one_two),
+        (
+            &["two", "one", "three"],
+            Some(keep_both),
+            false,
+            &three_one_two,
+        ),
         (
             &["one", "three", "two"],
             Some(keep_both),
@@ -819,8 +837,18 @@ fn same_named_items_from_three_folders_all_land_whatever_their_order_and_choice(
                 ("notes.txt", "one"),
             ],
         ),
-        (&["one", "two", "three"], Some(keep_both), true, &three_one_two),
-        (&["two", "three", "one"], Some(keep_both), true, &three_one_two),
+        (
+            &["one", "two", "three"],
+            Some(keep_both),
+            true,
+            &three_one_two,
+        ),
+        (
+            &["two", "three", "one"],
+            Some(keep_both),
+            true,
+            &three_one_two,
+        ),
     ];
     for (selected, choice, as_selected, listed) in rows {
         let context = format!("{selected:?}, {choice:?}, as selected: {as_selected}");
