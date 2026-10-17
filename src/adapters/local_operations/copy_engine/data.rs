@@ -142,7 +142,7 @@ impl Route {
             } else {
                 64 * MIB
             }),
-            holes: sparse(source_stat) && stores_holes(target.family) && reports_holes(source_family()),
+            holes: sparse(source_stat) && stores_holes(target) && reports_holes(source_family()),
         }
     }
 }
@@ -152,10 +152,11 @@ fn sparse(stat: &EntryStat) -> bool {
     stat.size >= 1 << 20 && stat.blocks.saturating_mul(512) < stat.size
 }
 
-/// FAT, exFAT and ntfs3 fill a skipped hole with zeros within one call,
-/// which reports no progress and cannot be cancelled.
-fn stores_holes(family: Family) -> bool {
-    !matches!(family, Family::Fat | Family::Ntfs3)
+/// FAT, exFAT and NTFS fill a skipped hole with zeros within one call, which
+/// reports no progress and cannot be cancelled, through exfat-fuse and
+/// ntfs-3g as in the kernel.
+fn stores_holes(target: &Mount) -> bool {
+    !matches!(target.family, Family::Fat | Family::Ntfs3) && target.fuse_format.is_none()
 }
 
 /// Some ZFS releases report holes over unsynced data, also through NFS.

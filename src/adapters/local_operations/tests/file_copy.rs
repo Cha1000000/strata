@@ -555,7 +555,7 @@ fn sparse_files_keep_their_holes_where_both_ends_can() -> Result<(), Box<dyn Err
         Option<(Op, &'static str, fn(&Path) -> Racer)>,
         bool,
     );
-    let rows: [Row; 12] = [
+    let rows: [Row; 13] = [
         ("one mount", ext4, None, None, true),
         ("two mounts", ext4, Some(ext4), None, true),
         (
@@ -574,6 +574,13 @@ fn sparse_files_keep_their_holes_where_both_ends_can() -> Result<(), Box<dyn Err
         ),
         ("FAT target", ext4, Some(vfat), None, false),
         ("ntfs3 target", ext4, Some(ntfs3), None, false),
+        (
+            "exfat-fuse target",
+            ext4,
+            Some(Quirks::exfat_fuse),
+            None,
+            false,
+        ),
         ("ZFS source", zfs, Some(ext4), None, false),
         ("holes unknown", holes_unknown, Some(ext4), None, false),
         ("holes lost midway", holes_lost, Some(ext4), None, false),
