@@ -4,6 +4,12 @@ Strata can serve the XDG Desktop Portal FileChooser interface for portal-aware a
 
 The chooser is deliberately limited to local files and folders. It uses the main app's sidebar, Columns/Icons/List views, List type grouping, filters, metadata, previews, and themed controls. Recent appears when enabled in sidebar preferences and supported by the desktop's recent-files backend; only local targets are listed. Overwrite confirmation uses the same in-window modal as the app.
 
+The picker and browser share the sidebar's compact rows, insertion gaps, drag
+feedback, and place/pin reordering. Local folders dragged into a Pinned gap are
+bookmarked, not moved. The picker still hides non-local pins and rejects remote
+pin offers before probing them. Its sidebar visibility/compact choice remains
+local to the dialog; pin and place-order changes use the shared saved state.
+
 File-open requests include a **Name** field. Type an existing filename in the current folder, or paste a direct `http://` or `https://` file URL, then click **Open** or press Enter. A URL downloads to a temporary local file returned to the requesting application. A compact circular progress indicator and cancel button appear at the bottom-left of the action bar; downloads without a known size show a spinner and bytes downloaded. Escape cancels the download before the chooser itself. Chooser validation errors, including Name-field file lookup and URL download failures, appear as plain error text in the action bar rather than adding a row above it. The address bar remains navigation-only, and downloads are unavailable in folder and Save requests.
 
 Downloads are named from `Content-Disposition` or the URL path and persist under a `strata-download-*` folder in the temp directory after the chooser closes, so the requesting app can still open them. Folders older than a day are swept when the portal starts or a new download begins. URLs with credentials and automatic redirects are rejected; use the direct file URL.

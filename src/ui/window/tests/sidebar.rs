@@ -6,6 +6,7 @@ use gtk::prelude::*;
 
 use super::super::{
     browser_for_window, build_sidebar, move_pinned_place, pin_gap_index, pin_locations_at,
+    sidebar_reorder_matches,
 };
 use crate::model::Location;
 use crate::test_support::gtk_test_with_env;
@@ -103,6 +104,28 @@ fn a_rejected_place_click_returns_the_highlight_to_the_open_location() {
             window.destroy();
         },
     );
+}
+
+#[test]
+fn sidebar_reorders_only_distinct_rows_in_the_same_section() {
+    for (source, target, accepts) in [
+        ("trash", "home", true),
+        ("home", "trash", true),
+        ("pinned:0", "pinned:1", true),
+        ("pinned:1", "pinned:0", true),
+        ("home", "home", false),
+        ("pinned:0", "pinned:0", false),
+        ("home", "pinned:0", false),
+        ("pinned:0", "home", false),
+        ("not-a-place", "home", false),
+        ("pinned:invalid", "pinned:0", false),
+    ] {
+        assert_eq!(
+            sidebar_reorder_matches(source, target),
+            accepts,
+            "{source} -> {target}"
+        );
+    }
 }
 
 fn pin(path: &str, name: &str) -> (Location, String) {

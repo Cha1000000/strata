@@ -115,14 +115,15 @@ fn a_rejected_selection_cannot_become_a_copy_or_partial_pin() {
 }
 
 #[test]
-fn trash_and_web_links_are_rejected_before_any_probe() {
-    for (location, expected) in [
-        (Location::local("/home/user/folder"), true),
-        (Location::uri("sftp://host/folder"), true),
-        (Location::uri("trash:///folder"), false),
-        (Location::uri("http://example.com/"), false),
-        (Location::uri("HTTPS://example.com/folder"), false),
+fn pin_validation_preserves_the_choosers_local_only_boundary_before_any_probe() {
+    for (location, browser, chooser) in [
+        (Location::local("/home/user/folder"), true, true),
+        (Location::uri("sftp://host/folder"), true, false),
+        (Location::uri("trash:///folder"), false, false),
+        (Location::uri("http://example.com/"), false, false),
+        (Location::uri("HTTPS://example.com/folder"), false, false),
     ] {
-        assert_eq!(can_pin(&location), expected, "{location:?}");
+        assert_eq!(can_pin(&location, false), browser, "browser: {location:?}");
+        assert_eq!(can_pin(&location, true), chooser, "chooser: {location:?}");
     }
 }

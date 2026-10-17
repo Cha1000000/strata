@@ -2249,7 +2249,12 @@ scrollbar.horizontal > range > trough > slider {
   outline: 1px solid transparent;
   outline-offset: -1px;
   padding: 0;
-  transition: background 220ms ease-out, outline-color 220ms ease-out;
+  transition: background-color 220ms ease-out;
+}
+
+.sidebar > .sidebar-row,
+.sidebar > .sidebar-device {
+  margin: 0;
 }
 
 .sidebar-row:hover {
@@ -2283,26 +2288,64 @@ scrollbar.horizontal > range > trough > slider {
   opacity: 0.52;
 }
 
-.sidebar-row.reorderable:drop(active),
-.sidebar-row:drop(active),
-.sidebar-row.drop-destination {
-  background: alpha(@strata_highlight, 0.46);
-  outline-color: alpha(@strata_accent, 0.72);
-  transform: scale(1.02);
+.sidebar.sidebar-drag-active .sidebar-row {
+  transition: none;
 }
 
-.sidebar-pin-gap,
-.sidebar-pin-gap:drop(active) {
-  min-height: 4px;
-  margin: 0 8px;
+.sidebar.sidebar-inserting .sidebar-row,
+.sidebar.sidebar-inserting .sidebar-row:hover,
+.sidebar.sidebar-inserting .sidebar-device,
+.sidebar.sidebar-inserting .sidebar-device:hover {
+  background-color: transparent;
+}
+
+.sidebar.sidebar-drag-active .sidebar-row:focus:not(.drop-destination),
+.sidebar.sidebar-drag-active .sidebar-device.focused {
+  outline-color: transparent;
+}
+
+.sidebar-row.drop-destination,
+.sidebar-row.drop-destination:hover {
+  background: alpha(@strata_highlight, 0.46);
+  outline-color: alpha(@strata_accent, 0.72);
+  transform: none;
+  transition: none;
+}
+
+.sidebar-row.file-drop-zone:drop(active) {
+  box-shadow: none;
+}
+
+.sidebar-row.reorder-before,
+.sidebar-row.reorder-before:drop(active),
+.sidebar-row.reorder-after,
+.sidebar-row.reorder-after:drop(active) {
+  background: transparent;
+  box-shadow: none;
+  outline-color: transparent;
+  transform: none;
+  transition: none;
+}
+
+.sidebar-row-gap,
+.sidebar-row-gap:drop(active) {
+  min-height: 2px;
+  margin: 0;
   background: transparent;
   outline: none;
   box-shadow: none;
 }
 
-.sidebar-pin-gap.eligible,
-.sidebar-pin-gap.eligible:drop(active) {
-  background-image: linear-gradient(to bottom, transparent 33%, @strata_accent 33%, @strata_accent 66%, transparent 66%);
+.sidebar-pin-gap.empty {
+  min-height: 8px;
+}
+
+.sidebar-row-gap.eligible,
+.sidebar-row-gap.eligible:drop(active) {
+  background-image: linear-gradient(@strata_accent, @strata_accent);
+  background-size: calc(100% - 8px) 2px;
+  background-position: center;
+  background-repeat: no-repeat;
 }
 
 .sidebar-row:focus {

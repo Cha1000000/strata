@@ -89,7 +89,7 @@ struct SidebarShell {
 
 impl SidebarShell {
     fn new() -> Self {
-        let places = gtk::Box::new(gtk::Orientation::Vertical, 2);
+        let places = gtk::Box::new(gtk::Orientation::Vertical, 0);
         places.add_css_class("sidebar");
         let scroller = gtk::ScrolledWindow::builder()
             .child(&places)
@@ -164,6 +164,9 @@ impl SidebarState {
         let volume_monitor = gio::VolumeMonitor::get();
         let place_order = resolve_place_order(&preference_manager.sidebar_order());
         let places_visibility = preference_manager.sidebar_places_visibility();
+        let drop_feedback = Rc::new(super::sidebar_drop_feedback::SidebarDropFeedback::new(
+            &widget,
+        ));
         Rc::new(Self {
             widget,
             browser: view.browser(),
@@ -193,6 +196,7 @@ impl SidebarState {
             keycaps: RefCell::new(Vec::new()),
             keycaps_shown: Cell::new(false),
             visible_pins: RefCell::new(Vec::new()),
+            drop_feedback,
         })
     }
 
@@ -255,7 +259,7 @@ impl SidebarState {
         self.place_rows
             .borrow_mut()
             .push((location.clone(), row.clone()));
-        install_sidebar_file_drop(&self.view, row, location.clone());
+        install_sidebar_file_drop(self, row, location.clone());
         let browser = Rc::downgrade(&self.browser);
         let sidebar = self.widget.downgrade();
         let keyboard_activation = Rc::new(Cell::new(false));

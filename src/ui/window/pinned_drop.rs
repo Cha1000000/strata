@@ -121,20 +121,33 @@ impl Drop for FolderValidation {
 #[derive(Default)]
 pub(super) struct FolderDragCache {
     current: RefCell<Option<(glib::WeakRef<gdk::Drop>, Rc<FolderValidation>)>>,
+    local_only: bool,
 }
 
 impl FolderDragCache {
+    pub(super) fn new(local_only: bool) -> Self {
+        Self {
+            local_only,
+            ..Self::default()
+        }
+    }
+
     fn validation(&self, drop: &gdk::Drop) -> Rc<FolderValidation> {
+        let local_only = self.local_only;
         if let Some((cached_drop, validation)) = self.current.borrow().as_ref()
             && cached_drop.upgrade().as_ref() == Some(drop)
         {
             return validation.clone();
         }
         let validation = if let Some(folder) = reorder_source(drop) {
-            FolderValidation::ready(Some(vec![folder].into()))
+            let allowed = can_pin(&folder.0, local_only);
+            FolderValidation::ready(allowed.then(|| vec![folder].into()))
         } else if let Some(snapshot) = active_drag_snapshot(drop) {
             FolderValidation::ready(snapshot.folders.filter(|folders| {
-                !folders.is_empty() && folders.iter().all(|(location, _)| can_pin(location))
+                !folders.is_empty()
+                    && folders
+                        .iter()
+                        .all(|(location, _)| can_pin(location, local_only))
             }))
         } else {
             let drop = drop.clone();
@@ -150,7 +163,10 @@ impl FolderDragCache {
                         .iter()
                         .map(crate::adapters::location_for_file)
                         .collect::<Option<Vec<_>>>()?;
-                    if !locations.iter().all(can_pin) {
+                    if !locations
+                        .iter()
+                        .all(|location| can_pin(location, local_only))
+                    {
                         return None;
                     }
                     crate::adapters::directory_validation::folder_names(locations)
@@ -170,8 +186,9 @@ impl FolderDragCache {
 }
 
 /// Checked before probing: trash cannot be pinned, and GVfs would fetch web links on hover.
-fn can_pin(location: &Location) -> bool {
-    !is_trash_location(location)
+fn can_pin(location: &Location, local_only: bool) -> bool {
+    (!local_only || location.native_path().is_some())
+        && !is_trash_location(location)
         && !location.uri_value().is_some_and(|uri| {
             glib::Uri::parse_scheme(uri).is_some_and(|scheme| {
                 scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https")
@@ -197,12 +214,16 @@ fn pin_action(drop: &gdk::Drop) -> gdk::DragAction {
 struct PinDropSite {
     widget: glib::WeakRef<gtk::Box>,
     hover_drop: RefCell<Option<gdk::Drop>>,
+    feedback: Rc<super::sidebar_drop_feedback::SidebarDropFeedback>,
 }
 
 impl PinDropSite {
     fn enter(self: &Rc<Self>, drop: &gdk::Drop, cache: &FolderDragCache) -> gdk::DragAction {
         self.leave();
         self.hover_drop.replace(Some(drop.clone()));
+        if let Some(widget) = self.widget.upgrade() {
+            self.feedback.enter(widget.upcast_ref());
+        }
         let validation = cache.validation(drop);
         let action = validation.action(pin_action(drop));
         let site = Rc::downgrade(self);
@@ -214,6 +235,7 @@ impl PinDropSite {
             }
             if let Some(widget) = site.widget.upgrade()
                 && widget.root().is_some()
+                && site.feedback.is_current(widget.upcast_ref())
             {
                 let action = if locations.is_some() {
                     pin_action(&drop)
@@ -221,9 +243,9 @@ impl PinDropSite {
                     gdk::DragAction::empty()
                 };
                 if action.is_empty() {
-                    widget.remove_css_class("eligible");
+                    site.feedback.leave(widget.upcast_ref());
                 } else {
-                    widget.add_css_class("eligible");
+                    site.feedback.pin(widget.upcast_ref());
                 }
                 drop.status(action, action);
             }
@@ -234,7 +256,7 @@ impl PinDropSite {
     fn leave(&self) {
         self.hover_drop.take();
         if let Some(widget) = self.widget.upgrade() {
-            widget.remove_css_class("eligible");
+            self.feedback.leave(widget.upcast_ref());
         }
     }
 }
@@ -245,12 +267,11 @@ pub(super) fn append_gap(
     before: Option<Location>,
     cache: &Rc<FolderDragCache>,
 ) {
-    let gap = gtk::Box::builder()
-        .orientation(gtk::Orientation::Vertical)
-        .accessible_role(gtk::AccessibleRole::Group)
-        .build();
+    let gap = super::sidebar_drop_feedback::row_gap(Some(&crate::i18n::tr("PINNED")));
     gap.add_css_class("sidebar-pin-gap");
-    crate::ui::accessibility::set_label(&gap, &crate::i18n::tr("PINNED"));
+    if after.is_none() && before.is_none() {
+        gap.add_css_class("empty");
+    }
     let target = gtk::DropTargetAsync::new(
         Some(
             gdk::ContentFormats::for_type(gdk::FileList::static_type())
@@ -269,6 +290,7 @@ pub(super) fn append_gap(
     let site = Rc::new(PinDropSite {
         widget: gap.downgrade(),
         hover_drop: RefCell::new(None),
+        feedback: state.drop_feedback.clone(),
     });
     let enter_site = site.clone();
     let enter_cache = cache.clone();
