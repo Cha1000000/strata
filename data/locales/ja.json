@@ -1025,6 +1025,7 @@
   "This folder is empty": "このフォルダーは空です",
   "This installation is managed by Omarchy. Run “omarchy update” to install it.": "このインストールは Omarchy によって管理されています。インストールするには「omarchy update」を実行してください。",
   "This installation is managed by pacman. Install it through a full system update.": "このインストールは pacman によって管理されています。システム全体の更新でインストールしてください。",
+  "This item is being changed by a file operation.": "この項目はファイル操作で変更中です。",
   "This location is not a local folder": "この場所はローカルフォルダーではありません",
   "This may take a moment": "しばらくかかる場合があります",
   "This model file exceeds the 128 MiB preview limit. Try a smaller or lower-detail version.": "このモデルファイルはプレビューの上限である 128 MiB を超えています。より小さいか詳細度の低いバージョンをお試しください。",

@@ -1025,6 +1025,7 @@
   "This folder is empty": "This folder is empty",
   "This installation is managed by Omarchy. Run “omarchy update” to install it.": "This installation is managed by Omarchy. Run “omarchy update” to install it.",
   "This installation is managed by pacman. Install it through a full system update.": "This installation is managed by pacman. Install it through a full system update.",
+  "This item is being changed by a file operation.": "This item is being changed by a file operation.",
   "This location is not a local folder": "This location is not a local folder",
   "This may take a moment": "This may take a moment",
   "This model file exceeds the 128 MiB preview limit. Try a smaller or lower-detail version.": "This model file exceeds the 128 MiB preview limit. Try a smaller or lower-detail version.",

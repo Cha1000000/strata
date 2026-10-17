@@ -27,8 +27,8 @@ use crate::{
         DirectoryChange, DirectoryEvent, DirectoryRequest, FileSource, LoadHandle,
         LocationIdentity, LocationValidationError, MetadataOutcome, MetadataRequest,
         MetadataUpdate, RequestId, backend_unavailable_message, bytes_support_named_family,
-        is_hidden_name, is_image_path, is_media_path, native_hidden_names, native_kind,
-        sanitize_failure_message, symlink_kind,
+        file_activity, is_hidden_name, is_image_path, is_media_path, native_hidden_names,
+        native_kind, sanitize_failure_message, symlink_kind,
     },
 };
 
@@ -1840,26 +1840,26 @@ fn fill_icon_details_with_probe(
     }
 
     update.child_count = if info.file_type() == gio::FileType::Directory {
-        let Ok(entries) = fs::read_dir(path) else {
-            update.image_dimensions = MetadataValue::Unavailable;
-            update.child_count = MetadataValue::Unavailable;
-            update.duration_seconds = MetadataValue::Unavailable;
-            if cancellable.is_cancelled() || Instant::now() >= deadline {
-                return false;
+        match count_children(path, cancellable, deadline) {
+            None => return false,
+            Some(Children::Counted(count)) => MetadataValue::Known(count),
+            Some(Children::Withheld) => {
+                update.image_dimensions = MetadataValue::Unavailable;
+                update.duration_seconds = MetadataValue::Unavailable;
+                update.child_count = MetadataValue::Unknown;
+                return true;
             }
-            cache_icon_details(path, fingerprint, update);
-            return true;
-        };
-        let mut count = 0u64;
-        for entry in entries {
-            if cancellable.is_cancelled() || Instant::now() >= deadline {
-                return false;
-            }
-            if entry.is_ok() {
-                count = count.saturating_add(1);
+            Some(Children::Unreadable) => {
+                update.image_dimensions = MetadataValue::Unavailable;
+                update.child_count = MetadataValue::Unavailable;
+                update.duration_seconds = MetadataValue::Unavailable;
+                if cancellable.is_cancelled() || Instant::now() >= deadline {
+                    return false;
+                }
+                cache_icon_details(path, fingerprint, update);
+                return true;
             }
         }
-        MetadataValue::Known(count)
     } else {
         MetadataValue::Unavailable
     };
@@ -1892,6 +1892,7 @@ fn fill_icon_details_with_probe(
                     .map(|d| MetadataValue::Known(d.round() as u64))
                     .unwrap_or(MetadataValue::Unavailable);
             }
+            Err(error) if error == file_activity::HELD_FOR_OPERATION => return true,
             Err(_) => {
                 update.image_dimensions = MetadataValue::Unavailable;
                 update.duration_seconds = MetadataValue::Unavailable;
@@ -1906,6 +1907,38 @@ fn fill_icon_details_with_probe(
     }
     cache_icon_details(path, fingerprint, update);
     true
+}
+
+enum Children {
+    Counted(u64),
+    Unreadable,
+    Withheld,
+}
+
+fn count_children(
+    path: &Path,
+    cancellable: &gio::Cancellable,
+    deadline: Instant,
+) -> Option<Children> {
+    let mut entries = match file_activity::list(path) {
+        Ok(entries) => entries,
+        Err(error) if file_activity::is_refusal(&error) => return Some(Children::Withheld),
+        Err(_) => return Some(Children::Unreadable),
+    };
+    let mut count = 0u64;
+    for entry in entries.by_ref() {
+        if cancellable.is_cancelled() || Instant::now() >= deadline {
+            return None;
+        }
+        if entry.is_ok() {
+            count = count.saturating_add(1);
+        }
+    }
+    Some(if entries.stopped() {
+        Children::Withheld
+    } else {
+        Children::Counted(count)
+    })
 }
 
 fn update_from_info(info: &gio::FileInfo, location: &Location) -> (MetadataUpdate, bool) {
@@ -1991,7 +2024,11 @@ fn folder_identity(metadata: &fs::Metadata) -> Option<LocationIdentity> {
 
 fn native_entry_with_identity(directory: &Path, identity: LocationIdentity) -> Option<PathBuf> {
     use std::os::unix::fs::DirEntryExt;
-    let entries: Vec<fs::DirEntry> = fs::read_dir(directory).ok()?.flatten().collect();
+    let mut listing = file_activity::list(directory).ok()?;
+    let entries: Vec<fs::DirEntry> = listing.by_ref().flatten().collect();
+    if listing.stopped() {
+        return None;
+    }
     let matches = |entry: &&fs::DirEntry| {
         entry
             .metadata()
@@ -2200,7 +2237,7 @@ fn read_numbered_names(
 
 fn numbered_names_in(folder: &Path) -> std::io::Result<HashSet<OsString>> {
     let mut names = HashSet::new();
-    for entry in fs::read_dir(folder)? {
+    for entry in file_activity::list(folder)? {
         let name = entry?.file_name();
         if is_numbered_name(&name) {
             names.insert(name);

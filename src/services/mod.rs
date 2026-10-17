@@ -5,6 +5,7 @@ pub(crate) mod camera_preview;
 mod document;
 pub(crate) mod document_media;
 pub(crate) mod docx;
+pub(crate) mod file_activity;
 pub(crate) mod file_providers;
 mod file_source;
 pub(crate) mod image_conversion;

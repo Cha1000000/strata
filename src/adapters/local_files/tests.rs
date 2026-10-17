@@ -1929,24 +1929,73 @@ fn fill_directory_child_count_extracts_item_count() -> Result<(), Box<dyn Error>
     fs::write(root.join("file-1.txt"), b"1").expect("file 1");
     fs::write(root.join("file-2.txt"), b"2").expect("file 2");
     fs::create_dir_all(root.join("subdir")).expect("subdir");
+    let alias = root.with_extension("alias");
+    std::os::unix::fs::symlink(&root, &alias).expect("alias");
+    let fill = |id, folder: &Path| {
+        let events = run_fill(MetadataRequest {
+            id: RequestId(id),
+            entries: vec![Location::local(folder)],
+            full: false,
+            include_icon_details: true,
+            time_budget: Duration::from_secs(10),
+        });
+        assert_eq!(fill_outcome(&events), Some(MetadataOutcome::Complete));
+        events.iter().rev().find_map(|event| match event {
+            DirectoryEvent::MetadataFilled { updates, .. } => {
+                updates.first().map(|update| update.child_count.clone())
+            }
+            _ => None,
+        })
+    };
+    let activity = crate::services::file_activity::begin(
+        crate::services::file_activity::OperationScope::default(),
+    );
 
-    let events = run_fill(MetadataRequest {
-        id: RequestId(1),
-        entries: vec![Location::local(&root)],
-        full: false,
-        include_icon_details: true,
-        time_budget: Duration::from_secs(10),
-    });
-    assert_eq!(fill_outcome(&events), Some(MetadataOutcome::Complete));
-    let child_count = events.iter().rev().find_map(|event| match event {
-        DirectoryEvent::MetadataFilled { updates, .. } => {
-            updates.first().map(|update| update.child_count.clone())
-        }
-        _ => None,
-    });
-    assert_eq!(child_count, Some(MetadataValue::Known(3)));
+    let real = root.canonicalize()?;
+
+    for (row, folder) in [("as named", &root), ("through a symbolic link", &alias)] {
+        let fence = activity.fence([real.clone()]);
+        assert_eq!(
+            fill(1, folder),
+            Some(MetadataValue::Unknown),
+            "{row}: a folder an operation fences is not listed"
+        );
+        drop(fence);
+        assert_eq!(fill(2, folder), Some(MetadataValue::Known(3)), "{row}");
+    }
+    fs::remove_file(&alias).expect("the alias should be removed");
     fs::remove_dir_all(&root).expect("the fixture directory should be removed");
     Ok(())
+}
+
+#[test]
+fn background_folder_listings_skip_a_folder_an_operation_fences() {
+    let root = tempfile::tempdir().expect("fixture directory");
+    let folder = root.path().join("folder");
+    fs::create_dir(&folder).expect("watched folder");
+    fs::write(folder.join("#1234"), b"").expect("numbered name");
+    let identity =
+        folder_identity(&fs::metadata(&folder).expect("folder metadata")).expect("folder identity");
+    let listings: [(&str, &dyn Fn() -> bool); 2] = [
+        ("numbered names", &|| {
+            numbered_names_in(&folder)
+                .is_ok_and(|names| names.contains(std::ffi::OsStr::new("#1234")))
+        }),
+        ("departure probe", &|| {
+            native_entry_with_identity(root.path(), identity).as_ref() == Some(&folder)
+        }),
+    ];
+    let activity = crate::services::file_activity::begin(
+        crate::services::file_activity::OperationScope::default(),
+    );
+
+    for (listing, lists) in &listings {
+        assert!(lists(), "{listing}");
+    }
+    let _fence = activity.fence([root.path().to_owned()]);
+    for (listing, lists) in &listings {
+        assert!(!lists(), "{listing} under a fence");
+    }
 }
 
 #[test]
@@ -2148,7 +2197,7 @@ fn cheap_metadata_is_published_while_details_are_waiting() {
 }
 
 #[test]
-fn cancelled_media_details_are_not_cached_as_unavailable() {
+fn cancelled_or_withheld_media_details_are_not_cached_as_unavailable() {
     let root = tempfile::tempdir().expect("fixture directory");
     let path = root.path().join("photo.jpg");
     fs::write(&path, b"\xff\xd8\xff\xe0\0\x10JFIF\0").expect("fixture file");
@@ -2160,22 +2209,38 @@ fn cancelled_media_details_are_not_cached_as_unavailable() {
             None::<&gio::Cancellable>,
         )
         .expect("source metadata");
-    let cancellable = gio::Cancellable::new();
-    let (mut update, _) = update_from_info(&info, &location);
-    assert!(!fill_icon_details_with_probe(
-        &mut update,
-        &info,
-        &location,
-        &cancellable,
-        Instant::now() + Duration::from_secs(10),
-        |_, _, cancellation| {
-            cancellation.cancel();
-            Err("cancelled".to_owned())
-        },
-    ));
-    assert_eq!(update.image_dimensions, MetadataValue::Unknown);
-    assert_eq!(update.duration_seconds, MetadataValue::Unknown);
-    assert!(cached_icon_details_for_revisit(&path).is_none());
+    for (row, cancels, error, filled) in [
+        ("cancelled", true, "cancelled", false),
+        (
+            "withheld by an operation",
+            false,
+            crate::services::file_activity::HELD_FOR_OPERATION,
+            true,
+        ),
+    ] {
+        let cancellable = gio::Cancellable::new();
+        let (mut update, _) = update_from_info(&info, &location);
+        assert_eq!(
+            fill_icon_details_with_probe(
+                &mut update,
+                &info,
+                &location,
+                &cancellable,
+                Instant::now() + Duration::from_secs(10),
+                |_, _, cancellation| {
+                    if cancels {
+                        cancellation.cancel();
+                    }
+                    Err(error.to_owned())
+                },
+            ),
+            filled,
+            "{row}"
+        );
+        assert_eq!(update.image_dimensions, MetadataValue::Unknown, "{row}");
+        assert_eq!(update.duration_seconds, MetadataValue::Unknown, "{row}");
+        assert!(cached_icon_details_for_revisit(&path).is_none(), "{row}");
+    }
 }
 
 #[derive(Clone, Default)]

@@ -1025,6 +1025,7 @@
   "This folder is empty": "Esta carpeta está vacía",
   "This installation is managed by Omarchy. Run “omarchy update” to install it.": "Esta instalación está gestionada por Omarchy. Ejecuta «omarchy update» para instalarla.",
   "This installation is managed by pacman. Install it through a full system update.": "Esta instalación está gestionada por pacman. Instálala mediante una actualización completa del sistema.",
+  "This item is being changed by a file operation.": "Una operación de archivos está modificando este elemento.",
   "This location is not a local folder": "Esta ubicación no es una carpeta local",
   "This may take a moment": "Esto puede tardar un momento",
   "This model file exceeds the 128 MiB preview limit. Try a smaller or lower-detail version.": "Este archivo de modelo supera el límite de vista previa de 128 MiB. Prueba una versión más pequeña o con menos detalle.",

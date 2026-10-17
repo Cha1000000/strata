@@ -1025,6 +1025,7 @@
   "This folder is empty": "Эта папка пуста",
   "This installation is managed by Omarchy. Run “omarchy update” to install it.": "Эта установка управляется Omarchy. Чтобы установить обновление, выполните «omarchy update».",
   "This installation is managed by pacman. Install it through a full system update.": "Эта установка управляется pacman. Установите обновление через полное обновление системы.",
+  "This item is being changed by a file operation.": "Этот элемент сейчас изменяется файловой операцией.",
   "This location is not a local folder": "Это расположение не является локальной папкой",
   "This may take a moment": "Это может занять некоторое время",
   "This model file exceeds the 128 MiB preview limit. Try a smaller or lower-detail version.": "Этот файл модели превышает предел предпросмотра в 128 МиБ. Попробуйте версию меньшего размера или с меньшей детализацией.",

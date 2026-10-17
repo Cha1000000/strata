@@ -1025,6 +1025,7 @@
   "This folder is empty": "此文件夹为空",
   "This installation is managed by Omarchy. Run “omarchy update” to install it.": "已安装的 Strata 由 Omarchy 管理。请运行“omarchy update”安装此更新。",
   "This installation is managed by pacman. Install it through a full system update.": "已安装的 Strata 由 pacman 管理。请通过完整系统更新安装此更新。",
+  "This item is being changed by a file operation.": "文件操作正在更改此项目。",
   "This location is not a local folder": "此位置不是本地文件夹",
   "This may take a moment": "可能需要一些时间",
   "This model file exceeds the 128 MiB preview limit. Try a smaller or lower-detail version.": "此模型文件超出 128 MiB 预览上限。请尝试较小或较低精度的版本。",

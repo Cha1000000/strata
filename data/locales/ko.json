@@ -1025,6 +1025,7 @@
   "This folder is empty": "이 폴더는 비어 있습니다",
   "This installation is managed by Omarchy. Run “omarchy update” to install it.": "이 설치는 Omarchy가 관리합니다. 설치하려면 “omarchy update”를 실행하세요.",
   "This installation is managed by pacman. Install it through a full system update.": "이 설치는 pacman이 관리합니다. 전체 시스템 업데이트로 설치하세요.",
+  "This item is being changed by a file operation.": "파일 작업이 이 항목을 변경하는 중입니다.",
   "This location is not a local folder": "이 위치는 로컬 폴더가 아닙니다",
   "This may take a moment": "잠시 시간이 걸릴 수 있습니다",
   "This model file exceeds the 128 MiB preview limit. Try a smaller or lower-detail version.": "이 모델 파일은 미리 보기 한도인 128MiB를 초과합니다. 더 작거나 디테일이 더 낮은 버전을 사용해 보세요.",

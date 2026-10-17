@@ -1025,6 +1025,7 @@
   "This folder is empty": "Thư mục này trống",
   "This installation is managed by Omarchy. Run “omarchy update” to install it.": "Bản cài đặt này do Omarchy quản lý. Hãy chạy “omarchy update” để cài đặt.",
   "This installation is managed by pacman. Install it through a full system update.": "Bản cài đặt này do pacman quản lý. Hãy cài đặt thông qua cập nhật toàn bộ hệ thống.",
+  "This item is being changed by a file operation.": "Mục này đang được một thao tác tệp thay đổi.",
   "This location is not a local folder": "Vị trí này không phải thư mục cục bộ",
   "This may take a moment": "Việc này có thể mất một lúc",
   "This model file exceeds the 128 MiB preview limit. Try a smaller or lower-detail version.": "Tệp mô hình này vượt quá giới hạn xem trước 128 MiB. Hãy thử phiên bản nhỏ hơn hoặc ít chi tiết hơn.",
