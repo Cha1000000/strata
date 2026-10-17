@@ -290,7 +290,6 @@ impl ReplacePlan {
         self.target.identity.into()
     }
 
-    /// A folder may only be copied once the target is known to lie outside it.
     pub(super) fn copy_stays_outside_source(&self) -> bool {
         !self.directory()
             || placement::contains(fs(), self.source.identity, self.target_parent.as_fd())
@@ -764,7 +763,8 @@ pub(super) async fn set_aside_and_publish(
     ))
 }
 
-/// Replaces `target` with `source` without a window in which neither exists.
+/// Replaces `target` with `source`; the original is removed only once the
+/// replacement is in place.
 pub(super) async fn replace_owing(
     source: gio::File,
     target: gio::File,
@@ -935,7 +935,7 @@ pub(super) async fn replace_local(
 
 /// What a merge will write: `created` are the topmost destination paths with
 /// no existing counterpart, `overwritten` are leaf collisions whose originals
-/// were staged in Trash so undo can restore them.
+/// go to Trash, or aside where Trash is unavailable.
 #[derive(Default)]
 pub(super) struct MergePlan {
     pub(super) created: Vec<Location>,
@@ -1120,10 +1120,8 @@ pub(super) async fn merge_owing(
     let folders = (&source, &target);
     classify_merge(folders, &mut plan, cancellable, (&hooks.names, folder)).await?;
     let target_path = target.path();
-    // Stage every overwritten original in Trash before the copy so undo can
-    // restore it; on failure, report what was staged so it stays recoverable.
-    // Without Trash, originals go aside and are deleted after the merge, so
-    // undo keeps their incoming copies.
+    // Originals go to Trash, or aside where Trash is unavailable, before
+    // anything is copied.
     let mut trashed = Vec::new();
     let mut aside = None;
     for location in &plan.overwritten {

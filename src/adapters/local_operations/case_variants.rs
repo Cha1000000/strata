@@ -48,7 +48,6 @@ impl CaseVariants {
         }
     }
 
-    /// Whether `earlier` comes before `index` and their names differ only in case.
     pub(super) fn follows(&self, index: usize, earlier: usize) -> bool {
         earlier < index
             && self
@@ -68,8 +67,6 @@ impl CaseVariants {
         }
     }
 
-    /// What the earlier items whose names differ from `index`'s only in case
-    /// were saved as.
     pub(super) fn earlier(&self, index: usize) -> Vec<LocalFileIdentity> {
         self.others
             .get(&index)
@@ -81,7 +78,6 @@ impl CaseVariants {
     }
 }
 
-/// Whether `target` holds one of the items `earlier` names.
 pub(super) async fn taken_by(target: &gio::File, earlier: &[LocalFileIdentity]) -> bool {
     !earlier.is_empty()
         && identity(target)

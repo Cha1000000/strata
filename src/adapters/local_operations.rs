@@ -2528,7 +2528,6 @@ fn rename_failure_error(failure: RenameFailure, source: &Path, target: &Path) ->
     }
 }
 
-/// A copy is allowed only once the target is known to be outside the source.
 fn move_local_path(
     source_path: PathBuf,
     target_path: PathBuf,

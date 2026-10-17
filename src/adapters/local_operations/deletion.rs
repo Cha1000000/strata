@@ -189,7 +189,6 @@ pub(super) fn ensure_local_delete_target_unchanged<ParentFd: AsFd, TargetFd: AsF
     Ok(())
 }
 
-/// Unlinks non-directories immediately; returns pinned directories and their children.
 pub(super) fn open_local_delete_target<Fd: AsFd>(
     parent: &Fd,
     name: &OsStr,

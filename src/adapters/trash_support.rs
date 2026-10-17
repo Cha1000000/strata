@@ -148,7 +148,7 @@ pub(crate) async fn attempt(
     Err(TrashError { failure, error })
 }
 
-/// Blocking counterpart for replacement/archive workers which already hold identity.
+/// Blocking counterpart of [`trash_with_cleanup`] for worker threads.
 pub(crate) fn verified_with_cleanup(
     path: &Path,
     attempt: impl FnOnce() -> Result<(), glib::Error>,

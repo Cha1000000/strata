@@ -755,10 +755,8 @@ pub(super) async fn run_merge_undo(
     let mut errors = Vec::new();
     let mut completed = 0usize;
     let remaining = |index: usize| pending[index..].to_vec();
-    // Undo applies to copies only, so an incoming item at an overwritten path
-    // is a duplicate of the surviving source: delete it permanently, if it
-    // is unchanged, to free the path, then move the staged original back
-    // out of Trash.
+    // Copies only: the incoming item duplicates the surviving source, so it
+    // is deleted when unchanged before the original comes back from Trash.
     for (index, location) in overwritten.iter().enumerate() {
         if cancellable.is_cancelled() {
             emit(cancelled_event(

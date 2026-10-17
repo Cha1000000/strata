@@ -188,8 +188,9 @@ pub struct UndoMergeRequest {
     /// Paths the merge wrote fresh; undo moves them to Trash, or without
     /// Trash deletes them as far as `placed` records them unchanged.
     pub created: Vec<Location>,
-    /// Paths whose originals were staged in Trash before being overwritten;
-    /// undo deletes the incoming copy and restores the original.
+    /// Paths whose originals went to Trash, or aside where Trash is
+    /// unavailable, before being overwritten; undo deletes the incoming copy
+    /// and restores an original from Trash.
     pub overwritten: Vec<Location>,
     pub originals: HashMap<Location, TrashedOriginal>,
     /// What the operation put at created and overwritten paths; an item
