@@ -11,6 +11,7 @@ use std::{
 use gtk::{gio, glib, prelude::*};
 
 use crate::{
+    adapters::probes,
     model::{FolderSort, Location, SortDirection, SortKey},
     services::TrashedOriginal,
 };
@@ -18,10 +19,7 @@ use crate::{
 use super::{
     FileStamp, MAX_ICONS_THUMBNAIL_SIZE, MIN_ICONS_THUMBNAIL_SIZE, PreferenceManager,
     SHARED_MANAGER, file_stamp,
-    folder_views::{
-        FolderKey, FolderViews, TakenViews, folder_was_deleted, holds_mount_points,
-        key_for_location,
-    },
+    folder_views::{FolderKey, FolderViews, TakenViews, key_for_location},
     read_preferences, read_state_file, settings_path, store_sort,
     trashed::TrashedValues,
 };
@@ -391,12 +389,19 @@ impl PreferenceManager {
         let (Some(path), Some(key)) = (location.native_path(), key_for_location(location)) else {
             return;
         };
-        if !self.folder_view_store().views.borrow().has_within(&key)
-            || !folder_was_deleted(path, &key, holds_mount_points)
-        {
+        if !self.folder_view_store().views.borrow().may_forget(&key) {
             return;
         }
-        self.change_folder_views(Affects::Sorts, |views| views.relocate(&key, None, false));
+        let path = path.to_owned();
+        glib::MainContext::default().spawn_local(async move {
+            if !probes::folder_was_deleted(&path).await {
+                return;
+            }
+            if let Some(manager) = SHARED_MANAGER.with(|shared| shared.borrow().upgrade()) {
+                manager
+                    .change_folder_views(Affects::Sorts, |views| views.relocate(&key, None, false));
+            }
+        });
     }
 
     /// Another Strata process, such as the portal chooser, can change the

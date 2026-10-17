@@ -20,10 +20,6 @@ pub(in crate::ui) fn key_for_location(location: &Location) -> Option<FolderKey> 
     })
 }
 
-pub(in crate::ui) fn holds_mount_points(directory: &Path) -> bool {
-    with_mount_snapshot(|snapshot| snapshot.table.has_mount_inside(directory))
-}
-
 /// The innermost removable root wins, so a drive mounted inside another keeps its own key.
 pub(in crate::ui) fn key_for_path(path: &Path, removable: &[RemovableRoot]) -> Option<FolderKey> {
     let path = local_path(path)?;

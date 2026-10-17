@@ -2,7 +2,6 @@
 
 use std::{
     fs, io,
-    sync::{Arc, Condvar, Mutex},
     time::{Duration, Instant},
 };
 
@@ -12,11 +11,12 @@ use rustix::io::Errno;
 use super::{Presence, child_folders, folder, folder_was_deleted, presence};
 use crate::{
     adapters::{
-        local_operations::tests::fs_quirks::{FsQuirks, Op, Quirks, Racer},
+        local_operations::tests::fs_quirks::{FsQuirks, Op, Quirks},
         volume::{MountTable, mount_lanes, mount_watch},
     },
     model::{EntryKind, Location},
     services::{LocationValidationError, file_activity},
+    test_support::Gate,
 };
 
 fn answer<T>(probe: impl Future<Output = T>) -> T {
@@ -128,6 +128,7 @@ fn a_folder_counts_as_deleted_only_beside_others_and_away_from_mount_points() {
                 (crowded.join("gone"), true),
                 (crowded.join("kept"), false),
                 (empty.join("gone"), false),
+                (empty.join("photos/2024"), false),
                 (mounts.join("gone"), false),
             ] {
                 assert_eq!(
@@ -171,35 +172,6 @@ fn child_folders_match_their_prefix_through_symbolic_links()
     drop(fence);
     assert_eq!(listed("do", false, 100).len(), 3);
     Ok(())
-}
-
-#[derive(Clone, Default)]
-struct Gate(Arc<(Mutex<(bool, bool)>, Condvar)>);
-
-impl Gate {
-    fn racer(&self) -> Racer {
-        let gate = self.clone();
-        Box::new(move || {
-            let (state, changed) = &*gate.0;
-            let mut state = state.lock().expect("gate");
-            state.0 = true;
-            changed.notify_all();
-            while !state.1 {
-                state = changed.wait(state).expect("gate");
-            }
-        })
-    }
-
-    fn reached(&self) -> bool {
-        self.0.0.lock().expect("gate").0
-    }
-}
-
-impl Drop for Gate {
-    fn drop(&mut self) {
-        self.0.0.lock().expect("gate").1 = true;
-        self.0.1.notify_all();
-    }
 }
 
 fn wait_until(what: &str, done: impl Fn() -> bool) {

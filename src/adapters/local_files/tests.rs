@@ -19,7 +19,7 @@ use std::{
 use super::*;
 use crate::{
     model::{Location, MetadataValue},
-    test_support::{ASYNC_MAIN_CONTEXT_DEFAULT, capture_logs},
+    test_support::{ASYNC_MAIN_CONTEXT_DEFAULT, Gate, capture_logs},
 };
 
 fn capture_directory_start_logs(locations: &[(RequestId, &Location)]) -> String {
@@ -1279,39 +1279,6 @@ fn native_loads_list_through_the_filesystem_seam() -> Result<(), Box<dyn Error>>
         );
     }
     Ok(())
-}
-
-#[derive(Clone, Default)]
-struct Gate(std::sync::Arc<(std::sync::Mutex<(bool, bool)>, std::sync::Condvar)>);
-
-impl Gate {
-    fn racer(&self) -> Box<dyn FnMut() + Send> {
-        let gate = self.clone();
-        Box::new(move || {
-            let (state, changed) = &*gate.0;
-            let mut state = state.lock().expect("gate");
-            state.0 = true;
-            changed.notify_all();
-            while !state.1 {
-                state = changed.wait(state).expect("gate");
-            }
-        })
-    }
-
-    fn reached(&self) -> bool {
-        self.0.0.lock().expect("gate").0
-    }
-
-    fn release(&self) {
-        self.0.0.lock().expect("gate").1 = true;
-        self.0.1.notify_all();
-    }
-}
-
-impl Drop for Gate {
-    fn drop(&mut self) {
-        self.release();
-    }
 }
 
 fn load_into(

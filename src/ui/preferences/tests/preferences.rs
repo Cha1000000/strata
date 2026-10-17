@@ -1722,6 +1722,65 @@ fn item_customizations_follow_relocations_and_removals() {
 }
 
 #[test]
+fn a_folder_that_failed_to_open_forgets_its_settings_once_a_worker_proves_it_deleted() {
+    gtk_test(
+        "ui::preferences::tests::preferences::a_folder_that_failed_to_open_forgets_its_settings_once_a_worker_proves_it_deleted",
+        || {
+            use crate::adapters::{FsOp, FsQuirks, Quirks};
+
+            let manager = PreferenceManager::shared();
+            manager.set_remember_folder_views(true);
+            let root = tempfile::tempdir().expect("fixture");
+            let crowded = root.path().join("crowded");
+            let empty = root.path().join("empty");
+            fs::create_dir_all(crowded.join("kept")).expect("fixture folder");
+            fs::create_dir(&empty).expect("fixture folder");
+            let saved = FolderSort::Saved(SortKey::Type, SortDirection::Ascending);
+            let folders = [
+                crowded.join("gone"),
+                crowded.join("kept"),
+                empty.join("lost"),
+            ]
+            .map(Location::local);
+            for folder in &folders {
+                manager.set_folder_sort(folder, SortKey::Type, SortDirection::Ascending);
+            }
+            let gate = crate::test_support::Gate::default();
+            let _scope = FsQuirks::install(
+                root.path(),
+                Quirks {
+                    before: vec![(FsOp::Stat, "gone", 0, gate.racer())],
+                    ..Quirks::default()
+                },
+            );
+            let sorts = || {
+                folders
+                    .each_ref()
+                    .map(|folder| manager.resolve_folder_sort(folder, false))
+            };
+
+            for folder in &folders {
+                manager.forget_missing_folder(folder);
+            }
+            wait_for(|| gate.reached(), "the deletion check to reach the seam");
+            assert_eq!(sorts(), [saved; 3], "kept until the check answers");
+
+            gate.release();
+            let forgotten = [FolderSort::Default, saved, saved];
+            wait_for(
+                || sorts() == forgotten,
+                "the deleted folder to be forgotten",
+            );
+            let settled = std::time::Instant::now() + Duration::from_millis(200);
+            while std::time::Instant::now() < settled {
+                glib::MainContext::default().iteration(false);
+            }
+            assert_eq!(sorts(), forgotten, "only the folder missing beside others");
+        },
+    );
+}
+
+#[test]
 fn list_column_visibility_preserves_default_sort_and_publishes_once() {
     gtk_test(
         "ui::preferences::tests::preferences::list_column_visibility_preserves_default_sort_and_publishes_once",

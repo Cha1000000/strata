@@ -7,7 +7,7 @@ mod tests;
 
 use std::{
     io::Write,
-    sync::{Arc, LockResult, Mutex, MutexGuard, Once, OnceLock, PoisonError},
+    sync::{Arc, Condvar, LockResult, Mutex, MutexGuard, Once, OnceLock, PoisonError},
     time::{Duration, Instant},
 };
 
@@ -253,6 +253,39 @@ pub(crate) fn gtk_test_with_env(
     }
     let status = command.status().expect("isolated GTK test starts");
     assert!(status.success(), "{name} failed");
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct Gate(Arc<(Mutex<(bool, bool)>, Condvar)>);
+
+impl Gate {
+    pub(crate) fn racer(&self) -> Box<dyn FnMut() + Send> {
+        let gate = self.clone();
+        Box::new(move || {
+            let (state, changed) = &*gate.0;
+            let mut state = state.lock().unwrap_or_else(PoisonError::into_inner);
+            state.0 = true;
+            changed.notify_all();
+            while !state.1 {
+                state = changed.wait(state).unwrap_or_else(PoisonError::into_inner);
+            }
+        })
+    }
+
+    pub(crate) fn reached(&self) -> bool {
+        self.0.0.lock().unwrap_or_else(PoisonError::into_inner).0
+    }
+
+    pub(crate) fn release(&self) {
+        self.0.0.lock().unwrap_or_else(PoisonError::into_inner).1 = true;
+        self.0.1.notify_all();
+    }
+}
+
+impl Drop for Gate {
+    fn drop(&mut self) {
+        self.release();
+    }
 }
 
 pub(crate) fn serve_http_once(response: Vec<u8>) -> String {
