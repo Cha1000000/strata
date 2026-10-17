@@ -6535,7 +6535,7 @@ two-column presentation. */
 .settings-dialog .settings-close image,
 .settings-dialog .settings-indent,
 .settings-dialog .about-repository image {
-  -gtk-icon-filter: saturate(0) opacity(0.65);
+  -gtk-icon-filter: opacity(0.65);
 }
 
 .settings-dialog .settings-nav-active image {
@@ -6603,7 +6603,7 @@ two-column presentation. */
 
 .release-notes-toggle image {
   transform: rotate(90deg);
-  -gtk-icon-filter: saturate(0) opacity(0.65);
+  -gtk-icon-filter: opacity(0.65);
 }
 
 .release-notes-toggle.expanded image {
@@ -6625,7 +6625,7 @@ two-column presentation. */
 }
 
 .settings-search-icon {
-  -gtk-icon-filter: saturate(0) opacity(0.65);
+  -gtk-icon-filter: opacity(0.65);
 }
 
 .settings-dialog .settings-library-toolbar .menu-heading {

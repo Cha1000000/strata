@@ -72,7 +72,7 @@ pub(super) fn apply_variant(
     tokens.syntax_preprocessor = syntax(&palette.preprocessor);
 }
 
-fn readable(color: &str, backgrounds: &[&String], pole: &str, ratio: f64) -> String {
+pub(super) fn readable(color: &str, backgrounds: &[&String], pole: &str, ratio: f64) -> String {
     (0..=255)
         .map(|step| blend(color, pole, f64::from(step) / 255.0))
         .find(|color| {
@@ -80,7 +80,7 @@ fn readable(color: &str, backgrounds: &[&String], pole: &str, ratio: f64) -> Str
                 .iter()
                 .all(|background| contrast(color, background) >= ratio)
         })
-        .expect("variant surfaces leave enough contrast at the foreground endpoint")
+        .expect("the foreground endpoint reaches the contrast floor")
 }
 
 fn luminance(color: &str) -> f64 {
