@@ -379,6 +379,38 @@ fn keep_both_numbers_a_long_archive_name_within_the_limit() -> Result<(), Box<dy
     Ok(())
 }
 
+#[test]
+fn keep_both_tries_every_numbered_name_up_to_its_bound() -> Result<(), Box<dyn Error>> {
+    use crate::adapters::local_operations::placement::NUMBERED_NAME_ATTEMPTS;
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let root = tempfile::tempdir()?;
+    let archive = root.path().join("archive.zip");
+    fs::write(&archive, b"existing")?;
+    let last = NUMBERED_NAME_ATTEMPTS - 1;
+    for number in 1..last {
+        fs::write(root.path().join(format!("archive ({number}).zip")), b"")?;
+    }
+
+    let (published, _, _) = glib::MainContext::default().block_on(write_staged_archive(
+        root.path(),
+        &archive,
+        TransferConflict::KeepBoth,
+        never_cancelled(),
+        |mut file| {
+            file.write_all(b"new archive")
+                .map_err(|error| error.to_string())?;
+            Ok(())
+        },
+    ))?;
+
+    assert_eq!(published, format!("archive ({last}).zip"));
+    assert_eq!(fs::read(root.path().join(&published))?, b"new archive");
+    assert_eq!(fs::read(&archive)?, b"existing");
+    Ok(())
+}
+
 const NFS_SUPER_MAGIC: rustix::fs::FsWord = 0x6969;
 const TMPFS_MAGIC: rustix::fs::FsWord = 0x0102_1994;
 const FUSE_SUPER_MAGIC: rustix::fs::FsWord = 0x6573_5546;

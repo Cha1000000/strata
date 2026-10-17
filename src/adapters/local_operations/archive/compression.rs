@@ -418,9 +418,21 @@ impl Publication {
     }
 
     fn publish_numbered(&self, stage: &Stage) -> Result<Published, ArchiveError> {
-        let mut candidate = self.name.clone();
+        let (stem, extension) = split_extension(OsStr::new(&self.name), false);
         let mut limit = None;
-        for suffix in 1..NUMBERED_NAME_ATTEMPTS {
+        for suffix in 0..NUMBERED_NAME_ATTEMPTS {
+            let candidate = if suffix == 0 {
+                self.name.clone()
+            } else if extension.is_empty() {
+                return Err(
+                    crate::i18n::tr("Archive filename must have a format extension").into(),
+                );
+            } else {
+                let limit = *limit.get_or_insert_with(|| name_limit(fs(), stage.parent.as_fd()));
+                numbered_name(stem, suffix, extension, limit, false)
+                    .to_string_lossy()
+                    .into_owned()
+            };
             match stage.place(OsStr::new(&candidate)) {
                 Ok(()) => {
                     return Ok(Published {
@@ -428,20 +440,7 @@ impl Publication {
                         displaced: Displaced::None,
                     });
                 }
-                Err(PlaceError::Exists) => {
-                    let (stem, extension) = split_extension(OsStr::new(&self.name), false);
-                    if extension.is_empty() {
-                        return Err(crate::i18n::tr(
-                            "Archive filename must have a format extension",
-                        )
-                        .into());
-                    }
-                    let limit =
-                        *limit.get_or_insert_with(|| name_limit(fs(), stage.parent.as_fd()));
-                    candidate = numbered_name(stem, suffix, extension, limit, false)
-                        .to_string_lossy()
-                        .into_owned();
-                }
+                Err(PlaceError::Exists) => {}
                 Err(error) => return Err(self.creation_failed(placement_reason(error))),
             }
         }
