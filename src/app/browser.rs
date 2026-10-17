@@ -4599,8 +4599,8 @@ impl Browser {
         }
     }
 
-    /// Columns in `rescanning` reload once the operation ends, so a bulk
-    /// removal leaves them to that reload.
+    /// A Recent or camera view in `rescanning` reloads once the operation
+    /// ends, so a bulk removal leaves it to that reload.
     fn remove_deleted_locations(self: &Rc<Self>, locations: &[Location], rescanning: &[usize]) {
         let open_locations = {
             let state = self.state.borrow();
