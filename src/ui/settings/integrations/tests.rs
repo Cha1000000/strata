@@ -3,11 +3,12 @@
 use std::{
     cell::{Cell, RefCell},
     fs,
+    sync::atomic::{AtomicUsize, Ordering},
     time::{Duration, Instant},
 };
 
 use super::*;
-use crate::services::provider_catalog::{Requirement, parse};
+use crate::services::provider_catalog::parse;
 
 const MANIFEST: &str = r#"
 schema_version = 1
@@ -92,21 +93,26 @@ fn the_page_installs_updates_and_removes_catalog_entries() {
             let root = config.path().join("strata/providers");
             let catalog = Rc::new(RefCell::new(vec![example(b"#!/bin/sh\ncat\n")]));
             let reloads = Rc::new(Cell::new(0));
+            let checks = Arc::new(AtomicUsize::new(0));
             let page = integrations_page_with(Source {
                 catalog: Box::new({
                     let catalog = catalog.clone();
                     move || catalog.borrow().clone()
                 }),
                 root: Some(root.clone()),
-                check: Arc::new(|entry| {
-                    entry
-                        .requirements()
-                        .into_iter()
-                        .map(|requirement| RequirementResult {
-                            satisfied: requirement.command.as_deref() == Some("sh"),
-                            requirement,
-                        })
-                        .collect()
+                check: Arc::new({
+                    let checks = checks.clone();
+                    move |entry| {
+                        checks.fetch_add(1, Ordering::SeqCst);
+                        entry
+                            .requirements()
+                            .into_iter()
+                            .map(|requirement| RequirementResult {
+                                satisfied: requirement.command.as_deref() == Some("sh"),
+                                requirement,
+                            })
+                            .collect()
+                    }
                 }),
                 open_folder: None,
                 reload: Rc::new({
@@ -145,6 +151,15 @@ fn the_page_installs_updates_and_removes_catalog_entries() {
                 "the runtime passes and the daemon is missing"
             );
             assert_eq!(reloads.get(), 0, "no reload before a change");
+            remap(&window, &page);
+            wait_until("rescanned", || {
+                named(&page, "integration-example").is_some()
+            });
+            assert_eq!(
+                checks.load(Ordering::SeqCst),
+                1,
+                "revisiting the page reuses requirement results"
+            );
 
             click(&page, "integration-example-install");
             wait_until("installed", || {
@@ -220,6 +235,9 @@ fn the_page_installs_updates_and_removes_catalog_entries() {
                 named(&page, "integration-handmade").is_some()
             });
             assert_eq!(reloads.get(), before + 1, "Refresh reloads and rescans");
+            wait_until("requirements checked again", || {
+                checks.load(Ordering::SeqCst) == 2
+            });
             assert!(
                 descendants(&page)
                     .iter()
@@ -272,11 +290,6 @@ fn an_empty_catalog_explains_itself() {
                     .any(|label| label.text() == message)
             });
             assert!(named(&page, "integrations-refresh").is_some());
-            let _ = Requirement {
-                command: None,
-                module: None,
-                packages: Default::default(),
-            };
             window.destroy();
         },
     );

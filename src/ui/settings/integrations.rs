@@ -34,7 +34,6 @@ pub(super) struct Source {
     pub check: Checker,
     /// Shows the registration directory in the browser, when a window hosts the page.
     pub open_folder: Option<super::OpenFolder>,
-    /// Reloads the running providers after a change.
     pub reload: Rc<dyn Fn()>,
 }
 
@@ -103,6 +102,7 @@ pub(super) fn integrations_page_with(source: Source) -> gtk::Widget {
     refresh.connect_clicked(move |_| {
         if let Some(page) = refreshing.upgrade() {
             (page.source.reload)();
+            page.requirements.borrow_mut().clear();
             page.rebuild();
         }
     });
@@ -245,21 +245,7 @@ impl Page {
 
     fn catalog_row(self: &Rc<Self>, row: &Row) -> gtk::Box {
         let entry = &row.entry;
-        // Vertical by design: the responsive layout stacks horizontal rows,
-        // which would push the logo above the copy.
-        let widget = gtk::Box::new(gtk::Orientation::Vertical, 3);
-        widget.add_css_class("settings-option");
-        widget.add_css_class("integration-row");
-        // The copy expands to center within the shared row height; stop that
-        // expansion from reaching the page.
-        widget.set_vexpand(false);
-        widget.set_widget_name(&format!("integration-{}", entry.id));
-        let copy = gtk::Box::new(gtk::Orientation::Vertical, 3);
-        copy.set_hexpand(true);
-        // Rows share a minimum height; keep short copy centered within it
-        // whichever orientation the responsive layout gives the row.
-        copy.set_vexpand(true);
-        copy.set_valign(gtk::Align::Center);
+        let (widget, copy) = row_frame(&entry.id);
         let heading = gtk::Box::new(gtk::Orientation::Horizontal, 10);
         heading.append(&logo(entry.icon_bytes(), entry.category));
         let name = crate::i18n::tr(&entry.name);
@@ -392,24 +378,11 @@ impl Page {
                 });
             }
         }
-        widget.append(&copy);
         widget
     }
 
     fn manual_row(self: &Rc<Self>, installation: Installation) -> gtk::Box {
-        let widget = gtk::Box::new(gtk::Orientation::Vertical, 3);
-        widget.add_css_class("settings-option");
-        widget.add_css_class("integration-row");
-        // The copy expands to center within the shared row height; stop that
-        // expansion from reaching the page.
-        widget.set_vexpand(false);
-        widget.set_widget_name(&format!("integration-{}", installation.id));
-        let copy = gtk::Box::new(gtk::Orientation::Vertical, 3);
-        copy.set_hexpand(true);
-        // Rows share a minimum height; keep short copy centered within it
-        // whichever orientation the responsive layout gives the row.
-        copy.set_vexpand(true);
-        copy.set_valign(gtk::Align::Center);
+        let (widget, copy) = row_frame(&installation.id);
         let heading = gtk::Box::new(gtk::Orientation::Horizontal, 10);
         heading.append(&logo(installation.icon.as_deref(), Category::Other));
         let title = gtk::Label::new(Some(&installation.name));
@@ -431,7 +404,6 @@ impl Page {
         confirmation.add_css_class("integration-confirmation");
         confirmation.set_visible(false);
         copy.append(&confirmation);
-        widget.append(&copy);
         let context = Rc::new(RowContext {
             page: Rc::downgrade(self),
             id: installation.id.clone(),
@@ -528,6 +500,27 @@ impl Page {
         }
         container
     }
+}
+
+/// A row and the copy box its content goes in.
+fn row_frame(id: &str) -> (gtk::Box, gtk::Box) {
+    // Vertical by design: the responsive layout stacks horizontal rows,
+    // which would push the logo above the copy.
+    let widget = gtk::Box::new(gtk::Orientation::Vertical, 3);
+    widget.add_css_class("settings-option");
+    widget.add_css_class("integration-row");
+    // The copy expands to center within the shared row height; stop that
+    // expansion from reaching the page.
+    widget.set_vexpand(false);
+    widget.set_widget_name(&format!("integration-{id}"));
+    let copy = gtk::Box::new(gtk::Orientation::Vertical, 3);
+    copy.set_hexpand(true);
+    // Rows share a minimum height; keep short copy centered within it
+    // whichever orientation the responsive layout gives the row.
+    copy.set_vexpand(true);
+    copy.set_valign(gtk::Align::Center);
+    widget.append(&copy);
+    (widget, copy)
 }
 
 struct RowContext {
