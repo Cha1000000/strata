@@ -153,6 +153,7 @@ fn invalid_utf8_names_keep_their_native_bytes() -> Result<(), Box<dyn Error>> {
         include_metadata: false,
         max_entries: 100,
         time_budget: Duration::from_secs(10),
+        background: false,
     });
     let entry = batched_entries(&events)
         .into_iter()
@@ -207,6 +208,7 @@ fn symlink_targets_and_broken_links_are_distinguished() -> Result<(), Box<dyn Er
         include_metadata: true,
         max_entries: 100,
         time_budget: Duration::from_secs(10),
+        background: false,
     });
     let entries = batched_entries(&events);
     let kind = |name: &str| {
@@ -922,6 +924,7 @@ fn recent_enumeration_publishes_valid_targets_and_skips_stale_entries() {
             include_metadata: true,
             max_entries: 10,
             time_budget: Duration::from_secs(10),
+            background: false,
         },
         Box::new(source),
     );
@@ -950,6 +953,7 @@ fn recent_enumeration_finishes_normally_when_empty() {
             include_metadata: false,
             max_entries: 10,
             time_budget: Duration::from_secs(10),
+            background: false,
         },
         Box::new(source),
     );
@@ -976,6 +980,7 @@ fn recent_enumeration_respects_the_request_batch_size() {
             include_metadata: false,
             max_entries: 10,
             time_budget: Duration::from_secs(10),
+            background: false,
         },
         Box::new(source),
     );
@@ -1007,6 +1012,7 @@ fn recent_enumeration_respects_max_entries_and_reports_truncation() {
             include_metadata: false,
             max_entries: 3,
             time_budget: Duration::from_secs(10),
+            background: false,
         },
         Box::new(source),
     );
@@ -1116,6 +1122,7 @@ fn recent_request() -> DirectoryRequest {
         include_metadata: false,
         max_entries: 10,
         time_budget: Duration::from_secs(5),
+        background: false,
     }
 }
 
@@ -1128,6 +1135,7 @@ fn recent_enumeration_honors_a_zero_time_budget() {
         include_metadata: false,
         max_entries: 10,
         time_budget: Duration::ZERO,
+        background: false,
     });
 
     assert!(batched_entries(&events).is_empty());
@@ -1152,6 +1160,7 @@ fn cancelling_recent_enumeration_stops_further_publication() {
             include_metadata: false,
             max_entries: 10,
             time_budget: Duration::from_secs(10),
+            background: false,
         },
         Rc::new(move |event| collected.borrow_mut().push(event)),
         Instant::now(),
@@ -1199,6 +1208,7 @@ fn enumerate_reports_truncated_once_the_entry_budget_is_exceeded() {
         include_metadata: false,
         max_entries: 3,
         time_budget: Duration::from_secs(10),
+        background: false,
     });
     fs::remove_dir_all(&root).expect("the fixture directory should be removed");
 
@@ -1265,6 +1275,7 @@ fn native_loads_list_through_the_filesystem_seam() -> Result<(), Box<dyn Error>>
             include_metadata: false,
             max_entries: 100,
             time_budget: Duration::from_secs(10),
+            background: false,
         });
 
         let failed = events.iter().find_map(|event| match event {
@@ -1303,6 +1314,7 @@ fn load_into(
             include_metadata: false,
             max_entries: 100,
             time_budget: Duration::from_secs(30),
+            background: false,
         },
         Rc::new(move |event| events.borrow_mut().push(event)),
     )
@@ -1710,6 +1722,7 @@ fn listing_request(path: &Path, max_entries: usize) -> DirectoryRequest {
         include_metadata: false,
         max_entries,
         time_budget: Duration::from_secs(10),
+        background: false,
     }
 }
 
@@ -1974,19 +1987,97 @@ fn a_hung_mount_holds_one_worker_and_answers_unresponsive() -> Result<(), Box<dy
             .collect::<Vec<_>>()
     };
 
+    let relisted = Rc::new(RefCell::new(Vec::new()));
+    let relist = || {
+        let events = relisted.clone();
+        LocalFileSource.enumerate(
+            DirectoryRequest {
+                background: true,
+                ..listing_request(&hung, 100)
+            },
+            Rc::new(move |event| events.borrow_mut().push(event)),
+        )
+    };
+
     let first = check(&hung);
     drain_until(|| gate.reached());
     let repeats = [check(&hung), check(&hung)];
     let elsewhere = check(&healthy);
-    drain_until(|| answers.borrow().len() == 3);
-    let while_hung = (answered(&hung), answered(&healthy));
+    let refused_relist = relist();
+    drain_until(|| answers.borrow().len() == 3 && outcome_of(&relisted, 1).is_some());
+    let while_hung = (
+        answered(&hung),
+        answered(&healthy),
+        outcome_of(&relisted, 1),
+    );
     gate.release();
     drain_until(|| answers.borrow().len() == 4);
 
-    assert_eq!(while_hung, (vec!["unresponsive"; 2], vec!["stamp"]));
+    assert_eq!(
+        while_hung,
+        (
+            vec!["unresponsive"; 2],
+            vec!["stamp"],
+            Some(Err("The operation timed out".to_owned()))
+        )
+    );
     assert_eq!(answered(&hung), ["unresponsive", "unresponsive", "stamp"]);
     assert_eq!(scope.count(FsOp::FolderStamp), 1);
-    drop((first, repeats, elsewhere));
+    drop((first, repeats, elsewhere, refused_relist));
+    Ok(())
+}
+
+#[test]
+fn a_check_answer_can_relist_while_the_check_reads_another_folder_of_its_mount()
+-> Result<(), Box<dyn Error>> {
+    use crate::adapters::{FsOp, FsQuirks, Quirks};
+
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let root = tempfile::tempdir()?;
+    let (changed, slow) = (root.path().join("changed"), root.path().join("slow"));
+    fs::create_dir(&changed)?;
+    fs::create_dir(&slow)?;
+    fs::write(changed.join("added elsewhere"), b"x")?;
+    let gate = Gate::default();
+    let _scope = FsQuirks::install(
+        &slow,
+        Quirks {
+            before: vec![(FsOp::FolderStamp, "*", 0, gate.racer())],
+            ..Quirks::default()
+        },
+    );
+    let relisted = Rc::new(RefCell::new(Vec::new()));
+    let relists: Rc<RefCell<Vec<LoadHandle>>> = Rc::default();
+    let (events, handles, folder) = (relisted.clone(), relists.clone(), changed.clone());
+    let _check = LocalFileSource.check_stamps(
+        vec![Location::local(&changed), Location::local(&slow)],
+        Rc::new(move |location, _| {
+            if location == Location::local(&folder) {
+                let events = events.clone();
+                handles.borrow_mut().push(LocalFileSource.enumerate(
+                    DirectoryRequest {
+                        background: true,
+                        ..listing_request(&folder, 100)
+                    },
+                    Rc::new(move |event| events.borrow_mut().push(event)),
+                ));
+            }
+        }),
+    );
+
+    drain_until(|| gate.reached());
+    let context = glib::MainContext::default();
+    let settle = Instant::now() + Duration::from_millis(200);
+    while outcome_of(&relisted, 1).is_none() && Instant::now() < settle {
+        context.iteration(false);
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    gate.release();
+    drain_until(|| outcome_of(&relisted, 1).is_some());
+
+    assert_eq!(outcome_of(&relisted, 1), Some(Ok(1)));
     Ok(())
 }
 
@@ -2089,6 +2180,7 @@ fn enumerate_resolves_can_trash_from_a_child_entry() {
         include_metadata: false,
         max_entries: 10,
         time_budget: Duration::from_secs(10),
+        background: false,
     });
     fs::remove_dir_all(&root).expect("the fixture directory should be removed");
 
@@ -2117,6 +2209,7 @@ fn enumerate_resolves_can_delete_from_a_child_entry() {
         include_metadata: false,
         max_entries: 10,
         time_budget: Duration::from_secs(10),
+        background: false,
     });
     fs::remove_dir_all(&root).expect("the fixture directory should be removed");
 
@@ -2139,6 +2232,7 @@ fn entry_limited_metadata_load_fills_every_retained_entry() {
         include_metadata: true,
         max_entries: 3,
         time_budget: Duration::from_secs(10),
+        background: false,
     });
     fs::remove_dir_all(&root).expect("the fixture directory should be removed");
 
@@ -2173,6 +2267,7 @@ fn enumerate_completes_untruncated_at_the_exact_entry_budget() {
         include_metadata: false,
         max_entries: 4,
         time_budget: Duration::from_secs(10),
+        background: false,
     });
     fs::remove_dir_all(&root).expect("the fixture directory should be removed");
 
@@ -2198,6 +2293,7 @@ fn enumerate_reports_truncated_once_the_time_budget_is_exceeded() {
         include_metadata: false,
         max_entries: usize::MAX,
         time_budget: Duration::from_nanos(1),
+        background: false,
     });
     fs::remove_dir_all(&root).expect("the fixture directory should be removed");
 
@@ -2224,6 +2320,7 @@ fn enumerate_completes_untruncated_within_budget() {
         include_metadata: false,
         max_entries: 100,
         time_budget: Duration::from_secs(10),
+        background: false,
     });
     fs::remove_dir_all(&root).expect("the fixture directory should be removed");
 
@@ -2253,6 +2350,7 @@ fn native_enumeration_marks_hidden_files() {
         include_metadata: false,
         max_entries: 100,
         time_budget: Duration::from_secs(10),
+        background: false,
     }));
     assert_eq!(entries.len(), 4);
     assert!(
@@ -2284,6 +2382,7 @@ fn native_enumeration_reports_an_unreadable_root() {
         include_metadata: false,
         max_entries: 100,
         time_budget: Duration::from_secs(10),
+        background: false,
     });
 
     assert!(matches!(events.as_slice(), [DirectoryEvent::Failed { .. }]));
@@ -2301,6 +2400,7 @@ fn cancelled_native_scan_returns_no_partial_result() {
         include_metadata: false,
         max_entries: 100,
         time_budget: Duration::from_secs(10),
+        background: false,
     };
     let cancellable = gio::Cancellable::new();
     cancellable.cancel();
@@ -2336,6 +2436,7 @@ fn enumerate_with_metadata_fills_sizes_up_front() -> Result<(), Box<dyn Error>> 
         include_metadata: true,
         max_entries: 100,
         time_budget: Duration::from_secs(10),
+        background: false,
     });
     let streaming = run_enumerate(DirectoryRequest {
         id: RequestId(2),
@@ -2344,6 +2445,7 @@ fn enumerate_with_metadata_fills_sizes_up_front() -> Result<(), Box<dyn Error>> 
         include_metadata: false,
         max_entries: 100,
         time_budget: Duration::from_secs(10),
+        background: false,
     });
     fs::remove_dir_all(&root).expect("the fixture directory should be removed");
 
@@ -2718,6 +2820,7 @@ fn fill_media_file_caches_duration_for_revisits() -> Result<(), Box<dyn Error>> 
         include_metadata: false,
         max_entries: 100,
         time_budget: Duration::from_secs(10),
+        background: false,
     }));
     assert_eq!(revisited_entries.len(), 1);
     assert_eq!(
@@ -2839,13 +2942,20 @@ fn background_folder_listings_skip_a_folder_an_operation_fences() {
     )
     .identity
     .expect("folder identity");
-    let listings: [(&str, &dyn Fn() -> bool); 2] = [
+    let listings: [(&str, &dyn Fn() -> bool); 3] = [
         ("numbered names", &|| {
             numbered_names_in(&folder)
                 .is_ok_and(|names| names.contains(std::ffi::OsStr::new("#1234")))
         }),
         ("departure probe", &|| {
             native_entry_with_identity(root.path(), identity).as_ref() == Some(&folder)
+        }),
+        ("background re-list", &|| {
+            let events = run_enumerate(DirectoryRequest {
+                background: true,
+                ..listing_request(&folder, 100)
+            });
+            batched_entry_count(&events) == 1 && finished_truncated(&events) == Some(false)
         }),
     ];
     let activity = crate::services::file_activity::begin(
@@ -2859,6 +2969,50 @@ fn background_folder_listings_skip_a_folder_an_operation_fences() {
     for (listing, lists) in &listings {
         assert!(!lists(), "{listing} under a fence");
     }
+}
+
+#[test]
+fn a_background_relist_stops_for_an_operation_that_changes_its_folder() -> Result<(), Box<dyn Error>>
+{
+    use crate::adapters::{FsOp, FsQuirks, Quirks};
+
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let root = tempfile::tempdir()?;
+    let folder = root.path().join("folder");
+    fs::create_dir(&folder)?;
+    fs::write(folder.join("file"), b"content")?;
+    let gate = Gate::default();
+    let _scope = FsQuirks::install(
+        &folder,
+        Quirks {
+            before: vec![(FsOp::ListChunks, "*", 0, gate.racer())],
+            ..Quirks::default()
+        },
+    );
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let recorded = events.clone();
+    let _load = LocalFileSource.enumerate(
+        DirectoryRequest {
+            background: true,
+            ..listing_request(&folder, 100)
+        },
+        Rc::new(move |event| recorded.borrow_mut().push(event)),
+    );
+
+    drain_until(|| gate.reached());
+    let activity = file_activity::begin(file_activity::OperationScope::default());
+    let fence = activity.fence([folder.clone()]);
+    fence.stop_reads();
+    gate.release();
+    drain_until(|| outcome_of(&events, 1).is_some());
+
+    assert_eq!(
+        outcome_of(&events, 1),
+        Some(Err(file_activity::HELD_FOR_OPERATION.to_owned()))
+    );
+    Ok(())
 }
 
 #[test]

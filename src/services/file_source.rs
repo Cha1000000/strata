@@ -34,6 +34,7 @@ pub struct DirectoryRequest {
     /// Complete camera Photos scans use `Duration::MAX` to disable the deadline;
     /// their `max_entries` is `usize::MAX`. Bounded peeks retain finite limits.
     pub time_budget: Duration,
+    pub background: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -651,6 +652,11 @@ pub trait FileSource {
     fn probe_stamp(&self, _location: Location, emit: Rc<dyn Fn(StampAnswer)>) -> LoadHandle {
         emit(StampAnswer::Unsupported);
         LoadHandle::new(|| {})
+    }
+
+    /// Known without any I/O.
+    fn answering(&self, _location: &Location) -> bool {
+        true
     }
 
     /// Background checks of folders on one mount, each answered once.

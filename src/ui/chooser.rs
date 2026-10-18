@@ -282,6 +282,10 @@ impl FileSource for ChooserFileSource {
         self.source.check_stamps(locations, emit)
     }
 
+    fn answering(&self, location: &Location) -> bool {
+        self.source.answering(location)
+    }
+
     fn find_by_identity(
         &self,
         parent: Location,

@@ -1096,6 +1096,13 @@ enum MonitorState {
     Unavailable,
 }
 
+#[derive(Clone, Copy)]
+struct KeptListing {
+    request_id: RequestId,
+    truncated: bool,
+    background: bool,
+}
+
 #[derive(Default)]
 struct ColumnMonitor {
     requested: bool,
@@ -1121,6 +1128,7 @@ pub struct Browser {
     sorting: RefCell<HashMap<usize, SortingLoad>>,
     staged_publishes: RefCell<HashMap<usize, StagedPublish>>,
     preserving_refreshes: RefCell<HashSet<usize>>,
+    kept_listings: RefCell<HashMap<usize, KeptListing>>,
     publish_timer: RefCell<Option<gio::glib::SourceId>>,
     remote: RefCell<RemoteState>,
     metadata_loads: RefCell<HashMap<usize, LoadHandle>>,
@@ -1209,6 +1217,7 @@ impl Browser {
             sorting: RefCell::new(HashMap::new()),
             staged_publishes: RefCell::new(HashMap::new()),
             preserving_refreshes: RefCell::new(HashSet::new()),
+            kept_listings: RefCell::new(HashMap::new()),
             publish_timer: RefCell::new(None),
             remote: RefCell::new(RemoteState::new()),
             metadata_loads: RefCell::new(HashMap::new()),
@@ -1840,6 +1849,7 @@ impl Browser {
                 include_metadata: true,
                 max_entries: PEEK_MAX_ENTRIES,
                 time_budget: PEEK_TIME_BUDGET,
+                background: false,
             },
             emit,
         );
@@ -4069,7 +4079,7 @@ impl Browser {
             self.root_identity.take();
         }
         self.monitors.borrow_mut().push(ColumnMonitor::default());
-        let handle = self.request_directory(depth, location, request_id);
+        let handle = self.request_directory(depth, location, request_id, false);
         self.loads.borrow_mut().push(handle);
     }
 
@@ -4599,8 +4609,9 @@ impl Browser {
         depth: usize,
         location: Location,
         request_id: RequestId,
+        background: bool,
     ) -> LoadHandle {
-        self.note_listing_started(depth, request_id);
+        self.note_listing_started(depth, request_id, background);
         let weak: Weak<Self> = Rc::downgrade(self);
         let emit = Rc::new(move |event| {
             if let Some(browser) = weak.upgrade() {
@@ -4634,6 +4645,7 @@ impl Browser {
                 include_metadata,
                 max_entries,
                 time_budget,
+                background,
             },
             emit,
         )
@@ -4761,6 +4773,14 @@ impl Browser {
     }
 
     fn refresh_column(self: &Rc<Self>, depth: usize) {
+        if (self.settled(depth) || self.preserving_refreshes.borrow().contains(&depth))
+            && self
+                .location_at(depth)
+                .is_some_and(|location| !self.source.answering(&location))
+        {
+            self.refresh_keeping_listing(depth, false);
+            return;
+        }
         self.refresh_column_with_reveal(depth, None);
     }
 
@@ -4771,6 +4791,30 @@ impl Browser {
     }
 
     fn refresh_column_preserving_entries(self: &Rc<Self>, depth: usize) {
+        self.refresh_preserving(depth, None);
+    }
+
+    pub(super) fn refresh_keeping_listing(self: &Rc<Self>, depth: usize, background: bool) {
+        let shown = {
+            let state = self.state.borrow();
+            state
+                .columns
+                .get(depth)
+                .map(|column| (state.request_id_for_depth(depth), column.truncated))
+        };
+        let Some((request_id, truncated)) = shown else {
+            return;
+        };
+        let truncated = self
+            .kept_listings
+            .borrow()
+            .get(&depth)
+            .filter(|kept| Some(kept.request_id) == request_id)
+            .map_or(truncated, |kept| kept.truncated);
+        self.refresh_preserving(depth, Some((truncated, background)));
+    }
+
+    fn refresh_preserving(self: &Rc<Self>, depth: usize, kept: Option<(bool, bool)>) {
         let request_id = self.new_request_id();
         let location = self.state.borrow_mut().refresh_column(depth, request_id);
         let Some(location) = location else {
@@ -4778,8 +4822,25 @@ impl Browser {
         };
         Self::refresh_search_indexes_for(&location, None);
         self.preserving_refreshes.borrow_mut().insert(depth);
+        let background = match kept {
+            Some((truncated, background)) => {
+                self.kept_listings.borrow_mut().insert(
+                    depth,
+                    KeptListing {
+                        request_id,
+                        truncated,
+                        background,
+                    },
+                );
+                background
+            }
+            None => {
+                self.kept_listings.borrow_mut().remove(&depth);
+                false
+            }
+        };
         self.emit(BrowserEvent::ColumnRefreshing { depth });
-        let handle = self.request_directory(depth, location, request_id);
+        let handle = self.request_directory(depth, location, request_id, background);
         if let Some(load) = self.loads.borrow_mut().get_mut(depth) {
             *load = handle;
         }
@@ -4811,7 +4872,7 @@ impl Browser {
         };
         Self::refresh_search_indexes_for(&location, None);
         self.emit(BrowserEvent::ColumnReloaded { depth });
-        let handle = self.request_directory(depth, location, request_id);
+        let handle = self.request_directory(depth, location, request_id, false);
         if let Some(load) = self.loads.borrow_mut().get_mut(depth) {
             *load = handle;
         }

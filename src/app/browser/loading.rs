@@ -148,7 +148,15 @@ impl Browser {
     }
 
     fn receive_completion(self: &Rc<Self>, request_id: RequestId, completion: LoadCompletion) {
-        match self.open_load_target(request_id) {
+        let target = self.open_load_target(request_id);
+        if let Some(OpenLoad::Native(depth)) = target
+            && completion.truncated
+            && self.cut_short_of_a_complete_listing(depth, request_id)
+            && self.keep_listing(depth, request_id)
+        {
+            return;
+        }
+        match target {
             Some(OpenLoad::Native(depth)) => {
                 self.stage_batch(request_id, depth, Vec::new());
                 self.finish_staged_load(depth, request_id, completion);
@@ -183,6 +191,10 @@ impl Browser {
     }
 
     fn receive_failure(self: &Rc<Self>, request_id: RequestId, message: String) {
+        let depth = self.state.borrow().depth_for_request(request_id);
+        if depth.is_some_and(|depth| self.keep_listing(depth, request_id)) {
+            return;
+        }
         match self.open_load_target(request_id) {
             Some(OpenLoad::Native(depth)) => {
                 self.staging.borrow_mut().remove(&depth);
@@ -211,6 +223,60 @@ impl Browser {
             drop(state);
             self.emit(BrowserEvent::PeekFailed { message });
         }
+    }
+}
+
+impl Browser {
+    fn cut_short_of_a_complete_listing(&self, depth: usize, request_id: RequestId) -> bool {
+        let listed = self
+            .staging
+            .borrow()
+            .get(&depth)
+            .filter(|staged| staged.request_id == request_id)
+            .map_or(0, |staged| staged.entries.len());
+        listed < super::MAX_DIRECTORY_ENTRIES
+            && self.kept_listings.borrow().get(&depth).is_some_and(|kept| {
+                kept.request_id == request_id && kept.background && !kept.truncated
+            })
+    }
+
+    fn keep_listing(self: &Rc<Self>, depth: usize, request_id: RequestId) -> bool {
+        let kept = self
+            .kept_listings
+            .borrow()
+            .get(&depth)
+            .copied()
+            .filter(|kept| kept.request_id == request_id);
+        let Some(kept) = kept else {
+            return false;
+        };
+        self.kept_listings.borrow_mut().remove(&depth);
+        let mut deltas = self
+            .staging
+            .borrow_mut()
+            .remove(&depth)
+            .map(|staging| staging.deltas)
+            .unwrap_or_default();
+        if let Some(sorting) = self.sorting.borrow_mut().remove(&depth) {
+            deltas.extend(sorting.deltas);
+        }
+        self.cancel_publish(depth);
+        if !self
+            .state
+            .borrow_mut()
+            .keep_listing(request_id, kept.truncated)
+        {
+            return false;
+        }
+        self.note_listing_kept(depth);
+        self.emit(BrowserEvent::LoadFinished {
+            depth,
+            truncated: kept.truncated,
+        });
+        for (watched, change) in deltas {
+            self.handle_directory_change(depth, &watched, change);
+        }
+        true
     }
 }
 

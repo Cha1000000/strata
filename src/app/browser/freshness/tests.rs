@@ -9,10 +9,12 @@ use std::{
 
 use super::*;
 use crate::{
+    app::BrowserEvent,
     model::{EntryKind, FileEntry, MetadataValue},
     services::{
-        DirectoryEvent, DirectoryRequest, Evidence, FileSource, IdentityTraits, InodeNumbers,
-        ItemIdentity, LocationValidationError, Watching, file_activity::OperationScope,
+        DirectoryChange, DirectoryEvent, DirectoryRequest, Evidence, FileSource, IdentityTraits,
+        InodeNumbers, ItemIdentity, LocationValidationError, Watching,
+        file_activity::OperationScope,
     },
 };
 
@@ -28,6 +30,7 @@ struct Folder {
 
 type Emit = Rc<dyn Fn(DirectoryEvent)>;
 type Check = (Location, Rc<dyn Fn(Location, StampAnswer)>);
+type Notify = Rc<dyn Fn(DirectoryChange)>;
 
 #[derive(Default)]
 struct Folders {
@@ -36,8 +39,12 @@ struct Folders {
     checks: RefCell<Vec<Location>>,
     hold_loads: Cell<bool>,
     held_loads: RefCell<Vec<(DirectoryRequest, Emit)>>,
+    fail_loads: Cell<bool>,
+    truncate_loads: Cell<bool>,
+    stalled: Cell<bool>,
     hold_checks: Cell<bool>,
     held_checks: RefCell<Vec<Check>>,
+    monitors: RefCell<HashMap<Location, Notify>>,
 }
 
 impl Folders {
@@ -87,20 +94,20 @@ impl Folders {
             .map_or(StampAnswer::Missing, |folder| folder.answer.clone())
     }
 
-    fn finish_load(&self, request: &DirectoryRequest, emit: &Emit) {
+    fn begin_load(&self, request: &DirectoryRequest, emit: &Emit) -> bool {
         let folder = self.folders.borrow().get(&request.location).cloned();
         let request_id = request.id;
         let Some(Folder {
             answer: StampAnswer::Stamp(stamp),
             names,
             ..
-        }) = folder
+        }) = folder.filter(|_| !self.stalled.get())
         else {
             emit(DirectoryEvent::Failed {
                 request_id,
-                message: "No such file or folder".to_owned(),
+                message: "The operation timed out".to_owned(),
             });
-            return;
+            return false;
         };
         emit(DirectoryEvent::Stamp {
             request_id,
@@ -113,11 +120,22 @@ impl Folders {
                 .map(|name| entry(&request.location, name))
                 .collect(),
         });
-        emit(DirectoryEvent::Finished {
-            request_id,
-            truncated: false,
-            can_trash: None,
-            can_delete: None,
+        true
+    }
+
+    fn finish_load(&self, request: &DirectoryRequest, emit: &Emit) {
+        let request_id = request.id;
+        emit(match self.fail_loads.get() {
+            true => DirectoryEvent::Failed {
+                request_id,
+                message: "A device input/output error occurred".to_owned(),
+            },
+            false => DirectoryEvent::Finished {
+                request_id,
+                truncated: self.truncate_loads.get(),
+                can_trash: None,
+                can_delete: None,
+            },
         });
     }
 
@@ -128,11 +146,40 @@ impl Folders {
         }
     }
 
+    fn answer(&self, location: &Location, answer: StampAnswer) {
+        let mut folders = self.folders.borrow_mut();
+        folders.get_mut(location).expect("a known folder").answer = answer;
+    }
+
+    fn notify(&self, location: &Location, change: DirectoryChange) {
+        let notify = self.monitors.borrow().get(location).cloned();
+        notify.expect("a requested monitor")(change);
+    }
+
     fn answer_held_checks(&self) {
         let held = self.held_checks.take();
         for (location, emit) in held {
             emit(location.clone(), self.answer_of(&location));
         }
+    }
+
+    fn mount_of(&self, location: &Location) -> Option<MountToken> {
+        match self.answer_of(location) {
+            StampAnswer::Stamp(stamp) => stamp.mount,
+            _ => None,
+        }
+    }
+
+    fn lane_busy(&self, location: &Location) -> bool {
+        let mount = self.mount_of(location);
+        mount.is_some()
+            && (self.held_loads.borrow().iter().any(|(request, _)| {
+                request.background && self.mount_of(&request.location) == mount
+            }) || self
+                .held_checks
+                .borrow()
+                .iter()
+                .any(|(checked, _)| self.mount_of(checked) == mount))
     }
 }
 
@@ -146,6 +193,16 @@ impl FileSource for Folders {
 
     fn enumerate(&self, request: DirectoryRequest, emit: Emit) -> LoadHandle {
         self.loads.borrow_mut().push(request.location.clone());
+        if request.background && self.lane_busy(&request.location) {
+            emit(DirectoryEvent::Failed {
+                request_id: request.id,
+                message: "The operation timed out".to_owned(),
+            });
+            return LoadHandle::new(|| {});
+        }
+        if !self.begin_load(&request, &emit) {
+            return LoadHandle::new(|| {});
+        }
         if self.hold_loads.get() {
             self.held_loads.borrow_mut().push((request, emit));
         } else {
@@ -158,9 +215,10 @@ impl FileSource for Folders {
         &self,
         location: Location,
         _include_hidden: bool,
-        _notify: Rc<dyn Fn(crate::services::DirectoryChange)>,
+        notify: Notify,
         report: Rc<dyn Fn(Watching)>,
     ) -> LoadHandle {
+        self.monitors.borrow_mut().insert(location.clone(), notify);
         let watching = self
             .folders
             .borrow()
@@ -172,14 +230,24 @@ impl FileSource for Folders {
         LoadHandle::new(|| {})
     }
 
+    fn answering(&self, _location: &Location) -> bool {
+        !self.stalled.get()
+    }
+
     fn check_stamps(
         &self,
         locations: Vec<Location>,
         emit: Rc<dyn Fn(Location, StampAnswer)>,
     ) -> LoadHandle {
-        for location in locations {
+        let busy: Vec<bool> = locations
+            .iter()
+            .map(|location| self.lane_busy(location))
+            .collect();
+        for (location, busy) in locations.into_iter().zip(busy) {
             self.checks.borrow_mut().push(location.clone());
-            if self.hold_checks.get() {
+            if busy {
+                emit(location, StampAnswer::Unresponsive);
+            } else if self.hold_checks.get() {
                 self.held_checks.borrow_mut().push((location, emit.clone()));
             } else {
                 emit(location.clone(), self.answer_of(&location));
@@ -286,6 +354,17 @@ fn browser_on(source: &Rc<Folders>) -> (Rc<Browser>, Clock) {
     (browser, clock)
 }
 
+fn recorded(browser: &Browser) -> Rc<RefCell<Vec<BrowserEvent>>> {
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let observed = events.clone();
+    browser.observe(move |event| observed.borrow_mut().push(event.clone()));
+    events
+}
+
+fn count(events: &RefCell<Vec<BrowserEvent>>, wanted: impl Fn(&BrowserEvent) -> bool) -> usize {
+    events.borrow().iter().filter(|event| wanted(event)).count()
+}
+
 fn names_at(browser: &Browser, depth: usize) -> Vec<String> {
     browser.state.borrow().columns[depth]
         .entries
@@ -325,6 +404,28 @@ fn an_unchanged_stamp_never_relists_while_a_changed_one_does() {
 
     assert_eq!((source.checks_of(&share), source.checks_of(&sub)), (1, 1));
     assert_eq!((source.loads_of(&share), source.loads_of(&sub)), (1, 2));
+    assert_eq!(names_at(&browser, 1), ["added elsewhere", "listed"]);
+}
+
+#[test]
+fn folders_changed_on_one_mount_relist_one_after_the_other() {
+    let source = Rc::new(Folders::default());
+    let share = source.add("/net/share", network(1), Some(Watching::Live));
+    let sub = source.add("/net/share/sub", network(2), Some(Watching::Live));
+    let (browser, clock) = browser_on(&source);
+    browser.navigate(share.clone());
+    browser.show_child(0, sub.clone());
+    source.change(&share, &["listed", "added elsewhere"]);
+    source.change(&sub, &["listed", "added elsewhere"]);
+    source.hold_loads.set(true);
+
+    clock.tick_at(15);
+    let while_the_share_lists = (source.loads_of(&share), source.loads_of(&sub));
+    source.finish_held_loads();
+    source.finish_held_loads();
+
+    assert_eq!(while_the_share_lists, (2, 1));
+    assert_eq!(names_at(&browser, 0), ["added elsewhere", "listed"]);
     assert_eq!(names_at(&browser, 1), ["added elsewhere", "listed"]);
 }
 
@@ -430,25 +531,44 @@ fn a_stale_folder_waits_for_an_open_inline_edit() {
 
 #[test]
 fn a_relist_waits_ten_times_its_own_duration() {
-    let source = Rc::new(Folders::default());
-    let share = source.add("/net/share", network(1), Some(Watching::Live));
-    let (browser, clock) = browser_on(&source);
-    browser.navigate(share.clone());
-    source.hold_loads.set(true);
-    source.change(&share, &["listed", "added elsewhere"]);
+    let mut failures = Vec::new();
+    for (row, truncated, failed, shown) in [
+        ("shown", false, false, vec!["added elsewhere", "listed"]),
+        ("cut short", true, false, vec!["listed"]),
+        ("failed", false, true, vec!["listed"]),
+    ] {
+        let source = Rc::new(Folders::default());
+        let share = source.add("/net/share", network(1), Some(Watching::Live));
+        let (browser, clock) = browser_on(&source);
+        browser.navigate(share.clone());
+        source.hold_loads.set(true);
+        source.truncate_loads.set(truncated);
+        source.fail_loads.set(failed);
+        source.change(&share, &["listed", "added elsewhere"]);
 
-    clock.tick_at(15);
-    clock.at(20);
-    source.finish_held_loads();
-    let relisted = source.loads_of(&share);
-    clock.tick_at(69);
-    let checks_within_ten_listings = source.checks_of(&share);
-    clock.tick_at(70);
+        clock.tick_at(15);
+        clock.at(20);
+        source.finish_held_loads();
+        let relisted = (source.loads_of(&share), names_at(&browser, 0));
+        clock.tick_at(69);
+        let checks_within_ten_listings = source.checks_of(&share);
+        clock.tick_at(70);
 
-    assert_eq!(relisted, 2);
-    assert_eq!(names_at(&browser, 0), ["added elsewhere", "listed"]);
-    assert_eq!(checks_within_ten_listings, 1);
-    assert_eq!(source.checks_of(&share), 2);
+        let got = (
+            relisted,
+            checks_within_ten_listings,
+            source.checks_of(&share),
+        );
+        let expected = (
+            (2, shown.iter().map(|name| (*name).to_owned()).collect()),
+            1,
+            2,
+        );
+        if got != expected {
+            failures.push(format!("{row}: got {got:?}, expected {expected:?}"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
 #[test]
@@ -542,4 +662,175 @@ fn checks_skip_folders_an_operation_changes_and_resume_after_it() {
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn a_background_relist_that_fails_keeps_the_previous_listing() {
+    let source = Rc::new(Folders::default());
+    let share = source.add("/net/share", network(1), Some(Watching::Live));
+    let (browser, clock) = browser_on(&source);
+    browser.navigate(share.clone());
+    let events = recorded(&browser);
+    source.change(&share, &["listed", "added elsewhere"]);
+    source.hold_loads.set(true);
+    source.fail_loads.set(true);
+
+    clock.tick_at(15);
+    source.notify(&share, DirectoryChange::Upsert(entry(&share, "made here")));
+    source.finish_held_loads();
+    let kept = (
+        names_at(&browser, 0),
+        browser.state.borrow().columns[0].load_state.clone(),
+    );
+    source.hold_loads.set(false);
+    source.fail_loads.set(false);
+    clock.tick_at(30);
+
+    assert_eq!(
+        kept,
+        (
+            vec!["listed".to_owned(), "made here".to_owned()],
+            LoadState::Ready
+        )
+    );
+    assert_eq!(
+        count(&events, |event| matches!(
+            event,
+            BrowserEvent::LoadFailed { .. }
+        )),
+        0
+    );
+    assert_eq!(
+        count(&events, |event| matches!(
+            event,
+            BrowserEvent::LoadFinished { depth: 0, .. }
+        )),
+        2
+    );
+    assert_eq!(source.loads_of(&share), 3);
+    assert_eq!(names_at(&browser, 0), ["added elsewhere", "listed"]);
+}
+
+#[test]
+fn a_time_truncated_relist_does_not_replace_a_complete_listing() {
+    let _serial = crate::test_support::ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .expect("the async test lock should not be poisoned");
+    let at_the_cap: Vec<String> = (0..super::super::MAX_DIRECTORY_ENTRIES)
+        .map(|index| format!("entry {index}"))
+        .collect();
+    let mut failures = Vec::new();
+    for (row, truncated_before, listed, kept) in [
+        ("complete before", false, 2, true),
+        ("truncated before", true, 2, false),
+        (
+            "complete before, cut at the entry cap",
+            false,
+            at_the_cap.len(),
+            false,
+        ),
+    ] {
+        let source = Rc::new(Folders::default());
+        let share = source.add("/net/share", network(1), Some(Watching::Live));
+        let (browser, clock) = browser_on(&source);
+        source.truncate_loads.set(truncated_before);
+        browser.navigate(share.clone());
+        let names: Vec<&str> = match listed {
+            2 => vec!["listed", "added elsewhere"],
+            _ => at_the_cap.iter().map(String::as_str).collect(),
+        };
+        source.change(&share, &names);
+        source.truncate_loads.set(true);
+
+        clock.tick_at(15);
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !browser.settled(0) && Instant::now() < deadline {
+            glib::MainContext::default().iteration(false);
+            std::thread::sleep(Duration::from_millis(1));
+        }
+
+        let got = (
+            names_at(&browser, 0).len(),
+            browser.state.borrow().columns[0].truncated,
+        );
+        let expected = match kept {
+            true => (1, false),
+            false => (listed, true),
+        };
+        if got != expected {
+            failures.push(format!("{row}: got {got:?}, expected {expected:?}"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn a_refresh_on_a_mount_that_stopped_answering_keeps_its_rows() {
+    let mut failures = Vec::new();
+    for (stalled, relisting_truncated) in [(false, false), (true, false), (true, true)] {
+        let source = Rc::new(Folders::default());
+        let share = source.add("/net/share", network(1), Some(Watching::Live));
+        let (browser, clock) = browser_on(&source);
+        source.truncate_loads.set(relisting_truncated);
+        browser.navigate(share.clone());
+        let events = recorded(&browser);
+        if relisting_truncated {
+            source.change(&share, &["listed", "added elsewhere"]);
+            source.hold_loads.set(true);
+            clock.tick_at(15);
+        }
+        source.stalled.set(stalled);
+
+        browser.refresh_all();
+
+        let got = (
+            names_at(&browser, 0),
+            count(&events, |event| {
+                matches!(event, BrowserEvent::ColumnReloaded { .. })
+            }),
+            count(&events, |event| {
+                matches!(event, BrowserEvent::LoadFailed { .. })
+            }),
+            browser.state.borrow().columns[0].truncated,
+        );
+        let expected = (
+            vec!["listed".to_owned()],
+            usize::from(!stalled),
+            0,
+            relisting_truncated,
+        );
+        if got != expected {
+            failures.push(format!(
+                "stalled {stalled}, re-listing a truncated listing {relisting_truncated}: \
+                 got {got:?}, expected {expected:?}"
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn a_folder_found_inaccessible_shows_the_failure_and_is_no_longer_checked() {
+    let source = Rc::new(Folders::default());
+    let home = source.add("/home/me", local(1), Some(Watching::Live));
+    let private = source.add("/home/me/nas", network(2), Some(Watching::Live));
+    let (browser, clock) = browser_on(&source);
+    browser.navigate(home.clone());
+    browser.show_child(0, private.clone());
+    let events = recorded(&browser);
+    source.answer(&private, StampAnswer::Inaccessible);
+
+    clock.tick_at(15);
+    let armed_after_the_failure = clock.armed();
+    clock.tick_at(30);
+
+    assert_eq!(
+        count(&events, |event| matches!(
+            event,
+            BrowserEvent::LoadFailed { depth: 1, .. }
+        )),
+        1
+    );
+    assert_eq!(armed_after_the_failure, None);
+    assert_eq!(source.checks_of(&private), 1);
 }

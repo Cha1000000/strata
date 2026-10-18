@@ -821,6 +821,31 @@ fn scan_native_directory(
     progress: &Progress,
     stamped: oneshot::Sender<DirectoryStamp>,
 ) -> NativeEnumeration {
+    let held = request.background.then(|| {
+        let real = path.canonicalize().unwrap_or_else(|_| path.to_owned());
+        let stop = cancellable.clone();
+        file_activity::hold([path, &real], move || stop.cancel())
+    });
+    let hold = match held.transpose() {
+        Ok(hold) => hold,
+        Err(refused) => return NativeEnumeration::Failed(refused.into()),
+    };
+    match scan_native_listing(path, request, cancellable, deadline, progress, stamped) {
+        NativeEnumeration::Cancelled if hold.as_ref().is_some_and(file_activity::Hold::stopped) => {
+            NativeEnumeration::Failed(file_activity::HELD_FOR_OPERATION.to_owned())
+        }
+        scanned => scanned,
+    }
+}
+
+fn scan_native_listing(
+    path: &Path,
+    request: &DirectoryRequest,
+    cancellable: &gio::Cancellable,
+    deadline: Instant,
+    progress: &Progress,
+    stamped: oneshot::Sender<DirectoryStamp>,
+) -> NativeEnumeration {
     let failed = |error: rustix::io::Errno| {
         NativeEnumeration::Failed(crate::services::io_error_message(&error.into()))
     };
@@ -951,14 +976,19 @@ fn enumerate_native(
     let task = glib::MainContext::default().spawn_local(async move {
         let deadline = started + request.time_budget;
         let listing = format!(
-            "listing with metadata {} up to {}",
-            request.include_metadata, request.max_entries
+            "listing with metadata {} up to {}, in the background {}",
+            request.include_metadata, request.max_entries, request.background
         );
+        let class = match request.background {
+            true => Class::Background,
+            false => Class::Interactive,
+        };
         let folder = path.clone();
         let (stamped, stamp) = oneshot::channel();
-        let work = mount_lanes::run_joined(&folder, listing, move |progress, cancellable| {
-            scan_native_directory(&path, &request, cancellable, deadline, progress, stamped)
-        });
+        let work =
+            mount_lanes::run_joined_in(&folder, listing, class, move |progress, cancellable| {
+                scan_native_directory(&path, &request, cancellable, deadline, progress, stamped)
+            });
         let mut work = std::pin::pin!(work);
         let early = futures_lite::future::or(async { Err(stamp.await) }, async {
             Ok(work.as_mut().await)
@@ -1436,6 +1466,27 @@ impl FileSource for LocalFileSource {
         }
 
         let task = glib::MainContext::default().spawn_local(async move {
+            let admitted = request
+                .background
+                .then(|| {
+                    mount_lanes::admit_remote(
+                        mount_lanes::authority(location.uri_value().unwrap_or_default()),
+                        Class::Background,
+                    )
+                })
+                .transpose();
+            let Ok(admitted) = admitted else {
+                emit(DirectoryEvent::Failed {
+                    request_id,
+                    message: crate::services::io_error_message(&ErrorKind::TimedOut.into()),
+                });
+                return;
+            };
+            let beat = || {
+                if let Some(admitted) = &admitted {
+                    admitted.progress().beat();
+                }
+            };
             let directory = gio_file_for_location(&location);
             let deadline = started + request.time_budget;
             let finish_truncated = |entries: usize,
@@ -1475,14 +1526,17 @@ impl FileSource for LocalFileSource {
                 )
                 .await
                 {
-                    Ok(Ok(info)) => emit(DirectoryEvent::Stamp {
-                        request_id,
-                        stamp: remote_stamp(
-                            location.uri_value().unwrap_or_default(),
-                            &info,
-                            read_at,
-                        ),
-                    }),
+                    Ok(Ok(info)) => {
+                        beat();
+                        emit(DirectoryEvent::Stamp {
+                            request_id,
+                            stamp: remote_stamp(
+                                location.uri_value().unwrap_or_default(),
+                                &info,
+                                read_at,
+                            ),
+                        });
+                    }
                     Ok(Err(_)) => {}
                     Err(_) => {
                         finish_truncated(0, "time budget", can_trash, can_delete);
@@ -1540,6 +1594,7 @@ impl FileSource for LocalFileSource {
                 .await
                 {
                     Ok(Ok(files)) if files.is_empty() => {
+                        beat();
                         tracing::info!(
                             request_id = request_id.0,
                             entries = total_entries,
@@ -1559,6 +1614,7 @@ impl FileSource for LocalFileSource {
                         break;
                     }
                     Ok(Ok(files)) => {
+                        beat();
                         if can_trash.is_none() {
                             can_trash = files.iter().find_map(info_can_trash);
                         }
@@ -1759,6 +1815,12 @@ impl FileSource for LocalFileSource {
         LoadHandle::new(move || {
             task.abort();
             connected.take();
+        })
+    }
+
+    fn answering(&self, location: &Location) -> bool {
+        location.native_path().is_none_or(|path| {
+            mount_lanes::responsiveness(path) == mount_lanes::Responsiveness::Answering
         })
     }
 

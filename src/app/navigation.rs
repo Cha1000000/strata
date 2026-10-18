@@ -1320,6 +1320,20 @@ impl NavigationState {
         Some((depth, cursor_moved))
     }
 
+    pub fn keep_listing(&mut self, request_id: RequestId, truncated: bool) -> bool {
+        let Some((_, column)) = self.column_for_request_mut(request_id) else {
+            return false;
+        };
+        column.pending_selection.clear();
+        column.truncated = truncated;
+        column.load_state = if column.entries.is_empty() {
+            LoadState::Empty
+        } else {
+            LoadState::Ready
+        };
+        true
+    }
+
     pub fn fail(&mut self, request_id: RequestId, message: String) -> Option<usize> {
         let (depth, column) = self.column_for_request_mut(request_id)?;
         column.drop_load_intents();

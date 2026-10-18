@@ -24,7 +24,6 @@ use rustix::io::Errno;
 use super::{MountTable, mount_watch};
 
 pub(crate) const STALLED_AFTER: Duration = Duration::from_secs(2);
-#[cfg_attr(not(test), expect(dead_code, reason = "step 7's notice reads it"))]
 pub(crate) const NOT_RESPONDING_AFTER: Duration = Duration::from_secs(10);
 const BEAT_EVERY: Duration = Duration::from_millis(100);
 const LEARNED_PATHS: usize = 4096;
@@ -43,7 +42,6 @@ pub(crate) enum Unanswered {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[cfg_attr(not(test), expect(dead_code, reason = "step 7's notice reads it"))]
 pub(crate) enum Responsiveness {
     Answering,
     Stalled,
@@ -343,7 +341,6 @@ impl Lanes {
         }
     }
 
-    #[cfg_attr(not(test), expect(dead_code, reason = "step 7's notice reads it"))]
     fn responsiveness(&self, target: &Target<'_>, now: Instant) -> Responsiveness {
         let requests = self
             .tickets
@@ -753,6 +750,15 @@ pub(crate) async fn run_joined<T: Send + Sync + 'static>(
     kind: String,
     work: impl FnOnce(&Progress, &gio::Cancellable) -> T + Send + 'static,
 ) -> Result<Arc<T>, Unanswered> {
+    run_joined_in(path, kind, Class::Interactive, work).await
+}
+
+pub(crate) async fn run_joined_in<T: Send + Sync + 'static>(
+    path: &Path,
+    kind: String,
+    class: Class,
+    work: impl FnOnce(&Progress, &gio::Cancellable) -> T + Send + 'static,
+) -> Result<Arc<T>, Unanswered> {
     let join = (path.to_owned(), kind);
     let (sender, answer) = oneshot::channel();
     let work: Work = Box::new(move |progress, cancellable| Arc::new(work(progress, cancellable)));
@@ -760,7 +766,7 @@ pub(crate) async fn run_joined<T: Send + Sync + 'static>(
         let (mut lanes, mounts) = lanes_following_mounts();
         let now = Instant::now();
         let target = lanes.target(path, &mounts);
-        let probe = lanes.verdict(&target, Class::Interactive, now, None)?;
+        let probe = lanes.verdict(&target, class, now, None)?;
         let fresh = lanes.serial();
         match lanes.jobs.get_mut(&join) {
             Some(job) if job.running.joinable() => (job.running.join(sender), None),
@@ -803,7 +809,6 @@ pub(crate) async fn run_joined<T: Send + Sync + 'static>(
     }
 }
 
-#[cfg_attr(not(test), expect(dead_code, reason = "step 7's notice reads it"))]
 pub(crate) fn responsiveness(path: &Path) -> Responsiveness {
     let (lanes, mounts) = lanes_following_mounts();
     let target = lanes.target(path, &mounts);

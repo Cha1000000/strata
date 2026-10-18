@@ -51,6 +51,7 @@ struct Listing {
     request: RequestId,
     started: Instant,
     stamp: Option<DirectoryStamp>,
+    background: bool,
 }
 
 #[derive(Default)]
@@ -58,8 +59,17 @@ pub(super) struct ColumnFreshness {
     baseline: Option<DirectoryStamp>,
     listing: Option<Listing>,
     next_due: Option<Instant>,
+    relist: bool,
     unchanged: u32,
     checking: bool,
+}
+
+impl ColumnFreshness {
+    fn mount(&self) -> Option<MountToken> {
+        self.baseline
+            .as_ref()
+            .and_then(|baseline| baseline.mount.clone())
+    }
 }
 
 type Checked = (usize, Location, Weak<RefCell<ColumnFreshness>>);
@@ -132,41 +142,65 @@ impl Browser {
         }
     }
 
-    pub(super) fn note_listing_started(&self, depth: usize, request_id: RequestId) {
+    pub(super) fn note_listing_started(
+        &self,
+        depth: usize,
+        request_id: RequestId,
+        background: bool,
+    ) {
         if let Some(column) = self.column_freshness(depth) {
-            column.borrow_mut().listing = Some(Listing {
+            let mut column = column.borrow_mut();
+            column.relist = false;
+            column.listing = Some(Listing {
                 request: request_id,
                 started: self.freshness_now(),
                 stamp: None,
+                background,
             });
         }
+    }
+
+    fn end_listing(&self, depth: usize, column: &mut ColumnFreshness) -> Option<Listing> {
+        let now = self.freshness_now();
+        let current = self.state.borrow().request_id_for_depth(depth);
+        let listing = column
+            .listing
+            .take()
+            .filter(|listing| Some(listing.request) == current);
+        let took = listing.as_ref().map_or(Duration::ZERO, |listing| {
+            now.saturating_duration_since(listing.started)
+        });
+        column.next_due = Some(
+            now + self
+                .check_interval(column.unchanged)
+                .max(took * RELIST_DUTY),
+        );
+        listing
     }
 
     pub(super) fn note_listing_finished(self: &Rc<Self>, depth: usize) {
         let Some(column) = self.column_freshness(depth) else {
             return;
         };
-        let now = self.freshness_now();
-        let current = self.state.borrow().request_id_for_depth(depth);
         {
             let mut column = column.borrow_mut();
-            let listing = column
-                .listing
-                .take()
-                .filter(|listing| Some(listing.request) == current);
-            let took = listing.as_ref().map_or(Duration::ZERO, |listing| {
-                now.saturating_duration_since(listing.started)
-            });
-            if let Some(stamp) = listing.and_then(|listing| listing.stamp) {
+            if let Some(stamp) = self
+                .end_listing(depth, &mut column)
+                .and_then(|listing| listing.stamp)
+            {
                 column.baseline = Some(stamp);
             }
-            column.next_due = Some(
-                now + self
-                    .check_interval(column.unchanged)
-                    .max(took * RELIST_DUTY),
-            );
         }
         self.reschedule_freshness();
+        self.start_relists();
+    }
+
+    pub(super) fn note_listing_kept(self: &Rc<Self>, depth: usize) {
+        if let Some(column) = self.column_freshness(depth) {
+            self.end_listing(depth, &mut column.borrow_mut());
+        }
+        self.reschedule_freshness();
+        self.start_relists();
     }
 
     fn awaits_check(&self, depth: usize, column: &ColumnFreshness) -> bool {
@@ -190,7 +224,7 @@ impl Browser {
             }
     }
 
-    fn settled(&self, depth: usize) -> bool {
+    pub(super) fn settled(&self, depth: usize) -> bool {
         matches!(
             self.state
                 .borrow()
@@ -285,6 +319,7 @@ impl Browser {
             for (depth, _, column) in group.iter().filter(|(_, checked, _)| *checked == location) {
                 browser.apply_check(*depth, column, &location, answer.clone());
             }
+            browser.start_relists();
         });
         let job = self.source.check_stamps(locations, emit);
         if unanswered.get() > 0 {
@@ -336,9 +371,50 @@ impl Browser {
             && self.settled(depth)
             && !Self::operation_touches(location)
         {
-            self.refresh_column_preserving_entries(depth);
+            match answer {
+                StampAnswer::Inaccessible => self.refresh_column_preserving_entries(depth),
+                _ => column.borrow_mut().relist = true,
+            }
         }
         self.reschedule_freshness();
+    }
+
+    fn start_relists(self: &Rc<Self>) {
+        while let Some(depth) = self.next_relist() {
+            self.refresh_keeping_listing(depth, true);
+        }
+    }
+
+    fn next_relist(&self) -> Option<usize> {
+        let columns = self.freshness_columns();
+        let busy: Vec<MountToken> = columns
+            .iter()
+            .filter_map(|column| {
+                let column = column.borrow();
+                let working = column.checking
+                    || column
+                        .listing
+                        .as_ref()
+                        .is_some_and(|listing| listing.background);
+                working.then(|| column.mount()).flatten()
+            })
+            .collect();
+        for (depth, column) in columns.iter().enumerate() {
+            let mut column = column.borrow_mut();
+            if !column.relist || column.mount().is_some_and(|mount| busy.contains(&mount)) {
+                continue;
+            }
+            column.relist = false;
+            if self.settled(depth)
+                && self
+                    .location_at(depth)
+                    .is_some_and(|location| !Self::operation_touches(&location))
+                && !self.freshness_held()
+            {
+                return Some(depth);
+            }
+        }
+        None
     }
 
     pub(super) fn reschedule_freshness(self: &Rc<Self>) {
