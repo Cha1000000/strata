@@ -2,7 +2,7 @@
 
 //! Storage properties, Strata-only display labels, and removable-only formatting.
 
-use std::{cell::Cell, future::Future, rc::Rc};
+use std::{cell::Cell, future::Future, path::PathBuf, rc::Rc};
 
 use gtk::{gio, glib, prelude::*};
 
@@ -326,8 +326,220 @@ fn wire_modal_close(shell: &ModalShell) {
     shell.layout.confirm.grab_focus();
 }
 
+pub(super) struct DriveFactsRequest {
+    device: Option<PathBuf>,
+    mount_root: Option<gio::File>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(super) struct DriveFacts {
+    filesystem: Option<String>,
+    mounted: bool,
+    mount_point: Option<PathBuf>,
+    total_bytes: Option<u64>,
+    usage: Option<(u64, u64)>,
+}
+
+fn gather_drive_facts(request: DriveFactsRequest) -> DriveFacts {
+    let device = request.device.as_deref();
+    let mount_root = request.mount_root.or_else(|| {
+        device
+            .and_then(drive_ops::mounted_path_for_device)
+            .map(gio::File::for_path)
+    });
+    let filesystem = device
+        .and_then(drive_ops::filesystem_label_for_device)
+        .or_else(|| {
+            mount_root
+                .as_ref()
+                .and_then(|root| {
+                    root.query_filesystem_info("filesystem::type", gio::Cancellable::NONE)
+                        .ok()
+                })
+                .and_then(|info| {
+                    info.attribute_string("filesystem::type")
+                        .map(|name| name.to_string())
+                })
+        });
+    let mount_point = mount_root.as_ref().and_then(|root| root.path());
+    DriveFacts {
+        filesystem,
+        mounted: mount_root.is_some(),
+        usage: mount_point.as_deref().and_then(drive_ops::usage_for_path),
+        mount_point,
+        total_bytes: device.and_then(drive_ops::device_size_bytes),
+    }
+}
+
+struct PropertyRows<'a> {
+    grid: &'a gtk::Grid,
+    row: i32,
+    attached: Vec<gtk::Widget>,
+}
+
+impl PropertyRows<'_> {
+    fn add(&mut self, label_text: &str, value_text: &str) -> gtk::Label {
+        let label = form_label(&crate::i18n::tr(label_text));
+        label.set_xalign(0.0);
+        let value = gtk::Label::new(Some(value_text));
+        value.set_xalign(0.0);
+        value.set_hexpand(true);
+        value.set_selectable(true);
+        value.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        value.set_max_width_chars(48);
+        self.grid.attach(&label, 0, self.row, 1, 1);
+        self.grid.attach(&value, 1, self.row, 1, 1);
+        self.row += 1;
+        self.attached.push(label.upcast());
+        self.attached.push(value.clone().upcast());
+        value
+    }
+
+    fn add_wide(&mut self, widget: &gtk::Widget) {
+        self.grid.attach(widget, 0, self.row, 2, 1);
+        self.row += 1;
+        self.attached.push(widget.clone());
+    }
+
+    fn add_facts(&mut self, facts: &DriveFacts) {
+        self.add(
+            "Filesystem",
+            &facts
+                .filesystem
+                .clone()
+                .unwrap_or_else(|| crate::i18n::tr("Unknown")),
+        );
+        if !facts.mounted {
+            self.add("Status", &crate::i18n::tr("Not mounted"));
+            if let Some(total) = facts.total_bytes {
+                self.add("Capacity", &crate::i18n::file_size(total));
+            }
+            self.add("Used", &crate::i18n::tr("Unavailable (not mounted)"));
+            return;
+        }
+        self.add(
+            "Mount point",
+            &mount_point_text(facts.mount_point.as_deref()),
+        );
+        self.add("Status", &crate::i18n::tr("Mounted"));
+        let total = facts
+            .usage
+            .map(|(total, _)| total)
+            .filter(|total| *total > 0)
+            .or(facts.total_bytes);
+        match (total, facts.usage) {
+            (Some(total), Some((_, available))) => {
+                let used = total.saturating_sub(available);
+                self.add("Capacity", &crate::i18n::file_size(total));
+                self.add("Used", &crate::i18n::file_size(used));
+                self.add("Free", &crate::i18n::file_size(available));
+                let summary = capacity_summary(total, available);
+                summary.widget.set_margin_top(8);
+                self.add_wide(summary.widget.upcast_ref());
+            }
+            (Some(total), None) => {
+                self.add("Capacity", &crate::i18n::file_size(total));
+                self.add("Used", &crate::i18n::tr("Unavailable"));
+            }
+            (None, _) => {
+                self.add("Capacity", &crate::i18n::tr("Unavailable"));
+            }
+        }
+    }
+
+    fn add_pending_facts(&mut self, mount_root: Option<&gio::File>) {
+        self.add("Filesystem", "—");
+        match mount_root {
+            Some(root) => {
+                self.add("Mount point", &mount_point_text(root.path().as_deref()));
+                self.add("Status", &crate::i18n::tr("Mounted"));
+            }
+            None => {
+                self.add("Status", "—");
+            }
+        }
+        self.add("Capacity", "—");
+        self.add("Used", "—");
+    }
+}
+
+fn mount_point_text(path: Option<&std::path::Path>) -> String {
+    path.map(|path| path.display().to_string())
+        .unwrap_or_else(|| "—".to_owned())
+}
+
+fn drive_properties_grid(
+    name: &str,
+    label_id: Option<String>,
+    block_device: Option<PathBuf>,
+    mount_root: Option<gio::File>,
+    gather: fn(DriveFactsRequest) -> DriveFacts,
+) -> gtk::Grid {
+    let grid = gtk::Grid::new();
+    grid.set_column_spacing(12);
+    grid.set_row_spacing(8);
+    grid.set_hexpand(true);
+    grid.set_column_homogeneous(false);
+    let mut rows = PropertyRows {
+        grid: &grid,
+        row: 0,
+        attached: Vec::new(),
+    };
+    rows.add("System name", name);
+    if let Some(id) = label_id {
+        let label = rows.add("Strata label", &crate::i18n::tr("Not set"));
+        super::super::preferences::PreferenceManager::shared().bind_preference(
+            &label,
+            move |manager| manager.device_label(&id),
+            |widget, value| {
+                widget
+                    .downcast_ref::<gtk::Label>()
+                    .expect("Strata label value")
+                    .set_text(
+                        &value
+                            .as_deref()
+                            .map_or_else(|| crate::i18n::tr("Not set"), str::to_owned),
+                    )
+            },
+        );
+    }
+    rows.add(
+        "Device",
+        &block_device
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "—".to_owned()),
+    );
+    let first_fact = rows.row;
+    rows.attached.clear();
+    rows.add_pending_facts(mount_root.as_ref());
+    let pending = rows.attached;
+    let request = DriveFactsRequest {
+        device: block_device,
+        mount_root,
+    };
+    let shown = grid.downgrade();
+    glib::MainContext::default().spawn_local(async move {
+        let Ok(facts) = gio::spawn_blocking(move || gather(request)).await else {
+            return;
+        };
+        let Some(grid) = shown.upgrade() else {
+            return;
+        };
+        for widget in pending {
+            grid.remove(&widget);
+        }
+        PropertyRows {
+            grid: &grid,
+            row: first_fact,
+            attached: Vec::new(),
+        }
+        .add_facts(&facts);
+    });
+    grid
+}
+
 /// Properties: name, device, filesystem, mount status, capacity bar.
-/// Everything is read synchronously; unavailable data shows as em dash.
 pub(super) fn show_drive_properties(
     parent: &gtk::Widget,
     target: &PropertiesTarget,
@@ -357,46 +569,6 @@ pub(super) fn show_drive_properties(
         .subtitle
         .set_ellipsize(gtk::pango::EllipsizeMode::End);
 
-    let grid = gtk::Grid::new();
-    grid.set_column_spacing(12);
-    grid.set_row_spacing(8);
-    grid.set_hexpand(true);
-    grid.set_column_homogeneous(false);
-
-    let mut row = 0;
-    let mut add_row = |label_text: &str, value_text: &str| {
-        let label = form_label(&crate::i18n::tr(label_text));
-        label.set_xalign(0.0);
-        let value = gtk::Label::new(Some(value_text));
-        value.set_xalign(0.0);
-        value.set_hexpand(true);
-        value.set_selectable(true);
-        value.set_ellipsize(gtk::pango::EllipsizeMode::End);
-        value.set_max_width_chars(48);
-        grid.attach(&label, 0, row, 1, 1);
-        grid.attach(&value, 1, row, 1, 1);
-        row += 1;
-        value
-    };
-
-    add_row("System name", &name);
-    if let Some(id) = target.label_id() {
-        let label = add_row("Strata label", &crate::i18n::tr("Not set"));
-        super::super::preferences::PreferenceManager::shared().bind_preference(
-            &label,
-            move |manager| manager.device_label(&id),
-            |widget, value| {
-                widget
-                    .downcast_ref::<gtk::Label>()
-                    .expect("Strata label value")
-                    .set_text(
-                        &value
-                            .as_deref()
-                            .map_or_else(|| crate::i18n::tr("Not set"), str::to_owned),
-                    )
-            },
-        );
-    }
     let block_device = volume
         .as_ref()
         .and_then(drive_ops::block_device_for_volume)
@@ -407,83 +579,13 @@ pub(super) fn show_drive_properties(
                 .as_deref()
                 .and_then(drive_ops::block_device_for_path)
         });
-    let mount_root = mount_root.or_else(|| {
-        block_device
-            .as_deref()
-            .and_then(drive_ops::mounted_path_for_device)
-            .map(gio::File::for_path)
-    });
-    add_row(
-        "Device",
-        &block_device
-            .as_ref()
-            .map(|path| path.display().to_string())
-            .unwrap_or_else(|| "—".to_owned()),
+    let grid = drive_properties_grid(
+        &name,
+        target.label_id(),
+        block_device,
+        mount_root,
+        gather_drive_facts,
     );
-
-    let filesystem = block_device
-        .as_ref()
-        .and_then(|device| drive_ops::filesystem_label_for_device(device))
-        .or_else(|| {
-            mount_root
-                .as_ref()
-                .and_then(|root| {
-                    root.query_filesystem_info("filesystem::type", gio::Cancellable::NONE)
-                        .ok()
-                })
-                .and_then(|info| {
-                    info.attribute_string("filesystem::type")
-                        .map(|name| name.to_string())
-                })
-        })
-        .unwrap_or_else(|| crate::i18n::tr("Unknown"));
-    add_row("Filesystem", &filesystem);
-
-    let total_bytes = block_device
-        .as_ref()
-        .and_then(|device| drive_ops::device_size_bytes(device));
-    match mount_root {
-        Some(root) => {
-            let location = root
-                .path()
-                .map(|path| path.display().to_string())
-                .unwrap_or_else(|| "—".to_owned());
-            add_row("Mount point", &location);
-            add_row("Status", &crate::i18n::tr("Mounted"));
-            let usage = root
-                .path()
-                .and_then(|path| drive_ops::usage_for_path(&path));
-            let total = usage
-                .map(|(total, _)| total)
-                .filter(|total| *total > 0)
-                .or(total_bytes);
-            match (total, usage) {
-                (Some(total), Some((_, available))) => {
-                    let used = total.saturating_sub(available);
-                    add_row("Capacity", &crate::i18n::file_size(total));
-                    add_row("Used", &crate::i18n::file_size(used));
-                    add_row("Free", &crate::i18n::file_size(available));
-                    let summary = capacity_summary(total, available);
-                    summary.widget.set_margin_top(8);
-                    grid.attach(&summary.widget, 0, row, 2, 1);
-                }
-                (Some(total), None) => {
-                    add_row("Capacity", &crate::i18n::file_size(total));
-                    add_row("Used", &crate::i18n::tr("Unavailable"));
-                }
-                (None, _) => {
-                    add_row("Capacity", &crate::i18n::tr("Unavailable"));
-                }
-            }
-        }
-        None => {
-            add_row("Status", &crate::i18n::tr("Not mounted"));
-            if let Some(total) = total_bytes {
-                add_row("Capacity", &crate::i18n::file_size(total));
-            }
-            add_row("Used", &crate::i18n::tr("Unavailable (not mounted)"));
-        }
-    }
 
     shell.layout.body.append(&grid);
 

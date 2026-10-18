@@ -28,6 +28,7 @@ struct MountEntry {
     device: (u32, u32),
     site: MountSite,
     mount_type: MountType,
+    source: Option<PathBuf>,
 }
 
 impl MountEntry {
@@ -420,8 +421,9 @@ impl MountTable {
                 let mount_point = fields.next()?;
                 let mut back = back.split(|byte| *byte == b' ');
                 let fs_type = std::str::from_utf8(back.next()?).ok()?;
+                let source = back.next().map(|source| PathBuf::from(unescape(source)));
                 let super_options = back
-                    .nth(1)
+                    .next()
                     .and_then(|options| std::str::from_utf8(options).ok())
                     .unwrap_or_default();
                 Some(MountEntry {
@@ -435,6 +437,7 @@ impl MountTable {
                         fs_type: fs_type.to_owned(),
                         super_options: super_options.to_owned(),
                     },
+                    source,
                 })
             })
             .collect::<Vec<_>>();
@@ -474,10 +477,6 @@ impl MountTable {
         })
     }
 
-    pub(super) fn is_remote_path(&self, path: &Path) -> bool {
-        self.fs_type_for(path).is_some_and(is_remote_fs_type)
-    }
-
     /// Remote filesystems other than FUSE drivers for local block devices,
     /// such as ntfs-3g and exfat-fuse on a USB drive.
     pub(crate) fn is_network_path(&self, path: &Path) -> bool {
@@ -491,16 +490,18 @@ impl MountTable {
             .any(|entry| entry.site.point.parent() == Some(directory))
     }
 
-    pub(super) fn query_may_block(&self, path: &Path) -> bool {
-        // Prefix probes can trigger autofs even when a nested mount is local.
-        self.is_remote_path(path)
-            || self.entries.iter().any(|entry| {
-                entry.mount_type.fs_type == "autofs" && path.starts_with(&entry.site.point)
-            })
-    }
-
     pub(crate) fn is_mount_point(&self, path: &Path) -> bool {
         self.entries.iter().any(|entry| entry.site.point == path)
+    }
+
+    pub(crate) fn sources(&self) -> impl Iterator<Item = (&Path, &Path)> {
+        self.entries
+            .iter()
+            .filter_map(|entry| Some((entry.site.point.as_path(), entry.source.as_deref()?)))
+    }
+
+    pub(crate) fn source_for(&self, path: &Path) -> Option<&Path> {
+        self.innermost(path)?.source.as_deref()
     }
 
     pub(crate) fn mount_point_for(&self, path: &Path) -> Option<&Path> {

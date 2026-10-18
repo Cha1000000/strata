@@ -387,11 +387,13 @@ fn strata_label_identity_survives_mount_changes_without_using_recycled_device_pa
 
 #[test]
 fn properties_resolve_the_innermost_block_mount_including_btrfs_and_escaped_paths() {
-    let table = br"25 1 8:1 / / rw - ext4 /dev/sda1 rw
+    let table = &MountTable::parse(
+        br"25 1 8:1 / / rw - ext4 /dev/sda1 rw
 26 25 0:40 /@home /home rw - btrfs /dev/nvme0n1p2 rw
 27 26 8:2 / /home/USB\040Backup rw - exfat /dev/sdb1 rw
 28 27 0:2 / /home/USB\040Backup/cache rw - tmpfs tmpfs rw
-";
+",
+    );
     for (device, root) in [
         ("/dev/sda1", Some("/")),
         ("/dev/nvme0n1p2", Some("/home")),
@@ -419,8 +421,11 @@ fn properties_resolve_the_innermost_block_mount_including_btrfs_and_escaped_path
 
 #[test]
 fn mount_table_fallback_keeps_storage_but_not_system_mounts() {
-    let devices = mounted_devices_from_table(
-        br"25 1 8:1 / / rw - ext4 /dev/sda1 rw
+    crate::test_support::gtk_test(
+        "ui::window::devices::tests::mount_table_fallback_keeps_storage_but_not_system_mounts",
+        || {
+            crate::adapters::mount_watch::publish_for_isolated_test(Some(MountTable::parse(
+                br"25 1 8:1 / / rw - ext4 /dev/sda1 rw
 26 1 8:2 / /boot rw - vfat /dev/sda2 rw
 27 1 0:1 / /proc rw - proc proc rw
 28 1 8:3 / /run/media/me/USB\040Backup rw shared:1 - exfat /dev/sdb1 rw
@@ -429,28 +434,68 @@ fn mount_table_fallback_keeps_storage_but_not_system_mounts() {
 malformed
 31 1 8:5 / /mnt/missing-source rw - ext4
 ",
-    );
-    assert_eq!(
-        devices,
-        vec![
-            PathBuf::from("/run/media/me/USB Backup"),
-            PathBuf::from("/mnt/Archive")
-        ]
+            )));
+            let roots = global_search_roots();
+            for (root, searched) in [
+                ("/", false),
+                ("/run/media/me/USB Backup", true),
+                ("/mnt/Archive", true),
+                ("/boot", false),
+                ("/proc", false),
+                ("/run/user/1000/gvfs", false),
+                ("/mnt/missing-source", false),
+            ] {
+                assert_eq!(roots.contains(&PathBuf::from(root)), searched, "{root}");
+            }
+        },
     );
 }
 
 #[test]
-fn mount_paths_decode_kernel_escapes_without_losing_native_bytes() {
-    assert_eq!(
-        mount_path(br"/mnt/a\040b\011c\012d\134e"),
-        Some(PathBuf::from("/mnt/a b\tc\nd\\e"))
+fn crypto_hints_are_read_off_the_ui_thread_and_rebuild_the_sidebar_when_they_arrive() {
+    crate::test_support::gtk_test(
+        "ui::window::devices::tests::crypto_hints_are_read_off_the_ui_thread_and_rebuild_the_sidebar_when_they_arrive",
+        || {
+            static PROBED_ON_UI_THREAD: std::sync::Mutex<Vec<bool>> =
+                std::sync::Mutex::new(Vec::new());
+            fn probe(_: &str) -> BlockCryptoHint {
+                PROBED_ON_UI_THREAD
+                    .lock()
+                    .expect("probes")
+                    .push(crate::util::ui_thread::is_current());
+                BlockCryptoHint {
+                    id_fs_usage: Some("crypto".to_owned()),
+                    ..BlockCryptoHint::default()
+                }
+            }
+            let rebuilt = Rc::new(Cell::new(0));
+            let counted = rebuilt.clone();
+            let _sidebar = super::super::device_release::watch_sidebars(move || {
+                counted.set(counted.get() + 1);
+            });
+            assert_eq!(
+                block_crypto_hint_with("/dev/fixture-crypt", probe),
+                BlockCryptoHint::default()
+            );
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while rebuilt.get() == 0 {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the hint never arrived"
+                );
+                gtk::glib::MainContext::default().iteration(false);
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+            assert_eq!(
+                block_crypto_hint_with("/dev/fixture-crypt", probe)
+                    .id_fs_usage
+                    .as_deref(),
+                Some("crypto")
+            );
+            assert_eq!(rebuilt.get(), 1);
+            assert_eq!(*PROBED_ON_UI_THREAD.lock().expect("probes"), [false]);
+        },
     );
-    assert_eq!(
-        mount_path(b"/mnt/\xff"),
-        Some(std::ffi::OsString::from_vec(b"/mnt/\xff".to_vec()).into())
-    );
-    assert_eq!(mount_path(br"/mnt/bad\04"), None);
-    assert_eq!(mount_path(br"/mnt/bad\999"), None);
 }
 
 #[test]

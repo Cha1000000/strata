@@ -2375,9 +2375,15 @@ impl ViewState {
                     if sources.is_empty() {
                         return false;
                     }
-                    let commit =
-                        super::file_drop_commit(target, &destination, &sources, &drop_state);
-                    state.commit_file_drop(destination, sources, commit);
+                    super::file_drop_commit(
+                        target,
+                        destination,
+                        sources,
+                        &drop_state,
+                        move |destination, sources, commit| {
+                            state.commit_file_drop(destination, sources, commit);
+                        },
+                    );
                     true
                 });
                 button.add_controller(drop);

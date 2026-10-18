@@ -25,8 +25,8 @@ use super::{
     complete_release_success, enter_releasing, is_pending, location_at_flush_for_test,
     note_unmount_progress, pending_device_shell, present_release_overlay, release_body_text,
     release_error_count, release_is_dismissed, release_is_pending, release_overlay_presented,
-    release_phase, release_shows_spinner, reset_releases, set_mounted_roots_for_test,
-    settle_pending_attempt, start_release, syncs_before_flush_for_test, unmatched_pending,
+    release_phase, release_shows_spinner, reset_releases, settle_pending_attempt, start_release,
+    syncs_before_flush_for_test, unmatched_pending,
 };
 
 fn key(unix_device: &str) -> ReleaseKey {
@@ -557,7 +557,19 @@ fn start_release_leaves_before_flush_and_restores_when_gio_fails_while_mounted()
             }));
             browser.navigate(Location::local(&mount));
             assert!(!dropped.load(Ordering::SeqCst));
-            set_mounted_roots_for_test(Some(vec![mount.clone()]));
+            let publish = |mounted: bool| {
+                let mut mountinfo = "1 0 8:1 / / rw - ext4 /dev/root rw\n".to_owned();
+                if mounted {
+                    mountinfo.push_str(&format!(
+                        "900 1 8:17 / {} rw - vfat /dev/sdb1 rw\n",
+                        mount.display()
+                    ));
+                }
+                crate::adapters::mount_watch::publish_for_isolated_test(Some(
+                    crate::adapters::MountTable::parse(mountinfo),
+                ));
+            };
+            publish(true);
             crate::adapters::install_sync_probe(None, true);
             let (overlay, window) = host();
             let calls = Rc::new(Cell::new(0u32));
@@ -599,7 +611,7 @@ fn start_release_leaves_before_flush_and_restores_when_gio_fails_while_mounted()
             crate::adapters::clear_sync_probe();
             reset_releases();
 
-            set_mounted_roots_for_test(Some(vec![mount.clone()]));
+            publish(true);
             crate::adapters::install_sync_probe(Some(std::io::ErrorKind::Other), false);
             let (overlay, window) = host();
             let calls = Rc::new(Cell::new(0u32));
@@ -630,7 +642,7 @@ fn start_release_leaves_before_flush_and_restores_when_gio_fails_while_mounted()
 
             dropped.store(false, Ordering::SeqCst);
             browser.navigate(Location::local(&mount));
-            set_mounted_roots_for_test(Some(vec![mount.clone()]));
+            publish(true);
             crate::adapters::install_sync_probe(None, true);
             let (overlay, window) = host();
             let settled = Rc::new(Cell::new(false));
@@ -660,7 +672,7 @@ fn start_release_leaves_before_flush_and_restores_when_gio_fails_while_mounted()
 
             dropped.store(false, Ordering::SeqCst);
             browser.navigate(Location::local(&mount));
-            set_mounted_roots_for_test(Some(Vec::new()));
+            publish(false);
             crate::adapters::install_sync_probe(None, false);
             let (overlay, window) = host();
             let settled = Rc::new(Cell::new(false));
@@ -685,7 +697,7 @@ fn start_release_leaves_before_flush_and_restores_when_gio_fails_while_mounted()
             );
             window.destroy();
             crate::adapters::clear_sync_probe();
-            set_mounted_roots_for_test(None);
+            crate::adapters::mount_watch::publish_for_isolated_test(None);
             reset_releases();
         },
     );

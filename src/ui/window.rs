@@ -2928,8 +2928,15 @@ fn install_sidebar_file_drop(
         if sources.is_empty() {
             return false;
         }
-        let commit = file_drop_commit(target, &destination, &sources, &drop_state);
-        view.commit_file_drop(destination.clone(), sources, commit);
+        file_drop_commit(
+            target,
+            destination.clone(),
+            sources,
+            &drop_state,
+            move |destination, sources, commit| {
+                view.commit_file_drop(destination, sources, commit);
+            },
+        );
         true
     });
     row.add_controller(drop);
@@ -3459,7 +3466,7 @@ pub(crate) fn crypto_password_uuid_for_volume(volume: &gio::Volume) -> Option<St
     let unix = gio_volume_unix_device(volume);
     let hint = unix
         .as_deref()
-        .map(devices::probe_block_crypto)
+        .map(devices::block_crypto_hint)
         .unwrap_or_default();
     devices::crypto_password_uuid(
         volume.uuid().as_deref(),
@@ -3478,7 +3485,7 @@ fn crypto_password_uuid_for_mount(mount: &gio::Mount) -> Option<String> {
         .and_then(|drive| drive.identifier(gio::VOLUME_IDENTIFIER_KIND_UNIX_DEVICE.as_str()));
     let hint = unix
         .as_deref()
-        .map(devices::probe_block_crypto)
+        .map(devices::block_crypto_hint)
         .unwrap_or_default();
     devices::crypto_password_uuid(None, unix.as_deref(), hint.as_ref(), false)
 }
@@ -3825,7 +3832,7 @@ fn gio_icons_are_encrypted(
     names.extend(gio_icon_names(icon));
     let names: Vec<&str> = names.iter().map(String::as_str).collect();
     let hint = unix_device
-        .map(devices::probe_block_crypto)
+        .map(devices::block_crypto_hint)
         .unwrap_or_default();
     devices::is_encrypted_device(&names, start_stop, hint.as_ref())
 }

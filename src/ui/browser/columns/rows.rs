@@ -384,11 +384,18 @@ pub(super) fn column_rows(
                 let Some(sources) = locations_from_file_list_value(value) else {
                     return false;
                 };
-                let commit = file_drop_commit(target, &destination, &sources, &drop_state);
                 slide_in_down(&dropped_row);
-                glib::timeout_add_local_once(Duration::from_millis(300), move || {
-                    state.commit_file_drop(destination, sources, commit);
-                });
+                file_drop_commit(
+                    target,
+                    destination,
+                    sources,
+                    &drop_state,
+                    move |destination, sources, commit| {
+                        glib::timeout_add_local_once(Duration::from_millis(300), move || {
+                            state.commit_file_drop(destination, sources, commit);
+                        });
+                    },
+                );
                 true
             });
             row.add_controller(drop);

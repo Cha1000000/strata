@@ -171,30 +171,39 @@ fn mounted_at(root: &Path, mount_id: u64, fs_type: &str) -> MountTable {
 
 #[test]
 fn unsupported_mounts_are_remembered_per_mount_instance() {
-    let root = tempfile::tempdir().expect("tempdir");
-    let inside = root.path().join("folder/file");
-    let mounts = mounted_at(root.path(), 7101, "fuse.sshfs");
-    let mount = mounts.mount_for(&inside).expect("fixture mount");
-    record_unsupported(mount.clone(), UnsupportedReason::FuseRefused);
-    assert_eq!(
-        unsupported_reason_in(&mounts, &inside),
-        Some((mount, UnsupportedReason::FuseRefused))
-    );
-    assert_eq!(
-        unsupported_reason_in(&mounted_at(root.path(), 7102, "fuse.sshfs"), &inside),
-        None,
-        "a remount is a different mount"
-    );
+    crate::test_support::gtk_test(
+        "adapters::trash_support::tests::unsupported_mounts_are_remembered_per_mount_instance",
+        || {
+            let root = tempfile::tempdir().expect("tempdir");
+            let inside = root.path().join("folder/file");
+            let reason_while_published = |mounts: MountTable| {
+                crate::adapters::mount_watch::publish_for_isolated_test(Some(mounts));
+                unsupported_reason_for(&inside)
+            };
+            let mounts = mounted_at(root.path(), 7101, "fuse.sshfs");
+            let mount = mounts.mount_for(&inside).expect("fixture mount");
+            record_unsupported(mount.clone(), UnsupportedReason::FuseRefused);
+            assert_eq!(
+                reason_while_published(mounts),
+                Some((mount, UnsupportedReason::FuseRefused))
+            );
+            assert_eq!(
+                reason_while_published(mounted_at(root.path(), 7102, "fuse.sshfs")),
+                None,
+                "a remount is a different mount"
+            );
 
-    let local = mounted_at(root.path(), 7103, "ext4");
-    record_unsupported(
-        local.mount_for(&inside).expect("fixture mount"),
-        UnsupportedReason::Reported,
-    );
-    assert_eq!(
-        unsupported_reason_in(&local, &inside),
-        None,
-        "GIO's probe is accurate outside FUSE"
+            let local = mounted_at(root.path(), 7103, "ext4");
+            record_unsupported(
+                local.mount_for(&inside).expect("fixture mount"),
+                UnsupportedReason::Reported,
+            );
+            assert_eq!(
+                reason_while_published(local),
+                None,
+                "GIO's probe is accurate outside FUSE"
+            );
+        },
     );
 }
 

@@ -4370,8 +4370,13 @@ fn install_mode_directory_drop_target(
         let Some(handler) = transfer_handler.borrow().clone() else {
             return false;
         };
-        let commit = super::browser::file_drop_commit(target, &destination, &sources, &drop_state);
-        handler(destination.clone(), sources, commit);
+        super::browser::file_drop_commit(
+            target,
+            destination.clone(),
+            sources,
+            &drop_state,
+            move |destination, sources, commit| handler(destination, sources, commit),
+        );
         true
     });
     widget.add_controller(drop);
@@ -4598,8 +4603,13 @@ fn install_list_drag_drop(
         let Some(handler) = transfer_handler.borrow().clone() else {
             return false;
         };
-        let commit = super::browser::file_drop_commit(target, &destination, &sources, &drop_state);
-        handler(destination, sources, commit);
+        super::browser::file_drop_commit(
+            target,
+            destination,
+            sources,
+            &drop_state,
+            move |destination, sources, commit| handler(destination, sources, commit),
+        );
         true
     });
     row.add_controller(drop);

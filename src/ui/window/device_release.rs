@@ -178,7 +178,7 @@ pub(super) fn watch_sidebars(rebuild: impl Fn() + 'static) -> SidebarWatch {
     SidebarWatch { id, _hook: hook }
 }
 
-fn refresh_sidebars() {
+pub(super) fn refresh_sidebars() {
     let hooks: Vec<Rc<RebuildHook>> = REBUILDERS.with(|hooks| {
         hooks
             .borrow()
@@ -894,7 +894,8 @@ where
                         previous.as_ref(),
                         left_at.as_ref(),
                         flush_root.as_deref(),
-                    );
+                    )
+                    .await;
                     decide_flush(kind, Err(crate::services::io_error_message(&error)))
                 }
                 Ok(()) => {
@@ -907,7 +908,8 @@ where
                             previous.as_ref(),
                             left_at.as_ref(),
                             flush_root.as_deref(),
-                        );
+                        )
+                        .await;
                     }
                     let (progress, unplug) = RELEASES.with(|releases| {
                         let releases = releases.borrow();
@@ -927,13 +929,18 @@ where
     true
 }
 
-fn restore_previous_if_mounted(
+async fn restore_previous_if_mounted(
     browser: Option<&Rc<Browser>>,
     previous: Option<&crate::model::Location>,
     left_at: Option<&crate::model::Location>,
     root: Option<&Path>,
 ) {
-    if root.is_some_and(volume_still_mounted)
+    let Some(root) = root else {
+        return;
+    };
+    if crate::adapters::mount_watch::fresh()
+        .await
+        .is_mount_point(root)
         && let (Some(browser), Some(previous)) = (browser, previous)
         && browser.active_location().as_ref() == left_at
         && left_at != Some(previous)
@@ -954,17 +961,6 @@ fn blocking_join_message(error: Box<dyn std::any::Any + Send>) -> String {
         .unwrap_or_else(|| "filesystem sync panicked".to_owned())
 }
 
-fn volume_still_mounted(root: &Path) -> bool {
-    #[cfg(test)]
-    if let Some(forced) = MOUNTED_ROOTS.with(|slot| slot.borrow().clone()) {
-        return forced
-            .iter()
-            .any(|mount| root == mount || root.starts_with(mount));
-    }
-    let _allowed = crate::util::ui_thread::allow(crate::util::ui_thread::Exception::MountTable);
-    crate::adapters::MountTable::current().is_mount_point(root)
-}
-
 async fn flush_mount(root: Option<PathBuf>) -> Result<(), io::Error> {
     let Some(root) = root else {
         return Ok(());
@@ -980,7 +976,6 @@ async fn flush_mount(root: Option<PathBuf>) -> Result<(), io::Error> {
 thread_local! {
     static LOCATION_AT_FLUSH: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
     static SYNCS_BEFORE_FLUSH: Cell<usize> = const { Cell::new(0) };
-    static MOUNTED_ROOTS: RefCell<Option<Vec<PathBuf>>> = const { RefCell::new(None) };
 }
 
 #[cfg(test)]
@@ -1001,11 +996,6 @@ pub(super) fn location_at_flush_for_test() -> Option<PathBuf> {
 #[cfg(test)]
 pub(super) fn syncs_before_flush_for_test() -> usize {
     SYNCS_BEFORE_FLUSH.with(|slot| slot.get())
-}
-
-#[cfg(test)]
-pub(super) fn set_mounted_roots_for_test(roots: Option<Vec<PathBuf>>) {
-    MOUNTED_ROOTS.with(|slot| *slot.borrow_mut() = roots);
 }
 
 pub(super) fn mount_operation(parent: &gtk::Widget, key: &ReleaseKey) -> gtk::MountOperation {

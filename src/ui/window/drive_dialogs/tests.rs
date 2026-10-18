@@ -539,3 +539,42 @@ fn format_filesystem_selection_updates_label_limit_and_validity() {
         },
     );
 }
+
+#[test]
+fn drive_properties_show_at_once_and_fill_in_facts_read_off_the_ui_thread() {
+    crate::test_support::gtk_test(
+        "ui::window::drive_dialogs::tests::drive_properties_show_at_once_and_fill_in_facts_read_off_the_ui_thread",
+        || {
+            static GATHERED_ON_UI_THREAD: std::sync::Mutex<Vec<bool>> =
+                std::sync::Mutex::new(Vec::new());
+            fn gather(request: DriveFactsRequest) -> DriveFacts {
+                GATHERED_ON_UI_THREAD
+                    .lock()
+                    .expect("gathered")
+                    .push(crate::util::ui_thread::is_current());
+                assert_eq!(
+                    request.device.as_deref(),
+                    Some(std::path::Path::new("/dev/fixture"))
+                );
+                DriveFacts {
+                    filesystem: Some("exFAT".to_owned()),
+                    total_bytes: Some(4096),
+                    ..DriveFacts::default()
+                }
+            }
+            let grid = drive_properties_grid(
+                "Fixture",
+                None,
+                Some(PathBuf::from("/dev/fixture")),
+                None,
+                gather,
+            );
+            assert!(has_label(grid.upcast_ref(), "—"));
+            assert!(!has_label(grid.upcast_ref(), "exFAT"));
+            wait_until(|| has_label(grid.upcast_ref(), "exFAT"));
+            assert!(has_label(grid.upcast_ref(), "Not mounted"));
+            assert!(!has_label(grid.upcast_ref(), "—"));
+            assert_eq!(*GATHERED_ON_UI_THREAD.lock().expect("gathered"), [false]);
+        },
+    );
+}

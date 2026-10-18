@@ -11,6 +11,10 @@ use crate::adapters::volume::names::{
 };
 use crate::services::{IdentityTraits, InodeNumbers};
 
+fn remote(table: &MountTable, path: &Path) -> bool {
+    table.fs_type_for(path).is_some_and(is_remote_fs_type)
+}
+
 mod byte_paths;
 
 const SAMPLE: &str = "\
@@ -164,8 +168,8 @@ fn innermost_mount_wins() {
         table.mount_point_for(nested),
         Some(Path::new("/mnt/nfs/local"))
     );
-    assert!(!table.is_remote_path(nested));
-    assert!(table.is_remote_path(Path::new("/mnt/nfs/file")));
+    assert!(!remote(&table, nested));
+    assert!(remote(&table, Path::new("/mnt/nfs/file")));
     assert_eq!(
         table.mount_point_for(Path::new("/mnt/nfs/docs")),
         Some(Path::new("/mnt/nfs"))
@@ -228,7 +232,7 @@ fn fuse_drivers_for_local_drives_are_not_network_shares() {
         "{SAMPLE}70 22 8:33 / /run/media/user/USB rw,relatime shared:40 - fuseblk /dev/sdc1 rw\n"
     ));
     let usb = Path::new("/run/media/user/USB/photos");
-    assert!(table.is_remote_path(usb), "a FUSE daemon can still block");
+    assert!(remote(&table, usb), "a FUSE daemon can still block");
     assert!(!table.is_network_path(usb));
     for share in [
         "/mnt/nfs/docs",

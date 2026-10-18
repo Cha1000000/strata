@@ -3,94 +3,44 @@
 use std::{
     cell::{Cell, OnceCell, RefCell},
     collections::{HashMap, HashSet},
-    os::unix::ffi::OsStringExt,
     path::{Path, PathBuf},
     rc::{Rc, Weak},
 };
 
 use gtk::{gio, prelude::*};
 
-fn system_mounted_devices() -> Vec<PathBuf> {
-    // MountEntry bindings require GLib 2.84; retain compatibility with GLib 2.72.
-    std::fs::read("/proc/self/mountinfo")
-        .map(|table| mounted_devices_from_table(&table))
-        .unwrap_or_default()
-}
+use crate::adapters::MountTable;
 
-fn mounted_devices_from_table(table: &[u8]) -> Vec<PathBuf> {
+fn mounted_devices(table: &MountTable) -> Vec<PathBuf> {
     table
-        .split(|byte| *byte == b'\n')
-        .filter_map(|line| {
-            let fields: Vec<_> = line.split(|byte| *byte == b' ').collect();
-            let separator = fields.iter().position(|field| *field == b"-")?;
-            if separator < 6 {
-                return None;
-            }
-            let root = mount_path(fields[4])?;
-            let source = mount_path(fields.get(separator + 2)?)?;
-            if !source.starts_with("/dev")
-                || !root.is_absolute()
-                || gio_unix::functions::is_mount_path_system_internal(&root)
-            {
-                return None;
-            }
-            Some(root)
+        .sources()
+        .filter(|(point, source)| {
+            source.starts_with("/dev")
+                && point.is_absolute()
+                && !gio_unix::functions::is_mount_path_system_internal(point)
         })
+        .map(|(point, _)| point.to_owned())
         .collect()
 }
 
-fn mount_entries(table: &[u8]) -> impl Iterator<Item = (PathBuf, PathBuf)> {
-    table.split(|byte| *byte == b'\n').filter_map(|line| {
-        let fields: Vec<_> = line.split(|byte| *byte == b' ').collect();
-        let separator = fields.iter().position(|field| *field == b"-")?;
-        if separator < 6 {
-            return None;
-        }
-        let root = mount_path(fields[4])?;
-        let source = mount_path(fields.get(separator + 2)?)?;
-        root.is_absolute().then_some((root, source))
-    })
-}
-
-pub(super) fn block_device_from_mount_table(table: &[u8], path: &Path) -> Option<PathBuf> {
-    mount_entries(table)
-        .filter(|(root, _)| path.starts_with(root))
-        .max_by_key(|(root, _)| root.as_os_str().len())
-        .map(|(_, source)| source)
+pub(super) fn block_device_from_mount_table(table: &MountTable, path: &Path) -> Option<PathBuf> {
+    table
+        .source_for(path)
         .filter(|source| source.starts_with("/dev"))
+        .map(Path::to_owned)
 }
 
-pub(super) fn mounted_path_from_table(table: &[u8], device: &Path) -> Option<PathBuf> {
+pub(super) fn mounted_path_from_table(table: &MountTable, device: &Path) -> Option<PathBuf> {
     let device = device
         .canonicalize()
         .unwrap_or_else(|_| device.to_path_buf());
-    mount_entries(table).find_map(|(root, source)| {
+    table.sources().find_map(|(point, source)| {
         if !source.starts_with("/dev") {
             return None;
         }
-        let source = source.canonicalize().unwrap_or(source);
-        (source == device).then_some(root)
+        let source = source.canonicalize().unwrap_or_else(|_| source.to_owned());
+        (source == device).then(|| point.to_owned())
     })
-}
-
-fn mount_path(encoded: &[u8]) -> Option<PathBuf> {
-    let mut decoded = Vec::with_capacity(encoded.len());
-    let mut bytes = encoded.iter().copied();
-    while let Some(byte) = bytes.next() {
-        if byte == b'\\' {
-            let escape = [bytes.next()?, bytes.next()?, bytes.next()?];
-            decoded.push(match &escape {
-                b"040" => b' ',
-                b"011" => b'\t',
-                b"012" => b'\n',
-                b"134" => b'\\',
-                _ => return None,
-            });
-        } else {
-            decoded.push(byte);
-        }
-    }
-    Some(std::ffi::OsString::from_vec(decoded).into())
 }
 
 pub(super) fn label_identity(uuid: Option<&str>, root_uri: Option<&str>) -> Option<String> {
@@ -531,7 +481,78 @@ pub(super) fn encrypted_device_is_locked(icon_names: &[&str], has_mount: bool) -
     }
 }
 
-pub(super) fn probe_block_crypto(unix_device: &str) -> BlockCryptoHint {
+#[derive(Default)]
+struct CryptoHints {
+    known: RefCell<HashMap<String, BlockCryptoHint>>,
+    pending: RefCell<HashSet<String>>,
+    monitor: OnceCell<gio::VolumeMonitor>,
+}
+
+thread_local! {
+    static CRYPTO_HINTS: CryptoHints = CryptoHints::default();
+}
+
+pub(super) fn block_crypto_hint(unix_device: &str) -> BlockCryptoHint {
+    block_crypto_hint_with(unix_device, probe_block_crypto)
+}
+
+fn block_crypto_hint_with(
+    unix_device: &str,
+    probe: fn(&str) -> BlockCryptoHint,
+) -> BlockCryptoHint {
+    CRYPTO_HINTS.with(|hints| {
+        hints.monitor.get_or_init(|| {
+            let monitor = gio::VolumeMonitor::get();
+            let recheck = move || recheck_crypto_hints(probe);
+            monitor.connect_volume_added(move |_, _| recheck());
+            monitor.connect_volume_removed(move |_, _| recheck());
+            monitor.connect_volume_changed(move |_, _| recheck());
+            monitor.connect_drive_connected(move |_, _| recheck());
+            monitor.connect_drive_disconnected(move |_, _| recheck());
+            monitor.connect_drive_changed(move |_, _| recheck());
+            monitor
+        });
+    });
+    let known = CRYPTO_HINTS.with(|hints| hints.known.borrow().get(unix_device).cloned());
+    known.unwrap_or_else(|| {
+        probe_crypto_hint(unix_device.to_owned(), probe);
+        BlockCryptoHint::default()
+    })
+}
+
+fn recheck_crypto_hints(probe: fn(&str) -> BlockCryptoHint) {
+    let devices: Vec<String> =
+        CRYPTO_HINTS.with(|hints| hints.known.borrow().keys().cloned().collect());
+    for device in devices {
+        probe_crypto_hint(device, probe);
+    }
+}
+
+fn probe_crypto_hint(unix_device: String, probe: fn(&str) -> BlockCryptoHint) {
+    if !CRYPTO_HINTS.with(|hints| hints.pending.borrow_mut().insert(unix_device.clone())) {
+        return;
+    }
+    gtk::glib::MainContext::default().spawn_local(async move {
+        let device = unix_device.clone();
+        let hint = gio::spawn_blocking(move || probe(&device))
+            .await
+            .unwrap_or_default();
+        let changed = CRYPTO_HINTS.with(|hints| {
+            hints.pending.borrow_mut().remove(&unix_device);
+            let seen = hints
+                .known
+                .borrow_mut()
+                .insert(unix_device, hint.clone())
+                .unwrap_or_default();
+            seen != hint
+        });
+        if changed {
+            super::device_release::refresh_sidebars();
+        }
+    });
+}
+
+fn probe_block_crypto(unix_device: &str) -> BlockCryptoHint {
     let unix_device = unix_device.trim();
     if unix_device.is_empty() {
         return BlockCryptoHint::default();
@@ -760,7 +781,7 @@ pub(super) fn global_search_roots() -> Vec<PathBuf> {
         .into_iter()
         .filter(|mount| !mount.is_shadowed())
         .filter_map(|mount| mount.root().path())
-        .chain(system_mounted_devices());
+        .chain(mounted_devices(&crate::adapters::mount_watch::latest()));
     search_roots(&super::home_directory(), roots)
 }
 

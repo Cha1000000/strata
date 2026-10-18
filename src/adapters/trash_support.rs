@@ -20,10 +20,7 @@ use std::{
 use gtk::{gio, glib, prelude::*};
 
 use super::volume::{MountTable, TrashMountKey as MountKey, is_fuse_fs_type};
-use crate::{
-    services::TrashedOriginal,
-    util::ui_thread::{self, Exception},
-};
+use crate::services::TrashedOriginal;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum TrashFailure {
@@ -91,8 +88,7 @@ pub(crate) struct SystemTrash;
 
 impl TrashEnvironment for SystemTrash {
     fn mounts(&self) -> MountTable {
-        let _allowed = ui_thread::allow(Exception::MountTable);
-        MountTable::current()
+        super::volume::mount_watch::latest()
     }
 
     fn home(&self) -> PathBuf {
@@ -374,8 +370,7 @@ pub(crate) fn unsupported_reason_for(path: &Path) -> Option<(MountKey, Unsupport
     if unsupported_mounts().is_empty() {
         return None;
     }
-    let _allowed = ui_thread::allow(Exception::MountTable);
-    unsupported_reason_in(&MountTable::current(), path)
+    unsupported_reason_in(&super::volume::mount_watch::latest(), path)
 }
 
 /// Blocking: resolves symlinks first, for worker threads already reading `directory`.
