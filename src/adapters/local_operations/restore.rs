@@ -11,7 +11,10 @@ use crate::{
         gio_file_for_location,
         local_files::trash_thumbnail_path,
         location_for_file,
-        trash_restore::{RestoreContext, plan_restore_for_location},
+        trash_restore::{
+            RestoreContext, absolute_original, candidate_trash_roots, decode_trashinfo_path,
+            plan_restore_for_location,
+        },
         trash_support::trash_with_cleanup,
     },
     model::Location,
@@ -405,13 +408,16 @@ pub(super) async fn trashed_entries_for_originals(
         .iter()
         .filter_map(|location| location.native_path().map(Path::to_path_buf))
         .collect::<HashSet<_>>();
-    // GVfs can miss an item re-trashed under the same basename after a restore, so prefer the
-    // authoritative freedesktop.org metadata for the home trash before consulting trash:///.
+    // GVfs can miss an item re-trashed under the same basename after a restore, and may not run
+    // at all, so prefer the authoritative freedesktop.org metadata before consulting trash:///.
+    let context = RestoreContext::current().await;
+    let fallback_context = context.clone();
     let fallback_requested = requested.clone();
     let fallback_cancellable = cancellable.clone();
     let fallback_originals = originals.clone();
     let mut fallback = gio::spawn_blocking(move || {
-        home_trash_entries(
+        trash_entries(
+            &fallback_context,
             &fallback_requested,
             &fallback_cancellable,
             &fallback_originals,
@@ -430,9 +436,8 @@ pub(super) async fn trashed_entries_for_originals(
             .collect());
     }
 
-    let context = RestoreContext::current().await;
     let trash = gio::File::for_uri("trash:///");
-    let enumerator = await_cancellable(&trash, cancellable, |trash, cancellable, result| {
+    let enumerated = await_cancellable(&trash, cancellable, |trash, cancellable, result| {
         trash.enumerate_children_async(
             "standard::name,standard::display-name,standard::target-uri,trash::orig-path,trash::deletion-date",
             gio::FileQueryInfoFlags::NOFOLLOW_SYMLINKS,
@@ -441,7 +446,13 @@ pub(super) async fn trashed_entries_for_originals(
             move |value| result.resolve(value),
         );
     })
-    .await?;
+    .await;
+    let enumerator = match enumerated {
+        Err(error) if error.matches(gio::IOErrorEnum::NotSupported) => {
+            return Err(trashed_items_unavailable());
+        }
+        enumerator => enumerator?,
+    };
     let mut newest = HashMap::<PathBuf, (String, RestoreEntry)>::new();
     loop {
         if cancellable.is_cancelled() {
@@ -514,10 +525,7 @@ pub(super) async fn trashed_entries_for_originals(
         .any(|path| !fallback.contains_key(path) && !newest.contains_key(path))
         || requested.len() != original_locations.len()
     {
-        return Err(glib::Error::new(
-            gio::IOErrorEnum::NotFound,
-            &crate::i18n::tr("One or more recently trashed items are no longer available"),
-        ));
+        return Err(trashed_items_unavailable());
     }
     Ok(original_locations
         .iter()
@@ -528,6 +536,13 @@ pub(super) async fn trashed_entries_for_originals(
                 .or_else(|| newest.remove(path).map(|(_, entry)| entry))
         })
         .collect())
+}
+
+fn trashed_items_unavailable() -> glib::Error {
+    glib::Error::new(
+        gio::IOErrorEnum::NotFound,
+        &crate::i18n::tr("One or more recently trashed items are no longer available"),
+    )
 }
 
 pub(super) fn gvfs_trash_entry(
@@ -1033,30 +1048,48 @@ pub(super) async fn run_merge_undo(
     }
 }
 
-pub(super) fn home_trash_entries(
+fn trash_entries(
+    context: &RestoreContext,
     requested: &HashSet<PathBuf>,
     cancellable: &gio::Cancellable,
     originals: &HashMap<Location, ItemIdentity>,
 ) -> HashMap<PathBuf, RestoreEntry> {
-    home_trash_entries_at(
-        &glib::user_data_dir().join("Trash"),
-        requested,
-        cancellable,
-        originals,
-    )
+    let mut roots = requested
+        .iter()
+        .flat_map(|path| candidate_trash_roots(context, Some(path)))
+        .collect::<Vec<_>>();
+    roots.sort();
+    roots.dedup();
+    trash_entries_at(&roots, requested, cancellable, originals)
 }
 
-pub(super) fn home_trash_entries_at(
+pub(super) fn trash_entries_at(
+    roots: &[PathBuf],
+    requested: &HashSet<PathBuf>,
+    cancellable: &gio::Cancellable,
+    originals: &HashMap<Location, ItemIdentity>,
+) -> HashMap<PathBuf, RestoreEntry> {
+    let mut newest = HashMap::<PathBuf, (String, RestoreEntry)>::new();
+    for trash_root in roots {
+        newest_in_trash(trash_root, requested, cancellable, originals, &mut newest);
+    }
+    newest
+        .into_iter()
+        .map(|(path, (_, entry))| (path, entry))
+        .collect()
+}
+
+fn newest_in_trash(
     trash_root: &Path,
     requested: &HashSet<PathBuf>,
     cancellable: &gio::Cancellable,
     originals: &HashMap<Location, ItemIdentity>,
-) -> HashMap<PathBuf, RestoreEntry> {
+    newest: &mut HashMap<PathBuf, (String, RestoreEntry)>,
+) {
     let info_root = trash_root.join("info");
     let files_root = trash_root.join("files");
-    let mut newest = HashMap::<PathBuf, (String, RestoreEntry)>::new();
     let Ok(infos) = std::fs::read_dir(info_root) else {
-        return HashMap::new();
+        return;
     };
     for info in infos.flatten() {
         if cancellable.is_cancelled() {
@@ -1078,8 +1111,9 @@ pub(super) fn home_trash_entries_at(
             .lines()
             .find_map(|line| line.strip_prefix("DeletionDate="))
             .unwrap_or_default();
-        let Some(original_path) =
-            encoded_path.and_then(|path| gio::File::for_uri(&format!("file://{path}")).path())
+        let Some(original_path) = encoded_path
+            .and_then(decode_trashinfo_path)
+            .and_then(|path| absolute_original(trash_root, path))
         else {
             continue;
         };
@@ -1114,8 +1148,4 @@ pub(super) fn home_trash_entries_at(
             }
         }
     }
-    newest
-        .into_iter()
-        .map(|(path, (_, entry))| (path, entry))
-        .collect()
 }

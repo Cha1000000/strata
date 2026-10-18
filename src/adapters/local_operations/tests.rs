@@ -192,15 +192,14 @@ use super::{
     StagedOriginalLookup, TRANSFER_PROGRESS_INTERVAL, TransferProgressTracker, TransferStop,
     TrashError, await_cancellable, copy_failure_after_cleanup, copy_failure_on_fat32,
     copy_new_recursively_on_filesystem, copy_new_remote_file_with, copy_recursively,
-    deletion_error_message, deletion_error_summary, home_trash_entries_at, io_error,
-    join_local_tasks, local_file_identity, merge_local, merge_local_with, move_local,
-    move_local_with,
+    deletion_error_message, deletion_error_summary, io_error, join_local_tasks,
+    local_file_identity, merge_local, merge_local_with, move_local, move_local_with,
     names::{Taken, numbered_name, numbered_names, parse_copy_suffix},
     open_local_parent_directory, operation_error_summary, parallel_delete_local,
     permanently_delete_local, permanently_delete_local_path_if_unchanged, replace_local,
     replace_local_with, run_deletion_in, run_merge_undo, set_removable_roots_for_test,
     set_sync_observer, stop_transfer, sync_probe_observations, transfer_is_noop, transfer_sizes,
-    trash_stage_overwrite, validated_child, was_cancelled,
+    trash_entries_at, trash_stage_overwrite, validated_child, was_cancelled,
 };
 use crate::{
     adapters::volume::FAT32_MAX_FILE_SIZE,

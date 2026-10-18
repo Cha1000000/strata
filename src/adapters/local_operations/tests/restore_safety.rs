@@ -882,8 +882,8 @@ fn home_trash_fallback_finds_broken_symlinks_the_virtual_backend_has_not_refresh
         format!("[Trash Info]\nPath={encoded}\nDeletionDate=2026-09-03T16:05:39\n"),
     )?;
 
-    let entries = home_trash_entries_at(
-        &trash,
+    let entries = trash_entries_at(
+        std::slice::from_ref(&trash),
         &HashSet::from([original.clone()]),
         &gio::Cancellable::new(),
         &HashMap::new(),
@@ -902,8 +902,8 @@ fn home_trash_fallback_finds_broken_symlinks_the_virtual_backend_has_not_refresh
     let cancellable = gio::Cancellable::new();
     cancellable.cancel();
     assert!(
-        home_trash_entries_at(
-            &trash,
+        trash_entries_at(
+            std::slice::from_ref(&trash),
             &HashSet::from([original]),
             &cancellable,
             &HashMap::new()

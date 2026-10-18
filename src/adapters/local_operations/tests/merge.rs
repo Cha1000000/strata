@@ -1807,8 +1807,8 @@ fn merge_undo_uses_recorded_identity_when_trash_dates_collide() -> Result<(), Bo
             let (trash_root, originals) = (trash_root.clone(), originals.clone());
             Box::pin(async move {
                 gio::spawn_blocking(move || {
-                    home_trash_entries_at(
-                        &trash_root,
+                    trash_entries_at(
+                        std::slice::from_ref(&trash_root),
                         &HashSet::from([path.clone()]),
                         &cancellable,
                         &originals,
@@ -1920,8 +1920,8 @@ fn a_trashed_original_is_found_only_by_what_its_mount_proves() -> Result<(), Box
                 super::fs_quirks::recreated(&trashed);
             }
         }
-        let entries = home_trash_entries_at(
-            &trash_root,
+        let entries = trash_entries_at(
+            std::slice::from_ref(&trash_root),
             &HashSet::from([original.clone()]),
             &gio::Cancellable::new(),
             &HashMap::from([(Location::local(&original), recorded)]),
@@ -1934,6 +1934,178 @@ fn a_trashed_original_is_found_only_by_what_its_mount_proves() -> Result<(), Box
         );
     }
     Ok(())
+}
+
+#[derive(Clone, Copy, Debug)]
+enum VolumeTrash {
+    PerUser,
+    Shared,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Undone {
+    Replace,
+    Delete,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Trashed {
+    Original,
+    Nothing,
+    OriginalBesideANewerOneBehindALink,
+}
+
+#[test]
+fn undo_finds_an_original_in_the_trash_of_its_own_mount() {
+    crate::test_support::gtk_test(
+        "adapters::local_operations::tests::merge::undo_finds_an_original_in_the_trash_of_its_own_mount",
+        || {
+            let _serial = serial().expect("serial");
+            let uid = rustix::process::getuid().as_raw();
+            for (layout, undone, trashed) in [
+                (VolumeTrash::PerUser, Undone::Replace, Trashed::Original),
+                (VolumeTrash::Shared, Undone::Replace, Trashed::Original),
+                (VolumeTrash::PerUser, Undone::Delete, Trashed::Original),
+                (VolumeTrash::PerUser, Undone::Delete, Trashed::Nothing),
+                (
+                    VolumeTrash::PerUser,
+                    Undone::Delete,
+                    Trashed::OriginalBesideANewerOneBehindALink,
+                ),
+            ] {
+                let row = format!("{layout:?} Trash, undo of a {undone:?}, {trashed:?}");
+                let volume = tempfile::tempdir().expect("volume");
+                crate::adapters::mount_watch::publish_for_isolated_test(Some(
+                    crate::adapters::MountTable::parse(format!(
+                        "1 0 8:1 / / rw - ext4 /dev/root rw\n\
+                         4242 1 8:2 / {} rw - ext4 /dev/sdb1 rw\n",
+                        volume.path().display()
+                    )),
+                ));
+                let trash = match layout {
+                    VolumeTrash::PerUser => volume.path().join(format!(".Trash-{uid}")),
+                    VolumeTrash::Shared => {
+                        let shared = volume.path().join(".Trash");
+                        fs::create_dir(&shared).expect("shared Trash");
+                        fs::set_permissions(
+                            &shared,
+                            std::os::unix::fs::PermissionsExt::from_mode(0o1777),
+                        )
+                        .expect("sticky shared Trash");
+                        shared.join(uid.to_string())
+                    }
+                };
+                for folder in [
+                    trash.join("files"),
+                    trash.join("info"),
+                    volume.path().join("folder"),
+                ] {
+                    fs::create_dir_all(folder).expect("fixture folder");
+                }
+                let original = volume.path().join("folder/report.txt");
+                let info = trash.join("info/report.txt.trashinfo");
+                let put_in_trash = |trash: &Path, contents: &str, date: &str| {
+                    fs::write(trash.join("files/report.txt"), contents).expect("trashed item");
+                    fs::write(
+                        trash.join("info/report.txt.trashinfo"),
+                        format!(
+                            "[Trash Info]\nPath=folder/report.txt\nDeletionDate={date}T00:00:00\n"
+                        ),
+                    )
+                    .expect("trash info");
+                };
+                let planted = volume.path().join("planted");
+                match trashed {
+                    Trashed::Original => put_in_trash(&trash, "original", "2026-01-01"),
+                    Trashed::Nothing => {}
+                    Trashed::OriginalBesideANewerOneBehindALink => {
+                        put_in_trash(&trash, "original", "2026-01-01");
+                        fs::create_dir_all(planted.join("files")).expect("planted files");
+                        fs::create_dir_all(planted.join("info")).expect("planted info");
+                        put_in_trash(&planted, "planted", "2099-01-01");
+                        let shared = volume.path().join(".Trash");
+                        fs::create_dir(&shared).expect("shared Trash");
+                        fs::set_permissions(
+                            &shared,
+                            std::os::unix::fs::PermissionsExt::from_mode(0o1777),
+                        )
+                        .expect("sticky shared Trash");
+                        std::os::unix::fs::symlink(&planted, shared.join(uid.to_string()))
+                            .expect("linked user Trash");
+                    }
+                }
+                let location = Location::local(&original);
+                let events = Rc::new(RefCell::new(Vec::new()));
+                let emitted = events.clone();
+                let emit: Rc<dyn Fn(OperationEvent)> =
+                    Rc::new(move |event| emitted.borrow_mut().push(event));
+                let id = OperationRequestId(1729);
+                let _operation = match undone {
+                    Undone::Replace => {
+                        fs::write(&original, b"incoming copy").expect("incoming copy");
+                        LocalOperationProvider.undo_merge(
+                            crate::services::UndoMergeRequest {
+                                id,
+                                created: Vec::new(),
+                                overwritten: vec![location.clone()],
+                                originals: HashMap::new(),
+                                placed: placed_now(&[&original]),
+                            },
+                            emit,
+                        )
+                    }
+                    Undone::Delete => LocalOperationProvider.restore(
+                        RestoreRequest {
+                            id,
+                            source: RestoreSource::OriginalLocations(vec![location.clone()]),
+                        },
+                        emit,
+                    ),
+                };
+                wait_for_operation(&events, |event| {
+                    matches!(
+                        event,
+                        OperationEvent::Restored { .. }
+                            | OperationEvent::RestoreCompletedWithErrors { .. }
+                            | OperationEvent::CompletedWithErrors { .. }
+                            | OperationEvent::Failed { .. }
+                            | OperationEvent::Cancelled { .. }
+                    )
+                });
+
+                if let Trashed::Nothing = trashed {
+                    assert!(
+                        matches!(
+                            events.borrow().last(),
+                            Some(OperationEvent::Failed { message, .. })
+                                if message == "Unable to find items in Trash: \
+                                    One or more recently trashed items are no longer available"
+                        ),
+                        "{row}: {:?}",
+                        events.borrow().last()
+                    );
+                    continue;
+                }
+                assert!(
+                    matches!(
+                        events.borrow().last(),
+                        Some(OperationEvent::Restored { .. })
+                    ),
+                    "{row}: {:?}",
+                    events.borrow().last()
+                );
+                assert_eq!(fs::read(&original).expect("restored"), b"original", "{row}");
+                assert!(!info.exists(), "{row}: the Trash entry is gone");
+                if let Trashed::OriginalBesideANewerOneBehindALink = trashed {
+                    assert_eq!(
+                        fs::read(planted.join("files/report.txt")).expect("planted"),
+                        b"planted",
+                        "{row}"
+                    );
+                }
+            }
+        },
+    );
 }
 
 #[test]

@@ -102,10 +102,13 @@ Residual limits:
   are never used. On ntfs-3g and exfat-fuse, which report no birth time, an item deleted and
   recreated at the same name with the same type passes for the original.
 - Undo and restore find an item Strata moved to Trash by its original path and the newest deletion
-  date. Undo of an archive that replaced its original, and the saved views and colors of a trashed
-  item, also need the Trash item to pass the mount's identity rule: type, the birth time where both
-  report one, the inode number where the mount keeps numbers, and for files size and modification
-  time where it renumbers them. Undo of a Delete and of a paste's Replace go by path and date alone.
+  date. Undo reads the Trash folders itself, the home Trash and the `.Trash/$uid` and
+  `.Trash-$uid` folders of the item's mount, so it needs no GVfs. As in GLib, a mount's Trash
+  folder counts only when it is a folder the user owns, not a link. Undo of an archive that
+  replaced its original, and the saved views and colors of a trashed item, also need the Trash item
+  to pass the mount's identity rule: type, the birth time where both report one, the inode number
+  where the mount keeps numbers, and for files size and modification time where it renumbers them.
+  Undo of a Delete and of a paste's Replace go by path and date alone.
   Where the mount keeps inode numbers but reports neither a birth time nor a file handle (ntfs-3g),
   another item trashed from the same path that got the inode number can be brought back instead;
   nothing is ever overwritten.

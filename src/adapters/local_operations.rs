@@ -110,14 +110,14 @@ use restore::RestoreEntry;
 #[cfg(test)]
 use restore::StagedOriginalLookup;
 #[cfg(test)]
-use restore::home_trash_entries_at;
-#[cfg(test)]
 use restore::move_restore_path;
 use restore::restore_renamed;
 use restore::restore_trash_entry;
 use restore::restore_worker_count;
 use restore::restored_destination;
 use restore::run_merge_undo;
+#[cfg(test)]
+use restore::trash_entries_at;
 use restore::trashed_entries_for_originals;
 use restore::trashed_merge_original;
 #[cfg(test)]
