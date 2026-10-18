@@ -138,11 +138,12 @@ themes, the Omarchy theme state and GTK's bookmarks file. These startup reads ar
 exception to keeping file calls off the interface thread. Every later save goes
 through the settings writer: preferences, folder settings, the tabs session, folder
 history, recent applications, custom themes, the source-preview style scheme and
-pinned folders. Every later re-read after another process changed a file (folder
-settings and default sort and size saved by the portal chooser, custom themes,
-Omarchy theme changes) is parsed on the writer and applied on the interface thread;
-a change of this process's own that is still being saved wins over an older save
-from elsewhere. Selection, history, the sort of
+pinned folders. Open With reads recent applications on the writer too, so a launch
+that is still being recorded is listed. Every later re-read after another process
+changed a file (folder settings and default sort and size saved by the portal
+chooser, custom themes, Omarchy theme changes) is parsed on the writer and applied
+on the interface thread; a change of this process's own that is still being saved
+wins over an older save from elsewhere. Selection, history, the sort of
 folders that are not remembered, filter query, transient theme
 catalog filters, dialogs, and preview playback position remain window-local.
 Pinned places, portal integration and other externally managed state have their

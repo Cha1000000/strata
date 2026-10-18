@@ -1026,6 +1026,13 @@ fn history_path() -> PathBuf {
     gtk::glib::user_data_dir().join("strata/recent-apps.toml")
 }
 
+fn recorded_apps(content_type: &str) -> Vec<String> {
+    gtk::glib::MainContext::default()
+        .block_on(crate::ui::recent_apps::read())
+        .expect("recent-app history")
+        .recent_ids(&[content_type.to_owned()])
+}
+
 #[test]
 fn open_with_shows_recently_used_first_and_excludes_it_from_recommended() {
     crate::test_support::gtk_test(
@@ -1054,7 +1061,18 @@ fn open_with_shows_recently_used_first_and_excludes_it_from_recommended() {
 
             launch_recorder("strata-beta", &[(&directory.join("a.txt"), "text/plain")]);
             wait_until(|| received(&output_beta) == [directory.join("a.txt")]);
-            open_single_with_dialog(&fixture, &browser, "b.txt");
+            let writer = crate::storage::writer::hold();
+            fixture.view.browser().clear_active_selection();
+            move_to_named(&fixture, &browser, "b.txt");
+            plain(&fixture, Key::space);
+            shifted(&fixture, Key::O);
+            pump(200);
+            assert!(
+                !modal_visible(&fixture.overlay),
+                "the chooser waits for the history read"
+            );
+            drop(writer);
+            wait_until(|| modal_visible(&fixture.overlay));
             let sections = chooser_sections(&fixture.overlay);
             assert_eq!(sections[0].0, "Recently Used", "{sections:?}");
             assert_eq!(sections[0].1, ["Beta Editor"], "{sections:?}");
@@ -1479,14 +1497,8 @@ fn default_activation_records_application_history_for_files_and_folders() {
             launch_recorder("strata-dirs", &[(&directory, "inode/directory")]);
             wait_until(|| received(&output_dirs) == [directory.clone()]);
             crate::storage::writer::settle();
-            let stored =
-                crate::ui::recent_apps::load().recent_ids(&["inode/directory".to_string()]);
-            assert_eq!(stored, ["strata-dirs.desktop"]);
-            assert!(
-                crate::ui::recent_apps::load()
-                    .recent_ids(&["text/plain".to_string()])
-                    .is_empty()
-            );
+            assert_eq!(recorded_apps("inode/directory"), ["strata-dirs.desktop"]);
+            assert!(recorded_apps("text/plain").is_empty());
 
             let associations = gtk::glib::user_config_dir().join("mimeapps.list");
             let mut mimeapps = std::fs::read_to_string(&associations).expect("mimeapps");
@@ -1495,10 +1507,49 @@ fn default_activation_records_application_history_for_files_and_folders() {
             move_to_named(&fixture, &browser, "a.txt");
             plain(&fixture, Key::Return);
             wait_until(|| received(&output_alpha) == [directory.join("a.txt")]);
-            wait_until(|| {
-                crate::ui::recent_apps::load().recent_ids(&["text/plain".to_string()])
-                    == ["strata-alpha.desktop"]
-            });
+            wait_until(|| recorded_apps("text/plain") == ["strata-alpha.desktop"]);
+        },
+    );
+}
+
+#[test]
+fn activation_fallback_opens_one_chooser_after_the_history_read() {
+    let no_applications = tempfile::tempdir().expect("data dirs without applications");
+    crate::test_support::gtk_test_with_env(
+        "ui::window::tests::keyboard_dispatch::file_verbs::activation_fallback_opens_one_chooser_after_the_history_read",
+        [("XDG_DATA_DIRS", no_applications.path())],
+        || {
+            let fixture = KeyboardFixture::new();
+            let browser = fixture.view.browser();
+            let choosers = || {
+                let mut count = 0;
+                let mut child = fixture.overlay.first_child();
+                while let Some(widget) = child {
+                    if widget.is_visible()
+                        && widget_with_class(&widget, "open-with-dialog").is_some()
+                    {
+                        count += 1;
+                    }
+                    child = widget.next_sibling();
+                }
+                count
+            };
+
+            move_to_named(&fixture, &browser, "a.txt");
+            let writer = crate::storage::writer::hold();
+            plain(&fixture, Key::Return);
+            plain(&fixture, Key::Return);
+            pump(200);
+            assert_eq!(choosers(), 0, "the chooser waits for the history read");
+            drop(writer);
+            wait_until(|| choosers() > 0);
+            crate::storage::writer::settle();
+            pump(200);
+            assert_eq!(
+                choosers(),
+                1,
+                "a repeated activation stacks no second chooser"
+            );
         },
     );
 }

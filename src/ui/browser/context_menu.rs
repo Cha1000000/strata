@@ -554,9 +554,12 @@ pub(in crate::ui) fn install_folder_context_menu(
             state.show_folder_properties(&properties_location);
         }
     });
+    let open_with_history = Rc::new(RefCell::new(None::<crate::ui::recent_apps::State>));
+    let open_with_generation = Rc::new(Cell::new(0_u64));
     let weak = Rc::downgrade(state);
     let open_with_popover = popover.downgrade();
     let open_with_location = location.clone();
+    let history_for_click = open_with_history.clone();
     open_with.connect_clicked(move |_| {
         if let Some(popover) = open_with_popover.upgrade() {
             popover.popdown();
@@ -570,15 +573,17 @@ pub(in crate::ui) fn install_folder_context_menu(
         let file = gio_file_for_location(&open_with_location);
         let requires_uris =
             crate::ui::open_with::requires_uri_handlers(std::slice::from_ref(&file));
-        let (recommended_apps, other_apps) =
-            crate::ui::open_with::categorized_apps("inode/directory", requires_uris);
+        let Some(choices) = history_for_click.borrow().as_ref().map(|history| {
+            crate::ui::open_with::choices_for_type(history, "inode/directory", requires_uris)
+        }) else {
+            return;
+        };
         let browser = Rc::downgrade(&state.browser);
         crate::ui::open_with::show(
             &state.overlay,
             vec![file],
             vec!["inode/directory".to_string()],
-            recommended_apps,
-            other_apps,
+            choices,
             crate::ui::open_with::OpenWithContext::Explicit,
             Rc::new(move || {
                 if let Some(browser) = browser.upgrade() {
@@ -611,6 +616,9 @@ pub(in crate::ui) fn install_folder_context_menu(
         }));
         select_all.set_sensitive(has_entries());
         open_terminal.set_sensitive(can_open_terminal(&location_for_trigger));
+        if directory_actions {
+            prepare_folder_open_with(&open_with, &open_with_history, &open_with_generation);
+        }
         let hidden_files_shown = browser_for_trigger.preferences().show_hidden;
         toggle_hidden_label.set_text(&crate::i18n::tr(if hidden_files_shown {
             "Hide Hidden Files"
@@ -1302,8 +1310,7 @@ pub(in crate::ui) fn install_resolved_item_context_menu(
                 &state.overlay,
                 selection.files,
                 selection.content_types,
-                selection.recommended_apps,
-                selection.other_apps,
+                selection.choices,
                 crate::ui::open_with::OpenWithContext::Explicit,
                 Rc::new(move || {
                     if let Some(browser) = browser.upgrade() {
@@ -1333,8 +1340,7 @@ pub(in crate::ui) fn install_resolved_item_context_menu(
                 &state.overlay,
                 selection.files,
                 selection.content_types,
-                selection.recommended_apps,
-                selection.other_apps,
+                selection.choices,
                 crate::ui::open_with::OpenWithContext::Explicit,
                 Rc::new(move || {
                     if let Some(browser) = browser.upgrade() {
@@ -2162,8 +2168,7 @@ struct OpenWithSelection {
     locations: Vec<Location>,
     files: Vec<gio::File>,
     content_types: Vec<String>,
-    recommended_apps: Vec<gio::AppInfo>,
-    other_apps: Vec<gio::AppInfo>,
+    choices: crate::ui::open_with::Choices,
     default: Option<gio::AppInfo>,
 }
 
@@ -2185,6 +2190,27 @@ fn set_open_with_explanation(button: &gtk::Button, explanation: Option<&str>) {
         option.set_menu_description(explanation.as_str());
     }
     button.update_property(&[gtk::accessible::Property::Description(&explanation)]);
+}
+
+fn prepare_folder_open_with(
+    button: &gtk::Button,
+    history: &Rc<RefCell<Option<crate::ui::recent_apps::State>>>,
+    generation: &Rc<Cell<u64>>,
+) {
+    button.set_sensitive(false);
+    set_open_with_explanation(button, Some("Looking for compatible applications…"));
+    history.replace(None);
+    let expected = generation.get().wrapping_add(1);
+    generation.set(expected);
+    let (button, history, generation) = (button.clone(), history.clone(), generation.clone());
+    glib::MainContext::default().spawn_local(async move {
+        let answer = crate::ui::recent_apps::read().await.unwrap_or_default();
+        if generation.get() == expected {
+            history.replace(Some(answer));
+            button.set_sensitive(true);
+            set_open_with_explanation(&button, None);
+        }
+    });
 }
 
 fn prepare_open_with(
@@ -2233,8 +2259,7 @@ fn prepare_open_with(
             locations,
             files,
             content_types: applications.content_types,
-            recommended_apps: applications.recommended,
-            other_apps: applications.other,
+            choices: applications.choices,
             default: applications.default,
         }));
         for button in [&single_button, &multiple_button] {

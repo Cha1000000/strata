@@ -453,8 +453,7 @@ impl BrowserView {
                 &state.overlay,
                 files,
                 applications.content_types,
-                applications.recommended,
-                applications.other,
+                applications.choices,
                 crate::ui::open_with::OpenWithContext::Explicit,
                 Rc::new(move || {
                     if let Some(browser) = browser.upgrade() {

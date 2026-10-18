@@ -51,11 +51,12 @@ pub(super) fn record(content_types: &[String], app_id: &str, known_ids: HashSet<
     }));
 }
 
-pub(super) fn load() -> State {
-    load_from(&history_path())
+pub(super) fn read() -> futures_channel::oneshot::Receiver<State> {
+    crate::storage::writer::run(|| load_from(&history_path()))
 }
 
 fn load_from(path: &Path) -> State {
+    crate::util::ui_thread::assert_off();
     let contents = match std::fs::read_to_string(path) {
         Ok(contents) => contents,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return State::default(),

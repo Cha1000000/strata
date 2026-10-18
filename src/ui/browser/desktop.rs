@@ -74,7 +74,7 @@ pub(in crate::ui) fn open_location_at(
                 if executable && file.is_native() && location.native_path().is_some() {
                     confirm_run_program(&location, &parent);
                 } else {
-                    show_open_with_fallback(&parent, file, &content_type, browser);
+                    show_open_with_fallback(&parent, file, &content_type, browser).await;
                 }
             }
             Err(error) => {
@@ -130,21 +130,29 @@ async fn resolve_default_application(file: &gio::File) -> Result<DefaultApplicat
     })
 }
 
-fn show_open_with_fallback(
+async fn show_open_with_fallback(
     parent: &impl IsA<gtk::Widget>,
     file: gio::File,
     content_type: &str,
     browser: Weak<Browser>,
 ) {
+    let history = crate::ui::recent_apps::read().await.unwrap_or_default();
+    let unobstructed = parent
+        .as_ref()
+        .root()
+        .and_downcast::<gtk::Window>()
+        .is_some_and(|window| {
+            window.is_visible() && !crate::ui::window::foreign_modal_visible(&window, None)
+        });
+    if !unobstructed {
+        return;
+    }
     let requires_uris = crate::ui::open_with::requires_uri_handlers(std::slice::from_ref(&file));
-    let (recommended_apps, other_apps) =
-        crate::ui::open_with::categorized_apps(content_type, requires_uris);
     crate::ui::open_with::show(
         parent,
         vec![file],
         vec![content_type.to_string()],
-        recommended_apps,
-        other_apps,
+        crate::ui::open_with::choices_for_type(&history, content_type, requires_uris),
         crate::ui::open_with::OpenWithContext::ActivationFallback,
         Rc::new(move || {
             if let Some(browser) = browser.upgrade() {
