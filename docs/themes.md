@@ -27,6 +27,40 @@ The `@strata_*` namespace prevents accidental collisions with other
 stylesheets' `@theme_*` colors; it does not stop deliberate `@strata_*`
 redefinitions in a user stylesheet.
 
+## User stylesheet
+
+To restyle Strata itself, create an optional stylesheet at:
+
+```text
+~/.config/strata/style.css
+```
+
+It is loaded above every stylesheet Strata ships, including the active theme,
+so its rules win over Strata's own. The `@strata_*` colors of the active theme
+are available, which keeps overrides in step with theme changes:
+
+```css
+/* A floating, rounded sidebar */
+.sidebar-shell {
+    margin: 8px 0 8px 8px;
+    border-right: none;
+    border-radius: 14px;
+    background: alpha(@strata_surface, 0.6);
+}
+
+/* Let the card show through the sidebar's own opaque layers */
+.sidebar-shell .sidebar-scroll,
+.sidebar-shell .sidebar-scroll viewport,
+.sidebar-shell .sidebar {
+    background: transparent;
+}
+```
+
+Strata re-reads the file when it changes, so edits apply to open windows
+without a restart; deleting it restores the default appearance. Rules GTK
+cannot parse are skipped and logged as warnings. Class names are not a stable
+interface and may change between releases.
+
 ## Custom theme files
 
 Custom themes are TOML files in:

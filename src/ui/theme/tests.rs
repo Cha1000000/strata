@@ -918,3 +918,44 @@ fn interface_font_applies_before_settings_open_and_live_while_previews_stay_mono
         },
     );
 }
+
+#[test]
+fn user_stylesheet_overrides_strata_and_reloads_live() {
+    gtk_test(
+        "ui::theme::tests::user_stylesheet_overrides_strata_and_reloads_live",
+        || {
+            let config = crate::ui::preferences::config_directory();
+            std::fs::create_dir_all(&config).expect("config directory");
+            let stylesheet = config.join("style.css");
+
+            let manager = ThemeManager::shared();
+            std::fs::write(
+                &stylesheet,
+                "label { color: nope; }\nlabel { color: rgb(255, 0, 0); }\n",
+            )
+            .expect("user stylesheet");
+            let window = gtk::Window::new();
+            let label = gtk::Label::new(Some("styled"));
+            window.set_child(Some(&label));
+            window.present();
+            let has_color = |label: &gtk::Label, expected: &gtk::gdk::RGBA| {
+                let actual = label.color();
+                (actual.red() - expected.red()).abs() < 0.01
+                    && (actual.green() - expected.green()).abs() < 0.01
+                    && (actual.blue() - expected.blue()).abs() < 0.01
+            };
+            let red = gtk::gdk::RGBA::parse("rgb(255, 0, 0)").expect("red");
+            let green = gtk::gdk::RGBA::parse("rgb(0, 255, 0)").expect("green");
+            let text = gtk::gdk::RGBA::parse(&manager.starter_tokens().text).expect("text color");
+            wait_for_live_theme(|| has_color(&label, &red));
+
+            std::fs::write(&stylesheet, "label { color: rgb(0, 255, 0); }\n")
+                .expect("edited stylesheet");
+            wait_for_live_theme(|| has_color(&label, &green));
+
+            std::fs::remove_file(&stylesheet).expect("remove stylesheet");
+            wait_for_live_theme(|| has_color(&label, &text));
+            window.close();
+        },
+    );
+}
