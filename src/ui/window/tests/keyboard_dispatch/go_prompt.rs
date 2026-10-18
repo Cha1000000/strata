@@ -57,13 +57,14 @@ impl FileSource for InertUris {
         LocalFileSource.fill_metadata(request, emit)
     }
 
-    fn watch(
+    fn start_watch(
         &self,
         location: Location,
         include_hidden: bool,
         notify: Rc<dyn Fn(DirectoryChange)>,
-    ) -> Option<LoadHandle> {
-        LocalFileSource.watch(location, include_hidden, notify)
+        report: Rc<dyn Fn(crate::services::Watching)>,
+    ) -> LoadHandle {
+        LocalFileSource.start_watch(location, include_hidden, notify, report)
     }
 }
 

@@ -26,18 +26,27 @@ enum OpenLoad {
 impl Browser {
     pub(super) fn handle_directory_event(self: &Rc<Self>, event: DirectoryEvent) {
         match event {
-            DirectoryEvent::Stamp { request_id, stamp } => self.record_stamp(request_id, stamp),
+            DirectoryEvent::Stamp { request_id, stamp } => {
+                self.watch_answered_folder(request_id, Some(&stamp));
+                self.record_stamp(request_id, stamp);
+            }
             DirectoryEvent::ListingDigest { .. } => {}
             DirectoryEvent::Batch {
                 request_id,
                 entries,
-            } => self.receive_batch(request_id, entries),
+            } => {
+                self.watch_answered_folder(request_id, None);
+                self.receive_batch(request_id, entries);
+            }
             DirectoryEvent::Finished {
                 request_id,
                 truncated,
                 can_trash,
                 can_delete,
             } => {
+                if !truncated {
+                    self.watch_answered_folder(request_id, None);
+                }
                 self.receive_completion(
                     request_id,
                     LoadCompletion {

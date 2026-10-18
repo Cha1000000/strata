@@ -34,7 +34,7 @@ use crate::{
     services::{
         DirectoryChange, DirectoryEvent, DirectoryRequest, DirectoryStamp, Evidence, FileSource,
         IdentityTraits, ItemIdentity, LoadHandle, LocationValidationError, MetadataOutcome,
-        MetadataRequest, MetadataUpdate, MountToken, RequestId, StampAnswer,
+        MetadataRequest, MetadataUpdate, MountToken, RequestId, StampAnswer, Watching,
         backend_unavailable_message, bytes_support_named_family, file_activity, is_hidden_name,
         is_image_path, is_media_path, link_target_kind, listed_kind, native_hidden_names,
         sanitize_failure_message, symlink_kind,
@@ -43,6 +43,9 @@ use crate::{
 use futures_channel::oneshot;
 
 mod camera_photos;
+mod monitors;
+
+pub(crate) use monitors::watch_folder;
 
 const LIST_ATTRIBUTES: &str = "standard::display-name,standard::name,standard::type,standard::is-hidden,standard::is-symlink,standard::target-uri,access::can-trash,access::can-delete";
 const FULL_ATTRIBUTES: &str = "standard::display-name,standard::name,standard::type,standard::is-hidden,standard::is-symlink,standard::size,standard::target-uri,time::modified,unix::mode,access::can-trash,access::can-delete";
@@ -362,10 +365,6 @@ fn stamped_remotely(location: &Location) -> bool {
     })
 }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the monitor's gap check calls it")
-)]
 fn stamp_failure(error: rustix::io::Errno) -> StampAnswer {
     use rustix::io::Errno;
     match error {
@@ -375,10 +374,6 @@ fn stamp_failure(error: rustix::io::Errno) -> StampAnswer {
     }
 }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the monitor's gap check calls it")
-)]
 fn remote_stamp_failure(error: &glib::Error) -> StampAnswer {
     if error.matches(gio::IOErrorEnum::NotFound) || error.matches(gio::IOErrorEnum::NotDirectory) {
         StampAnswer::Missing
@@ -1670,113 +1665,40 @@ impl FileSource for LocalFileSource {
         LoadHandle::new(move || task.abort())
     }
 
-    fn watch(
+    fn start_watch(
         &self,
         location: Location,
         include_hidden: bool,
         notify: Rc<dyn Fn(DirectoryChange)>,
-    ) -> Option<LoadHandle> {
-        let file = gio_file_for_location(&location);
-        let monitor = match file.monitor_directory(
-            gio::FileMonitorFlags::WATCH_MOVES,
-            None::<&gio::Cancellable>,
-        ) {
-            Ok(monitor) => monitor,
-            Err(error) => {
-                tracing::warn!(
-                    backend = %location.backend_name(),
-                    error_domain = ?error.domain(),
-                    error_code = error.code(),
-                    "directory monitoring unavailable"
-                );
-                tracing::debug!(
-                    location = %location.diagnostic_path(),
-                    "directory monitoring location"
-                );
-                return None;
-            }
-        };
-
-        let cancelled = Rc::new(Cell::new(false));
-        let pending = Rc::new(RefCell::new(HashMap::<
-            PendingMonitorKey,
-            PendingMonitorChange,
-        >::new()));
-        let timeout = Rc::new(RefCell::new(None::<glib::SourceId>));
-        let numbered = Rc::new(RefCell::new(NumberedNames::default()));
-        let awaited = RefCell::new(AwaitedHints::default());
-        let pending_for_change = pending.clone();
-        let timeout_for_change = timeout.clone();
-        let cancelled_for_change = cancelled.clone();
-        let watched = location.clone();
-        monitor.connect_changed(move |_, file, other_file, event| {
-            let change = pending_monitor_change(
-                &watched,
-                location_for_file(file),
-                other_file.and_then(location_for_file),
-                event,
-            );
-            let Some(change) =
-                change.and_then(|change| visible_monitor_change(&watched, change, include_hidden))
-            else {
-                return;
-            };
-            // Arrivals are learned even while a rescan is pending.
-            let admission = numbered.borrow_mut().admit(&change, event);
-            match admission {
-                NumberedAdmission::Queue => {}
-                NumberedAdmission::Skip => return,
-                NumberedAdmission::Read(folder) => {
-                    read_numbered_names(
-                        numbered.clone(),
-                        folder,
-                        notify.clone(),
-                        cancelled_for_change.clone(),
+        report: Rc<dyn Fn(Watching)>,
+    ) -> LoadHandle {
+        let started = monitors::start(&location, gio::FileMonitorFlags::WATCH_MOVES);
+        let connected = Rc::new(RefCell::new(None));
+        let slot = connected.clone();
+        let task = glib::MainContext::default().spawn_local(async move {
+            match started.await {
+                Some(monitor) => {
+                    slot.replace(Some(connect_monitor(
+                        monitor,
+                        location,
+                        include_hidden,
+                        notify,
+                    )));
+                    report(Watching::Live);
+                }
+                None => {
+                    tracing::debug!(
+                        location = %location.diagnostic_path(),
+                        "directory monitoring unavailable"
                     );
-                    return;
+                    report(Watching::Unavailable);
                 }
-            }
-            if !awaited.borrow_mut().needs_query(&change, event) {
-                return;
-            }
-            if pending_for_change.borrow().contains_key(&None) {
-                return;
-            }
-            if matches!(change, PendingMonitorChange::Rescan) {
-                tracing::debug!(?event, "directory monitor requested reconciliation");
-            }
-            let key = match &change {
-                PendingMonitorChange::Upsert(location) | PendingMonitorChange::Remove(location) => {
-                    Some(location.clone())
-                }
-                PendingMonitorChange::Move { to, .. } => Some(to.clone()),
-                PendingMonitorChange::Rescan => None,
-            };
-            if !queue_monitor_change(&mut pending_for_change.borrow_mut(), key, change) {
-                return;
-            }
-
-            if timeout_for_change.borrow().is_none() {
-                let pending = pending_for_change.clone();
-                let timeout = timeout_for_change.clone();
-                let notify = notify.clone();
-                let cancelled = cancelled_for_change.clone();
-                let source = glib::timeout_add_local_once(Duration::from_millis(100), move || {
-                    timeout.take();
-                    flush_monitor_changes(&pending, &notify, &cancelled);
-                });
-                timeout_for_change.replace(Some(source));
             }
         });
-
-        Some(LoadHandle::new(move || {
-            cancelled.set(true);
-            if let Some(source) = timeout.take() {
-                source.remove();
-            }
-            pending.borrow_mut().clear();
-            let _cancelled = monitor.cancel();
-        }))
+        LoadHandle::new(move || {
+            task.abort();
+            connected.take();
+        })
     }
 
     fn probe_stamp(&self, location: Location, emit: Rc<dyn Fn(StampAnswer)>) -> LoadHandle {
@@ -1861,6 +1783,116 @@ impl FileSource for LocalFileSource {
             emit(found.map(Location::local));
         });
         LoadHandle::new(move || task.abort())
+    }
+}
+
+struct ConnectedMonitor {
+    handler: Option<glib::SignalHandlerId>,
+    cancelled: Rc<Cell<bool>>,
+    pending: Rc<RefCell<HashMap<PendingMonitorKey, PendingMonitorChange>>>,
+    timeout: Rc<RefCell<Option<glib::SourceId>>>,
+    monitor: monitors::BareMonitor,
+}
+
+impl Drop for ConnectedMonitor {
+    fn drop(&mut self) {
+        self.cancelled.set(true);
+        if let Some(source) = self.timeout.take() {
+            source.remove();
+        }
+        self.pending.borrow_mut().clear();
+        if let Some(handler) = self.handler.take() {
+            self.monitor.monitor().disconnect(handler);
+        }
+    }
+}
+
+fn connect_monitor(
+    monitor: monitors::BareMonitor,
+    location: Location,
+    include_hidden: bool,
+    notify: Rc<dyn Fn(DirectoryChange)>,
+) -> ConnectedMonitor {
+    let cancelled = Rc::new(Cell::new(false));
+    let pending = Rc::new(RefCell::new(HashMap::<
+        PendingMonitorKey,
+        PendingMonitorChange,
+    >::new()));
+    let timeout = Rc::new(RefCell::new(None::<glib::SourceId>));
+    let numbered = Rc::new(RefCell::new(NumberedNames::default()));
+    let awaited = RefCell::new(AwaitedHints::default());
+    let pending_for_change = pending.clone();
+    let timeout_for_change = timeout.clone();
+    let cancelled_for_change = cancelled.clone();
+    let watched = location.clone();
+    let handler = monitor
+        .monitor()
+        .connect_changed(move |_, file, other_file, event| {
+            let change = pending_monitor_change(
+                &watched,
+                location_for_file(file),
+                other_file.and_then(location_for_file),
+                event,
+            );
+            let Some(change) =
+                change.and_then(|change| visible_monitor_change(&watched, change, include_hidden))
+            else {
+                return;
+            };
+            // Arrivals are learned even while a rescan is pending.
+            let admission = numbered.borrow_mut().admit(&change, event);
+            match admission {
+                NumberedAdmission::Queue => {}
+                NumberedAdmission::Skip => return,
+                NumberedAdmission::Read(folder) => {
+                    read_numbered_names(
+                        numbered.clone(),
+                        folder,
+                        notify.clone(),
+                        cancelled_for_change.clone(),
+                    );
+                    return;
+                }
+            }
+            if !awaited.borrow_mut().needs_query(&change, event) {
+                return;
+            }
+            if pending_for_change.borrow().contains_key(&None) {
+                return;
+            }
+            if matches!(change, PendingMonitorChange::Rescan) {
+                tracing::debug!(?event, "directory monitor requested reconciliation");
+            }
+            let key = match &change {
+                PendingMonitorChange::Upsert(location) | PendingMonitorChange::Remove(location) => {
+                    Some(location.clone())
+                }
+                PendingMonitorChange::Move { to, .. } => Some(to.clone()),
+                PendingMonitorChange::Rescan => None,
+            };
+            if !queue_monitor_change(&mut pending_for_change.borrow_mut(), key, change) {
+                return;
+            }
+
+            if timeout_for_change.borrow().is_none() {
+                let pending = pending_for_change.clone();
+                let timeout = timeout_for_change.clone();
+                let notify = notify.clone();
+                let cancelled = cancelled_for_change.clone();
+                let source = glib::timeout_add_local_once(Duration::from_millis(100), move || {
+                    timeout.take();
+                    flush_monitor_changes(&pending, &notify, &cancelled);
+                });
+                timeout_for_change.replace(Some(source));
+            }
+        });
+
+    ConnectedMonitor {
+        handler: Some(handler),
+        cancelled,
+        pending,
+        timeout,
+        monitor,
     }
 }
 

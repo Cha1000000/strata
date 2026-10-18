@@ -1352,13 +1352,14 @@ impl crate::services::FileSource for TrashlessLocal {
         crate::adapters::LocalFileSource.fill_metadata(request, emit)
     }
 
-    fn watch(
+    fn start_watch(
         &self,
         location: Location,
         include_hidden: bool,
         notify: Rc<dyn Fn(crate::services::DirectoryChange)>,
-    ) -> Option<crate::services::LoadHandle> {
-        crate::adapters::LocalFileSource.watch(location, include_hidden, notify)
+        report: Rc<dyn Fn(crate::services::Watching)>,
+    ) -> crate::services::LoadHandle {
+        crate::adapters::LocalFileSource.start_watch(location, include_hidden, notify, report)
     }
 }
 

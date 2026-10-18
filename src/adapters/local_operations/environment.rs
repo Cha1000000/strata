@@ -22,6 +22,12 @@ pub(super) trait FsEnvironment: Send + Sync {
     fn trash(&self, path: &Path, cancellable: &gio::Cancellable) -> Result<bool, glib::Error>;
     fn mount_type(&self, fd: BorrowedFd<'_>) -> Option<(MountType, MountSite)>;
     fn folder_mount(&self, path: &Path, id: Option<u64>) -> Option<(u64, MountType)>;
+    fn watch_folder(
+        &self,
+        folder: &gio::File,
+        flags: gio::FileMonitorFlags,
+    ) -> Result<gio::FileMonitor, glib::Error>;
+    fn unwatch_folder(&self, folder: &gio::File, monitor: gio::FileMonitor);
     /// udev's `ID_FS_TYPE`, when the device has a database record.
     fn device_format(&self, fd: BorrowedFd<'_>) -> Result<Option<String>, Errno>;
     fn rotational(&self, fd: BorrowedFd<'_>) -> Option<bool>;
@@ -99,6 +105,20 @@ impl FsEnvironment for System {
             }
         };
         mount_of(id).map(|(mount_type, _)| (id, mount_type))
+    }
+
+    fn watch_folder(
+        &self,
+        folder: &gio::File,
+        flags: gio::FileMonitorFlags,
+    ) -> Result<gio::FileMonitor, glib::Error> {
+        assert_off_main_thread();
+        folder.monitor_directory(flags, gio::Cancellable::NONE)
+    }
+
+    fn unwatch_folder(&self, _folder: &gio::File, monitor: gio::FileMonitor) {
+        assert_off_main_thread();
+        monitor.cancel();
     }
 
     fn device_format(&self, fd: BorrowedFd<'_>) -> Result<Option<String>, Errno> {

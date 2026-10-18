@@ -4329,15 +4329,19 @@ impl crate::services::FileSource for Listing {
         crate::adapters::LocalFileSource.enumerate(request, emit)
     }
 
-    fn watch(
+    fn start_watch(
         &self,
         location: Location,
         include_hidden: bool,
         notify: Rc<dyn Fn(crate::services::DirectoryChange)>,
-    ) -> Option<crate::services::LoadHandle> {
-        self.watched
-            .then(|| crate::adapters::LocalFileSource.watch(location, include_hidden, notify))
-            .flatten()
+        report: Rc<dyn Fn(crate::services::Watching)>,
+    ) -> crate::services::LoadHandle {
+        if self.watched {
+            crate::adapters::LocalFileSource.start_watch(location, include_hidden, notify, report)
+        } else {
+            report(crate::services::Watching::Unavailable);
+            crate::services::LoadHandle::new(|| {})
+        }
     }
 }
 

@@ -39,7 +39,7 @@ use crate::{
     services::{
         CancelledOperation, CompressRequest, DirectoryEvent, Evidence, ExtractRequest,
         IdentityTraits, InodeNumbers, LoadHandle, MetadataOutcome, MetadataRequest, MetadataUpdate,
-        MountToken, UndoCopyRequest, UndoMoveRequest,
+        MountToken, StampAnswer, UndoCopyRequest, UndoMoveRequest, Watching,
     },
 };
 

@@ -528,18 +528,22 @@ pub(crate) fn authority(uri: &str) -> String {
     }
 }
 
+pub(crate) fn admit_remote(authority: String, class: Class) -> Result<Admitted, Unanswered> {
+    let target = Target {
+        key: LaneKey::Remote(authority),
+        path: None,
+        lexical: None,
+    };
+    admitted(&mut lanes(), target, class)
+}
+
 /// GVfs backends that stop answering keep GIO's asynchronous calls waiting forever.
 pub(crate) async fn run_remote<T: Outcome>(
     authority: String,
     class: Class,
     call: impl Future<Output = T>,
 ) -> Result<T, Unanswered> {
-    let target = Target {
-        key: LaneKey::Remote(authority),
-        path: None,
-        lexical: None,
-    };
-    let admitted = admitted(&mut lanes(), target, class)?;
+    let admitted = admit_remote(authority, class)?;
     let answer = call.await;
     admitted.progress().answered(&answer);
     Ok(answer)

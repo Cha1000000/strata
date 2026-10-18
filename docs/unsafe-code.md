@@ -95,6 +95,26 @@ then. Written streams are never closed this way, as their close reports lost dat
 regression test closes a probe enumerator and stream let go after and during a call, and
 requires each close to run off the UI thread.
 
+### Folder monitors made off the UI thread
+
+Location: `src/adapters/local_files/monitors.rs::BareMonitor`
+
+Reason: GLib's inotify backend creates, cancels and delivers every directory monitor under one
+global lock, and creating one walks the folder's path, which blocks on a mount that stopped
+answering. Strata therefore creates and cancels monitors on one serial worker thread, which
+`gio::FileMonitor` (not `Send`) cannot cross without a wrapper.
+
+`BareMonitor` is the only value that moves a monitor between that worker and the UI thread, and
+it never carries a signal handler: the worker creates the monitor with no thread-default main
+context pushed, so its events reach the default main context, and sends it bare. The UI thread
+connects the `changed` handler, whose closure owns `Rc` state. On release the UI thread first
+disconnects that handler, removes the coalescing timeout and drops the state, and only then drops
+the bare monitor, whose `Drop` hands it to the worker for `g_file_monitor_cancel` and the final
+unref. So no closure, and no `Rc` it captured, can be freed off the UI thread; GObject reference
+counts and the cancel are thread-safe. A monitor created after its request was dropped is sent back
+to the worker the same way and never gets a handler. If the worker cannot take it, the monitor is
+leaked rather than cancelled on the UI thread.
+
 ### Browser sandbox fork boundary
 
 Location: `src/sandbox/browser/process.rs::{fork,namespaces}`

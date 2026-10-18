@@ -505,6 +505,21 @@ fn a_directory_reporting_changes_against_itself_is_not_its_own_child() {
     );
 }
 
+/// Waits on the main context, which the caller holds, until the monitor is live.
+fn live_watch(location: Location, notify: Rc<dyn Fn(DirectoryChange)>) -> LoadHandle {
+    let reported = Rc::new(Cell::new(None));
+    let report = reported.clone();
+    let handle = LocalFileSource.start_watch(
+        location,
+        false,
+        notify,
+        Rc::new(move |watching| report.set(Some(watching))),
+    );
+    drain_until(|| reported.get().is_some());
+    assert_eq!(reported.get(), Some(Watching::Live));
+    handle
+}
+
 #[test]
 fn change_events_for_unnamed_temporary_files_are_ignored() -> Result<(), Box<dyn Error>> {
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
@@ -517,13 +532,10 @@ fn change_events_for_unnamed_temporary_files_are_ignored() -> Result<(), Box<dyn
     fs::write(&listed, b"a")?;
     let changes: Rc<RefCell<Vec<DirectoryChange>>> = Rc::default();
     let collected = changes.clone();
-    let handle = LocalFileSource
-        .watch(
-            Location::local(&directory),
-            false,
-            Rc::new(move |change| collected.borrow_mut().push(change)),
-        )
-        .expect("the native location should be monitored");
+    let handle = live_watch(
+        Location::local(&directory),
+        Rc::new(move |change| collected.borrow_mut().push(change)),
+    );
     let write_unnamed = || -> Result<Location, Box<dyn Error>> {
         let mut file = fs::OpenOptions::new()
             .read(true)
@@ -584,13 +596,10 @@ fn a_file_linked_into_place_is_queried_once() -> Result<(), Box<dyn Error>> {
     fs::create_dir_all(&directory)?;
     let changes: Rc<RefCell<Vec<DirectoryChange>>> = Rc::default();
     let collected = changes.clone();
-    let handle = LocalFileSource
-        .watch(
-            Location::local(&directory),
-            false,
-            Rc::new(move |change| collected.borrow_mut().push(change)),
-        )
-        .expect("the native location should be monitored");
+    let handle = live_watch(
+        Location::local(&directory),
+        Rc::new(move |change| collected.borrow_mut().push(change)),
+    );
     let linked = Location::local(directory.join("linked.txt"));
     let queries = || {
         changes
@@ -635,13 +644,10 @@ fn sustained_native_monitor_bursts_flush_without_rescanning() {
     fs::create_dir_all(&directory).expect("the fixture directory should be created");
     let changes: Rc<RefCell<Vec<DirectoryChange>>> = Rc::new(RefCell::new(Vec::new()));
     let collected = changes.clone();
-    let handle = LocalFileSource
-        .watch(
-            Location::local(&directory),
-            false,
-            Rc::new(move |change| collected.borrow_mut().push(change)),
-        )
-        .expect("the native location should be monitored");
+    let handle = live_watch(
+        Location::local(&directory),
+        Rc::new(move |change| collected.borrow_mut().push(change)),
+    );
 
     for index in 0..1_000 {
         fs::write(
@@ -692,13 +698,10 @@ fn watching_a_uri_location_reports_created_entries() {
 
     let changes: Rc<RefCell<Vec<DirectoryChange>>> = Rc::new(RefCell::new(Vec::new()));
     let collected = changes.clone();
-    let handle = LocalFileSource
-        .watch(
-            Location::uri(uri.as_str()),
-            false,
-            Rc::new(move |change| collected.borrow_mut().push(change)),
-        )
-        .expect("a URI location should be monitored");
+    let handle = live_watch(
+        Location::uri(uri.as_str()),
+        Rc::new(move |change| collected.borrow_mut().push(change)),
+    );
 
     fs::write(directory.join("arrival.txt"), b"arrived")
         .expect("the fixture file should be written");
@@ -1364,6 +1367,148 @@ fn a_local_folder_is_validated_on_a_worker_while_the_window_keeps_running()
     drain_until(|| answer.borrow().is_some());
 
     assert_eq!(answer.take(), Some(Ok(())));
+    Ok(())
+}
+
+struct ReportsDrop(std::sync::mpsc::Sender<std::thread::ThreadId>);
+
+impl Drop for ReportsDrop {
+    fn drop(&mut self) {
+        let _ = self.0.send(std::thread::current().id());
+    }
+}
+
+type Threads = std::sync::Arc<std::sync::Mutex<Vec<std::thread::ThreadId>>>;
+
+fn thread_recorder() -> (Threads, Box<dyn FnMut() + Send>) {
+    let threads = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let recorded = threads.clone();
+    let record = Box::new(move || {
+        recorded
+            .lock()
+            .expect("thread record")
+            .push(std::thread::current().id());
+    });
+    (threads, record)
+}
+
+#[test]
+fn a_monitor_is_made_and_released_on_a_worker_while_the_window_keeps_running()
+-> Result<(), Box<dyn Error>> {
+    use crate::adapters::{FsOp, FsQuirks, Quirks};
+
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    for dropped_while_parked in [false, true] {
+        let root = tempfile::tempdir()?;
+        let folder = root.path().join("folder");
+        fs::create_dir(&folder)?;
+        let gate = Gate::default();
+        let (released_on, released) = thread_recorder();
+        let scope = FsQuirks::install(
+            root.path(),
+            Quirks {
+                before: vec![(FsOp::Watch, "folder", 0, gate.racer())],
+                after: vec![(FsOp::Unwatch, "folder", 0, released)],
+                ..Quirks::default()
+            },
+        );
+        let (dropped, drops) = std::sync::mpsc::channel();
+        let probe = ReportsDrop(dropped);
+        let changes: Rc<RefCell<Vec<DirectoryChange>>> = Rc::default();
+        let collected = changes.clone();
+        let reported = Rc::new(Cell::new(None));
+        let report = reported.clone();
+        let ticked = Rc::new(Cell::new(false));
+        let tick = ticked.clone();
+        glib::timeout_add_local_once(Duration::from_millis(10), move || tick.set(true));
+
+        let handle = LocalFileSource.start_watch(
+            Location::local(&folder),
+            false,
+            Rc::new(move |change| {
+                let _held = &probe;
+                collected.borrow_mut().push(change);
+            }),
+            Rc::new(move |watching| report.set(Some(watching))),
+        );
+        drain_until(|| gate.reached() && ticked.get());
+        assert_eq!(reported.get(), None, "parked");
+        if dropped_while_parked {
+            drop(handle);
+            gate.release();
+        } else {
+            gate.release();
+            drain_until(|| reported.get().is_some());
+            assert_eq!(reported.get(), Some(Watching::Live));
+            fs::write(folder.join("arrival"), b"arrived")?;
+            drain_until(|| !changes.borrow().is_empty());
+            drop(handle);
+            assert_eq!(
+                drops.try_recv().ok(),
+                Some(std::thread::current().id()),
+                "the handler's state goes with the handle, on this thread"
+            );
+        }
+        drain_until(|| scope.count(FsOp::Unwatch) == 1);
+
+        assert_eq!(reported.get().is_none(), dropped_while_parked);
+        assert!(
+            !released_on
+                .lock()
+                .expect("thread record")
+                .contains(&std::thread::current().id()),
+            "dropped while parked: {dropped_while_parked}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn a_folder_on_a_mount_that_stopped_answering_gets_no_monitor() -> Result<(), Box<dyn Error>> {
+    use crate::adapters::{FsOp, FsQuirks, Quirks, mount_lanes};
+
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let root = tempfile::tempdir()?;
+    let folder = root.path().join("folder");
+    fs::create_dir(&folder)?;
+    let gate = Gate::default();
+    let scope = FsQuirks::install(
+        root.path(),
+        Quirks {
+            before: vec![(FsOp::FolderStamp, "folder", 0, gate.racer())],
+            ..Quirks::default()
+        },
+    );
+    let watch = || {
+        let reported = Rc::new(Cell::new(None));
+        let report = reported.clone();
+        let handle = LocalFileSource.start_watch(
+            Location::local(&folder),
+            false,
+            Rc::new(|_| {}),
+            Rc::new(move |watching| report.set(Some(watching))),
+        );
+        drain_until(|| reported.get().is_some());
+        (reported.get(), handle)
+    };
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let load = load_into(&events, &folder, 1);
+    drain_until(|| mount_lanes::responsiveness(&folder) == mount_lanes::Responsiveness::Stalled);
+
+    let (stalled, _unwatched) = watch();
+    gate.release();
+    drain_until(|| outcome_of(&events, 1).is_some());
+    let (answering, _watched) = watch();
+
+    assert_eq!(
+        (stalled, answering, scope.count(FsOp::Watch)),
+        (Some(Watching::Unavailable), Some(Watching::Live), 1)
+    );
+    drop(load);
     Ok(())
 }
 

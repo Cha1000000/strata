@@ -1381,8 +1381,9 @@ fn a_chosen_folder_is_checked_off_the_ui_thread_while_the_chooser_stays_open() {
                             .browser()
                             .column_snapshot(0)
                             .is_some_and(|snapshot| !snapshot.loading)
+                            && chooser.browser().column_has_monitor(0)
                     },
-                    &format!("{case}: the chosen folder's listing"),
+                    &format!("{case}: the chosen folder's listing and monitor"),
                 );
                 let write_only = matches!(chosen, ChosenFolder::WriteOnly);
                 if write_only {
@@ -2235,6 +2236,7 @@ fn cancelling_an_operation_keeps_the_live_local_listing_visible() {
                     view.browser()
                         .column_snapshot(0)
                         .is_some_and(|snapshot| !snapshot.loading && snapshot.count == 1)
+                        && view.browser().column_has_monitor(0)
                 },
                 "the local listing",
             );
@@ -2564,6 +2566,7 @@ fn transfer_reveal_waits_for_the_live_monitor_instead_of_reloading() {
                     view.browser()
                         .column_snapshot(0)
                         .is_some_and(|snapshot| !snapshot.loading && snapshot.count == 0)
+                        && view.browser().column_has_monitor(0)
                 },
                 "the empty local destination",
             );
@@ -2619,6 +2622,7 @@ fn revealing_an_already_open_local_destination_keeps_its_live_listing() {
                     view.browser()
                         .column_snapshot(0)
                         .is_some_and(|snapshot| !snapshot.loading && snapshot.count == 1)
+                        && view.browser().column_has_monitor(0)
                 },
                 "the local destination listing",
             );

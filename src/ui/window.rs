@@ -1142,7 +1142,7 @@ pub(super) struct SidebarState {
     place_rows: RefCell<Vec<(Location, gtk::Button)>>,
     trash_contents: Cell<TrashContents>,
     trash_menu_rows: RefCell<Option<TrashMenuRows>>,
-    trash_monitor: RefCell<Option<gio::FileMonitor>>,
+    trash_monitor: RefCell<Option<crate::services::LoadHandle>>,
     trash_probe_running: Cell<bool>,
     trash_probe_pending: Cell<bool>,
     local_only: bool,
@@ -1285,9 +1285,7 @@ impl SidebarView {
 
     pub(super) fn disconnect(&self) {
         unparent_sidebar_popovers(self.state.widget.upcast_ref());
-        if let Some(monitor) = self.state.trash_monitor.take() {
-            monitor.cancel();
-        }
+        self.state.trash_monitor.take();
         self.bookmark_watch.take();
         for handler in self.handlers.take() {
             self.state.volume_monitor.disconnect(handler);
@@ -1989,14 +1987,8 @@ impl SidebarState {
         if self.trash_monitor.borrow().is_some() {
             return;
         }
-        let trash = gio::File::for_uri("trash:///");
-        let Ok(monitor) =
-            trash.monitor_directory(gio::FileMonitorFlags::NONE, gio::Cancellable::NONE)
-        else {
-            return;
-        };
         let weak = Rc::downgrade(self);
-        monitor.connect_changed(move |_, _, _, _| {
+        let monitor = crate::adapters::watch_folder(&Location::uri("trash:///"), move || {
             if let Some(state) = weak.upgrade() {
                 state.refresh_trash_contents();
             }

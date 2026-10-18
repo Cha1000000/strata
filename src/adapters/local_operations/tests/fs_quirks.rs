@@ -86,6 +86,9 @@ pub(crate) enum Op {
     ListChunks,
     FolderStamp,
     Access,
+    /// Creating a folder's change monitor.
+    Watch,
+    Unwatch,
     CreateNode,
     OpenFifo,
     CreateReadonly,
@@ -2188,6 +2191,48 @@ impl FsEnvironment for Scoped {
                 .map(|(mount_type, _)| (u64::MAX - scope.id, mount_type)),
             None => System.folder_mount(path, id),
         }
+    }
+
+    fn watch_folder(
+        &self,
+        folder: &gio::File,
+        flags: gio::FileMonitorFlags,
+    ) -> Result<gio::FileMonitor, glib::Error> {
+        assert_off_main_thread();
+        let path = folder.path();
+        let Some((scope, path)) = path
+            .as_deref()
+            .and_then(|path| Some((scope_containing(path)?, path)))
+        else {
+            return System.watch_folder(folder, flags);
+        };
+        let mut watched = None;
+        let ran = scope.run(Op::Watch, &[path.file_name().unwrap_or_default()], |_| {
+            watched = Some(System.watch_folder(folder, flags));
+            Ok(())
+        });
+        match (ran, watched) {
+            (Ok(()), Some(watched)) => watched,
+            (Err(errno), _) => Err(glib::Error::new(
+                gio::io_error_from_errno(errno.raw_os_error()),
+                &errno.to_string(),
+            )),
+            (Ok(()), None) => unreachable!("a call that ran watched the folder"),
+        }
+    }
+
+    fn unwatch_folder(&self, folder: &gio::File, monitor: gio::FileMonitor) {
+        assert_off_main_thread();
+        let path = folder.path();
+        if let Some((scope, path)) = path
+            .as_deref()
+            .and_then(|path| Some((scope_containing(path)?, path)))
+        {
+            let _ = scope.run(Op::Unwatch, &[path.file_name().unwrap_or_default()], |_| {
+                Ok(())
+            });
+        }
+        System.unwatch_folder(folder, monitor);
     }
 
     fn device_format(&self, fd: BorrowedFd<'_>) -> Result<Option<String>, Errno> {

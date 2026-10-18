@@ -242,6 +242,17 @@ pub(in crate::adapters) fn stamp_mount(path: &Path, stamp: &FolderStamp) -> Opti
     })
 }
 
+pub(in crate::adapters) fn watch_folder(
+    folder: &gio::File,
+    flags: gio::FileMonitorFlags,
+) -> Result<gio::FileMonitor, gtk::glib::Error> {
+    fs().watch_folder(folder, flags)
+}
+
+pub(in crate::adapters) fn unwatch_folder(folder: &gio::File, monitor: gio::FileMonitor) {
+    fs().unwatch_folder(folder, monitor);
+}
+
 pub(in crate::adapters) fn list_folder(
     path: &Path,
     each: &mut dyn FnMut(Listed) -> ControlFlow<()>,

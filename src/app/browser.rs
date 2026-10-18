@@ -17,9 +17,10 @@ use crate::{
         ItemIdentity, LoadHandle, LocationValidationError, MetadataOutcome, MetadataRequest,
         MoveRecord, NameMode, OperationEvent, OperationProvider, OperationRequestId,
         PasswordFailure, PasteItem, PasteRequest, PlacedSnapshot, RenameRecord, RenameRequest,
-        RenamedItem, RequestId, RestoreRequest, RestoreSource, RestoreTrashItem, TransferConflict,
-        TransferReport, TrashedOriginal, UndoCopyRequest, UndoMergeRequest, UndoMoveItem,
-        UndoMoveRequest, UndoRenameRequest, validate_basename, validate_uri_credentials,
+        RenamedItem, RequestId, RestoreRequest, RestoreSource, RestoreTrashItem, StampAnswer,
+        TransferConflict, TransferReport, TrashedOriginal, UndoCopyRequest, UndoMergeRequest,
+        UndoMoveItem, UndoMoveRequest, UndoRenameRequest, Watching, validate_basename,
+        validate_uri_credentials,
     },
 };
 
@@ -1068,11 +1069,27 @@ struct SortingLoad {
     deltas: Vec<(Location, DirectoryChange)>,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum MonitorState {
+    #[default]
+    Pending,
+    Active,
+    Unavailable,
+}
+
+#[derive(Default)]
+struct ColumnMonitor {
+    requested: bool,
+    state: Rc<Cell<MonitorState>>,
+    watch: Option<LoadHandle>,
+    gap_check: Rc<RefCell<Option<LoadHandle>>>,
+}
+
 pub struct Browser {
     source: Rc<dyn FileSource>,
     state: RefCell<NavigationState>,
     loads: RefCell<Vec<LoadHandle>>,
-    monitors: RefCell<Vec<Option<LoadHandle>>>,
+    monitors: RefCell<Vec<ColumnMonitor>>,
     /// The depth-0 folder's identity when it loaded, which finds it after a rename.
     root_identity: RefCell<Option<(Location, ItemIdentity)>>,
     /// The current step of the one departure check that runs at a time.
@@ -4026,10 +4043,9 @@ impl Browser {
         {
             self.root_identity.take();
         }
-        let handle = self.request_directory(depth, location.clone(), request_id);
+        self.monitors.borrow_mut().push(ColumnMonitor::default());
+        let handle = self.request_directory(depth, location, request_id);
         self.loads.borrow_mut().push(handle);
-        let monitor = self.install_monitor(depth, location);
-        self.monitors.borrow_mut().push(monitor);
     }
 
     /// A folder that vanished before its reload keeps the identity it loaded with.
@@ -4042,7 +4058,26 @@ impl Browser {
         }
     }
 
-    fn install_monitor(self: &Rc<Self>, depth: usize, location: Location) -> Option<LoadHandle> {
+    /// Requested once the folder answered, so it is never made on a mount that stopped.
+    pub(super) fn watch_answered_folder(
+        self: &Rc<Self>,
+        request_id: RequestId,
+        baseline: Option<&DirectoryStamp>,
+    ) {
+        let Some(depth) = self.state.borrow().depth_for_request(request_id) else {
+            return;
+        };
+        let Some(location) = self.location_at(depth) else {
+            return;
+        };
+        let (state, gap_check) = {
+            let mut monitors = self.monitors.borrow_mut();
+            let Some(monitor) = monitors.get_mut(depth).filter(|monitor| !monitor.requested) else {
+                return;
+            };
+            monitor.requested = true;
+            (monitor.state.clone(), monitor.gap_check.clone())
+        };
         let weak: Weak<Self> = Rc::downgrade(self);
         let watched = location.clone();
         let notify = Rc::new(move |change| {
@@ -4050,8 +4085,68 @@ impl Browser {
                 browser.handle_directory_change(depth, &watched, change);
             }
         });
-        self.source
-            .watch(location, self.preferences.get().show_hidden, notify)
+        let weak: Weak<Self> = Rc::downgrade(self);
+        let (reported, checked, baseline) = (state.clone(), location.clone(), baseline.cloned());
+        let report = Rc::new(
+            move |watching| match (watching, weak.upgrade(), &baseline) {
+                (Watching::Unavailable, ..) => reported.set(MonitorState::Unavailable),
+                (Watching::Live, Some(browser), Some(baseline)) => {
+                    browser.check_monitor_gap(depth, &reported, &gap_check, &checked, baseline);
+                }
+                (Watching::Live, ..) => reported.set(MonitorState::Active),
+            },
+        );
+        let watch =
+            self.source
+                .start_watch(location, self.preferences.get().show_hidden, notify, report);
+        if let Some(monitor) = self
+            .monitors
+            .borrow_mut()
+            .get_mut(depth)
+            .filter(|monitor| Rc::ptr_eq(&monitor.state, &state))
+        {
+            monitor.watch = Some(watch);
+        }
+    }
+
+    /// Changes made between the load's stamp and the monitor going live reached no one, so
+    /// the monitor counts only once they are listed.
+    fn check_monitor_gap(
+        self: &Rc<Self>,
+        depth: usize,
+        state: &Rc<Cell<MonitorState>>,
+        gap_check: &Rc<RefCell<Option<LoadHandle>>>,
+        location: &Location,
+        baseline: &DirectoryStamp,
+    ) {
+        let weak: Weak<Self> = Rc::downgrade(self);
+        let (state, checked, baseline) = (state.clone(), location.clone(), baseline.clone());
+        let probe = self.source.probe_stamp(
+            location.clone(),
+            Rc::new(move |answer| {
+                state.set(MonitorState::Active);
+                let Some(browser) = weak.upgrade() else {
+                    return;
+                };
+                let current = browser
+                    .monitors
+                    .borrow()
+                    .get(depth)
+                    .is_some_and(|monitor| Rc::ptr_eq(&monitor.state, &state))
+                    && browser.location_at(depth).as_ref() == Some(&checked);
+                let moved = match answer {
+                    StampAnswer::Stamp(stamp) => {
+                        stamp.moved_since(&baseline) || baseline.may_hide_changes()
+                    }
+                    StampAnswer::Missing => true,
+                    _ => false,
+                };
+                if current && moved {
+                    browser.refresh_column_preserving_entries(depth);
+                }
+            }),
+        );
+        gap_check.replace(Some(probe));
     }
 
     fn apply_owned_batch(self: &Rc<Self>, request_id: RequestId, entries: Vec<FileEntry>) {
@@ -4549,7 +4644,7 @@ impl Browser {
         self.monitors
             .borrow()
             .get(depth)
-            .is_some_and(Option::is_some)
+            .is_some_and(|monitor| monitor.state.get() == MonitorState::Active)
     }
 
     fn refresh_columns_at_or_below(self: &Rc<Self>, roots: &HashSet<Location>) {

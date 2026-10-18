@@ -36,7 +36,8 @@ use crate::{
     },
     services::{
         DirectoryChange, DirectoryEvent, DirectoryRequest, FileSource, ItemIdentity, LoadHandle,
-        LocationValidationError, MetadataRequest, RemoteDownload, download_remote, remote_file_url,
+        LocationValidationError, MetadataRequest, RemoteDownload, StampAnswer, Watching,
+        download_remote, remote_file_url,
     },
 };
 
@@ -231,12 +232,13 @@ impl FileSource for ChooserFileSource {
         })
     }
 
-    fn watch(
+    fn start_watch(
         &self,
         location: Location,
         include_hidden: bool,
         notify: Rc<dyn Fn(DirectoryChange)>,
-    ) -> Option<LoadHandle> {
+        report: Rc<dyn Fn(Watching)>,
+    ) -> LoadHandle {
         let filter = self.filter.clone();
         let directory_only = self.directory_only.clone();
         let root_limit = self.root_limit.clone();
@@ -249,19 +251,27 @@ impl FileSource for ChooserFileSource {
             ));
         });
         let (Some(root), Some(path)) = (self.root_limit.clone(), location.native_path()) else {
-            return self.source.watch(location, include_hidden, notify);
+            return self
+                .source
+                .start_watch(location, include_hidden, notify, report);
         };
         let path = path.to_owned();
         let source = self.source.clone();
-        Some(after_containment(root, path, move |answer| {
-            answer
-                .ok()
-                .and_then(|()| source.watch(location, include_hidden, notify))
-        }))
+        after_containment(root, path, move |answer| match answer {
+            Ok(()) => Some(source.start_watch(location, include_hidden, notify, report)),
+            Err(_) => {
+                report(Watching::Unavailable);
+                None
+            }
+        })
     }
 
     fn confined_to(&self) -> Option<&Path> {
         self.root_limit.as_deref()
+    }
+
+    fn probe_stamp(&self, location: Location, emit: Rc<dyn Fn(StampAnswer)>) -> LoadHandle {
+        self.source.probe_stamp(location, emit)
     }
 
     fn find_by_identity(

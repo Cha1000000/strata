@@ -118,10 +118,11 @@ fn a_confined_chooser_checks_paths_at_once_and_where_folders_lead_on_a_worker() 
             let watch = |path: &Path| {
                 let changes = Rc::new(RefCell::new(Vec::new()));
                 let sink = changes.clone();
-                let handle = source.watch(
+                let handle = source.start_watch(
                     Location::local(path),
                     false,
                     Rc::new(move |change| sink.borrow_mut().push(change)),
+                    Rc::new(|_| {}),
                 );
                 (changes, handle)
             };

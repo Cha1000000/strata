@@ -411,10 +411,6 @@ pub struct DirectoryStamp {
 }
 
 impl DirectoryStamp {
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the monitor's gap check compares stamps")
-    )]
     pub fn moved_since(&self, baseline: &Self) -> bool {
         self.modified != baseline.modified
             || self.changed != baseline.changed
@@ -424,13 +420,31 @@ impl DirectoryStamp {
                 _ => true,
             }
     }
+
+    /// On coarse times, a change soon after the last one may have left them as they were.
+    pub fn may_hide_changes(&self) -> bool {
+        let Some(window) = self.coarse_window else {
+            return false;
+        };
+        let latest = self
+            .changed
+            .map_or(self.modified, |changed| changed.max(self.modified));
+        u64::try_from(latest.0)
+            .ok()
+            .and_then(|seconds| {
+                (SystemTime::UNIX_EPOCH + Duration::new(seconds, latest.1)).checked_add(window)
+            })
+            .is_none_or(|settled| self.read_at < settled)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Watching {
+    Live,
+    Unavailable,
 }
 
 #[derive(Clone, Debug)]
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the monitor's gap check reads stamps")
-)]
 pub enum StampAnswer {
     Stamp(DirectoryStamp),
     Missing,
@@ -614,10 +628,26 @@ pub trait FileSource {
         None
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the monitor's gap check calls it")
-    )]
+    /// Starts a monitor without blocking; `report` says once whether it went live.
+    fn start_watch(
+        &self,
+        location: Location,
+        include_hidden: bool,
+        notify: Rc<dyn Fn(DirectoryChange)>,
+        report: Rc<dyn Fn(Watching)>,
+    ) -> LoadHandle {
+        match self.watch(location, include_hidden, notify) {
+            Some(watch) => {
+                report(Watching::Live);
+                watch
+            }
+            None => {
+                report(Watching::Unavailable);
+                LoadHandle::new(|| {})
+            }
+        }
+    }
+
     fn probe_stamp(&self, _location: Location, emit: Rc<dyn Fn(StampAnswer)>) -> LoadHandle {
         emit(StampAnswer::Unsupported);
         LoadHandle::new(|| {})
