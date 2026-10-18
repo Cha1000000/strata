@@ -1729,7 +1729,7 @@ fn listing_request(path: &Path, max_entries: usize) -> DirectoryRequest {
 fn load_stamp(events: &[DirectoryEvent]) -> Option<DirectoryStamp> {
     events.iter().find_map(|event| match event {
         DirectoryEvent::Stamp { request_id, stamp } if *request_id == RequestId(1) => {
-            Some(stamp.clone())
+            Some((**stamp).clone())
         }
         _ => None,
     })
@@ -1881,9 +1881,14 @@ fn a_stamp_classifies_the_folder_by_its_mount_not_its_path() -> Result<(), Box<d
 
     for no_mount_ids in [false, true] {
         let root = tempfile::tempdir()?;
-        let (home, nas) = (root.path().join("home"), root.path().join("nas"));
+        let (home, nas, ssh) = (
+            root.path().join("home"),
+            root.path().join("nas"),
+            root.path().join("ssh"),
+        );
         fs::create_dir_all(home.join("documents"))?;
         fs::create_dir_all(nas.join("music"))?;
+        fs::create_dir_all(&ssh)?;
         std::os::unix::fs::symlink(nas.join("music"), home.join("music"))?;
         let _home = FsQuirks::install(
             &home,
@@ -1897,6 +1902,13 @@ fn a_stamp_classifies_the_folder_by_its_mount_not_its_path() -> Result<(), Box<d
             Quirks {
                 no_mount_ids,
                 ..Quirks::nfs42()
+            },
+        );
+        let _ssh = FsQuirks::install(
+            &ssh,
+            Quirks {
+                no_mount_ids,
+                ..Quirks::sshfs()
             },
         );
 
@@ -1915,6 +1927,15 @@ fn a_stamp_classifies_the_folder_by_its_mount_not_its_path() -> Result<(), Box<d
                 linked.identity.map(|identity| identity.traits.numbers),
             ),
             (false, true, true, Some(InodeNumbers::Kept)),
+            "no mount ids: {no_mount_ids}"
+        );
+        assert_eq!(
+            (
+                documents.daemon_cache,
+                music.daemon_cache,
+                stamp(&ssh).ok_or("no stamp")?.daemon_cache
+            ),
+            (None, None, Some(Duration::from_secs(21))),
             "no mount ids: {no_mount_ids}"
         );
         assert!(music.mount.is_some(), "no mount ids: {no_mount_ids}");

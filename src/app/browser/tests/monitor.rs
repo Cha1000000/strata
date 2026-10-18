@@ -962,7 +962,7 @@ impl FileSource for LateMonitorSource {
         self.loads.borrow_mut().push(request.location.clone());
         emit(DirectoryEvent::Stamp {
             request_id: request.id,
-            stamp: self.baseline.clone(),
+            stamp: Box::new(self.baseline.clone()),
         });
         emit(DirectoryEvent::Finished {
             request_id: request.id,
@@ -1160,7 +1160,7 @@ fn a_monitor_is_requested_only_once_the_folder_answered() {
                 vec![
                     DirectoryEvent::Stamp {
                         request_id,
-                        stamp: stamp_at(100, Duration::from_secs(1_000)),
+                        stamp: Box::new(stamp_at(100, Duration::from_secs(1_000))),
                     },
                     finished(request_id, true),
                 ]

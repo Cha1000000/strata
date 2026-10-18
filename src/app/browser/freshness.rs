@@ -54,8 +54,9 @@ pub struct FreshnessInput {
 struct Listing {
     request: RequestId,
     started: Instant,
-    stamp: Option<DirectoryStamp>,
+    stamp: Option<(DirectoryStamp, Instant)>,
     background: bool,
+    confirming: bool,
 }
 
 #[derive(Default)]
@@ -63,6 +64,8 @@ pub(super) struct ColumnFreshness {
     baseline: Option<DirectoryStamp>,
     listing: Option<Listing>,
     next_due: Option<Instant>,
+    confirm_at: Option<Instant>,
+    confirming: bool,
     relist: bool,
     unchanged: u32,
     checking: bool,
@@ -153,7 +156,7 @@ impl Browser {
                 .as_mut()
                 .filter(|listing| listing.request == request_id)
         {
-            listing.stamp = Some(stamp.clone());
+            listing.stamp = Some((stamp.clone(), self.freshness_now()));
         }
     }
 
@@ -166,11 +169,13 @@ impl Browser {
         if let Some(column) = self.column_freshness(depth) {
             let mut column = column.borrow_mut();
             column.relist = false;
+            let confirming = std::mem::take(&mut column.confirming) && background;
             column.listing = Some(Listing {
                 request: request_id,
                 started: self.freshness_now(),
                 stamp: None,
                 background,
+                confirming,
             });
         }
     }
@@ -199,10 +204,16 @@ impl Browser {
         };
         {
             let mut column = column.borrow_mut();
-            if let Some(stamp) = self
-                .end_listing(depth, &mut column)
-                .and_then(|listing| listing.stamp)
+            if let Some(Listing {
+                stamp: Some((stamp, stamped)),
+                confirming,
+                ..
+            }) = self.end_listing(depth, &mut column)
             {
+                column.confirm_at = stamp
+                    .confirm_after()
+                    .filter(|_| !confirming)
+                    .map(|after| stamped + after);
                 column.baseline = Some(stamp);
             }
         }
@@ -212,13 +223,19 @@ impl Browser {
 
     pub(super) fn note_listing_kept(self: &Rc<Self>, depth: usize) {
         if let Some(column) = self.column_freshness(depth) {
-            self.end_listing(depth, &mut column.borrow_mut());
+            let mut column = column.borrow_mut();
+            if self
+                .end_listing(depth, &mut column)
+                .is_some_and(|listing| listing.confirming)
+            {
+                column.confirm_at = column.next_due;
+            }
         }
         self.reschedule_freshness();
         self.start_relists();
     }
 
-    fn awaits_check(&self, depth: usize, column: &ColumnFreshness) -> bool {
+    fn watched(&self, depth: usize, column: &ColumnFreshness) -> bool {
         !column.checking
             && !matches!(
                 self.state
@@ -228,7 +245,6 @@ impl Browser {
                     .map(|column| &column.load_state),
                 Some(LoadState::Error(_))
             )
-            && column.next_due.is_some()
             && column
                 .baseline
                 .as_ref()
@@ -282,24 +298,37 @@ impl Browser {
                 let Some(location) = self.location_at(depth) else {
                     continue;
                 };
-                let mount = {
+                let due = |at: Option<Instant>| at.is_some_and(|at| at <= now);
+                let (check, confirm, mount) = {
                     let column = column.borrow();
-                    if !self.awaits_check(depth, &column)
-                        || column.next_due.is_some_and(|due| due > now)
-                    {
+                    if !self.watched(depth, &column) {
                         continue;
                     }
-                    column
-                        .baseline
-                        .as_ref()
-                        .and_then(|baseline| baseline.mount.clone())
+                    (due(column.next_due), due(column.confirm_at), column.mount())
                 };
-                if !self.settled(depth) || Self::operation_touches(&location) {
-                    let mut column = column.borrow_mut();
-                    column.next_due = Some(now + self.check_interval(column.unchanged));
+                if !check && !confirm {
                     continue;
                 }
-                column.borrow_mut().checking = true;
+                let later =
+                    |column: &ColumnFreshness| Some(now + self.check_interval(column.unchanged));
+                if !self.settled(depth) || Self::operation_touches(&location) {
+                    let mut column = column.borrow_mut();
+                    if check {
+                        column.next_due = later(&column);
+                    }
+                    if confirm {
+                        column.confirm_at = later(&column);
+                    }
+                    continue;
+                }
+                {
+                    let mut column = column.borrow_mut();
+                    if confirm {
+                        column.confirm_at = None;
+                        column.confirming = true;
+                    }
+                    column.checking = true;
+                }
                 let checked = (depth, location, Rc::downgrade(&column));
                 match groups
                     .iter_mut()
@@ -366,7 +395,7 @@ impl Browser {
             return false;
         }
         let now = self.freshness_now();
-        let finding = {
+        let (finding, confirming) = {
             let mut column = column.borrow_mut();
             let finding = match (&answer, column.baseline.as_ref()) {
                 (StampAnswer::Stamp(stamp), Some(baseline)) if stamp.replaced(baseline) => {
@@ -391,11 +420,22 @@ impl Browser {
                 Finding::Unreachable => Some(now + UNREACHABLE_RETRY),
                 _ => Some(now + self.check_interval(column.unchanged)),
             };
-            finding
+            (finding, std::mem::take(&mut column.confirming))
         };
         let free = self.settled(depth) && !Self::operation_touches(location);
-        if matches!(finding, Finding::Stale) && free && !self.freshness_held() {
-            column.borrow_mut().relist = true;
+        let relist = match finding {
+            Finding::Stale => true,
+            Finding::Unchanged => confirming,
+            _ => false,
+        };
+        {
+            let mut column = column.borrow_mut();
+            if relist && free && !self.freshness_held() {
+                column.relist = true;
+                column.confirming = confirming && matches!(finding, Finding::Unchanged);
+            } else if confirming {
+                column.confirm_at = column.next_due;
+            }
         }
         let departed = match finding {
             Finding::Inaccessible if free && !self.freshness_held() => {
@@ -450,6 +490,9 @@ impl Browser {
             {
                 return Some(depth);
             }
+            if std::mem::take(&mut column.confirming) {
+                column.confirm_at = column.next_due;
+            }
         }
         None
     }
@@ -462,8 +505,8 @@ impl Browser {
                     .enumerate()
                     .filter_map(|(depth, column)| {
                         let column = column.borrow();
-                        self.awaits_check(depth, &column)
-                            .then_some(column.next_due)
+                        self.watched(depth, &column)
+                            .then(|| column.next_due.into_iter().chain(column.confirm_at).min())
                             .flatten()
                     })
                     .min()

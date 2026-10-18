@@ -123,6 +123,7 @@ fn identified_stamp(identity: ItemIdentity) -> DirectoryStamp {
         mount: Some(MountToken::Native(1)),
         outside_writers: false,
         coarse_window: None,
+        daemon_cache: None,
         read_at: std::time::UNIX_EPOCH,
     }
 }
@@ -151,7 +152,7 @@ impl FolderIdentities {
         if let Some(identity) = self.0.borrow().get(&request.location).copied() {
             emit(DirectoryEvent::Stamp {
                 request_id: request.id,
-                stamp: identified_stamp(identity),
+                stamp: Box::new(identified_stamp(identity)),
             });
         }
     }

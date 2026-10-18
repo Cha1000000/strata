@@ -28,7 +28,7 @@ impl Browser {
         match event {
             DirectoryEvent::Stamp { request_id, stamp } => {
                 self.watch_answered_folder(request_id, Some(&stamp));
-                self.record_stamp(request_id, stamp);
+                self.record_stamp(request_id, *stamp);
             }
             DirectoryEvent::ListingDigest { .. } => {}
             DirectoryEvent::Batch {

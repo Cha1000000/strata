@@ -242,6 +242,7 @@ pub(in crate::adapters) struct StampMount {
     pub identity: IdentityTraits,
     pub outside_writers: bool,
     pub coarse_window: Option<Duration>,
+    pub daemon_cache: Option<Duration>,
 }
 
 pub(in crate::adapters) fn stamp_mount(path: &Path, stamp: &FolderStamp) -> Option<StampMount> {
@@ -251,6 +252,7 @@ pub(in crate::adapters) fn stamp_mount(path: &Path, stamp: &FolderStamp) -> Opti
         identity: mount_type.identity(),
         outside_writers: mount_type.outside_writers(),
         coarse_window: mount_type.coarse_times(None).map(|coarse| coarse.window),
+        daemon_cache: mount_type.daemon_cache(),
     })
 }
 

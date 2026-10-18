@@ -329,6 +329,7 @@ fn directory_stamp(path: &Path, stamp: &FolderStamp, read_at: SystemTime) -> Dir
             .or(mount.as_ref().map(|mount| mount.id))
             .map(MountToken::Native),
         outside_writers: mount.as_ref().is_some_and(|mount| mount.outside_writers),
+        daemon_cache: mount.as_ref().and_then(|mount| mount.daemon_cache),
         coarse_window: mount
             .and_then(|mount| mount.coarse_window)
             .or_else(|| CoarseTimes::whole_second(stamp.modified.1).map(|coarse| coarse.window)),
@@ -354,6 +355,7 @@ fn remote_stamp(uri: &str, info: &gio::FileInfo, read_at: SystemTime) -> Directo
         mount: Some(MountToken::Remote(mount_lanes::authority(uri))),
         outside_writers: !matches!(scheme.as_str(), "admin" | "mtp" | "gphoto2"),
         coarse_window: CoarseTimes::whole_second(modified.1).map(|coarse| coarse.window),
+        daemon_cache: None,
         read_at,
     }
 }
@@ -999,7 +1001,10 @@ fn enumerate_native(
             Ok(outcome) => outcome,
             Err(stamp) => {
                 if let Ok(stamp) = stamp {
-                    emit(DirectoryEvent::Stamp { request_id, stamp });
+                    emit(DirectoryEvent::Stamp {
+                        request_id,
+                        stamp: Box::new(stamp),
+                    });
                     stamp_sent = true;
                 }
                 work.await
@@ -1037,10 +1042,7 @@ fn enumerate_native(
                 can_delete,
             } => {
                 if !stamp_sent {
-                    emit(DirectoryEvent::Stamp {
-                        request_id,
-                        stamp: *stamp,
-                    });
+                    emit(DirectoryEvent::Stamp { request_id, stamp });
                 }
                 let total_entries = entries.len();
                 if !entries.is_empty() {
@@ -1530,11 +1532,11 @@ impl FileSource for LocalFileSource {
                         beat();
                         emit(DirectoryEvent::Stamp {
                             request_id,
-                            stamp: remote_stamp(
+                            stamp: Box::new(remote_stamp(
                                 location.uri_value().unwrap_or_default(),
                                 &info,
                                 read_at,
-                            ),
+                            )),
                         });
                     }
                     Ok(Err(_)) => {}

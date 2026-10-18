@@ -408,6 +408,7 @@ pub struct DirectoryStamp {
     pub outside_writers: bool,
     /// How long after a change another change may leave the stamp as it was.
     pub coarse_window: Option<Duration>,
+    pub daemon_cache: Option<Duration>,
     pub read_at: SystemTime,
 }
 
@@ -426,20 +427,34 @@ impl DirectoryStamp {
         }
     }
 
+    fn settles_at(&self, window: Duration) -> Option<SystemTime> {
+        let latest = self
+            .changed
+            .map_or(self.modified, |changed| changed.max(self.modified));
+        u64::try_from(latest.0).ok().and_then(|seconds| {
+            (SystemTime::UNIX_EPOCH + Duration::new(seconds, latest.1)).checked_add(window)
+        })
+    }
+
     /// On coarse times, a change soon after the last one may have left them as they were.
     pub fn may_hide_changes(&self) -> bool {
         let Some(window) = self.coarse_window else {
             return false;
         };
-        let latest = self
-            .changed
-            .map_or(self.modified, |changed| changed.max(self.modified));
-        u64::try_from(latest.0)
-            .ok()
-            .and_then(|seconds| {
-                (SystemTime::UNIX_EPOCH + Duration::new(seconds, latest.1)).checked_add(window)
-            })
+        self.settles_at(window)
             .is_none_or(|settled| self.read_at < settled)
+    }
+
+    pub fn confirm_after(&self) -> Option<Duration> {
+        let whole_seconds =
+            self.modified.1 == 0 && self.changed.is_none_or(|changed| changed.1 == 0);
+        let window = self
+            .coarse_window
+            .filter(|_| whole_seconds && self.may_hide_changes())?;
+        let settles = self.settles_at(window).map_or(window, |settled| {
+            settled.duration_since(self.read_at).unwrap_or_default()
+        });
+        Some(settles.max(self.daemon_cache.unwrap_or_default()))
     }
 }
 
@@ -464,7 +479,7 @@ pub enum DirectoryEvent {
     /// Comes before the first batch.
     Stamp {
         request_id: RequestId,
-        stamp: DirectoryStamp,
+        stamp: Box<DirectoryStamp>,
     },
     Batch {
         request_id: RequestId,

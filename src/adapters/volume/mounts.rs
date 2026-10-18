@@ -246,7 +246,14 @@ impl MountType {
     pub(crate) fn outside_writers(&self) -> bool {
         self.fs_type != "fuseblk" && is_remote_fs_type(&self.fs_type)
     }
+
+    pub(crate) fn daemon_cache(&self) -> Option<Duration> {
+        (self.fs_type == "fuse.sshfs").then_some(SSHFS_DAEMON_CACHE)
+    }
 }
+
+/// sshfs's default `dcache_timeout` of 20 s, on a whole-second clock.
+pub(crate) const SSHFS_DAEMON_CACHE: Duration = Duration::from_secs(21);
 
 pub(crate) const FAT32_MAX_FILE_SIZE: u64 = u32::MAX as u64;
 

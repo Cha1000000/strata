@@ -118,10 +118,7 @@ impl Folders {
             });
             return false;
         };
-        emit(DirectoryEvent::Stamp {
-            request_id,
-            stamp: *stamp,
-        });
+        emit(DirectoryEvent::Stamp { request_id, stamp });
         emit(DirectoryEvent::Batch {
             request_id,
             entries: names
@@ -381,6 +378,7 @@ fn stamp(mount: u64, inode: u64, outside_writers: bool) -> DirectoryStamp {
         mount: Some(MountToken::Native(mount)),
         outside_writers,
         coarse_window: None,
+        daemon_cache: None,
         read_at: UNIX_EPOCH + Duration::from_secs(1_000),
     }
 }
@@ -1052,4 +1050,118 @@ fn an_unreachable_folder_keeps_its_listing_and_is_retried_later() {
         browser.state.borrow().columns[0].load_state,
         LoadState::Ready
     );
+}
+
+fn coarse(
+    modified: (i64, u32),
+    read_at_millis: u64,
+    coarse_window: Option<u64>,
+    daemon_cache: Option<u64>,
+) -> DirectoryStamp {
+    DirectoryStamp {
+        modified,
+        changed: Some(modified),
+        coarse_window: coarse_window.map(Duration::from_secs),
+        daemon_cache: daemon_cache.map(Duration::from_secs),
+        read_at: UNIX_EPOCH + Duration::from_millis(read_at_millis),
+        ..network(1)
+    }
+}
+
+#[test]
+fn a_coarse_baseline_is_confirmed_once_after_its_window() {
+    let mut failures = Vec::new();
+    for (row, stamp, fails_once, confirmed_at) in [
+        (
+            "whole seconds",
+            coarse((1_000, 0), 1_000_500, Some(2), None),
+            false,
+            Some(2),
+        ),
+        (
+            "whole seconds whose confirmation fails once",
+            coarse((1_000, 0), 1_000_500, Some(2), None),
+            true,
+            Some(2),
+        ),
+        (
+            "whole seconds behind a daemon's cache",
+            coarse((1_000, 0), 1_000_500, Some(3), Some(21)),
+            false,
+            Some(21),
+        ),
+        (
+            "whole seconds read after their window",
+            coarse((1_000, 0), 1_005_000, Some(2), None),
+            false,
+            None,
+        ),
+        (
+            "coarse ticks with fractions",
+            coarse((1_000, 10_000_000), 1_000_500, Some(2), None),
+            false,
+            None,
+        ),
+        (
+            "fine-grained",
+            coarse((1_000, 5), 1_000_500, None, None),
+            false,
+            None,
+        ),
+    ] {
+        let source = Rc::new(Folders::default());
+        let share = source.add("/net/share", stamp, Some(Watching::Live));
+        let (browser, clock) = browser_on(&source);
+        browser.navigate(share.clone());
+        source.fail_loads.set(fails_once);
+
+        let loads: Vec<usize> = (1..=40)
+            .map(|second| {
+                clock.tick_at(second);
+                if source.loads_of(&share) > 1 {
+                    source.fail_loads.set(false);
+                }
+                source.loads_of(&share)
+            })
+            .collect();
+
+        let first_relist = loads
+            .iter()
+            .position(|loads| *loads > 1)
+            .map(|index| index as u64 + 1);
+        let got = (first_relist, loads.last().copied());
+        let expected = (
+            confirmed_at,
+            Some(1 + usize::from(confirmed_at.is_some()) + usize::from(fails_once)),
+        );
+        if got != expected {
+            failures.push(format!("{row}: got {got:?}, expected {expected:?}"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn a_confirmation_and_a_check_due_together_on_one_mount_both_go_through() {
+    let source = Rc::new(Folders::default());
+    let share = source.add(
+        "/net/share",
+        coarse((1_000, 0), 1_000_500, Some(3), Some(15)),
+        Some(Watching::Live),
+    );
+    let sub = source.add("/net/share/sub", network(2), Some(Watching::Live));
+    let (browser, clock) = browser_on(&source);
+    browser.navigate(share.clone());
+    browser.show_child(0, sub.clone());
+    source.change(&sub, &["listed", "added elsewhere"]);
+    source.hold_checks.set(true);
+    source.hold_loads.set(true);
+
+    clock.tick_at(15);
+    source.answer_held_checks();
+    source.finish_held_loads();
+    source.finish_held_loads();
+
+    assert_eq!(source.loads_of(&share), 2);
+    assert_eq!(names_at(&browser, 1), ["added elsewhere", "listed"]);
 }
