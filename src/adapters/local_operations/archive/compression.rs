@@ -8,10 +8,10 @@ mod tests;
 use super::super::{
     copy_engine,
     fs_ops::{Entry, EntryStat, OffMain, fs},
-    mount_profile::{name_limit, name_rules},
+    mount_profile::{self, name_limit, name_rules},
     names::{fix::split_extension, numbered_name},
     native_fs::{
-        LocalFileIdentity, local_directory_children, open_local_child_directory,
+        self, LocalFileIdentity, local_directory_children, open_local_child_directory,
         open_local_parent_directory,
     },
     owed::{Deletion, Owed},
@@ -114,7 +114,7 @@ enum Strategy {
     New,
     Numbered,
     /// Replaces only the item seen before encoding.
-    Replace(Replacement, LocalFileIdentity),
+    Replace(Replacement, EntryStat),
 }
 
 #[derive(Clone, Copy)]
@@ -201,7 +201,7 @@ impl Publication {
                     } else {
                         self.without_trash(&parent)?
                     };
-                    (mode, Strategy::Replace(replacement, stat.identity))
+                    (mode, Strategy::Replace(replacement, stat))
                 }
             },
         };
@@ -291,7 +291,7 @@ impl Publication {
         strategy: Strategy,
         cancelled: &AtomicBool,
     ) -> Result<Published, ArchiveError> {
-        let (replacement, identity) = match strategy {
+        let (replacement, recorded) = match strategy {
             Strategy::New => {
                 return stage
                     .place(OsStr::new(&self.name))
@@ -299,37 +299,42 @@ impl Publication {
                     .map_err(|error| self.creation_failed(placement_reason(error)));
             }
             Strategy::Numbered => return self.publish_numbered(stage),
-            Strategy::Replace(replacement, identity) => (replacement, identity),
+            Strategy::Replace(replacement, recorded) => (replacement, recorded),
         };
         let Some(stat) = self.existing(&stage.parent)? else {
             return self.publish(stage, Strategy::New, cancelled);
         };
-        if stat.identity != identity {
+        if !native_fs::unchanged(
+            mount_profile::identity_at(fs(), stage.parent.as_fd()),
+            recorded.identity,
+            recorded.file_attributes(),
+            &stat,
+        ) {
             return Err(archive_failed(crate::i18n::tr(
                 "The target changed while the operation was in progress",
             )));
         }
         match replacement {
-            Replacement::Trash => self.publish_after_trash(stage, identity, cancelled),
-            Replacement::Exchange => self.publish_by_exchange(stage, identity),
-            Replacement::Aside => self.publish_after_set_aside(stage, identity),
+            Replacement::Trash => self.publish_after_trash(stage, (&recorded, &stat), cancelled),
+            Replacement::Exchange => self.publish_by_exchange(stage, &stat),
+            Replacement::Aside => self.publish_after_set_aside(stage, &stat),
         }
     }
 
     fn publish_by_exchange(
         &self,
         stage: &Stage,
-        identity: LocalFileIdentity,
+        current: &EntryStat,
     ) -> Result<Published, ArchiveError> {
         let target = Entry::new(&*stage.parent, OsStr::new(&self.name));
         match exchange(fs(), stage.entry(), target) {
             Ok(true) => Ok(self.published(Displaced::Aside(DisplacedOriginal {
                 parent: OffMain::new(stage.parent.clone()),
                 name: stage.name.clone(),
-                identity,
+                identity: current.identity,
             }))),
             Ok(false) => match set_aside_if_safe(fs(), stage.parent.as_fd(), false) {
-                Ok(Some(_)) => self.publish_after_set_aside(stage, identity),
+                Ok(Some(_)) => self.publish_after_set_aside(stage, current),
                 Ok(None) => Err(self.cannot_replace_safely()),
                 Err(error) => Err(self.creation_failed(placement_reason(error))),
             },
@@ -340,9 +345,10 @@ impl Publication {
     fn publish_after_trash(
         &self,
         stage: &Stage,
-        identity: LocalFileIdentity,
+        (recorded, current): (&EntryStat, &EntryStat),
         cancelled: &AtomicBool,
     ) -> Result<Published, ArchiveError> {
+        let identity = current.identity;
         match trash_verified(
             Entry::new(&*stage.parent, OsStr::new(&self.name)),
             &self.destination.join(&self.name),
@@ -352,7 +358,7 @@ impl Publication {
             Ok(()) => {}
             Err(error) if error.is_unsupported() => {
                 let replacement = self.without_trash(&stage.parent)?;
-                return self.publish(stage, Strategy::Replace(replacement, identity), cancelled);
+                return self.publish(stage, Strategy::Replace(replacement, *recorded), cancelled);
             }
             Err(error) => {
                 return Err(archive_failed(rust_i18n::t!(
@@ -387,14 +393,15 @@ impl Publication {
     fn publish_after_set_aside(
         &self,
         stage: &Stage,
-        identity: LocalFileIdentity,
+        current: &EntryStat,
     ) -> Result<Published, ArchiveError> {
         let target = OsStr::new(&self.name);
         let aside = match set_aside(
             fs(),
             Entry::new(&*stage.parent, target),
             HiddenName::Replaced,
-            identity,
+            current.identity,
+            current.kept_attributes(),
         ) {
             Ok(aside) => aside,
             Err(RenameFailure::Place(PlaceError::Unsupported)) => {

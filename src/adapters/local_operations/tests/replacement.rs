@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: MIT
 
-use std::os::unix::fs::MetadataExt;
+use std::{os::unix::fs::MetadataExt, sync::atomic::Ordering};
 
 use rustix::{fs::FsWord, io::Errno};
 
 use super::super::{Copying, StageContent, publish_staged_replacement};
-use super::fs_quirks::{Exchange, Op, Racer, Support, Trash};
+use super::fs_quirks::{Births, Exchange, Op, Racer, Support, Trash};
 use super::*;
 use crate::{adapters::volume::mount_capabilities, services::ReplacedOriginal};
 
@@ -520,6 +520,90 @@ fn replacement_stops_before_exchanging_a_substituted_target() -> Result<(), Box<
 }
 
 #[test]
+fn a_target_is_replaced_only_while_its_mount_still_knows_it() -> Result<(), Box<dyn Error>> {
+    #[derive(Clone, Copy, Debug)]
+    enum Meanwhile {
+        Evicted,
+        EvictedOnceNumbersWent,
+        ReplacedAlikeOnceNumbersWent,
+        ReplacedAlikeAndEvictedOnceNumbersWent,
+    }
+    let _serial = serial()?;
+    let samba = || Quirks {
+        births: Births::MadeUp,
+        ..Quirks::cifs()
+    };
+    let rows: [(Preset, Meanwhile, bool); 4] = [
+        (Quirks::vfat, Meanwhile::Evicted, true),
+        (samba, Meanwhile::EvictedOnceNumbersWent, true),
+        (samba, Meanwhile::ReplacedAlikeOnceNumbersWent, false),
+        (
+            samba,
+            Meanwhile::ReplacedAlikeAndEvictedOnceNumbersWent,
+            false,
+        ),
+    ];
+    for (preset, meanwhile, replaced) in rows {
+        let row = format!("{:?}, {meanwhile:?}", preset().mount_type);
+        let root = tempfile::tempdir()?;
+        let share = root.path().join("share");
+        fs::create_dir(&share)?;
+        let (source, target) = (share.join("source"), share.join("target"));
+        let arrival = root.path().join("arrival");
+        fs::write(&source, b"new")?;
+        fs::write(&target, b"old")?;
+        fs::write(&arrival, b"OLD")?;
+        let hour_before = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)?
+            .as_secs()
+            - 3600;
+        for file in [&target, &arrival] {
+            set_times(file, hour_before, 0)?;
+        }
+        let happened = Arc::new(AtomicBool::new(false));
+        let (at, done) = (share.clone(), happened.clone());
+        let racer: Racer = Box::new(move || {
+            let target = at.join("target");
+            let numbers_went = || super::fs_quirks::autodisable_serverino(&at);
+            let replaced_alike = || fs::rename(&arrival, &target).is_ok();
+            let evicted = || super::fs_quirks::evict(&target);
+            let happened = match meanwhile {
+                Meanwhile::Evicted => evicted(),
+                Meanwhile::EvictedOnceNumbersWent => numbers_went() && evicted(),
+                Meanwhile::ReplacedAlikeOnceNumbersWent => numbers_went() && replaced_alike(),
+                Meanwhile::ReplacedAlikeAndEvictedOnceNumbersWent => {
+                    numbers_went() && replaced_alike() && evicted()
+                }
+            };
+            done.store(happened, Ordering::Release);
+        });
+        let _scope = FsQuirks::install(
+            &share,
+            Quirks {
+                trash: Trash::Unsupported,
+                before: vec![(Op::OpenSource, "source", 0, racer)],
+                ..preset()
+            },
+        );
+
+        let (result, _) = replace_reporting(&source, &target, false);
+
+        assert!(happened.load(Ordering::Acquire), "{row}");
+        if replaced {
+            assert!(result.is_ok(), "{row}: {result:?}");
+            assert_eq!(fs::read(&target)?, b"new", "{row}");
+            assert_eq!(names(&share)?, ["source", "target"], "{row}");
+        } else {
+            let error = result.expect_err("the target changed");
+            assert!(error.to_string().contains("changed"), "{row}: {error}");
+            assert_eq!(fs::read(&target)?, b"OLD", "{row}");
+            assert_eq!(names(&share)?, ["source", "target"], "{row}");
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn cancelled_replacement_move_tracks_the_modified_source_and_target_roots()
 -> Result<(), Box<dyn Error>> {
     let _serial = serial()?;
@@ -781,24 +865,54 @@ fn rejected_exchange_falls_back_to_aside_and_is_remembered() -> Result<(), Box<d
 #[test]
 fn a_failed_publication_puts_the_original_back() -> Result<(), Box<dyn Error>> {
     let _serial = serial()?;
-    for (directory, quirks, op) in [
-        (false, Quirks::default(), Op::Rename),
-        (true, Quirks::default(), Op::Rename),
-        (false, Quirks::without_rename_flags(), Op::Link),
+    let vfat = Quirks {
+        exchange: Exchange::Rejected,
+        ..Quirks::vfat()
+    };
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum Item {
+        File,
+        Folder,
+        Symlink,
+    }
+    for (item, quirks, op, evicted) in [
+        (Item::File, Quirks::default(), Op::Rename, false),
+        (Item::Folder, Quirks::default(), Op::Rename, false),
+        (Item::File, Quirks::without_rename_flags(), Op::Link, false),
+        (Item::File, vfat, Op::Rename, true),
+        (Item::Symlink, Quirks::sshfs(), Op::Rename, false),
     ] {
+        let directory = item == Item::Folder;
         let root = tempfile::tempdir()?;
         let source = root.path().join("source");
         let target = root.path().join("target");
         write_item(&source, directory, b"new")?;
-        write_item(&target, directory, b"old")?;
+        match item {
+            Item::Symlink => std::os::unix::fs::symlink("old", &target)?,
+            _ => write_item(&target, directory, b"old")?,
+        }
         let original = inode(&target)?;
+        let folder = root.path().to_path_buf();
+        let evicting: Racer = Box::new(move || {
+            let aside = names(&folder)
+                .expect("list the folder")
+                .into_iter()
+                .find(|name| name.starts_with(".strata-replaced-"))
+                .expect("the original is aside");
+            assert!(super::fs_quirks::evict(&folder.join(aside)));
+        });
         // The first match sets the original aside; the second publishes.
         let quirks = FsQuirks::install(
             root.path(),
             without_trash(
-                NFS_SUPER_MAGIC,
+                quirks.fs_type.unwrap_or(NFS_SUPER_MAGIC),
                 Quirks {
                     fail: vec![(op, "target", 1, Errno::IO)],
+                    before: if evicted {
+                        vec![(op, "target", 1, evicting)]
+                    } else {
+                        Vec::new()
+                    },
                     ..quirks
                 },
             ),
@@ -806,12 +920,16 @@ fn a_failed_publication_puts_the_original_back() -> Result<(), Box<dyn Error>> {
 
         let (result, replaced) = replace_reporting(&source, &target, false);
 
-        assert!(result.is_err(), "{directory} {op:?}");
+        assert!(result.is_err(), "{item:?} {op:?}");
         assert!(replaced.is_empty());
         assert!(quirks.used_name(".strata-replaced-*"));
-        assert_eq!(inode(&target)?, original);
-        assert_eq!(read_item(&target, directory)?, b"old");
-        assert_eq!(names(root.path())?, ["source", "target"]);
+        assert_eq!(names(root.path())?, ["source", "target"], "{item:?} {op:?}");
+        if item == Item::Symlink {
+            assert_eq!(fs::read_link(&target)?, Path::new("old"));
+        } else {
+            assert_eq!(inode(&target)?, original);
+            assert_eq!(read_item(&target, directory)?, b"old");
+        }
     }
     Ok(())
 }

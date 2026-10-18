@@ -230,11 +230,10 @@ pub(crate) struct CachedListing {
 
 /// Samba makes a creation time up from a file's times; the client keeps the first one it saw.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-#[expect(dead_code, reason = "the Replace target rows make them up")]
 pub(crate) enum Births {
     #[default]
     Reported,
-    MadeUpElsewhere,
+    /// For entries not created through the seam.
     MadeUp,
 }
 
@@ -1375,12 +1374,7 @@ impl Scope {
             stat.ctime = stat.ctime.min(tick);
             stat.identity.birth = stat.identity.birth.map(|birth| birth.min(tick));
         }
-        let made_up = match state.quirks.births {
-            Births::Reported => false,
-            Births::MadeUpElsewhere => !state.created.contains(&key),
-            Births::MadeUp => true,
-        };
-        if made_up {
+        if state.quirks.births == Births::MadeUp && !state.created.contains(&key) {
             let earliest = stat.atime.min(stat.mtime).min(stat.ctime);
             stat.identity.birth = Some(*state.made_up.entry(key).or_insert(earliest));
         }
@@ -1810,6 +1804,14 @@ impl Scope {
         state.cached.remove(&to);
         if let Some(cached) = cached {
             state.cached.insert(to.clone(), cached);
+        }
+        let renumbered = state.renumbered.remove(&from);
+        let displaced_renumbered = state.renumbered.remove(&to);
+        if renumbered {
+            state.renumbered.insert(to.clone());
+        }
+        if displaced_renumbered && flags.contains(RenameFlags::EXCHANGE) {
+            state.renumbered.insert(from.clone());
         }
         let moved = state.link_names.remove(&from);
         let displaced = state.link_names.remove(&to);

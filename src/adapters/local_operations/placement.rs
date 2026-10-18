@@ -26,11 +26,11 @@ use super::{
 };
 use crate::{
     adapters::volume::{
-        Family, LONGEST_NAME_NTFS_3G_RENAMES_OVER, MountCapabilities, MountKey,
-        learn_mount_capability, mount_capabilities,
+        LONGEST_NAME_NTFS_3G_RENAMES_OVER, MountCapabilities, MountKey, learn_mount_capability,
+        mount_capabilities,
     },
     model::hidden_names::HiddenName,
-    services::InodeNumbers,
+    services::{Attributes, InodeNumbers},
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -126,10 +126,7 @@ impl<'a> Mount<'a> {
     /// Whether an inode number still found at a name proves the entry is
     /// the one it was read from, as the mount's type tells.
     fn numbers_kept(&self) -> bool {
-        let capabilities = mount_profile::known(self.fs, self.dir, self.key());
-        let family = capabilities.family.unwrap_or(Family::Other);
-        mount_profile::identity_now(self.fs, self.dir, family, capabilities.identity).numbers
-            == InodeNumbers::Kept
+        mount_profile::identity_at(self.fs, self.dir).numbers == InodeNumbers::Kept
     }
 
     fn learn(&self, learn: impl FnOnce(&mut MountCapabilities)) {
@@ -561,13 +558,13 @@ pub(super) fn remove_if_unchanged(
     flags: AtFlags,
 ) -> bool {
     let unchanged = |current: &EntryStat| {
-        current.identity == identity
+        if current.identity == identity {
+            return true;
+        }
+        let traits = mount_profile::identity_at(fs, entry.dir);
+        native_fs::unchanged(traits, identity, None, current)
             || (flags.contains(AtFlags::REMOVEDIR)
-                && native_fs::birth_reset_folder(
-                    mount_profile::known_mount(fs, entry.dir).1.identity,
-                    identity,
-                    current,
-                ))
+                && native_fs::birth_reset_folder(traits, identity, current))
     };
     fs.stat(entry, true)
         .is_ok_and(|current| unchanged(&current))
@@ -855,6 +852,7 @@ pub(super) struct SetAside {
     pub name: OsString,
     /// As observed after the move; a recreated symlink is a new inode.
     pub identity: LocalFileIdentity,
+    pub attributes: Option<Attributes>,
 }
 
 pub(super) fn move_aside(
@@ -862,12 +860,13 @@ pub(super) fn move_aside(
     from: Entry<'_>,
     to: Entry<'_>,
     expected: LocalFileIdentity,
-) -> Result<LocalFileIdentity, PlaceError> {
+    attributes: Option<Attributes>,
+) -> Result<(LocalFileIdentity, Option<Attributes>), PlaceError> {
     if place(fs, from, to, Some(expected))? != Placed::RecreatedSymlink {
-        return Ok(expected);
+        return Ok((expected, attributes));
     }
     fs.stat(to, true)
-        .map(|stat| stat.identity)
+        .map(|stat| (stat.identity, stat.kept_attributes()))
         .map_err(|_| PlaceError::Unconfirmed)
 }
 
@@ -876,13 +875,18 @@ pub(super) fn set_aside(
     entry: Entry<'_>,
     hidden: HiddenName,
     expected: LocalFileIdentity,
+    attributes: Option<Attributes>,
 ) -> Result<SetAside, RenameFailure> {
     let mut reserved = OsString::new();
     reserve_hidden_name(hidden, |name| {
         reserved = name.to_os_string();
-        move_aside(fs, entry, at(entry.dir, name), expected)
+        move_aside(fs, entry, at(entry.dir, name), expected, attributes)
     })
-    .map(|(name, identity)| SetAside { name, identity })
+    .map(|(name, (identity, attributes))| SetAside {
+        name,
+        identity,
+        attributes,
+    })
     .map_err(|error| match error {
         PlaceError::Unconfirmed => RenameFailure::Stranded {
             temporary: reserved,
@@ -899,13 +903,36 @@ pub(super) fn put_back(
     aside: &SetAside,
     name: &OsStr,
 ) -> Result<(), PlaceError> {
-    place(
+    place_back(
         fs,
         at(dir, &aside.name),
         at(dir, name),
-        Some(aside.identity),
+        aside.identity,
+        aside.attributes,
     )
     .map(drop)
+}
+
+pub(super) fn place_back(
+    fs: &dyn FsOps,
+    from: Entry<'_>,
+    to: Entry<'_>,
+    identity: LocalFileIdentity,
+    attributes: Option<Attributes>,
+) -> Result<Placed, PlaceError> {
+    let current = match fs.stat(from, false) {
+        Ok(current) => current,
+        Err(_) => return place(fs, from, to, Some(identity)),
+    };
+    if !native_fs::unchanged(
+        mount_profile::identity_at(fs, from.dir),
+        identity,
+        attributes,
+        &current,
+    ) {
+        return Err(PlaceError::Changed);
+    }
+    place(fs, from, to, Some(current.identity))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1057,7 +1084,7 @@ pub(super) fn rename_in_place(
     let Some(identity) = alias_of(fs, from, to) else {
         return Err(RenameFailure::Place(PlaceError::Exists));
     };
-    let aside = set_aside(fs, from, HiddenName::Rename, identity)?;
+    let aside = set_aside(fs, from, HiddenName::Rename, identity, None)?;
     let parked = at(from.dir, &aside.name);
     // The SMB client keeps answering for the lookup of `to` for about a
     // second; revalidating drops it.

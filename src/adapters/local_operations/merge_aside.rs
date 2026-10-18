@@ -28,7 +28,7 @@ use super::{
     placement::{self, Feasibility, PlaceError},
     placement_reason, run_blocking, was_cancelled,
 };
-use crate::model::hidden_names::HiddenName;
+use crate::{model::hidden_names::HiddenName, services::Attributes};
 
 struct Folder {
     name: OsString,
@@ -49,6 +49,7 @@ struct Moved {
     aside_parent: Arc<OwnedFd>,
     name: OsString,
     identity: LocalFileIdentity,
+    attributes: Option<Attributes>,
 }
 
 pub(super) struct MergeAside {
@@ -197,11 +198,12 @@ impl MergeAside {
         if original.is_directory() {
             return Err(failed(PlaceError::Changed));
         }
-        let identity = placement::move_aside(
+        let (identity, attributes) = placement::move_aside(
             fs(),
             entry,
             Entry::new(&*aside_parent, file_name),
             original.identity,
+            original.kept_attributes(),
         )
         .map_err(failed)?;
         self.moved.push(Moved {
@@ -210,6 +212,7 @@ impl MergeAside {
             aside_parent,
             name: file_name.to_os_string(),
             identity,
+            attributes,
         });
         Ok(())
     }
@@ -255,13 +258,15 @@ impl MergeAside {
         for moved in std::mem::take(&mut self.moved).into_iter().rev() {
             let aside = Entry::new(&*moved.aside_parent, &moved.name);
             let original = Entry::new(&*moved.parent, &moved.name);
-            let mut put = placement::place(fs(), aside, original, Some(moved.identity));
+            let put_back =
+                || placement::place_back(fs(), aside, original, moved.identity, moved.attributes);
+            let mut put = put_back();
             if put == Err(PlaceError::Exists)
                 && placed
                     .get(&moved.path)
                     .is_some_and(|copy| copy.discard(fs(), original))
             {
-                put = placement::place(fs(), aside, original, Some(moved.identity));
+                put = put_back();
             }
             if let Err(error) = put {
                 failure.get_or_insert(error);
@@ -298,7 +303,7 @@ impl MergeAside {
                 return true;
             }
             let aside = Entry::new(&*moved.aside_parent, &moved.name);
-            match placement::place(fs(), aside, original, Some(moved.identity)) {
+            match placement::place_back(fs(), aside, original, moved.identity, moved.attributes) {
                 Ok(_) => false,
                 // `Exists` too: a name taken since the check was not replaced by the merge.
                 Err(error) => {

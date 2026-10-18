@@ -10,7 +10,7 @@ use super::super::fixtures::{
 use super::{ArchiveError, inspect_archive_sources, process_umask, write_staged_archive};
 use crate::{
     adapters::local_operations::tests::fs_quirks::{
-        FsQuirks, Op, Preset, Quirks, Trash, recreated,
+        FsQuirks, Op, Preset, Quirks, Trash, evict, recreated,
     },
     services::{ArchiveFormat, ReplacedOriginal, TransferConflict, TrashedOriginal},
     test_support::ASYNC_MAIN_CONTEXT_DEFAULT,
@@ -625,12 +625,26 @@ fn replacement_fails_before_encoding_when_no_strategy_is_safe() -> Result<(), Bo
 }
 
 #[test]
-fn an_archive_swapped_while_encoding_is_never_replaced() -> Result<(), Box<dyn Error>> {
+fn an_archive_replaces_only_the_item_its_mount_still_knows() -> Result<(), Box<dyn Error>> {
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
         .lock()
         .map_err(|error| error.to_string())?;
+    let reused = |fs_type| {
+        move || Quirks {
+            fs_type: Some(fs_type),
+            reused_inodes: Some("existing.zip"),
+            ..Quirks::default()
+        }
+    };
     // NFS sets the original aside; tmpfs exchanges it.
-    for fs_type in [NFS_SUPER_MAGIC, TMPFS_MAGIC] {
+    type MakeQuirks = Box<dyn Fn() -> Quirks>;
+    let rows: [(MakeQuirks, bool); 3] = [
+        (Box::new(reused(NFS_SUPER_MAGIC)), true),
+        (Box::new(reused(TMPFS_MAGIC)), true),
+        (Box::new(Quirks::vfat), false),
+    ];
+    for (quirks, swapped) in rows {
+        let row = format!("{:?}, swapped: {swapped}", quirks().fs_type);
         let root = tempfile::tempdir()?;
         let archive = root.path().join("existing.zip");
         fs::write(&archive, b"original")?;
@@ -638,12 +652,10 @@ fn an_archive_swapped_while_encoding_is_never_replaced() -> Result<(), Box<dyn E
             root.path(),
             Quirks {
                 trash: Trash::Unsupported,
-                fs_type: Some(fs_type),
-                reused_inodes: Some("existing.zip"),
-                ..Quirks::default()
+                ..quirks()
             },
         );
-        let swapped = archive.clone();
+        let changed = archive.clone();
 
         let result = glib::MainContext::default().block_on(write_staged_archive(
             root.path(),
@@ -651,21 +663,30 @@ fn an_archive_swapped_while_encoding_is_never_replaced() -> Result<(), Box<dyn E
             TransferConflict::ReplaceExisting,
             never_cancelled(),
             move |mut file| {
-                fs::remove_file(&swapped).map_err(|error| error.to_string())?;
-                fs::write(&swapped, b"theirs").map_err(|error| error.to_string())?;
-                recreated(&swapped);
+                if swapped {
+                    fs::remove_file(&changed).map_err(|error| error.to_string())?;
+                    fs::write(&changed, b"theirs").map_err(|error| error.to_string())?;
+                    recreated(&changed);
+                } else if !evict(&changed) {
+                    return Err("the original was not evicted".to_owned().into());
+                }
                 file.write_all(b"replacement")
                     .map_err(|error| error.to_string())?;
                 Ok(())
             },
         ));
 
-        let Err(ArchiveError::Failed(message)) = result else {
-            return Err(format!("expected a refusal, got {result:?}").into());
-        };
-        assert!(message.contains("changed"), "{message}");
-        assert_eq!(fs::read(&archive)?, b"theirs");
-        assert_eq!(names(root.path())?, ["existing.zip"], "{fs_type:#x}");
+        if swapped {
+            let Err(ArchiveError::Failed(message)) = result else {
+                return Err(format!("{row}: expected a refusal, got {result:?}").into());
+            };
+            assert!(message.contains("changed"), "{row}: {message}");
+            assert_eq!(fs::read(&archive)?, b"theirs", "{row}");
+        } else {
+            assert!(result.is_ok(), "{row}: {result:?}");
+            assert_eq!(fs::read(&archive)?, b"replacement", "{row}");
+        }
+        assert_eq!(names(root.path())?, ["existing.zip"], "{row}");
     }
     Ok(())
 }

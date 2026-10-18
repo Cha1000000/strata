@@ -800,7 +800,14 @@ fn set_aside_refuses_a_substituted_item_or_names_where_it_went() -> Result<(), B
 
         let result = match swap {
             Swap::AsACaseOnlyRenameParksIt => rename_in(root.path(), "report", "Report").map(drop),
-            _ => set_aside(fs(), Entry::new(&parent, OsStr::new(name)), kind, expected).map(drop),
+            _ => set_aside(
+                fs(),
+                Entry::new(&parent, OsStr::new(name)),
+                kind,
+                expected,
+                None,
+            )
+            .map(drop),
         };
 
         assert_eq!(

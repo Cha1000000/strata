@@ -33,8 +33,8 @@ use super::{
     copy_recursively_with_progress,
     deletion::{PinnedEntry, parallel_delete_local},
     device, existing_folder_names, io_error, is_trash_unsupported_failure, merge_aside,
-    mount_profile::NamePolicy,
-    native_fs::{LocalFileIdentity, open_local_parent_directory, os_error_detail},
+    mount_profile::{self, NamePolicy},
+    native_fs::{self, LocalFileIdentity, open_local_parent_directory, os_error_detail},
     native_path, os_io_error, placement, placement_error_kind, placement_failure, placement_reason,
     progress::TransferProgressTracker,
     release::ActiveOperation,
@@ -403,10 +403,19 @@ pub(super) fn displacement_or_refusal(
 
 pub(super) fn ensure_unchanged(
     entry: Entry<'_>,
-    expected: LocalFileIdentity,
-) -> Result<(), glib::Error> {
+    recorded: &EntryStat,
+) -> Result<EntryStat, glib::Error> {
     match fs().stat(entry, false) {
-        Ok(stat) if stat.identity == expected => Ok(()),
+        Ok(stat)
+            if native_fs::unchanged(
+                mount_profile::identity_at(fs(), entry.dir),
+                recorded.identity,
+                recorded.file_attributes(),
+                &stat,
+            ) =>
+        {
+            Ok(stat)
+        }
         Ok(_) | Err(rustix::io::Errno::NOENT) => Err(translated_io_error(
             "The target changed while the operation was in progress",
         )),
@@ -469,8 +478,8 @@ pub(super) fn place_source(
     let target = plan.target_entry();
     let source = plan.source_entry();
     let expected = Some(plan.source.identity);
-    ensure_unchanged(target, plan.target.identity)?;
-    match trash::trash_verified(target, target_path, plan.target.identity, cancellable) {
+    let current = ensure_unchanged(target, &plan.target)?;
+    match trash::trash_verified(target, target_path, current.identity, cancellable) {
         Ok(()) => {
             return match placement::place(fs(), source, target, expected) {
                 Ok(_) => Ok(SourcePlaced::Trashed),
@@ -492,8 +501,14 @@ pub(super) fn place_source(
         Err(error) => return Err(error.error),
     }
     let name = plan.target_display();
-    let aside = placement::set_aside(fs(), target, HiddenName::Replaced, plan.target.identity)
-        .map_err(|error| set_aside_failure(error, &name))?;
+    let aside = placement::set_aside(
+        fs(),
+        target,
+        HiddenName::Replaced,
+        current.identity,
+        current.kept_attributes(),
+    )
+    .map_err(|error| set_aside_failure(error, &name))?;
     let error = match placement::place(fs(), source, target, expected) {
         Ok(_) => return Ok(SourcePlaced::SetAside(aside)),
         Err(error) => error,
@@ -614,13 +629,8 @@ pub(super) async fn replace_through_stage(
                 let (path, cancellable) = (target_path.to_path_buf(), cancellable.clone());
                 run_blocking(move || {
                     let target = Entry::new(&*parent, &step_plan.target_name);
-                    ensure_unchanged(target, step_plan.target.identity)?;
-                    match trash::trash_verified(
-                        target,
-                        &path,
-                        step_plan.target.identity,
-                        &cancellable,
-                    ) {
+                    let current = ensure_unchanged(target, &step_plan.target)?;
+                    match trash::trash_verified(target, &path, current.identity, &cancellable) {
                         Ok(()) => Ok(Removal::Trashed),
                         Err(error) if is_trash_unsupported_failure(false, &error) => {
                             displacement_without_trash(
@@ -639,10 +649,10 @@ pub(super) async fn replace_through_stage(
                 let stage_name = staged.name.clone();
                 let exchanged = run_blocking(move || {
                     let target = Entry::new(&*parent, &step_plan.target_name);
-                    ensure_unchanged(target, step_plan.target.identity)?;
+                    let current = ensure_unchanged(target, &step_plan.target)?;
                     let name = step_plan.target_display();
                     match placement::exchange(fs(), Entry::new(&*parent, &stage_name), target) {
-                        Ok(true) => Ok(None),
+                        Ok(true) => Ok(Ok(current.identity)),
                         Ok(false) => displacement_or_refusal(
                             placement::set_aside_if_safe(
                                 fs(),
@@ -651,13 +661,13 @@ pub(super) async fn replace_through_stage(
                             ),
                             &name,
                         )
-                        .map(|displacement| Some(Removal::Without(displacement))),
+                        .map(|displacement| Err(Removal::Without(displacement))),
                         Err(error) => Err(placement_failure(error, &name, could_not_replace)),
                     }
                 })
                 .await;
                 match exchanged {
-                    Ok(None) => {
+                    Ok(Ok(original)) => {
                         if let Some(sources) = &mut copied.0 {
                             sources.copied_to(copy_engine::published(
                                 staged.parent.clone(),
@@ -670,13 +680,13 @@ pub(super) async fn replace_through_stage(
                             displaced: Some(DisplacedOriginal {
                                 parent: OffMain::new(staged.parent),
                                 name: staged.name,
-                                identity: plan.target.identity,
+                                identity: original,
                             }),
                             placed: None,
                         };
                         return Ok((replaced, copied));
                     }
-                    Ok(Some(next)) => Ok(next),
+                    Ok(Err(next)) => Ok(next),
                     Err(error) => Err(error),
                 }
             }
@@ -715,11 +725,14 @@ pub(super) async fn set_aside_and_publish(
     let step_plan = plan.clone();
     let step_name = name.clone();
     let aside = run_blocking(move || {
+        let target = Entry::new(&*parent, &step_plan.target_name);
+        let current = ensure_unchanged(target, &step_plan.target)?;
         placement::set_aside(
             fs(),
-            Entry::new(&*parent, &step_plan.target_name),
+            target,
             HiddenName::Replaced,
-            step_plan.target.identity,
+            current.identity,
+            current.kept_attributes(),
         )
         .map_err(|error| set_aside_failure(error, &step_name))
     })

@@ -66,6 +66,12 @@ pub(super) fn identity_now(
     identity
 }
 
+pub(super) fn identity_at(fs: &dyn FsOps, dir: BorrowedFd<'_>) -> IdentityTraits {
+    let (_, capabilities) = known_mount(fs, dir);
+    let family = capabilities.family.unwrap_or(Family::Other);
+    identity_now(fs, dir, family, capabilities.identity)
+}
+
 /// For `fuseblk`, udev's record of the device tells which daemon serves it. What another
 /// thread learned of the mount meanwhile stays.
 fn learn_mount_type(fs: &dyn FsOps, dir: BorrowedFd<'_>, key: MountKey) -> MountCapabilities {

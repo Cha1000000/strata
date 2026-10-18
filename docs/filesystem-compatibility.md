@@ -20,7 +20,9 @@ one is deleted.
   [The reserved-name step and its risk](#the-reserved-name-step-and-its-risk). Where only the
   client kernel or a FUSE daemon checks for an existing name, other clients are not covered; see
   the residual limits below. Replace only ever removes the item the user confirmed, identified by
-  device, inode, type and, where the filesystem reports it, birth time.
+  the mount's identity rule: device, type and inode where the mount keeps inode numbers, the birth
+  time where it reports one, and a file's size and times where neither tells (see
+  [Replace and merge](#replace-and-merge)).
 - **Never remove a name on a guess.** A name is unlinked only after Strata has proven which inode
   it holds. When the outcome of a step cannot be proven, both names are kept and the operation
   reports that the result could not be confirmed.
@@ -238,6 +240,20 @@ Before copying anything, Replace chooses how to remove the original, in this ord
 4. Otherwise Replace fails before any data is copied. This happens only where a probe cannot
    settle what the mount supports, or for a folder on a mount without `RENAME_NOREPLACE` that has
    hard links but cannot rename over an empty folder.
+
+Right before it removes the original, after the whole copy, Replace checks that the item at its
+name is still the one it read before copying, by the mount's identity rule. Where the mount keeps
+inode numbers, that is the device, type, inode and birth time; vfat, exFAT and SMB without server
+inode numbers number an entry afresh once the kernel evicts it, so there the birth time stands in
+for the inode, and on SMB a file must also keep its size, modification time and change time (see
+[Moves across filesystems](#moves-across-filesystems)); where a mount neither keeps numbers nor
+reports birth times, as sshfs and exfat-fuse, a file must keep its size and modification time, and
+a folder its inode. An original renumbered while it waits is still replaced; another item is
+refused as "The target changed while the operation was in progress". The original then goes on
+with the identity it has now. An original set aside is put back by the same rule, without the
+change time, which setting it aside changes. It is removed by its device, type, inode and birth
+time, the birth time standing in for the inode where the mount numbers entries afresh, as it sits at
+a hidden name only Strata uses. Archives replace their target the same way.
 
 Copies are written into a hidden `.strata-replacement-<id>` stage before they are placed. A file
 stage is created by the copy itself, exclusively, at a fresh name, so nothing is ever copied over

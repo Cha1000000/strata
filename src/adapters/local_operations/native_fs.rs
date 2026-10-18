@@ -62,6 +62,19 @@ pub(super) fn compare(
     recorded.evidence(attributes).compare(traits, &now)
 }
 
+pub(super) fn unchanged(
+    traits: IdentityTraits,
+    recorded: LocalFileIdentity,
+    attributes: Option<Attributes>,
+    current: &EntryStat,
+) -> bool {
+    match compare(traits, recorded, attributes, current) {
+        Proof::Same => true,
+        Proof::Different => false,
+        Proof::Unproven => recorded == current.identity,
+    }
+}
+
 /// By device and type alone: only for sites that check the entries or remove it empty or hidden.
 pub(super) fn birth_reset_folder(
     traits: IdentityTraits,

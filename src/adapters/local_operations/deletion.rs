@@ -29,9 +29,9 @@ use super::{
     deletion_error_summary, deletion_undone_when_cancelled, fs_ops, io_error,
     is_trash_unsupported_failure, join_local_tasks,
     leftovers::{self, Deadline, Refused},
-    mount_profile::known_mount,
+    mount_profile::identity_at,
     native_fs::{
-        LocalFileIdentity, birth_reset_folder, local_directory_children,
+        self, LocalFileIdentity, birth_reset_folder, local_directory_children,
         open_local_parent_directory, os_error_detail, retry_local_open,
     },
     next_children,
@@ -145,13 +145,13 @@ pub(super) fn ensure_expected_local_identity<Fd: AsFd>(
     expected: Option<LocalFileIdentity>,
 ) -> Result<(), String> {
     let unchanged = |expected: LocalFileIdentity| {
-        expected == current.identity
+        if expected == current.identity {
+            return true;
+        }
+        let traits = identity_at(fs(), parent.as_fd());
+        native_fs::unchanged(traits, expected, None, current)
             || (hidden_names::classify(name).is_some()
-                && birth_reset_folder(
-                    known_mount(fs(), parent.as_fd()).1.identity,
-                    expected,
-                    current,
-                ))
+                && birth_reset_folder(traits, expected, current))
     };
     if expected.is_some_and(|expected| !unchanged(expected)) {
         return Err(rust_i18n::t!(

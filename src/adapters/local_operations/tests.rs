@@ -298,6 +298,22 @@ pub(super) fn names(dir: &Path) -> io::Result<Vec<String>> {
     Ok(names)
 }
 
+/// Where inode numbers are not trusted, a file born within one birth-time tick
+/// of `than` passes for it.
+fn wait_for_a_later_birth_time(probe: &Path, than: &fs::Metadata) {
+    let Ok(born) = than.created() else {
+        return;
+    };
+    loop {
+        fs::write(probe, b"probe").expect("write the probe");
+        let stamped = fs::metadata(probe).expect("stat the probe");
+        fs::remove_file(probe).expect("remove the probe");
+        if stamped.created().is_ok_and(|later| later > born) {
+            break;
+        }
+    }
+}
+
 fn set_times(path: &Path, seconds: u64, nanoseconds: u32) -> io::Result<()> {
     let times = rustix::fs::Timespec {
         tv_sec: i64::try_from(seconds).map_err(io::Error::other)?,

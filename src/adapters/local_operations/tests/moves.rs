@@ -1384,22 +1384,6 @@ fn wait_for_a_later_change_time(probe: &Path, than: &fs::Metadata) {
     fs::remove_file(probe).expect("remove the probe");
 }
 
-/// Where inode numbers are not trusted, a file born within one birth-time tick
-/// of `than` passes for it.
-fn wait_for_a_later_birth_time(probe: &Path, than: &fs::Metadata) {
-    let Ok(born) = than.created() else {
-        return;
-    };
-    loop {
-        fs::write(probe, b"probe").expect("write the probe");
-        let stamped = fs::metadata(probe).expect("stat the probe");
-        fs::remove_file(probe).expect("remove the probe");
-        if stamped.created().is_ok_and(|later| later > born) {
-            break;
-        }
-    }
-}
-
 #[test]
 fn a_file_rewritten_as_it_is_read_is_copied_again_whole() -> Result<(), Box<dyn Error>> {
     let _serial = serial()?;

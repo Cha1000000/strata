@@ -102,6 +102,17 @@ impl EntryStat {
             ctime: Some(self.ctime),
         }
     }
+
+    pub(super) fn file_attributes(&self) -> Option<Attributes> {
+        matches!(self.kind, FileType::RegularFile | FileType::Symlink).then(|| self.attributes())
+    }
+
+    pub(super) fn kept_attributes(&self) -> Option<Attributes> {
+        self.file_attributes().map(|attributes| Attributes {
+            ctime: None,
+            ..attributes
+        })
+    }
 }
 
 pub(super) trait FsOps: super::environment::FsEnvironment {
