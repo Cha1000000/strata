@@ -33,6 +33,7 @@
   "A file in it is still open in another program. Close it and try again.": "文件夹中的某个文件仍在其他程序中打开。请关闭后重试。",
   "Default": "默认",
   "Interface font": "界面字体",
+  "It is still open in a program on this or another computer.": "该项目仍在本机或其他计算机上的程序中打开。",
   "Items whose names change to suit this location overwrite items with the new name.": "为适应此位置而更改名称的项目会覆盖使用新名称的项目。",
   "Names changed for different reasons": "名称因不同原因而更改",
   "Names in this location can’t end with a space or a period": "此位置的名称不能以空格或句点结尾",

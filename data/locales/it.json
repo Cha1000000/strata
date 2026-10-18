@@ -33,6 +33,7 @@
   "A file in it is still open in another program. Close it and try again.": "Un file nella cartella è ancora aperto in un altro programma. Chiudilo e riprova.",
   "Default": "Predefinito",
   "Interface font": "Carattere dell’interfaccia",
+  "It is still open in a program on this or another computer.": "L’elemento è ancora aperto in un programma su questo o su un altro computer.",
   "Items whose names change to suit this location overwrite items with the new name.": "Gli elementi il cui nome cambia per adattarsi a questa posizione sovrascrivono quelli con il nuovo nome.",
   "Names changed for different reasons": "I nomi sono cambiati per motivi diversi",
   "Names in this location can’t end with a space or a period": "I nomi in questa posizione non possono terminare con uno spazio o un punto",

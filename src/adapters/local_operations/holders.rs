@@ -14,10 +14,14 @@ use std::{
 };
 
 use gtk::gio::prelude::AppInfoExt;
-use rustix::fs::{AtFlags, Mode, OFlags, StatxFlags};
+use rustix::{
+    fs::{AtFlags, Mode, OFlags, StatxFlags},
+    io::Errno,
+};
 
 use super::{
     fs_ops::{Entry, FsOps},
+    mount_profile::known_mount,
     native_fs::opened_path,
 };
 use crate::{
@@ -58,6 +62,24 @@ pub(super) fn held_inside(holder: Option<&Holder>) -> Option<String> {
             "A file in it is still in use by Strata. Try again when its other operation or search ends.",
         ),
     })
+}
+
+/// `EBUSY` comes from another computer's handle, which this computer's `/proc` never shows.
+pub(super) fn refused_rename(fs: &dyn FsOps, from: Entry<'_>, errno: Errno) -> Option<String> {
+    let (_, capabilities) = known_mount(fs, from.dir);
+    capabilities.deferred_close?;
+    match errno {
+        Errno::BUSY => Some(crate::i18n::tr(
+            "It is still open in a program on this or another computer.",
+        )),
+        Errno::ACCESS
+            if capabilities.silly_names != Some(SillyNames::Unlisted)
+                && fs.stat(from, false).is_ok_and(|stat| stat.is_directory()) =>
+        {
+            held_inside(find(fs, from, &[]).as_ref())
+        }
+        _ => None,
+    }
 }
 
 pub(super) fn held_elsewhere(silly_names: Option<SillyNames>) -> Option<String> {

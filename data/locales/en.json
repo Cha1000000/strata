@@ -33,6 +33,7 @@
   "A file in it is still open in another program. Close it and try again.": "A file in it is still open in another program. Close it and try again.",
   "Default": "Default",
   "Interface font": "Interface font",
+  "It is still open in a program on this or another computer.": "It is still open in a program on this or another computer.",
   "Items whose names change to suit this location overwrite items with the new name.": "Items whose names change to suit this location overwrite items with the new name.",
   "Names changed for different reasons": "Names changed for different reasons",
   "Names in this location can’t end with a space or a period": "Names in this location can’t end with a space or a period",

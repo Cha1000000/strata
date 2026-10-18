@@ -1322,6 +1322,10 @@ fn folder_with_an_open_file(path: &Path, holds: &Holds) -> io::Result<()> {
 }
 
 fn delete_permanently(folders: &[PathBuf]) -> Vec<OperationEvent> {
+    delete(folders, true)
+}
+
+fn delete(folders: &[PathBuf], permanent: bool) -> Vec<OperationEvent> {
     let events = Rc::new(RefCell::new(Vec::new()));
     let emitted = events.clone();
     glib::MainContext::default().block_on(run_deletion_in(
@@ -1331,7 +1335,7 @@ fn delete_permanently(folders: &[PathBuf]) -> Vec<OperationEvent> {
             .iter()
             .map(|folder| DeletionTarget::from_entry(&directory_entry(folder)))
             .collect(),
-        true,
+        permanent,
         Rc::new(move |event| emitted.borrow_mut().push(event)),
         gio::Cancellable::new(),
     ));
@@ -1554,30 +1558,46 @@ fn a_folder_only_leftovers_keep_goes_once_they_do_within_the_mount_s_wait()
 }
 
 #[test]
-fn one_wait_for_leftovers_covers_every_folder_of_a_delete() -> Result<(), Box<dyn Error>> {
+fn one_wait_for_open_files_covers_every_folder_of_a_delete_or_trash() -> Result<(), Box<dyn Error>>
+{
     let _serial = serial()?;
-    let start = SystemTime::UNIX_EPOCH + CLOCK_START;
-    let _clock = ClockGuard::set(start);
-    let root = tempfile::tempdir()?;
-    let _scope = FsQuirks::install(root.path(), Quirks::nfs3());
-    let holds = Holds::default();
-    let folders = [root.path().join("first"), root.path().join("second")];
-    for folder in &folders {
-        folder_with_an_open_file(folder, &holds)?;
-    }
-
-    let events = delete_permanently(&folders);
-
-    assert!(
-        matches!(
-            events.last(),
-            Some(OperationEvent::CompletedWithErrors { deleted_locations, .. })
-                if deleted_locations.is_empty()
+    let smb_folders_refused = || Quirks {
+        folder_renames_refused_below: Some(Duration::from_secs(1)),
+        ..Quirks::cifs()
+    };
+    let rows: [(&str, Preset, bool, Duration); 2] = [
+        ("nfs3, Delete", Quirks::nfs3, true, Duration::from_secs(2)),
+        (
+            "cifs, Trash",
+            smb_folders_refused,
+            false,
+            Duration::from_millis(1500),
         ),
-        "{events:?}"
-    );
-    assert!(folders.iter().all(|folder| folder.is_dir()));
-    assert_eq!(waited_since(start)?, Duration::from_secs(2));
+    ];
+    for (row, preset, permanent, budget) in rows {
+        let start = SystemTime::UNIX_EPOCH + CLOCK_START;
+        let _clock = ClockGuard::set(start);
+        let root = tempfile::tempdir()?;
+        let _scope = FsQuirks::install(root.path(), preset());
+        let holds = Holds::default();
+        let folders = [root.path().join("first"), root.path().join("second")];
+        for folder in &folders {
+            folder_with_an_open_file(folder, &holds)?;
+        }
+
+        let events = delete(&folders, permanent);
+
+        assert!(
+            matches!(
+                events.last(),
+                Some(OperationEvent::CompletedWithErrors { deleted_locations, .. })
+                    if deleted_locations.is_empty()
+            ),
+            "{row}: {events:?}"
+        );
+        assert!(folders.iter().all(|folder| folder.is_dir()), "{row}");
+        assert_eq!(waited_since(start)?, budget, "{row}");
+    }
     Ok(())
 }
 

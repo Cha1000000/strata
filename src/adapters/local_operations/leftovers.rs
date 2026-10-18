@@ -28,7 +28,13 @@ use crate::{
 const LINGERS: Duration = Duration::from_secs(2);
 
 #[derive(Clone, Default)]
-pub(super) struct Deadline(Arc<OnceLock<SystemTime>>);
+pub(crate) struct Deadline(Arc<OnceLock<SystemTime>>);
+
+impl Deadline {
+    pub(super) fn wait(&self, budget: Duration) -> Wait {
+        Wait::since(*self.0.get_or_init(now), budget)
+    }
+}
 
 #[derive(Clone, Copy, Debug)]
 pub(super) enum Refused {
@@ -68,8 +74,7 @@ pub(super) fn remove_folder(
         };
         at_once = held.emptied && !at_once;
         if !at_once {
-            let wait =
-                wait.get_or_insert_with(|| Wait::since(*deadline.0.get_or_init(now), held.budget));
+            let wait = wait.get_or_insert_with(|| deadline.wait(held.budget));
             match wait.pause(stopped) {
                 Pause::Retry => {}
                 Pause::Spent => return Err(Refused::StillOpen(errno)),

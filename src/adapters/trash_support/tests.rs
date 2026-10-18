@@ -236,6 +236,7 @@ impl TrashEnvironment for RefusingMount {
         &self,
         file: &gio::File,
         _cancellable: &gio::Cancellable,
+        _deadline: &crate::adapters::local_operations::Deadline,
     ) -> Pin<Box<dyn Future<Output = Result<Option<crate::services::TrashedOriginal>, glib::Error>>>>
     {
         self.attempts.set(self.attempts.get() + 1);

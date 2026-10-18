@@ -343,6 +343,8 @@ pub(crate) struct Quirks {
     pub silly_rename: Option<Silly>,
     /// The program a `/proc` scan names; without one, only this process is scanned.
     pub holder: Option<Holder>,
+    /// Folder renames and Trash fail with `EACCES` while a file below is held, and this long after.
+    pub folder_renames_refused_below: Option<Duration>,
     /// Files report a size of 0 whatever they hold, so `copy_file_range`
     /// copies nothing from them, as virtual files on FUSE (lxcfs) do.
     pub virtual_sizes: bool,
@@ -958,6 +960,8 @@ struct State {
     created: HashSet<(u64, u64)>,
     made_up: HashMap<(u64, u64), (i64, u32)>,
     holds: HashMap<(u64, u64), usize>,
+    held_paths: HashMap<(u64, u64), PathBuf>,
+    closed_holds: Vec<(PathBuf, SystemTime)>,
     leftovers: Vec<SillyLeftover>,
     silly_renames: u64,
 }
@@ -1019,6 +1023,8 @@ impl FsQuirks {
                 unplugged: false,
                 serverino_disabled: false,
                 holds: HashMap::new(),
+                held_paths: HashMap::new(),
+                closed_holds: Vec::new(),
                 leftovers: Vec::new(),
                 silly_renames: 0,
                 cached: HashMap::new(),
@@ -1100,6 +1106,9 @@ impl Drop for HoldGuard {
         }
         state.holds.remove(&self.key);
         let now = clock_for_test();
+        if let Some(path) = state.held_paths.remove(&self.key) {
+            state.closed_holds.push((path, now));
+        }
         for leftover in &mut state.leftovers {
             if leftover.key == self.key {
                 leftover.unheld_since.get_or_insert(now);
@@ -1662,6 +1671,11 @@ impl Scope {
     }
 
     fn rename(&self, from: Entry<'_>, to: Entry<'_>, flags: RenameFlags) -> Result<(), Errno> {
+        if let Some(folder) = path_of(from.dir).map(|dir| dir.join(from.name))
+            && self.refuses_folder_rename(&folder)
+        {
+            return Err(Errno::ACCESS);
+        }
         let _naming = self.naming();
         let (rename_flags, exchange, over_empty) = self.quirk(|quirks| {
             (
@@ -1923,6 +1937,26 @@ impl Aside {
 }
 
 impl Scope {
+    fn refuses_folder_rename(&self, folder: &Path) -> bool {
+        let Some(lingers) = self.quirk(|quirks| quirks.folder_renames_refused_below) else {
+            return false;
+        };
+        if !std::fs::symlink_metadata(folder).is_ok_and(|metadata| metadata.is_dir()) {
+            return false;
+        }
+        let now = clock_for_test();
+        let state = self.state();
+        let below = |path: &Path| path != folder && path.starts_with(folder);
+        state
+            .holds
+            .keys()
+            .filter_map(|key| state.held_paths.get(key))
+            .any(|path| below(path))
+            || state.closed_holds.iter().any(|(path, closed)| {
+                below(path) && now.duration_since(*closed).unwrap_or_default() < lingers
+            })
+    }
+
     fn reap(&self) {
         let mut state = self.state();
         let Some(silly) = state.quirks.silly_rename else {
@@ -2168,7 +2202,12 @@ pub(crate) fn hold(path: &Path) -> HoldGuard {
     let scope = scope_for_path(path).expect("a scope holding the file");
     let stat = rustix::fs::lstat(path).expect("the held file");
     let key = (stat.st_dev, stat.st_ino);
-    *scope.state().holds.entry(key).or_default() += 1;
+    let mut state = scope.state();
+    *state.holds.entry(key).or_default() += 1;
+    if let Ok(path) = path.canonicalize() {
+        state.held_paths.insert(key, path);
+    }
+    drop(state);
     HoldGuard { scope, key }
 }
 
@@ -2244,6 +2283,10 @@ impl FsEnvironment for Scoped {
         let name = path.file_name().unwrap_or_default();
         let mut outcome = Ok(true);
         let ran = scope.run(Op::Trash, &[name], |scope| {
+            let real = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+            if scope.refuses_folder_rename(&real) {
+                return Err(Errno::ACCESS);
+            }
             outcome = match scope.quirk(|quirks| quirks.trash) {
                 Trash::Supported => System.trash(path, cancellable),
                 Trash::Unsupported | Trash::Refused => Err(glib::Error::new(

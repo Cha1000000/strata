@@ -33,6 +33,7 @@
   "A file in it is still open in another program. Close it and try again.": "Файл в этой папке всё ещё открыт в другой программе. Закройте его и повторите попытку.",
   "Default": "По умолчанию",
   "Interface font": "Шрифт интерфейса",
+  "It is still open in a program on this or another computer.": "Элемент всё ещё открыт в программе на этом или другом компьютере.",
   "Items whose names change to suit this location overwrite items with the new name.": "Элементы, имена которых меняются для этого расположения, перезапишут элементы с новыми именами.",
   "Names changed for different reasons": "Имена изменились по разным причинам",
   "Names in this location can’t end with a space or a period": "Имя в этом расположении не может заканчиваться пробелом или точкой",

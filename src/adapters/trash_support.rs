@@ -19,7 +19,10 @@ use std::{
 
 use gtk::{gio, glib, prelude::*};
 
-use super::volume::{MountTable, TrashMountKey as MountKey, is_fuse_fs_type};
+use super::{
+    local_operations::Deadline,
+    volume::{MountTable, TrashMountKey as MountKey, is_fuse_fs_type},
+};
 use crate::services::TrashedOriginal;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -81,6 +84,7 @@ pub(crate) trait TrashEnvironment {
         &self,
         file: &gio::File,
         cancellable: &gio::Cancellable,
+        deadline: &Deadline,
     ) -> Pin<Box<dyn Future<Output = Result<Option<TrashedOriginal>, glib::Error>>>>;
 }
 
@@ -99,12 +103,12 @@ impl TrashEnvironment for SystemTrash {
         &self,
         file: &gio::File,
         cancellable: &gio::Cancellable,
+        deadline: &Deadline,
     ) -> Pin<Box<dyn Future<Output = Result<Option<TrashedOriginal>, glib::Error>>>> {
-        let file = file.clone();
-        let cancellable = cancellable.clone();
-        Box::pin(
-            async move { super::local_operations::trash::trash_entry(&file, &cancellable).await },
-        )
+        let (file, cancellable, deadline) = (file.clone(), cancellable.clone(), deadline.clone());
+        Box::pin(async move {
+            super::local_operations::trash::trash_entry(&file, &cancellable, &deadline).await
+        })
     }
 }
 
@@ -123,7 +127,7 @@ pub(crate) async fn trash_with_cleanup_in(
     cancellable: &gio::Cancellable,
 ) -> Result<Option<TrashedOriginal>, TrashError> {
     let mut leftovers = LeftoverWatch::observe(environment, native_path(file)).await;
-    let result = attempt(environment, file, cancellable).await;
+    let result = attempt(environment, file, cancellable, &Deadline::default()).await;
     if let Some(path) = native_path(file) {
         leftovers.note(&path, result.as_ref().err().map(|error| error.failure));
     }
@@ -136,8 +140,9 @@ pub(crate) async fn attempt(
     environment: &dyn TrashEnvironment,
     file: &gio::File,
     cancellable: &gio::Cancellable,
+    deadline: &Deadline,
 ) -> Result<Option<TrashedOriginal>, TrashError> {
-    let error = match environment.trash(file, cancellable).await {
+    let error = match environment.trash(file, cancellable, deadline).await {
         Ok(identity) => return Ok(identity),
         Err(error) => error,
     };

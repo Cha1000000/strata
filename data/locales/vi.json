@@ -33,6 +33,7 @@
   "A file in it is still open in another program. Close it and try again.": "Một tệp trong thư mục này vẫn đang mở trong một chương trình khác. Hãy đóng tệp rồi thử lại.",
   "Default": "Mặc định",
   "Interface font": "Phông chữ giao diện",
+  "It is still open in a program on this or another computer.": "Mục này vẫn đang mở trong một chương trình trên máy tính này hoặc máy tính khác.",
   "Items whose names change to suit this location overwrite items with the new name.": "Các mục được đổi tên cho phù hợp với vị trí này sẽ ghi đè các mục mang tên mới đó.",
   "Names changed for different reasons": "Tên đã thay đổi vì nhiều lý do khác nhau",
   "Names in this location can’t end with a space or a period": "Tên tại vị trí này không được kết thúc bằng dấu cách hoặc dấu chấm",

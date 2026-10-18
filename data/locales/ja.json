@@ -33,6 +33,7 @@
   "A file in it is still open in another program. Close it and try again.": "フォルダー内のファイルが別のプログラムでまだ開かれています。閉じてから、もう一度お試しください。",
   "Default": "デフォルト",
   "Interface font": "インターフェイスのフォント",
+  "It is still open in a program on this or another computer.": "この項目は、このコンピューターまたは別のコンピューターのプログラムでまだ開かれています。",
   "Items whose names change to suit this location overwrite items with the new name.": "この場所に合わせて名前が変わる項目は、変更後の名前の項目を上書きします。",
   "Names changed for different reasons": "名前はさまざまな理由で変更されました",
   "Names in this location can’t end with a space or a period": "この場所では名前の末尾にスペースやピリオドは使用できません",

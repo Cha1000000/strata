@@ -126,10 +126,12 @@ use restore::{NameKept, restore_name};
 mod copy_engine;
 mod create_entry;
 mod deferred_close;
+use deferred_close::WaitCancelled;
 mod environment;
 mod fs_ops;
 mod holders;
 mod leftovers;
+pub(super) use leftovers::Deadline;
 mod merge_aside;
 mod mount_profile;
 mod owed;
@@ -2497,16 +2499,11 @@ fn could_not_move(name: &str, error: &str) -> String {
     .into_owned()
 }
 
-async fn rename_native(source: PathBuf, target: PathBuf) -> Result<(), glib::Error> {
-    renamed_native(source.clone(), target.clone())
-        .await?
-        .map_err(|failure| rename_failure_error(failure, &source, &target))
-}
-
-async fn renamed_native(
+async fn rename_native(
     source: PathBuf,
     target: PathBuf,
-) -> Result<Result<(), RenameFailure>, glib::Error> {
+    cancellable: &gio::Cancellable,
+) -> Result<(), glib::Error> {
     let (Some(source_parent), Some(source_name), Some(target_parent), Some(target_name)) = (
         source.parent().map(Path::to_path_buf),
         source.file_name().map(OsStr::to_os_string),
@@ -2515,21 +2512,38 @@ async fn renamed_native(
     ) else {
         return Err(translated_io_error("Invalid move destination"));
     };
-    let outcome = run_local_fs_step(move || {
+    let stopped = cancellable.clone();
+    run_local_fs_step(move || {
         let source_dir = open_local_parent_directory(&source_parent)?;
         let target_dir = if target_parent == source_parent {
             None
         } else {
             Some(open_local_parent_directory(&target_parent)?)
         };
-        Ok(placement::rename_in_place(
+        let from = Entry::new(&source_dir, &source_name);
+        let to = Entry::new(target_dir.as_ref().unwrap_or(&source_dir), &target_name);
+        let Ok(renamed) = deferred_close::retry_folder_rename(
             fs(),
-            Entry::new(&source_dir, &source_name),
-            Entry::new(target_dir.as_ref().unwrap_or(&source_dir), &target_name),
-        ))
+            from,
+            &Deadline::default(),
+            &|| stopped.is_cancelled(),
+            |failure| {
+                matches!(
+                    failure,
+                    RenameFailure::Place(PlaceError::Io(rustix::io::Errno::ACCESS))
+                )
+            },
+            || placement::rename_in_place(fs(), from, to),
+        ) else {
+            return Ok(Err(cancelled_local_operation()));
+        };
+        Ok(renamed.map(drop).map_err(|failure| match failure {
+            RenameFailure::Place(error) => still_open_rename(from, error)
+                .map_or_else(|| rename_failure_error(failure, &source, &target), io_error),
+            failure => rename_failure_error(failure, &source, &target),
+        }))
     })
-    .await?;
-    Ok(outcome.map(drop))
+    .await?
 }
 
 fn rename_failure_error(failure: RenameFailure, source: &Path, target: &Path) -> glib::Error {
@@ -2580,49 +2594,76 @@ fn move_local_path(
         };
 
         let display_name = source_name.to_string_lossy().into_owned();
-        let outcome = run_local_fs_step(move || {
+        let stopped = cancellable.clone();
+        run_local_fs_step(move || {
             let source_parent = open_local_parent_directory(&source_parent_path)?;
             let target_parent = open_local_parent_directory(&target_parent_path)?;
             let from = Entry::new(&source_parent, &source_name);
-            let is_directory = match taken {
-                Taken::Fail => false,
-                Taken::Number => match fs().stat(from, false) {
-                    Ok(stat) => stat.is_directory(),
-                    Err(error) => return Ok(Err(PlaceError::Io(error))),
-                },
-            };
-            let limit = || mount_profile::name_limit(fs(), target_parent.as_fd());
-            for name in taken.names(&target_name, is_directory, limit) {
-                let to = Entry::new(&target_parent, &name);
-                let placed = placement::place(fs(), from, to, None);
-                if taken == Taken::Number && matches!(placed, Err(PlaceError::Exists)) {
-                    continue;
-                }
-                return Ok(match placed {
-                    Ok(_) => Ok(Moved::Done(gio::File::for_path(
-                        target_parent_path.join(&name),
-                    ))),
-                    Err(PlaceError::CrossDevice | PlaceError::Unsupported) => {
-                        match fs().stat(from, false) {
-                            Ok(stat)
-                                if stat.is_directory()
-                                    && placement::contains(fs(), stat.identity, to.dir)
-                                        != Some(false) =>
-                            {
-                                Err(PlaceError::IntoItself)
-                            }
-                            Ok(_) => Ok(Moved::Copy),
-                            Err(error) => Err(PlaceError::Io(error)),
-                        }
+            let moved = || {
+                let is_directory = match taken {
+                    Taken::Fail => false,
+                    Taken::Number => match fs().stat(from, false) {
+                        Ok(stat) => stat.is_directory(),
+                        Err(error) => return Ok(Err(PlaceError::Io(error))),
+                    },
+                };
+                let limit = || mount_profile::name_limit(fs(), target_parent.as_fd());
+                let deadline = Deadline::default();
+                for name in taken.names(&target_name, is_directory, limit) {
+                    let to = Entry::new(&target_parent, &name);
+                    let placed = deferred_close::retry_folder_rename(
+                        fs(),
+                        from,
+                        &deadline,
+                        &|| stopped.is_cancelled(),
+                        |error| matches!(error, PlaceError::Io(rustix::io::Errno::ACCESS)),
+                        || placement::place(fs(), from, to, None),
+                    )?;
+                    if taken == Taken::Number && matches!(placed, Err(PlaceError::Exists)) {
+                        continue;
                     }
-                    Err(error) => Err(error),
-                });
-            }
-            Ok(Err(PlaceError::Exists))
+                    return Ok(match placed {
+                        Ok(_) => Ok(Moved::Done(gio::File::for_path(
+                            target_parent_path.join(&name),
+                        ))),
+                        Err(PlaceError::CrossDevice | PlaceError::Unsupported) => {
+                            match fs().stat(from, false) {
+                                Ok(stat)
+                                    if stat.is_directory()
+                                        && placement::contains(fs(), stat.identity, to.dir)
+                                            != Some(false) =>
+                                {
+                                    Err(PlaceError::IntoItself)
+                                }
+                                Ok(_) => Ok(Moved::Copy),
+                                Err(error) => Err(PlaceError::Io(error)),
+                            }
+                        }
+                        Err(error) => Err(error),
+                    });
+                }
+                Ok(Err(PlaceError::Exists))
+            };
+            Ok(match moved() {
+                Ok(moved) => moved.map_err(|error| match still_open_rename(from, error) {
+                    Some(reason) => io_error(could_not_move(
+                        &display_name,
+                        &crate::services::error_detail(reason),
+                    )),
+                    None => placement_failure(error, &display_name, could_not_move),
+                }),
+                Err(WaitCancelled) => Err(cancelled_local_operation()),
+            })
         })
-        .await?;
-        outcome.map_err(|error| placement_failure(error, &display_name, could_not_move))
+        .await?
     })
+}
+
+fn still_open_rename(from: Entry<'_>, error: PlaceError) -> Option<String> {
+    match error {
+        PlaceError::Io(errno) => holders::refused_rename(fs(), from, errno),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -2920,7 +2961,12 @@ impl OperationProvider for LocalOperationProvider {
             let result = match request.entry.location.native_path() {
                 Some(path) => match glib::filename_from_utf8(&request.new_name) {
                     Ok((name, _)) => {
-                        rename_native(path.to_path_buf(), path.with_file_name(name)).await
+                        rename_native(
+                            path.to_path_buf(),
+                            path.with_file_name(name),
+                            &operation_cancellable,
+                        )
+                        .await
                     }
                     Err(error) => Err(glib::Error::new(
                         gio::IOErrorEnum::InvalidFilename,
@@ -3882,7 +3928,12 @@ impl OperationProvider for LocalOperationProvider {
             } else if let (Some(source), Some(target)) =
                 (current.native_path(), original.native_path())
             {
-                rename_native(source.to_path_buf(), target.to_path_buf()).await
+                rename_native(
+                    source.to_path_buf(),
+                    target.to_path_buf(),
+                    &operation_cancellable,
+                )
+                .await
             } else {
                 move_file_with_progress(
                     gio_file_for_location(&current),

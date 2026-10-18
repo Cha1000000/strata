@@ -907,6 +907,7 @@ pub(super) async fn run_deletion_in(
                             environment.as_ref(),
                             &file,
                             &cancellable,
+                            &deadline,
                         )
                         .await;
                     }

@@ -2,7 +2,13 @@
 
 use std::time::{Duration, SystemTime};
 
-use super::copy_engine::{now, sleep};
+use super::{
+    copy_engine::{now, sleep},
+    fs_ops::{Entry, FsOps},
+    leftovers::Deadline,
+    mount_profile::known_mount,
+};
+use crate::adapters::volume::SillyNames;
 
 /// How long after `closetimeo` the SMB client may take to close the handle.
 const MARGIN: Duration = Duration::from_millis(500);
@@ -59,4 +65,43 @@ impl Wait {
 
 pub(super) fn closing(closetimeo: Duration) -> Duration {
     closetimeo.saturating_add(MARGIN).min(LIMIT)
+}
+
+pub(super) struct WaitCancelled;
+
+/// Linux 6.17 to 7.1 may keep closed SMB handles open below a renamed folder (unverified).
+pub(super) fn retry_folder_rename<T, E>(
+    fs: &dyn FsOps,
+    folder: Entry<'_>,
+    deadline: &Deadline,
+    cancelled: &dyn Fn() -> bool,
+    refused: impl Fn(&E) -> bool,
+    mut rename: impl FnMut() -> Result<T, E>,
+) -> Result<Result<T, E>, WaitCancelled> {
+    let mut error = match rename() {
+        Err(error) if refused(&error) => error,
+        done => return Ok(done),
+    };
+    let (_, capabilities) = known_mount(fs, folder.dir);
+    let Some(closetimeo) = capabilities
+        .deferred_close
+        .filter(|_| capabilities.silly_names != Some(SillyNames::Unlisted))
+    else {
+        return Ok(Err(error));
+    };
+    if !fs.stat(folder, false).is_ok_and(|stat| stat.is_directory()) {
+        return Ok(Err(error));
+    }
+    let mut wait = deadline.wait(closing(closetimeo));
+    loop {
+        match wait.pause(cancelled) {
+            Pause::Retry => {}
+            Pause::Spent => return Ok(Err(error)),
+            Pause::Cancelled => return Err(WaitCancelled),
+        }
+        error = match rename() {
+            Err(error) if refused(&error) => error,
+            done => return Ok(done),
+        };
+    }
 }

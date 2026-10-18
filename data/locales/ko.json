@@ -33,6 +33,7 @@
   "A file in it is still open in another program. Close it and try again.": "폴더 안의 파일이 다른 프로그램에서 아직 열려 있습니다. 파일을 닫은 후 다시 시도하세요.",
   "Default": "기본값",
   "Interface font": "인터페이스 글꼴",
+  "It is still open in a program on this or another computer.": "이 항목은 이 컴퓨터나 다른 컴퓨터의 프로그램에서 아직 열려 있습니다.",
   "Items whose names change to suit this location overwrite items with the new name.": "이 위치에 맞게 이름이 바뀌는 항목은 바뀐 이름과 같은 이름의 항목을 덮어씁니다.",
   "Names changed for different reasons": "여러 가지 이유로 이름이 바뀌었습니다",
   "Names in this location can’t end with a space or a period": "이 위치에서는 이름을 공백이나 마침표로 끝낼 수 없습니다",
