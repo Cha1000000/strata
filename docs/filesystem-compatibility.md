@@ -38,10 +38,13 @@ one is deleted.
   under a hidden leftover name until it is closed, is never deleted, renamed or copied when Strata
   finds it inside a folder: the folder stays, and the error names the program where it can. See
   [Files that are still open](#files-that-are-still-open).
-- **Keep transfer work off the interface thread.** Native copying, placement, and paste/restore/delete
-  planning run on workers. Some existing archive-name, undo and redo replay checks
-  remain synchronous; removing those calls is tracked in [#1590](https://github.com/lgse/strata/issues/1590).
-  An unresponsive mount can still block the window through those remaining checks.
+- **Keep file calls off the interface thread.** Apart from the exceptions listed under
+  [Unresponsive mounts](#unresponsive-mounts), code on the GTK main thread makes no filesystem
+  call, synchronous GIO file call, mount-table or udev read, and waits for no process that makes
+  one. It asks a worker and applies the answer only while it is still current. Folder loads,
+  probes and monitors on a mount that stops answering are bounded, so such a mount makes an action
+  slow or fail but does not freeze the window. That section also says what a dead mount still
+  does.
 - **Move metadata, not data.** Renames never copy file contents. Moves within one filesystem
   rename too, including on mounts with neither `RENAME_NOREPLACE` nor usable hard links. Moves
   copy only when the kernel returns `EXDEV` (across devices, bind mounts, btrfs subvolumes or
@@ -1161,8 +1164,8 @@ Empty Trash, and unmounting a drive. Before it changes an item, it releases it:
 1. New reads of the item, or of anything inside it, are refused ("This item is being changed by a
    file operation."), and running ones are told to stop.
 2. Off the interface thread, the real path of the item's folder is resolved through the mount's
-   request lane, so a read opened through a symbolic link is released too. Where the mount does
-   not answer, only the path as given is covered.
+   [request lane](#request-lanes), so a read opened through a symbolic link is released too. Where
+   the mount does not answer, only the path as given is covered.
 3. The operation waits until the stopped reads have ended, at most 2 s in all, then goes on.
 
 A merge releases each original only as it moves that original out of the way, so previews in the
@@ -1304,6 +1307,153 @@ directory handle from a listing never blocked a rename in the lab.
 
 The prefixes live in `placement.rs`. Names that may hold user data are never deleted or renamed automatically.
 
+## Unresponsive mounts
+
+When an NFS or SMB server stops, an sshfs connection hangs, a FUSE daemon stops or a GVfs backend
+hangs, every call into that mount waits, often until the server comes back. Strata keeps those
+waits off the interface thread and bounds how many workers they can hold.
+
+### Off the interface thread
+
+The GTK main thread is marked at start (`src/util/ui_thread.rs`), and every seam that touches the
+disk asserts that it runs elsewhere, also outside main-loop dispatch: the syscall seam, the probes,
+mount-table reads and the settings writer. What the interface needs from the disk it asks of a
+worker:
+
+- Opening a folder checks it on a worker, and its load, its change monitor, typed-path completions,
+  the check that forgets a deleted folder's settings, restored tabs and the default folder run
+  there too. A restored tab, a new tab's default folder or a go chord's folder is given up only
+  when it is proven missing or not a folder; a timeout or an I/O error opens it with its error and
+  keeps the saved choice.
+- Context menus and the delete dialog read the mount table the watcher published and a cache of
+  removable destinations whose roots were checked off the thread, and Send To checks the chosen
+  device again while the transfer prepares. Drag targets, encryption hints, unmounting, and the
+  drive properties and Format dialogs, which open at once and fill in their facts, read that table
+  or ask a worker.
+- Undo and redo, Compress, and the folder choosers of Copy To, Move To, Extract To and Send To ask
+  the probes in `src/adapters/local_operations/probes.rs`. Only a proven absence counts as missing:
+  an undo whose item cannot be checked is attempted and reports the real error, a moved dangling
+  link is undone, and a destination that cannot be checked is written only by an exclusive create,
+  which never replaces.
+- Search results are checked on the search worker, and only hits proven gone are dropped.
+- Programs and terminals are resolved and started on a worker, since starting a child waits until
+  it has entered its working folder.
+- Strata's own settings and state files are saved by one background writer and read again there
+  after another program changes them; see [Saved preferences](preferences.md).
+- An enumerator or stream the interface lets go of is closed in the background
+  (`src/adapters/gio_close.rs`), as GLib would otherwise close it in place. With the server
+  stopped, closing a read-only file blocked on NFSv4.2 and exfat-fuse in the lab, and closing a
+  written one blocked on NFS, SMB and exfat-fuse until the server returned. A written stream is
+  never closed this way, since its close reports lost data.
+
+The exceptions are:
+
+- The reads that build the first window, before it shows: Strata's settings and state files and
+  GTK's bookmarks file. The bundled font Strata writes at start is read by fontconfig whenever it
+  lays out text.
+- GLib's volume monitor, which works only on the main thread. Strata takes it once, in the primary
+  instance's start-up, right after checking that GVfs answers and before the first window shows.
+  Under GLib's own unix volume monitor (`GIO_USE_VOLUME_MONITOR=unix`, as without GVfs), that first
+  use checks every removable mount under `/run/media/$USER`; in the lab it hung for more than 10 s
+  while the daemon of such a FUSE mount (ntfs-3g, exfat-fuse) was stopped. Once the monitor exists,
+  later mount changes did not block it.
+- GIO's checks of an application's program while it lists or launches applications
+  (`GDesktopAppInfo`), and the toolkit's own resources (icons, fonts, styles, MIME data) from
+  system paths.
+- Quitting, which waits up to 10 s for queued settings saves.
+- Calls not yet moved to a worker. When a folder's monitor reports a symbolic link whose target
+  cannot be followed, building its row stats that target. The folder descriptors that a restore from
+  Trash, an Undo of a merge or a Replace paste used are closed as it ends. Opening a media preview's
+  audio output loads its sound plugins, also looking for them relative to the folder Strata was
+  started from, which stays its working folder. Running a custom action creates its private folder
+  under `$XDG_RUNTIME_DIR/strata/actions`. A theme change rescans the text-view styles Strata
+  generates in its cache folder.
+
+The [main-thread I/O audit](e2e-testing.md#main-thread-io-audit) reports any other file call the
+interface thread makes, and its stall watchdog names the call the interface thread is blocked in.
+
+### Request lanes
+
+These worker requests go through their mount's lane in `src/adapters/volume/mount_lanes.rs`: folder
+loads, probes, monitor creation, the release before an operation, the leftover review and its sweep
+of stale probes, and imports, exports and program checks of custom actions. A lane is keyed by the
+mount's id once a `statx` answer has named it. Until then a request is keyed by its path and the
+mount the table places it on, so a dead target of a symbolic link trips only that path and what lies
+below it, never the home folder the link sits in. A GVfs location is keyed by its scheme, user,
+server and port.
+
+- **Progress.** A request makes progress when it gets an answer: success, "not found", "not a
+  folder", a stale handle or a permission refusal. `EIO`, `ETIMEDOUT`, `EHOSTDOWN`, `ENOTCONN`, a
+  reset connection and a cancel are not answers, and neither is the end of a call by itself. A
+  listing makes progress with each chunk it reads. Progress counts per request, so a cached answer
+  to one request never vouches for another that hangs.
+- **Stalled.** A lane stalls once any request on it has gone 2 s without its own progress. New
+  interactive requests there (folder loads, probes, monitors, releases) then fail at once as timed
+  out, and background requests are skipped, never queued. Once the stuck request has ended without
+  an answer, one request at a time is let in to find out whether the mount answers again. The stall
+  clears when a request there makes progress, or when a mount-table change removes the mount.
+  After 10 s the mount counts as not responding.
+- **Joins.** Folder loads, folder probes and stamp reads run at most one call per path and kind. A
+  repeated request joins the running one until it starts reading, and after that waits for one
+  follow-up call, so F5 never gets a listing that began before it was pressed.
+
+So once a lane has stalled, no new request there takes a worker, except that one request let in
+and one per path reached through a link into a mount whose id is not yet known, however often the
+user clicks, presses F5 or arrows through its folders. Requests that started in the 2 s before the
+stall keep their workers until the server answers, one per path and kind for those that join:
+arrowing through five folders of a dead NFS mount within 2 s parks five workers, and none after
+that. Without the lanes, each such action parked another thread of GLib's worker pool, up to its
+330 threads, after which every asynchronous GIO call in the process waited. Previews and
+thumbnails, the folder size in Properties, search walks and file operations do not go through the
+lanes, so each of those that reaches a dead mount waits there, on its own thread or helper
+process, until the server answers.
+
+### What a dead server does
+
+Measured in the lab over loopback, with the server stopped:
+
+- **No timely error.** Hard NFS returned nothing in 62 s, SMB with its default options first failed
+  with `EHOSTDOWN` after about 207 s, and sshfs and stopped FUSE daemons returned nothing in 31 to
+  40 s. Only NFS mounted `soft` with short timeouts (`timeo=10,retrans=1`) failed within 3 s, with
+  `EIO`. The lanes' 2 s is the only timely signal. A healthy call took at most 121 µs and the gap
+  between listing chunks at most 394 µs; the slowest healthy operation, a cold listing of 3,000
+  entries on sshfs, took 128 ms. A mount slower than 2 s per round trip looks unresponsive until it
+  answers; real network latency was not measured.
+- **Parked calls stay parked.** The close of a written file on NFS and SMB, every sshfs request, a
+  flush on exfat-fuse and SMB requests during a reconnect could not be killed until the server
+  returned, so a worker parked there stays parked until then.
+- **What blocks.** A path lookup blocks once a component of the path needs revalidation: on NFS
+  once its attribute cache expires (`acdirmin`, 30 s by default), on SMB after `actimeo` (1 s), on
+  sshfs once its own cache misses, and on ntfs-3g at once, as it caches nothing. `statx` with
+  `AT_STATX_DONT_SYNC` by path is no exception, as it walks the path and revalidates expired
+  components. Through an `O_PATH` descriptor it answered at once on every dead mount.
+- **Caches are per process.** The NFS client keys its access cache by the calling process, so
+  helpers Strata starts (preview sandboxes, terminals, programs it launches) begin cold and block
+  on a dead server even in a folder Strata just listed.
+- **NFSv4.2 delegations.** A forced stat of a recently used folder can be answered by the client
+  under a directory delegation, also while the server is dead.
+- **The mount table stays live.** Reading `/proc/self/mountinfo` never waited on a server (446 µs
+  at most over 4,974 reads during six outages, an SMB reconnect included), and `poll` on it woke at
+  once on a change. Strata's mount watcher (`src/adapters/volume/mount_watch.rs`) reads it on its
+  own thread, waits 50 ms for a burst of changes to end, and publishes the table to readers that
+  do no I/O: a burst of 3,000 changes cost 3 reads, and sustained churn 0.6 to 0.8 % of one core.
+
+### Folder monitors
+
+A folder's change monitor is created once the folder's load has answered, never on a stalled lane.
+One serial worker creates and cancels every monitor, through the lanes: those of open folders, the
+Trash, Strata's settings files, custom themes and the Omarchy theme folders. GLib's inotify backend
+creates, cancels and delivers every monitor in a process under one lock, and creating a monitor
+walks its path, which blocks on a dead mount like any lookup. So while a creation is stuck on a
+mount that stopped answering, monitors on every folder deliver nothing, and later creations and
+cancels wait, until that server answers. The window stays usable, but folders stop updating by
+themselves meanwhile.
+
+A column counts as unmonitored until its monitor is live. Once it is, the folder's change stamp is
+read again, and a change since the load re-lists the folder once. Before Linux 6.13, a change in
+the same clock tick as the load's stamp, made after the listing read past it and before the monitor
+went live, stays hidden until the next change or F5.
+
 ## Filesystem notes
 
 Rename and link support decides which placement step runs. "Rejects flags" means
@@ -1379,8 +1529,17 @@ cache even when forced, folder stamps without a mount id (kernels before 5.8), l
 a cached directory (SMB, renewed by each use) or the daemon's cache (sshfs), and writeback errors
 that `syncfs` reports. Tests can also pretend to run on another kernel release, freeze the clock
 that the racily clean check, the wait for SMB's deferred close and the emulated attribute cache
-read, and set a paste's batch limits and clock. The seam also asserts that no call runs on the main
-context's thread.
+read, and set a paste's batch limits and clock.
+
+The seam, the probes, mount-table reads and the settings writer assert that no call runs on the
+interface thread. That thread is marked at start, and GTK tests mark the thread they run on, so a
+call outside main-loop dispatch is caught too; only the named start-up and exit exceptions take a
+scoped `ui_thread::allow`. A test that checks that the window keeps running while a call hangs
+parks the call with a seam racer that waits on `test_support::Gate`, pumps the main loop until the
+call is reached, checks that nothing waited for it, then releases it. Lane tests hand the lanes'
+state the time, past 2 s and 10 s, instead of waiting. The [main-thread I/O audit and the stall
+watchdog](e2e-testing.md#main-thread-io-audit) look for calls the asserts cannot see, inside GLib
+and GTK.
 
 For [files that are still open](#files-that-are-still-open) they emulate each mount family's
 leftovers: the name NFS, SMB or FUSE gives a file unlinked while open, which references count (any

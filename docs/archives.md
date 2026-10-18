@@ -141,6 +141,12 @@ operation layer checks the path again. A path that exists but is not a regular
 file fails with ``Not an archive: `<name>` `` before any destination folder is
 created.
 
+**Extract to…** checks the chosen folder off the interface thread and, like
+Copy To and Move To, accepts a folder the user may write into but not list, such
+as a drop box with mode 0733. Extracting into one fails with "Could not open
+extraction destination: Permission denied", because the extractor opens the
+destination to read the names it already holds.
+
 Only a failure that the decoder reports as a missing or incorrect password
 opens the password prompt, with "Invalid password" for an incorrect one. The
 wording of an error message never decides it, so a member or archive name

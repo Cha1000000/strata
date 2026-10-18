@@ -353,9 +353,22 @@ Feature unit tests sit beside their implementations. Cross-feature browser tests
 `STRATA_REQUIRE_GTK_TESTS=1` when exercising those tests on a display to make unavailable GTK a
 failure rather than a skip.
 
-This separation is not a redesign of operation policy or a claim that all UI filesystem calls have
-been eliminated. Collision probes for typed names, destination creation and permission editing still
-deserve application/adapter boundaries in focused follow-ups. Likewise, alternate renderers, staged
+Code on the GTK main thread makes no file call, except those listed under [Off the interface
+thread](filesystem-compatibility.md#off-the-interface-thread). `util/ui_thread.rs` marks that
+thread, and the syscall seam, `FsEnvironment`, the probes, `MountTable::current()` and the settings
+writer's file calls assert that they run elsewhere; only named, scoped exceptions (the reads that
+build the first window, the exit flush) let them through. The interface asks instead:
+`adapters/local_operations/probes.rs` for presence, folder checks, writable destinations and
+typed-path listings; `adapters/volume/mount_watch.rs`, a thread that keeps the mount table published
+for readers that do no I/O; `adapters/volume/mount_lanes.rs`, which bounds the folder loads, probes,
+monitors and other requests it admits to a mount that stops answering;
+`adapters/local_files/monitors.rs`, the one worker that creates and cancels file monitors;
+`adapters/gio_close.rs`, which closes the enumerators and streams the interface lets go of in the
+background; and `storage/writer.rs`, the background writer for Strata's own settings and state. See
+[Unresponsive mounts](filesystem-compatibility.md#unresponsive-mounts) and the [main-thread I/O
+audit](e2e-testing.md#main-thread-io-audit).
+
+This separation is not a redesign of operation policy. Alternate renderers, staged
 publication/metadata orchestration, native transfer security and the settings workspace should be
 refactored independently of browser composition. Investigation and scope decisions are recorded in
 [issue #397](https://github.com/lgse/strata/issues/397).

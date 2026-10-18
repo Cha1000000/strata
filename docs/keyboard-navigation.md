@@ -37,10 +37,13 @@ Each tab retains its location, selection, navigation history, preview and search
 state. Tab locations persist across restarts: a plain launch (no folder
 argument, reveal request, or unlock target) reopens the previous tabs in order
 with the previously active tab selected, when **Settings → General → Startup →
-Restore open tabs** is on (the default). Missing directories, credential-bearing
-URIs, and transient locations such as trashed-item children, non-root Recent
-entries, and camera roots are skipped; with nothing restorable the window opens
-at the default directory as before. Windows opened for an explicit folder,
+Restore open tabs** is on (the default). Credential-bearing URIs and transient
+locations such as trashed-item children, non-root Recent entries, and camera
+roots are skipped; with nothing restorable the window opens at the default
+directory as before. Every saved folder gets its tab at once and is checked off
+the interface thread: a folder proven missing or not a folder closes its tab,
+and one that cannot be checked, such as on a server that does not answer, keeps
+its tab and shows its error. Windows opened for an explicit folder,
 reveal request, or unlock target never overwrite the saved session; with
 several plain-launch windows open the most recently changed one wins. Selection, history, and preview state stay
 in-memory. Appearance preferences and the clipboard remain
