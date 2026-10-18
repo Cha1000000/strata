@@ -557,7 +557,7 @@ Each patch breaks a single critical workflow and maps to the scenario that
 hits the mutated line, not every test in that file: drop onto a folder,
 Ctrl+V paste, arrow-key selection, single-click activation, the appearance
 menu, filtered Space preview, filter-row updates, popover outside-wheel,
-and the long-name caret. The unmodified scenarios must pass first; only a failed
+held document scrollbars, and the long-name caret. The unmodified scenarios must pass first; only a failed
 scenario assertion in the mutated run counts as detection, not a
 startup/collection error or killed process. Logs and JUnit reports are
 saved in `target/e2e-mutations`. The script restores source changes

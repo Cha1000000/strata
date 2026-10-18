@@ -23,6 +23,7 @@ declare -A SCENARIOS=(
   [quick-preview]="tests/e2e/scenarios/test_quick_preview.py::test_space_previews_a_filtered_result_without_changing_the_query"
   [filter-results]="tests/e2e/scenarios/test_filter_results.py::test_query_updates_retain_selection_focus_preview_and_background_menu"
   [popover-scrolling]="tests/e2e/scenarios/test_popover_scrolling.py::test_panel_wheel_routing"
+  [preview-scrollbar]="tests/e2e/scenarios/test_quick_preview.py::test_document_scrollbar_holds_content_still_while_rows_recycle"
   [rename-caret]="tests/e2e/scenarios/test_inline_renaming.py::test_long_rename_keeps_caret_visible"
 )
 

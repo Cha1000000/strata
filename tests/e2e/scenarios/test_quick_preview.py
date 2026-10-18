@@ -1041,6 +1041,101 @@ def test_preview_find_navigates_content_without_filtering_files(strata, filename
     assert strata.selected_names() == selected_after
 
 
+def document_point_text(document):
+    from gi.repository import Atspi, GLib
+
+    bounds = document.window_bounds()
+    text_nodes = [node for node in document.find_all() if node.text]
+    for fraction in (0.5, 0.25, 0.75):
+        x, y = bounds.x + bounds.width // 4, bounds.y + int(bounds.height * fraction)
+        for node in text_nodes:
+            area = node.window_bounds()
+            if not (area.x <= x < area.x + area.width and area.y <= y < area.y + area.height):
+                continue
+            text = Atspi.Accessible.get_text_iface(node.accessible)
+            try:
+                offset = Atspi.Text.get_offset_at_point(text, x, y, Atspi.CoordType.WINDOW)
+            except GLib.Error:
+                # Paragraph spacing and empty line tails have no text offset.
+                continue
+            if offset >= 0:
+                end = min(offset + 40, Atspi.Text.get_character_count(text))
+                return fraction, offset, Atspi.Text.get_text(text, offset, end)
+    return None
+
+
+@pytest.mark.parametrize("fixture_tree,filename", [
+    ({f"scroll.{extension}": "\n\n".join(
+        f"Short paragraph {i}." if i % 2 == 0 else
+        " ".join(f"paragraph-{i}-word-{word}" for word in range(10 + (i * 37) % 150))
+        for i in range(400)
+    )}, f"scroll.{extension}")
+    for extension in ("md", "txt")
+], indirect=["fixture_tree"], ids=["rendered", "virtual-source"])
+@pytest.mark.preferences(browser_mode="list", single_click_previews=False, preview_text_wrap=True)
+def test_document_scrollbar_holds_content_still_while_rows_recycle(strata, filename):
+    strata.select_entry_with_keyboard(filename)
+    strata.keyboard.press("space")
+    strata.wait(lambda: strata.preview_shows("Short paragraph 0"), "the document preview")
+    document = strata.wait(
+        lambda: strata.preview().find(predicate=lambda node: node.role.startswith("document")),
+        "the virtual document",
+    )
+    scrollbar = strata.wait(
+        lambda: strata.preview().find(role="scroll bar", states={"vertical"}),
+        "the document scrollbar",
+    )
+    def settled_content():
+        previous = None
+        settled = 0
+
+        def content_settled():
+            nonlocal previous, settled
+            current = document_point_text(document)
+            settled = settled + 1 if current is not None and current == previous else 0
+            previous = current
+            return current if settled >= 3 else None
+
+        return strata.wait(content_settled, "the newly visited rows to settle")
+
+    initial = settled_content()
+    track = scrollbar.screen_bounds()
+    pointer = strata.pointer.connection
+    x = track.center[0]
+    strata.pointer.move_to(x, track.y + 1)
+    pointer.button(1, True)
+    try:
+        for fraction in (0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9):
+            y = track.y + int(track.height * fraction)
+            pointer.motion(x, y)
+            expected = settled_content()
+            samples = []
+
+            def sample_held_content():
+                pointer.motion(x, y)
+                samples.append(document_point_text(document))
+                return len(samples) >= 12
+
+            strata.wait(sample_held_content, "held-thumb motion events to be processed")
+            assert all(sample == expected for sample in samples), (
+                f"document content moved while the scrollbar pointer stayed still: {samples!r}"
+            )
+        pointer.motion(x, track.y + track.height - 1)
+        settled_content()
+        assert strata.preview_shows("paragraph-399-word-72"), "dragging to the bottom reaches the document tail"
+        pointer.motion(x, track.y + 1)
+        assert settled_content() == initial, "dragging to the top restores the initial content"
+    finally:
+        pointer.motion(*document.screen_bounds().center)
+        pointer.button(1, False)
+
+    released = settled_content()
+    value = scrollbar.numeric_value
+    strata.pointer.scroll(document.screen_bounds().center, clicks=3, down=True)
+    strata.wait(lambda: document_point_text(document) != released, "wheel scrolling after release")
+    strata.wait(lambda: scrollbar.numeric_value != value, "the thumb to follow wheel scrolling")
+
+
 LONG_DOCUMENT = {
     "long.txt": "".join(f"document line {line}\n" for line in range(400)),
     "notes.txt": "the quick brown fox\n",

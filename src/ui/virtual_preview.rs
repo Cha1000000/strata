@@ -20,6 +20,7 @@ use crate::ui::keys::{
     bindings::{COPY, DOWN, FIRST_ITEM, LAST_ITEM, LEFT, RIGHT, SELECT_ALL, UP},
 };
 
+mod scrollbar;
 mod selection;
 use selection::Motion;
 pub(super) use selection::match_ranges;
@@ -361,7 +362,7 @@ fn virtual_preview(
     for warning in warnings {
         container.append(&super::preview::document_notice(&warning));
     }
-    container.append(&scroll);
+    container.append(&scrollbar::wrap(&scroll));
     (container, state)
 }
 
