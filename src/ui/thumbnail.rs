@@ -52,6 +52,9 @@ thread_local! {
         RefCell::new(HashMap::new());
     static TRACKED_THUMBNAILS: RefCell<HashMap<usize, TrackedThumbnail>> = RefCell::new(HashMap::new());
     static REFRESHING_CUSTOMIZED_ICONS: Cell<bool> = const { Cell::new(false) };
+    static RELEASED_THUMBNAILS: RefCell<Vec<SettledPark>> = const { RefCell::new(Vec::new()) };
+    static RELEASES: RefCell<Option<crate::services::file_activity::Subscription>> =
+        const { RefCell::new(None) };
 }
 
 struct TrackedThumbnail {
@@ -1044,6 +1047,7 @@ async fn finish_thumbnail_job(
     result: Result<(crate::sandbox::browser::Thumbnail, bool), String>,
 ) {
     let targets = take_pending_targets(&job.key, job.id);
+    let requested = (job.key, job.kind);
     let key = job.resolved;
     let path = key.path.clone();
     if let Some(targets) = targets {
@@ -1074,6 +1078,10 @@ async fn finish_thumbnail_job(
                     enqueue_persist(key.path.clone(), mtime, png);
                 }
             }
+            Err(message) if message == crate::services::file_activity::HELD_FOR_OPERATION => {
+                crate::metrics::mark_thumbnail_cancelled();
+                admit_after_release(requested, targets);
+            }
             Err(_) => {
                 crate::metrics::mark_thumbnail_cancelled();
                 THUMBNAIL_CACHE.with(|cache| cache.borrow_mut().insert_failure(key));
@@ -1083,6 +1091,26 @@ async fn finish_thumbnail_job(
     }
     let counts = crate::metrics::thumbnail_counts();
     tracing::debug!(?counts, "thumbnail pipeline settled");
+}
+
+fn admit_after_release((key, kind): (ThumbnailKey, ThumbnailKind), targets: Vec<PendingTarget>) {
+    RELEASED_THUMBNAILS.with_borrow_mut(|released| {
+        released.retain(|park| request_is_live(&park.target));
+        released.extend(targets.into_iter().map(|target| SettledPark {
+            key: key.clone(),
+            kind,
+            target,
+        }));
+    });
+    RELEASES.with_borrow_mut(|releases| {
+        releases.get_or_insert_with(|| {
+            crate::services::file_activity::observe(|notice| {
+                if let crate::services::file_activity::Notice::Lifted(_) = notice {
+                    fire_parks(RELEASED_THUMBNAILS.take());
+                }
+            })
+        });
+    });
 }
 
 fn retry_deferred_thumbnails() {

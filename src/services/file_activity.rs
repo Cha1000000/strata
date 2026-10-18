@@ -1,12 +1,15 @@
 // SPDX-License-Identifier: MIT
 
 use std::{
+    cell::{Cell, RefCell},
     collections::{BTreeMap, BTreeSet},
     fmt,
     fs::{self, File},
     future::Future,
     io::{self, Read},
+    marker::PhantomData,
     path::{Path, PathBuf},
+    rc::Rc,
     sync::{
         Arc, Condvar, Mutex, MutexGuard, PoisonError,
         atomic::{AtomicBool, Ordering},
@@ -354,8 +357,8 @@ impl Activity {
     }
 }
 
-impl Drop for Activity {
-    fn drop(&mut self) {
+impl Activity {
+    pub(crate) fn end(&self) {
         let mut registry = registry();
         let Some(scope) = registry.operations.remove(&self.0) else {
             return;
@@ -366,6 +369,12 @@ impl Drop for Activity {
         for folder in &scope.folders {
             registry.folders.remove(folder);
         }
+    }
+}
+
+impl Drop for Activity {
+    fn drop(&mut self) {
+        self.end();
     }
 }
 
@@ -461,13 +470,54 @@ impl Drop for Fence {
     }
 }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "step 7's checks and step 8's leftovers read it")
-)]
 pub(crate) fn is_changing(path: &Path) -> bool {
     let registry = registry();
     registry.roots.covers(path) || registry.fenced.covers(path)
+}
+
+pub(crate) enum Notice<'a> {
+    Releasing(&'a [PathBuf]),
+    Lifted(&'a [PathBuf]),
+}
+
+impl Notice<'_> {
+    pub(crate) fn covers(&self, path: &Path) -> bool {
+        let (Self::Releasing(roots) | Self::Lifted(roots)) = self;
+        roots.iter().any(|root| path.starts_with(root))
+    }
+}
+
+type Observer = Rc<dyn Fn(&Notice<'_>)>;
+
+thread_local! {
+    static OBSERVERS: RefCell<BTreeMap<u64, Observer>> = const { RefCell::new(BTreeMap::new()) };
+    static NEXT_OBSERVER: Cell<u64> = const { Cell::new(0) };
+}
+
+/// Notices reach observers on the thread that releases: the main thread.
+pub(crate) struct Subscription(u64, PhantomData<Rc<()>>);
+
+pub(crate) fn observe(observer: impl Fn(&Notice<'_>) + 'static) -> Subscription {
+    let id = NEXT_OBSERVER.with(|next| {
+        next.set(next.get() + 1);
+        next.get()
+    });
+    OBSERVERS.with_borrow_mut(|observers| observers.insert(id, Rc::new(observer)));
+    Subscription(id, PhantomData)
+}
+
+impl Drop for Subscription {
+    fn drop(&mut self) {
+        let _ = OBSERVERS.try_with(|observers| observers.borrow_mut().remove(&self.0));
+    }
+}
+
+pub(crate) fn notify(notice: &Notice<'_>) {
+    let observers: Vec<Observer> =
+        OBSERVERS.with_borrow(|observers| observers.values().cloned().collect());
+    for observer in observers {
+        observer(notice);
+    }
 }
 
 /// Only `folder` itself: an operation writing into its subfolders lists those.

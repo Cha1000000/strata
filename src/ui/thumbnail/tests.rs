@@ -119,3 +119,64 @@ fn show_thumbnails_cancels_late_results_and_forgets_recycled_targets() {
         },
     );
 }
+
+#[test]
+fn a_thumbnail_released_by_an_operation_is_not_remembered_as_failed() {
+    gtk_test(
+        "ui::thumbnail::tests::a_thumbnail_released_by_an_operation_is_not_remembered_as_failed",
+        || {
+            let directory = tempfile::tempdir().expect("media folder");
+            let path = directory.path().join("photo.png");
+            let key = ThumbnailKey {
+                path: path.clone(),
+                modified: None,
+                file_size: None,
+                thumbnail_size: super::super::thumbnail_cache::CANONICAL_MAX_EDGE,
+            };
+            let slot = ThumbnailSlot::new(18);
+            let request = NEXT_REQUEST.fetch_add(1, Ordering::Relaxed);
+            let target =
+                register_active_request(&slot, slot.as_ptr() as usize, request, key.clone());
+            let job = NEXT_REQUEST.fetch_add(1, Ordering::Relaxed);
+            PENDING_THUMBNAILS.with_borrow_mut(|pending| {
+                pending.insert(
+                    key.clone(),
+                    PendingThumbnail {
+                        id: job,
+                        kind: ThumbnailKind::Image,
+                        cancellation: Cancellation::default(),
+                        targets: vec![target.clone()],
+                    },
+                );
+            });
+
+            glib::MainContext::default().block_on(finish_thumbnail_job(
+                ThumbnailJob {
+                    id: job,
+                    key: key.clone(),
+                    resolved: key.clone(),
+                    kind: ThumbnailKind::Image,
+                    cancellation: Cancellation::default(),
+                },
+                Err(crate::services::file_activity::HELD_FOR_OPERATION.to_owned()),
+            ));
+
+            assert!(
+                THUMBNAIL_CACHE
+                    .with_borrow_mut(|cache| cache.get(&key))
+                    .is_none(),
+                "an operation's refusal is no failure to remember"
+            );
+            assert!(request_is_live(&target));
+            assert!(PENDING_THUMBNAILS.with_borrow(|pending| !pending.contains_key(&key)));
+            let operation = crate::adapters::ActiveOperation::begin([]);
+            glib::MainContext::default()
+                .block_on(operation.release(vec![path], &gio::Cancellable::new()));
+            drop(operation);
+            assert!(
+                PENDING_THUMBNAILS.with_borrow(|pending| pending.contains_key(&key)),
+                "the thumbnail is asked for again once the operation ends"
+            );
+        },
+    );
+}

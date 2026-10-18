@@ -1927,6 +1927,7 @@ fn build_chooser_hosted(
     }));
 
     let state_for_observer = state.clone();
+    preview.follow_operations(&browser);
     let preview_for_browser = preview.clone();
     let weak_browser = Rc::downgrade(&browser);
     browser.observe(move |event| {

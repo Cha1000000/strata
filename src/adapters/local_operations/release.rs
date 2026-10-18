@@ -18,7 +18,7 @@ use crate::{
         mount_watch,
     },
     model::Location,
-    services::file_activity::{self, Activity, Fence, OperationScope},
+    services::file_activity::{self, Activity, Fence, Notice, OperationScope},
 };
 
 pub(crate) const RELEASE_BUDGET: Duration = Duration::from_secs(2);
@@ -26,6 +26,7 @@ pub(crate) const RELEASE_BUDGET: Duration = Duration::from_secs(2);
 pub(crate) struct ActiveOperation {
     activity: Activity,
     fences: RefCell<Vec<Fence>>,
+    released: RefCell<Vec<PathBuf>>,
     real_folders: RefCell<HashMap<PathBuf, Option<PathBuf>>>,
 }
 
@@ -37,6 +38,7 @@ impl ActiveOperation {
                 folders: folders.into_iter().collect(),
             }),
             fences: RefCell::default(),
+            released: RefCell::default(),
             real_folders: RefCell::default(),
         }
     }
@@ -79,6 +81,7 @@ impl ActiveOperation {
             folders: Vec::new(),
         });
         let lexical = self.activity.fence(roots.iter().cloned());
+        file_activity::notify(&Notice::Releasing(&roots));
         lexical.stop_reads();
         let mut drained = vec![lexical.drained()];
         self.fences.borrow_mut().push(lexical);
@@ -89,12 +92,15 @@ impl ActiveOperation {
             })
             .await;
             if !real.is_empty() {
-                let fence = self.activity.fence(real);
+                let fence = self.activity.fence(real.iter().cloned());
+                file_activity::notify(&Notice::Releasing(&real));
                 fence.stop_reads();
                 drained.push(fence.drained());
                 self.fences.borrow_mut().push(fence);
+                self.released.borrow_mut().extend(real);
             }
         }
+        self.released.borrow_mut().extend(roots);
         futures_lite::future::or(
             async {
                 for fence in drained {
@@ -131,6 +137,17 @@ impl ActiveOperation {
                 (!lexical.contains(&real)).then_some(real)
             })
             .collect()
+    }
+}
+
+impl Drop for ActiveOperation {
+    fn drop(&mut self) {
+        self.fences.get_mut().clear();
+        self.activity.end();
+        let lifted = std::mem::take(self.released.get_mut());
+        if !lifted.is_empty() {
+            file_activity::notify(&Notice::Lifted(&lifted));
+        }
     }
 }
 

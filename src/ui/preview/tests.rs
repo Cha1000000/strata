@@ -6,6 +6,7 @@ use crate::model::{Location, MetadataValue};
 mod audio;
 mod find;
 mod media_controls;
+mod operations;
 mod pdf;
 mod video;
 
