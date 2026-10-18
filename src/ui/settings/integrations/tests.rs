@@ -8,7 +8,7 @@ use std::{
 };
 
 use super::*;
-use crate::services::provider_catalog::parse;
+use crate::services::integration_catalog::parse;
 
 const MANIFEST: &str = r#"
 schema_version = 1

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-//! Opt-in integrations bundled with Strata: the catalog under `providers/`,
+//! Opt-in integrations bundled with Strata: the catalog under `integrations/`,
 //! their installation as external file providers and update detection.
 
 use serde::{Deserialize, Serialize};
@@ -23,7 +23,7 @@ pub(crate) type BundledFile = (&'static str, &'static [u8]);
 pub(crate) type BundledEntry = (&'static str, &'static [BundledFile]);
 
 mod bundle {
-    include!(concat!(env!("OUT_DIR"), "/providers.rs"));
+    include!(concat!(env!("OUT_DIR"), "/integrations.rs"));
 }
 
 #[cfg(test)]
@@ -32,9 +32,9 @@ mod tests;
 pub(crate) const CATALOG_FILE: &str = "catalog.toml";
 /// Written beside an installed copy; its absence marks a manual installation.
 pub(crate) const RECORD_FILE: &str = "catalog-install.json";
-/// A `providers/`-layout directory that replaces the bundled catalog while
+/// An `integrations/`-layout directory that replaces the bundled catalog while
 /// developing an integration.
-pub(crate) const CATALOG_OVERRIDE: &str = "STRATA_PROVIDER_CATALOG";
+pub(crate) const CATALOG_OVERRIDE: &str = "STRATA_INTEGRATION_CATALOG";
 const MANIFEST_FILE: &str = "provider.json";
 const FILE_LIMIT: usize = 32;
 const FILE_SIZE_LIMIT: usize = 1024 * 1024;
@@ -376,7 +376,7 @@ pub(crate) fn bundled() -> &'static [Entry] {
     })
 }
 
-/// The bundled catalog, or the directory named by `STRATA_PROVIDER_CATALOG`.
+/// The bundled catalog, or the directory named by `STRATA_INTEGRATION_CATALOG`.
 pub(crate) fn catalog() -> Vec<Entry> {
     match std::env::var_os(CATALOG_OVERRIDE) {
         Some(directory) => load_directory(Path::new(&directory)),

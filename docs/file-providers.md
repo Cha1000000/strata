@@ -52,7 +52,7 @@ dark backgrounds. Strata's own interface continues to use themed Lucide icons.
 
 ## Bundled integrations
 
-Providers maintained in this repository live under [`providers/`](../providers/README.md),
+Integrations maintained in this repository live under [`integrations/`](../integrations/README.md),
 one directory per integration with a `catalog.toml` beside the program. Strata
 embeds that directory at build time and lists it in **Settings → Integrations**,
 grouped by category with each entry's maintainer and requirement checks.
@@ -68,7 +68,7 @@ folder** shows the registration directory in the browser. Each change stops
 the running providers and discovers the registrations again, so it takes
 effect at once; **Refresh** does the same after edits made by hand.
 
-`STRATA_PROVIDER_CATALOG=<directory>` replaces the bundled catalog with a
+`STRATA_INTEGRATION_CATALOG=<directory>` replaces the bundled catalog with a
 directory in the same layout, for developing an entry without rebuilding Strata.
 
 ## Transport
@@ -309,7 +309,7 @@ filenames are unsupported; no lossy conversion is performed.
 `./scripts/test-headless.py file_providers` covers trusted registration, protocol
 bounds, literal filenames, process framing, queue saturation, snapshot ordering,
 recursive action retirement, tracking admission and window remapping.
-`./scripts/test-headless.py provider_catalog` covers catalog parsing and bounds,
+`./scripts/test-headless.py integration_catalog` covers catalog parsing and bounds,
 installation records, update and edit detection, and that every bundled entry
 parses and is translated; `./scripts/test-headless.py integrations` covers the
 Settings page. `./scripts/e2e.sh tests/e2e/scenarios/test_file_providers.py`

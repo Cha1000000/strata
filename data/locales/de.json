@@ -538,7 +538,7 @@
   "No integrations are bundled with this build.": "Mit diesem Build werden keine Integrationen gebündelt.",
   "Not installed": "Nicht installiert",
   "OTHER": "SONSTIGES",
-  "Optional providers bundled with Strata connect the context menu to other apps and services, such as sending files to a phone. They run with your permissions, like any program you install.": "Optionale, mit Strata gebündelte Anbieter verbinden das Kontextmenü mit anderen Apps und Diensten, etwa zum Senden von Dateien an ein Telefon. Sie laufen mit Ihren Berechtigungen wie jedes installierte Programm.",
+  "Optional integrations bundled with Strata connect the context menu to other apps and services, such as sending files to a phone. They run with your permissions, like any program you install.": "Optionale, mit Strata gebündelte Integrationen verbinden das Kontextmenü mit anderen Apps und Diensten, etwa zum Senden von Dateien an ein Telefon. Sie laufen mit Ihren Berechtigungen wie jedes installierte Programm.",
   "Raise the limits in Settings → General → Search & filtering.": "Die Limits lassen sich unter Einstellungen → Allgemein → Suche & Filter erhöhen.",
   "Replace": "Ersetzen",
   "Requires:": "Erfordert:",

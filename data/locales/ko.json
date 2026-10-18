@@ -538,7 +538,7 @@
   "No integrations are bundled with this build.": "이 빌드에는 포함된 통합이 없습니다.",
   "Not installed": "설치되지 않음",
   "OTHER": "기타",
-  "Optional providers bundled with Strata connect the context menu to other apps and services, such as sending files to a phone. They run with your permissions, like any program you install.": "Strata에 포함된 선택형 제공자는 컨텍스트 메뉴를 다른 앱과 서비스에 연결합니다(예: 휴대전화로 파일 보내기). 설치한 다른 프로그램처럼 사용자의 권한으로 실행됩니다.",
+  "Optional integrations bundled with Strata connect the context menu to other apps and services, such as sending files to a phone. They run with your permissions, like any program you install.": "Strata에 포함된 선택형 통합은 컨텍스트 메뉴를 다른 앱과 서비스에 연결합니다(예: 휴대전화로 파일 보내기). 설치한 다른 프로그램처럼 사용자의 권한으로 실행됩니다.",
   "Raise the limits in Settings → General → Search & filtering.": "설정 → 일반 → 검색 및 필터링에서 제한을 높일 수 있습니다.",
   "Replace": "바꾸기",
   "Requires:": "필요:",

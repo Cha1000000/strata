@@ -538,7 +538,7 @@
   "No integrations are bundled with this build.": "Bản dựng này không đi kèm tích hợp nào.",
   "Not installed": "Chưa cài đặt",
   "OTHER": "KHÁC",
-  "Optional providers bundled with Strata connect the context menu to other apps and services, such as sending files to a phone. They run with your permissions, like any program you install.": "Các trình cung cấp tùy chọn đi kèm Strata kết nối menu ngữ cảnh với các ứng dụng và dịch vụ khác, chẳng hạn gửi tệp sang điện thoại. Chúng chạy với quyền của bạn, như mọi chương trình bạn cài đặt.",
+  "Optional integrations bundled with Strata connect the context menu to other apps and services, such as sending files to a phone. They run with your permissions, like any program you install.": "Các tích hợp tùy chọn đi kèm Strata kết nối menu ngữ cảnh với các ứng dụng và dịch vụ khác, chẳng hạn gửi tệp sang điện thoại. Chúng chạy với quyền của bạn, như mọi chương trình bạn cài đặt.",
   "Raise the limits in Settings → General → Search & filtering.": "Tăng giới hạn trong Cài đặt → Chung → Tìm kiếm & Lọc.",
   "Replace": "Thay thế",
   "Requires:": "Yêu cầu:",

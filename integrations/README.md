@@ -3,7 +3,7 @@
 Integrations are [external file providers](../docs/file-providers.md) that ship
 with Strata but stay off until a user installs them from **Settings →
 Integrations**. Each subdirectory here is one catalog entry. Strata embeds the
-directory at build time, so adding a provider needs no packaging change; the
+directory at build time, so adding an integration needs no packaging change; the
 Settings page copies it into `~/.config/strata/providers/<id>/` on install and
 removes it on request.
 
@@ -13,7 +13,7 @@ contribution as you would a program the user is asked to run.
 ## Layout
 
 ```text
-providers/
+integrations/
   kdeconnect/
     catalog.toml       required: the catalog entry
     provider.py        the program Strata starts; named by `entry`
@@ -79,10 +79,10 @@ replaced. There is no version field to bump.
 - **Protocol first.** Use the documented provider protocol only. Do not inspect
   file contents to draw menus or badges, and keep selected paths out of logs.
 - **Tests.** Keep unit tests under `tests/`, runnable with the interpreter the
-  entry names from the provider directory (`python3 -m unittest discover -s
-  tests`), or for every entry with `python3 scripts/provider_tests.py`. List
+  entry names from the integration directory (`python3 -m unittest discover -s
+  tests`), or for every entry with `python3 scripts/integration_tests.py`. List
   Ubuntu packages the tests need in `tests/apt-packages.txt`. They run in the
-  `providers` workflow when files under `providers/` change. The
+  `Integrations` workflow when files under `integrations/` change. The
   Rust suite checks that every bundled entry parses and stays within the
   manifest bounds; the E2E suite exercises the Settings page with a fixture
   catalog, not with bundled entries.
@@ -94,7 +94,7 @@ replaced. There is no version field to bump.
 Point Strata at a checkout instead of the bundled catalog while iterating:
 
 ```bash
-STRATA_PROVIDER_CATALOG=providers cargo run
+STRATA_INTEGRATION_CATALOG=integrations cargo run
 ```
 
 Settings → Integrations then lists the directory's entries. Install from there

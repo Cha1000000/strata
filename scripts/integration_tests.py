@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
-"""Run the tests of every bundled integration under providers/.
+"""Run the tests of every bundled integration under integrations/.
 
-Each provider directory holds a catalog.toml naming its runtime and entry
+Each integration directory holds a catalog.toml naming its runtime and entry
 script. The entry is byte-compiled with that runtime, and tests under
-providers/<id>/tests/ run through unittest discovery. Packages listed one per
+integrations/<id>/tests/ run through unittest discovery. Packages listed one per
 line in tests/apt-packages.txt are printed by --apt-packages for CI to install.
 """
 
@@ -17,7 +17,7 @@ import sys
 import tomllib
 
 
-def provider_directories(root: Path) -> list[Path]:
+def integration_directories(root: Path) -> list[Path]:
     if not root.is_dir():
         return []
     return sorted(
@@ -29,7 +29,7 @@ def provider_directories(root: Path) -> list[Path]:
 
 def apt_packages(root: Path) -> list[str]:
     packages: list[str] = []
-    for directory in provider_directories(root):
+    for directory in integration_directories(root):
         listing = directory / "tests" / "apt-packages.txt"
         if not listing.is_file():
             continue
@@ -40,7 +40,7 @@ def apt_packages(root: Path) -> list[str]:
     return packages
 
 
-def run_provider(directory: Path) -> bool:
+def run_integration(directory: Path) -> bool:
     manifest = tomllib.loads((directory / "catalog.toml").read_text())
     runtime = manifest["runtime"]
     entry = directory / manifest["entry"]
@@ -53,7 +53,7 @@ def run_provider(directory: Path) -> bool:
         print(f"== {directory.name}: no tests directory", flush=True)
         return True
     print(f"== {directory.name}: unittest discover", flush=True)
-    # Run from the provider directory so tests import the entry as a module.
+    # Run from the integration directory so tests import the entry as a module.
     result = subprocess.run(
         [runtime, "-m", "unittest", "discover", "-v", "-s", "tests"],
         cwd=directory,
@@ -64,17 +64,17 @@ def run_provider(directory: Path) -> bool:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parent.parent / "providers")
+    parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parent.parent / "integrations")
     parser.add_argument("--apt-packages", action="store_true", help="print the packages tests need")
     arguments = parser.parse_args(argv)
     if arguments.apt_packages:
         print("\n".join(apt_packages(arguments.root)))
         return 0
-    directories = provider_directories(arguments.root)
+    directories = integration_directories(arguments.root)
     if not directories:
-        print("no bundled providers")
+        print("no bundled integrations")
         return 0
-    failures = [directory.name for directory in directories if not run_provider(directory)]
+    failures = [directory.name for directory in directories if not run_integration(directory)]
     if failures:
         print(f"failed: {', '.join(failures)}", file=sys.stderr)
         return 1

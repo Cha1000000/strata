@@ -1415,7 +1415,7 @@
   "No integrations are bundled with this build.": "此建置未隨附任何整合。",
   "Not installed": "未安裝",
   "OTHER": "其他",
-  "Optional providers bundled with Strata connect the context menu to other apps and services, such as sending files to a phone. They run with your permissions, like any program you install.": "Strata 隨附的選用提供者會將右鍵選單連接到其他應用程式和服務，例如將檔案傳送到手機。它們以您的權限執行，與您安裝的任何程式一樣。",
+  "Optional integrations bundled with Strata connect the context menu to other apps and services, such as sending files to a phone. They run with your permissions, like any program you install.": "Strata 隨附的選用整合會將右鍵選單連接到其他應用程式和服務，例如將檔案傳送到手機。它們以您的權限執行，與您安裝的任何程式一樣。",
   "Replace": "取代",
   "Requires:": "需要：",
   "The change failed.": "變更失敗。",

@@ -538,7 +538,7 @@
   "No integrations are bundled with this build.": "このビルドには連携が同梱されていません。",
   "Not installed": "未インストール",
   "OTHER": "その他",
-  "Optional providers bundled with Strata connect the context menu to other apps and services, such as sending files to a phone. They run with your permissions, like any program you install.": "Strata に同梱された任意の連携プロバイダーは、コンテキストメニューを他のアプリやサービスにつなぎます（例: スマートフォンへのファイル送信）。インストールした他のプログラムと同様にあなたの権限で動作します。",
+  "Optional integrations bundled with Strata connect the context menu to other apps and services, such as sending files to a phone. They run with your permissions, like any program you install.": "Strata に同梱されたオプションの連携は、コンテキストメニューを他のアプリやサービスにつなぎます（例: スマートフォンへのファイル送信）。インストールした他のプログラムと同様にあなたの権限で動作します。",
   "Raise the limits in Settings → General → Search & filtering.": "設定 → 一般 → 検索と絞り込みで制限を引き上げられます。",
   "Replace": "置き換える",
   "Requires:": "必要:",

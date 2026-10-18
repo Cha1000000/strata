@@ -41,7 +41,7 @@ def catalog(test_environment):
     folder.mkdir(parents=True)
     (folder / "catalog.toml").write_text(MANIFEST)
     (folder / "provider.py").write_text(PROVIDER)
-    test_environment.extra_variables["STRATA_PROVIDER_CATALOG"] = str(folder.parent)
+    test_environment.extra_variables["STRATA_INTEGRATION_CATALOG"] = str(folder.parent)
     return folder
 
 

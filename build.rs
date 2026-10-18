@@ -9,8 +9,8 @@ use std::{
 fn main() {
     println!("cargo::rerun-if-changed=data/locales");
     write_translation_catalogs();
-    println!("cargo::rerun-if-changed=providers");
-    write_provider_bundle();
+    println!("cargo::rerun-if-changed=integrations");
+    write_integration_bundle();
     glib_build_tools::compile_resources(&["data"], "data/strata.gresource.xml", "strata.gresource");
 
     println!("cargo::rerun-if-env-changed=STRATA_TRUSTED_COMMAND_PATH");
@@ -89,11 +89,11 @@ fn write_translation_catalogs() {
     fs::write(output, source).expect("write translation catalogs");
 }
 
-/// Embeds every integration under `providers/` so releases carry the catalog
+/// Embeds every integration under `integrations/` so releases carry the catalog
 /// without packaging changes. Directories starting with `.` or `_` and
 /// documentation files are left out.
-fn write_provider_bundle() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("providers");
+fn write_integration_bundle() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("integrations");
     let mut directories: Vec<PathBuf> = fs::read_dir(&root)
         .map(|entries| {
             entries
@@ -109,12 +109,12 @@ fn write_provider_bundle() {
         let id = directory
             .file_name()
             .and_then(|name| name.to_str())
-            .expect("provider directory name");
+            .expect("integration directory name");
         if id.starts_with(['.', '_']) {
             continue;
         }
         let mut files: Vec<PathBuf> = fs::read_dir(&directory)
-            .expect("read provider directory")
+            .expect("read integration directory")
             .filter_map(Result::ok)
             .map(|entry| entry.path())
             .filter(|path| path.is_file())
@@ -125,7 +125,7 @@ fn write_provider_bundle() {
             let name = file
                 .file_name()
                 .and_then(|name| name.to_str())
-                .expect("provider file name");
+                .expect("integration file name");
             if name.starts_with('.') || name == "README.md" {
                 continue;
             }
@@ -139,8 +139,8 @@ fn write_provider_bundle() {
         source.push_str("]),\n");
     }
     source.push_str("];\n");
-    let output = Path::new(&env::var_os("OUT_DIR").expect("OUT_DIR")).join("providers.rs");
-    fs::write(output, source).expect("write provider bundle");
+    let output = Path::new(&env::var_os("OUT_DIR").expect("OUT_DIR")).join("integrations.rs");
+    fs::write(output, source).expect("write integration bundle");
 }
 
 fn git_commit() -> Option<String> {

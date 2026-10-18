@@ -14,8 +14,8 @@ use super::{page_content, scrollable_page, search, settings_group};
 use crate::{
     assets::{self, icons},
     services::{
+        integration_catalog::{self, Category, Entry, Installation, RequirementResult, Status},
         package_manager::PackageManager,
-        provider_catalog::{self, Category, Entry, Installation, RequirementResult, Status},
     },
     ui::{accessibility, controls::copyable_command},
 };
@@ -40,9 +40,9 @@ pub(super) struct Source {
 impl Default for Source {
     fn default() -> Self {
         Self {
-            catalog: Box::new(provider_catalog::catalog),
+            catalog: Box::new(integration_catalog::catalog),
             root: crate::services::file_providers::config_root(),
-            check: Arc::new(provider_catalog::check_requirements),
+            check: Arc::new(integration_catalog::check_requirements),
             open_folder: None,
             reload: Rc::new(crate::ui::file_providers::reload),
         }
@@ -69,7 +69,7 @@ pub(super) fn integrations_page_with(source: Source) -> gtk::Widget {
     title.set_xalign(0.0);
     title.add_css_class("settings-option-title");
     let description = gtk::Label::new(Some(&crate::i18n::tr(
-        "Optional providers bundled with Strata connect the context menu to other apps and services, such as sending files to a phone. They run with your permissions, like any program you install.",
+        "Optional integrations bundled with Strata connect the context menu to other apps and services, such as sending files to a phone. They run with your permissions, like any program you install.",
     )));
     description.set_xalign(0.0);
     description.set_wrap(true);
@@ -147,17 +147,17 @@ impl Page {
                     .into_iter()
                     .map(|entry| Row {
                         status: root.as_deref().map_or(Status::NotInstalled, |root| {
-                            provider_catalog::status(&entry, root)
+                            integration_catalog::status(&entry, root)
                         }),
                         enabled: root
                             .as_deref()
-                            .is_none_or(|root| provider_catalog::enabled(root, &entry.id)),
+                            .is_none_or(|root| integration_catalog::enabled(root, &entry.id)),
                         entry,
                     })
                     .collect();
                 let manual = root.as_deref().map_or_else(Vec::new, |root| {
                     let catalog: Vec<Entry> = rows.iter().map(|row| row.entry.clone()).collect();
-                    provider_catalog::manual_installations(root, &catalog)
+                    integration_catalog::manual_installations(root, &catalog)
                 });
                 (rows, manual)
             })
@@ -639,7 +639,7 @@ impl RowContext {
             self.fail(&crate::i18n::tr("No configuration folder is available."));
             return;
         };
-        self.run(move || provider_catalog::install(&entry, &root).map(|_| ()));
+        self.run(move || integration_catalog::install(&entry, &root).map(|_| ()));
     }
 
     fn set_enabled(self: &Rc<Self>, enabled: bool) {
@@ -650,7 +650,7 @@ impl RowContext {
             return;
         };
         let id = self.id.clone();
-        self.run(move || provider_catalog::set_enabled(&root, &id, enabled));
+        self.run(move || integration_catalog::set_enabled(&root, &id, enabled));
     }
 
     fn remove(self: &Rc<Self>) {
@@ -661,7 +661,7 @@ impl RowContext {
             return;
         };
         let id = self.id.clone();
-        self.run(move || provider_catalog::remove(&root, &id));
+        self.run(move || integration_catalog::remove(&root, &id));
     }
 
     fn run(self: &Rc<Self>, work: impl FnOnce() -> Result<(), String> + Send + 'static) {
