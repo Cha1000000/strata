@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 
-use super::fs_ops::{Entry, EntryStat, assert_off_main_thread, fs};
-use crate::services::{Attributes, Evidence, IdentityTraits, Proof, TrashedOriginal};
+use super::fs_ops::{Entry, EntryStat, FsOps, OffMain, assert_off_main_thread, fs};
+use crate::services::{Attributes, Evidence, IdentityTraits, InodeNumbers, Proof, TrashedOriginal};
 use std::{
     ffi::{OsStr, OsString},
     io,
@@ -72,6 +72,67 @@ pub(super) fn unchanged(
         Proof::Same => true,
         Proof::Different => false,
         Proof::Unproven => recorded == current.identity,
+    }
+}
+
+/// An `O_PATH` hold keeps the kernel from evicting an entry, so it keeps its number.
+pub(super) struct Pinned {
+    pin: Option<OffMain<OwnedFd>>,
+}
+
+impl Pinned {
+    pub(super) fn at(
+        fs: &dyn FsOps,
+        entry: Entry<'_>,
+        stat: &EntryStat,
+        traits: IdentityTraits,
+    ) -> Self {
+        let unproven = stat.identity.birth.is_none_or(|birth| birth == (0, 0))
+            || (stat.is_directory() && !traits.folder_births);
+        let pin = (traits.numbers == InodeNumbers::Renewed && unproven)
+            .then(|| {
+                fs.open_at(
+                    entry,
+                    rustix::fs::OFlags::PATH
+                        | rustix::fs::OFlags::NOFOLLOW
+                        | rustix::fs::OFlags::CLOEXEC,
+                    rustix::fs::Mode::empty(),
+                    None,
+                )
+                .ok()
+            })
+            .flatten()
+            .filter(|pin| {
+                fs.stat_fd(pin.as_fd())
+                    .is_ok_and(|pinned| pinned.identity == stat.identity)
+            })
+            .map(OffMain::new);
+        Self { pin }
+    }
+
+    pub(super) fn holds(&self, fs: &dyn FsOps, current: &EntryStat) -> Option<bool> {
+        let pin = self.pin.as_ref()?;
+        Some(
+            fs.stat_fd(pin.as_fd())
+                .is_ok_and(|pinned| pinned.identity == current.identity),
+        )
+    }
+
+    /// A path-keyed FUSE daemon keeps a name's number for a file another writer puts there.
+    pub(super) fn unchanged(
+        &self,
+        fs: &dyn FsOps,
+        traits: IdentityTraits,
+        recorded: &EntryStat,
+        current: &EntryStat,
+    ) -> bool {
+        self.holds(fs, current) != Some(false)
+            && unchanged(
+                traits,
+                recorded.identity,
+                recorded.file_attributes(),
+                current,
+            )
     }
 }
 

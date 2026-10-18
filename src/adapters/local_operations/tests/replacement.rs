@@ -524,6 +524,8 @@ fn a_target_is_replaced_only_while_its_mount_still_knows_it() -> Result<(), Box<
     #[derive(Clone, Copy, Debug)]
     enum Meanwhile {
         Evicted,
+        ReplacedAlike,
+        ReplacedLonger,
         EvictedOnceNumbersWent,
         ReplacedAlikeOnceNumbersWent,
         ReplacedAlikeAndEvictedOnceNumbersWent,
@@ -533,26 +535,38 @@ fn a_target_is_replaced_only_while_its_mount_still_knows_it() -> Result<(), Box<
         births: Births::MadeUp,
         ..Quirks::cifs()
     };
-    let rows: [(Preset, Meanwhile, bool); 4] = [
-        (Quirks::vfat, Meanwhile::Evicted, true),
-        (samba, Meanwhile::EvictedOnceNumbersWent, true),
-        (samba, Meanwhile::ReplacedAlikeOnceNumbersWent, false),
+    let path_keyed = || Quirks {
+        reused_inodes: Some("target"),
+        ..Quirks::sshfs()
+    };
+    let rows: [(Preset, Meanwhile, bool, bool); 7] = [
+        (Quirks::vfat, Meanwhile::Evicted, true, true),
+        (Quirks::sshfs, Meanwhile::Evicted, true, false),
+        (Quirks::sshfs, Meanwhile::ReplacedAlike, false, true),
+        (path_keyed, Meanwhile::ReplacedLonger, false, true),
+        (samba, Meanwhile::EvictedOnceNumbersWent, true, true),
+        (samba, Meanwhile::ReplacedAlikeOnceNumbersWent, false, true),
         (
             samba,
             Meanwhile::ReplacedAlikeAndEvictedOnceNumbersWent,
             false,
+            true,
         ),
     ];
-    for (preset, meanwhile, replaced) in rows {
+    for (preset, meanwhile, replaced, possible) in rows {
         let row = format!("{:?}, {meanwhile:?}", preset().mount_type);
         let root = tempfile::tempdir()?;
         let share = root.path().join("share");
         fs::create_dir(&share)?;
         let (source, target) = (share.join("source"), share.join("target"));
         let arrival = root.path().join("arrival");
+        let theirs: &[u8] = match meanwhile {
+            Meanwhile::ReplacedLonger => b"OLD, longer",
+            _ => b"OLD",
+        };
         fs::write(&source, b"new")?;
         fs::write(&target, b"old")?;
-        fs::write(&arrival, b"OLD")?;
+        fs::write(&arrival, theirs)?;
         let hour_before = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)?
             .as_secs()
@@ -560,19 +574,20 @@ fn a_target_is_replaced_only_while_its_mount_still_knows_it() -> Result<(), Box<
         for file in [&target, &arrival] {
             set_times(file, hour_before, 0)?;
         }
-        let happened = Arc::new(AtomicBool::new(false));
+        let happened = Arc::new(AtomicBool::new(!possible));
         let (at, done) = (share.clone(), happened.clone());
         let racer: Racer = Box::new(move || {
             let target = at.join("target");
             let numbers_went = || super::fs_quirks::autodisable_serverino(&at);
-            let replaced_alike = || fs::rename(&arrival, &target).is_ok();
+            let renamed_over = || fs::rename(&arrival, &target).is_ok();
             let evicted = || super::fs_quirks::evict(&target);
             let happened = match meanwhile {
                 Meanwhile::Evicted => evicted(),
+                Meanwhile::ReplacedAlike | Meanwhile::ReplacedLonger => renamed_over(),
                 Meanwhile::EvictedOnceNumbersWent => numbers_went() && evicted(),
-                Meanwhile::ReplacedAlikeOnceNumbersWent => numbers_went() && replaced_alike(),
+                Meanwhile::ReplacedAlikeOnceNumbersWent => numbers_went() && renamed_over(),
                 Meanwhile::ReplacedAlikeAndEvictedOnceNumbersWent => {
-                    numbers_went() && replaced_alike() && evicted()
+                    numbers_went() && renamed_over() && evicted()
                 }
             };
             done.store(happened, Ordering::Release);
@@ -588,7 +603,7 @@ fn a_target_is_replaced_only_while_its_mount_still_knows_it() -> Result<(), Box<
 
         let (result, _) = replace_reporting(&source, &target, false);
 
-        assert!(happened.load(Ordering::Acquire), "{row}");
+        assert_eq!(happened.load(Ordering::Acquire), possible, "{row}");
         if replaced {
             assert!(result.is_ok(), "{row}: {result:?}");
             assert_eq!(fs::read(&target)?, b"new", "{row}");
@@ -596,7 +611,7 @@ fn a_target_is_replaced_only_while_its_mount_still_knows_it() -> Result<(), Box<
         } else {
             let error = result.expect_err("the target changed");
             assert!(error.to_string().contains("changed"), "{row}: {error}");
-            assert_eq!(fs::read(&target)?, b"OLD", "{row}");
+            assert_eq!(fs::read(&target)?, theirs, "{row}");
             assert_eq!(names(&share)?, ["source", "target"], "{row}");
         }
     }

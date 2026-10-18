@@ -29,6 +29,7 @@ pub(crate) struct MountCapabilities {
     pub no_replace: Option<bool>,
     pub exchange: Option<bool>,
     pub hard_links: Option<bool>,
+    pub links_keep_numbers: bool,
     pub rename_over_empty_directory: Option<bool>,
     pub tmpfile: Option<bool>,
     /// Whether an unnamed file links only through `/proc`: `AT_EMPTY_PATH`

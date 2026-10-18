@@ -33,8 +33,8 @@ use super::{
     copy_recursively_with_progress,
     deletion::{PinnedEntry, parallel_delete_local},
     device, existing_folder_names, io_error, is_trash_unsupported_failure, merge_aside,
-    mount_profile::{self, NamePolicy},
-    native_fs::{self, LocalFileIdentity, open_local_parent_directory, os_error_detail},
+    mount_profile::{self, NamePolicy, known_mount},
+    native_fs::{LocalFileIdentity, Pinned, open_local_parent_directory, os_error_detail},
     native_path, os_io_error, placement, placement_error_kind, placement_failure, placement_reason,
     progress::TransferProgressTracker,
     release::ActiveOperation,
@@ -269,6 +269,7 @@ pub(super) struct ReplacePlan {
     pub(super) target_parent: Arc<OwnedFd>,
     pub(super) target_name: OsString,
     pub(super) target: EntryStat,
+    pub(super) target_pin: Pinned,
     pub(super) strategy: ReplaceStrategy,
 }
 
@@ -368,6 +369,12 @@ pub(super) fn plan_replace(
             &target_name.to_string_lossy(),
         )?))
     };
+    let target_pin = Pinned::at(
+        fs(),
+        Entry::new(&target_parent, &target_name),
+        &target,
+        known_mount(fs(), target_parent.as_fd()).1.identity,
+    );
     Ok(Some(ReplacePlan {
         source_parent: Arc::new(source_parent),
         source_name,
@@ -375,6 +382,7 @@ pub(super) fn plan_replace(
         target_parent: Arc::new(target_parent),
         target_name,
         target,
+        target_pin,
         strategy,
     }))
 }
@@ -404,18 +412,18 @@ pub(super) fn displacement_or_refusal(
 pub(super) fn ensure_unchanged(
     entry: Entry<'_>,
     recorded: &EntryStat,
+    pin: &Pinned,
 ) -> Result<EntryStat, glib::Error> {
+    let unchanged = |stat: &EntryStat| {
+        pin.unchanged(
+            fs(),
+            mount_profile::identity_at(fs(), entry.dir),
+            recorded,
+            stat,
+        )
+    };
     match fs().stat(entry, false) {
-        Ok(stat)
-            if native_fs::unchanged(
-                mount_profile::identity_at(fs(), entry.dir),
-                recorded.identity,
-                recorded.file_attributes(),
-                &stat,
-            ) =>
-        {
-            Ok(stat)
-        }
+        Ok(stat) if unchanged(&stat) => Ok(stat),
         Ok(_) | Err(rustix::io::Errno::NOENT) => Err(translated_io_error(
             "The target changed while the operation was in progress",
         )),
@@ -478,8 +486,8 @@ pub(super) fn place_source(
     let target = plan.target_entry();
     let source = plan.source_entry();
     let expected = Some(plan.source.identity);
-    let current = ensure_unchanged(target, &plan.target)?;
-    match trash::trash_verified(target, target_path, current.identity, cancellable) {
+    let current = ensure_unchanged(target, &plan.target, &plan.target_pin)?;
+    match trash::trash_verified(target, target_path, &current, cancellable) {
         Ok(()) => {
             return match placement::place(fs(), source, target, expected) {
                 Ok(_) => Ok(SourcePlaced::Trashed),
@@ -629,8 +637,9 @@ pub(super) async fn replace_through_stage(
                 let (path, cancellable) = (target_path.to_path_buf(), cancellable.clone());
                 run_blocking(move || {
                     let target = Entry::new(&*parent, &step_plan.target_name);
-                    let current = ensure_unchanged(target, &step_plan.target)?;
-                    match trash::trash_verified(target, &path, current.identity, &cancellable) {
+                    let current =
+                        ensure_unchanged(target, &step_plan.target, &step_plan.target_pin)?;
+                    match trash::trash_verified(target, &path, &current, &cancellable) {
                         Ok(()) => Ok(Removal::Trashed),
                         Err(error) if is_trash_unsupported_failure(false, &error) => {
                             displacement_without_trash(
@@ -649,7 +658,8 @@ pub(super) async fn replace_through_stage(
                 let stage_name = staged.name.clone();
                 let exchanged = run_blocking(move || {
                     let target = Entry::new(&*parent, &step_plan.target_name);
-                    let current = ensure_unchanged(target, &step_plan.target)?;
+                    let current =
+                        ensure_unchanged(target, &step_plan.target, &step_plan.target_pin)?;
                     let name = step_plan.target_display();
                     match placement::exchange(fs(), Entry::new(&*parent, &stage_name), target) {
                         Ok(true) => Ok(Ok(current.identity)),
@@ -726,7 +736,7 @@ pub(super) async fn set_aside_and_publish(
     let step_name = name.clone();
     let aside = run_blocking(move || {
         let target = Entry::new(&*parent, &step_plan.target_name);
-        let current = ensure_unchanged(target, &step_plan.target)?;
+        let current = ensure_unchanged(target, &step_plan.target, &step_plan.target_pin)?;
         placement::set_aside(
             fs(),
             target,

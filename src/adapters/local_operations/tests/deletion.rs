@@ -6,7 +6,7 @@ use crate::adapters::local_operations::{
     run_local_delete_workers,
 };
 use crate::{adapters::trash_support::SystemTrash, model::hidden_names::foreign_leftover};
-use std::sync::{Barrier, atomic::Ordering, mpsc};
+use std::sync::{Barrier, Mutex, atomic::Ordering, mpsc};
 
 #[test]
 fn permanent_deletion_reports_injected_unlink_failures_without_removing_the_item()
@@ -1184,12 +1184,11 @@ fn verified_trash_learns_fuse_refusals_and_cleans_leftovers_on_both_worker_route
                                     .expect("open");
                             let at =
                                 super::super::Entry::new(&parent, path.file_name().expect("name"));
-                            let identity =
-                                super::super::fs().stat(at, false).expect("stat").identity;
+                            let stat = super::super::fs().stat(at, false).expect("stat");
                             Ok(super::super::trash::trash_verified(
                                 at,
                                 &path,
-                                identity,
+                                &stat,
                                 &gio::Cancellable::new(),
                             ))
                         }))
@@ -1229,15 +1228,32 @@ fn a_trash_that_moves_nothing_is_retryable_and_records_no_undo() {
     crate::test_support::gtk_test(
         "adapters::local_operations::tests::deletion::a_trash_that_moves_nothing_is_retryable_and_records_no_undo",
         || {
-            for trash in [Trash::FalseWithoutError, Trash::SucceedsWithoutMoving] {
+            let rows: [(Trash, Preset, Option<bool>); 5] = [
+                (Trash::FalseWithoutError, Quirks::default, None),
+                (Trash::SucceedsWithoutMoving, Quirks::default, None),
+                (Trash::SucceedsWithoutMoving, Quirks::vfat, Some(true)),
+                (Trash::SucceedsWithoutMoving, Quirks::sshfs, Some(false)),
+                (Trash::SucceedsWithoutMoving, Quirks::exfat, Some(false)),
+            ];
+            for (trash, preset, evicted) in rows {
                 let root = tempfile::tempdir().expect("root");
                 let folder = root.path().join("folder");
                 fs::create_dir(&folder).expect("folder");
+                let evicting = Arc::new(Mutex::new(None));
+                let (path, outcome) = (folder.clone(), evicting.clone());
+                let racer: super::fs_quirks::Racer = Box::new(move || {
+                    *outcome.lock().expect("outcome") = Some(super::fs_quirks::evict(&path));
+                });
                 let _quirks = FsQuirks::install(
                     root.path(),
                     Quirks {
                         trash,
-                        ..Quirks::default()
+                        after: if evicted.is_some() {
+                            vec![(Op::Trash, "folder", 0, racer)]
+                        } else {
+                            Vec::new()
+                        },
+                        ..preset()
                     },
                 );
                 let events = Rc::new(RefCell::new(Vec::new()));
@@ -1270,6 +1286,12 @@ fn a_trash_that_moves_nothing_is_retryable_and_records_no_undo() {
                 );
                 assert!(trashed_items(&events).is_empty());
                 assert!(folder.is_dir());
+                assert_eq!(
+                    *evicting.lock().expect("outcome"),
+                    evicted,
+                    "{:?}",
+                    preset().mount_type
+                );
             }
         },
     );

@@ -48,7 +48,8 @@ use super::{
     mount_profile::{self, FolderRules, NamePolicy, Site, known_mount},
     names::{Taken, may_be_refused, numbered_names, stricter_names},
     native_fs::{
-        LocalFileIdentity, compare, open_local_parent_directory, os_error_detail, os_error_text,
+        LocalFileIdentity, Pinned, compare, open_local_parent_directory, os_error_detail,
+        os_error_text,
     },
     placement::{self, ENOTSUPP, PlaceError},
     placement_error_kind, placement_reason,
@@ -2658,6 +2659,12 @@ impl<'a> FileCopy<'a> {
         target: FileTarget<'_>,
     ) -> Result<(OsString, LocalFileIdentity), Failure> {
         let fs = self.copy.fs;
+        let _pinned = Pinned::at(
+            fs,
+            self.at(&stage.name),
+            &stage.created,
+            self.target.identity,
+        );
         let settled = self
             .copy
             .sync_written(fd.as_fd(), &self.target)

@@ -10,9 +10,10 @@ use rustix::io::Errno;
 
 use super::{
     await_cancellable,
-    fs_ops::{Entry, fs},
+    fs_ops::{Entry, EntryStat, fs},
     io_error,
-    native_fs::{LocalFileIdentity, open_local_parent_directory, os_error_text},
+    mount_profile::known_mount,
+    native_fs::{self, Pinned, open_local_parent_directory, os_error_text},
     run_blocking,
 };
 use crate::services::TrashedOriginal;
@@ -45,9 +46,9 @@ pub(super) fn trash_local_blocking(
     };
     let parent = open_local_parent_directory(parent).map_err(io_error)?;
     let at = Entry::new(&parent, name);
-    let identity = fs().stat(at, false).map_err(errno_error)?.identity;
-    verify_trash(at, path, identity, cancellable)?;
-    Ok(identity.into())
+    let stat = fs().stat(at, false).map_err(errno_error)?;
+    verify_trash(at, path, &stat, cancellable)?;
+    Ok(stat.identity.into())
 }
 
 /// An item still there afterwards fails as `NotSupported`, so callers fall
@@ -55,25 +56,31 @@ pub(super) fn trash_local_blocking(
 pub(super) fn trash_verified(
     at: Entry<'_>,
     path: &Path,
-    identity: LocalFileIdentity,
+    stat: &EntryStat,
     cancellable: &gio::Cancellable,
 ) -> Result<(), crate::adapters::trash_support::TrashError> {
     crate::adapters::trash_support::verified_with_cleanup(path, || {
-        verify_trash(at, path, identity, cancellable)
+        verify_trash(at, path, stat, cancellable)
     })
 }
 
 fn verify_trash(
     at: Entry<'_>,
     path: &Path,
-    identity: LocalFileIdentity,
+    stat: &EntryStat,
     cancellable: &gio::Cancellable,
 ) -> Result<(), glib::Error> {
+    let traits = known_mount(fs(), at.dir).1.identity;
+    let pin = Pinned::at(fs(), at, stat, traits);
     let trashed = fs().trash(path, cancellable)?;
+    let still_there = |current: &EntryStat| {
+        pin.holds(fs(), current)
+            .unwrap_or_else(|| native_fs::unchanged(traits, stat.identity, None, current))
+    };
     if trashed
         && !fs()
             .stat(at, false)
-            .is_ok_and(|stat| stat.identity == identity)
+            .is_ok_and(|current| still_there(&current))
     {
         return Ok(());
     }

@@ -8,7 +8,7 @@ use std::{
 
 use rustix::io::Errno;
 
-use super::fs_quirks::{Call, NameOpens, Op, Racer, Support, TmpfileLink};
+use super::fs_quirks::{Call, NameOpens, Op, Racer, Support, TmpfileLink, evict};
 use super::*;
 use crate::adapters::volume::{XattrNamespace, mount_capabilities};
 
@@ -132,6 +132,42 @@ fn a_file_being_copied_is_invisible_until_complete() -> Result<(), Box<dyn Error
         assert_eq!(names(&mounts.destination)?, ["target.bin"], "{case}");
         assert_eq!(fs::read(mounts.target())?, contents, "{case}");
     }
+    Ok(())
+}
+
+#[test]
+fn a_stage_only_a_held_descriptor_tells_apart_is_held_until_it_is_published()
+-> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock()?;
+    let evicted = Arc::new(Mutex::new(None));
+    let outcome = evicted.clone();
+    let mounts = mounts(Quirks::default(), move |destination| {
+        let folder = destination.to_path_buf();
+        let evicting: Racer = Box::new(move || {
+            let stage = names(&folder)
+                .expect("list the destination")
+                .into_iter()
+                .find(|name| name.starts_with(".strata-copy-"))
+                .expect("a stage");
+            *outcome.lock().expect("outcome") = Some(evict(&folder.join(stage)));
+        });
+        Quirks {
+            tmpfile: Support::Rejected(Errno::OPNOTSUPP),
+            before: vec![(Op::Rename, ".strata-copy-*", 0, evicting)],
+            ..Quirks::sshfs()
+        }
+    })?;
+    let contents = patterned(64 * 1024);
+    let source = mounts.source(&contents)?;
+
+    copy(&source, &mounts.target())?;
+
+    assert_eq!(
+        *evicted.lock().map_err(|error| error.to_string())?,
+        Some(false)
+    );
+    assert_eq!(names(&mounts.destination)?, ["target.bin"]);
+    assert_eq!(fs::read(mounts.target())?, contents);
     Ok(())
 }
 

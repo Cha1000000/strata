@@ -246,19 +246,27 @@ name is still the one it read before copying, by the mount's identity rule. Wher
 inode numbers, that is the device, type, inode and birth time; vfat, exFAT and SMB without server
 inode numbers number an entry afresh once the kernel evicts it, so there the birth time stands in
 for the inode, and on SMB a file must also keep its size, modification time and change time (see
-[Moves across filesystems](#moves-across-filesystems)); where a mount neither keeps numbers nor
-reports birth times, as sshfs and exfat-fuse, a file must keep its size and modification time, and
-a folder its inode. An original renumbered while it waits is still replaced; another item is
-refused as "The target changed while the operation was in progress". The original then goes on
-with the identity it has now. An original set aside is put back by the same rule, without the
-change time, which setting it aside changes. It is removed by its device, type, inode and birth
-time, the birth time standing in for the inode where the mount numbers entries afresh, as it sits at
-a hidden name only Strata uses. Archives replace their target the same way.
+[Moves across filesystems](#moves-across-filesystems)). Where a mount neither keeps numbers nor
+reports birth times, as sshfs, exfat-fuse and vboxsf, and for a folder on kernel exFAT, Replace
+holds the target from when it reads it until it is gone, with an `O_PATH` descriptor, which opens
+nothing on a FUSE daemon or SMB server. The kernel cannot evict a held entry, so it keeps its
+number, and a file another program renames over it through the mount is refused. sshfs and vboxsf
+keep that number for a file put at the name on the server or by another client, so a file must
+still keep its size and modification time, as where no descriptor could be opened, and a folder its
+inode and any birth time. NFS keeps inode numbers and is never held this way; a held file unlinked
+there would leave a `.nfs` leftover. An original renumbered while it waits is still replaced;
+another item is refused as "The target changed while the operation was in progress". The original
+then goes on with the identity it has now. An original set aside is put back by the same rule,
+without the change time, which setting it aside changes. It is removed by its device, type, inode
+and birth time, the birth time standing in for the inode where the mount numbers entries afresh, as
+it sits at a hidden name only Strata uses. Archives replace their target the same way.
 
 Copies are written into a hidden `.strata-replacement-<id>` stage before they are placed. A file
 stage is created by the copy itself, exclusively, at a fresh name, so nothing is ever copied over
 a stage. Where the original or a moved source will be deleted, the stage is flushed to disk first;
-see [Durability](#durability).
+see [Durability](#durability). Where only a descriptor tells a file stage apart, as for the target
+above, it is held from its last write until it is published or removed, so it keeps its number
+once closed; archive stages too.
 
 When Replace is part of a move within one filesystem, the source itself is placed after the
 original is out of the way, so nothing is copied unless no step can place it. Without Trash, a
@@ -1089,7 +1097,9 @@ There, Delete offers permanent deletion and Replace and Merge use the order abov
 
 GLib 2.86.0 to 2.88.4 can report success without trashing anything on FUSE filesystems that do not
 report entry types (GLib issue #4060). Strata therefore checks that a trashed local item is gone
-before reporting success or recording Undo.
+before reporting success or recording Undo: an item still at its name by the mount's identity
+rule, or held across the call where only a descriptor tells it (see
+[Replace and merge](#replace-and-merge)), was not trashed, whatever number the kernel gave it.
 
 ## Hidden names
 
@@ -1131,8 +1141,11 @@ filesystem stores are under [Names](#names).
 | overlayfs | yes | yes | yes | lower-layer folders cannot be renamed without `redirect_dir` |
 
 libfuse high-level daemons without `use_ino`, sshfs among them, give each hard link its own inode
-number, so a link cannot prove that it holds the item. Once a probe on Strata's own names confirms
-this, Strata stops using links on that mount, and files take the
+number, so a link cannot prove that it holds the item. A FUSE daemon whose probe link keeps the
+file's number and counts two links, as ntfs-3g passes the volume's inode numbers on, counts from
+then on as keeping inode numbers, so its entries are compared by number rather than held or known
+by their size and times. Once a probe on Strata's own names confirms that links get numbers of
+their own, Strata stops using links on that mount, and files take the
 [reserved-name step](#the-reserved-name-step-and-its-risk). A link to a user's item made before
 that confirmation is removed by the identity it reported right after linking, if its type,
 permissions, size and modification time match the item's, and the file then takes that step.

@@ -7,9 +7,10 @@ use rustix::io::Errno;
 use super::super::{
     LocalFileIdentity,
     fs_ops::{Entry, fs},
+    mount_profile::known_mount,
     placement::{
-        Feasibility, PlaceError, Placed, Probed, RenameFailure, Renamed, can_set_aside, place,
-        probe, rename_in_place, set_aside,
+        Feasibility, PlaceError, Placed, Probed, RenameFailure, Renamed, can_set_aside, links_hold,
+        place, probe, rename_in_place, set_aside,
     },
 };
 use super::fs_quirks::{Op, OverEmptyDirectory, Racer, Support};
@@ -840,20 +841,22 @@ fn set_aside_refuses_a_substituted_item_or_names_where_it_went() -> Result<(), B
     Ok(())
 }
 
-type ProbeCase = (Preset, Probed, Feasibility, Feasibility);
+type ProbeCase = (Preset, Probed, Feasibility, Feasibility, InodeNumbers);
 
 #[test]
 fn the_probe_learns_each_quirk_and_leaves_nothing_behind() -> Result<(), Box<dyn Error>> {
-    let cases: [ProbeCase; 10] = [
+    let cases: [ProbeCase; 11] = [
         (
             Quirks::default,
             Probed {
                 no_replace: Some(true),
                 hard_links: Some(true),
                 rename_over_empty_directory: Some(true),
+                links_keep_numbers: true,
             },
             Feasibility::Yes,
             Feasibility::Yes,
+            InodeNumbers::Kept,
         ),
         (
             Quirks::without_rename_flags,
@@ -861,9 +864,11 @@ fn the_probe_learns_each_quirk_and_leaves_nothing_behind() -> Result<(), Box<dyn
                 no_replace: Some(false),
                 hard_links: Some(true),
                 rename_over_empty_directory: Some(true),
+                links_keep_numbers: true,
             },
             Feasibility::Yes,
             Feasibility::Yes,
+            InodeNumbers::Kept,
         ),
         (
             Quirks::vboxsf,
@@ -871,9 +876,11 @@ fn the_probe_learns_each_quirk_and_leaves_nothing_behind() -> Result<(), Box<dyn
                 no_replace: Some(false),
                 hard_links: Some(false),
                 rename_over_empty_directory: Some(false),
+                links_keep_numbers: false,
             },
             Feasibility::Yes,
             Feasibility::Yes,
+            InodeNumbers::Renewed,
         ),
         (
             || Quirks {
@@ -884,9 +891,11 @@ fn the_probe_learns_each_quirk_and_leaves_nothing_behind() -> Result<(), Box<dyn
                 no_replace: Some(false),
                 hard_links: Some(false),
                 rename_over_empty_directory: None,
+                links_keep_numbers: false,
             },
             Feasibility::Yes,
             Feasibility::Yes,
+            InodeNumbers::Renewed,
         ),
         (
             || Quirks {
@@ -897,9 +906,11 @@ fn the_probe_learns_each_quirk_and_leaves_nothing_behind() -> Result<(), Box<dyn
                 no_replace: Some(false),
                 hard_links: Some(false),
                 rename_over_empty_directory: Some(true),
+                links_keep_numbers: false,
             },
             Feasibility::Yes,
             Feasibility::Yes,
+            InodeNumbers::Kept,
         ),
         (
             Quirks::without_folder_placement,
@@ -907,9 +918,11 @@ fn the_probe_learns_each_quirk_and_leaves_nothing_behind() -> Result<(), Box<dyn
                 no_replace: Some(false),
                 hard_links: Some(true),
                 rename_over_empty_directory: Some(false),
+                links_keep_numbers: true,
             },
             Feasibility::Yes,
             Feasibility::No,
+            InodeNumbers::Kept,
         ),
         (
             Quirks::without_placement,
@@ -917,9 +930,11 @@ fn the_probe_learns_each_quirk_and_leaves_nothing_behind() -> Result<(), Box<dyn
                 no_replace: Some(false),
                 hard_links: None,
                 rename_over_empty_directory: Some(false),
+                links_keep_numbers: false,
             },
             Feasibility::No,
             Feasibility::No,
+            InodeNumbers::Kept,
         ),
         (
             // SMB with POSIX extensions: EISDIR from an exclusive file create is
@@ -935,9 +950,11 @@ fn the_probe_learns_each_quirk_and_leaves_nothing_behind() -> Result<(), Box<dyn
                 no_replace: Some(true),
                 hard_links: Some(true),
                 rename_over_empty_directory: None,
+                links_keep_numbers: true,
             },
             Feasibility::Yes,
             Feasibility::Yes,
+            InodeNumbers::Kept,
         ),
         (
             // cifs with server inode numbers turned off.
@@ -949,9 +966,11 @@ fn the_probe_learns_each_quirk_and_leaves_nothing_behind() -> Result<(), Box<dyn
                 no_replace: Some(true),
                 hard_links: Some(false),
                 rename_over_empty_directory: Some(true),
+                links_keep_numbers: false,
             },
             Feasibility::Yes,
             Feasibility::Yes,
+            InodeNumbers::Kept,
         ),
         (
             Quirks::sshfs,
@@ -959,12 +978,30 @@ fn the_probe_learns_each_quirk_and_leaves_nothing_behind() -> Result<(), Box<dyn
                 no_replace: Some(false),
                 hard_links: Some(false),
                 rename_over_empty_directory: Some(true),
+                links_keep_numbers: false,
             },
             Feasibility::Yes,
             Feasibility::Yes,
+            InodeNumbers::Renewed,
+        ),
+        (
+            Quirks::ntfs_3g,
+            Probed {
+                no_replace: Some(true),
+                hard_links: Some(true),
+                rename_over_empty_directory: Some(true),
+                links_keep_numbers: true,
+            },
+            Feasibility::Yes,
+            Feasibility::Yes,
+            InodeNumbers::Kept,
         ),
     ];
-    for (quirks, expected, files, folders) in cases {
+    for ((quirks, expected, files, folders, numbers), learned_first) in cases
+        .into_iter()
+        .flat_map(|case| [false, true].map(|learned_first| (case, learned_first)))
+    {
+        let row = format!("{:?}, learned first: {learned_first}", quirks().mount_type);
         let root = tempfile::tempdir()?;
         let parent = open_local_parent_directory(root.path())?;
         {
@@ -972,8 +1009,25 @@ fn the_probe_learns_each_quirk_and_leaves_nothing_behind() -> Result<(), Box<dyn
             assert_eq!(probe(fs(), parent.as_fd(), true, true, true), Ok(expected));
         }
         let _scope = FsQuirks::install(root.path(), quirks());
-        assert_eq!(can_set_aside(fs(), parent.as_fd(), false), Ok(files));
-        assert_eq!(can_set_aside(fs(), parent.as_fd(), true), Ok(folders));
+        if learned_first {
+            known_mount(fs(), parent.as_fd());
+        }
+        assert_eq!(
+            can_set_aside(fs(), parent.as_fd(), false),
+            Ok(files),
+            "{row}"
+        );
+        assert_eq!(
+            can_set_aside(fs(), parent.as_fd(), true),
+            Ok(folders),
+            "{row}"
+        );
+        links_hold(fs(), parent.as_fd());
+        assert_eq!(
+            known_mount(fs(), parent.as_fd()).1.identity.numbers,
+            numbers,
+            "{row}"
+        );
         assert!(names(root.path())?.is_empty(), "{:?}", names(root.path())?);
     }
     Ok(())

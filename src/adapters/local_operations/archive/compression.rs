@@ -8,10 +8,10 @@ mod tests;
 use super::super::{
     copy_engine,
     fs_ops::{Entry, EntryStat, OffMain, fs},
-    mount_profile::{self, name_limit, name_rules},
+    mount_profile::{self, known_mount, name_limit, name_rules},
     names::{fix::split_extension, numbered_name},
     native_fs::{
-        self, LocalFileIdentity, local_directory_children, open_local_child_directory,
+        LocalFileIdentity, Pinned, local_directory_children, open_local_child_directory,
         open_local_parent_directory,
     },
     owed::{Deletion, Owed},
@@ -114,7 +114,12 @@ enum Strategy {
     New,
     Numbered,
     /// Replaces only the item seen before encoding.
-    Replace(Replacement, EntryStat),
+    Replace(Replacement, Target),
+}
+
+struct Target {
+    recorded: EntryStat,
+    pin: Pinned,
 }
 
 #[derive(Clone, Copy)]
@@ -201,7 +206,17 @@ impl Publication {
                     } else {
                         self.without_trash(&parent)?
                     };
-                    (mode, Strategy::Replace(replacement, stat))
+                    let pin = Pinned::at(
+                        fs(),
+                        Entry::new(&*parent, OsStr::new(&self.name)),
+                        &stat,
+                        known_mount(fs(), parent.as_fd()).1.identity,
+                    );
+                    let target = Target {
+                        recorded: stat,
+                        pin,
+                    };
+                    (mode, Strategy::Replace(replacement, target))
                 }
             },
         };
@@ -214,13 +229,18 @@ impl Publication {
             .map_err(file_creation_error)
         })
         .map_err(|error| self.creation_failed(placement_reason(error)))?;
-        let stage = match fs().stat_fd(file.as_fd()).map(|stat| stat.identity) {
-            Ok(identity) => Stage {
-                ownership: OnceLock::new(),
-                parent,
-                name,
-                identity,
-            },
+        let (stage, _pinned) = match fs().stat_fd(file.as_fd()) {
+            Ok(stat) => {
+                let traits = known_mount(fs(), parent.as_fd()).1.identity;
+                let pinned = Pinned::at(fs(), Entry::new(&*parent, &name), &stat, traits);
+                let stage = Stage {
+                    ownership: OnceLock::new(),
+                    parent,
+                    name,
+                    identity: stat.identity,
+                };
+                (stage, pinned)
+            }
             Err(error) => return Err(self.creation_failed(errno_text(error))),
         };
         let result =
@@ -291,7 +311,7 @@ impl Publication {
         strategy: Strategy,
         cancelled: &AtomicBool,
     ) -> Result<Published, ArchiveError> {
-        let (replacement, recorded) = match strategy {
+        let (replacement, target) = match strategy {
             Strategy::New => {
                 return stage
                     .place(OsStr::new(&self.name))
@@ -299,15 +319,15 @@ impl Publication {
                     .map_err(|error| self.creation_failed(placement_reason(error)));
             }
             Strategy::Numbered => return self.publish_numbered(stage),
-            Strategy::Replace(replacement, recorded) => (replacement, recorded),
+            Strategy::Replace(replacement, target) => (replacement, target),
         };
         let Some(stat) = self.existing(&stage.parent)? else {
             return self.publish(stage, Strategy::New, cancelled);
         };
-        if !native_fs::unchanged(
+        if !target.pin.unchanged(
+            fs(),
             mount_profile::identity_at(fs(), stage.parent.as_fd()),
-            recorded.identity,
-            recorded.file_attributes(),
+            &target.recorded,
             &stat,
         ) {
             return Err(archive_failed(crate::i18n::tr(
@@ -315,7 +335,7 @@ impl Publication {
             )));
         }
         match replacement {
-            Replacement::Trash => self.publish_after_trash(stage, (&recorded, &stat), cancelled),
+            Replacement::Trash => self.publish_after_trash(stage, target, &stat, cancelled),
             Replacement::Exchange => self.publish_by_exchange(stage, &stat),
             Replacement::Aside => self.publish_after_set_aside(stage, &stat),
         }
@@ -345,20 +365,21 @@ impl Publication {
     fn publish_after_trash(
         &self,
         stage: &Stage,
-        (recorded, current): (&EntryStat, &EntryStat),
+        target: Target,
+        current: &EntryStat,
         cancelled: &AtomicBool,
     ) -> Result<Published, ArchiveError> {
         let identity = current.identity;
         match trash_verified(
             Entry::new(&*stage.parent, OsStr::new(&self.name)),
             &self.destination.join(&self.name),
-            identity,
+            current,
             &gio::Cancellable::new(),
         ) {
             Ok(()) => {}
             Err(error) if error.is_unsupported() => {
                 let replacement = self.without_trash(&stage.parent)?;
-                return self.publish(stage, Strategy::Replace(replacement, *recorded), cancelled);
+                return self.publish(stage, Strategy::Replace(replacement, target), cancelled);
             }
             Err(error) => {
                 return Err(archive_failed(rust_i18n::t!(

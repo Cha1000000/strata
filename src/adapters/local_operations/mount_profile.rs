@@ -72,6 +72,23 @@ pub(super) fn identity_at(fs: &dyn FsOps, dir: BorrowedFd<'_>) -> IdentityTraits
     identity_now(fs, dir, family, capabilities.identity)
 }
 
+pub(super) fn with_links(
+    family: Option<Family>,
+    identity: IdentityTraits,
+    links_keep_numbers: bool,
+) -> IdentityTraits {
+    if links_keep_numbers
+        && family == Some(Family::Fuse)
+        && identity.numbers == InodeNumbers::Renewed
+    {
+        return IdentityTraits {
+            numbers: InodeNumbers::Kept,
+            ..identity
+        };
+    }
+    identity
+}
+
 /// For `fuseblk`, udev's record of the device tells which daemon serves it. What another
 /// thread learned of the mount meanwhile stays.
 fn learn_mount_type(fs: &dyn FsOps, dir: BorrowedFd<'_>, key: MountKey) -> MountCapabilities {
@@ -117,7 +134,8 @@ fn learn_mount_type(fs: &dyn FsOps, dir: BorrowedFd<'_>, key: MountKey) -> Mount
     learn_mount_capability(key, |capabilities| {
         if capabilities.family.is_none() {
             capabilities.family = Some(family);
-            capabilities.identity = identity;
+            capabilities.identity =
+                with_links(Some(family), identity, capabilities.links_keep_numbers);
             capabilities.fuse_format = fuse_format;
             capabilities.coarse_times = coarse_times;
             capabilities.deferred_close = deferred_close;

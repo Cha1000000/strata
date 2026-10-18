@@ -138,6 +138,11 @@ impl<'a> Mount<'a> {
         self.probed_links.set(self.probed_links.get() || links);
         let probed = probe(self.fs, self.dir, renames, links, folders)?;
         self.learn(|capabilities| {
+            if probed.links_keep_numbers {
+                capabilities.links_keep_numbers = true;
+                capabilities.identity =
+                    mount_profile::with_links(capabilities.family, capabilities.identity, true);
+            }
             for (field, value) in [
                 (&mut capabilities.no_replace, probed.no_replace),
                 (&mut capabilities.hard_links, probed.hard_links),
@@ -717,6 +722,7 @@ pub(super) struct Probed {
     pub no_replace: Option<bool>,
     pub hard_links: Option<bool>,
     pub rename_over_empty_directory: Option<bool>,
+    pub links_keep_numbers: bool,
 }
 
 pub(super) fn creation_error(error: Errno) -> PlaceError {
@@ -793,6 +799,7 @@ pub(super) fn probe(
             probed.hard_links = match fs.stat(at(dir, &linked), true) {
                 Ok(stat) => {
                     remove_probe_file(fs, at(dir, &linked), stat.identity);
+                    probed.links_keep_numbers = stat.identity == identity && stat.nlink == 2;
                     // A link that reports another inode cannot prove a placement.
                     Some(stat.identity == identity)
                 }

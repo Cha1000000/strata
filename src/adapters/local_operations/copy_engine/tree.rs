@@ -1672,13 +1672,15 @@ impl Place {
             staged: (name, identity),
             ..
         } = self;
-        drop(opened);
         let stage = Entry::new(&*live, &name);
+        let held = fs.stat_fd(opened.as_fd()).ok().map(|held| held.identity);
         let unchanged = || {
             fs.stat(stage, false)
-                .is_ok_and(|current| current.identity == identity)
+                .is_ok_and(|current| held == Some(current.identity))
         };
-        let removed = if unchanged() {
+        let ours = unchanged();
+        drop(opened);
+        let removed = if ours {
             match tree.copy.remove_folder(stage, &unchanged) {
                 Ok(()) | Err(Refused::Os(Errno::NOENT) | Refused::Changed(_)) => Ok(()),
                 Err(refused) => Err(refused.errno()),
