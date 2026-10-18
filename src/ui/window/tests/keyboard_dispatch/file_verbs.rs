@@ -208,9 +208,9 @@ fn tenxer_footer_rename_changes_only_the_focused_item_on_enter() {
 }
 
 #[test]
-fn typed_rename_passes_a_same_item_name_to_the_operation() {
+fn typed_rename_drops_a_dismissed_request_and_refuses_a_hard_link_name() {
     crate::test_support::gtk_test(
-        "ui::window::tests::keyboard_dispatch::file_verbs::typed_rename_passes_a_same_item_name_to_the_operation",
+        "ui::window::tests::keyboard_dispatch::file_verbs::typed_rename_drops_a_dismissed_request_and_refuses_a_hard_link_name",
         || {
             let fixture = KeyboardFixture::new();
             enable_tenxer(&fixture);
@@ -233,13 +233,14 @@ fn typed_rename_passes_a_same_item_name_to_the_operation() {
             assert_eq!(fixture.shortcuts.open_prompt_kind(), Some(Prompt::Rename));
             plain(&fixture, Key::Escape);
 
-            // The same item under another name is not refused by the prompt;
-            // the operation itself refuses a separate hard link.
             submit_rename(&fixture, "link.txt");
-            wait_until(|| modal_visible(&fixture.overlay));
-            assert_eq!(fixture.shortcuts.open_prompt_kind(), None);
-            assert!(click_class(&fixture.overlay, "action-dialog-close"));
-            wait_until(|| !modal_visible(&fixture.overlay));
+            wait_until(|| {
+                fixture.shortcuts.prompt_hint().as_deref()
+                    == Some("\u{201c}link.txt\u{201d} already exists")
+            });
+            assert_eq!(fixture.shortcuts.open_prompt_kind(), Some(Prompt::Rename));
+            assert!(!modal_visible(&fixture.overlay));
+            plain(&fixture, Key::Escape);
             assert_eq!(contents(&directory.join("a.txt")), "preview");
             assert_eq!(contents(&directory.join("link.txt")), "preview");
         },
