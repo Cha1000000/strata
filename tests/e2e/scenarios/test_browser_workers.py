@@ -128,7 +128,7 @@ def test_browser_workers_reuse_processes_and_preserve_source_details(strata, mod
     if persistent:
         pid = _worker_pids(strata)[-1]
         status = Path(f"/proc/{pid}/status").read_text()
-        assert f"PPid:\t{strata.application.process.popen.pid}\n" in status
+        assert f"PPid:\t{strata.application.pid}\n" in status
         os.kill(pid, signal.SIGKILL)
         strata.keyboard.press("alt+Left")
         strata.wait(lambda: strata.entry("photos-c"), "parent after worker loss")

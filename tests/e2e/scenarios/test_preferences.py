@@ -5,6 +5,7 @@ import subprocess
 
 import pytest
 
+from harness import main_io
 from harness.application import binary_path
 from harness.environment import process_environment
 
@@ -35,8 +36,14 @@ def test_preferences_sync_across_windows_and_restart(strata):
     variables = process_environment()
     variables.update(strata.environment.variables())
     variables.update(strata.display.environment)
-    subprocess.run(
+    command, _ = main_io.launch(
+        strata.environment,
+        strata.fixture.root,
         [str(binary_path()), str(strata.fixture.root)],
+        variables,
+    )
+    subprocess.run(
+        command,
         env=variables,
         cwd=strata.fixture.root,
         check=True,

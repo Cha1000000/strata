@@ -313,6 +313,7 @@ fn main() -> gtk::glib::ExitCode {
     });
     adapters::mount_watch::start();
     util::ui_thread::mark();
+    util::ui_thread::stalls::start();
     application.run()
 }
 

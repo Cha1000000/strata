@@ -6,7 +6,7 @@ import subprocess
 
 import pytest
 
-from harness import tree
+from harness import main_io, tree
 from harness.process import terminate
 from harness.application import binary_path
 from harness.environment import process_environment
@@ -16,8 +16,11 @@ def launch_argument(strata, argument):
     variables = process_environment()
     variables.update(strata.environment.variables())
     variables.update(strata.display.environment)
+    command, _ = main_io.launch(
+        strata.environment, strata.fixture.root, [binary_path(), argument], variables
+    )
     subprocess.run(
-        [binary_path(), argument],
+        command,
         env=variables,
         cwd=strata.fixture.root,
         check=True,
@@ -85,7 +88,9 @@ def test_multiple_arguments_include_non_utf8_directory_and_file(strata):
     variables = process_environment()
     variables.update(strata.environment.variables())
     variables.update(strata.display.environment)
-    subprocess.run(
+    command, _ = main_io.launch(
+        strata.environment,
+        strata.fixture.root,
         [
             os.fsencode(binary_path()),
             *directories,
@@ -93,6 +98,10 @@ def test_multiple_arguments_include_non_utf8_directory_and_file(strata):
             broken_link,
             colliding_argument,
         ],
+        variables,
+    )
+    subprocess.run(
+        command,
         env=variables,
         cwd=strata.fixture.root,
         check=True,
@@ -141,9 +150,12 @@ def test_startup_with_closed_pipes(strata, closed_streams):
     variables.update(strata.environment.variables())
     variables.update(strata.display.environment)
     variables["RUST_LOG"] = "trace"
+    command, capture = main_io.launch(
+        strata.environment, strata.fixture.root, [binary_path(), str(target_dir)], variables
+    )
 
     process = subprocess.Popen(
-        [binary_path(), str(target_dir)],
+        command,
         env=variables,
         cwd=strata.fixture.root,
         start_new_session=True,
@@ -164,5 +176,7 @@ def test_startup_with_closed_pipes(strata, closed_streams):
             return any(window.find(name="target.txt") is not None for window in windows)
 
         strata.wait(target_window_exists, "primary startup with closed output pipes")
+        if capture is not None:
+            capture.ready()
     finally:
         terminate(process)

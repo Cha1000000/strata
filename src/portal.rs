@@ -259,6 +259,7 @@ pub(crate) fn run() -> glib::ExitCode {
     }
     crate::metrics::initialize();
     crate::logging::initialize();
+    crate::util::ui_thread::stalls::start();
     tracing::info!(
         version = FILE_CHOOSER_VERSION,
         "starting Strata FileChooser portal backend"

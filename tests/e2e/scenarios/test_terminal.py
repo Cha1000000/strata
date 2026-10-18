@@ -86,7 +86,7 @@ def test_opening_a_terminal_without_an_emulator_reports_no_terminal_found(strata
 def test_terminal_launchers_are_reaped_after_they_exit(strata, test_environment):
     root = strata.fixture.root
     log = test_environment.root / LAUNCH_LOG
-    pid = strata.application.process.popen.pid
+    pid = strata.application.pid
 
     for count in range(1, 4):
         strata.keyboard.press("ctrl+alt+t")

@@ -8,7 +8,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import tree
+from . import main_io, tree
 from .display import HeadlessDisplay
 from .environment import TestEnvironment, process_environment
 from .process import ManagedProcess, terminate
@@ -69,14 +69,18 @@ class Application:
     location: Path
     process: ManagedProcess | None = None
     _frame: tree.Node | None = None
+    _capture: main_io.Capture | None = None
 
     def start(self) -> "Application":
         variables = process_environment()
         variables.update(self.environment.variables())
         variables.update(self.display.environment)
+        command, self._capture = main_io.launch(
+            self.environment, self.location, [str(binary_path()), str(self.location)], variables
+        )
         self.process = ManagedProcess.spawn(
             "strata",
-            [str(binary_path()), str(self.location)],
+            command,
             log_dir=self.environment.root,
             env=variables,
             cwd=self.location,
@@ -86,6 +90,8 @@ class Application:
         except BaseException:
             self.stop()
             raise
+        if self._capture is not None:
+            self._capture.ready()
         return self
 
     def _await_window(self) -> None:
@@ -112,6 +118,14 @@ class Application:
             timeout=LAUNCH_TIMEOUT,
             on_timeout=self.diagnostics,
         )
+
+    @property
+    def pid(self) -> int:
+        if self.process is None:
+            raise AssertionError("strata is not running")
+        if self._capture is None:
+            return self.process.popen.pid
+        return main_io.traced_child(self.process.popen.pid)
 
     @property
     def root(self) -> tree.Node:
@@ -149,4 +163,7 @@ class Application:
         self._frame = None
         if self.process is not None:
             terminate(self.process.popen)
+            if self._capture is not None:
+                self._capture.keep_log(self.process.log_path)
             self.process = None
+        self._capture = None

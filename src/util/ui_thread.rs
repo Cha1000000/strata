@@ -4,6 +4,8 @@ use std::{cell::Cell, marker::PhantomData};
 
 use gtk::glib;
 
+pub(crate) mod stalls;
+
 thread_local! {
     static MARKED: Cell<bool> = const { Cell::new(false) };
     static ALLOWED: Cell<usize> = const { Cell::new(0) };
