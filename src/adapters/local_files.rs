@@ -34,10 +34,10 @@ use crate::{
     services::{
         DirectoryChange, DirectoryEvent, DirectoryRequest, DirectoryStamp, Evidence, FileSource,
         IdentityTraits, ItemIdentity, LoadHandle, LocationValidationError, MetadataOutcome,
-        MetadataRequest, MetadataUpdate, MountToken, RequestId, StampAnswer, Watching,
-        backend_unavailable_message, bytes_support_named_family, file_activity, is_hidden_name,
-        is_image_path, is_media_path, link_target_kind, listed_kind, native_hidden_names,
-        sanitize_failure_message, symlink_kind,
+        MetadataRequest, MetadataUpdate, MountToken, RequestId, Responsiveness, StampAnswer,
+        Watching, backend_unavailable_message, bytes_support_named_family, file_activity,
+        is_hidden_name, is_image_path, is_media_path, link_target_kind, listed_kind,
+        native_hidden_names, sanitize_failure_message, symlink_kind,
     },
 };
 use futures_channel::oneshot;
@@ -1824,10 +1824,15 @@ impl FileSource for LocalFileSource {
         })
     }
 
-    fn answering(&self, location: &Location) -> bool {
-        location.native_path().is_none_or(|path| {
-            mount_lanes::responsiveness(path) == mount_lanes::Responsiveness::Answering
-        })
+    fn responsiveness(&self, location: &Location) -> Responsiveness {
+        location
+            .native_path()
+            .map_or(Responsiveness::Answering, mount_lanes::responsiveness)
+    }
+
+    fn follow_responsiveness(&self, notify: Rc<dyn Fn()>) -> LoadHandle {
+        mount_lanes::follow(&notify);
+        LoadHandle::new(move || drop(notify))
     }
 
     fn probe_stamp(&self, location: Location, emit: Rc<dyn Fn(StampAnswer)>) -> LoadHandle {

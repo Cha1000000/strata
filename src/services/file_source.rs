@@ -458,6 +458,14 @@ impl DirectoryStamp {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum Responsiveness {
+    #[default]
+    Answering,
+    Stalled,
+    NotResponding,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Watching {
     Live,
@@ -674,8 +682,13 @@ pub trait FileSource {
     }
 
     /// Known without any I/O.
-    fn answering(&self, _location: &Location) -> bool {
-        true
+    fn responsiveness(&self, _location: &Location) -> Responsiveness {
+        Responsiveness::Answering
+    }
+
+    /// Runs `notify` when a request may have stopped answering, until the handle drops.
+    fn follow_responsiveness(&self, _notify: Rc<dyn Fn()>) -> LoadHandle {
+        LoadHandle::new(|| {})
     }
 
     /// Background checks of folders on one mount, each answered once.

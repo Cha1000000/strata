@@ -5,11 +5,13 @@ mod tests;
 
 use std::{
     any::Any,
+    cell::RefCell,
     collections::HashMap,
     future::Future,
     io,
     path::{Path, PathBuf},
     pin::Pin,
+    rc::{Rc, Weak},
     sync::{
         Arc, LazyLock, Mutex, MutexGuard, PoisonError,
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -41,12 +43,7 @@ pub(crate) enum Unanswered {
     Failed,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum Responsiveness {
-    Answering,
-    Stalled,
-    NotResponding,
-}
+pub(crate) use crate::services::Responsiveness;
 
 /// Errors from a server or daemon that stopped answering are not progress.
 pub(crate) trait Outcome {
@@ -157,6 +154,7 @@ struct Lanes {
     generation: u64,
     mounts: MountTable,
     jobs: HashMap<JoinKey, Job>,
+    watching: bool,
 }
 
 impl Default for Lanes {
@@ -169,6 +167,7 @@ impl Default for Lanes {
             generation: 0,
             mounts: MountTable::parse(b""),
             jobs: HashMap::new(),
+            watching: false,
         }
     }
 }
@@ -272,6 +271,7 @@ impl Lanes {
                 progress_at: now,
             },
         );
+        self.keep_watching();
         ticket
     }
 
@@ -282,7 +282,33 @@ impl Lanes {
         if let Some(ticket) = tickets.get_mut(&ticket) {
             ticket.progress_at = now;
             stalls.remove(ticket.holds());
+            self.keep_watching();
         }
+    }
+
+    fn keep_watching(&mut self) {
+        if !std::mem::replace(&mut self.watching, true) {
+            watch_after(STALLED_AFTER);
+        }
+    }
+
+    /// Whether anything is stalled; watches on while a request may still stall.
+    fn watch(&mut self, now: Instant) -> bool {
+        let next = self
+            .tickets
+            .values()
+            .map(|ticket| ticket.progress_at + STALLED_AFTER)
+            .filter(|stalls_at| *stalls_at > now)
+            .min();
+        self.watching = next.is_some();
+        if let Some(stalls_at) = next {
+            watch_after(stalls_at.saturating_duration_since(now));
+        }
+        !self.stalls.is_empty()
+            || self
+                .tickets
+                .values()
+                .any(|ticket| ticket.quiet(now) >= STALLED_AFTER)
     }
 
     fn learn(&mut self, ticket: u64, path: &Path, id: u64, now: Instant) {
@@ -322,6 +348,7 @@ impl Lanes {
         if let Some(ticket) = self.tickets.get_mut(&ticket) {
             ticket.reaching = Some(probe.unwrap_or(target.key));
             ticket.progress_at = now;
+            self.keep_watching();
         }
         true
     }
@@ -339,6 +366,7 @@ impl Lanes {
         } else {
             self.outlived(key, since, now);
         }
+        self.keep_watching();
     }
 
     fn responsiveness(&self, target: &Target<'_>, now: Instant) -> Responsiveness {
@@ -361,6 +389,42 @@ impl Lanes {
 }
 
 static LANES: LazyLock<Mutex<Lanes>> = LazyLock::new(Mutex::default);
+
+thread_local! {
+    static FOLLOWERS: RefCell<Vec<Weak<dyn Fn()>>> = RefCell::default();
+}
+
+/// `notify` runs on the main thread while it lives, whenever a request may have stopped answering.
+pub(crate) fn follow(notify: &Rc<dyn Fn()>) {
+    FOLLOWERS.with(|followers| {
+        let mut followers = followers.borrow_mut();
+        followers.retain(|follower| follower.strong_count() > 0);
+        followers.push(Rc::downgrade(notify));
+    });
+}
+
+fn watch_after(delay: Duration) {
+    // Tests drive the lanes by hand: a timer would fire on another test's thread.
+    if !cfg!(test) {
+        glib::timeout_add_once(delay, watch_stalls);
+    }
+}
+
+fn watch_stalls() {
+    if !lanes().watch(Instant::now()) {
+        return;
+    }
+    let followers: Vec<Rc<dyn Fn()>> = FOLLOWERS.with(|followers| {
+        followers
+            .borrow()
+            .iter()
+            .filter_map(Weak::upgrade)
+            .collect()
+    });
+    for notify in followers {
+        notify();
+    }
+}
 
 fn lanes() -> MutexGuard<'static, Lanes> {
     LANES.lock().unwrap_or_else(PoisonError::into_inner)

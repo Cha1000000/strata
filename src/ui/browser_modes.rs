@@ -394,6 +394,7 @@ struct Pane {
     status: gtk::Label,
     spinner: gtk::Spinner,
     truncated_hint: gtk::Image,
+    not_responding: gtk::Box,
     marquee: super::marquee::Marquee,
     search: super::inline_search::InlineSearch,
     filter_entry: Option<gtk::Entry>,
@@ -2458,14 +2459,15 @@ fn build_icons_pane(
             .actions
             .prepend(&super::browser::pane_new_folder_button(state, depth));
     }
-    let (shell, header, content, model, stack, status, spinner, truncated_hint) = pane_base(
-        title,
-        BrowserMode::Icons,
-        "icons-pane",
-        &icons_loading_skeleton(options.thumbnail_size.get(), options.density),
-        Some(controls.leading.clone().upcast()),
-        Some(controls.actions.clone().upcast()),
-    );
+    let (shell, header, content, model, stack, status, spinner, truncated_hint, not_responding) =
+        pane_base(
+            title,
+            BrowserMode::Icons,
+            "icons-pane",
+            &icons_loading_skeleton(options.thumbnail_size.get(), options.density),
+            Some(controls.leading.clone().upcast()),
+            Some(controls.actions.clone().upcast()),
+        );
     let source_index = SourceIndexMap::watch(&model);
     if let Some(destination) = browser.location_at(depth) {
         install_mode_directory_drop_target(&stack, destination, transfer_handler.clone());
@@ -2686,6 +2688,7 @@ fn build_icons_pane(
         status,
         spinner,
         truncated_hint,
+        not_responding,
         marquee,
         search,
         filter_entry: Some(controls.filter_entry),
@@ -3712,14 +3715,15 @@ fn build_list_pane(
 
     let (filter_entry, filter_revealer, filter_button) = filter_controls("Filter list (%{keys})");
     actions.append(&filter_button);
-    let (shell, header, content, model, stack, status, spinner, truncated_hint) = pane_base(
-        title,
-        BrowserMode::List,
-        "list-pane",
-        &list_loading_skeleton(&columns),
-        Some(navigation.upcast()),
-        Some(actions.upcast()),
-    );
+    let (shell, header, content, model, stack, status, spinner, truncated_hint, not_responding) =
+        pane_base(
+            title,
+            BrowserMode::List,
+            "list-pane",
+            &list_loading_skeleton(&columns),
+            Some(navigation.upcast()),
+            Some(actions.upcast()),
+        );
     let source_index = SourceIndexMap::watch(&model);
     if let Some(destination) = browser.location_at(depth) {
         install_mode_directory_drop_target(&stack, destination, transfer_handler.clone());
@@ -3967,6 +3971,7 @@ fn build_list_pane(
         status,
         spinner,
         truncated_hint,
+        not_responding,
         marquee,
         search,
         filter_entry: Some(filter_entry),
@@ -4118,6 +4123,7 @@ fn pane_base(
     gtk::Label,
     gtk::Spinner,
     gtk::Image,
+    gtk::Box,
 ) {
     let shell = super::accessibility::pane_box();
     shell.add_css_class(class);
@@ -4160,6 +4166,8 @@ fn pane_base(
         header.append(&actions);
     }
     shell.append(&header);
+    let not_responding = super::browser::not_responding_notice();
+    shell.append(&not_responding);
 
     let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
     content.set_hexpand(true);
@@ -4188,6 +4196,7 @@ fn pane_base(
         status,
         spinner,
         truncated_hint,
+        not_responding,
     )
 }
 
@@ -5344,6 +5353,7 @@ fn apply_snapshot(pane: &Pane, snapshot: &BrowserColumnSnapshot, browser: &Brows
     pane.truncated_hint.set_visible(snapshot.truncated);
     pane.leftovers_button
         .set_visible(!browser.column_leftovers(pane.depth).is_empty());
+    pane.not_responding.set_visible(snapshot.not_responding);
     if snapshot.loading {
         pane.spinner.start();
         if restarts_loading {

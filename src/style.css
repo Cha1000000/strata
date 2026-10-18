@@ -3833,6 +3833,14 @@ button.shortcut-footer-button:disabled {
   padding: 2px 5px 4px 12px;
 }
 
+.listing-notice {
+  background: alpha(@strata_accent, 0.12);
+  border-bottom: 1px solid alpha(@strata_border, 0.5);
+  color: @strata_text;
+  font-size: 0.9em;
+  padding: 6px 12px;
+}
+
 .column-truncated-hint {
   opacity: 0;
 }

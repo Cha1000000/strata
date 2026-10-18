@@ -349,6 +349,14 @@ impl ViewState {
                     set_column_busy(column, true);
                 }
             }
+            BrowserEvent::ColumnNotResponding {
+                depth,
+                not_responding,
+            } => {
+                if let Some(column) = self.columns.borrow().get(*depth) {
+                    column.not_responding.set_visible(*not_responding);
+                }
+            }
             BrowserEvent::ColumnReloaded { depth } => {
                 if let Some(column) = self.columns.borrow().get(*depth) {
                     super::pane_header::sync_column_sort_direction(

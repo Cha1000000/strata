@@ -462,6 +462,7 @@ pub(super) struct ColumnView {
     pub(super) spinner: gtk::Spinner,
     pub(super) spinner_delay: Rc<RefCell<Option<glib::SourceId>>>,
     pub(super) truncated_hint: gtk::Image,
+    pub(super) not_responding: gtk::Box,
     pub(super) empty_trash_button: Option<gtk::Button>,
     pub(super) leftovers_button: gtk::Button,
     pub(super) show_hidden: Rc<Cell<bool>>,
@@ -1119,6 +1120,7 @@ impl ViewState {
             set_filter_placeholder(column, snapshot.count);
             update_empty_trash_sensitivity(column, snapshot.count);
             column.truncated_hint.set_visible(snapshot.truncated);
+            column.not_responding.set_visible(snapshot.not_responding);
             let positions = snapshot
                 .selected_positions
                 .into_iter()
@@ -1389,6 +1391,8 @@ impl ViewState {
         header.append(&header_actions_stack);
         column.append(&header);
         column.append(&filter_revealer);
+        let not_responding = super::not_responding_notice();
+        column.append(&not_responding);
 
         let entry_count = Rc::new(Cell::new(0));
         let browser_for_model = self.browser.clone();
@@ -2154,6 +2158,7 @@ impl ViewState {
             spinner,
             spinner_delay: Rc::new(RefCell::new(None)),
             truncated_hint,
+            not_responding,
             empty_trash_button: is_trash.then_some(empty_trash),
             leftovers_button: leftovers,
             show_hidden,

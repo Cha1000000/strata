@@ -9,11 +9,11 @@ use std::{
 use gtk::glib;
 
 use crate::{
-    app::navigation::LoadState,
+    app::{BrowserEvent, navigation::LoadState},
     model::Location,
     services::{
-        DirectoryChange, DirectoryStamp, LoadHandle, MountToken, RequestId, StampAnswer,
-        file_activity,
+        DirectoryChange, DirectoryStamp, LoadHandle, MountToken, RequestId, Responsiveness,
+        StampAnswer, file_activity,
     },
 };
 
@@ -81,6 +81,7 @@ pub(super) struct ColumnFreshness {
     relist: bool,
     unchanged: u32,
     checking: bool,
+    not_responding: bool,
 }
 
 impl ColumnFreshness {
@@ -112,6 +113,9 @@ pub(super) struct Freshness {
     left_focus: Cell<Option<Duration>>,
     timer: RefCell<Option<glib::SourceId>>,
     jobs: RefCell<Vec<(Rc<Cell<usize>>, LoadHandle)>>,
+    following: Cell<bool>,
+    follow_timer: RefCell<Option<glib::SourceId>>,
+    lanes: RefCell<Option<LoadHandle>>,
     #[cfg(test)]
     clock: Cell<Option<(Instant, Duration)>>,
 }
@@ -127,6 +131,9 @@ impl Browser {
             self.regain_focus();
         } else if previous != input {
             self.reschedule_freshness();
+        }
+        if previous.presence != input.presence {
+            self.follow_responsiveness();
         }
     }
 
@@ -227,7 +234,7 @@ impl Browser {
     }
 
     pub(super) fn note_listing_started(
-        &self,
+        self: &Rc<Self>,
         depth: usize,
         request_id: RequestId,
         background: bool,
@@ -244,6 +251,7 @@ impl Browser {
                 confirming,
             });
         }
+        self.keep_following_responsiveness(true);
     }
 
     fn end_listing(&self, depth: usize, column: &mut ColumnFreshness) -> Option<Listing> {
@@ -283,6 +291,7 @@ impl Browser {
         }
         self.reschedule_freshness();
         self.start_relists();
+        self.follow_responsiveness();
     }
 
     pub(super) fn note_listing_kept(self: &Rc<Self>, depth: usize) {
@@ -297,6 +306,7 @@ impl Browser {
         }
         self.reschedule_freshness();
         self.start_relists();
+        self.follow_responsiveness();
     }
 
     fn watched(&self, depth: usize, column: &ColumnFreshness) -> bool {
@@ -413,6 +423,7 @@ impl Browser {
             self.check_columns(group);
         }
         self.reschedule_freshness();
+        self.follow_responsiveness();
     }
 
     fn check_columns(self: &Rc<Self>, group: Vec<Checked>) {
@@ -438,6 +449,7 @@ impl Browser {
                 }
             }
             browser.start_relists();
+            browser.follow_responsiveness();
         });
         let job = self.source.check_stamps(locations, emit);
         if unanswered.get() > 0 {
@@ -571,6 +583,79 @@ impl Browser {
             }
         }
         None
+    }
+
+    pub(super) fn column_not_responding(&self, depth: usize) -> bool {
+        self.column_freshness(depth)
+            .is_some_and(|column| column.borrow().not_responding)
+    }
+
+    pub(super) fn follow_lanes(self: &Rc<Self>) {
+        let weak = Rc::downgrade(self);
+        let lanes = self.source.follow_responsiveness(Rc::new(move || {
+            if let Some(browser) = weak.upgrade() {
+                browser.follow_responsiveness();
+            }
+        }));
+        self.freshness.lanes.replace(Some(lanes));
+    }
+
+    pub(crate) fn follow_responsiveness(self: &Rc<Self>) {
+        let mut follow = false;
+        let mut changed = Vec::new();
+        for (depth, column) in self.freshness_columns().into_iter().enumerate() {
+            let Some(location) = self.location_at(depth) else {
+                continue;
+            };
+            let responsiveness = self.source.responsiveness(&location);
+            let (loading, failed) = match self
+                .state
+                .borrow()
+                .columns
+                .get(depth)
+                .map(|column| &column.load_state)
+            {
+                Some(LoadState::Loading) => (true, false),
+                Some(LoadState::Error(_)) => (false, true),
+                _ => (false, false),
+            };
+            let not_responding = responsiveness == Responsiveness::NotResponding && !failed;
+            let mut column = column.borrow_mut();
+            follow |= loading || column.checking || responsiveness != Responsiveness::Answering;
+            if column.not_responding != not_responding {
+                column.not_responding = not_responding;
+                changed.push((depth, not_responding));
+            }
+        }
+        for (depth, not_responding) in changed {
+            self.emit(BrowserEvent::ColumnNotResponding {
+                depth,
+                not_responding,
+            });
+        }
+        self.keep_following_responsiveness(follow);
+    }
+
+    fn keep_following_responsiveness(self: &Rc<Self>, follow: bool) {
+        let follow = follow && self.freshness.input.get().presence != Presence::Hidden;
+        if follow == self.freshness.following.replace(follow) {
+            return;
+        }
+        if let Some(timer) = self.freshness.follow_timer.take() {
+            timer.remove();
+        }
+        if !follow || cfg!(test) {
+            return;
+        }
+        let weak = Rc::downgrade(self);
+        let timer = glib::timeout_add_seconds_local_once(1, move || {
+            if let Some(browser) = weak.upgrade() {
+                browser.freshness.follow_timer.take();
+                browser.freshness.following.set(false);
+                browser.follow_responsiveness();
+            }
+        });
+        self.freshness.follow_timer.replace(Some(timer));
     }
 
     pub(super) fn reschedule_freshness(self: &Rc<Self>) {

@@ -6,6 +6,9 @@ use gtk::prelude::*;
 
 use crate::ui::loading_skeleton::{CONTENT_PAGE, LOADING_PAGE};
 
+#[cfg(test)]
+mod tests;
+
 const FEEDBACK_PAGE: &str = "feedback";
 
 #[derive(Clone)]
@@ -123,4 +126,26 @@ impl LoadPresentation {
         }
         self.loading.show(FEEDBACK_PAGE);
     }
+}
+
+pub(in crate::ui) fn not_responding_notice() -> gtk::Box {
+    let notice = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .spacing(8)
+        .accessible_role(gtk::AccessibleRole::Status)
+        .visible(false)
+        .build();
+    notice.add_css_class("listing-notice");
+    let icon = crate::assets::primary_icon(crate::assets::icons::TRIANGLE_ALERT, 16);
+    icon.set_valign(gtk::Align::Start);
+    notice.append(&icon);
+    let label = gtk::Label::new(Some(&crate::i18n::tr(
+        "Not responding. This list may be out of date.",
+    )));
+    label.set_xalign(0.0);
+    label.set_hexpand(true);
+    label.set_wrap(true);
+    label.set_wrap_mode(gtk::pango::WrapMode::WordChar);
+    notice.append(&label);
+    notice
 }

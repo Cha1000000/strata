@@ -282,8 +282,12 @@ impl FileSource for ChooserFileSource {
         self.source.check_stamps(locations, emit)
     }
 
-    fn answering(&self, location: &Location) -> bool {
-        self.source.answering(location)
+    fn responsiveness(&self, location: &Location) -> crate::services::Responsiveness {
+        self.source.responsiveness(location)
+    }
+
+    fn follow_responsiveness(&self, notify: Rc<dyn Fn()>) -> LoadHandle {
+        self.source.follow_responsiveness(notify)
     }
 
     fn find_by_identity(

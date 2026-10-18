@@ -17,9 +17,10 @@ use crate::{
         ItemIdentity, LoadHandle, LocationValidationError, MetadataOutcome, MetadataRequest,
         MoveRecord, NameMode, OperationEvent, OperationProvider, OperationRequestId,
         PasswordFailure, PasteItem, PasteRequest, PlacedSnapshot, RenameRecord, RenameRequest,
-        RenamedItem, RequestId, RestoreRequest, RestoreSource, RestoreTrashItem, StampAnswer,
-        TransferConflict, TransferReport, UndoCopyRequest, UndoMergeRequest, UndoMoveItem,
-        UndoMoveRequest, UndoRenameRequest, Watching, validate_basename, validate_uri_credentials,
+        RenamedItem, RequestId, Responsiveness, RestoreRequest, RestoreSource, RestoreTrashItem,
+        StampAnswer, TransferConflict, TransferReport, UndoCopyRequest, UndoMergeRequest,
+        UndoMoveItem, UndoMoveRequest, UndoRenameRequest, Watching, validate_basename,
+        validate_uri_credentials,
     },
 };
 
@@ -119,6 +120,7 @@ pub struct BrowserColumnSnapshot {
     pub error: Option<String>,
     pub truncated: bool,
     pub reveal_pending: bool,
+    pub not_responding: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -189,6 +191,10 @@ pub enum BrowserEvent {
     },
     ColumnRefreshing {
         depth: usize,
+    },
+    ColumnNotResponding {
+        depth: usize,
+        not_responding: bool,
     },
     HiddenToggled {
         show_hidden: bool,
@@ -1215,7 +1221,7 @@ impl Browser {
     }
 
     pub fn with_preferences(source: Rc<dyn FileSource>, preferences: ViewPreferences) -> Rc<Self> {
-        Rc::new_cyclic(|self_weak| Self {
+        let browser = Rc::new_cyclic(|self_weak| Self {
             source,
             state: RefCell::new(NavigationState::with_preferences(preferences)),
             loads: RefCell::new(Vec::new()),
@@ -1285,7 +1291,9 @@ impl Browser {
             sort_resync: folder_sorts::SortResync::default(),
             _operations_ended: Self::follow_ended_operations(self_weak.clone()),
             self_weak: self_weak.clone(),
-        })
+        });
+        browser.follow_lanes();
+        browser
     }
 
     pub fn observe(&self, observer: impl Fn(&BrowserEvent) + 'static) {
@@ -2439,6 +2447,7 @@ impl Browser {
             },
             truncated: column.truncated,
             reveal_pending: state.reveal_pending(depth),
+            not_responding: self.column_not_responding(depth),
         })
     }
 
@@ -4788,9 +4797,9 @@ impl Browser {
 
     fn refresh_column(self: &Rc<Self>, depth: usize) {
         if (self.settled(depth) || self.preserving_refreshes.borrow().contains(&depth))
-            && self
-                .location_at(depth)
-                .is_some_and(|location| !self.source.answering(&location))
+            && self.location_at(depth).is_some_and(|location| {
+                self.source.responsiveness(&location) != Responsiveness::Answering
+            })
         {
             self.refresh_keeping_listing(depth, false);
             return;

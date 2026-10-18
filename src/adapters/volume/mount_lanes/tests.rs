@@ -350,3 +350,38 @@ fn a_gvfs_backend_that_stops_answering_trips_only_its_authority() {
     bench.answer(probe, 2.8);
     assert!(ask(&mut bench, "smb://@nas:-1", 2.9).is_ok());
 }
+
+#[test]
+fn the_stall_watch_runs_while_a_request_may_still_stop_answering() {
+    let mut bench = Bench::new();
+    let mut seen = vec![("idle", false, bench.lanes.watching)];
+    let mut watch = |bench: &mut Bench, row, seconds| {
+        let stalled = bench.lanes.watch(bench.at(seconds));
+        seen.push((row, stalled, bench.lanes.watching));
+    };
+    let listing = bench.call("/mnt/nas/big", 0.0);
+    let stuck = bench.call("/mnt/usb", 0.5);
+    bench.beat(listing, 1.0);
+    watch(&mut bench, "both answering", 2.0);
+    watch(&mut bench, "one went quiet", 2.5);
+    bench.answer(listing, 2.8);
+    watch(&mut bench, "only the quiet one left", 3.0);
+    bench.beat(stuck, 4.0);
+    let resumed = bench.lanes.watching;
+    watch(&mut bench, "quiet again", 6.0);
+    bench.answer(stuck, 6.5);
+    watch(&mut bench, "all answered", 8.5);
+
+    assert!(resumed);
+    assert_eq!(
+        seen,
+        [
+            ("idle", false, false),
+            ("both answering", false, true),
+            ("one went quiet", true, true),
+            ("only the quiet one left", true, false),
+            ("quiet again", true, false),
+            ("all answered", false, false),
+        ]
+    );
+}
