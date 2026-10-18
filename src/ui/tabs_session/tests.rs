@@ -5,6 +5,10 @@ use std::fs;
 use super::*;
 use crate::model::Location;
 
+fn save_to(path: &Path, tabs: &[Location], active: usize) -> io::Result<()> {
+    fs::write(path, session_contents(tabs, active)?)
+}
+
 fn session_file() -> (tempfile::TempDir, PathBuf) {
     let directory = tempfile::tempdir().expect("session fixture");
     let path = directory.path().join("tabs.toml");

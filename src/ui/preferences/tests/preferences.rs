@@ -48,6 +48,7 @@ fn saved_language_applies_before_settings_and_changes_only_after_restart() {
             manager.set_language(crate::i18n::Language::Japanese);
             assert!(manager.language_restart_required());
             assert_eq!(crate::i18n::tr("Language"), "Langue");
+            crate::storage::writer::settle();
             assert_eq!(
                 read_preferences().expect("read saved language").language,
                 crate::i18n::Language::Japanese
@@ -55,6 +56,7 @@ fn saved_language_applies_before_settings_and_changes_only_after_restart() {
             manager.set_language(crate::i18n::Language::French);
             assert!(!manager.language_restart_required());
             manager.set_language(crate::i18n::Language::Japanese);
+            crate::storage::writer::settle();
             let restarted = PreferenceManager::load();
             assert!(!restarted.language_restart_required());
             assert_eq!(&*rust_i18n::locale(), "ja");
@@ -78,6 +80,7 @@ fn recent_sort_is_not_stored_as_an_ordinary_folder_default() {
             });
 
             assert_eq!(*manager.preferences.borrow(), saved);
+            crate::storage::writer::settle();
             let persisted: Preferences =
                 toml::from_str(&fs::read_to_string(settings_path()).expect("saved preferences"))
                     .expect("persisted preferences");
@@ -169,6 +172,7 @@ fn send_to_history_is_device_scoped_deduplicated_capped_and_persistent() {
                     .send_to_recent_destinations("volume:drive-root")
                     .is_empty()
             );
+            crate::storage::writer::settle();
 
             let reloaded = PreferenceManager::load();
             assert_eq!(
@@ -179,6 +183,7 @@ fn send_to_history_is_device_scoped_deduplicated_capped_and_persistent() {
                 reloaded.send_to_recent_destinations("volume:sandisk"),
                 [PathBuf::from("Backup")]
             );
+            crate::storage::writer::settle();
             let saved: Preferences =
                 toml::from_str(&fs::read_to_string(settings_path()).expect("saved preferences"))
                     .expect("persisted preferences reload");
@@ -235,17 +240,20 @@ fn assert_recovered_preferences_survive_save(
 
     let manager = PreferenceManager::shared();
     assert_eq!(*manager.preferences.borrow(), expected);
+    crate::storage::writer::settle();
     assert_eq!(
         fs::read_to_string(settings_path()).expect("unchanged settings file"),
         malformed
     );
     expected.folder_peeking = false;
     manager.set_folder_peeking(false);
+    crate::storage::writer::settle();
 
     let persisted: Preferences =
         toml::from_str(&fs::read_to_string(settings_path()).expect("saved file"))
             .expect("save repairs invalid preferences");
     assert_eq!(persisted, expected);
+    crate::storage::writer::settle();
     assert_eq!(read_preferences().expect("saved preferences"), expected);
 }
 
@@ -294,12 +302,14 @@ fn unreadable_preferences_are_preserved_while_live_changes_still_apply() {
                         settings_path().display()
                     ),
                 );
+                crate::storage::writer::settle();
                 assert_eq!(
                     fs::read(settings_path()).expect("preserved settings"),
                     broken
                 );
                 fs::write(settings_path(), &valid).expect("repair settings");
                 manager.set_folder_peeking(false);
+                crate::storage::writer::settle();
                 assert_eq!(
                     fs::read(settings_path()).expect("repair left untouched"),
                     valid
@@ -313,11 +323,69 @@ fn unreadable_preferences_are_preserved_while_live_changes_still_apply() {
             assert_eq!(*manager.preferences.borrow(), non_default_preferences());
             manager.set_folder_peeking(false);
             assert!(save_notices(&window).is_empty());
+            crate::storage::writer::settle();
             assert!(
                 !read_preferences()
                     .expect("saving resumes after reload")
                     .folder_peeking
             );
+        },
+    );
+}
+
+#[test]
+fn changes_apply_at_once_and_reach_the_file_on_the_settings_writer() {
+    gtk_test(
+        "ui::preferences::tests::preferences::changes_apply_at_once_and_reach_the_file_on_the_settings_writer",
+        || {
+            seed_saved_preferences_for_test();
+            let manager = PreferenceManager::shared();
+            let anchors = [
+                gtk::Box::new(gtk::Orientation::Vertical, 0),
+                gtk::Box::new(gtk::Orientation::Vertical, 0),
+            ];
+            let values = Rc::new(RefCell::new(Vec::new()));
+            for anchor in &anchors {
+                let observed = values.clone();
+                manager.bind_preference(
+                    anchor,
+                    PreferenceManager::folder_peeking,
+                    move |_, value| {
+                        observed.borrow_mut().push(value);
+                    },
+                );
+            }
+            let held = crate::storage::writer::hold();
+            manager.set_folder_peeking(false);
+            assert_eq!(*values.borrow(), [true, true, false, false]);
+            assert!(
+                read_preferences()
+                    .expect("saved preferences")
+                    .folder_peeking,
+                "the file waits for the settings writer"
+            );
+            drop(held);
+            crate::storage::writer::settle();
+            assert!(
+                !read_preferences()
+                    .expect("saved preferences")
+                    .folder_peeking
+            );
+
+            let held = crate::storage::writer::hold();
+            manager.set_folder_peeking(true);
+            let releasing = std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(200));
+                drop(held);
+            });
+            crate::storage::writer::flush_at_exit();
+            assert!(
+                read_preferences()
+                    .expect("saved preferences")
+                    .folder_peeking,
+                "quitting waits for queued saves"
+            );
+            releasing.join().expect("released writer");
         },
     );
 }
@@ -331,9 +399,12 @@ fn missing_settings_allow_first_run_saves() {
             let manager = PreferenceManager::load();
             assert!(!manager.folder_peeking());
             manager.set_folder_peeking(true);
+            crate::storage::writer::settle();
             assert!(read_preferences().expect("first run save").folder_peeking);
+            crate::storage::writer::settle();
             assert!(PreferenceManager::load().folder_peeking());
             manager.set_folder_peeking(false);
+            crate::storage::writer::settle();
             assert!(!PreferenceManager::load().folder_peeking());
         },
     );
@@ -358,6 +429,7 @@ fn symlinked_settings_save_through_to_the_target() {
             let manager = PreferenceManager::load();
             assert!(manager.folder_peeking());
             manager.set_folder_peeking(false);
+            crate::storage::writer::settle();
 
             assert!(
                 !manager.persistence_dirty.get(),
@@ -378,6 +450,7 @@ fn symlinked_settings_save_through_to_the_target() {
                     .expect("dotfiles settings parse");
             assert!(!saved.folder_peeking);
             drop(manager);
+            crate::storage::writer::settle();
             assert!(!PreferenceManager::load().folder_peeking());
         },
     );
@@ -396,6 +469,7 @@ fn failed_saves_show_one_notice_per_failure_streak() {
             other.present();
             wait_for(|| !window.is_active(), "another window to take focus");
             manager.set_folder_peeking(true);
+            crate::storage::writer::settle();
             assert!(
                 save_notices(&window).is_empty(),
                 "a change while no browser window is active only logs"
@@ -405,6 +479,7 @@ fn failed_saves_show_one_notice_per_failure_streak() {
             wait_for(|| window.is_active(), "the notice window to become active");
             manager.set_folder_peeking(true);
             window.set_visible(false);
+            crate::storage::writer::settle();
             assert!(
                 save_notices(&window).is_empty(),
                 "a window hidden before the notice opens shows nothing"
@@ -414,6 +489,7 @@ fn failed_saves_show_one_notice_per_failure_streak() {
 
             manager.set_folder_peeking(true);
             manager.set_type_to_search(!manager.type_to_search());
+            crate::storage::writer::settle();
             let notices = save_notices(&window);
             assert_eq!(
                 notices.len(),
@@ -431,12 +507,14 @@ fn failed_saves_show_one_notice_per_failure_streak() {
 
             fs::remove_dir(settings_path()).expect("repair the settings file");
             manager.set_folder_peeking(true);
+            crate::storage::writer::settle();
             assert!(read_preferences().expect("retried save").folder_peeking);
             assert_eq!(save_notices(&window).len(), 1);
 
             fs::remove_file(settings_path()).expect("saved settings file");
             fs::create_dir(settings_path()).expect("block the settings file again");
             manager.set_folder_peeking(false);
+            crate::storage::writer::settle();
             assert_eq!(
                 save_notices(&window).len(),
                 2,
@@ -611,6 +689,7 @@ fn unlisted_auto_refresh_intervals_round_up_on_load_and_set() {
             for (requested, expected) in [(45, 60), (u32::MAX, 600), (300, 300), (0, 0)] {
                 manager.set_auto_refresh_interval(requested);
                 assert_eq!(manager.auto_refresh_interval(), expected);
+                crate::storage::writer::settle();
                 assert_eq!(
                     read_preferences()
                         .expect("saved preferences")
@@ -656,6 +735,7 @@ fn unlisted_search_limits_round_up_on_load_and_set() {
             for (requested, expected) in [(45, 60), (u32::MAX, 0), (300, 300), (10, 10)] {
                 manager.set_search_time_limit(requested);
                 assert_eq!(manager.search_time_limit(), expected);
+                crate::storage::writer::settle();
                 assert_eq!(
                     read_preferences()
                         .expect("saved preferences")
@@ -671,6 +751,7 @@ fn unlisted_search_limits_round_up_on_load_and_set() {
             ] {
                 manager.set_search_entry_limit(requested);
                 assert_eq!(manager.search_entry_limit(), expected);
+                crate::storage::writer::settle();
                 assert_eq!(
                     read_preferences()
                         .expect("saved preferences")
@@ -981,6 +1062,7 @@ fn saved_omarchy_mode_loads_and_changes_through_the_same_binding() {
                 OmarchyVariant::Darker,
             ] {
                 preferences.set_omarchy_variant(variant);
+                crate::storage::writer::settle();
                 let tokens = manager.appearance_tokens();
                 assert_eq!(tokens == startup, variant == OmarchyVariant::Darker);
                 for window in &windows {
@@ -1012,6 +1094,7 @@ fn saved_omarchy_mode_loads_and_changes_through_the_same_binding() {
                         .as_deref(),
                     Some(tokens.surface.as_str())
                 );
+                crate::storage::writer::settle();
                 assert_eq!(
                     read_preferences().expect("saved variant").omarchy_variant,
                     variant
@@ -1052,6 +1135,7 @@ fn saved_omarchy_mode_loads_and_changes_through_the_same_binding() {
             for window in windows {
                 window.close();
             }
+            crate::storage::writer::settle();
             assert_eq!(
                 read_preferences().expect("saved theme mode").mode,
                 "omarchy"
@@ -1135,6 +1219,7 @@ fn invalid_omarchy_palette_while_running_keeps_the_applied_palette() {
                 "background = '#112233'\nforeground = '#ddeeff'\naccent = '0x7aa2f7'\n",
             );
             themes.refresh_omarchy_state();
+            crate::storage::writer::settle();
             assert!(themes.follows_omarchy());
             assert!(themes.is_omarchy_available());
             assert_eq!(crate::assets::primary_icon_color(), "#445566");
@@ -1166,8 +1251,19 @@ fn invalid_omarchy_palette_while_running_keeps_the_applied_palette() {
 
             fs::remove_file(crate::ui::theme::omarchy_state_dir().join("theme.name"))
                 .expect("remove Omarchy theme name");
+            let held = crate::storage::writer::hold();
             themes.refresh_omarchy_state();
+            for _ in 0..20 {
+                glib::MainContext::default().iteration(false);
+            }
+            assert!(
+                themes.follows_omarchy(),
+                "Omarchy files are read again on the settings writer"
+            );
+            drop(held);
+            crate::storage::writer::settle();
             assert!(!themes.follows_omarchy());
+            crate::storage::writer::settle();
             assert_eq!(read_preferences().expect("saved theme mode").mode, "theme");
         },
     );
@@ -1330,6 +1426,7 @@ fn all_preference_setters_publish_and_persist_without_duplicate_notifications() 
                     "setter publishes exactly once"
                 );
                 assert_eq!(observations.borrow().last(), Some(&expected));
+                crate::storage::writer::settle();
                 assert_eq!(read_preferences().expect("saved preferences"), expected);
             };
             for setter in preference_setters {
@@ -1688,6 +1785,7 @@ fn item_customizations_follow_relocations_and_removals() {
                     (notified * 2, notified as u64),
                     "{case}: notifications of color and folder sort changes"
                 );
+                crate::storage::writer::settle();
                 let saved = read_preferences().expect("saved preferences");
                 for (relative, color, icon) in expected {
                     assert_eq!(
@@ -1819,6 +1917,7 @@ fn list_column_visibility_preserves_default_sort_and_publishes_once() {
                         &[((sort_key, direction), hidden.clone())],
                         "visibility must publish once without changing the sort"
                     );
+                    crate::storage::writer::settle();
                     let saved = read_preferences().expect("saved preferences");
                     assert_eq!(saved.list_hidden_columns, hidden);
                     assert_eq!(SortKey::from_stored(&saved.sort_key), Some(sort_key));
@@ -1889,6 +1988,7 @@ fn list_columns_order_and_visibility_persist_and_update() {
                     ListColumnId::Type,
                 ]
             );
+            crate::storage::writer::settle();
 
             let saved = read_preferences().expect("saved preferences");
             assert_eq!(saved.list_column_order, manager.list_column_order());
@@ -1906,6 +2006,7 @@ fn list_columns_order_and_visibility_persist_and_update() {
                 ]
             );
             assert!(manager.list_hidden_columns().is_empty());
+            crate::storage::writer::settle();
             let saved_reset = read_preferences().expect("saved preferences");
             assert_eq!(saved_reset.list_column_order, manager.list_column_order());
             assert!(saved_reset.list_hidden_columns.is_empty());

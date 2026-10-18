@@ -252,14 +252,37 @@ impl PageState {
         definition: &ActionDefinition,
         script: Option<ActionScript>,
     ) -> Result<(), String> {
-        self.registry
-            .write(&ActionWriteRequest {
+        self.change_store(|registry| {
+            registry.write(&ActionWriteRequest {
                 definition: definition.clone(),
                 script,
             })
-            .map_err(|error| error.user_message())?;
+        })
+        .map_err(|error| error.user_message())?;
         PageState::render(self);
         Ok(())
+    }
+
+    fn change_store<T>(&self, change: impl FnOnce(&ActionRegistry) -> T) -> T {
+        let _custom_actions =
+            crate::util::ui_thread::allow(crate::util::ui_thread::Exception::ActionStore);
+        change(&self.registry)
+    }
+
+    fn confirm_editor(
+        self: &Rc<Self>,
+        mode: EditorMode,
+        definition: ActionDefinition,
+        script: Option<ActionScript>,
+    ) -> Result<(), String> {
+        match mode {
+            EditorMode::Create => self
+                .change_store(|registry| {
+                    registry.create(&ActionWriteRequest { definition, script })
+                })
+                .map_err(|error| error.user_message()),
+            EditorMode::Edit => self.save(&definition, script),
+        }
     }
 
     fn edit(self: &Rc<Self>, button: &gtk::Button, action: Rc<ActionHandle>) {
@@ -363,14 +386,7 @@ impl PageState {
                     return;
                 }
             };
-            let result = match mode {
-                EditorMode::Create => state
-                    .registry
-                    .create(&ActionWriteRequest { definition, script })
-                    .map_err(|error| error.user_message()),
-                EditorMode::Edit => state.save(&definition, script),
-            };
-            match result {
+            match state.confirm_editor(mode, definition, script) {
                 Ok(()) => {
                     if let Some(layer) = weak_layer.upgrade() {
                         dismiss_modal_layer(&layer, &overlay_for_save, root_for_save.as_ref());
@@ -409,8 +425,7 @@ impl PageState {
         };
         definition.name = copy_name(&definition.name);
         if let Err(error) = self
-            .registry
-            .create(&ActionWriteRequest { definition, script })
+            .change_store(|registry| registry.create(&ActionWriteRequest { definition, script }))
         {
             show_error_dialog(
                 button,
@@ -437,7 +452,7 @@ impl PageState {
             let Some(path) = folder.path() else {
                 return;
             };
-            match state.registry.import(&path) {
+            match state.change_store(|registry| registry.import(&path)) {
                 Ok(id) => {
                     PageState::render(&state);
                     tracing::info!(action = %id, "imported a custom action");
@@ -469,7 +484,7 @@ impl PageState {
             .title(crate::i18n::tr("Export this action to a folder"))
             .modal(true)
             .build();
-        let registry = self.registry.clone();
+        let state = self.clone();
         let anchor = button.clone();
         let id = action.id().to_owned();
         dialog.select_folder(Some(&window), gio::Cancellable::NONE, move |result| {
@@ -479,19 +494,23 @@ impl PageState {
             let Some(path) = folder.path() else {
                 return;
             };
-            match registry.export(&id, &path) {
-                Ok(target) => show_notice(
-                    &anchor,
-                    &crate::i18n::tr("Action exported"),
-                    &target.display().to_string(),
-                ),
-                Err(error) => show_error_dialog(
-                    &anchor,
-                    &crate::i18n::tr("Unable to export the action"),
-                    &error.user_message(),
-                ),
-            }
+            state.export_to(&anchor, &id, &path);
         });
+    }
+
+    fn export_to(&self, anchor: &gtk::Button, id: &str, folder: &std::path::Path) {
+        match self.change_store(|registry| registry.export(id, folder)) {
+            Ok(target) => show_notice(
+                anchor,
+                &crate::i18n::tr("Action exported"),
+                &target.display().to_string(),
+            ),
+            Err(error) => show_error_dialog(
+                anchor,
+                &crate::i18n::tr("Unable to export the action"),
+                &error.user_message(),
+            ),
+        }
     }
 
     fn delete(self: &Rc<Self>, button: &gtk::Button, action: &Rc<ActionHandle>) {
@@ -529,7 +548,7 @@ impl PageState {
         let id = action.id().to_owned();
         let failure_anchor = button.clone();
         layout.confirm.connect_clicked(move |_| {
-            let result = state.registry.delete(&id);
+            let result = state.change_store(|registry| registry.delete(&id));
             if let Some(layer) = weak_layer.upgrade() {
                 dismiss_modal_layer(&layer, &overlay, root.as_ref());
             }

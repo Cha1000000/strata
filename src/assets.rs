@@ -259,6 +259,7 @@ pub fn set_catppuccin_theme_colors(enabled: bool) {
 }
 
 pub fn prepare() -> Result<(), Box<dyn std::error::Error>> {
+    let _startup = crate::util::ui_thread::allow(crate::util::ui_thread::Exception::Startup);
     gio::resources_register_include!("strata.gresource")?;
 
     let font_directory = glib::user_cache_dir()

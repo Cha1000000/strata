@@ -490,7 +490,21 @@ fn saving_merges_unsaved_changes_over_what_another_process_wrote() {
     let unsaved = merged.merged_over(written_later());
     assert_eq!(unsaved.view(&local("/new")), mine, "still unsaved");
     assert_eq!(unsaved.view(&local("/theirs")), FolderView::default());
-    merged.mark_saved();
+    let saving = merged.edits();
+    let after_snapshot = FolderView {
+        sort: None,
+        icons_size: Some(224),
+    };
+    assert!(merged.update(&local("/after"), |view| *view = after_snapshot));
+    merged.mark_saved_through(saving);
+    let remerged = merged.merged_over(written_later());
+    assert_eq!(
+        remerged.view(&local("/after")),
+        after_snapshot,
+        "a change made while a save ran stays unsaved"
+    );
+    assert_eq!(remerged.view(&local("/new")), FolderView::default());
+    merged.mark_saved_through(merged.edits());
     assert!(
         merged
             .merged_over(written_later())

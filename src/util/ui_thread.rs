@@ -13,6 +13,7 @@ thread_local! {
 pub(crate) enum Exception {
     Startup,
     ExitFlush,
+    ActionStore,
     #[cfg(test)]
     TestSetup,
 }

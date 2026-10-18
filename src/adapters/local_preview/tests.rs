@@ -132,6 +132,8 @@ fn cold_previews_with_shared_thumbnails_match_rendered_cache_hits() {
                     .expect("page surface");
                 let mut png = Vec::new();
                 surface.write_to_png(&mut png).expect("page PNG");
+                let _fixture =
+                    crate::util::ui_thread::allow(crate::util::ui_thread::Exception::TestSetup);
                 crate::ui::thumbnail_cache::store(&path, 1, &png);
                 let thumbnail = crate::ui::thumbnail_cache::lookup(&path, 1)
                     .expect("shared thumbnail is available");

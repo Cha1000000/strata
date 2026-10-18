@@ -1478,6 +1478,7 @@ fn default_activation_records_application_history_for_files_and_folders() {
 
             launch_recorder("strata-dirs", &[(&directory, "inode/directory")]);
             wait_until(|| received(&output_dirs) == [directory.clone()]);
+            crate::storage::writer::settle();
             let stored =
                 crate::ui::recent_apps::load().recent_ids(&["inode/directory".to_string()]);
             assert_eq!(stored, ["strata-dirs.desktop"]);

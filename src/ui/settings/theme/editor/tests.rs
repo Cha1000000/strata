@@ -28,6 +28,7 @@ fn syntax_pickers_preview_cancel_and_save_to_custom_theme() {
             for buffer in &buffers {
                 crate::ui::theme::register_source_buffer(buffer);
             }
+            crate::storage::writer::settle();
             let original = foreground(&buffers[0], "def:string");
             let ThemeEditor {
                 revealer: editor,
@@ -52,6 +53,7 @@ fn syntax_pickers_preview_cancel_and_save_to_custom_theme() {
                 }
                 child = wrapper.next_sibling();
             }
+            crate::storage::writer::settle();
             for buffer in &buffers {
                 for style in [
                     "def:statement",
@@ -64,6 +66,7 @@ fn syntax_pickers_preview_cancel_and_save_to_custom_theme() {
                 }
             }
             manager.cancel_preview();
+            crate::storage::writer::settle();
             for buffer in &buffers {
                 assert_eq!(foreground(buffer, "def:string"), original);
             }
@@ -84,6 +87,7 @@ fn syntax_pickers_preview_cancel_and_save_to_custom_theme() {
                 .downcast::<gtk::Button>()
                 .expect("save button");
             save.emit_clicked();
+            crate::storage::writer::settle();
             let source = std::fs::read_to_string(
                 glib::user_config_dir().join("strata/themes/syntax-fixture.toml"),
             )

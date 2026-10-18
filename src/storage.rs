@@ -215,6 +215,7 @@ fn replace(
     write: impl FnOnce(&mut File) -> io::Result<()>,
     unchanged: impl FnOnce(&Path) -> io::Result<bool>,
 ) -> io::Result<bool> {
+    crate::util::ui_thread::assert_off();
     let destination = resolve_destination(path, policy)?;
     let parent = destination
         .path

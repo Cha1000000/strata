@@ -45,7 +45,12 @@ current value immediately, then applies only
 changes to its selected value. There is no separate startup initializer to keep
 in sync with the change handler. Every setter goes through `save_preferences`,
 which deduplicates unchanged preferences and publishes changes through the same
-notification mechanism. Failed writes are logged with the path and reason, still
+notification mechanism. The setter returns once the change is published; the file
+is written by Strata's one background settings writer (`storage::writer`), which
+runs every save of Strata's own settings and state files in order on its own
+thread and keeps only the newest contents of a file whose save is still waiting.
+Quitting waits up to 10 seconds for queued saves; a crash before a queued save
+runs loses that last change. Failed writes are logged with the path and reason, still
 apply in memory, and are retried on the next save, so a transient failure such as
 a full disk recovers once its cause is fixed. The first failure also opens a
 "Settings can't be saved" dialog with the path and reason, saying that changes
@@ -125,7 +130,19 @@ control that might be midway through synchronization.
 | Window buttons (minimize, maximize, close) | Every window header binds at construction and updates live. Minimize and maximize are hidden by default; close is shown. The maximize button also restores a maximized window. |
 
 Tab locations persist in a separate session store (`$XDG_CONFIG_HOME/strata/tabs.toml`),
-saved whenever tabs change and validated on load. Selection, history, the sort of
+saved whenever tabs change and validated on load.
+
+Reading the files that build the first window happens on the interface thread
+before that window shows: `settings.toml`, `folder-views.toml`, `tabs.toml`, custom
+themes, the Omarchy theme state and GTK's bookmarks file. These startup reads are an
+exception to keeping file calls off the interface thread. Every later save goes
+through the settings writer: preferences, folder settings, the tabs session, folder
+history, recent applications, custom themes, the source-preview style scheme and
+pinned folders. Every later re-read after another process changed a file (folder
+settings and default sort and size saved by the portal chooser, custom themes,
+Omarchy theme changes) is parsed on the writer and applied on the interface thread;
+a change of this process's own that is still being saved wins over an older save
+from elsewhere. Selection, history, the sort of
 folders that are not remembered, filter query, transient theme
 catalog filters, dialogs, and preview playback position remain window-local.
 Pinned places, portal integration and other externally managed state have their
@@ -185,8 +202,8 @@ counts as using it, while re-sorting open columns does not.
 Values live in `$XDG_STATE_HOME/strata/folder-views.toml` (normally
 `~/.local/state/strata/folder-views.toml`), never in `settings.toml` or in the
 folders themselves. Writes are batched, so a burst of changes such as a slider drag
-is one write, and never block the click that made them; pending changes are written
-when Strata or the portal chooser quits. Saves from another Strata process, such as
+is one write, and run on the settings writer, never on the click that made them;
+pending changes are written when Strata or the portal chooser quits. Saves from another Strata process, such as
 the portal chooser, are merged instead of overwritten, open views follow them, and
 **Forget all folder settings** clears them too. Open views also follow default
 sort and size changes saved by another Strata process. The file follows the

@@ -441,7 +441,7 @@ fn launch_with_recent_registration(
             .into_iter()
             .filter_map(|candidate| candidate.id().map(|id| id.to_string()))
             .collect::<HashSet<_>>();
-        recent_apps::record(content_types, app_id.as_str(), &known_ids);
+        recent_apps::record(content_types, app_id.as_str(), known_ids);
     }
     let candidates: Vec<gio::File> = files
         .iter()

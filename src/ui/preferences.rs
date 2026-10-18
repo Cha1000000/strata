@@ -16,7 +16,10 @@ use crate::{
     model::{FolderColorValue, SortDirection, SortKey, ViewPreferences},
     sandbox::MediaPreviewBackend,
     services::{Channel, CrossVolumeDropStrategy, SearchLimits},
-    storage::{FileStamp, file_stamp},
+    storage::{
+        file_stamp,
+        writer::{self, Policy},
+    },
 };
 
 use super::icons_cell::{MAX_ICONS_THUMBNAIL_SIZE, MIN_ICONS_THUMBNAIL_SIZE};
@@ -607,8 +610,9 @@ pub struct PreferenceManager {
     startup_locale: &'static str,
     changes: bindings::PreferenceChanges,
     persistence_dirty: Cell<bool>,
-    /// The settings file as this process last wrote or read it.
-    settings_synced: Cell<Option<FileStamp>>,
+    saves_requested: Cell<u64>,
+    saves_finished: Cell<u64>,
+    this: std::rc::Weak<Self>,
     /// Why saving is off for this session: the file existed but could not be read.
     load_failure: Option<io::Error>,
     save_notices: save_notice::SaveNotices,
@@ -631,7 +635,7 @@ impl PreferenceManager {
     }
 
     fn load() -> Rc<Self> {
-        let settings_synced = file_stamp(&settings_path());
+        writer::note(&settings_path(), file_stamp(&settings_path()));
         let (mut preferences, load_failure) = match read_preferences() {
             Ok(preferences) => (preferences, None),
             Err(error) => {
@@ -671,12 +675,14 @@ impl PreferenceManager {
 
         let startup_locale = preferences.language.locale();
         rust_i18n::set_locale(startup_locale);
-        Rc::new(Self {
+        let manager = Rc::new_cyclic(|this| Self {
             startup_locale,
             startup_interface_renderer: preferences.interface_renderer,
             changes: bindings::PreferenceChanges::new(preferences.clone()),
             persistence_dirty: Cell::new(false),
-            settings_synced: Cell::new(settings_synced),
+            saves_requested: Cell::new(0),
+            saves_finished: Cell::new(0),
+            this: this.clone(),
             load_failure,
             save_notices: save_notice::SaveNotices::default(),
             folder_views: std::cell::OnceCell::new(),
@@ -684,7 +690,9 @@ impl PreferenceManager {
             folder_save_notices: save_notice::SaveNotices::for_folder_views(),
             item_customizations: Default::default(),
             preferences: RefCell::new(preferences),
-        })
+        });
+        manager.folder_view_store();
+        manager
     }
 
     /// Repairs loaded values whose validity depends on data the preference store
@@ -1808,22 +1816,51 @@ impl PreferenceManager {
         self.persistence_dirty.set(true);
         let contents =
             toml::to_string_pretty(&*self.preferences.borrow()).map_err(io::Error::other);
-        let result = contents.and_then(|contents| {
-            self.save_notices
-                .write(&path, &contents, crate::storage::atomic_write_config)
-        });
-        if result.is_ok() {
-            self.persistence_dirty.set(false);
-            self.settings_synced.set(file_stamp(&path));
+        if let Ok(contents) = &contents {
+            self.queue_settings_save(path.clone(), contents.as_bytes().to_vec());
         }
         if changed {
             self.changes.notify(self);
         }
         // Reported after bindings apply, and whether or not anything changed,
         // because a retry with an unchanged value can fail too.
-        if let Err(error) = result {
+        if let Err(error) = contents {
             self.save_notices.write_failed(&path, &error);
         }
+    }
+
+    fn queue_settings_save(&self, path: PathBuf, contents: Vec<u8>) {
+        let generation = self.saves_requested.get() + 1;
+        self.saves_requested.set(generation);
+        let saved = writer::save(path.clone(), Some(contents), Policy::Config, None);
+        let this = self.this.clone();
+        glib::MainContext::default().spawn_local(async move {
+            let result = saved
+                .await
+                .unwrap_or_else(|_| Err(io::Error::from_raw_os_error(libc::ECANCELED)));
+            if let Some(manager) = this.upgrade() {
+                manager.settings_saved(generation, &path, result);
+            }
+        });
+    }
+
+    fn settings_saved(&self, generation: u64, path: &Path, result: io::Result<()>) {
+        self.saves_finished
+            .set(self.saves_finished.get().max(generation));
+        if generation != self.saves_requested.get() {
+            return;
+        }
+        match result {
+            Ok(()) => {
+                self.persistence_dirty.set(false);
+                self.save_notices.saved();
+            }
+            Err(error) => self.save_notices.write_failed(path, &error),
+        }
+    }
+
+    fn settings_save_pending(&self) -> bool {
+        self.saves_finished.get() < self.saves_requested.get()
     }
 }
 
@@ -1839,7 +1876,11 @@ fn read_preferences() -> io::Result<Preferences> {
     let Some(contents) = read_state_file(&settings_path())? else {
         return Ok(Preferences::default());
     };
-    let table: toml::Table = toml::from_str(&contents)
+    parse_preferences(&contents)
+}
+
+fn parse_preferences(contents: &str) -> io::Result<Preferences> {
+    let table: toml::Table = toml::from_str(contents)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
     match table.clone().try_into() {
         Ok(preferences) => Ok(preferences),

@@ -16,6 +16,16 @@ use super::{
 use crate::test_support::{gtk_test, gtk_test_with_env, texture_has_visible_pixels};
 use gtk::prelude::*;
 
+fn save_custom_theme(manager: &Rc<ThemeManager>, tokens: ThemeTokens) -> std::io::Result<String> {
+    let saved = Rc::new(std::cell::RefCell::new(None));
+    let done = saved.clone();
+    manager.save_custom_theme(tokens, move |result| {
+        done.replace(Some(result));
+    });
+    crate::storage::writer::settle();
+    saved.take().expect("theme save finished")
+}
+
 #[test]
 fn bundled_catalog_is_valid_unique_and_alphabetical() {
     let themes = builtins();
@@ -140,7 +150,7 @@ fn saving_a_custom_theme_never_overwrites_an_existing_theme_file() {
             )
             .expect("link added after startup");
 
-            let id = manager.save_custom_theme(tokens).expect("saved theme");
+            let id = save_custom_theme(&manager, tokens).expect("saved theme");
 
             assert_eq!(id, "ocean-blue-5");
             assert!(directory.join("ocean-blue-5.toml").is_file());
@@ -670,8 +680,26 @@ fn non_ascii_theme_names_save_under_a_fallback_id() {
 
             let mut tokens = azure_tokens();
             tokens.name = "日本語".to_owned();
-            let id = manager
-                .save_custom_theme(tokens)
+            let held = crate::storage::writer::hold();
+            let saved = Rc::new(std::cell::RefCell::new(None));
+            let done = saved.clone();
+            manager.save_custom_theme(tokens, move |result| {
+                done.replace(Some(result));
+            });
+            for _ in 0..20 {
+                gtk::glib::MainContext::default().iteration(false);
+            }
+            assert!(
+                saved.borrow().is_none(),
+                "the save waits for the settings writer"
+            );
+            assert!(!directory.join("custom-theme.toml").exists());
+            assert_eq!(manager.selected_id(), "azure-glow");
+            drop(held);
+            crate::storage::writer::settle();
+            let id = saved
+                .take()
+                .expect("theme save finished")
                 .expect("a non-ASCII name saves");
             assert_eq!(id, "custom-theme");
             let saved = std::fs::read_to_string(directory.join("custom-theme.toml"))
@@ -695,9 +723,7 @@ fn non_ascii_theme_names_save_under_a_fallback_id() {
             let files_before = std::fs::read_dir(&directory).expect("themes").count();
             let mut blank = azure_tokens();
             blank.name = "   ".to_owned();
-            let error = manager
-                .save_custom_theme(blank)
-                .expect_err("a blank name is rejected");
+            let error = save_custom_theme(&manager, blank).expect_err("a blank name is rejected");
             assert_eq!(error.to_string(), "Enter a theme name");
             assert_eq!(
                 std::fs::read_dir(&directory).expect("themes").count(),

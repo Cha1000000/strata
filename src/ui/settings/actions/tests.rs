@@ -539,3 +539,45 @@ fn duplicate_ids_avoid_collisions_and_stay_within_the_limit() {
     assert_eq!(copy_name("Resize"), "Resize copy");
     assert!(copy_name(&"n".repeat(200)).chars().count() <= crate::model::MAX_ACTION_NAME_CHARS);
 }
+
+#[test]
+fn creating_duplicating_and_exporting_actions_save_from_the_settings_page() {
+    crate::test_support::gtk_test(
+        "ui::settings::actions::tests::creating_duplicating_and_exporting_actions_save_from_the_settings_page",
+        || {
+            let directory = tempfile::tempdir().expect("fixture");
+            let store = crate::adapters::LocalActionStore::at(directory.path().join("actions"));
+            let state = Rc::new(PageState {
+                registry: Rc::new(ActionRegistry::new(store)),
+                list: gtk::Box::new(gtk::Orientation::Vertical, 0),
+                problems: gtk::Box::new(gtk::Orientation::Vertical, 0),
+            });
+            let anchor = gtk::Button::new();
+            let mut definition = python_draft();
+            definition.id = "resize".to_owned();
+            definition.name = "Resize".to_owned();
+            let script = ActionScript {
+                file_name: "main.py".to_owned(),
+                contents: "print('resize')\n".to_owned(),
+            };
+            state
+                .confirm_editor(EditorMode::Create, definition, Some(script))
+                .expect("created");
+            let created = state
+                .registry
+                .catalog()
+                .get("resize")
+                .cloned()
+                .expect("listed");
+            state.duplicate(&anchor, &created);
+            assert_eq!(state.registry.catalog().actions().len(), 2);
+            let exported = directory.path().join("exported");
+            std::fs::create_dir(&exported).expect("export folder");
+            state.export_to(&anchor, "resize", &exported);
+            assert_eq!(
+                std::fs::read_to_string(exported.join("resize/main.py")).expect("exported script"),
+                "print('resize')\n"
+            );
+        },
+    );
+}

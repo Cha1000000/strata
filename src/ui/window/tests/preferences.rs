@@ -517,11 +517,13 @@ fn window_buttons_load_and_follow_settings_across_open_and_later_windows() {
                 assert!(settings_closed(open));
                 assert_buttons(open, [true, true, false]);
             }
+            crate::storage::writer::settle();
             let saved = std::fs::read(settings_file()).expect("saved settings");
             for open in [&first, &second] {
                 open.content.settings_button().emit_clicked();
             }
             settle();
+            crate::storage::writer::settle();
             assert_eq!(
                 std::fs::read(settings_file()).expect("settings unchanged"),
                 saved
@@ -558,6 +560,7 @@ fn window_buttons_load_and_follow_settings_across_open_and_later_windows() {
             for open in [&first, &second, &third] {
                 assert_buttons(open, [false, false, true]);
             }
+            crate::storage::writer::settle();
             let persisted: toml::Value = toml::from_str(
                 &std::fs::read_to_string(settings_file()).expect("persisted preferences"),
             )
@@ -679,6 +682,7 @@ fn browsing_control_and_shortcut_update_both_windows() {
             assert_controls(&first, true);
             assert_controls(&second, true);
             assert!(!second.content.footer().tag_visible());
+            crate::storage::writer::settle();
             let saved = std::fs::read_to_string(settings_file()).expect("saved settings");
             assert!(saved.contains("tenxer_mode = false"));
         },
@@ -736,6 +740,7 @@ fn saved_sidebar_compact_starts_railed_and_the_toggle_steps_both_windows() {
                 );
                 assert!(open.content.sidebar_visible());
             }
+            crate::storage::writer::settle();
             let saved = std::fs::read_to_string(settings_file()).expect("saved settings");
             assert!(saved.contains("sidebar_compact = true"), "{saved}");
         },
@@ -859,6 +864,7 @@ fn saved_sidebar_collapsed_restores_and_ctrl_b_updates_both_windows() {
                     || sidebar_report(&[&first, &second], &manager),
                 );
             }
+            crate::storage::writer::settle();
             let saved = std::fs::read_to_string(settings_file()).expect("saved settings");
             assert!(saved.contains("sidebar_expanded = false"), "{saved}");
         },
@@ -1235,6 +1241,7 @@ fn saved_folder_sorts_and_icon_sizes_apply_before_settings_and_follow_changes_ac
                 (SortKey::Name, SortDirection::Ascending)
             );
             manager.flush_folder_views();
+            crate::storage::writer::settle();
             assert!(folder_views_file().contains("sort = \"type\""));
 
             manager.set_browser_mode(BrowserMode::Icons);
@@ -1349,12 +1356,26 @@ fn folder_settings_saved_by_another_process_are_merged_instead_of_overwritten() 
                 FolderSort::Default
             );
 
+            let held = crate::storage::writer::hold();
             write_folder_views(&format!(
                 "version = 1\n[[folder]]\npath = \"{}\"\nsort = \"size\"\ndirection = \"descending\"\n",
                 elsewhere.display_path()
             ));
+            manager.notice_saves_elsewhere();
+            settle_for(std::time::Duration::from_millis(100));
+            assert_eq!(
+                manager.resolve_folder_sort(&elsewhere, false),
+                FolderSort::Default,
+                "another process's save is read on the settings writer"
+            );
+            drop(held);
+            wait_until(|| {
+                manager.resolve_folder_sort(&elsewhere, false)
+                    == FolderSort::Saved(SortKey::Size, SortDirection::Descending)
+            });
             manager.set_folder_sort(&here, SortKey::Type, SortDirection::Ascending);
             manager.flush_folder_views();
+            crate::storage::writer::settle();
 
             let saved = folder_views_file();
             assert!(saved.contains(&here.display_path()), "{saved}");
@@ -1371,14 +1392,44 @@ fn folder_settings_saved_by_another_process_are_merged_instead_of_overwritten() 
                     .is_some_and(|preferences| preferences.sort_key == SortKey::Size)
             });
 
+            for (sort_here, reread_first, saves) in
+                [(SortKey::Modified, true, 1), (SortKey::Size, false, 2)]
+            {
+                let outside = tempfile::tempdir().expect("folder sorted elsewhere");
+                let outside = Location::local(outside.path());
+                let held = crate::storage::writer::hold();
+                write_folder_views(&format!(
+                    "{}[[folder]]\npath = \"{}\"\nsort = \"size\"\ndirection = \"ascending\"\n",
+                    folder_views_file(),
+                    outside.display_path()
+                ));
+                if reread_first {
+                    manager.notice_saves_elsewhere();
+                }
+                manager.set_folder_sort(&here, sort_here, SortDirection::Ascending);
+                for _ in 0..saves {
+                    manager.flush_folder_views();
+                }
+                drop(held);
+                crate::storage::writer::settle();
+                assert_eq!(
+                    manager.resolve_folder_sort(&outside, false),
+                    FolderSort::Saved(SortKey::Size, SortDirection::Ascending)
+                );
+                let saved = folder_views_file();
+                assert!(saved.contains(&outside.display_path()), "{saved}");
+            }
+
             manager.forget_folder_views();
             manager.flush_folder_views();
+            crate::storage::writer::settle();
             write_folder_views(&format!(
                 "version = 1\n[[folder]]\npath = \"{}\"\nsort = \"type\"\ndirection = \"descending\"\n",
                 elsewhere.display_path()
             ));
             manager.forget_folder_views();
             manager.flush_folder_views();
+            crate::storage::writer::settle();
             assert!(
                 !folder_views_file().contains("[[folder]]"),
                 "forgetting also clears what another process saved"
@@ -1392,10 +1443,12 @@ fn folder_settings_saved_by_another_process_are_merged_instead_of_overwritten() 
                 write_folder_views(unsaveable);
                 manager.set_folder_sort(&here, SortKey::Size, SortDirection::Ascending);
                 manager.flush_folder_views();
+                crate::storage::writer::settle();
                 assert_eq!(folder_views_file(), unsaveable);
             }
             write_folder_views("version = 1\n");
             manager.flush_folder_views();
+            crate::storage::writer::settle();
             assert!(
                 folder_views_file().contains(&here.display_path()),
                 "the save is retried once the file can be read again"
@@ -1427,6 +1480,7 @@ fn folder_settings_saved_by_another_process_are_merged_instead_of_overwritten() 
             manager.set_folder_sort(&here, SortKey::Modified, SortDirection::Ascending);
             let started = std::time::Instant::now();
             manager.flush_folder_views();
+            crate::storage::writer::settle();
             assert!(
                 started.elapsed() < std::time::Duration::from_secs(4),
                 "the exit save stops waiting for a stuck process"
@@ -1446,7 +1500,16 @@ fn folder_settings_saved_by_another_process_are_merged_instead_of_overwritten() 
                 .expect("config directory");
             std::fs::write(&staged, toml::to_string(&settings).expect("settings"))
                 .expect("settings saved elsewhere");
+            let held = crate::storage::writer::hold();
             std::fs::rename(&staged, settings_file()).expect("settings replaced");
+            manager.notice_saves_elsewhere();
+            settle_for(std::time::Duration::from_millis(100));
+            assert_eq!(
+                manager.default_sort(),
+                (SortKey::Name, SortDirection::Ascending),
+                "defaults saved elsewhere are read on the settings writer"
+            );
+            drop(held);
             wait_until(|| manager.default_sort() == (SortKey::Modified, SortDirection::Descending));
             manager.set_folder_sort(&here, SortKey::Name, SortDirection::Ascending);
             assert_eq!(
@@ -1497,6 +1560,7 @@ fn unreadable_folder_settings_use_defaults_and_are_never_overwritten() {
                 "changes still apply until Strata closes"
             );
             PreferenceManager::shared().flush_folder_views();
+            crate::storage::writer::settle();
             assert_eq!(folder_views_file(), unreadable);
         },
     );
@@ -1642,6 +1706,7 @@ fn list_column_customization_preserves_saved_and_live_folder_sorts() {
                 FolderSort::Saved(size_descending.0, size_descending.1)
             );
             manager.flush_folder_views();
+            crate::storage::writer::settle();
             assert!(folder_views_file().contains("sort = \"size\""));
 
             manager.set_remember_folder_views(false);
@@ -1746,6 +1811,7 @@ fn show_thumbnails_saved_and_live_preferences_apply_across_windows_and_views() {
                 manager.set_show_thumbnails(false);
                 wait_until(|| shown(false));
             }
+            crate::storage::writer::settle();
             assert!(
                 std::fs::read_to_string(settings_file())
                     .expect("saved settings")
@@ -2200,6 +2266,7 @@ fn customize_items(root: &std::path::Path, items: &[ItemCustomization]) {
 
 fn assert_item_customizations(root: &std::path::Path, expected: &[ItemCustomization], case: &str) {
     let manager = PreferenceManager::shared();
+    crate::storage::writer::settle();
     let saved = std::fs::read_to_string(settings_file()).unwrap_or_default();
     for (relative, color, icon) in expected {
         let path = root.join(relative);

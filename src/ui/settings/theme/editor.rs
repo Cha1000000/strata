@@ -235,7 +235,8 @@ fn editor_actions(manager: Rc<ThemeManager>, form: ThemeEditorForm) -> gtk::Box 
     save.connect_clicked(move |_| {
         let mut tokens = values.borrow().clone();
         tokens.name = name.text().trim().to_owned();
-        match manager.save_custom_theme(tokens) {
+        let (preview, error, revealer) = (preview.clone(), error.clone(), revealer.clone());
+        manager.save_custom_theme(tokens, move |saved| match saved {
             Ok(_) => {
                 // Saving selects the theme, which ends the preview.
                 preview.applied.set(None);
@@ -246,7 +247,7 @@ fn editor_actions(manager: Rc<ThemeManager>, form: ThemeEditorForm) -> gtk::Box 
                 error.set_text(&save_error_text(&message));
                 error.set_visible(true);
             }
-        }
+        });
     });
     actions
 }
