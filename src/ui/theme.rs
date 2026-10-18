@@ -30,8 +30,7 @@ const FONT_STYLE_PRIORITY: u32 = BASE_THEME_STYLE_PRIORITY + 1;
 const STYLE_PRIORITY: u32 = FONT_STYLE_PRIORITY + 1;
 const RESET_CSS: &str = "* { all: unset; }";
 const TOKEN_STYLE_PRIORITY: u32 = STYLE_PRIORITY + 1;
-/// The optional user stylesheet sits above everything Strata loads, so it has
-/// the final word; without the file this provider stays empty.
+/// Above every Strata stylesheet, so `~/.config/strata/style.css` has the final word.
 const USER_STYLE_PRIORITY: u32 = TOKEN_STYLE_PRIORITY + 1;
 const USER_STYLE_FILE: &str = "style.css";
 const STYLE_CSS: &str = include_str!("../style.css");

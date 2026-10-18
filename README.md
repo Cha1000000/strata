@@ -676,6 +676,8 @@ Select **Add a theme**, enter a name, and choose the semantic colors for the bac
 
 Custom themes are stored as shareable TOML files in `~/.config/strata/themes/`. A selected theme is re-read when its file changes on disk, so a generator that rewrites it in place (for example a [matugen](https://github.com/InioX/matugen) template following the wallpaper) updates open windows without a restart. See [Themes](docs/themes.md) for the schema, file location, live updates, and Omarchy color mapping.
 
+To go beyond the color tokens, an optional `~/.config/strata/style.css` is loaded above Strata's own stylesheets and re-read when it changes; see [User stylesheet](docs/themes.md#user-stylesheet).
+
 ## Release channels
 
 Strata defaults to the **Stable** channel: only final tagged releases are ever offered, and a Stable install never receives, sees, or is notified about a prerelease.
