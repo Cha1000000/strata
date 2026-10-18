@@ -42,9 +42,9 @@ pub(crate) use document::{
 };
 pub use file_source::{
     DirectoryChange, DirectoryEvent, DirectoryRequest, DirectoryStamp, FileSource, LoadHandle,
-    LocationIdentity, LocationValidationError, MetadataOutcome, MetadataRequest, MetadataUpdate,
-    MountToken, RequestId, StampAnswer, UriCredentials, backend_unavailable_message,
-    sanitize_uri_credentials, validate_uri_credentials,
+    LocationValidationError, MetadataOutcome, MetadataRequest, MetadataUpdate, MountToken,
+    RequestId, StampAnswer, UriCredentials, backend_unavailable_message, sanitize_uri_credentials,
+    validate_uri_credentials,
 };
 pub(crate) use file_source::{
     INVALID_NAME_REASON, UNEXPECTED_SYSTEM_ERROR, error_detail, gio_error_detail,

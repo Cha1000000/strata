@@ -1750,6 +1750,83 @@ fn a_folder_put_back_to_its_old_time_still_reads_as_changed() -> Result<(), Box<
 }
 
 #[test]
+fn a_renamed_folder_is_followed_where_its_mount_proves_it_is_the_same() -> Result<(), Box<dyn Error>>
+{
+    use crate::adapters::{FsQuirks, Quirks, evict};
+
+    type Row = (&'static str, fn() -> Quirks, bool, bool);
+    let rows: [Row; 4] = [
+        ("numbers kept", Quirks::ext4, false, true),
+        (
+            "renumbered, birth kept",
+            || Quirks {
+                made_up_births: true,
+                ..Quirks::vfat()
+            },
+            true,
+            true,
+        ),
+        ("renumbered, no birth", Quirks::sshfs, true, false),
+        (
+            "renumbered, folder births unreliable",
+            Quirks::exfat,
+            true,
+            false,
+        ),
+    ];
+    for (row, quirks, evicted, followed) in rows {
+        let root = tempfile::tempdir()?;
+        let parent = root.path().join("parent");
+        let (old, new) = (parent.join("old"), parent.join("new"));
+        fs::create_dir_all(&old)?;
+        let _scope = FsQuirks::install(&parent, quirks());
+        let identity = directory_stamp(
+            &old,
+            &super::super::local_operations::folder_stamp(&old, false)
+                .map_err(|error| error.to_string())?,
+            SystemTime::now(),
+        )
+        .identity
+        .ok_or("no identity")?;
+        let probe = root.path().join("probe");
+        loop {
+            fs::write(&probe, b"probe")?;
+            let stamped = fs::metadata(&probe)?;
+            fs::remove_file(&probe)?;
+            if stamped.modified()? > fs::metadata(&old)?.modified()? {
+                break;
+            }
+        }
+        fs::create_dir(parent.join("sibling"))?;
+        fs::rename(&old, &new)?;
+        if evicted {
+            assert!(evict(&new), "{row}");
+        }
+
+        let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+            .lock()
+            .map_err(|error| error.to_string())?;
+        let found = Rc::new(RefCell::new(None));
+        let slot = found.clone();
+        let _find = LocalFileSource.find_by_identity(
+            Location::local(&parent),
+            identity,
+            Rc::new(move |location| {
+                slot.replace(Some(location));
+            }),
+        );
+        drain_until(|| found.borrow().is_some());
+
+        assert_eq!(
+            found.take().flatten(),
+            followed.then(|| Location::local(&new)),
+            "{row}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn enumerate_resolves_can_trash_from_a_child_entry() {
     let root = unique_fixture_root("can-trash");
     fs::create_dir_all(&root).expect("the fixture directory should be created");
@@ -2514,8 +2591,13 @@ fn background_folder_listings_skip_a_folder_an_operation_fences() {
     let folder = root.path().join("folder");
     fs::create_dir(&folder).expect("watched folder");
     fs::write(folder.join("#1234"), b"").expect("numbered name");
-    let identity =
-        folder_identity(&fs::metadata(&folder).expect("folder metadata")).expect("folder identity");
+    let identity = directory_stamp(
+        &folder,
+        &super::super::local_operations::folder_stamp(&folder, false).expect("folder stamp"),
+        SystemTime::now(),
+    )
+    .identity
+    .expect("folder identity");
     let listings: [(&str, &dyn Fn() -> bool); 2] = [
         ("numbered names", &|| {
             numbered_names_in(&folder)

@@ -154,7 +154,7 @@ pub(crate) use archive::{
 pub(crate) use archive::write_compression_fixture;
 pub(in crate::adapters) use fs_ops::{FolderStamp, folder_stamp, list_folder, stamp_mount};
 #[cfg(test)]
-pub(crate) use tests::fs_quirks::{FsQuirks, Op as FsOp, Quirks};
+pub(crate) use tests::fs_quirks::{FsQuirks, Op as FsOp, Quirks, evict};
 pub(crate) use transfer_targets::transfer_targets;
 pub(crate) use typed_names::refused_in as typed_name_refusal;
 

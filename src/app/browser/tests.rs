@@ -37,8 +37,9 @@ mod undo_refresh;
 use crate::{
     model::{EntryKind, MetadataValue},
     services::{
-        CancelledOperation, CompressRequest, DirectoryEvent, ExtractRequest, LoadHandle,
-        MetadataOutcome, MetadataRequest, MetadataUpdate, UndoCopyRequest, UndoMoveRequest,
+        CancelledOperation, CompressRequest, DirectoryEvent, Evidence, ExtractRequest,
+        IdentityTraits, InodeNumbers, LoadHandle, MetadataOutcome, MetadataRequest, MetadataUpdate,
+        MountToken, UndoCopyRequest, UndoMoveRequest,
     },
 };
 
@@ -87,33 +88,48 @@ type WatchCallback = Rc<dyn Fn(DirectoryChange)>;
 
 /// Identities of fake folders, so a source can find a folder after a rename.
 #[derive(Default)]
-struct FolderIdentities(RefCell<HashMap<Location, LocationIdentity>>);
+struct FolderIdentities(RefCell<HashMap<Location, ItemIdentity>>);
+
+fn folder_identity(inode: u64, born: i64) -> ItemIdentity {
+    ItemIdentity {
+        evidence: Evidence {
+            device: 1,
+            inode,
+            kind: rustix::fs::FileType::Directory,
+            birth: Some((born, 0)),
+            attributes: None,
+        },
+        traits: IdentityTraits {
+            numbers: InodeNumbers::Kept,
+            folder_births: true,
+        },
+    }
+}
+
+fn identified_stamp(identity: ItemIdentity) -> DirectoryStamp {
+    DirectoryStamp {
+        modified: (0, 0),
+        changed: Some((0, 0)),
+        identity: Some(identity),
+        mount: Some(MountToken::Native(1)),
+        outside_writers: false,
+        coarse_window: None,
+        read_at: std::time::UNIX_EPOCH,
+    }
+}
 
 impl FolderIdentities {
     fn identify(&self, location: &Location) {
         let mut identities = self.0.borrow_mut();
         let born = identities.len() as u64 + 1;
-        identities.insert(
-            location.clone(),
-            LocationIdentity {
-                device: 1,
-                inode: born,
-                created: Some(std::time::UNIX_EPOCH + std::time::Duration::from_secs(born)),
-            },
-        );
+        identities.insert(location.clone(), folder_identity(born, born as i64));
     }
 
     /// A new folder at `to` that the filesystem gave the deleted `from` folder's inode.
     fn reuse_inode(&self, from: &Location, to: &Location) {
         let mut identities = self.0.borrow_mut();
         let deleted = identities.remove(from).expect("an identified folder");
-        identities.insert(
-            to.clone(),
-            LocationIdentity {
-                created: Some(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000)),
-                ..deleted
-            },
-        );
+        identities.insert(to.clone(), folder_identity(deleted.evidence.inode, 1_000));
     }
 
     fn rename(&self, from: &Location, to: &Location) {
@@ -122,16 +138,21 @@ impl FolderIdentities {
         identities.insert(to.clone(), identity);
     }
 
-    fn identity(&self, location: &Location) -> Option<LocationIdentity> {
-        self.0.borrow().get(location).copied()
+    fn stamp(&self, request: &DirectoryRequest, emit: &Rc<dyn Fn(DirectoryEvent)>) {
+        if let Some(identity) = self.0.borrow().get(&request.location).copied() {
+            emit(DirectoryEvent::Stamp {
+                request_id: request.id,
+                stamp: identified_stamp(identity),
+            });
+        }
     }
 
-    fn find(&self, parent: &Location, identity: LocationIdentity) -> Option<Location> {
+    fn find(&self, parent: &Location, identity: ItemIdentity) -> Option<Location> {
         self.0
             .borrow()
             .iter()
             .find(|(location, candidate)| {
-                identity.matches(candidate) && location.parent().as_ref() == Some(parent)
+                identity.same(candidate) && location.parent().as_ref() == Some(parent)
             })
             .map(|(location, _)| location.clone())
     }
@@ -1208,19 +1229,10 @@ impl ScriptedSource {
 }
 
 impl FileSource for ScriptedSource {
-    fn query_location_identity(
-        &self,
-        location: Location,
-        emit: Rc<dyn Fn(Option<LocationIdentity>)>,
-    ) -> LoadHandle {
-        emit(self.identities.identity(&location));
-        LoadHandle::new(|| {})
-    }
-
     fn find_by_identity(
         &self,
         parent: Location,
-        identity: LocationIdentity,
+        identity: ItemIdentity,
         emit: Rc<dyn Fn(Option<Location>)>,
     ) -> LoadHandle {
         emit(self.identities.find(&parent, identity));
@@ -1245,6 +1257,7 @@ impl FileSource for ScriptedSource {
             self.enumerate_calls.borrow_mut().push((request.id, emit));
             return LoadHandle::new(|| {});
         }
+        self.identities.stamp(&request, &emit);
         emit(DirectoryEvent::Batch {
             request_id: request.id,
             entries: self

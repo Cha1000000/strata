@@ -91,10 +91,6 @@ pub struct ItemIdentity {
     pub traits: IdentityTraits,
 }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "Trash, navigation and load stamps compare it")
-)]
 impl ItemIdentity {
     pub fn same(&self, other: &Self) -> bool {
         self.proof(other) == Proof::Same

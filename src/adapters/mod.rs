@@ -36,7 +36,7 @@ pub(crate) use local_operations::{
     ArchiveListing, ArchiveListingStatus, decode_archive_listing, write_compression_fixture,
 };
 #[cfg(test)]
-pub(crate) use local_operations::{FsOp, FsQuirks, Quirks};
+pub(crate) use local_operations::{FsOp, FsQuirks, Quirks, evict};
 #[cfg(test)]
 pub(crate) use local_operations::{
     clear_sync_probe, install_sync_probe, release_sync_probe, sync_probe_is_blocked,

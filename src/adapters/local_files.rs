@@ -33,8 +33,8 @@ use crate::{
     model::{EntryKind, FileEntry, Location, MetadataValue},
     services::{
         DirectoryChange, DirectoryEvent, DirectoryRequest, DirectoryStamp, Evidence, FileSource,
-        IdentityTraits, ItemIdentity, LoadHandle, LocationIdentity, LocationValidationError,
-        MetadataOutcome, MetadataRequest, MetadataUpdate, MountToken, RequestId, StampAnswer,
+        IdentityTraits, ItemIdentity, LoadHandle, LocationValidationError, MetadataOutcome,
+        MetadataRequest, MetadataUpdate, MountToken, RequestId, StampAnswer,
         backend_unavailable_message, bytes_support_named_family, file_activity, is_hidden_name,
         is_image_path, is_media_path, link_target_kind, listed_kind, native_hidden_names,
         sanitize_failure_message, symlink_kind,
@@ -1839,34 +1839,10 @@ impl FileSource for LocalFileSource {
         LoadHandle::new(move || task.abort())
     }
 
-    fn query_location_identity(
-        &self,
-        location: Location,
-        emit: Rc<dyn Fn(Option<LocationIdentity>)>,
-    ) -> LoadHandle {
-        let Some(path) = location.native_path().map(Path::to_path_buf) else {
-            emit(None);
-            return LoadHandle::new(|| {});
-        };
-        // A hung network mount must not stall the window.
-        let task = glib::MainContext::default().spawn_local(async move {
-            let identity = gio::spawn_blocking(move || {
-                fs::symlink_metadata(&path)
-                    .ok()
-                    .and_then(|metadata| folder_identity(&metadata))
-            })
-            .await
-            .ok()
-            .flatten();
-            emit(identity);
-        });
-        LoadHandle::new(move || task.abort())
-    }
-
     fn find_by_identity(
         &self,
         parent: Location,
-        identity: LocationIdentity,
+        identity: ItemIdentity,
         emit: Rc<dyn Fn(Option<Location>)>,
     ) -> LoadHandle {
         let Some(directory) = parent.native_path().map(Path::to_path_buf) else {
@@ -2355,39 +2331,31 @@ fn log_directory_load_started(request_id: RequestId, location: &Location) {
     );
 }
 
-fn folder_identity(metadata: &fs::Metadata) -> Option<LocationIdentity> {
-    metadata.is_dir().then(|| LocationIdentity {
-        device: metadata.dev(),
-        inode: metadata.ino(),
-        created: metadata.created().ok(),
-    })
-}
-
-fn native_entry_with_identity(directory: &Path, identity: LocationIdentity) -> Option<PathBuf> {
+fn native_entry_with_identity(directory: &Path, identity: ItemIdentity) -> Option<PathBuf> {
     use std::os::unix::fs::DirEntryExt;
     let mut listing = file_activity::list(directory).ok()?;
-    let entries: Vec<fs::DirEntry> = listing.by_ref().flatten().collect();
+    let folders: Vec<fs::DirEntry> = listing
+        .by_ref()
+        .flatten()
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+        .collect();
     if listing.stopped() {
         return None;
     }
     let matches = |entry: &&fs::DirEntry| {
-        entry
-            .metadata()
-            .ok()
-            .and_then(|metadata| folder_identity(&metadata))
-            .is_some_and(|candidate| identity.matches(&candidate))
+        let path = entry.path();
+        super::local_operations::folder_stamp(&path, false).is_ok_and(|stamp| {
+            directory_stamp(&path, &stamp, SystemTime::now())
+                .identity
+                .is_some_and(|candidate| identity.same(&candidate))
+        })
     };
     // Btrfs subvolumes, overlayfs and FUSE can list a different inode than stat reports.
-    entries
+    folders
         .iter()
-        .filter(|entry| entry.ino() == identity.inode)
+        .filter(|entry| entry.ino() == identity.evidence.inode)
         .find(matches)
-        .or_else(|| {
-            entries
-                .iter()
-                .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
-                .find(matches)
-        })
+        .or_else(|| folders.iter().find(matches))
         .map(fs::DirEntry::path)
 }
 

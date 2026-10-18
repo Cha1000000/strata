@@ -26,7 +26,8 @@ enum OpenLoad {
 impl Browser {
     pub(super) fn handle_directory_event(self: &Rc<Self>, event: DirectoryEvent) {
         match event {
-            DirectoryEvent::Stamp { .. } | DirectoryEvent::ListingDigest { .. } => {}
+            DirectoryEvent::Stamp { request_id, stamp } => self.record_stamp(request_id, stamp),
+            DirectoryEvent::ListingDigest { .. } => {}
             DirectoryEvent::Batch {
                 request_id,
                 entries,

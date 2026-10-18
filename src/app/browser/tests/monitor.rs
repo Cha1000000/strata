@@ -325,7 +325,7 @@ fn watched_directory_changes_refresh_the_filter_index_for_that_directory() {
 
 type FindAnswer = (
     Location,
-    LocationIdentity,
+    ItemIdentity,
     Rc<dyn Fn(Option<Location>)>,
     Rc<Cell<bool>>,
 );
@@ -361,7 +361,7 @@ impl DepartingSource {
         self.missing.borrow_mut().insert(from.clone());
     }
 
-    fn find(&self, parent: &Location, identity: LocationIdentity) -> Option<Location> {
+    fn find(&self, parent: &Location, identity: ItemIdentity) -> Option<Location> {
         let listable = !self.unlistable.borrow().contains(parent);
         listable
             .then(|| self.identities.find(parent, identity))
@@ -402,6 +402,7 @@ impl FileSource for DepartingSource {
                 message: "No such file or folder".into(),
             });
         } else {
+            self.identities.stamp(&request, &emit);
             emit(DirectoryEvent::Finished {
                 request_id: request.id,
                 truncated: false,
@@ -422,24 +423,10 @@ impl FileSource for DepartingSource {
         Some(LoadHandle::new(|| {}))
     }
 
-    fn query_location_identity(
-        &self,
-        location: Location,
-        emit: Rc<dyn Fn(Option<LocationIdentity>)>,
-    ) -> LoadHandle {
-        let present = !self.missing.borrow().contains(&location);
-        emit(
-            present
-                .then(|| self.identities.identity(&location))
-                .flatten(),
-        );
-        LoadHandle::new(|| {})
-    }
-
     fn find_by_identity(
         &self,
         parent: Location,
-        identity: LocationIdentity,
+        identity: ItemIdentity,
         emit: Rc<dyn Fn(Option<Location>)>,
     ) -> LoadHandle {
         if !self.defer_finds {

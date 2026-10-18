@@ -35,9 +35,8 @@ use crate::{
         writable_from_read_only,
     },
     services::{
-        DirectoryChange, DirectoryEvent, DirectoryRequest, FileSource, LoadHandle,
-        LocationIdentity, LocationValidationError, MetadataRequest, RemoteDownload,
-        download_remote, remote_file_url,
+        DirectoryChange, DirectoryEvent, DirectoryRequest, FileSource, ItemIdentity, LoadHandle,
+        LocationValidationError, MetadataRequest, RemoteDownload, download_remote, remote_file_url,
     },
 };
 
@@ -262,18 +261,10 @@ impl FileSource for ChooserFileSource {
         self.root_limit.as_deref()
     }
 
-    fn query_location_identity(
-        &self,
-        location: Location,
-        emit: Rc<dyn Fn(Option<LocationIdentity>)>,
-    ) -> LoadHandle {
-        self.source.query_location_identity(location, emit)
-    }
-
     fn find_by_identity(
         &self,
         parent: Location,
-        identity: LocationIdentity,
+        identity: ItemIdentity,
         emit: Rc<dyn Fn(Option<Location>)>,
     ) -> LoadHandle {
         self.source.find_by_identity(parent, identity, emit)

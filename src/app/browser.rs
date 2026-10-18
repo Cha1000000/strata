@@ -13,11 +13,11 @@ use crate::{
     model::{FileEntry, Location, SortDirection, SortKey, ViewPreferences, lexically_normalized},
     services::{
         ArchiveFormat, CompressRequest, CreateDirectoryRequest, CreateFileRequest, DeleteRequest,
-        DirectoryChange, DirectoryRequest, ExtractRequest, FileSource, LoadHandle,
-        LocationIdentity, LocationValidationError, MetadataOutcome, MetadataRequest, MoveRecord,
-        NameMode, OperationEvent, OperationProvider, OperationRequestId, PasswordFailure,
-        PasteItem, PasteRequest, PlacedSnapshot, RenameRecord, RenameRequest, RenamedItem,
-        RequestId, RestoreRequest, RestoreSource, RestoreTrashItem, TransferConflict,
+        DirectoryChange, DirectoryRequest, DirectoryStamp, ExtractRequest, FileSource,
+        ItemIdentity, LoadHandle, LocationValidationError, MetadataOutcome, MetadataRequest,
+        MoveRecord, NameMode, OperationEvent, OperationProvider, OperationRequestId,
+        PasswordFailure, PasteItem, PasteRequest, PlacedSnapshot, RenameRecord, RenameRequest,
+        RenamedItem, RequestId, RestoreRequest, RestoreSource, RestoreTrashItem, TransferConflict,
         TransferReport, TrashedOriginal, UndoCopyRequest, UndoMergeRequest, UndoMoveItem,
         UndoMoveRequest, UndoRenameRequest, validate_basename, validate_uri_credentials,
     },
@@ -1074,8 +1074,7 @@ pub struct Browser {
     loads: RefCell<Vec<LoadHandle>>,
     monitors: RefCell<Vec<Option<LoadHandle>>>,
     /// The depth-0 folder's identity when it loaded, which finds it after a rename.
-    root_identity: RefCell<Option<(Location, LocationIdentity)>>,
-    root_identity_query: RefCell<Option<LoadHandle>>,
+    root_identity: RefCell<Option<(Location, ItemIdentity)>>,
     /// The current step of the one departure check that runs at a time.
     departure_probe: RefCell<Option<LoadHandle>>,
     metadata_pending: RefCell<HashMap<usize, Vec<ViewportTarget>>>,
@@ -1164,7 +1163,6 @@ impl Browser {
             loads: RefCell::new(Vec::new()),
             monitors: RefCell::new(Vec::new()),
             root_identity: RefCell::new(None),
-            root_identity_query: RefCell::new(None),
             departure_probe: RefCell::new(None),
             metadata_pending: RefCell::new(HashMap::new()),
             metadata_idle: RefCell::new(None),
@@ -4039,40 +4037,29 @@ impl Browser {
     }
 
     fn start_load(self: &Rc<Self>, depth: usize, location: Location, request_id: RequestId) {
+        if depth == 0
+            && self
+                .root_identity
+                .borrow()
+                .as_ref()
+                .is_some_and(|(known, _)| *known != location)
+        {
+            self.root_identity.take();
+        }
         let handle = self.request_directory(depth, location.clone(), request_id);
         self.loads.borrow_mut().push(handle);
-
-        if depth == 0 {
-            self.query_root_identity(location.clone());
-        }
         let monitor = self.install_monitor(depth, location);
         self.monitors.borrow_mut().push(monitor);
     }
 
-    fn query_root_identity(self: &Rc<Self>, location: Location) {
-        if self
-            .root_identity
-            .borrow()
-            .as_ref()
-            .is_some_and(|(known, _)| *known != location)
+    /// A folder that vanished before its reload keeps the identity it loaded with.
+    pub(super) fn record_stamp(&self, request_id: RequestId, stamp: DirectoryStamp) {
+        let depth = self.state.borrow().depth_for_request(request_id);
+        if depth == Some(0)
+            && let (Some(identity), Some(location)) = (stamp.identity, self.location_at(0))
         {
-            self.root_identity.take();
+            self.root_identity.replace(Some((location, identity)));
         }
-        let weak: Weak<Self> = Rc::downgrade(self);
-        let queried = location.clone();
-        let emit = Rc::new(move |identity: Option<LocationIdentity>| {
-            // A folder that vanished before its reload keeps the identity it loaded with.
-            if let Some(identity) = identity
-                && let Some(browser) = weak.upgrade()
-                && browser.location_at(0).as_ref() == Some(&queried)
-            {
-                browser
-                    .root_identity
-                    .replace(Some((queried.clone(), identity)));
-            }
-        });
-        let query = self.source.query_location_identity(location, emit);
-        self.root_identity_query.replace(Some(query));
     }
 
     fn install_monitor(self: &Rc<Self>, depth: usize, location: Location) -> Option<LoadHandle> {

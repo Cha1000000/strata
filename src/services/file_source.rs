@@ -444,9 +444,7 @@ pub enum StampAnswer {
 pub enum DirectoryEvent {
     /// Comes before the first batch.
     Stamp {
-        #[cfg_attr(not(test), expect(dead_code, reason = "browsers record the stamps"))]
         request_id: RequestId,
-        #[cfg_attr(not(test), expect(dead_code, reason = "browsers record the stamps"))]
         stamp: DirectoryStamp,
     },
     Batch {
@@ -534,26 +532,6 @@ pub struct MetadataRequest {
     /// Keep false for full sort passes to avoid probing off-screen media.
     pub include_icon_details: bool,
     pub time_budget: Duration,
-}
-
-/// What a folder is on its filesystem, which a rename does not change.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct LocationIdentity {
-    pub device: u64,
-    pub inode: u64,
-    pub created: Option<SystemTime>,
-}
-
-impl LocationIdentity {
-    /// Filesystems reuse a deleted folder's inode, so a known birth time must agree too.
-    pub fn matches(&self, other: &Self) -> bool {
-        self.device == other.device
-            && self.inode == other.inode
-            && match (self.created, other.created) {
-                (Some(created), Some(other)) => created == other,
-                _ => true,
-            }
-    }
 }
 
 /// A cancellable directory load. Dropping it cancels any unfinished provider work.
@@ -645,23 +623,12 @@ pub trait FileSource {
         LoadHandle::new(|| {})
     }
 
-    /// Identifies the folder at `location` across renames. Emits `None` when the provider
-    /// cannot, or nothing is there.
-    fn query_location_identity(
-        &self,
-        _location: Location,
-        emit: Rc<dyn Fn(Option<LocationIdentity>)>,
-    ) -> LoadHandle {
-        emit(None);
-        LoadHandle::new(|| {})
-    }
-
-    /// Finds the folder in `parent` that matches `identity`, such as one renamed in place.
-    /// Emits `None` when nothing matches or `parent` cannot be listed.
+    /// Finds the folder in `parent` that is provably `identity`, such as one renamed in place.
+    /// Emits `None` when nothing is, or `parent` cannot be listed.
     fn find_by_identity(
         &self,
         _parent: Location,
-        _identity: LocationIdentity,
+        _identity: ItemIdentity,
         emit: Rc<dyn Fn(Option<Location>)>,
     ) -> LoadHandle {
         emit(None);
