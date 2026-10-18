@@ -143,7 +143,11 @@ pinned folders and custom actions. Open With reads recent applications on the wr
 too, so a launch that is still being recorded is listed. Every later re-read after
 another process changed a file (folder settings and default sort and size saved by
 the portal chooser, custom themes, Omarchy theme changes) is parsed on the writer
-and applied on the interface thread; a change of this process's own that is still being saved
+and applied on the interface thread; the file monitors that notice those changes are
+created and released on the monitors worker that also watches open folders, and once
+each of them is live what it watches is read once more, so a change made while it was
+starting is not missed (the Omarchy theme folders are watched anew only when that
+set of folders changes); a change of this process's own that is still being saved
 wins over an older save from elsewhere. Selection, history, the sort of
 folders that are not remembered, filter query, transient theme
 catalog filters, dialogs, and preview playback position remain window-local.

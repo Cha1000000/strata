@@ -31,7 +31,7 @@ use rustix::{
 use super::super::copy_engine::clock_for_test;
 use super::super::environment::FsEnvironment;
 use super::super::fs_ops::{
-    Entry, EntryStat, FolderStamp, FsOps, FsStat, Listed, System, assert_off_main_thread,
+    Entry, EntryStat, FolderStamp, FsOps, FsStat, Listed, System, Watched, assert_off_main_thread,
 };
 use super::super::holders;
 use super::super::native_fs::LocalFileIdentity;
@@ -2340,37 +2340,38 @@ impl FsEnvironment for Scoped {
         }
     }
 
-    fn watch_folder(
+    fn watch(
         &self,
-        folder: &gio::File,
+        file: &gio::File,
+        watched: Watched,
         flags: gio::FileMonitorFlags,
     ) -> Result<gio::FileMonitor, glib::Error> {
         assert_off_main_thread();
-        let path = folder.path();
+        let path = file.path();
         let Some((scope, path)) = path
             .as_deref()
             .and_then(|path| Some((scope_containing(path)?, path)))
         else {
-            return System.watch_folder(folder, flags);
+            return System.watch(file, watched, flags);
         };
-        let mut watched = None;
+        let mut monitor = None;
         let ran = scope.run(Op::Watch, &[path.file_name().unwrap_or_default()], |_| {
-            watched = Some(System.watch_folder(folder, flags));
+            monitor = Some(System.watch(file, watched, flags));
             Ok(())
         });
-        match (ran, watched) {
-            (Ok(()), Some(watched)) => watched,
+        match (ran, monitor) {
+            (Ok(()), Some(monitor)) => monitor,
             (Err(errno), _) => Err(glib::Error::new(
                 gio::io_error_from_errno(errno.raw_os_error()),
                 &errno.to_string(),
             )),
-            (Ok(()), None) => unreachable!("a call that ran watched the folder"),
+            (Ok(()), None) => unreachable!("a call that ran watched the file"),
         }
     }
 
-    fn unwatch_folder(&self, folder: &gio::File, monitor: gio::FileMonitor) {
+    fn unwatch(&self, file: &gio::File, monitor: gio::FileMonitor) {
         assert_off_main_thread();
-        let path = folder.path();
+        let path = file.path();
         if let Some((scope, path)) = path
             .as_deref()
             .and_then(|path| Some((scope_containing(path)?, path)))
@@ -2379,7 +2380,7 @@ impl FsEnvironment for Scoped {
                 Ok(())
             });
         }
-        System.unwatch_folder(folder, monitor);
+        System.unwatch(file, monitor);
     }
 
     fn current_mount_type(&self, fd: BorrowedFd<'_>) -> Option<MountType> {

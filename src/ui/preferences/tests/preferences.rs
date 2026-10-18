@@ -1889,6 +1889,67 @@ fn item_customizations_follow_relocations_and_removals() {
 }
 
 #[test]
+fn settings_files_are_watched_from_the_monitors_worker_without_missing_a_save() {
+    gtk_test(
+        "ui::preferences::tests::preferences::settings_files_are_watched_from_the_monitors_worker_without_missing_a_save",
+        || {
+            use crate::adapters::{FsOp, FsQuirks, Quirks};
+
+            seed_saved_preferences_for_test();
+            let folder_views = super::super::folder_view_settings::folder_views_path();
+            fs::create_dir_all(folder_views.parent().expect("state directory"))
+                .expect("state directory");
+            fs::write(&folder_views, "").expect("folder settings file");
+            let sandbox = glib::home_dir()
+                .parent()
+                .expect("isolated sandbox")
+                .to_path_buf();
+            let gate = crate::test_support::Gate::default();
+            let scope = FsQuirks::install(
+                &sandbox,
+                Quirks {
+                    before: vec![(FsOp::Watch, "settings.toml", 0, gate.racer())],
+                    ..Quirks::default()
+                },
+            );
+            let ticked = Rc::new(std::cell::Cell::new(false));
+            let tick = ticked.clone();
+            glib::timeout_add_local_once(Duration::from_millis(10), move || tick.set(true));
+
+            let manager = PreferenceManager::shared();
+            wait_for(
+                || gate.reached() && ticked.get(),
+                "the settings watch to wait on the monitors worker while the window runs",
+            );
+            assert_eq!(
+                manager.default_sort(),
+                (SortKey::Size, SortDirection::Descending)
+            );
+            let mut saved = non_default_preferences();
+            saved.sort_key = "modified".into();
+            saved.sort_direction = "ascending".into();
+            fs::write(
+                settings_path(),
+                toml::to_string(&saved).expect("serialize another process's save"),
+            )
+            .expect("another process saves");
+            gate.release();
+            wait_for(
+                || manager.default_sort() == (SortKey::Modified, SortDirection::Ascending),
+                "the save made before the watch was live",
+            );
+            assert_eq!(scope.count(FsOp::Watch), 2);
+
+            drop(manager);
+            wait_for(
+                || scope.count(FsOp::Unwatch) == 2,
+                "both watches to be released on the monitors worker",
+            );
+        },
+    );
+}
+
+#[test]
 fn a_folder_that_failed_to_open_forgets_its_settings_once_a_worker_proves_it_deleted() {
     gtk_test(
         "ui::preferences::tests::preferences::a_folder_that_failed_to_open_forgets_its_settings_once_a_worker_proves_it_deleted",

@@ -16,6 +16,7 @@ use super::preferences::{
     CornerRoundness, FileIconColors, OmarchyVariant, PreferenceManager, TextSize,
     desktop_text_scale_factor, notify_live, snapped_root_font_px,
 };
+use crate::{adapters::Watched, model::Location, services::LoadHandle};
 
 mod font;
 mod omarchy;
@@ -193,9 +194,9 @@ pub struct ThemeManager {
     preferences: Rc<PreferenceManager>,
     omarchy_available: Cell<bool>,
     omarchy_state: RefCell<Option<OmarchyState>>,
-    omarchy_monitors: RefCell<Vec<gio::FileMonitor>>,
+    omarchy_monitors: RefCell<Vec<(PathBuf, LoadHandle)>>,
     pending_omarchy_refresh: RefCell<Option<glib::SourceId>>,
-    themes_monitors: RefCell<Vec<gio::FileMonitor>>,
+    themes_monitor: RefCell<Option<LoadHandle>>,
     pending_themes_refresh: RefCell<Option<glib::SourceId>>,
     preview: RefCell<Option<ThemeTokens>>,
     preview_generation: Cell<u64>,
@@ -255,7 +256,7 @@ impl ThemeManager {
             omarchy_state: RefCell::new(omarchy.state),
             omarchy_monitors: RefCell::new(Vec::new()),
             pending_omarchy_refresh: RefCell::new(None),
-            themes_monitors: RefCell::new(Vec::new()),
+            themes_monitor: RefCell::new(None),
             pending_themes_refresh: RefCell::new(None),
             preview: RefCell::new(None),
             preview_generation: Cell::new(0),
@@ -623,43 +624,50 @@ impl ThemeManager {
     }
 
     fn monitor_omarchy(self: &Rc<Self>, directories: &[PathBuf]) {
-        for monitor in self.omarchy_monitors.take() {
-            monitor.cancel();
-        }
+        let mut monitors = self.omarchy_monitors.take();
+        monitors.retain(|(path, _)| directories.contains(path));
         for path in directories {
-            let file = gio::File::for_path(path);
-            let Ok(monitor) =
-                file.monitor_directory(gio::FileMonitorFlags::NONE, gio::Cancellable::NONE)
-            else {
+            if monitors.iter().any(|(watched, _)| watched == path) {
                 continue;
-            };
-            let weak = Rc::downgrade(self);
-            monitor.connect_changed(move |_, file, other_file, _| {
-                if !is_omarchy_theme_event(file)
-                    && !other_file
-                        .as_ref()
-                        .is_some_and(|file| is_omarchy_theme_event(file))
-                {
-                    return;
-                }
-                let Some(manager) = weak.upgrade() else {
-                    return;
-                };
-                if let Some(pending) = manager.pending_omarchy_refresh.borrow_mut().take() {
-                    pending.remove();
-                }
-                let weak = weak.clone();
-                let refresh = glib::timeout_add_local_once(Duration::from_millis(75), move || {
-                    let Some(manager) = weak.upgrade() else {
+            }
+            let (changed, live) = (Rc::downgrade(self), Rc::downgrade(self));
+            let monitor = crate::adapters::watch(
+                &Location::local(path),
+                Watched::Folder,
+                move |file, other_file| {
+                    if !is_omarchy_theme_event(file)
+                        && !other_file.is_some_and(is_omarchy_theme_event)
+                    {
                         return;
-                    };
-                    manager.pending_omarchy_refresh.borrow_mut().take();
-                    manager.refresh_omarchy_state();
-                });
-                manager.pending_omarchy_refresh.replace(Some(refresh));
-            });
-            self.omarchy_monitors.borrow_mut().push(monitor);
+                    }
+                    if let Some(manager) = changed.upgrade() {
+                        manager.schedule_omarchy_refresh();
+                    }
+                },
+                move || {
+                    if let Some(manager) = live.upgrade() {
+                        manager.schedule_omarchy_refresh();
+                    }
+                },
+            );
+            monitors.push((path.clone(), monitor));
         }
+        self.omarchy_monitors.replace(monitors);
+    }
+
+    fn schedule_omarchy_refresh(self: &Rc<Self>) {
+        if let Some(pending) = self.pending_omarchy_refresh.borrow_mut().take() {
+            pending.remove();
+        }
+        let weak = Rc::downgrade(self);
+        let refresh = glib::timeout_add_local_once(Duration::from_millis(75), move || {
+            let Some(manager) = weak.upgrade() else {
+                return;
+            };
+            manager.pending_omarchy_refresh.borrow_mut().take();
+            manager.refresh_omarchy_state();
+        });
+        self.pending_omarchy_refresh.replace(Some(refresh));
     }
 
     pub(in crate::ui) fn refresh_omarchy_state(self: &Rc<Self>) {
@@ -674,7 +682,7 @@ impl ThemeManager {
 
     fn apply_omarchy_refresh(self: &Rc<Self>, refresh: OmarchyRefresh) {
         self.monitor_omarchy(&refresh.directories);
-        self.omarchy_state.replace(refresh.state);
+        let unchanged = self.omarchy_state.replace(refresh.state.clone()) == refresh.state;
         let available = self.omarchy_tokens(OmarchyVariant::Original).is_some()
             || (self.is_omarchy_available() && refresh.name_exists);
         let availability_changed = self.omarchy_available.replace(available) != available;
@@ -687,51 +695,50 @@ impl ThemeManager {
             self.preferences.notify_changes();
             return;
         }
-        if self.follows_omarchy() {
+        if !unchanged && self.follows_omarchy() {
             self.apply_selected();
             self.preferences.notify_changes();
         }
     }
 
     fn monitor_custom_themes(self: &Rc<Self>, directory_exists: bool) {
-        for monitor in self.themes_monitors.take() {
-            monitor.cancel();
-        }
-        let directory = themes_directory();
-        if !directory_exists {
+        if !directory_exists || self.themes_monitor.borrow().is_some() {
             return;
         }
-        let Ok(monitor) = gio::File::for_path(&directory)
-            .monitor_directory(gio::FileMonitorFlags::NONE, gio::Cancellable::NONE)
-        else {
-            return;
-        };
+        let (changed, live) = (Rc::downgrade(self), Rc::downgrade(self));
+        let monitor = crate::adapters::watch(
+            &Location::local(themes_directory()),
+            Watched::Folder,
+            move |file, other_file| {
+                if !is_custom_theme_event(file) && !other_file.is_some_and(is_custom_theme_event) {
+                    return;
+                }
+                if let Some(manager) = changed.upgrade() {
+                    manager.schedule_themes_refresh();
+                }
+            },
+            move || {
+                if let Some(manager) = live.upgrade() {
+                    manager.schedule_themes_refresh();
+                }
+            },
+        );
+        self.themes_monitor.replace(Some(monitor));
+    }
+
+    fn schedule_themes_refresh(self: &Rc<Self>) {
+        if let Some(pending) = self.pending_themes_refresh.borrow_mut().take() {
+            pending.remove();
+        }
         let weak = Rc::downgrade(self);
-        monitor.connect_changed(move |_, file, other_file, _| {
-            if !is_custom_theme_event(file)
-                && !other_file
-                    .as_ref()
-                    .is_some_and(|file| is_custom_theme_event(file))
-            {
-                return;
-            }
+        let refresh = glib::timeout_add_local_once(Duration::from_millis(75), move || {
             let Some(manager) = weak.upgrade() else {
                 return;
             };
-            if let Some(pending) = manager.pending_themes_refresh.borrow_mut().take() {
-                pending.remove();
-            }
-            let weak = weak.clone();
-            let refresh = glib::timeout_add_local_once(Duration::from_millis(75), move || {
-                let Some(manager) = weak.upgrade() else {
-                    return;
-                };
-                manager.pending_themes_refresh.borrow_mut().take();
-                manager.refresh_custom_themes();
-            });
-            manager.pending_themes_refresh.replace(Some(refresh));
+            manager.pending_themes_refresh.borrow_mut().take();
+            manager.refresh_custom_themes();
         });
-        self.themes_monitors.borrow_mut().push(monitor);
+        self.pending_themes_refresh.replace(Some(refresh));
     }
 
     pub(in crate::ui) fn refresh_custom_themes(self: &Rc<Self>) {
@@ -876,7 +883,7 @@ fn load_custom_themes() -> Vec<Theme> {
     themes
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 struct OmarchyState {
     name: String,
     colors: String,

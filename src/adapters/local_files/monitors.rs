@@ -11,6 +11,7 @@ use gtk::{gio, glib, prelude::*};
 use crate::{
     adapters::{
         gio_file_for_location,
+        local_operations::{self, Watched},
         mount_lanes::{self, Class},
     },
     model::Location,
@@ -56,6 +57,7 @@ impl Drop for BareMonitor {
 enum Job {
     Start {
         file: gio::File,
+        watched: Watched,
         lane: Lane,
         flags: gio::FileMonitorFlags,
         reply: oneshot::Sender<BareMonitor>,
@@ -87,6 +89,7 @@ fn run(job: Job) {
     match job {
         Job::Start {
             file,
+            watched,
             lane,
             flags,
             reply,
@@ -103,7 +106,7 @@ fn run(job: Job) {
             let Ok(admitted) = admitted else {
                 return;
             };
-            let created = super::super::local_operations::watch_folder(&file, flags);
+            let created = local_operations::watch(&file, watched, flags);
             admitted.progress().answered(&created);
             drop(admitted);
             match created {
@@ -122,7 +125,7 @@ fn run(job: Job) {
         }
         Job::Release(mut bare) => {
             if let Some(monitor) = bare.monitor.take() {
-                super::super::local_operations::unwatch_folder(&bare.file, monitor);
+                local_operations::unwatch(&bare.file, monitor);
             }
         }
     }
@@ -130,6 +133,7 @@ fn run(job: Job) {
 
 pub(super) fn start(
     location: &Location,
+    watched: Watched,
     flags: gio::FileMonitorFlags,
 ) -> impl std::future::Future<Output = Option<BareMonitor>> + use<> {
     let file = gio_file_for_location(location);
@@ -142,6 +146,7 @@ pub(super) fn start(
     let (reply, started) = oneshot::channel();
     let sent = send(Job::Start {
         file,
+        watched,
         lane,
         flags,
         reply,
@@ -155,16 +160,24 @@ pub(super) fn start(
     }
 }
 
-pub(crate) fn watch_folder(location: &Location, changed: impl Fn() + 'static) -> LoadHandle {
-    let started = start(location, gio::FileMonitorFlags::NONE);
+pub(crate) fn watch(
+    location: &Location,
+    watched: Watched,
+    changed: impl Fn(&gio::File, Option<&gio::File>) + 'static,
+    live: impl FnOnce() + 'static,
+) -> LoadHandle {
+    let started = start(location, watched, gio::FileMonitorFlags::NONE);
     let held = std::rc::Rc::new(std::cell::RefCell::new(
         None::<(BareMonitor, glib::SignalHandlerId)>,
     ));
     let slot = held.clone();
     let task = glib::MainContext::default().spawn_local(async move {
         if let Some(bare) = started.await {
-            let handler = bare.monitor().connect_changed(move |_, _, _, _| changed());
+            let handler = bare
+                .monitor()
+                .connect_changed(move |_, file, other_file, _| changed(file, other_file));
             slot.replace(Some((bare, handler)));
+            live();
         }
     });
     LoadHandle::new(move || {

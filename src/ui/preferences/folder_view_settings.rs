@@ -8,12 +8,12 @@ use std::{
     time::{Duration, Instant},
 };
 
-use gtk::{gio, glib, prelude::*};
+use gtk::glib;
 
 use crate::{
-    adapters::probes,
+    adapters::{Watched, probes},
     model::{FolderSort, Location, SortDirection, SortKey},
-    services::ItemIdentity,
+    services::{ItemIdentity, LoadHandle},
 };
 
 use super::{
@@ -48,22 +48,21 @@ pub(super) struct FolderViewStore {
     save_timer: RefCell<Option<(glib::SourceId, Duration)>>,
     trashed: RefCell<TrashedValues<TakenViews>>,
     /// Follow what another Strata process, such as the portal chooser, saves.
-    _monitors: [Option<gio::FileMonitor>; 2],
+    _monitors: [LoadHandle; 2],
 }
 
-fn watch(path: &Path, changed: fn(&PreferenceManager)) -> Option<gio::FileMonitor> {
-    let monitor = gio::File::for_path(path)
-        .monitor_file(gio::FileMonitorFlags::NONE, gio::Cancellable::NONE)
-        .inspect_err(|error| {
-            tracing::debug!(%error, path = %path.display(), "unable to watch for other processes");
-        })
-        .ok()?;
-    monitor.connect_changed(move |_, _, _, _| {
+fn watch(path: &Path, changed: fn(&PreferenceManager)) -> LoadHandle {
+    let notice = move || {
         if let Some(manager) = SHARED_MANAGER.with(|shared| shared.borrow().upgrade()) {
             changed(&manager);
         }
-    });
-    Some(monitor)
+    };
+    crate::adapters::watch(
+        &Location::local(path),
+        Watched::File,
+        move |_, _| notice(),
+        notice,
+    )
 }
 
 impl FolderViewStore {

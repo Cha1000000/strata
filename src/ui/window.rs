@@ -1989,11 +1989,16 @@ impl SidebarState {
             return;
         }
         let weak = Rc::downgrade(self);
-        let monitor = crate::adapters::watch_folder(&Location::uri("trash:///"), move || {
-            if let Some(state) = weak.upgrade() {
-                state.refresh_trash_contents();
-            }
-        });
+        let monitor = crate::adapters::watch(
+            &Location::uri("trash:///"),
+            crate::adapters::Watched::Folder,
+            move |_, _| {
+                if let Some(state) = weak.upgrade() {
+                    state.refresh_trash_contents();
+                }
+            },
+            || {},
+        );
         *self.trash_monitor.borrow_mut() = Some(monitor);
     }
 

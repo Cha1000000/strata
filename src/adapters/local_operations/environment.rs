@@ -2,7 +2,7 @@
 
 use super::{
     deletion::local_device_is_rotational,
-    fs_ops::{System, assert_off_main_thread},
+    fs_ops::{System, Watched, assert_off_main_thread},
     holders,
     native_fs::opened_path,
 };
@@ -27,12 +27,13 @@ pub(super) trait FsEnvironment: Send + Sync {
     fn trash(&self, path: &Path, cancellable: &gio::Cancellable) -> Result<bool, glib::Error>;
     fn mount_type(&self, fd: BorrowedFd<'_>) -> Option<(MountType, MountSite)>;
     fn folder_mount(&self, path: &Path, id: Option<u64>) -> Option<(u64, MountType)>;
-    fn watch_folder(
+    fn watch(
         &self,
-        folder: &gio::File,
+        file: &gio::File,
+        watched: Watched,
         flags: gio::FileMonitorFlags,
     ) -> Result<gio::FileMonitor, glib::Error>;
-    fn unwatch_folder(&self, folder: &gio::File, monitor: gio::FileMonitor);
+    fn unwatch(&self, file: &gio::File, monitor: gio::FileMonitor);
     /// The kernel's table, not the watcher's: cifs changes options without a mount-table event.
     fn current_mount_type(&self, fd: BorrowedFd<'_>) -> Option<MountType>;
     /// udev's `ID_FS_TYPE`, when the device has a database record.
@@ -105,16 +106,20 @@ impl FsEnvironment for System {
         mount_of(id).map(|(mount_type, _)| (id, mount_type))
     }
 
-    fn watch_folder(
+    fn watch(
         &self,
-        folder: &gio::File,
+        file: &gio::File,
+        watched: Watched,
         flags: gio::FileMonitorFlags,
     ) -> Result<gio::FileMonitor, glib::Error> {
         assert_off_main_thread();
-        folder.monitor_directory(flags, gio::Cancellable::NONE)
+        match watched {
+            Watched::Folder => file.monitor_directory(flags, gio::Cancellable::NONE),
+            Watched::File => file.monitor_file(flags, gio::Cancellable::NONE),
+        }
     }
 
-    fn unwatch_folder(&self, _folder: &gio::File, monitor: gio::FileMonitor) {
+    fn unwatch(&self, _file: &gio::File, monitor: gio::FileMonitor) {
         assert_off_main_thread();
         monitor.cancel();
     }

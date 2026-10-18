@@ -105,14 +105,15 @@ then. Written streams are never closed this way, as their close reports lost dat
 regression test closes a probe enumerator and stream let go after and during a call, and
 requires each close to run off the UI thread.
 
-### Folder monitors made off the UI thread
+### File and folder monitors made off the UI thread
 
 Location: `src/adapters/local_files/monitors.rs::BareMonitor`
 
-Reason: GLib's inotify backend creates, cancels and delivers every directory monitor under one
-global lock, and creating one walks the folder's path, which blocks on a mount that stopped
-answering. Strata therefore creates and cancels monitors on one serial worker thread, which
-`gio::FileMonitor` (not `Send`) cannot cross without a wrapper.
+Reason: GLib's inotify backend creates, cancels and delivers every file and directory monitor
+under one global lock, and creating one walks the watched path, which blocks on a mount that
+stopped answering. Strata therefore creates and cancels every monitor (open folders, the Trash,
+its own settings files, custom themes and the Omarchy theme folders) on one serial worker thread,
+which `gio::FileMonitor` (not `Send`) cannot cross without a wrapper.
 
 `BareMonitor` is the only value that moves a monitor between that worker and the UI thread, and
 it never carries a signal handler: the worker creates the monitor with no thread-default main

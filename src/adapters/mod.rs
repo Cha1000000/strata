@@ -21,10 +21,9 @@ pub(crate) use gio_location::{gio_file_for_location, location_for_file, reveal_t
 pub(crate) use local_actions::{LocalActionStore, resolve_executable as resolve_action_executable};
 pub use local_files::LocalFileSource;
 pub(crate) use local_files::{RecentRemovalState, recent_remove_entries};
-pub(crate) use local_files::{query_file_entry, watch_folder};
+pub(crate) use local_files::{query_file_entry, watch};
 pub(crate) use local_jobs::LocalActionRunner;
 pub use local_operations::LocalOperationProvider;
-pub(crate) use local_operations::probes;
 pub(crate) use local_operations::{
     ARCHIVE_PREVIEW_FAILED_MESSAGE, ARCHIVE_TOO_LARGE_MESSAGE, ARCHIVE_UNSUPPORTED_MESSAGE,
     ActiveOperation, INVALID_ARCHIVE, MAX_ARCHIVE_PASSWORD_BYTES, MAYBE_BAD_PASSWORD,
@@ -37,6 +36,7 @@ pub(crate) use local_operations::{
 };
 #[cfg(test)]
 pub(crate) use local_operations::{Births, FsOp, FsQuirks, Quirks, evict};
+pub(crate) use local_operations::{Watched, probes};
 #[cfg(test)]
 pub(crate) use local_operations::{
     clear_sync_probe, install_sync_probe, release_sync_probe, sync_probe_is_blocked,

@@ -155,8 +155,9 @@ pub(crate) use archive::{
 
 #[cfg(test)]
 pub(crate) use archive::write_compression_fixture;
+pub(crate) use fs_ops::Watched;
 pub(in crate::adapters) use fs_ops::{
-    FolderStamp, folder_stamp, list_folder, stamp_mount, unwatch_folder, watch_folder,
+    FolderStamp, folder_stamp, list_folder, stamp_mount, unwatch, watch,
 };
 #[cfg(test)]
 pub(crate) use tests::fs_quirks::{Births, FsQuirks, Op as FsOp, Quirks, evict};

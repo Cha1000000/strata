@@ -45,7 +45,7 @@ use futures_channel::oneshot;
 mod camera_photos;
 mod monitors;
 
-pub(crate) use monitors::watch_folder;
+pub(crate) use monitors::watch;
 
 const LIST_ATTRIBUTES: &str = "standard::display-name,standard::name,standard::type,standard::is-hidden,standard::is-symlink,standard::target-uri,access::can-trash,access::can-delete";
 const FULL_ATTRIBUTES: &str = "standard::display-name,standard::name,standard::type,standard::is-hidden,standard::is-symlink,standard::size,standard::target-uri,time::modified,unix::mode,access::can-trash,access::can-delete";
@@ -1791,7 +1791,11 @@ impl FileSource for LocalFileSource {
         notify: Rc<dyn Fn(DirectoryChange)>,
         report: Rc<dyn Fn(Watching)>,
     ) -> LoadHandle {
-        let started = monitors::start(&location, gio::FileMonitorFlags::WATCH_MOVES);
+        let started = monitors::start(
+            &location,
+            super::local_operations::Watched::Folder,
+            gio::FileMonitorFlags::WATCH_MOVES,
+        );
         let connected = Rc::new(RefCell::new(None));
         let slot = connected.clone();
         let task = glib::MainContext::default().spawn_local(async move {
