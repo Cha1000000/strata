@@ -1312,6 +1312,7 @@ pub(crate) fn recent_remove_entries(
 
 impl FileSource for LocalFileSource {
     fn validate_location(&self, location: &Location) -> Result<(), LocationValidationError> {
+        crate::util::ui_thread::assert_off();
         if let Some(path) = location.native_path() {
             let metadata = std::fs::metadata(path).map_err(LocationValidationError::from)?;
             if !metadata.is_dir() {
@@ -1342,9 +1343,11 @@ impl FileSource for LocalFileSource {
         location: Location,
         emit: Rc<dyn Fn(Result<(), LocationValidationError>)>,
     ) -> LoadHandle {
-        if location.native_path().is_some() {
-            emit(self.validate_location(&location));
-            return LoadHandle::new(|| {});
+        if let Some(path) = location.native_path().map(Path::to_path_buf) {
+            let task = glib::MainContext::default().spawn_local(async move {
+                emit(super::local_operations::probes::folder(&path).await);
+            });
+            return LoadHandle::new(move || task.abort());
         }
         let file = gio::File::for_uri(location.uri_value().unwrap_or_default());
         let task = glib::MainContext::default().spawn_local(async move {

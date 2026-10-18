@@ -1328,6 +1328,46 @@ fn outcome_of(events: &Rc<RefCell<Vec<DirectoryEvent>>>, id: u64) -> Option<Resu
 }
 
 #[test]
+fn a_local_folder_is_validated_on_a_worker_while_the_window_keeps_running()
+-> Result<(), Box<dyn Error>> {
+    use crate::adapters::{FsOp, FsQuirks, Quirks};
+
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let root = tempfile::tempdir()?;
+    let folder = root.path().join("folder");
+    fs::create_dir(&folder)?;
+    let gate = Gate::default();
+    let _scope = FsQuirks::install(
+        root.path(),
+        Quirks {
+            before: vec![(FsOp::FolderStamp, "folder", 0, gate.racer())],
+            ..Quirks::default()
+        },
+    );
+    let answer = Rc::new(RefCell::new(None));
+    let slot = answer.clone();
+    let ticked = Rc::new(Cell::new(false));
+    let tick = ticked.clone();
+    glib::timeout_add_local_once(Duration::from_millis(10), move || tick.set(true));
+
+    let _validation = LocalFileSource.validate_location_async(
+        Location::local(&folder),
+        Rc::new(move |result| {
+            slot.replace(Some(result));
+        }),
+    );
+    drain_until(|| gate.reached() && ticked.get());
+    assert!(answer.borrow().is_none());
+    gate.release();
+    drain_until(|| answer.borrow().is_some());
+
+    assert_eq!(answer.take(), Some(Ok(())));
+    Ok(())
+}
+
+#[test]
 fn repeated_loads_of_a_stuck_folder_share_one_call_and_then_time_out() -> Result<(), Box<dyn Error>>
 {
     use crate::adapters::{FsOp, FsQuirks, Quirks, mount_lanes};

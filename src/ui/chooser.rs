@@ -115,6 +115,18 @@ impl ChooserFileSource {
     fn set_filter(&self, filter: Option<gtk::FileFilter>) {
         self.filter.replace(filter);
     }
+
+    fn refusal(&self, location: &Location) -> Result<(), LocationValidationError> {
+        if !self.allows_navigation(location) {
+            return Err(LocationValidationError::Refused(OUTSIDE_ROOT));
+        }
+        if location.native_path().is_none() && !location.is_recent_root() {
+            return Err(LocationValidationError::Refused(
+                "The system file chooser supports local files and folders only.",
+            ));
+        }
+        Ok(())
+    }
 }
 
 impl FileSource for ChooserFileSource {
@@ -132,14 +144,7 @@ impl FileSource for ChooserFileSource {
     }
 
     fn validate_location(&self, location: &Location) -> Result<(), LocationValidationError> {
-        if !self.allows_navigation(location) {
-            return Err(LocationValidationError::Refused(OUTSIDE_ROOT));
-        }
-        if location.native_path().is_none() && !location.is_recent_root() {
-            return Err(LocationValidationError::Refused(
-                "The system file chooser supports local files and folders only.",
-            ));
-        }
+        self.refusal(location)?;
         if let (Some(root), Some(path)) = (&self.root_limit, location.native_path())
             && !path.canonicalize().is_ok_and(|real| real.starts_with(root))
         {
@@ -161,10 +166,8 @@ impl FileSource for ChooserFileSource {
                 None
             });
         }
-        if self.root_limit.is_some()
-            || (location.native_path().is_none() && !location.is_recent_root())
-        {
-            emit(self.validate_location(&location));
+        if let Err(refusal) = self.refusal(&location) {
+            emit(Err(refusal));
             return LoadHandle::new(|| {});
         }
         self.source.validate_location_async(location, emit)

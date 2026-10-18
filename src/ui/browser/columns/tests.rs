@@ -265,7 +265,13 @@ fn switching_to_a_sibling_closes_the_old_child_without_an_exit_animation() {
             let sibling = fixture._root.path().join("sibling-0");
             std::fs::create_dir_all(&sibling).expect("sibling directory");
             fixture.view.browser().descend(0, Location::local(&sibling));
-            pump_until(|| column_loaded(&fixture.view, 1), "sibling column load");
+            pump_until(
+                || {
+                    fixture.view.browser().location_at(1) == Some(Location::local(&sibling))
+                        && column_loaded(&fixture.view, 1)
+                },
+                "sibling column load",
+            );
             assert!(
                 old_child.parent().is_none(),
                 "the replaced child goes at once so its replacement takes its place"

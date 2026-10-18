@@ -1302,18 +1302,7 @@ impl Browser {
         if location.native_path().is_some() && !location.is_absolute_native() {
             return Err(LocationValidationError::NotAbsolute);
         }
-        if location.native_path().is_some() {
-            match self.source.validate_location(&location) {
-                Ok(()) => self.navigate(location),
-                Err(LocationValidationError::NotDirectory) => match location.parent() {
-                    Some(parent) => self.navigate_validated_inner(parent, false, vec![location]),
-                    None => return Err(LocationValidationError::NotDirectory),
-                },
-                Err(error) => return Err(error),
-            }
-        } else {
-            self.navigate_validated(location, true);
-        }
+        self.navigate_validated(location, true);
         Ok(())
     }
 
@@ -1692,17 +1681,8 @@ impl Browser {
             return;
         }
         self.close_peek();
-        if location.native_path().is_some() {
-            match self.source.validate_location(&location) {
-                Err(error) if !keep_parent_active => {
-                    self.emit(BrowserEvent::NavigationRejected {
-                        parent_depth,
-                        error,
-                    });
-                    self.focus_active();
-                }
-                _ => self.descend_validated(parent_depth, location, selection, keep_parent_active),
-            }
+        if keep_parent_active {
+            self.descend_validated(parent_depth, location, selection, keep_parent_active);
             return;
         }
 
@@ -1726,18 +1706,18 @@ impl Browser {
                 return;
             }
             match result {
-                Err(error) if !keep_parent_active => {
+                Err(error) => {
                     browser.emit(BrowserEvent::NavigationRejected {
                         parent_depth,
                         error,
                     });
                     browser.focus_active();
                 }
-                _ => browser.descend_validated(
+                Ok(()) => browser.descend_validated(
                     parent_depth,
                     pending_location.clone(),
                     selection.clone(),
-                    keep_parent_active,
+                    false,
                 ),
             }
         });

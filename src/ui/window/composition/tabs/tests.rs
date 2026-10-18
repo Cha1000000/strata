@@ -302,7 +302,7 @@ fn aborted_folder_clicks_release_the_title_hold() {
                     "unmap" => tabs.select(1),
                     _ => unreachable!(),
                 }
-                assert_eq!(title.text(), "parent", "{outcome}: resolved click");
+                wait_until(|| title.text() == "parent");
                 assert_eq!(
                     view.browser().active_location(),
                     Some(Location::local(root.path().join("parent"))),

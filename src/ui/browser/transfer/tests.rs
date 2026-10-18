@@ -1559,6 +1559,10 @@ fn an_extraction_reloads_its_folder_only_without_a_monitor() {
                 wait_until(|| listed(0).len() == 2, "the archive's folder");
                 if active_elsewhere {
                     view.browser().descend(0, Location::local(&other));
+                    wait_until(
+                        || view.browser().location_at(1) == Some(Location::local(&other)),
+                        "the other folder",
+                    );
                     view.browser().set_active_column(1);
                 }
                 let loads = (
@@ -3601,7 +3605,10 @@ fn drop_open_preference_applies_before_settings_and_live_across_views() {
                         } else {
                             Location::local(fixture.path())
                         };
-                        assert_eq!(view.browser().active_location(), Some(expected));
+                        wait_until(
+                            || view.browser().active_location() == Some(expected.clone()),
+                            "the revealed folder",
+                        );
                         if enabled && mode == BrowserMode::Columns {
                             assert_eq!(
                                 view.browser().location_at(0),

@@ -386,13 +386,15 @@ fn rejected_location_input_preserves_navigation_state() {
     browser.navigate(Location::local("/fixture"));
     events.borrow_mut().clear();
 
-    assert_eq!(
-        browser.navigate_input("/restricted"),
-        Err(LocationValidationError::Inaccessible)
-    );
+    assert_eq!(browser.navigate_input("/restricted"), Ok(()));
 
     assert_eq!(browser.active_location(), Some(Location::local("/fixture")));
-    assert!(events.borrow().is_empty());
+    assert!(matches!(
+        events.borrow().as_slice(),
+        [BrowserEvent::LocationNavigationRejected {
+            error: LocationValidationError::Inaccessible
+        }]
+    ));
 }
 
 #[test]
