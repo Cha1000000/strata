@@ -120,6 +120,11 @@ fn parse_rejects_invalid_manifests() {
         ),
         (
             "example",
+            files(&MANIFEST.replace("module = \"gi\"", "module = \"gi.repository\"")),
+            "top-level module name",
+        ),
+        (
+            "example",
             files(&MANIFEST.replace("apt = \"example-client\"", "brew = \"example\"")),
             "unknown package manager",
         ),
@@ -138,13 +143,16 @@ fn parse_rejects_invalid_manifests() {
         let error = parse(id, files).expect_err(expected);
         assert!(error.contains(expected), "{expected:?} in {error:?}");
     }
-    let mut reserved = files(MANIFEST);
-    reserved.insert("provider.json".into(), b"{}".to_vec());
-    assert!(
-        parse("example", reserved)
-            .expect_err("reserved")
-            .contains("written by Strata")
-    );
+    for name in ["provider.json", "catalog-install.json", "disabled"] {
+        let mut reserved = files(MANIFEST);
+        reserved.insert(name.into(), b"{}".to_vec());
+        assert!(
+            parse("example", reserved)
+                .expect_err(name)
+                .contains("written by Strata"),
+            "{name} is reserved"
+        );
+    }
     let mut bad_icon = files(MANIFEST);
     bad_icon.insert("logo.png".into(), b"not a png".to_vec());
     assert!(

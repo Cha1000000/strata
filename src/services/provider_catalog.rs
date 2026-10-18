@@ -95,7 +95,10 @@ impl Requirement {
                     && module.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
                     && module
                         .chars()
-                        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.') => {}
+                        .all(|c| c.is_ascii_alphanumeric() || c == '_') => {}
+            (None, Some(_)) => {
+                return Err("module must be a top-level module name".into());
+            }
             _ => return Err("each requirement names exactly one command or module".into()),
         }
         for (manager, package) in &self.packages {
@@ -199,7 +202,7 @@ pub(crate) fn parse(id: &str, files: BTreeMap<String, Vec<u8>>) -> Result<Entry,
         if !single_basename(name) {
             return Err(format!("invalid filename {name:?}"));
         }
-        if name == MANIFEST_FILE || name == RECORD_FILE {
+        if [MANIFEST_FILE, RECORD_FILE, file_providers::DISABLED_FILE].contains(&name.as_str()) {
             return Err(format!("{name} is written by Strata at install time"));
         }
         if bytes.len() > FILE_SIZE_LIMIT {
@@ -303,7 +306,6 @@ fn sha256(bytes: &[u8]) -> String {
     hex(&Sha256::digest(bytes))
 }
 
-/// Reads one integration directory in the `providers/` layout.
 fn read_directory(directory: &Path) -> Result<Entry, String> {
     let id = directory
         .file_name()

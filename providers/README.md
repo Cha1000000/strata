@@ -49,7 +49,7 @@ command = "kdeconnectd"           # looked up in trusted system directories
 packages = { pacman = "kdeconnect", apt = "kdeconnect", dnf = "kdeconnect", zypper = "kdeconnect" }
 
 [[requirements]]
-module = "gi"                     # asked of the interpreter, never imported
+module = "gi"                     # top-level; asked of the interpreter, never imported
 packages = { pacman = "python-gobject", apt = "python3-gi", dnf = "python3-gobject", zypper = "python3-gobject" }
 ```
 
