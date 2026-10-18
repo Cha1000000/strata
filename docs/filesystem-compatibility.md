@@ -32,6 +32,12 @@ one is deleted.
   [Moves across filesystems](#moves-across-filesystems).
 - **Show only complete copies.** A copy appears under its final name once it is complete, except
   on mounts where nothing can be placed; see [Publishing a copy](#publishing-a-copy).
+- **Never stand in an operation's way, and never remove another program's open file.** Before an
+  operation changes an item, Strata stops its own previews, thumbnails and background reads of it
+  and of everything inside it. A file another program still has open, which NFS, SMB and FUSE keep
+  under a hidden leftover name until it is closed, is never deleted, renamed or copied when Strata
+  finds it inside a folder: the folder stays, and the error names the program where it can. See
+  [Files that are still open](#files-that-are-still-open).
 - **Keep transfer work off the interface thread.** Native copying, placement, and paste/restore/delete
   planning run on workers. Some existing archive-name, undo and redo replay checks
   remain synchronous; removing those calls is tracked in [#1590](https://github.com/lgse/strata/issues/1590).
@@ -619,9 +625,10 @@ folder's birth time again whenever an entry is renamed into or within it, as a m
 entries, so there a folder of the copy that reports a birth time is known by its type, and its
 entries are checked one by one.
 
-What stays is reported by cause: changed during the move, could not be deleted (with the error, as
-in a read-only folder), a special file or symbolic link the destination cannot store, or an item
-whose copy was moved away. An entry already gone is not reported, since a move leaves exactly that.
+What stays is reported by cause: changed during the move, a folder holding a file that is
+[still open](#files-that-are-still-open), could not be deleted (with the error, as in a read-only
+folder), a special file or symbolic link the destination cannot store, or an item whose copy was
+moved away. An entry already gone is not reported, since a move leaves exactly that.
 A moved item with anything left behind is left out of Undo, and the report says so, naming up to
 eight such items and counting the rest. Undoing a move gives back names that were numbered as
 aliases, where the original name is free.
@@ -1128,6 +1135,160 @@ held item is not the target it checked. If another item took the name after the 
 reports the newest Trash entry GLib made for that path instead, so Undo and saved views follow what
 actually went to Trash.
 
+## Files that are still open
+
+On NFS, SMB and FUSE mounts, a file unlinked while a program still has it open stays under a
+hidden name until the last close, and its folder cannot be removed meanwhile. On SMB, a folder with
+a file open below it cannot be renamed, moved or trashed either. Local disks drop the name at once.
+Strata makes sure its own reads are never what is in the way, waits briefly for a file that is
+about to close, and otherwise leaves the file where it is and says which program holds it.
+
+### Releasing Strata's own reads
+
+`src/services/file_activity.rs` registers the reads Strata holds and the operations that run. Every
+read of a user's file goes through it, on a worker: previews and thumbnails with their sandboxes,
+media playback, waveform and storyboard decodes, metadata probes, the small in-process reads
+(content sniffing, text, Markdown images), and background listings (item counts, folder art,
+subtitle lookups, typed-path completions, search index walks, background re-lists and the
+Properties folder size). A folder the user opens is not registered, so browsing where an operation
+works is never blocked.
+
+Every operation registers before it changes anything, with the items it changes and the folders it
+writes into: rename, paste (with Replace and Merge), Delete and Move to Trash, restore, every undo
+and redo, compress, extract, new files and folders, restoring what an interrupted operation left,
+Empty Trash, and unmounting a drive. Before it changes an item, it releases it:
+
+1. New reads of the item, or of anything inside it, are refused ("This item is being changed by a
+   file operation."), and running ones are told to stop.
+2. Off the interface thread, the real path of the item's folder is resolved through the mount's
+   request lane, so a read opened through a symbolic link is released too. Where the mount does
+   not answer, only the path as given is covered.
+3. The operation waits until the stopped reads have ended, at most 2 s in all, then goes on.
+
+A merge releases each original only as it moves that original out of the way, so previews in the
+rest of the merged folder go on. Empty Trash releases the Trash folders of the home and of every
+mounted volume by their paths. Unmounting releases everything under the mount's root before it
+flushes: an open file makes the unmount fail as busy, and a sandbox that still binds a file lets
+the unmount succeed while the filesystem stays mounted inside the sandbox.
+
+This happens on every mount, local disks included, so music in the preview stops when its folder
+is renamed. A preview cleared this way follows the selection again once the operation ends: after a
+rename or move, the item at its new name. A thumbnail stopped this way is asked for again then and
+is not remembered as failed, and a Properties folder size that an operation interrupts ends as
+incomplete ("Some folders or entries couldn't be read."). When nothing is held under the item, the
+release costs one lookup of the folder's real path per folder and one lock.
+
+A sandboxed renderer has the user's file bound into its namespace. After bubblewrap exits, killed
+or not, Strata waits, at most 1 s, on a descriptor of the namespace's first process, opened when
+the sandbox started, until the kernel has torn the namespace and its bind down. In the lab,
+bubblewrap 0.12.0's namespace was still alive after nearly every exit: an unlink right after left
+a leftover after 372 of 380 kills, and after 4 of 100 normal exits on NFSv4.2. With the wait it
+left none in 380 of each, at a cost of about 2 ms after a kill and 0.1 ms after a normal exit. See
+[Preview sandbox](preview-sandbox.md#releasing-files-for-file-operations).
+
+### What each mount leaves
+
+| Mount | A file unlinked while open | Held by | Goes | Unlinking the leftover |
+| --- | --- | --- | --- | --- |
+| NFS v3 and v4 | renamed by the client to `.nfs` and 24 hex digits | any reference on this client, also an `O_PATH` descriptor or a sandbox's bind | at the last close | refused with `EBUSY` |
+| SMB, Linux 6.17 and later | renamed by the client to `.__smbfile_silly` and hex digits, also while a Linux client elsewhere has it open | open files only | when the server's last handle closes | `ENOENT`, as the delete is pending |
+| SMB with POSIX extensions | the name goes at once; the folder lists empty and refuses `rmdir` with `EACCES` | open files only | at the last close | — |
+| FUSE daemons on libfuse's high-level API (sshfs, ntfs-3g, exfat-fuse) | renamed by the daemon to `.fuse_hidden` and 16 hex digits | open files only | when the daemon gets the release; on sshfs one request later | succeeds, but leaves a fresh leftover |
+| local disks (ext4, XFS, btrfs, tmpfs, vfat, exFAT, ntfs3) | the name goes at once | — | — | — |
+
+In the lab every leftover went within one request of the last close, over loopback, and an SMB
+close the client deferred took up to `closetimeo`. A leftover is recognised by its name only
+on the mount family that makes it, so a file named `.nfs…` on ext4 is an ordinary file. One found
+inside a folder is left alone:
+
+- A recursive delete leaves it in place, and its folder goes through the wait below.
+- A copy or move of the folder leaves it out. A move keeps the source folder while it stays and
+  reports the folder as still open.
+- Only a leftover the user selects by name is deleted like any file, and the mount's refusal is
+  reported.
+
+### Removing a folder that holds only leftovers
+
+Deleting a folder, removing the source folders of a move, cleaning up a failed copy and removing a
+merge's stage all go through one removal in `src/adapters/local_operations/leftovers.rs`. When
+`rmdir` fails with `ENOTEMPTY`, or with `EACCES` and an empty listing on SMB with POSIX extensions,
+it lists the folder. Anything that is not the mount family's leftover ends it with the error as it
+is. Otherwise it tries again, with pauses of 10 ms doubling to 50 ms, listing again after each
+refusal, until a budget runs out: 2 s on NFS and FUSE, and on SMB the client's `closetimeo` (one
+second by default) plus half a second, at most 10 s. It stops at once when something else is
+listed, when the folder at the name is no longer the one it checked, or when the operation is
+cancelled. One budget covers a whole Delete, a paste's source deletions, or a copy's cleanups, so a
+thousand held folders cost one wait. A folder that empties goes at once and costs no wait.
+
+### Naming what holds it
+
+A folder still refused after the wait is reported as still open. Strata then looks for the holder,
+once per folder, on the worker:
+
+1. A read Strata holds, or another of its operations, inside the folder makes the holder Strata,
+   without reading `/proc`. This also covers Strata's sandboxes, whose binds show in no descriptor.
+2. Otherwise it reads the descriptor links of every process it may read (`/proc/<pid>/fd`) and
+   keeps those inside the folder: the `.nfs…` name on NFS, `<original> (deleted)` on SMB and FUSE.
+   Each is confirmed by the mount id and inode in `/proc/<pid>/fdinfo`, which match the leftover
+   (from Linux 5.14; earlier kernels keep the path match). Strata never calls `stat` through
+   another process's descriptors, which could call into a mount that does not answer.
+3. If no descriptor matched, files mapped without one, by device and inode in `/proc/<pid>/maps`.
+
+The first match wins, and the search stops after 200 ms. The program is named by its app where its
+process says which one, through its systemd app unit (as GNOME, KDE and uwsm launch apps) or GIO's
+launch variable and the app's desktop file, and otherwise by its process name. A program started
+from a terminal app is therefore named after the terminal. Strata's own process, a helper it
+started in a process group of its own (previews, custom actions), and another process running
+Strata's executable count as Strata; a terminal or program Strata opens for the user is named like
+any other.
+
+| Holder | Delete, the folder's line | Move report |
+| --- | --- | --- |
+| a program | A file in it is still open in %{program}. Close it there and try again. | “%{name}” was left in “%{folder}”, as a file in it is still open in %{program} |
+| Strata | A file in it is still in use by Strata. Try again when its other operation or search ends. | “%{name}” was left in “%{folder}”, as a file in it is still in use by Strata |
+| none found, NFS or FUSE | A file in it is still open in another program. Close it and try again. | “%{name}” was left in “%{folder}”, as a file in it is still open in another program |
+| none found, SMB | A file in it is still open in a program on this or another computer. | as above |
+| none found, SMB with POSIX extensions | Permission denied | Could not delete “%{name}”: Permission denied |
+
+On SMB with POSIX extensions an open file leaves no name, so an empty folder that refuses `rmdir`
+looks the same as one the user may not remove: Strata waits the SMB budget, then keeps the system's
+error unless it finds a holder on this computer.
+
+### SMB renames
+
+Samba refuses to rename a folder while any file below it is open, from any client, and the cifs
+client reports that as `EACCES`. A rename, a move within the mount, or a Move to Trash of a folder
+refused that way is tried again for the SMB budget above, cancellably; the refused rename changed
+nothing. Linux 7.2 closes this client's deferred handles below a folder before renaming it, so
+there only a handle still open refuses (360 renames, moves and Trash moves right after a close all
+succeeded at once in the lab). The retry is for 6.17 to 7.1, which may not, and was not verified.
+After the budget, the holder below the folder is named as above; with none found, "Permission
+denied" stays. On SMB with POSIX extensions, where a Linux client's open file does not refuse the
+rename, nothing waits and the system's error stays. A file rename, move or Move to Trash refused
+with `EBUSY`, which comes from a program on another computer that holds the file without sharing
+delete access, says "It is still open in a program on this or another computer." A cached
+directory handle from a listing never blocked a rename in the lab.
+
+### Limits of the release
+
+- **Leftovers nobody holds.** A leftover orphaned by a crashed NFS client, or a file with a
+  leftover's name that nothing holds, keeps its folder until someone removes it by hand.
+- **SMB deletes refused elsewhere.** Unlinking a file that a program on another computer holds
+  without sharing delete access fails with `EIO`, which Strata reports as an I/O error, since it
+  cannot be told apart from a real one.
+- **SMB before Linux 6.17** keeps a deleted open file under its own name, pending deletion. Strata
+  does not recognise it as a leftover (unverified), so removing its folder fails with the system's
+  error.
+- **A single file another program has open** is deleted without a report, as on local disks: its
+  name goes, and the space comes back at the last close.
+- **Other FUSE daemons.** rclone, gvfsd-fuse and other daemons not built on libfuse's high-level
+  API name leftovers otherwise or not at all, so removing a folder that holds one fails with the
+  system's error.
+- **GVfs.** Empty Trash and deletions on GVfs locations go through GVfs's own recursive delete,
+  which meets another program's leftover with GVfs's error.
+- **The holder search** sees only processes on this computer that Strata may read, and its 200 ms
+  limit is an estimate.
+
 ## Hidden names
 
 | Name | Purpose | After a crash |
@@ -1159,8 +1320,8 @@ filesystem stores are under [Names](#names).
 | ntfs3, ntfs (Linux 7.1 and later) | yes | no | yes | case-sensitive unless mounted with `nocase` |
 | ntfs-3g, libfuse2 daemons | rejects flags | rejects flags | ntfs-3g: yes | the kernel refuses rename flags below FUSE protocol 7.23; ntfs-3g never gets a rename over a name of 237 UTF-16 units or more (see [Placing an item without replacing](#placing-an-item-without-replacing)) |
 | exfat-fuse (libfuse3) | enforced by the kernel only | ignored: overwrites | no | built on libfuse2, it rejects flags, and files take the [reserved-name step](#the-reserved-name-step-and-its-risk) |
-| NFS v3 and v4 | rejects flags | rejects flags | yes | unlinking an open file leaves `.nfsXXXX` until it is closed |
-| SMB/CIFS | client-side only | no | server-dependent | usually case-insensitive; open files may block rename and delete |
+| NFS v3 and v4 | rejects flags | rejects flags | yes | a file unlinked while anything on this client references it stays as `.nfs…` until the last close (see [Files that are still open](#files-that-are-still-open)) |
+| SMB/CIFS | client-side only | no | server-dependent | usually case-insensitive; a file unlinked while open stays as `.__smbfile_silly…` until its last handle closes, and a folder with a file open below it cannot be renamed (see [Files that are still open](#files-that-are-still-open)) |
 | sshfs | rejects flags | rejects flags | not used | each link reports its own inode number; reports "exists" as `EPERM`; files take the [reserved-name step](#the-reserved-name-step-and-its-risk); without the server's `posix-rename@openssh.com` extension its rename over the placeholder fails with `EPERM`, so moved, restored and staged files are copied, and file renames, archive publication and setting a file aside fail |
 | 9p (WSL2, QEMU), ceph, eCryptfs | rejects flags | rejects flags | yes | |
 | vboxsf, rclone, s3fs | rejects flags | rejects flags | no | files take the [reserved-name step](#the-reserved-name-step-and-its-risk); vboxsf refuses to rename over an empty folder, so its folders take that step too |
@@ -1203,7 +1364,7 @@ For copies they also emulate a mount's family and superblock options as mountinf
 device format udev records, refused `O_TMPFILE` and its links, refused clones, a `copy_file_range`
 that ends early, short reads and writes, times reset at close (NFSv4.2 delegations, FUSE writeback
 caches), refused `chown`, foreign groups, extended attributes refused by prefix, injected or listed
-with ACLs first, refused `mknodat` of files and pipes, NFS silly renames, files that report no size,
+with ACLs first, refused `mknodat` of files and pipes, files that report no size,
 reported modes, change times that equal the modification time (FAT), folder birth times that renames
 reset (exFAT), times stamped within one tick of a coarse clock (kernels without multigrain
 timestamps), single link counts (sshfs), entries renumbered after eviction (never one a descriptor
@@ -1220,6 +1381,14 @@ that `syncfs` reports. Tests can also pretend to run on another kernel release, 
 that the racily clean check, the wait for SMB's deferred close and the emulated attribute cache
 read, and set a paste's batch limits and clock. The seam also asserts that no call runs on the main
 context's thread.
+
+For [files that are still open](#files-that-are-still-open) they emulate each mount family's
+leftovers: the name NFS, SMB or FUSE gives a file unlinked while open, which references count (any
+on NFS, open files only on SMB and FUSE), how long it outlives the last close on the test clock,
+what unlinking a held leftover returns, and SMB with POSIX extensions refusing `rmdir` instead.
+`fs_quirks::hold(path)` stands for another program keeping a file open, a quirk names the program a
+holder search finds (otherwise the search reads only the test process's own `/proc` entries), and
+another refuses SMB folder renames while a file below is held and for a set time after.
 
 For names they emulate the errno each lab mount returned for a name it refuses, names stored or
 listed as others (vfat dropping trailing dots, SMB reading private-use characters back and listing

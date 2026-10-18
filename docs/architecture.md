@@ -267,7 +267,19 @@ paste owes behind one durability barrier per destination filesystem, and the com
 reaches the UI as `OperationEvent::ItemsReported`. Replacement/merge, deletion, restore/undo and
 progress orchestration live in their adjacent `replacement`, `deletion`, `restore` and `progress`
 modules. `native_fs` owns shared descriptor and identity primitives; the syscall seam composes
-`FsEnvironment` for Trash, mount-table and udev queries without a second injection registry.
+`FsEnvironment` for Trash, mount-table, udev and `/proc` holder queries without a second injection
+registry.
+
+Every mutating `OperationProvider` entry, Empty Trash and a drive's unmount hold an
+`ActiveOperation` (`adapters/local_operations/release.rs`) until their final event. It registers
+the operation in `services/file_activity.rs`, the in-memory registry of Strata's own reads and
+running operations, and releases what the operation changes: it fences those paths against new
+reads, stops the registered reads under them (previews, thumbnails, sandboxes, metadata probes and
+background listings) and waits for them within a budget. Readers register at the funnels they
+already share, and preview drawers and thumbnails follow the registry's notices on the main thread.
+`leftovers.rs` removes folders that hold only other programs' silly-rename leftovers, and
+`holders.rs` names the program that still has a file open; see
+[Files that are still open](filesystem-compatibility.md#files-that-are-still-open).
 
 Filesystem work for Trash lives in `adapters/trash.rs`. Measurement shares one entry/time budget
 across root and descendant batches; depth truncation and unreadable descendants remain branch-local.

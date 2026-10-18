@@ -677,12 +677,41 @@ have separate limits, not a machine-global scheduler.
 | Backpressure | A full queue stops consumption and propagates pressure through bounded pipes; it does not accumulate a whole clip. Audio files read ahead until the appsrc queue is full, video until the presentation queue is, never until the playhead moves. Waiting for the consumer is not charged as decoder progress time. |
 | Audio clock | Until the sink first advances after a start, seek or resume, the playhead and video hold their position instead of leading on wall time, so a start-up or resume delay never snaps the playhead back; the 3-second stuck-clock recovery is armed only once the clock has run, leaving the 8-second progress watchdog as the bound for a sink that never starts. After that, a stalled clock lets video lead on wall time by at most 2 seconds. |
 | Paused | Keep position, frame and bounded queues for 30 seconds, then cancel the worker, drop PCM output/queues, and stop the polling timer. The displayed frame and position remain. Resume or a paused seek starts a new bounded decode. |
-| Close / selection change / destruction | Cancel promptly; pipe/queue waits check cancellation at 10–20-ms intervals. Kill/reap the renderer and its sandbox descendants. No join of a blocked pipe reader on the GTK thread. |
+| Close / selection change / destruction | Cancel promptly; pipe/queue waits check cancellation at 10–20-ms intervals. Kill/reap the renderer and its sandbox descendants, then wait for the sandbox's namespace (below). No join of a blocked pipe reader on the GTK thread. |
+| A file operation changes the file | Stop as on close, refuse new work on the file until the operation ends, then follow the selection again (below). |
 | End / malformed output / failure | Release the worker; malformed/truncated output, unavailable decoding and unsuccessful exit fail closed. No unsandboxed fallback. End-of-audio allows only sample-grid rounding (at most 22 µs), not a stalled clock. |
 
 The old batch-conversion wall timeout does not govern a paused real-time player.
 The limits do not promise instant startup, zero-latency seeking, or a total RAM
 plateau for every toolkit/driver.
+
+## Releasing files for file operations
+
+Every sandbox, pooled decode, media session and in-process read registers the
+file it reads, by the path it was given and by its real path, in
+`services/file_activity.rs` before it opens anything. Before a delete, Trash,
+move, rename, Replace, Merge, undo, restore, Empty Trash or unmount changes an
+item, the operation stops every registered read of the item and of anything
+inside it and waits, at most 2 seconds, until they have ended; reads that would
+start meanwhile fail with "This item is being changed by a file operation." On
+NFS, SMB and FUSE mounts a read still open there would leave the deleted file
+behind under a hidden name, keep its folder from being removed or renamed, or
+keep an unmounted filesystem alive. See
+[Files that are still open](filesystem-compatibility.md#files-that-are-still-open).
+
+- A preview drawer showing the item, or a file inside it, clears its target,
+  which stops playback, waveform and storyboard work. When the operation ends,
+  it shows the browser's focused entry again: the item at its new name after a
+  rename or move, the same file after a failed operation.
+- A thumbnail or metadata probe stopped or refused this way is not cached as a
+  failure; thumbnails still bound are asked for again when the operation ends.
+- bubblewrap reports its namespace's first process through `--info-fd`, on the
+  sandbox's otherwise unused stderr, and Strata opens a pidfd on it while the
+  sandbox runs. After every exit of bubblewrap, killed or normal, it waits on
+  that pidfd, at most 1 second, until the kernel has reaped the namespace and
+  dropped its bind of the user's file. With bubblewrap 0.12.0 the namespace was
+  still alive after nearly every exit; the wait costs about 2 ms after a kill and
+  0.1 ms after a normal exit. A sandbox's read counts as ended only after it.
 
 ## Isolation and hardware policy
 
