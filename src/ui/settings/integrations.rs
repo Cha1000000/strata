@@ -268,10 +268,15 @@ impl Page {
         let widget = gtk::Box::new(gtk::Orientation::Vertical, 3);
         widget.add_css_class("settings-option");
         widget.add_css_class("integration-row");
+        // The copy expands to center within the shared row height; stop that
+        // expansion from reaching the page.
+        widget.set_vexpand(false);
         widget.set_widget_name(&format!("integration-{}", entry.id));
         let copy = gtk::Box::new(gtk::Orientation::Vertical, 3);
         copy.set_hexpand(true);
-        // Rows share a minimum height; keep short copy centered within it.
+        // Rows share a minimum height; keep short copy centered within it
+        // whichever orientation the responsive layout gives the row.
+        copy.set_vexpand(true);
         copy.set_valign(gtk::Align::Center);
         let heading = gtk::Box::new(gtk::Orientation::Horizontal, 10);
         heading.append(&logo(entry.icon_bytes(), entry.category));
@@ -413,10 +418,15 @@ impl Page {
         let widget = gtk::Box::new(gtk::Orientation::Vertical, 3);
         widget.add_css_class("settings-option");
         widget.add_css_class("integration-row");
+        // The copy expands to center within the shared row height; stop that
+        // expansion from reaching the page.
+        widget.set_vexpand(false);
         widget.set_widget_name(&format!("integration-{}", installation.id));
         let copy = gtk::Box::new(gtk::Orientation::Vertical, 3);
         copy.set_hexpand(true);
-        // Rows share a minimum height; keep short copy centered within it.
+        // Rows share a minimum height; keep short copy centered within it
+        // whichever orientation the responsive layout gives the row.
+        copy.set_vexpand(true);
         copy.set_valign(gtk::Align::Center);
         let heading = gtk::Box::new(gtk::Orientation::Horizontal, 10);
         heading.append(&logo(installation.icon.as_deref(), Category::Other));
