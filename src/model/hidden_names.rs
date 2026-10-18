@@ -142,13 +142,6 @@ const FOREIGN_LEFTOVERS: [(&str, Suffix, ForeignLeftover); 4] = [
     ),
 ];
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "folder listings classify leftovers once their detection lands"
-    )
-)]
 pub(crate) fn classify(name: &OsStr) -> Option<Leftover> {
     let name = name.as_bytes();
     if !name.starts_with(STRATA) {

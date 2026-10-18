@@ -555,7 +555,7 @@ impl Ownership {
     /// one tick of a coarse clock only in its contents. Where the mount
     /// numbers an evicted entry afresh, the birth time stands in for the
     /// inode number where both stats report one, and where renames reset a
-    /// folder's birth time, a folder's type alone.
+    /// folder's birth time, a folder's type, as its entries are checked too.
     fn holds(
         &self,
         fs: &dyn FsOps,
@@ -574,9 +574,7 @@ impl Ownership {
             match native_fs::compare(traits, identity, None, stat) {
                 Proof::Same => true,
                 Proof::Different => false,
-                Proof::Unproven => {
-                    exact || (identity.kind == FileType::Directory && !traits.folder_births)
-                }
+                Proof::Unproven => exact || native_fs::birth_reset_folder(traits, identity, stat),
             }
         };
         same && state.is_none_or(|state| {

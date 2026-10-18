@@ -78,6 +78,10 @@ fn learn_mount_type(fs: &dyn FsOps, dir: BorrowedFd<'_>, key: MountKey) -> Mount
         .and_then(|_| fs.device_format(dir).ok().flatten());
     let format = device_format.as_deref();
     let fuse_format = format.and_then(FuseFormat::of);
+    let identity = IdentityTraits {
+        folder_births: identity.folder_births && fuse_format != Some(FuseFormat::Exfat),
+        ..identity
+    };
     let coarse_times = mount_type.and_then(|mount| mount.coarse_times(fuse_format));
     let deferred_close = mount_type.and_then(MountType::deferred_close);
     let silly_names = mount_type.and_then(MountType::silly_names);

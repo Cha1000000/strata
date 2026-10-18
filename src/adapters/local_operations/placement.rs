@@ -22,7 +22,7 @@ use super::{
     fs_ops::{Entry, EntryStat, FsOps},
     mount_profile,
     names::fix::units,
-    native_fs::LocalFileIdentity,
+    native_fs::{self, LocalFileIdentity},
 };
 use crate::{
     adapters::volume::{
@@ -560,8 +560,17 @@ pub(super) fn remove_if_unchanged(
     identity: LocalFileIdentity,
     flags: AtFlags,
 ) -> bool {
+    let unchanged = |current: &EntryStat| {
+        current.identity == identity
+            || (flags.contains(AtFlags::REMOVEDIR)
+                && native_fs::birth_reset_folder(
+                    mount_profile::known_mount(fs, entry.dir).1.identity,
+                    identity,
+                    current,
+                ))
+    };
     fs.stat(entry, true)
-        .is_ok_and(|current| current.identity == identity)
+        .is_ok_and(|current| unchanged(&current))
         && matches!(fs.unlink(entry, flags), Ok(()) | Err(Errno::NOENT))
 }
 

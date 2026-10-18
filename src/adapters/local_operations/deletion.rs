@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: MIT
 
-use super::fs_ops::{Entry, fs};
+use super::fs_ops::{Entry, EntryStat, fs};
 use crate::{
     adapters::{
         gio_close, gio_file_for_location,
         trash_support::{LeftoverWatch, SystemTrash, TrashEnvironment, TrashError, TrashFailure},
     },
-    model::{FileEntry, Location},
+    model::{FileEntry, Location, hidden_names},
     services::{OperationEvent, OperationRequestId},
 };
 use gtk::{gio, glib, prelude::*};
@@ -29,9 +29,10 @@ use super::{
     deletion_error_summary, deletion_undone_when_cancelled, fs_ops, io_error,
     is_trash_unsupported_failure, join_local_tasks,
     leftovers::{self, Deadline, Refused},
+    mount_profile::known_mount,
     native_fs::{
-        LocalFileIdentity, local_directory_children, open_local_parent_directory, os_error_detail,
-        retry_local_open,
+        LocalFileIdentity, birth_reset_folder, local_directory_children,
+        open_local_parent_directory, os_error_detail, retry_local_open,
     },
     next_children,
 };
@@ -137,12 +138,22 @@ pub(super) enum LocalDeleteStep {
     },
 }
 
-pub(super) fn ensure_expected_local_identity(
+pub(super) fn ensure_expected_local_identity<Fd: AsFd>(
+    parent: &Fd,
     name: &OsStr,
-    current: LocalFileIdentity,
+    current: &EntryStat,
     expected: Option<LocalFileIdentity>,
 ) -> Result<(), String> {
-    if expected.is_some_and(|expected| expected != current) {
+    let unchanged = |expected: LocalFileIdentity| {
+        expected == current.identity
+            || (hidden_names::classify(name).is_some()
+                && birth_reset_folder(
+                    known_mount(fs(), parent.as_fd()).1.identity,
+                    expected,
+                    current,
+                ))
+    };
+    if expected.is_some_and(|expected| !unchanged(expected)) {
         return Err(rust_i18n::t!(
             "%{name} changed while the operation was in progress",
             name = name.to_string_lossy()
@@ -205,7 +216,7 @@ pub(super) fn open_local_delete_target<Fd: AsFd>(
             .into_owned());
         }
     };
-    ensure_expected_local_identity(name, stat.identity, expected)?;
+    ensure_expected_local_identity(parent, name, &stat, expected)?;
     if !stat.is_directory() {
         if is_leftover() {
             return Ok(LocalDeleteStep::Leftover);
@@ -252,7 +263,7 @@ pub(super) fn open_local_delete_target<Fd: AsFd>(
         )
         .into_owned()
     })?;
-    ensure_expected_local_identity(name, opened.identity, expected)?;
+    ensure_expected_local_identity(parent, name, &opened, expected)?;
     let children = local_directory_children(&handle)?;
     Ok(LocalDeleteStep::Directory { handle, children })
 }

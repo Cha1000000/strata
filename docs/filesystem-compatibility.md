@@ -575,8 +575,8 @@ birth time (sshfs, exfat-fuse, vboxsf), the inode must still match, as another f
 size and time would pass a check of those alone; a copy the kernel renumbered before the check
 keeps its sources, reported like a copy that was moved away. The kernel's exFAT driver sets a
 folder's birth time again whenever an entry is renamed into or within it, as a merge places
-entries, so there a folder of the copy is known by its type alone and its entries are checked one
-by one.
+entries, so there a folder of the copy that reports a birth time is known by its type, and its
+entries are checked one by one.
 
 What stays is reported by cause: changed during the move, could not be deleted (with the error, as
 in a read-only folder), a special file or symbolic link the destination cannot store, or an item
@@ -760,11 +760,15 @@ reported.
   by content; without that, a same-size rewrite within one tick would pass. On NFS, SMB and FUSE
   mounts other than sshfs, a server or daemon whose clock runs more than 100 ms behind ours can
   still hide a same-size rewrite of a file it stamped within one of its ticks.
-- **exFAT folders.** The kernel's exFAT driver sets a folder's birth time again whenever an entry
-  is renamed into or within it. A move from exFAT keeps a whole source folder another program did
-  that to, instead of only the changed entry. A move onto exFAT knows the folders of its copy by
-  their type alone, so where another program renames a merged folder away and makes another at its
-  name, the move still deletes its sources, whose copies stay in the renamed folder.
+- **exFAT folders.** The kernel's exFAT driver sets a folder's birth time again, on disk, at every
+  rename whose destination is the folder: an entry renamed into or within it or over one of its
+  entries, or a folder moved into it. So there a folder is known by its device and type wherever
+  its entries are checked one by one or only an empty folder, or one at a hidden name of Strata's
+  own, is removed: a move's source folders and the folders of its copy, Strata's merge folder and
+  the folders putting originals back empties. Where another program renames a merged folder away
+  and makes another at its name, a move onto exFAT still deletes its sources, whose copies stay in
+  the renamed folder, and an empty folder another program makes at a moved folder's name once the
+  move emptied it can be removed with it.
 - **Relaxed identity.** Where a source has no stable inode numbers and reports no birth time
   (sshfs, exfat-fuse, ntfs-3g), a different file with the same type, size and times put at a source
   name passes for the original, unless it is racily clean and compared. The same goes for a move's

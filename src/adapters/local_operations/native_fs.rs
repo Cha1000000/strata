@@ -62,6 +62,21 @@ pub(super) fn compare(
     recorded.evidence(attributes).compare(traits, &now)
 }
 
+/// By device and type alone: only for sites that check the entries or remove it empty or hidden.
+pub(super) fn birth_reset_folder(
+    traits: IdentityTraits,
+    recorded: LocalFileIdentity,
+    current: &EntryStat,
+) -> bool {
+    let reported = |birth: Option<(i64, u32)>| birth.is_some_and(|birth| birth != (0, 0));
+    !traits.folder_births
+        && recorded.kind == rustix::fs::FileType::Directory
+        && current.identity.kind == recorded.kind
+        && current.identity.device == recorded.device
+        && reported(recorded.birth)
+        && reported(current.identity.birth)
+}
+
 impl From<LocalFileIdentity> for TrashedOriginal {
     fn from(identity: LocalFileIdentity) -> Self {
         Self {

@@ -2474,9 +2474,16 @@ fn copies_a_mount_numbers_afresh_are_known_by_birth_time_or_else_by_inode_number
     // birth time proves a renumbered entry, and merging into a folder on exFAT
     // sets its birth time again. Whether the move deletes its source.
     let (fail, merge) = (TransferConflict::FailIfExists, TransferConflict::Merge);
-    let rows: [(Preset, &str, TransferConflict, Change, bool); 10] = [
+    let rows: [(Preset, &str, TransferConflict, Change, bool); 11] = [
         (Quirks::sshfs, "notes.txt", fail, Change::None, false),
         (Quirks::sshfs, "folder", fail, Change::FolderEvicted, false),
+        (
+            Quirks::exfat_fuse,
+            "folder",
+            fail,
+            Change::FolderEvicted,
+            false,
+        ),
         (Quirks::vfat, "folder", fail, Change::None, true),
         (Quirks::exfat, "folder", fail, Change::None, true),
         (Quirks::exfat, "folder", fail, Change::Rewritten, false),
