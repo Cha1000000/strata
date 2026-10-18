@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 
 use std::{
+    fs::{self, Metadata},
+    os::unix::fs::MetadataExt,
     path::{Component, Path, PathBuf},
     process::Command,
 };
@@ -42,6 +44,51 @@ pub(crate) fn resolve(name: &str) -> Result<PathBuf, String> {
     let search = search_roots(SEARCH_ROOTS, CONFIGURED_SEARCH_PATH, &trust);
     let search: Vec<&Path> = search.iter().map(PathBuf::as_path).collect();
     resolve_in(name, &search, &trust)
+}
+
+/// Like [`resolve`], but also accepts a search-root entry whose target lies
+/// outside the trust roots when root owns the target and every directory above
+/// it, none writable by group or others, as with packages installed under
+/// `/opt` or `/usr/lib`. Such a match returns the target itself, because the
+/// links leading to it are not checked. Only integration requirements use this.
+pub(crate) fn resolve_installed(name: &str) -> Result<PathBuf, String> {
+    let trust: Vec<&Path> = TRUST_ROOTS.iter().copied().map(Path::new).collect();
+    let search = search_roots(SEARCH_ROOTS, CONFIGURED_SEARCH_PATH, &trust);
+    let search: Vec<&Path> = search.iter().map(PathBuf::as_path).collect();
+    resolve_in(name, &search, &trust).or_else(|error| {
+        resolve_owned_in(name, &search, Path::new("/"), |metadata| {
+            metadata.uid() == 0
+        })
+        .ok_or(error)
+    })
+}
+
+fn resolve_owned_in(
+    name: &str,
+    search_roots: &[&Path],
+    top: &Path,
+    trusted_owner: impl Fn(&Metadata) -> bool,
+) -> Option<PathBuf> {
+    if !is_single_basename(name) {
+        return None;
+    }
+    search_roots
+        .iter()
+        .map(|dir| dir.join(name))
+        .filter(|candidate| candidate.is_file())
+        .filter_map(|candidate| candidate.canonicalize().ok())
+        .find(|target| owned_up_to(target, top, &trusted_owner))
+}
+
+fn owned_up_to(path: &Path, top: &Path, trusted_owner: impl Fn(&Metadata) -> bool) -> bool {
+    path.starts_with(top)
+        && path
+            .ancestors()
+            .take_while(|ancestor| ancestor.starts_with(top))
+            .all(|ancestor| {
+                fs::metadata(ancestor)
+                    .is_ok_and(|metadata| trusted_owner(&metadata) && metadata.mode() & 0o022 == 0)
+            })
 }
 
 /// Fixed roots keep priority so NixOS wrappers still win. A configured directory
