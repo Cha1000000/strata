@@ -243,6 +243,7 @@ fn superseded_operations_still_report_each_location_they_changed() {
             inode: 2,
             kind: rustix::fs::FileType::RegularFile,
             birth: None,
+            handle: None,
             attributes: None,
         },
         traits: crate::services::IdentityTraits::default(),

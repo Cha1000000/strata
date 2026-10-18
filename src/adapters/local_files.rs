@@ -317,6 +317,7 @@ fn directory_stamp(path: &Path, stamp: &FolderStamp, read_at: SystemTime) -> Dir
                 inode: stamp.inode,
                 kind: stamp.kind,
                 birth: stamp.birth,
+                handle: None,
                 attributes: None,
             },
             traits: mount

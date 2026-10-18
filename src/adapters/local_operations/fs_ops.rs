@@ -25,9 +25,9 @@ use rustix::{
     io::Errno,
 };
 
-use super::native_fs::{LocalFileIdentity, retry_local_open};
+use super::native_fs::{LocalFileIdentity, file_handle, retry_local_open};
 use crate::{
-    adapters::volume::MountKey,
+    adapters::volume::{MountKey, mount_watch},
     services::{Attributes, IdentityTraits},
 };
 
@@ -326,6 +326,7 @@ fn entry_stat(stat: &rustix::fs::Statx) -> EntryStat {
             inode: stat.stx_ino,
             kind,
             birth,
+            handle: None,
         },
         kind,
         mode: u32::from(stat.stx_mode) & 0o7777,
@@ -377,9 +378,19 @@ fn statx_at(dir: BorrowedFd<'_>, name: &OsStr, flags: AtFlags) -> Result<EntrySt
         | StatxFlags::CTIME
         | StatxFlags::BTIME
         | StatxFlags::UID
-        | StatxFlags::GID;
+        | StatxFlags::GID
+        | StatxFlags::MNT_ID;
     match rustix::fs::statx(dir, name, flags | AtFlags::SYMLINK_NOFOLLOW, mask) {
-        Ok(stat) => Ok(entry_stat(&stat)),
+        Ok(stat) => {
+            let mut entry = entry_stat(&stat);
+            let mount_id = StatxFlags::from_bits_retain(stat.stx_mask)
+                .contains(StatxFlags::MNT_ID)
+                .then_some(stat.stx_mnt_id);
+            if mount_watch::latest().wants_file_handle(mount_id, entry.identity.birth) {
+                entry.identity.handle = file_handle(dir, name);
+            }
+            Ok(entry)
+        }
         Err(Errno::NOSYS) => {
             let at_flags = (flags & AtFlags::EMPTY_PATH) | AtFlags::SYMLINK_NOFOLLOW;
             rustix::fs::statat(dir, name, at_flags).map(|stat| legacy_stat(&stat))

@@ -1169,6 +1169,27 @@ fn a_case_only_rename_is_not_refused_as_taken_where_each_spelling_has_its_own_nu
 }
 
 #[test]
+fn a_file_handle_follows_the_item_and_not_its_name() -> Result<(), Box<dyn Error>> {
+    let root = tempfile::tempdir()?;
+    let dir = open_local_parent_directory(root.path())?;
+    let handle = |name: &str| super::super::native_fs::file_handle(dir.as_fd(), OsStr::new(name));
+    fs::write(root.path().join("report"), b"first")?;
+    let first = handle("report").ok_or("the temporary folder gives file handles")?;
+    fs::rename(root.path().join("report"), root.path().join("renamed"))?;
+    assert_eq!(handle("renamed"), Some(first));
+    let held = fs::File::open(root.path().join("renamed"))?;
+    assert_eq!(
+        super::super::native_fs::file_handle(held.as_fd(), OsStr::new("")),
+        Some(first)
+    );
+    fs::remove_file(root.path().join("renamed"))?;
+    fs::write(root.path().join("renamed"), b"first")?;
+    assert_ne!(handle("renamed"), Some(first));
+    assert_eq!(handle("missing"), None);
+    Ok(())
+}
+
+#[test]
 fn a_hard_link_is_never_taken_for_a_case_alias() -> Result<(), Box<dyn Error>> {
     let root = tempfile::tempdir()?;
     let _scope = FsQuirks::install(root.path(), case_insensitive(Quirks::default()));

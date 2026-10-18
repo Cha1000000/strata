@@ -17,6 +17,7 @@ pub(super) struct LocalFileIdentity {
     pub(super) inode: u64,
     pub(super) kind: rustix::fs::FileType,
     pub(super) birth: Option<(i64, u32)>,
+    pub(super) handle: Option<u64>,
 }
 
 impl PartialEq for LocalFileIdentity {
@@ -24,10 +25,14 @@ impl PartialEq for LocalFileIdentity {
         self.device == other.device
             && self.inode == other.inode
             && self.kind == other.kind
-            && match (self.birth, other.birth) {
-                (Some(left), Some(right)) => left == right,
-                _ => true,
-            }
+            && self
+                .birth
+                .zip(other.birth)
+                .is_none_or(|(left, right)| left == right)
+            && self
+                .handle
+                .zip(other.handle)
+                .is_none_or(|(left, right)| left == right)
     }
 }
 
@@ -38,6 +43,7 @@ impl LocalFileIdentity {
             inode: self.inode,
             kind: self.kind,
             birth: self.birth,
+            handle: self.handle,
             attributes,
         }
     }
@@ -48,6 +54,7 @@ impl LocalFileIdentity {
             inode: stat.st_ino,
             kind: rustix::fs::FileType::from_raw_mode(stat.st_mode),
             birth: None,
+            handle: None,
         }
     }
 }
@@ -181,6 +188,50 @@ pub(super) fn identity_at_path(path: &Path) -> Option<ItemIdentity> {
         &stat,
         super::mount_profile::identity_at(fs(), parent.as_fd()),
     ))
+}
+
+#[expect(unsafe_code, reason = "rustix has no name_to_handle_at")]
+pub(super) fn file_handle(dir: BorrowedFd<'_>, name: &OsStr) -> Option<u64> {
+    use std::hash::{Hash, Hasher};
+    const MAX_HANDLE_SZ: usize = 128;
+    #[repr(C)]
+    struct FileHandle {
+        handle_bytes: libc::c_uint,
+        handle_type: libc::c_int,
+        f_handle: [u8; MAX_HANDLE_SZ],
+    }
+    let path = std::ffi::CString::new(name.as_encoded_bytes()).ok()?;
+    let flags = if name.is_empty() {
+        libc::AT_EMPTY_PATH
+    } else {
+        0
+    };
+    let mut handle = FileHandle {
+        handle_bytes: libc::c_uint::try_from(MAX_HANDLE_SZ).ok()?,
+        handle_type: 0,
+        f_handle: [0; MAX_HANDLE_SZ],
+    };
+    let mut mount_id: libc::c_int = 0;
+    // SAFETY: `handle` is a `struct file_handle` with room for the `handle_bytes` it states,
+    // `path` is NUL-terminated, and every pointer outlives the call, which keeps none of them.
+    let result = unsafe {
+        libc::name_to_handle_at(
+            dir.as_raw_fd(),
+            path.as_ptr(),
+            std::ptr::from_mut(&mut handle).cast::<libc::file_handle>(),
+            &raw mut mount_id,
+            flags,
+        )
+    };
+    let bytes = handle
+        .f_handle
+        .get(..usize::try_from(handle.handle_bytes).ok()?)?;
+    (result == 0).then(|| {
+        let mut digest = std::hash::DefaultHasher::new();
+        handle.handle_type.hash(&mut digest);
+        bytes.hash(&mut digest);
+        digest.finish()
+    })
 }
 
 pub(super) fn retry_local_open(

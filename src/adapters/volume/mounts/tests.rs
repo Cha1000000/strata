@@ -99,6 +99,44 @@ fn only_mount_types_known_to_keep_inode_numbers_are_trusted_to() {
 }
 
 #[test]
+fn file_handles_are_read_only_where_they_tell_a_reused_number_apart() {
+    let table = MountTable::parse(
+        "\
+90 22 0:70 / /mnt/a rw - nfs server:/a rw,vers=3
+91 22 0:71 / /mnt/b rw - nfs4 server:/b rw,vers=4.2
+92 22 8:40 / /mnt/c rw - ext4 /dev/sdd1 rw
+93 22 8:41 / /mnt/d rw - ext3 /dev/sdd2 rw
+94 22 0:72 / /mnt/e rw - fuse.sshfs host:/ rw,user_id=1000
+95 22 8:42 / /mnt/f rw - fuseblk /dev/sdd3 rw,user_id=0
+96 22 0:73 / /mnt/g rw - cifs //server/g rw,vers=3.1.1,serverino
+97 22 8:43 / /mnt/h rw - exfat /dev/sdd4 rw
+",
+    );
+    let born = Some((1_700_000_000, 5));
+    let rows = [
+        (Some(90), None, true),
+        (Some(91), Some((0, 0)), true),
+        (Some(91), born, false),
+        (Some(92), None, true),
+        (Some(93), None, true),
+        (Some(92), born, false),
+        (Some(94), None, false),
+        (Some(95), None, false),
+        (Some(96), None, false),
+        (Some(97), None, false),
+        (Some(99), None, false),
+        (None, None, false),
+    ];
+    for (id, birth, wanted) in rows {
+        assert_eq!(
+            table.wants_file_handle(id, birth),
+            wanted,
+            "mount {id:?}, birth {birth:?}"
+        );
+    }
+}
+
+#[test]
 fn smb_mounts_keep_closed_handles_for_their_close_timeout() {
     let table = MountTable::parse(
         "\

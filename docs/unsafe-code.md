@@ -65,6 +65,16 @@ null. When GLib sets it, ownership transfers to Strata, which takes it with
 thread. Callers re-check the item's identity afterwards, so a TRUE that moved
 nothing is caught too.
 
+### File handles
+
+Location: `src/adapters/local_operations/native_fs.rs::file_handle`
+
+Reason: on NFS and ext2/3/4 without birth times, a freed inode number goes straight to the next
+file, and only the file handle's generation tells the two apart. rustix does not wrap
+`name_to_handle_at`, so Strata calls it through `libc` with a `struct file_handle` sized for
+`MAX_HANDLE_SZ` (128 bytes), stating that size in `handle_bytes`, and a NUL-terminated name; the
+call keeps no pointer. It keeps a 64-bit digest of the handle type and bytes, not the handle.
+
 ### Checked descriptor close
 
 Location: `src/adapters/local_operations/fs_ops.rs::System::close`

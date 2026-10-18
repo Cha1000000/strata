@@ -97,6 +97,7 @@ fn folder_identity(inode: u64, born: i64) -> ItemIdentity {
             inode,
             kind: rustix::fs::FileType::Directory,
             birth: Some((born, 0)),
+            handle: None,
             attributes: None,
         },
         traits: IdentityTraits {

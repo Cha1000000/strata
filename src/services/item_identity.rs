@@ -64,13 +64,19 @@ pub struct Evidence {
     pub inode: u64,
     pub kind: FileType,
     pub birth: Option<(i64, u32)>,
+    /// A digest of the file handle, whose generation changes when a number is reused.
+    pub handle: Option<u64>,
     /// A file's or link's; a folder's own size and times change with its entries.
     pub attributes: Option<Attributes>,
 }
 
 impl Evidence {
     pub fn compare(&self, traits: IdentityTraits, current: &Self) -> Proof {
-        if current.device != self.device || current.kind != self.kind {
+        let handles = self.handle.zip(current.handle);
+        if current.device != self.device
+            || current.kind != self.kind
+            || handles.is_some_and(|(recorded, now)| recorded != now)
+        {
             return Proof::Different;
         }
         let folder = self.kind == FileType::Directory;

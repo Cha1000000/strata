@@ -93,16 +93,22 @@ Residual limits:
   is therefore left at the destination too; where that is a hidden name Strata chose (an original
   set aside, a case-only rename's temporary name), the error names it.
 - ext4, ntfs3, NFS and SMB give a freed inode number straight to the next item created. Where no
-  birth time is reported (NFSv3, ntfs-3g, exfat-fuse), an item deleted and recreated at the same
-  name with the same type passes for the original.
+  birth time is reported (or a zero one) on NFS and on ext2, ext3 and ext4, Strata also reads the
+  file handle right after each stat, at no extra round trip, and an item whose handle changed is
+  another one: the handle carries the inode's generation, which reuse changes (measured on knfsd
+  exports with `no_subtree_check`). Exports with `subtree_check` and servers other than knfsd were
+  not measured; where their handle changes as a file moves between folders, a moved item counts as
+  another and is kept, the safe side. FUSE handles change once the kernel evicts an entry, so they
+  are never used. On ntfs-3g and exfat-fuse, which report no birth time, an item deleted and
+  recreated at the same name with the same type passes for the original.
 - Undo and restore find an item Strata moved to Trash by its original path and the newest deletion
   date. Undo of an archive that replaced its original, and the saved views and colors of a trashed
   item, also need the Trash item to pass the mount's identity rule: type, the birth time where both
   report one, the inode number where the mount keeps numbers, and for files size and modification
   time where it renumbers them. Undo of a Delete and of a paste's Replace go by path and date alone.
-  Where the mount keeps inode numbers but reports no birth time (NFSv3, ntfs-3g), another item
-  trashed from the same path that got the inode number can be brought back instead; nothing is
-  ever overwritten.
+  Where the mount keeps inode numbers but reports neither a birth time nor a file handle (ntfs-3g),
+  another item trashed from the same path that got the inode number can be brought back instead;
+  nothing is ever overwritten.
 - On SMB2/3, gvfsd-fuse and FUSE daemons that ignore rename flags, the no-replace check is made
   by the client kernel, so it protects against local processes but not against another client
   creating the same name at the same moment.
@@ -1183,8 +1189,9 @@ let _quirks = FsQuirks::install(root.path(), Quirks::without_rename_flags());
 Quirks emulate rejected rename flags (NFS, ntfs-3g), missing hard links (vfat, vboxsf), sshfs
 collisions reported as `EPERM`, gvfsd-fuse refusing to rename over an empty folder, case-insensitive
 lookups, invalid names, unsupported or lying Trash, reused inode numbers, hard links with their own
-inode numbers, missing birth times, lost replies (on sshfs, a lost rename reply leaves the target
-name reporting its old inode number) and racing processes, before or after a call.
+inode numbers, missing birth times, file handles that name the real inode on ext and NFS mounts
+without birth times, lost replies (on sshfs, a lost rename reply leaves the target name reporting
+its old inode number) and racing processes, before or after a call.
 
 For copies they also emulate a mount's family and superblock options as mountinfo reports them, the
 device format udev records, refused `O_TMPFILE` and its links, refused clones, a `copy_file_range`

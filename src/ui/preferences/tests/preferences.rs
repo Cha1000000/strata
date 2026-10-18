@@ -1817,6 +1817,7 @@ fn item_customizations_follow_relocations_and_removals() {
                             kind: rustix::fs::FileType::Directory,
                             birth: (!matches!(mount, RenewsNumbersWithoutBirths))
                                 .then_some((born, 0)),
+                            handle: None,
                             attributes: None,
                         },
                         traits: crate::services::IdentityTraits {

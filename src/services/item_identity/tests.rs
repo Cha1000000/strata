@@ -35,6 +35,7 @@ const FOLDER: Evidence = Evidence {
     inode: 10,
     kind: FileType::Directory,
     birth: Some((100, 0)),
+    handle: None,
     attributes: None,
 };
 const FILE: Evidence = Evidence {
@@ -76,6 +77,13 @@ fn changed(evidence: Evidence, size: u64) -> Evidence {
     });
     Evidence {
         attributes,
+        ..evidence
+    }
+}
+
+fn handled(evidence: Evidence, handle: u64) -> Evidence {
+    Evidence {
+        handle: Some(handle),
         ..evidence
     }
 }
@@ -341,6 +349,42 @@ fn an_item_is_known_again_only_by_what_its_mount_proves() {
             FILE,
             changed(renumbered(FILE), 5),
             SMB,
+            false,
+            false,
+        ),
+        (
+            "number reused without births, another file handle",
+            KEPT,
+            handled(without_birth(FILE), 1),
+            handled(without_birth(FILE), 2),
+            KEPT,
+            false,
+            false,
+        ),
+        (
+            "same number and file handle without births",
+            KEPT,
+            handled(without_birth(FILE), 1),
+            handled(without_birth(FILE), 1),
+            KEPT,
+            true,
+            true,
+        ),
+        (
+            "a file handle on one side only",
+            KEPT,
+            handled(without_birth(FILE), 1),
+            without_birth(FILE),
+            KEPT,
+            true,
+            true,
+        ),
+        (
+            "folder, no births, another file handle",
+            RENEWED,
+            handled(without_birth(FOLDER), 1),
+            handled(without_birth(FOLDER), 2),
+            RENEWED,
             false,
             false,
         ),

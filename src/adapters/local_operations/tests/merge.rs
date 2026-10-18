@@ -1876,7 +1876,7 @@ fn a_trashed_original_is_found_only_by_what_its_mount_proves() -> Result<(), Box
         (Quirks::sshfs, false, InTrash::Renumbered, true),
         (Quirks::sshfs, true, InTrash::Renumbered, false),
         (reusing_ext4, false, InTrash::NumberReused, false),
-        (reusing_nfs3, false, InTrash::NumberReused, true),
+        (reusing_nfs3, false, InTrash::NumberReused, false),
     ];
     for (preset, folder, change, found) in rows {
         let root = tempfile::tempdir()?;

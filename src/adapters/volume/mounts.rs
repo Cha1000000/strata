@@ -72,6 +72,14 @@ impl MountType {
         }
     }
 
+    /// Their handles carry the inode's generation; FUSE handles change once an entry is evicted.
+    pub(crate) fn wants_file_handle(&self, birth: Option<(i64, u32)>) -> bool {
+        matches!(
+            family(&self.fs_type),
+            Family::Ext | Family::Nfs | Family::Nfs4
+        ) && birth.is_none_or(|birth| birth == (0, 0))
+    }
+
     /// cifs drops `serverino` when it turns server numbers off, and never prints `noserverino`.
     pub(crate) fn server_numbers(&self) -> bool {
         family(&self.fs_type) == Family::Smb
@@ -470,6 +478,11 @@ impl MountTable {
             .iter()
             .find(|entry| entry.id == id)
             .map(MountEntry::parts)
+    }
+
+    pub(crate) fn wants_file_handle(&self, id: Option<u64>, birth: Option<(i64, u32)>) -> bool {
+        id.and_then(|id| self.mount_of(id))
+            .is_some_and(|(mount, _)| mount.wants_file_handle(birth))
     }
 
     pub(crate) fn points(&self) -> impl Iterator<Item = (u64, &Path)> {

@@ -542,11 +542,16 @@ fn a_target_is_replaced_only_while_its_mount_still_knows_it() -> Result<(), Box<
         reused_inodes: Some("target"),
         ..Quirks::sshfs()
     };
-    let rows: [(Preset, Meanwhile, bool, bool); 7] = [
+    let reusing_nfs3 = || Quirks {
+        reused_inodes: Some("target"),
+        ..Quirks::nfs3()
+    };
+    let rows: [(Preset, Meanwhile, bool, bool); 8] = [
         (Quirks::vfat, Meanwhile::Evicted, true, true),
         (Quirks::sshfs, Meanwhile::Evicted, true, false),
         (Quirks::sshfs, Meanwhile::ReplacedAlike, false, true),
         (path_keyed, Meanwhile::ReplacedLonger, false, true),
+        (reusing_nfs3, Meanwhile::ReplacedAlike, false, true),
         (samba, Meanwhile::EvictedOnceNumbersWent, true, true),
         (samba, Meanwhile::ReplacedAlikeOnceNumbersWent, false, true),
         (

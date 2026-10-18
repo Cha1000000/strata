@@ -1343,6 +1343,7 @@ impl Scope {
 
     fn reported(&self, path: Option<PathBuf>, mut stat: EntryStat) -> EntryStat {
         let key = (stat.identity.device, stat.identity.inode);
+        let mount_type = self.mount_type();
         if let Some(device) = path.as_deref().and_then(own_device) {
             stat.identity.device = device;
         }
@@ -1410,6 +1411,10 @@ impl Scope {
             stat.identity.inode = inode;
             stat.identity.birth = birth;
         }
+        // A handle names the real inode, whatever number is reported for it.
+        stat.identity.handle = mount_type
+            .wants_file_handle(stat.identity.birth)
+            .then(|| key.0.rotate_left(32) ^ key.1);
         stat
     }
 
@@ -1421,6 +1426,7 @@ impl Scope {
                 inode: stamp.inode,
                 kind: stamp.kind,
                 birth: stamp.birth,
+                handle: None,
             },
             kind: stamp.kind,
             mode: stamp.mode & 0o7777,
