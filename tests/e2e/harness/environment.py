@@ -96,6 +96,8 @@ class TestEnvironment:
     """A throwaway HOME the application under test may write to freely."""
 
     root: Path = field(init=False)
+    # Variables a scenario adds before the application starts.
+    extra_variables: dict[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         self.root = Path(tempfile.mkdtemp(prefix="strata-e2e-home-", dir="/tmp"))
@@ -171,7 +173,7 @@ class TestEnvironment:
     def variables(self) -> dict[str, str]:
         """Environment variables that pin locale, rendering, and storage."""
 
-        return {
+        variables = {
             "HOME": str(self.home),
             "XDG_CONFIG_HOME": str(self.config_home),
             "XDG_DATA_HOME": str(self.data_home),
@@ -200,6 +202,8 @@ class TestEnvironment:
             "GSETTINGS_BACKEND": "memory",
             "RUST_BACKTRACE": "1",
         }
+        variables.update(self.extra_variables)
+        return variables
 
     def cleanup(self) -> None:
         shutil.rmtree(self.root, ignore_errors=True)

@@ -39,6 +39,16 @@ impl PackageManager {
             .or_else(|| value("ID_LIKE")?.split_whitespace().find_map(manager_for))
     }
 
+    /// The key catalog manifests use for this manager's package names.
+    pub(crate) fn id(self) -> &'static str {
+        match self {
+            Self::Pacman => "pacman",
+            Self::Apt => "apt",
+            Self::Dnf => "dnf",
+            Self::Zypper => "zypper",
+        }
+    }
+
     pub(crate) fn install_command(self, packages: &[&str]) -> Option<String> {
         let mut unique = Vec::new();
         for package in packages {

@@ -18,6 +18,7 @@ pub(crate) use protocol::{
 };
 pub(crate) use transport::{Client, Update, start};
 pub(crate) const PATH_LIMIT: usize = 200;
+pub(crate) const ICON_LIMIT: u64 = 65536;
 
 #[derive(Clone, Deserialize)]
 pub(crate) struct Manifest {
@@ -44,7 +45,7 @@ fn trusted(path: &Path, directory: bool) -> bool {
             && m.mode() & 0o022 == 0
     })
 }
-fn slug(s: &str) -> bool {
+pub(crate) fn slug(s: &str) -> bool {
     !s.is_empty() && s.len() <= 64 && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
 }
 fn load(dir: &Path) -> Option<Registration> {
@@ -92,18 +93,25 @@ fn load(dir: &Path) -> Option<Registration> {
         if !trusted(&path, false) {
             return None;
         }
-        let bytes = read_limited(&path, 65536)?;
-        if bytes.len() < 24 || &bytes[..8] != b"\x89PNG\r\n\x1a\n" {
-            return None;
-        }
-        let width = u32::from_be_bytes(bytes[16..20].try_into().ok()?);
-        let height = u32::from_be_bytes(bytes[20..24].try_into().ok()?);
-        if width == 0 || height == 0 || width > 256 || height > 256 {
+        let bytes = read_limited(&path, ICON_LIMIT)?;
+        if !valid_icon(&bytes) {
             return None;
         }
         icons.insert(id.clone(), bytes);
     }
     Some(Registration { manifest, icons })
+}
+/// A PNG of at most 256×256 pixels; the size cap is enforced by the reader.
+pub(crate) fn valid_icon(bytes: &[u8]) -> bool {
+    let dimension = |range: std::ops::Range<usize>| {
+        bytes
+            .get(range)
+            .and_then(|slice| slice.try_into().ok())
+            .map(u32::from_be_bytes)
+    };
+    bytes.len() as u64 <= ICON_LIMIT
+        && bytes.starts_with(b"\x89PNG\r\n\x1a\n")
+        && matches!((dimension(16..20), dimension(20..24)), (Some(width), Some(height)) if (1..=256).contains(&width) && (1..=256).contains(&height))
 }
 fn read_limited(path: &Path, limit: u64) -> Option<Vec<u8>> {
     let mut bytes = Vec::new();

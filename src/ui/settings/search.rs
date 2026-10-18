@@ -332,6 +332,12 @@ const TARGETS: &[Target] = &[
         aliases: "what new changes changelog",
     },
     Target {
+        id: "integrations",
+        page: "integrations",
+        title: "Integrations",
+        aliases: "add-ons addons plugins extensions providers catalog install kde connect nextcloud dropbox cloud devices phone",
+    },
+    Target {
         id: "diagnostics",
         page: "diagnostics",
         title: "Run diagnostics",

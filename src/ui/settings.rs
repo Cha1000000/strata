@@ -28,6 +28,7 @@ mod bindings;
 mod diagnostics;
 mod exclusions;
 mod general;
+mod integrations;
 mod search;
 mod theme;
 mod wrap;
@@ -962,6 +963,11 @@ pub fn build_layer(
                         let page = actions::actions_page();
                         search::apply(&page, &search_state);
                         stack.add_named(&page, Some("actions"));
+                    }
+                    "integrations" => {
+                        let page = integrations::integrations_page();
+                        search::apply(&page, &search_state);
+                        stack.add_named(&page, Some("integrations"));
                     }
                     "updates" => {
                         let container = updates_container.clone();
@@ -3048,7 +3054,7 @@ struct NavigationEntry {
 
 /// Settings pages in navigation order. Search finds page titles here and routes
 /// to the button built from each entry.
-static NAVIGATION: [NavigationEntry; 6] = [
+static NAVIGATION: [NavigationEntry; 7] = [
     NavigationEntry {
         page: "general",
         label: "General",
@@ -3068,6 +3074,13 @@ static NAVIGATION: [NavigationEntry; 6] = [
         label: "Actions",
         subtitle: "Custom actions",
         icon: icons::PLAY,
+        accessible_label: None,
+    },
+    NavigationEntry {
+        page: "integrations",
+        label: "Integrations",
+        subtitle: "Add-ons from the catalog",
+        icon: icons::BLOCKS,
         accessible_label: None,
     },
     NavigationEntry {

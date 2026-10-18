@@ -6188,6 +6188,62 @@ two-column presentation. */
   margin-top: 4px;
 }
 
+.integration-row {
+  padding: 12px 18px;
+}
+
+.settings-group .integration-row + .integration-row {
+  border-top: 1px solid alpha(@strata_border, 0.55);
+}
+
+.integration-logo {
+  margin-right: 2px;
+}
+
+.integration-status {
+  border: 1px solid alpha(@strata_border, 0.4);
+  border-radius: 4px;
+  color: @strata_dim_text;
+  font-size: 0.8em;
+  padding: 1px 6px;
+}
+
+.integration-status.installed {
+  border-color: alpha(@strata_accent, 0.5);
+  color: @strata_accent;
+}
+
+.integration-status.update {
+  border-color: alpha(@strata_highlight, 0.6);
+  color: @strata_text;
+}
+
+.integration-requirement-list {
+  margin-top: 2px;
+}
+
+.integration-requirement.missing label {
+  color: @strata_danger;
+}
+
+.integration-message.error {
+  color: @strata_danger;
+}
+
+.integration-confirmation {
+  margin-top: 4px;
+}
+
+.integration-path {
+  color: @strata_dim_text;
+  font-family: monospace;
+  font-size: 0.85em;
+}
+
+.integration-restart {
+  margin-top: 12px;
+}
+
 .settings-group {
   background: mix(@strata_bg, @strata_muted, 0.25);
   border: 1px solid alpha(@strata_border, 0.55);

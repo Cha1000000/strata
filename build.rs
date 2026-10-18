@@ -9,6 +9,8 @@ use std::{
 fn main() {
     println!("cargo::rerun-if-changed=data/locales");
     write_translation_catalogs();
+    println!("cargo::rerun-if-changed=providers");
+    write_provider_bundle();
     glib_build_tools::compile_resources(&["data"], "data/strata.gresource.xml", "strata.gresource");
 
     println!("cargo::rerun-if-env-changed=STRATA_BUILD_COMMIT");
@@ -65,6 +67,60 @@ fn write_translation_catalogs() {
     source.push_str("];\n");
     let output = Path::new(&env::var_os("OUT_DIR").expect("OUT_DIR")).join("catalogs.rs");
     fs::write(output, source).expect("write translation catalogs");
+}
+
+/// Embeds every integration under `providers/` so releases carry the catalog
+/// without packaging changes. Directories starting with `.` or `_` and
+/// documentation files are left out.
+fn write_provider_bundle() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("providers");
+    let mut directories: Vec<PathBuf> = fs::read_dir(&root)
+        .map(|entries| {
+            entries
+                .filter_map(Result::ok)
+                .map(|entry| entry.path())
+                .filter(|path| path.is_dir())
+                .collect()
+        })
+        .unwrap_or_default();
+    directories.sort();
+    let mut source = String::from("pub(crate) static BUNDLED: &[super::BundledEntry] = &[\n");
+    for directory in directories {
+        let id = directory
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("provider directory name");
+        if id.starts_with(['.', '_']) {
+            continue;
+        }
+        let mut files: Vec<PathBuf> = fs::read_dir(&directory)
+            .expect("read provider directory")
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| path.is_file())
+            .collect();
+        files.sort();
+        writeln!(source, "({id:?}, &[").expect("format bundle");
+        for file in files {
+            let name = file
+                .file_name()
+                .and_then(|name| name.to_str())
+                .expect("provider file name");
+            if name.starts_with('.') || name == "README.md" {
+                continue;
+            }
+            writeln!(
+                source,
+                "({name:?}, include_bytes!({:?})),",
+                file.display().to_string()
+            )
+            .expect("format bundle");
+        }
+        source.push_str("]),\n");
+    }
+    source.push_str("];\n");
+    let output = Path::new(&env::var_os("OUT_DIR").expect("OUT_DIR")).join("providers.rs");
+    fs::write(output, source).expect("write provider bundle");
 }
 
 fn git_commit() -> Option<String> {

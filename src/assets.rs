@@ -21,6 +21,7 @@ pub mod icons {
     pub const ARROW_UP: &str = "strata-arrow-up";
     pub const ARROW_UP_NARROW_WIDE: &str = "strata-arrow-up-narrow-wide";
     pub const APP_WINDOW: &str = "strata-app-window";
+    pub const BLOCKS: &str = "strata-blocks";
     pub const CHECK: &str = "strata-check";
     pub const CIRCLE_CHECK: &str = "strata-circle-check";
     pub const CIRCLE_X: &str = "strata-circle-x";
@@ -28,6 +29,7 @@ pub mod icons {
     pub const CHEVRON_RIGHT: &str = "strata-chevron-right";
     pub const CLOCK: &str = "strata-clock";
     pub const CLIPBOARD_PASTE: &str = "strata-clipboard-paste";
+    pub const CLOUD: &str = "strata-cloud";
     pub const COPY: &str = "strata-copy";
     pub const COPY_PLUS: &str = "strata-copy-plus";
     pub const COG: &str = "strata-cog";
@@ -52,6 +54,7 @@ pub mod icons {
     pub const FOLDER_OPEN: &str = "strata-folder-open";
     pub const FOLDER_OUTPUT: &str = "strata-folder-output";
     pub const FOLDER_PLUS: &str = "strata-folder-plus";
+    pub const GIT_BRANCH: &str = "strata-git-branch";
     pub const HARD_DRIVE: &str = "strata-hard-drive";
     pub const INFO: &str = "strata-info";
     pub const GLOBE: &str = "strata-globe";
@@ -103,6 +106,7 @@ pub mod icons {
     pub const REFRESH: &str = "strata-refresh";
     pub const SHREDDER: &str = "strata-shredder";
     pub const SLIDERS: &str = "strata-sliders-horizontal";
+    pub const SMARTPHONE: &str = "strata-smartphone";
     pub const STETHOSCOPE: &str = "strata-stethoscope";
     pub const TERMINAL: &str = "strata-terminal";
     pub const TRASH: &str = "strata-trash";

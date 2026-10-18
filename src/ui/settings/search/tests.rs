@@ -91,6 +91,8 @@ fn ranks_exact_labels_aliases_and_small_typing_errors() {
         ("keybindings", "general", "hints"),
         ("render documents", "general", "render-documents"),
         ("markdown", "general", "render-documents"),
+        ("add-ons", "integrations", "integrations"),
+        ("plugins", "integrations", "integrations"),
         ("troubleshoot", "diagnostics", "diagnostics"),
         ("ffmpeg", "diagnostics", "diagnostics"),
     ] {
@@ -488,6 +490,10 @@ fn every_page_row_is_registered_for_search() {
                     .widget,
                 ),
                 ("actions", super::super::actions::actions_page()),
+                (
+                    "integrations",
+                    super::super::integrations::integrations_page(),
+                ),
                 (
                     "updates",
                     super::super::updates_page(

@@ -21,6 +21,7 @@ mod operations;
 pub(crate) mod package_manager;
 mod path_match;
 mod preview;
+pub(crate) mod provider_catalog;
 mod release_channel;
 mod remote_download;
 pub(crate) mod rtf;
