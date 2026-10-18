@@ -34,6 +34,8 @@ pub(super) struct Source {
     pub check: Checker,
     /// Shows the registration directory in the browser, when a window hosts the page.
     pub open_folder: Option<super::OpenFolder>,
+    /// Reloads the running providers after a change.
+    pub reload: Rc<dyn Fn()>,
 }
 
 impl Default for Source {
@@ -43,6 +45,7 @@ impl Default for Source {
             root: crate::services::file_providers::config_root(),
             check: Arc::new(provider_catalog::check_requirements),
             open_folder: None,
+            reload: Rc::new(crate::ui::file_providers::reload),
         }
     }
 }
@@ -67,7 +70,7 @@ pub(super) fn integrations_page_with(source: Source) -> gtk::Widget {
     title.set_xalign(0.0);
     title.add_css_class("settings-option-title");
     let description = gtk::Label::new(Some(&crate::i18n::tr(
-        "Optional providers bundled with Strata connect the context menu to other apps and services, such as sending files to a phone. They run with your permissions, like any program you install, and are loaded the next time Strata starts.",
+        "Optional providers bundled with Strata connect the context menu to other apps and services, such as sending files to a phone. They run with your permissions, like any program you install.",
     )));
     description.set_xalign(0.0);
     description.set_wrap(true);
@@ -80,44 +83,15 @@ pub(super) fn integrations_page_with(source: Source) -> gtk::Widget {
             path = root.display()
         ));
         copy.append(&location);
-        if let Some(open_folder) = source.open_folder.clone() {
-            let open = gtk::Button::with_label(&crate::i18n::tr("Open folder"));
-            open.add_css_class("settings-action-button");
-            open.set_widget_name("integrations-open-folder");
-            open.set_halign(gtk::Align::End);
-            open.set_margin_top(6);
-            let root = root.clone();
-            open.connect_clicked(move |_| open_folder(root.clone()));
-            copy.append(&open);
-        }
     }
+    let actions = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    actions.add_css_class("settings-integration-actions");
+    actions.set_halign(gtk::Align::End);
+    actions.set_margin_top(6);
+    copy.append(&actions);
     row.append(&copy);
     settings_group(&content, "").append(&row);
 
-    // Search shows or hides this box with the page title; the restart notice
-    // inside it keeps its own visibility.
-    let body = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    search::tag(&body, TITLE);
-    content.append(&body);
-    let notice = gtk::Box::new(gtk::Orientation::Horizontal, 12);
-    notice.add_css_class("settings-option");
-    notice.add_css_class("integration-restart");
-    notice.set_visible(false);
-    let notice_text = gtk::Label::new(Some(&crate::i18n::tr(
-        "Restart Strata to apply the change.",
-    )));
-    notice_text.set_xalign(0.0);
-    notice_text.set_wrap(true);
-    notice_text.set_hexpand(true);
-    notice_text.add_css_class("settings-option-description");
-    let restart = gtk::Button::with_label(&crate::i18n::tr("Restart now"));
-    restart.add_css_class("action-dialog-confirm");
-    restart.set_widget_name("integrations-restart");
-    restart.set_valign(gtk::Align::Center);
-    restart.connect_clicked(super::restart_application);
-    notice.append(&notice_text);
-    notice.append(&restart);
-    body.append(&notice);
     // A direct child of the page so its group headings get the page spacing.
     let list = gtk::Box::new(gtk::Orientation::Vertical, 0);
     search::tag(&list, TITLE);
@@ -126,11 +100,29 @@ pub(super) fn integrations_page_with(source: Source) -> gtk::Widget {
     let page = Rc::new(Page {
         source,
         list,
-        notice,
         requirements: RefCell::default(),
         manager: PackageManager::detect(),
         generation: Cell::new(0),
     });
+    let refresh = gtk::Button::with_label(&crate::i18n::tr("Refresh"));
+    refresh.add_css_class("settings-action-button");
+    refresh.set_widget_name("integrations-refresh");
+    let refreshing = Rc::downgrade(&page);
+    refresh.connect_clicked(move |_| {
+        if let Some(page) = refreshing.upgrade() {
+            (page.source.reload)();
+            page.rebuild();
+        }
+    });
+    actions.append(&refresh);
+    if let (Some(root), Some(open_folder)) = (&page.source.root, page.source.open_folder.clone()) {
+        let open = gtk::Button::with_label(&crate::i18n::tr("Open folder"));
+        open.add_css_class("settings-action-button");
+        open.set_widget_name("integrations-open-folder");
+        let root = root.clone();
+        open.connect_clicked(move |_| open_folder(root.clone()));
+        actions.append(&open);
+    }
     // The registry can change outside this page, so every visit rescans it.
     content.connect_map(move |_| page.rebuild());
     scrollable_page(&content, None)
@@ -139,7 +131,6 @@ pub(super) fn integrations_page_with(source: Source) -> gtk::Widget {
 struct Page {
     source: Source,
     list: gtk::Box,
-    notice: gtk::Box,
     /// Requirement results by entry id, filled by a worker after the first build.
     requirements: RefCell<HashMap<String, Vec<RequirementResult>>>,
     manager: Option<PackageManager>,
@@ -687,7 +678,7 @@ impl RowContext {
             };
             match result {
                 Ok(Ok(())) => {
-                    page.notice.set_visible(true);
+                    (page.source.reload)();
                     page.rebuild();
                 }
                 Ok(Err(error)) => {

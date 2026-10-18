@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     fs,
     time::{Duration, Instant},
 };
@@ -91,6 +91,7 @@ fn the_page_installs_updates_and_removes_catalog_entries() {
             let config = tempfile::tempdir().expect("config");
             let root = config.path().join("strata/providers");
             let catalog = Rc::new(RefCell::new(vec![example(b"#!/bin/sh\ncat\n")]));
+            let reloads = Rc::new(Cell::new(0));
             let page = integrations_page_with(Source {
                 catalog: Box::new({
                     let catalog = catalog.clone();
@@ -108,6 +109,10 @@ fn the_page_installs_updates_and_removes_catalog_entries() {
                         .collect()
                 }),
                 open_folder: None,
+                reload: Rc::new({
+                    let reloads = reloads.clone();
+                    move || reloads.set(reloads.get() + 1)
+                }),
             });
             let window = gtk::Window::builder()
                 .child(&page)
@@ -139,18 +144,14 @@ fn the_page_installs_updates_and_removes_catalog_entries() {
                 [(true, false), (false, true)],
                 "the runtime passes and the daemon is missing"
             );
-            let notice = named(&page, "integrations-restart");
-            assert!(notice.is_none(), "no restart notice before a change");
+            assert_eq!(reloads.get(), 0, "no reload before a change");
 
             click(&page, "integration-example-install");
             wait_until("installed", || {
                 status_text(&page).as_deref() == Some("Installed")
             });
             assert!(root.join("example/provider.json").exists());
-            assert!(
-                named(&page, "integrations-restart").is_some(),
-                "a change asks for a restart"
-            );
+            assert_eq!(reloads.get(), 1, "a change reloads the running providers");
             assert!(named(&page, "integration-example-install").is_none());
             assert!(named(&page, "integration-example-update").is_none());
 
@@ -165,6 +166,7 @@ fn the_page_installs_updates_and_removes_catalog_entries() {
                 status_text(&page).as_deref() == Some("Disabled")
             });
             assert!(root.join("example/disabled").exists());
+            assert_eq!(reloads.get(), 2, "disabling reloads the running providers");
             assert!(!switch(&page).is_active());
             switch(&page).set_active(true);
             wait_until("enabled again", || {
@@ -212,10 +214,12 @@ fn the_page_installs_updates_and_removes_catalog_entries() {
                 br#"{"version":1,"id":"handmade","name":"Handmade","command":["/bin/sh"]}"#,
             )
             .expect("manifest");
-            remap(&window, &page);
+            let before = reloads.get();
+            click(&page, "integrations-refresh");
             wait_until("manual row", || {
                 named(&page, "integration-handmade").is_some()
             });
+            assert_eq!(reloads.get(), before + 1, "Refresh reloads and rescans");
             assert!(
                 descendants(&page)
                     .iter()
@@ -252,6 +256,7 @@ fn an_empty_catalog_explains_itself() {
                 root: Some(config.path().join("providers")),
                 check: Arc::new(|_| Vec::new()),
                 open_folder: None,
+                reload: Rc::new(|| {}),
             });
             let window = gtk::Window::builder()
                 .child(&page)
@@ -266,7 +271,7 @@ fn an_empty_catalog_explains_itself() {
                     .filter_map(|widget| widget.downcast_ref::<gtk::Label>())
                     .any(|label| label.text() == message)
             });
-            assert!(named(&page, "integrations-restart").is_none());
+            assert!(named(&page, "integrations-refresh").is_some());
             let _ = Requirement {
                 command: None,
                 module: None,

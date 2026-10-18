@@ -6234,10 +6234,6 @@ two-column presentation. */
   margin-top: 4px;
 }
 
-.integration-restart {
-  margin-top: 12px;
-}
-
 .settings-group {
   background: mix(@strata_bg, @strata_muted, 0.25);
   border: 1px solid alpha(@strata_border, 0.55);

@@ -19,7 +19,18 @@ command = "example-daemon"
 packages = { apt = "example-daemon", pacman = "example-daemon" }
 """
 
-PROVIDER = "import sys\nfor line in sys.stdin:\n    pass\n"
+PROVIDER = """import json
+import sys
+
+for line in sys.stdin:
+    request = json.loads(line)
+    reply = {"version": 1, "id": request["id"]}
+    if request["method"] == "query":
+        reply["decorations"] = []
+    elif request["method"] == "menu":
+        reply["actions"] = [{"id": "share", "label": "Share with Example Cloud"}]
+    print(json.dumps(reply), flush=True)
+"""
 
 
 @pytest.fixture(autouse=True)
@@ -47,11 +58,7 @@ def open_integrations(strata, ready):
 
 
 def reopen_integrations(strata, ready):
-    assert strata.window.find(role="button", name="Close settings").activate()
-    strata.wait(
-        lambda: strata.window.find(role="button", name="Close settings") is None,
-        "settings closed",
-    )
+    close_settings(strata)
     open_integrations(strata, ready)
 
 
@@ -59,12 +66,33 @@ def labels(strata):
     return {" ".join(node.name.split()) for node in strata.window.find_all(role="label")}
 
 
+def close_settings(strata):
+    assert strata.window.find(role="button", name="Close settings").activate()
+    strata.wait(
+        lambda: strata.window.find(role="button", name="Close settings") is None,
+        "settings closed",
+    )
+
+
+def provider_action_offered(strata):
+    """Whether the running provider contributes its action to the context menu."""
+
+    strata.open_context_menu("todo.txt")
+    strata.wait(lambda: {"Open", "Cut"} <= set(strata.menu_items()), "context menu")
+    offered = strata.wait(
+        lambda: "Share with Example Cloud" in strata.menu_items() or None,
+        "provider action",
+        timeout=3.0,
+    ) if "Share with Example Cloud" in strata.menu_items() else None
+    strata.dismiss_menu()
+    return offered is not None
+
+
 def test_catalog_entries_install_update_and_remove(strata, catalog):
     installed = strata.environment.config_home / "strata/providers/example"
     open_integrations(strata, "Install Example Cloud")
     strata.wait(lambda: "Not installed" in labels(strata), "catalog status")
     assert strata.window.find(name="example-daemon: Missing") is not None
-    assert strata.window.find(role="button", name="Restart now") is None
 
     assert strata.window.find(role="button", name="Install Example Cloud").activate()
     strata.wait(lambda: "Installed" in labels(strata), "installed status")
@@ -73,15 +101,17 @@ def test_catalog_entries_install_update_and_remove(strata, catalog):
     assert manifest["command"][1] == str(installed / "provider.py")
     assert (installed / "provider.py").read_text() == PROVIDER
     assert (installed / "catalog-install.json").exists()
-    strata.wait(
-        lambda: strata.window.find(role="button", name="Restart now") is not None,
-        "restart notice",
-    )
+    close_settings(strata)
+    strata.wait(lambda: provider_action_offered(strata), "the installed provider runs without a restart")
 
+    open_integrations(strata, "Remove Example Cloud")
     switch = strata.wait(lambda: strata.window.find(name="Enable Example Cloud"), "enable switch")
     strata.pointer.click(switch)
     strata.wait(lambda: "Disabled" in labels(strata), "disabled status")
     assert (installed / "disabled").exists()
+    close_settings(strata)
+    strata.wait(lambda: not provider_action_offered(strata), "a disabled provider is stopped")
+    open_integrations(strata, "Remove Example Cloud")
     strata.pointer.click(strata.window.find(name="Enable Example Cloud"))
     strata.wait(lambda: not (installed / "disabled").exists(), "marker removed")
     strata.wait(lambda: "Installed" in labels(strata), "enabled status")
@@ -124,7 +154,8 @@ def test_catalog_entries_install_update_and_remove(strata, catalog):
     (handmade / "provider.json").write_text(
         json.dumps({"version": 1, "id": "handmade", "name": "Handmade", "command": ["/bin/sh"]})
     )
-    reopen_integrations(strata, "Remove Handmade")
+    assert strata.window.find(role="button", name="Refresh").activate()
+    strata.wait(lambda: strata.window.find(role="button", name="Remove Handmade"), "Refresh rescans")
     assert "Handmade" in labels(strata)
     assert strata.window.find(role="button", name="Remove Handmade").activate()
     confirm = strata.wait(

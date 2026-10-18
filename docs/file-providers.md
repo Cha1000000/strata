@@ -14,7 +14,8 @@ The browser does not need to know about cloud accounts, pins or service sockets.
 ## Registration and artwork
 
 Install one directory per provider under `$XDG_CONFIG_HOME/strata/providers/`
-(default `~/.config/strata/providers/`), then restart Strata. For example:
+(default `~/.config/strata/providers/`), then select **Refresh** in
+**Settings → Integrations** or restart Strata. For example:
 
 ```json
 {
@@ -35,10 +36,10 @@ icons and is drawn before that heading. Existing registrations need no changes.
 Commands are literal argv with an absolute executable; no shell interpolation,
 PATH lookup, placeholder expansion or working-directory executable lookup is
 performed. The child runs with `/` as its working directory. Nothing in a browsed
-folder registers a provider. Removing the registration and restarting Strata
-uninstalls it. Editing a registration takes effect on restart. An empty file
-named `disabled` beside `provider.json` keeps the registration installed but
-stops it from loading; **Settings → Integrations** toggles it with a switch.
+folder registers a provider. Removing the registration uninstalls it, and
+edits to a registration take effect after **Refresh** or a restart. An empty
+file named `disabled` beside `provider.json` keeps the registration installed
+but stops it from loading; **Settings → Integrations** toggles it with a switch.
 
 Registration directories/manifests and icon files must be owned by the current
 user or root, must not be group/world writable, and cannot be symlinks. Executable
@@ -63,8 +64,9 @@ directory. When a release changes a bundled provider, installed copies show
 and confirmed before they are replaced. Registrations without an install record
 are listed as installed manually with **Remove** only. Every installed
 registration has a switch that disables it without removing it, and **Open
-folder** shows the registration directory in the browser. Changes take effect
-after Strata restarts, which the page offers.
+folder** shows the registration directory in the browser. Each change stops
+the running providers and discovers the registrations again, so it takes
+effect at once; **Refresh** does the same after edits made by hand.
 
 `STRATA_PROVIDER_CATALOG=<directory>` replaces the bundled catalog with a
 directory in the same layout, for developing an entry without rebuilding Strata.

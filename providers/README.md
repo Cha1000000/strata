@@ -97,5 +97,6 @@ Point Strata at a checkout instead of the bundled catalog while iterating:
 STRATA_PROVIDER_CATALOG=providers cargo run
 ```
 
-Settings → Integrations then lists the directory's entries. Install from there,
-restart Strata, and exercise the provider through the context menu.
+Settings → Integrations then lists the directory's entries. Install from there
+and exercise the provider through the context menu; **Refresh** reloads the
+running providers after you edit the installed copy.

@@ -36,9 +36,8 @@ fn legacy_snapshot_replies_survive_refresh_hints_without_claiming_freshness() {
     assert!(freshness.accept(&selected, Some(101)));
 }
 
-fn install_hub() {
-    let (_, discovery) = mpsc::channel();
-    let registration = Registration {
+fn registration() -> Registration {
+    Registration {
         manifest: protocol::Manifest {
             version: 1,
             id: "example".into(),
@@ -53,13 +52,16 @@ fn install_hub() {
             icons: Default::default(),
         },
         icons: Default::default(),
-    };
+    }
+}
+fn install_hub() {
+    let (_, discovery) = mpsc::channel();
     HUB.with(|cell| {
         cell.replace(Some(Hub {
             discovery,
             discovered: true,
             providers: vec![Provider {
-                client: protocol::start(registration),
+                client: protocol::start(registration()),
                 icons: Default::default(),
                 id: "example".into(),
                 name: "Example Cloud".into(),
@@ -73,6 +75,7 @@ fn install_hub() {
             slots: Default::default(),
             pending: Default::default(),
             serial: 0,
+            ticking: true,
         }))
     });
 }
@@ -897,6 +900,7 @@ fn hub_timer_stops_and_tracking_ends_once_discovery_finds_no_providers() {
                     slots: Default::default(),
                     pending: Default::default(),
                     serial: 0,
+                    ticking: true,
                 }))
             });
             let early = ThumbnailSlot::new(16);
@@ -914,6 +918,46 @@ fn hub_timer_stops_and_tracking_ends_once_discovery_finds_no_providers() {
 
             install_hub();
             assert_eq!(tick_hub(), glib::ControlFlow::Continue);
+            HUB.with(|cell| cell.replace(None));
+        },
+    );
+}
+
+#[test]
+fn reload_replaces_providers_and_restarts_a_stopped_timer() {
+    crate::test_support::gtk_test(
+        "ui::file_providers::tests::reload_replaces_providers_and_restarts_a_stopped_timer",
+        || {
+            install_hub();
+            let slot = ThumbnailSlot::new(16);
+            slot.set_provider_path(Some("/tracked".into()));
+            assert!(admit(&slot, "/tracked".into()));
+            slot.set_decoration(None, Some("Available offline"));
+            with_hub(|hub| hub.ticking = false);
+
+            let (sender, discovery) = mpsc::channel();
+            reload_with(discovery);
+            with_hub(|hub| {
+                assert!(hub.providers.is_empty(), "running providers are dropped");
+                assert!(!hub.discovered, "a new discovery is awaited");
+                assert!(hub.ticking, "a stopped timer is started again");
+                assert_eq!(hub.slots.len(), 1, "tracked rows stay tracked");
+            });
+            assert!(
+                slot.decoration_description().is_none(),
+                "old badges are cleared"
+            );
+            assert_eq!(tick_hub(), glib::ControlFlow::Continue);
+
+            sender.send(vec![registration()]).expect("discovery result");
+            assert_eq!(tick_hub(), glib::ControlFlow::Continue);
+            with_hub(|hub| assert_eq!(hub.providers.len(), 1));
+
+            let (sender, discovery) = mpsc::channel();
+            reload_with(discovery);
+            sender.send(Vec::new()).expect("discovery result");
+            assert_eq!(tick_hub(), glib::ControlFlow::Break);
+            with_hub(|hub| assert!(!hub.ticking));
             HUB.with(|cell| cell.replace(None));
         },
     );
