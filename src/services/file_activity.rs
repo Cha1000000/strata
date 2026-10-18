@@ -19,6 +19,8 @@ use std::{
 
 use futures_channel::oneshot;
 
+use crate::model::Location;
+
 pub(crate) const HELD_FOR_OPERATION: &str = "This item is being changed by a file operation.";
 
 #[cfg_attr(
@@ -107,10 +109,11 @@ impl Counted {
 struct Registry {
     next: u64,
     readers: BTreeMap<u64, Reader>,
-    operations: BTreeMap<u64, OperationScope>,
+    operations: BTreeMap<u64, Registered>,
     barriers: BTreeMap<u64, Barrier>,
     roots: Counted,
     folders: Counted,
+    trees: Counted,
     fenced: Counted,
     waiting: usize,
 }
@@ -124,6 +127,7 @@ impl Registry {
             barriers: BTreeMap::new(),
             roots: Counted::new(),
             folders: Counted::new(),
+            trees: Counted::new(),
             fenced: Counted::new(),
             waiting: 0,
         }
@@ -303,13 +307,32 @@ pub(crate) struct OperationScope {
     pub(crate) folders: Vec<PathBuf>,
 }
 
+struct Registered {
+    scope: OperationScope,
+    trees: Vec<PathBuf>,
+}
+
+/// A URI's segments compare as a relative path's do, so GVfs folders share the path tables.
+fn folder_key(folder: &Location) -> Option<PathBuf> {
+    folder
+        .native_path()
+        .map(Path::to_path_buf)
+        .or_else(|| folder.uri_value().map(PathBuf::from))
+}
+
 pub(crate) struct Activity(u64);
 
 pub(crate) fn begin(scope: OperationScope) -> Activity {
     let mut registry = registry();
     let id = registry.id();
     registry.register(&scope);
-    registry.operations.insert(id, scope);
+    registry.operations.insert(
+        id,
+        Registered {
+            scope,
+            trees: Vec::new(),
+        },
+    );
     Activity(id)
 }
 
@@ -318,8 +341,32 @@ impl Activity {
         let mut registry = registry();
         registry.register(&scope);
         if let Some(operation) = registry.operations.get_mut(&self.0) {
-            operation.roots.extend(scope.roots);
-            operation.folders.extend(scope.folders);
+            operation.scope.roots.extend(scope.roots);
+            operation.scope.folders.extend(scope.folders);
+        }
+    }
+
+    pub(crate) fn include_folder(&self, folder: &Location) {
+        if let Some(folder) = folder_key(folder) {
+            self.include(OperationScope {
+                roots: Vec::new(),
+                folders: vec![folder],
+            });
+        }
+    }
+
+    /// The operation may write anywhere below `trees`, as a merge does.
+    pub(crate) fn include_trees(&self, trees: impl IntoIterator<Item = Location>) {
+        let trees: Vec<PathBuf> = trees
+            .into_iter()
+            .filter_map(|tree| folder_key(&tree))
+            .collect();
+        let mut registry = registry();
+        for tree in &trees {
+            registry.trees.add(tree);
+        }
+        if let Some(operation) = registry.operations.get_mut(&self.0) {
+            operation.trees.extend(trees);
         }
     }
 
@@ -360,7 +407,7 @@ impl Activity {
 impl Activity {
     pub(crate) fn end(&self) {
         let mut registry = registry();
-        let Some(scope) = registry.operations.remove(&self.0) else {
+        let Some(Registered { scope, trees }) = registry.operations.remove(&self.0) else {
             return;
         };
         for root in &scope.roots {
@@ -369,6 +416,17 @@ impl Activity {
         for folder in &scope.folders {
             registry.folders.remove(folder);
         }
+        for tree in &trees {
+            registry.trees.remove(tree);
+        }
+        drop(registry);
+        let ended: Vec<PathBuf> = scope
+            .roots
+            .into_iter()
+            .chain(scope.folders)
+            .chain(trees)
+            .collect();
+        notify(&Notice::Ended(&ended));
     }
 }
 
@@ -478,11 +536,12 @@ pub(crate) fn is_changing(path: &Path) -> bool {
 pub(crate) enum Notice<'a> {
     Releasing(&'a [PathBuf]),
     Lifted(&'a [PathBuf]),
+    Ended(&'a [PathBuf]),
 }
 
 impl Notice<'_> {
     pub(crate) fn covers(&self, path: &Path) -> bool {
-        let (Self::Releasing(roots) | Self::Lifted(roots)) = self;
+        let (Self::Releasing(roots) | Self::Lifted(roots) | Self::Ended(roots)) = self;
         roots.iter().any(|root| path.starts_with(root))
     }
 }
@@ -513,16 +572,23 @@ impl Drop for Subscription {
 }
 
 pub(crate) fn notify(notice: &Notice<'_>) {
-    let observers: Vec<Observer> =
-        OBSERVERS.with_borrow(|observers| observers.values().cloned().collect());
+    let observers: Vec<Observer> = OBSERVERS
+        .try_with(|observers| observers.borrow().values().cloned().collect())
+        .unwrap_or_default();
     for observer in observers {
         observer(notice);
     }
 }
 
-/// Only `folder` itself: an operation writing into its subfolders lists those.
+/// Only `folder` itself, unless it is below a tree: an operation writing into its subfolders
+/// lists those.
 pub(crate) fn is_active_in(folder: &Path) -> bool {
-    registry().folders.contains(folder)
+    let registry = registry();
+    registry.folders.contains(folder) || registry.trees.covers(folder)
+}
+
+pub(crate) fn is_active_at(folder: &Location) -> bool {
+    folder_key(folder).is_some_and(|folder| is_active_in(&folder))
 }
 
 /// An operation that also covers `folder` is the caller's own.
@@ -534,8 +600,9 @@ pub(crate) fn in_use_within(folder: &Path) -> bool {
         .values()
         .any(|reader| reader.paths.iter().any(|path| below(path)))
         || registry.operations.values().any(|operation| {
-            operation.roots.iter().any(|root| below(root))
-                && !operation.roots.iter().any(|root| folder.starts_with(root))
+            let roots = &operation.scope.roots;
+            roots.iter().any(|root| below(root))
+                && !roots.iter().any(|root| folder.starts_with(root))
         })
 }
 

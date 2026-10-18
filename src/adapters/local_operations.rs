@@ -3052,11 +3052,8 @@ impl OperationProvider for LocalOperationProvider {
             } else {
                 Vec::new()
             };
-            let operation = Rc::new(ActiveOperation::begin(
-                release::natives([&request.destination])
-                    .into_iter()
-                    .chain(release::parents(&moved)),
-            ));
+            let operation = Rc::new(ActiveOperation::begin(release::parents(&moved)));
+            operation.include_folder(&request.destination);
             let sources = request
                 .items
                 .iter()
@@ -3135,10 +3132,12 @@ impl OperationProvider for LocalOperationProvider {
                     .zip(&targets)
                     .zip(&duplicate)
                     .filter(move |((item, _), duplicate)| item.conflict == conflict && !**duplicate)
-                    .filter_map(|((_, target), _)| target.as_ref().and_then(gio::File::path))
+                    .filter_map(|((_, target), _)| target.as_ref())
             };
-            operation.include_folders(targets_of(TransferConflict::Merge));
-            let replaced = targets_of(TransferConflict::ReplaceExisting);
+            operation
+                .include_trees(targets_of(TransferConflict::Merge).filter_map(location_for_file));
+            let replaced =
+                targets_of(TransferConflict::ReplaceExisting).filter_map(gio::File::path);
             operation
                 .release(
                     moved.into_iter().chain(replaced).collect(),

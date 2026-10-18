@@ -17,6 +17,7 @@ mod deferred;
 mod directory_changes;
 mod events;
 mod folder_sorts;
+mod leftovers;
 mod location_input;
 mod metadata;
 mod monitor;
@@ -645,6 +646,7 @@ thread_local! {
     static UNDO_RENAME_REQUESTS: RefCell<Vec<(Location, Location)>> = const { RefCell::new(Vec::new()) };
     static TRASHED_IDENTITIES: RefCell<HashMap<Location, ItemIdentity>> = RefCell::default();
     static FORWARD_RENAME_OUTCOME: Cell<Option<ForwardRenameOutcome>> = const { Cell::new(None) };
+    static SWEPT_PROBES: RefCell<Vec<(Location, Vec<OsString>)>> = const { RefCell::new(Vec::new()) };
 }
 
 #[derive(Clone, Copy)]
@@ -887,6 +889,10 @@ impl OperationProvider for ImmediateOperationProvider {
             restored: Vec::new(),
         });
         LoadHandle::new(|| {})
+    }
+
+    fn sweep_probes(&self, folder: &Location, names: &[OsString]) {
+        SWEPT_PROBES.with_borrow_mut(|swept| swept.push((folder.clone(), names.to_vec())));
     }
 
     fn compress(&self, request: CompressRequest, emit: Rc<dyn Fn(OperationEvent)>) -> LoadHandle {

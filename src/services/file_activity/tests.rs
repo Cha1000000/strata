@@ -286,8 +286,32 @@ fn running_operations_answer_for_their_roots_and_folders_until_they_end() {
         folders: Vec::new(),
     });
     let fence = second.fence([set_aside.clone()]);
+    let merged = root.path().join("merged");
+    let remote = Location::uri("sftp://host/share/dir");
+    second.include_folder(&remote);
+    second.include_trees([
+        Location::local(&merged),
+        Location::uri("sftp://host/share/merged"),
+    ]);
     assert!(is_changing(&other));
     assert!(is_changing(&set_aside));
+    let active = |folder: Location| is_active_at(&folder);
+    let below_trees = [
+        Location::local(&merged),
+        Location::local(merged.join("sub/deep")),
+        remote.clone(),
+        Location::uri("sftp://host/share/merged"),
+        Location::uri("sftp://host/share/merged/sub"),
+    ];
+    let elsewhere = [
+        Location::local(root.path()),
+        Location::local(root.path().join("merged-too")),
+        Location::uri("sftp://host/share/dir/sub"),
+        Location::uri("sftp://host/share"),
+        Location::uri("sftp://other/share/dir"),
+    ];
+    assert!(below_trees.iter().cloned().all(active));
+    assert!(!elsewhere.iter().cloned().any(active));
 
     drop(first);
     assert!(!is_changing(&item));
@@ -298,4 +322,5 @@ fn running_operations_answer_for_their_roots_and_folders_until_they_end() {
     drop(second);
     assert!(!is_active_in(&folder));
     assert!(!is_changing(&other));
+    assert!(!below_trees.into_iter().any(active));
 }

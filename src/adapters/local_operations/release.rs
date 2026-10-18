@@ -43,11 +43,12 @@ impl ActiveOperation {
         }
     }
 
-    pub(crate) fn include_folders(&self, folders: impl IntoIterator<Item = PathBuf>) {
-        self.activity.include(OperationScope {
-            roots: Vec::new(),
-            folders: folders.into_iter().collect(),
-        });
+    pub(crate) fn include_folder(&self, folder: &Location) {
+        self.activity.include_folder(folder);
+    }
+
+    pub(crate) fn include_trees(&self, trees: impl IntoIterator<Item = Location>) {
+        self.activity.include_trees(trees);
     }
 
     pub(crate) async fn release(&self, roots: Vec<PathBuf>, cancellable: &gio::Cancellable) {

@@ -646,6 +646,7 @@ impl PreviewDrawer {
                         state.show_after_focus_change(entry, depth);
                     }
                 }
+                Notice::Ended(_) => {}
             }
         });
         self.state.operations.replace(Some(subscription));

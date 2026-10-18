@@ -643,10 +643,6 @@ pub trait OperationProvider {
         expect(dead_code, reason = "step 8's Restore action calls it")
     )]
     fn recover(&self, request: RecoverRequest, emit: Rc<dyn Fn(OperationEvent)>) -> LoadHandle;
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "step 8's leftover detection calls it")
-    )]
     fn sweep_probes(&self, _folder: &Location, _names: &[OsString]) {}
     fn compress(&self, request: CompressRequest, emit: Rc<dyn Fn(OperationEvent)>) -> LoadHandle;
     fn extract(&self, request: ExtractRequest, emit: Rc<dyn Fn(OperationEvent)>) -> LoadHandle;

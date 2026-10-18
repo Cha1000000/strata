@@ -29,6 +29,7 @@ mod deferred;
 mod directory_changes;
 mod folder_sorts;
 mod freshness;
+mod leftovers;
 mod loading;
 mod navigation_lifecycle;
 mod operation_events;
@@ -358,6 +359,16 @@ pub enum BrowserEvent {
         location: Location,
     },
     EmptyTrashRequested,
+    /// What interrupted operations left in the column changed; `announce` marks the
+    /// first time this session that a folder holding set-aside originals shows them.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "the leftover button and dock card read them")
+    )]
+    LeftoversChanged {
+        depth: usize,
+        announce: bool,
+    },
     ArchiveStarted {
         total: usize,
     },
@@ -1193,6 +1204,7 @@ pub struct Browser {
     observers: RefCell<Vec<Observer>>,
     preferences_observers: RefCell<Vec<PreferencesObserver>>,
     sort_resync: folder_sorts::SortResync,
+    _operations_ended: crate::services::file_activity::Subscription,
     self_weak: Weak<Browser>,
 }
 
@@ -1270,6 +1282,7 @@ impl Browser {
             observers: RefCell::new(Vec::new()),
             preferences_observers: RefCell::new(Vec::new()),
             sort_resync: folder_sorts::SortResync::default(),
+            _operations_ended: Self::follow_ended_operations(self_weak.clone()),
             self_weak: self_weak.clone(),
         })
     }
@@ -4987,6 +5000,7 @@ impl Browser {
         for observer in &observers {
             observer(&event);
         }
+        self.follow_leftovers(&event);
     }
 
     fn new_request_id(&self) -> RequestId {

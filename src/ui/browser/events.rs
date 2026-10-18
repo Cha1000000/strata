@@ -1020,6 +1020,7 @@ impl ViewState {
             BrowserEvent::EmptyTrashRequested => {
                 self.load_trash_summary();
             }
+            BrowserEvent::LeftoversChanged { .. } => {}
             BrowserEvent::LocationNavigationRejected { error } => {
                 let credentials = self.pending_location_credentials.take();
                 match error {

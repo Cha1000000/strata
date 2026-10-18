@@ -336,9 +336,10 @@ impl Browser {
     }
 
     pub(super) fn operation_touches(location: &Location) -> bool {
-        location.native_path().is_some_and(|path| {
-            file_activity::is_changing(path) || file_activity::is_active_in(path)
-        })
+        location
+            .native_path()
+            .is_some_and(file_activity::is_changing)
+            || file_activity::is_active_at(location)
     }
 
     fn freshness_held(&self) -> bool {

@@ -236,70 +236,107 @@ fn a_release_on_a_mount_that_does_not_answer_fences_lexically() -> Result<(), Bo
 #[test]
 fn a_merge_fences_an_original_only_when_it_is_set_aside() -> Result<(), Box<dyn Error>> {
     let _serial = serial()?;
-    let root = tempfile::tempdir()?;
-    let sources = root.path().join("sources");
-    let destination = root.path().join("destination");
-    for (folder, files) in [
-        (&sources, &[("run/a.txt", "new a")][..]),
-        (
-            &destination,
-            &[("run/a.txt", "old a"), ("run/b.txt", "old b")][..],
-        ),
-    ] {
-        for (path, contents) in files {
-            let path = folder.join(path);
-            fs::create_dir_all(path.parent().expect("parent"))?;
-            fs::write(path, contents)?;
+    for named_by_uri in [false, true] {
+        let root = tempfile::tempdir()?;
+        let sources = root.path().join("sources");
+        let destination = root.path().join("destination");
+        for (folder, files) in [
+            (
+                &sources,
+                &[("run/a.txt", "new a"), ("run/sub/new.txt", "new")][..],
+            ),
+            (
+                &destination,
+                &[
+                    ("run/a.txt", "old a"),
+                    ("run/b.txt", "old b"),
+                    ("run/sub/old.txt", "old"),
+                ][..],
+            ),
+        ] {
+            for (path, contents) in files {
+                let path = folder.join(path);
+                fs::create_dir_all(path.parent().expect("parent"))?;
+                fs::write(path, contents)?;
+            }
         }
+        let pasted_into = if named_by_uri {
+            Location::uri(gio::File::for_path(&destination).uri())
+        } else {
+            Location::local(&destination)
+        };
+        let original = Preview::of(&destination.join("run/a.txt"));
+        let sibling = Preview::of(&destination.join("run/b.txt"));
+        let stopped_before_aside = Arc::new(Mutex::new(None));
+        let target_active = Arc::new(Mutex::new(None));
+        let nested_active = Arc::new(Mutex::new(None));
+        let (seen, seen_active) = (stopped_before_aside.clone(), target_active.clone());
+        let stopped = original.stopped.clone();
+        let target = destination.join("run");
+        let racer: Racer = Box::new(move || {
+            *seen.lock().expect("set-aside check") = Some(stopped.load(Ordering::SeqCst) > 0);
+            *seen_active.lock().expect("set-aside check") =
+                Some(file_activity::is_active_in(&target));
+        });
+        let (seen_nested, nested, folder) = (
+            nested_active.clone(),
+            destination.join("run/sub"),
+            pasted_into.clone(),
+        );
+        let nested_racer: Racer = Box::new(move || {
+            *seen_nested.lock().expect("nested check") = Some((
+                file_activity::is_active_in(&nested),
+                file_activity::is_active_at(&folder),
+            ));
+        });
+        let _sources = FsQuirks::install(&sources, Quirks::default());
+        let _destination = FsQuirks::install(
+            &destination,
+            Quirks {
+                trash: Trash::Unsupported,
+                before: vec![
+                    (Op::Rename, "a.txt", 0, racer),
+                    (Op::Rename, "new.txt", 0, nested_racer),
+                ],
+                ..Quirks::default()
+            },
+        );
+
+        run_paste(PasteRequest {
+            id: OperationRequestId(1729),
+            destination: pasted_into,
+            items: vec![PasteItem {
+                source: Location::local(sources.join("run")),
+                conflict: TransferConflict::Merge,
+                target_name: None,
+            }],
+            move_sources: false,
+        });
+
+        assert_eq!(
+            *stopped_before_aside.lock().expect("set-aside check"),
+            Some(true),
+            "the original's preview stops before it is set aside"
+        );
+        assert_eq!(
+            *target_active.lock().expect("set-aside check"),
+            Some(true),
+            "the merge target is active while the merge writes into it"
+        );
+        assert_eq!(
+            *nested_active.lock().expect("nested check"),
+            Some((true, true)),
+            "a folder the merge descends into, and the destination named by URI ({named_by_uri}), \
+             are active while the merge writes there"
+        );
+        assert!(
+            !sibling.was_stopped(),
+            "the rest of the target stays previewable"
+        );
+        assert_eq!(fs::read(destination.join("run/a.txt"))?, b"new a");
+        assert_eq!(fs::read(destination.join("run/b.txt"))?, b"old b");
+        assert_eq!(fs::read(destination.join("run/sub/new.txt"))?, b"new");
     }
-    let original = Preview::of(&destination.join("run/a.txt"));
-    let sibling = Preview::of(&destination.join("run/b.txt"));
-    let stopped_before_aside = Arc::new(Mutex::new(None));
-    let target_active = Arc::new(Mutex::new(None));
-    let (seen, seen_active) = (stopped_before_aside.clone(), target_active.clone());
-    let stopped = original.stopped.clone();
-    let target = destination.join("run");
-    let racer: Racer = Box::new(move || {
-        *seen.lock().expect("set-aside check") = Some(stopped.load(Ordering::SeqCst) > 0);
-        *seen_active.lock().expect("set-aside check") = Some(file_activity::is_active_in(&target));
-    });
-    let _sources = FsQuirks::install(&sources, Quirks::default());
-    let _destination = FsQuirks::install(
-        &destination,
-        Quirks {
-            trash: Trash::Unsupported,
-            before: vec![(Op::Rename, "a.txt", 0, racer)],
-            ..Quirks::default()
-        },
-    );
-
-    run_paste(PasteRequest {
-        id: OperationRequestId(1729),
-        destination: Location::local(&destination),
-        items: vec![PasteItem {
-            source: Location::local(sources.join("run")),
-            conflict: TransferConflict::Merge,
-            target_name: None,
-        }],
-        move_sources: false,
-    });
-
-    assert_eq!(
-        *stopped_before_aside.lock().expect("set-aside check"),
-        Some(true),
-        "the original's preview stops before it is set aside"
-    );
-    assert_eq!(
-        *target_active.lock().expect("set-aside check"),
-        Some(true),
-        "the merge target is active while the merge writes into it"
-    );
-    assert!(
-        !sibling.was_stopped(),
-        "the rest of the target stays previewable"
-    );
-    assert_eq!(fs::read(destination.join("run/a.txt"))?, b"new a");
-    assert_eq!(fs::read(destination.join("run/b.txt"))?, b"old b");
     Ok(())
 }
 
