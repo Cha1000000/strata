@@ -1384,3 +1384,103 @@ fn one_wait_for_leftovers_covers_every_folder_of_a_delete() -> Result<(), Box<dy
     assert_eq!(waited_since(start)?, Duration::from_secs(2));
     Ok(())
 }
+
+#[derive(Clone, Copy, Debug)]
+enum Hidden {
+    Leftover { closed_after: Option<Op> },
+    NamedLikeOne,
+}
+
+#[test]
+fn a_recursive_delete_never_unlinks_another_program_s_leftover() -> Result<(), Box<dyn Error>> {
+    let _serial = serial()?;
+    let leftover = |closed_after| Hidden::Leftover { closed_after };
+    let rows: [(&str, Preset, Hidden); 9] = [
+        ("nfs3", Quirks::nfs3, leftover(None)),
+        ("nfs3", Quirks::nfs3, leftover(Some(Op::Unlink))),
+        ("nfs3", Quirks::nfs3, leftover(Some(Op::List))),
+        ("cifs", Quirks::cifs, leftover(None)),
+        ("cifs", Quirks::cifs, leftover(Some(Op::Unlink))),
+        ("sshfs", Quirks::sshfs, leftover(None)),
+        ("sshfs", Quirks::sshfs, leftover(Some(Op::Unlink))),
+        ("ext4", Quirks::ext4, Hidden::NamedLikeOne),
+        ("exfat-fuse", Quirks::exfat_fuse, Hidden::NamedLikeOne),
+    ];
+    for (mount, preset, hidden) in rows {
+        let row = format!("{mount}, {hidden:?}");
+        let start = SystemTime::UNIX_EPOCH + CLOCK_START;
+        let _clock = ClockGuard::set(start);
+        let root = tempfile::tempdir()?;
+        let folder = root.path().join("folder");
+        let holds = Holds::default();
+        let closed_after = match hidden {
+            Hidden::Leftover { closed_after } => closed_after,
+            Hidden::NamedLikeOne => None,
+        };
+        let scope = FsQuirks::install(
+            root.path(),
+            Quirks {
+                after: closed_after
+                    .map(|op| (op, "folder", 0, releasing(&holds)))
+                    .into_iter()
+                    .collect(),
+                ..preset()
+            },
+        );
+        match hidden {
+            Hidden::Leftover { .. } => {
+                folder_with_an_open_file(&folder, &holds)?;
+                let dir = open_local_parent_directory(&folder)?;
+                super::super::fs_ops::fs().unlink(
+                    super::super::fs_ops::Entry::new(&dir, OsStr::new("open.txt")),
+                    rustix::fs::AtFlags::empty(),
+                )?;
+            }
+            Hidden::NamedLikeOne => {
+                fs::create_dir(&folder)?;
+                fs::write(folder.join(".nfs000000000000005e000000de"), b"ordinary")?;
+            }
+        }
+        let [hidden_name] = names(&folder)?.try_into().map_err(|_| "one hidden name")?;
+        fs::write(folder.join("ordinary.txt"), b"ordinary")?;
+        scope.clear_calls();
+
+        let events = delete_permanently(std::slice::from_ref(&folder));
+
+        let unlinked = scope
+            .calls()
+            .into_iter()
+            .filter(|call| call.op == Op::Unlink)
+            .flat_map(|call| call.names)
+            .collect::<Vec<_>>();
+        assert!(
+            unlinked.contains(&"ordinary.txt".into()),
+            "{row}: {unlinked:?}"
+        );
+        if let Hidden::NamedLikeOne = hidden {
+            assert!(!folder.exists(), "{row}: {events:?}");
+            continue;
+        }
+        assert!(
+            !unlinked.contains(&hidden_name.clone().into()),
+            "{row}: {unlinked:?}"
+        );
+        if closed_after.is_some() {
+            assert!(
+                matches!(events.last(), Some(OperationEvent::Deleted { .. })),
+                "{row}: {events:?}"
+            );
+            assert!(!folder.exists(), "{row}");
+        } else {
+            assert!(
+                matches!(
+                    events.last(),
+                    Some(OperationEvent::CompletedWithErrors { .. })
+                ),
+                "{row}: {events:?}"
+            );
+            assert_eq!(names(&folder)?, [hidden_name], "{row}");
+        }
+    }
+    Ok(())
+}

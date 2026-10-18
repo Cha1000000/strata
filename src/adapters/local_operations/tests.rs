@@ -736,7 +736,7 @@ fn sequential_delete_local(
         let step_parent = parent.try_clone().map_err(|error| error.to_string())?;
         let step_name = name.clone();
         let step = super::run_local_delete_step(move || {
-            super::open_local_delete_target(&step_parent, &step_name, None)
+            super::open_local_delete_target(&step_parent, &step_name, None, false)
         })
         .await
         .map_err(|error| error.to_string())?;

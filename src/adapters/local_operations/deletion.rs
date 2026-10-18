@@ -130,6 +130,7 @@ pub(super) fn permanently_delete_keeping(
 
 pub(super) enum LocalDeleteStep {
     Removed,
+    Leftover,
     Directory {
         handle: OwnedFd,
         children: Vec<OsString>,
@@ -189,19 +190,26 @@ pub(super) fn open_local_delete_target<Fd: AsFd>(
     parent: &Fd,
     name: &OsStr,
     expected: Option<LocalFileIdentity>,
+    leftovers_stay: bool,
 ) -> Result<LocalDeleteStep, String> {
-    let stat = fs()
-        .stat(Entry::new(parent, name), false)
-        .map_err(|error| {
-            rust_i18n::t!(
+    let is_leftover = || leftovers_stay && leftovers::is_leftover(fs(), parent.as_fd(), name);
+    let stat = match fs().stat(Entry::new(parent, name), false) {
+        Ok(stat) => stat,
+        Err(rustix::io::Errno::NOENT) if is_leftover() => return Ok(LocalDeleteStep::Leftover),
+        Err(error) => {
+            return Err(rust_i18n::t!(
                 "Could not inspect %{name}: %{error}",
                 name = name.to_string_lossy(),
                 error = os_error_detail(error)
             )
-            .into_owned()
-        })?;
+            .into_owned());
+        }
+    };
     ensure_expected_local_identity(name, stat.identity, expected)?;
     if !stat.is_directory() {
+        if is_leftover() {
+            return Ok(LocalDeleteStep::Leftover);
+        }
         fs().unlink(Entry::new(parent, name), rustix::fs::AtFlags::empty())
             .map_err(|error| {
                 rust_i18n::t!(
@@ -328,6 +336,7 @@ pub(super) fn process_local_delete_job(queue: &LocalDeleteQueue, job: LocalDelet
             if queue.is_stopped() {
                 return;
             }
+            let in_deleted_folder = guard.is_some();
             if let Some(guard) = guard
                 && let Err(error) = ensure_local_delete_target_unchanged(
                     guard.parent.as_ref(),
@@ -338,15 +347,17 @@ pub(super) fn process_local_delete_job(queue: &LocalDeleteQueue, job: LocalDelet
                 queue.fail(error);
                 return;
             }
-            let step = match open_local_delete_target(parent.as_ref(), &name, expected) {
-                Ok(step) => step,
-                Err(error) => {
-                    queue.fail(error);
-                    return;
-                }
-            };
+            let step =
+                match open_local_delete_target(parent.as_ref(), &name, expected, in_deleted_folder)
+                {
+                    Ok(step) => step,
+                    Err(error) => {
+                        queue.fail(error);
+                        return;
+                    }
+                };
             match step {
-                LocalDeleteStep::Removed => queue.complete(completion),
+                LocalDeleteStep::Removed | LocalDeleteStep::Leftover => queue.complete(completion),
                 LocalDeleteStep::Directory { handle, children } => {
                     let handle = Arc::new(handle);
                     if children.is_empty() {

@@ -4,6 +4,8 @@
 //! the last close.
 
 use std::{
+    ffi::OsStr,
+    os::fd::BorrowedFd,
     sync::{Arc, OnceLock},
     time::{Duration, SystemTime},
 };
@@ -75,6 +77,12 @@ pub(super) fn remove_folder(
             return Err(Refused::Changed(errno));
         }
     }
+}
+
+pub(super) fn is_leftover(fs: &dyn FsOps, dir: BorrowedFd<'_>, name: &OsStr) -> bool {
+    foreign_leftover(name).is_some_and(|family| {
+        known_mount(fs, dir).1.silly_names == Some(SillyNames::Renamed(family))
+    })
 }
 
 struct Held {
