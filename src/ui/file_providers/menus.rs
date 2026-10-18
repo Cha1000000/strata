@@ -291,7 +291,6 @@ pub(super) struct Renderer {
     context: Context,
     popover: glib::WeakRef<gtk::PopoverMenu>,
     sections: Sections,
-    /// Labelled per-provider sections inside Send to…, when the menu has one.
     send_to: Option<Sections>,
 }
 

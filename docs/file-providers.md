@@ -82,19 +82,29 @@ row. Badges share the thumbnail/icon rendering used by Columns, List and Icons.
 ```
 
 Return an empty `actions` array for ineligible selections. No placeholder or
-disabled global menu item is inserted. Strata always keeps each provider's root
-entries together in an inline section with a small, muted, non-interactive
-heading. This is not an extra submenu: providers choose flat actions, recursive
-submenus, or a mixture within their section:
+disabled global menu item is inserted. Unless placed in **Send to…** (below),
+Strata keeps each provider's root entries together in an inline section with a
+small, muted, non-interactive heading. This is not an extra submenu: providers
+choose flat actions, recursive submenus, or a mixture within their section:
 
 ```json
 {"version":1,"id":2,"actions":[{"id":"share","label":"Copy share link","context":"opaque-selection-token"},{"id":"offline","label":"Offline availability","children":[{"id":"keep","label":"Keep offline","icon":"available","context":"opaque-selection-token"}]}]}
 ```
 
 Only leaves activate; a branch's nonempty `children` array is navigation only.
-Branches cannot have `context`.
+Branches cannot have `context`. Across the entire tree, allow at most 64 nodes,
+four levels (roots are level one), and unique ids of 1–64 ASCII letters, digits
+or dashes. Labels are nonempty plain text, at most 128 UTF-8 bytes, without control
+characters. Icons are optional declared icon ids. Leaf `context` is an optional
+nonempty opaque string of at most 2,048 UTF-8 bytes. Action and submenu labels
+remain as supplied, without repeated provider suffixes. The section heading
+identifies their source using the registered name or id, including when different
+providers supply identical labels. Empty sections and their headings disappear.
+Menus populate asynchronously; retained provider sections and branches reuse
+their models on refresh. Removed leaves are disabled before removal, including
+when their containing section or branch is withdrawn or the menu closes.
 
-A root action whose selection is a *destination*, such as a paired phone, can ask
+A root action that names a *destination*, such as a paired phone, can ask
 to appear inside Strata's **Send to…** submenu instead of the provider section:
 
 ```json
@@ -111,17 +121,7 @@ read on root actions only; it is ignored on children, on background (folder)
 menus and in menus without a Send to… entry, where the action stays in the
 provider section. Unrecognized values also keep the section, so a provider that
 uses `placement` degrades to a heading section on older Strata versions without
-a handshake. Across the entire tree, allow at most 64 nodes,
-four levels (roots are level one), and unique ids of 1–64 ASCII letters, digits
-or dashes. Labels are nonempty plain text, at most 128 UTF-8 bytes, without control
-characters. Icons are optional declared icon ids. Leaf `context` is an optional
-nonempty opaque string of at most 2,048 UTF-8 bytes. Action and submenu labels
-remain as supplied, without repeated provider suffixes. The section heading
-identifies their source using the registered name or id, including when different
-providers supply identical labels. Empty sections and their headings disappear.
-Menus populate asynchronously; retained provider sections and branches reuse
-their models on refresh. Removed leaves are disabled before removal, including
-when their containing section or branch is withdrawn or the menu closes.
+a handshake.
 
 Each menu and activation describes the whole selection, never a silently filtered
 subset. An adapter may support cross-account selections; otherwise return no
