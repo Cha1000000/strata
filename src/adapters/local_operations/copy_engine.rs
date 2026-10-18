@@ -851,14 +851,7 @@ fn copy_new(
                     direct_folder(copy, source, stat.identity, parent, name, workers)
                 });
             }
-            let staged = stage_folder(
-                copy,
-                source,
-                stat.identity,
-                parent,
-                HiddenName::Copy,
-                workers,
-            )?;
+            let staged = stage_folder(copy, source, stat.identity, parent, workers)?;
             publish_folder(copy, staged, name, taken, workers)
         }
         _ => Err(Failure::NotCopyable),
@@ -892,27 +885,26 @@ fn copy_special(
         None => StageContent::Fifo,
     };
     // These creation syscalls return no descriptor; retain ownership in a private stage.
-    let staged =
-        StagedSibling::create(parent.clone(), HiddenName::Copy, content).map_err(|error| {
-            match error {
-                PlaceError::Io(error)
-                    if stat.kind == FileType::Fifo && tree::refuses_node(FileType::Fifo, error) =>
-                {
-                    Failure::NotCopyable
-                }
-                // The stage's name is valid everywhere, unlike the target.
-                PlaceError::Io(error)
-                    if link
-                        && (tree::refuses_node(FileType::Symlink, error)
-                            || matches!(error, Errno::INVAL | Errno::ILSEQ)) =>
-                {
-                    let refused = Failure::LinkRefused(error);
-                    copy.refused_link(&site, &refused);
-                    refused
-                }
-                error => error.into(),
+    let staged = StagedSibling::create(parent.clone(), content).map_err(|error| {
+        match error {
+            PlaceError::Io(error)
+                if stat.kind == FileType::Fifo && tree::refuses_node(FileType::Fifo, error) =>
+            {
+                Failure::NotCopyable
             }
-        })?;
+            // The stage's name is valid everywhere, unlike the target.
+            PlaceError::Io(error)
+                if link
+                    && (tree::refuses_node(FileType::Symlink, error)
+                        || matches!(error, Errno::INVAL | Errno::ILSEQ)) =>
+            {
+                let refused = Failure::LinkRefused(error);
+                copy.refused_link(&site, &refused);
+                refused
+            }
+            error => error.into(),
+        }
+    })?;
     let prepared = (|| {
         let at = Entry::new(&**parent, &staged.name);
         if stat.kind == FileType::Fifo {
@@ -1032,11 +1024,7 @@ fn copy_stage(
             if !copy.names.profiles.holds_link_to(&site, &link) {
                 return Err(Failure::LinkRefused(Errno::ILSEQ));
             }
-            let staged = match StagedSibling::create(
-                parent,
-                HiddenName::Replacement,
-                StageContent::Symlink(link),
-            ) {
+            let staged = match StagedSibling::create(parent, StageContent::Symlink(link)) {
                 // The stage's name is valid everywhere, unlike the target.
                 Err(PlaceError::Io(error))
                     if tree::refuses_node(FileType::Symlink, error)
@@ -1065,14 +1053,7 @@ fn copy_stage(
         }
         FileType::Directory => {
             let workers = workers.unwrap_or_else(|| worker_count(source, &parent));
-            stage_folder(
-                copy,
-                source,
-                stat.identity,
-                &parent,
-                HiddenName::Replacement,
-                workers,
-            )
+            stage_folder(copy, source, stat.identity, &parent, workers)
         }
         _ => Err(Failure::NotCopyable),
     }
@@ -1093,11 +1074,10 @@ fn stage_folder(
     source: &Source,
     expected: LocalFileIdentity,
     parent: &Arc<OwnedFd>,
-    hidden: HiddenName,
     workers: usize,
 ) -> Result<StagedSibling, Failure> {
     copy.check_cancelled()?;
-    let mut staged = StagedSibling::create(parent.clone(), hidden, StageContent::Directory)?;
+    let mut staged = StagedSibling::create(parent.clone(), StageContent::Directory)?;
     let root = Root {
         parent: parent.clone(),
         name: staged.name.clone(),
@@ -2371,15 +2351,6 @@ enum FileTarget<'a> {
     Hidden,
 }
 
-impl FileTarget<'_> {
-    fn stage_name(self) -> HiddenName {
-        match self {
-            Self::Final(..) => HiddenName::Copy,
-            Self::Hidden => HiddenName::Replacement,
-        }
-    }
-}
-
 struct Stage {
     name: OsString,
     created: EntryStat,
@@ -2521,7 +2492,7 @@ impl<'a> FileCopy<'a> {
                     _ => Errno::EXIST,
                 })
             }
-            FileTarget::Hidden => placement::reserve_hidden_name(HiddenName::Replacement, |name| {
+            FileTarget::Hidden => placement::reserve_hidden_name(HiddenName::Copy, |name| {
                 link_tmpfile(fs, &self.target, tmpfile, self.at(name)).map_err(|error| {
                     match placement::file_creation_error(error) {
                         PlaceError::Exists => PlaceError::Exists,
@@ -2591,7 +2562,7 @@ impl<'a> FileCopy<'a> {
         parent: &EntryStat,
         target: FileTarget<'_>,
     ) -> Result<(OsString, LocalFileIdentity), Failure> {
-        let (fd, stage) = self.create_stage(target)?;
+        let (fd, stage) = self.create_stage()?;
         let copied = self
             .copy
             .copy_data(
@@ -2622,7 +2593,7 @@ impl<'a> FileCopy<'a> {
         parent: &EntryStat,
         target: FileTarget<'_>,
     ) -> Result<(OsString, LocalFileIdentity), Failure> {
-        let (fd, stage) = self.create_stage(target)?;
+        let (fd, stage) = self.create_stage()?;
         let copied = self
             .read_into(source, fd.as_fd(), parent)
             .and_then(|snapshot| {
@@ -2644,9 +2615,8 @@ impl<'a> FileCopy<'a> {
         }
     }
 
-    fn create_stage(&self, target: FileTarget<'_>) -> Result<(OwnedFd, Stage), Failure> {
-        let (name, (fd, created)) =
-            stage::create_file(self.copy.fs, self.dir, target.stage_name())?;
+    fn create_stage(&self) -> Result<(OwnedFd, Stage), Failure> {
+        let (name, (fd, created)) = stage::create_file(self.copy.fs, self.dir)?;
         Ok((fd, Stage { name, created }))
     }
 

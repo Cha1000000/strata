@@ -1697,13 +1697,14 @@ fn an_original_that_cannot_be_deleted_fails_its_replacing_move() -> Result<(), B
     fs::write(destination.join("notes.txt"), b"old")?;
     let (watched, foreign) = (destination.clone(), root.path().join("foreign"));
     let racer: super::fs_quirks::Racer = Box::new(move || {
-        let aside = fs::read_dir(&watched)
+        let originals = fs::read_dir(&watched)
             .expect("list the destination")
             .filter_map(Result::ok)
             .find(|entry| entry.file_name().to_string_lossy().starts_with(".strata-"))
             .expect("the original is aside");
         fs::write(&foreign, b"foreign").expect("write the foreign file");
-        fs::rename(&foreign, aside.path()).expect("put it at the original's name");
+        fs::rename(&foreign, originals.path().join("notes.txt"))
+            .expect("put it at the original's name");
     });
     let _sources = FsQuirks::install(&sources, Quirks::default());
     let _destination = FsQuirks::install(

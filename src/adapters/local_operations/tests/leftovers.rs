@@ -134,6 +134,8 @@ fn an_unplug_after_setting_aside_keeps_the_original_under_its_name() -> Result<(
         assert_eq!(fs::read(&source)?, b"new", "{row}");
         for name in names(root.path())? {
             if name != originals && name != "source" {
+                let class = classify(OsStr::new(&name));
+                assert_eq!(class, Some(Leftover::IncompleteCopy), "{row}: {name}");
                 assert_eq!(fs::read(root.path().join(&name))?, b"new", "{row}: {name}");
             }
         }
@@ -179,5 +181,94 @@ fn an_unplug_mid_case_only_rename_keeps_the_old_spelling() -> Result<(), Box<dyn
             error: PlaceError::Unconfirmed,
         })
     );
+    Ok(())
+}
+
+#[test]
+fn an_unplug_after_an_exchange_leaves_no_original_at_a_stage() -> Result<(), Box<dyn Error>> {
+    let _serial = serial()?;
+    let root = tempfile::tempdir()?;
+    let source = root.path().join("source");
+    let target = root.path().join("target");
+    fs::write(&source, b"new")?;
+    fs::write(&target, b"old")?;
+    let scope = FsQuirks::install(
+        root.path(),
+        Quirks {
+            trash: Trash::Unsupported,
+            unplugged_after: Some((Op::Exchange, "target", 0)),
+            ..Quirks::ext4()
+        },
+    );
+
+    let result = glib::MainContext::default().block_on(replace_local(
+        gio::File::for_path(&source),
+        gio::File::for_path(&target),
+        false,
+        gio::Cancellable::new(),
+        None,
+    ));
+
+    assert!(result.is_err());
+    scope.replug();
+    let (originals, inside) = originals_in(root.path())?;
+    assert_eq!(
+        names(root.path())?,
+        [originals.as_str(), "source", "target"]
+    );
+    assert_eq!(inside, ["target"]);
+    assert_eq!(
+        fs::read(root.path().join(&originals).join("target"))?,
+        b"old"
+    );
+    assert_eq!(fs::read(&target)?, b"new");
+    Ok(())
+}
+
+#[test]
+fn a_refused_exchange_sets_the_original_aside_after_moving_the_copy_back()
+-> Result<(), Box<dyn Error>> {
+    let _serial = serial()?;
+    let root = tempfile::tempdir()?;
+    let source = root.path().join("source");
+    let target = root.path().join("target");
+    fs::write(&source, b"new")?;
+    fs::write(&target, b"old")?;
+    // Unplugged once the original is aside: the copy went into a folder for the
+    // exchange, came back to its stage name, and the original took its place.
+    let scope = FsQuirks::install(
+        root.path(),
+        Quirks {
+            trash: Trash::Unsupported,
+            fail: vec![(Op::Exchange, "*", 0, Errno::INVAL)],
+            unplugged_after: Some((Op::Rename, "target", 2)),
+            ..Quirks::ext4()
+        },
+    );
+
+    let result = glib::MainContext::default().block_on(replace_local(
+        gio::File::for_path(&source),
+        gio::File::for_path(&target),
+        false,
+        gio::Cancellable::new(),
+        None,
+    ));
+
+    assert!(result.is_err());
+    assert_eq!(scope.count(Op::Exchange), 1);
+    scope.replug();
+    let (originals, inside) = originals_in(root.path())?;
+    assert_eq!(inside, ["target"]);
+    assert_eq!(
+        fs::read(root.path().join(&originals).join("target"))?,
+        b"old"
+    );
+    let left = names(root.path())?;
+    let [stage, ..] = left.as_slice() else {
+        return Err(format!("the copy stays at its stage: {left:?}").into());
+    };
+    assert_eq!(classify(OsStr::new(stage)), Some(Leftover::IncompleteCopy));
+    assert_eq!(fs::read(root.path().join(stage))?, b"new");
+    assert_eq!(left, [stage.as_str(), originals.as_str(), "source"]);
     Ok(())
 }

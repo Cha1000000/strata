@@ -52,7 +52,6 @@ use crate::{
         },
         volume::{Family, MountKey, NameProfile},
     },
-    model::hidden_names::HiddenName,
     services::{IdentityTraits, KeptCause, Proof, RenameCause, SpecialKind},
 };
 
@@ -1414,8 +1413,7 @@ impl Live {
     ) -> Result<(), Failure> {
         let fs = tree.copy.fs;
         tree.copy.check_cancelled()?;
-        let staged =
-            StagedSibling::create(self.dir.clone(), HiddenName::Copy, StageContent::Directory)?;
+        let staged = StagedSibling::create(self.dir.clone(), StageContent::Directory)?;
         let (name, identity) = (staged.name.clone(), staged.identity);
         lock(&tree.stages).push(staged);
         let dir = fs.open_dir(Entry::new(&*self.dir, &name))?;

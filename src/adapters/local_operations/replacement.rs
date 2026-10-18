@@ -15,7 +15,7 @@ use gtk::{gio, glib, prelude::*};
 
 use super::{
     owed::{Deletion, Owed},
-    placement::{Displacement, PlaceError, RenameFailure},
+    placement::{Displacement, Exchanged, PlaceError, RenameFailure},
 };
 use std::{
     collections::{HashMap, HashSet},
@@ -64,12 +64,8 @@ pub(super) struct StagedSibling {
 }
 
 impl StagedSibling {
-    pub(super) fn create(
-        parent: Arc<OwnedFd>,
-        hidden: HiddenName,
-        content: StageContent,
-    ) -> Result<Self, PlaceError> {
-        let (name, identity) = placement::reserve_hidden_name(hidden, |name| {
+    pub(super) fn create(parent: Arc<OwnedFd>, content: StageContent) -> Result<Self, PlaceError> {
+        let (name, identity) = placement::reserve_hidden_name(HiddenName::Copy, |name| {
             let entry = Entry::new(&*parent, name);
             let made = match &content {
                 StageContent::Directory => {
@@ -449,12 +445,10 @@ pub(super) fn set_aside_failure(failure: RenameFailure, name: &str) -> glib::Err
     }
 }
 
-/// An original kept under a hidden name until its replacement is safe on disk.
+/// An original kept in an originals folder until its replacement is safe on disk.
 pub(super) struct DisplacedOriginal {
     pub(super) parent: OffMain<Arc<OwnedFd>>,
-    /// The folder of the operation's own it is kept in, under its own name;
-    /// without one, it sits in `parent` at a hidden `name`.
-    pub(super) originals: Option<placement::Originals>,
+    pub(super) originals: placement::Originals,
     pub(super) name: OsString,
     pub(super) identity: LocalFileIdentity,
 }
@@ -463,16 +457,14 @@ impl DisplacedOriginal {
     pub(super) fn aside(parent: Arc<OwnedFd>, aside: placement::SetAside) -> Self {
         Self {
             parent: OffMain::new(parent),
-            originals: Some(aside.originals),
+            originals: aside.originals,
             name: aside.name,
             identity: aside.identity,
         }
     }
 
     pub(super) fn kept_in(&self) -> &OsStr {
-        self.originals
-            .as_ref()
-            .map_or(&self.name, |originals| &originals.name)
+        &self.originals.name
     }
 }
 
@@ -486,17 +478,6 @@ pub(super) async fn remove_displaced_original(
         name,
         identity,
     } = original;
-    let Some(originals) = originals else {
-        return parallel_delete_local(
-            vec![PinnedEntry {
-                parent: parent.into_inner(),
-                name,
-                identity: Some(identity),
-            }],
-            gio::Cancellable::new(),
-        )
-        .await;
-    };
     let roots = vec![PinnedEntry {
         parent: originals.handle(),
         name,
@@ -692,15 +673,16 @@ pub(super) async fn replace_through_stage(
                 .await
             }
             Removal::Without(Displacement::Exchange) => {
-                let stage_name = staged.name.clone();
+                let (stage_name, copy) = (staged.name.clone(), staged.identity);
                 let exchanged = run_blocking(move || {
                     let target = Entry::new(&*parent, &step_plan.target_name);
                     let current =
                         ensure_unchanged(target, &step_plan.target, &step_plan.target_pin)?;
                     let name = step_plan.target_display();
-                    match placement::exchange(fs(), Entry::new(&*parent, &stage_name), target) {
-                        Ok(true) => Ok(Ok(current.identity)),
-                        Ok(false) => displacement_or_refusal(
+                    let stage = Entry::new(&*parent, &stage_name);
+                    match placement::exchange_through(fs(), stage, target, copy) {
+                        Ok(Exchanged::Swapped(originals)) => Ok(Ok((originals, current.identity))),
+                        Ok(Exchanged::Refused) => displacement_or_refusal(
                             placement::set_aside_if_safe(
                                 fs(),
                                 parent.as_fd(),
@@ -714,7 +696,7 @@ pub(super) async fn replace_through_stage(
                 })
                 .await;
                 match exchanged {
-                    Ok(Ok(original)) => {
+                    Ok(Ok((originals, original))) => {
                         if let Some(sources) = &mut copied.0 {
                             sources.copied_to(copy_engine::published(
                                 staged.parent.clone(),
@@ -726,8 +708,8 @@ pub(super) async fn replace_through_stage(
                             original: ReplacedOriginal::Deleted,
                             displaced: Some(DisplacedOriginal {
                                 parent: OffMain::new(staged.parent),
-                                originals: None,
-                                name: staged.name,
+                                originals,
+                                name: plan.target_name.clone(),
                                 identity: original,
                             }),
                             placed: None,

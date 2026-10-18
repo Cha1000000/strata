@@ -16,8 +16,8 @@ use super::super::{
     },
     owed::{Deletion, Owed},
     placement::{
-        Displacement, NUMBERED_NAME_ATTEMPTS, PlaceError, RenameFailure,
-        displacement_without_trash, exchange, file_creation_error, place_staged, put_back,
+        Displacement, Exchanged, NUMBERED_NAME_ATTEMPTS, PlaceError, RenameFailure,
+        displacement_without_trash, exchange_through, file_creation_error, place_staged, put_back,
         remove_if_unchanged, reserve_hidden_name, set_aside, set_aside_if_safe,
     },
     placement_reason,
@@ -221,7 +221,7 @@ impl Publication {
             },
         };
 
-        let (name, file) = reserve_hidden_name(HiddenName::Compression, |name| {
+        let (name, file) = reserve_hidden_name(HiddenName::Copy, |name| {
             fs().create_exclusive(
                 Entry::new(&*parent, name),
                 rustix::fs::Mode::from_raw_mode(0o600),
@@ -347,14 +347,16 @@ impl Publication {
         current: &EntryStat,
     ) -> Result<Published, ArchiveError> {
         let target = Entry::new(&*stage.parent, OsStr::new(&self.name));
-        match exchange(fs(), stage.entry(), target) {
-            Ok(true) => Ok(self.published(Displaced::Aside(DisplacedOriginal {
-                parent: OffMain::new(stage.parent.clone()),
-                originals: None,
-                name: stage.name.clone(),
-                identity: current.identity,
-            }))),
-            Ok(false) => match set_aside_if_safe(fs(), stage.parent.as_fd(), false) {
+        match exchange_through(fs(), stage.entry(), target, stage.identity) {
+            Ok(Exchanged::Swapped(originals)) => {
+                Ok(self.published(Displaced::Aside(DisplacedOriginal {
+                    parent: OffMain::new(stage.parent.clone()),
+                    originals,
+                    name: OsString::from(&self.name),
+                    identity: current.identity,
+                })))
+            }
+            Ok(Exchanged::Refused) => match set_aside_if_safe(fs(), stage.parent.as_fd(), false) {
                 Ok(Some(_)) => self.publish_after_set_aside(stage, current),
                 Ok(None) => Err(self.cannot_replace_safely()),
                 Err(error) => Err(self.creation_failed(placement_reason(error))),

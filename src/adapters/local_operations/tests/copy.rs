@@ -2872,13 +2872,13 @@ fn only_entry(folder: &Path, prefix: &str) -> PathBuf {
 }
 
 fn only_stage(root: &Path) -> PathBuf {
-    only_entry(root, ".strata-replacement-")
+    only_entry(root, ".strata-copy-")
 }
 
 /// A folder put at a file stage's name gets the stage's inode number back.
 fn reusing_stage_inodes(before: (Op, &'static str, usize, Racer)) -> Quirks {
     Quirks {
-        reused_inodes: Some(".strata-replacement-*"),
+        reused_inodes: Some(".strata-copy-*"),
         no_birth_time: true,
         before: vec![before],
         ..Quirks::without_placement()
@@ -2898,7 +2898,7 @@ fn a_stage_left_after_the_exclusive_copy_is_reported() -> Result<(), Box<dyn Err
     // Two stats decide publication; the third is the discard.
     let _scope = FsQuirks::install(
         root.path(),
-        reusing_stage_inodes((Op::Stat, ".strata-replacement-*", 2, racer)),
+        reusing_stage_inodes((Op::Stat, ".strata-copy-*", 2, racer)),
     );
     let staged = stage(root.path(), false)?;
     let staged_path = root.path().join(&staged.name);
@@ -2932,7 +2932,7 @@ fn a_stage_swapped_before_publication_is_neither_published_nor_deleted()
     });
     let _scope = FsQuirks::install(
         root.path(),
-        reusing_stage_inodes((Op::Rename, ".strata-replacement-*", 0, racer)),
+        reusing_stage_inodes((Op::Rename, ".strata-copy-*", 0, racer)),
     );
     let staged = stage(root.path(), false)?;
     let staged_path = root.path().join(&staged.name);

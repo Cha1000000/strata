@@ -486,12 +486,49 @@ fn an_archive_replaced_without_trash_deletes_its_original() -> Result<(), Box<dy
         assert_eq!(fs::read(&archive)?, b"replacement");
         assert_eq!(fs::metadata(&archive)?.permissions().mode() & 0o777, 0o640);
         assert_eq!(names(root.path())?, ["existing.zip"]);
+        assert!(quirks.used_name(".strata-originals-*"));
         assert_eq!(
-            quirks.used_name(".strata-originals-*"),
-            sets_aside,
+            quirks.count(Op::Exchange),
+            usize::from(!sets_aside),
             "{trash:?} {fs_type:#x}"
         );
     }
+    Ok(())
+}
+
+#[test]
+fn an_unplug_after_an_exchange_leaves_no_original_at_a_stage() -> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let root = tempfile::tempdir()?;
+    let archive = root.path().join("existing.zip");
+    fs::write(&archive, b"original")?;
+    let quirks = FsQuirks::install(
+        root.path(),
+        Quirks {
+            trash: Trash::Unsupported,
+            fs_type: Some(TMPFS_MAGIC),
+            unplugged_after: Some((Op::Exchange, "existing.zip", 0)),
+            ..Quirks::default()
+        },
+    );
+
+    let (result, _) = publish_replacement(root.path(), TransferConflict::ReplaceExisting);
+
+    assert!(result.is_err());
+    quirks.replug();
+    let names = names(root.path())?;
+    let [originals, published] = names.as_slice() else {
+        return Err(format!("the original and the archive: {names:?}").into());
+    };
+    assert!(originals.starts_with(".strata-originals-"), "{names:?}");
+    assert_eq!(published, "existing.zip");
+    assert_eq!(
+        fs::read(root.path().join(originals).join("existing.zip"))?,
+        b"original"
+    );
+    assert_eq!(fs::read(&archive)?, b"replacement");
     Ok(())
 }
 
@@ -571,7 +608,10 @@ fn an_archive_replaced_without_trash_is_on_disk_before_its_original_is_deleted()
             .into_iter()
             .find(|name| name != "existing.zip")
             .ok_or("the original is kept")?;
-        assert_eq!(fs::read(root.path().join(&kept))?, b"original");
+        assert_eq!(
+            fs::read(root.path().join(&kept).join("existing.zip"))?,
+            b"original"
+        );
         let Err(ArchiveError::Failed(message)) = result else {
             return Err(format!("{row}: {result:?}").into());
         };
@@ -779,7 +819,7 @@ fn keep_both_numbering_works_with_network_collision_errnos() -> Result<(), Box<d
         } else {
             // SMB with POSIX extensions: the first stage name is held by a folder.
             Quirks {
-                fail: vec![(Op::Create, ".strata-compression-*", 0, Errno::ISDIR)],
+                fail: vec![(Op::Create, ".strata-copy-*", 0, Errno::ISDIR)],
                 ..Quirks::default()
             }
         };
@@ -1103,7 +1143,7 @@ fn staged_archives_are_not_published_after_cancellation_or_close_failure()
             if boundary == "close" {
                 quirks.after.push((
                     Op::Close,
-                    ".strata-compression-*",
+                    ".strata-copy-*",
                     0,
                     Box::new(move || {
                         on_close.store(true, Ordering::Release);
@@ -1112,7 +1152,7 @@ fn staged_archives_are_not_published_after_cancellation_or_close_failure()
             } else if boundary == "close error" {
                 quirks
                     .fail
-                    .push((Op::Close, ".strata-compression-*", 0, Errno::IO));
+                    .push((Op::Close, ".strata-copy-*", 0, Errno::IO));
             }
             let _scope = FsQuirks::install(root.path(), quirks);
             let on_write = cancelled.clone();

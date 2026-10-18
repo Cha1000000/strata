@@ -991,20 +991,30 @@ pub(super) fn move_aside(
     expected: LocalFileIdentity,
     attributes: Option<Attributes>,
 ) -> Result<(LocalFileIdentity, Option<Attributes>), PlaceError> {
-    match fs.stat(from, false) {
-        Ok(current) if current.identity == expected => {}
+    let current = match fs.stat(from, false) {
+        Ok(current)
+            if current.identity == expected
+                || native_fs::unchanged(
+                    mount_profile::identity_at(fs, from.dir),
+                    expected,
+                    attributes,
+                    &current,
+                ) =>
+        {
+            current.identity
+        }
         Ok(_) | Err(Errno::NOENT) => return Err(PlaceError::Changed),
         Err(error) => return Err(PlaceError::Io(error)),
-    }
+    };
     match fs.rename(from, to, RenameFlags::empty()) {
-        Ok(()) => verified(fs, to, Some(expected), Ok(Placed::Renamed)),
+        Ok(()) => verified(fs, to, Some(current), Ok(Placed::Renamed)),
         Err(Errno::XDEV) => Err(PlaceError::CrossDevice),
         Err(error) if may_have_lost_reply(error) => {
-            resolve(fs, from, to, Some(expected), error).map(|()| Placed::Renamed)
+            resolve(fs, from, to, Some(current), error).map(|()| Placed::Renamed)
         }
         Err(error) => Err(PlaceError::Io(error)),
     }
-    .map(|_| (expected, attributes))
+    .map(|_| (current, attributes))
 }
 
 pub(super) fn set_aside(
@@ -1178,6 +1188,46 @@ pub(super) fn exchange(fs: &dyn FsOps, from: Entry<'_>, to: Entry<'_>) -> Result
         }
         Err(Errno::XDEV) => Err(PlaceError::CrossDevice),
         Err(error) => Err(PlaceError::Io(error)),
+    }
+}
+
+pub(super) enum Exchanged {
+    Swapped(Originals),
+    Refused,
+}
+
+pub(super) fn exchange_through(
+    fs: &dyn FsOps,
+    stage: Entry<'_>,
+    target: Entry<'_>,
+    copy: LocalFileIdentity,
+) -> Result<Exchanged, PlaceError> {
+    // A read-only folder cannot change parent; set-aside publishes the copy in place.
+    let denied = |error| matches!(error, PlaceError::Io(Errno::ACCESS | Errno::PERM));
+    let originals = Originals::create(fs, target.dir)?;
+    let parked = originals.entry(target.name);
+    let copy = match move_aside(fs, stage, parked, copy, None) {
+        Ok((copy, _)) => copy,
+        Err(error) => {
+            if error != PlaceError::Unconfirmed {
+                let _ = originals.remove(fs, target.dir, &Deadline::default());
+            }
+            return if denied(error) {
+                Ok(Exchanged::Refused)
+            } else {
+                Err(error)
+            };
+        }
+    };
+    let exchanged = exchange(fs, parked, target);
+    if let Ok(true) = exchanged {
+        return Ok(Exchanged::Swapped(originals));
+    }
+    place(fs, parked, stage, Some(copy))?;
+    let _ = originals.remove(fs, target.dir, &Deadline::default());
+    match exchanged {
+        Err(error) if !denied(error) => Err(error),
+        _ => Ok(Exchanged::Refused),
     }
 }
 

@@ -166,12 +166,9 @@ pub(super) fn renamed_beneath(
 
 fn file_stage(root: &Path) -> Result<super::StagedSibling, Box<dyn Error>> {
     let parent = Arc::new(open_local_parent_directory(root)?);
-    let (name, (_, created)) = super::copy_engine::stage::create_file(
-        super::fs_ops::fs(),
-        parent.as_fd(),
-        HiddenName::Replacement,
-    )
-    .map_err(|error| format!("{error:?}"))?;
+    let (name, (_, created)) =
+        super::copy_engine::stage::create_file(super::fs_ops::fs(), parent.as_fd())
+            .map_err(|error| format!("{error:?}"))?;
     Ok(super::StagedSibling {
         ownership: None,
         parent,
@@ -186,10 +183,7 @@ fn staged(
     content: super::StageContent,
 ) -> Result<super::StagedSibling, Box<dyn Error>> {
     let parent = Arc::new(open_local_parent_directory(root)?);
-    Ok(
-        super::StagedSibling::create(parent, HiddenName::Replacement, content)
-            .map_err(|error| format!("{error:?}"))?,
-    )
+    Ok(super::StagedSibling::create(parent, content).map_err(|error| format!("{error:?}"))?)
 }
 
 use super::{

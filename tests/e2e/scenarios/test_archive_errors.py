@@ -40,7 +40,7 @@ def test_cancel_compression_stops_before_publishing_and_allows_another_operation
         "compression worker to stop and report cancellation",
     )
     assert not strata.window.find(role="progress bar")
-    assert not list(fixture.root.glob(".strata-compression-*"))
+    assert not list(fixture.root.glob(".strata-copy-*"))
     assert not list(fixture.root.glob("*.7z"))
     assert not list(fixture.root.glob("*.tar.gz"))
     assert fixture.path("payload.bin").stat().st_size == payload_size

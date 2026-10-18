@@ -109,7 +109,7 @@ pub(super) fn test_file_entry(path: &Path) -> FileEntry {
     }
 }
 
-pub(super) const COMPRESSION_STAGE: &str = ".strata-compression-";
+pub(super) const COMPRESSION_STAGE: &str = ".strata-copy-";
 pub(super) const EXTRACTION_STAGE: &str = ".strata-extraction-";
 
 pub(super) fn stages(destination: &Path, prefix: &str) -> Result<Vec<OsString>, Box<dyn Error>> {

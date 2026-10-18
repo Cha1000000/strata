@@ -113,9 +113,8 @@ fn fold(name: &OsStr) -> Option<String> {
 pub(in crate::adapters::local_operations) fn create_file(
     fs: &dyn FsOps,
     dir: BorrowedFd<'_>,
-    hidden: HiddenName,
 ) -> Result<(OsString, (OwnedFd, EntryStat)), PlaceError> {
-    placement::reserve_hidden_name(hidden, |name| {
+    placement::reserve_hidden_name(HiddenName::Copy, |name| {
         let entry = Entry { dir, name };
         let fd = match fs.create_exclusive(entry, Mode::from_raw_mode(0o600)) {
             Ok(fd) => fd,
