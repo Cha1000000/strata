@@ -394,6 +394,7 @@ fn local(inode: u64) -> DirectoryStamp {
 struct Clock {
     browser: Rc<Browser>,
     start: Instant,
+    asleep: Cell<Duration>,
 }
 
 impl Clock {
@@ -401,16 +402,23 @@ impl Clock {
         let clock = Self {
             browser: browser.clone(),
             start: Instant::now(),
+            asleep: Cell::new(Duration::ZERO),
         };
         clock.at(0);
         clock
     }
 
     fn at(&self, seconds: u64) {
+        let awake = Duration::from_secs(seconds);
         self.browser
             .freshness
             .clock
-            .set(Some(self.start + Duration::from_secs(seconds)));
+            .set(Some((self.start + awake, awake + self.asleep.get())));
+    }
+
+    fn sleep(&self, seconds: u64) {
+        self.asleep
+            .set(self.asleep.get() + Duration::from_secs(seconds));
     }
 
     fn tick_at(&self, seconds: u64) {
@@ -569,11 +577,10 @@ fn checks_stop_while_hidden_and_resume_on_focus() {
         presence: Presence::Focused,
         ..browser.freshness_input()
     });
-    clock.tick_at(16);
     let checked_on_focus = source.checks_of(&share);
-    clock.tick_at(18);
+    clock.tick_at(17);
     let checked_before_the_focused_interval = source.checks_of(&share);
-    clock.tick_at(19);
+    clock.tick_at(18);
 
     assert_eq!(armed_while_hidden, None);
     assert_eq!(
@@ -621,6 +628,163 @@ fn power_saver_slows_focused_checks_and_stops_unfocused_ones() {
     assert_eq!((before_four_intervals, at_four_intervals), (0, 1));
     assert_eq!((armed_unfocused, unfocused), (None, 1));
     assert_eq!(source.checks_of(&share), 2);
+}
+
+#[derive(Clone, Copy)]
+enum Blocker {
+    InlineEdit,
+    Operation,
+}
+
+#[test]
+fn focus_after_thirty_seconds_relists_visible_checked_folders() {
+    let mut failures = Vec::new();
+    for (row, away, asleep, blocker, expected) in [
+        ("away 29 s", 29, 0, None, (1, 1, 1)),
+        ("away 30 s", 30, 0, None, (0, 2, 2)),
+        (
+            "away 20 s around 8 h asleep",
+            20,
+            8 * 3_600,
+            None,
+            (0, 2, 2),
+        ),
+        (
+            "an inline edit open at focus",
+            40,
+            0,
+            Some(Blocker::InlineEdit),
+            (1, 1, 2),
+        ),
+        (
+            "an operation writing into the folder at focus",
+            40,
+            0,
+            Some(Blocker::Operation),
+            (0, 1, 2),
+        ),
+    ] {
+        let source = Rc::new(Folders::default());
+        let home = source.add("/freshness/focus", local(1), Some(Watching::Live));
+        let nas = source.add("/freshness/focus/nas", network(2), Some(Watching::Live));
+        let (browser, clock) = browser_on(&source);
+        let editing = Rc::new(Cell::new(false));
+        let held = editing.clone();
+        browser.set_freshness_hold(move || held.get());
+        let focus = |presence| {
+            browser.set_freshness(FreshnessInput {
+                presence,
+                ..browser.freshness_input()
+            });
+        };
+        focus(Presence::Focused);
+        browser.navigate(home.clone());
+        browser.show_child(0, nas.clone());
+        clock.at(1);
+        focus(Presence::Visible);
+        clock.sleep(asleep);
+
+        clock.at(1 + away);
+        editing.set(matches!(blocker, Some(Blocker::InlineEdit)));
+        let folder = nas.native_path().expect("a native folder").to_path_buf();
+        let activity = matches!(blocker, Some(Blocker::Operation)).then(|| {
+            file_activity::begin(OperationScope {
+                roots: vec![folder.join("listed")],
+                folders: vec![folder],
+            })
+        });
+        focus(Presence::Focused);
+        let at_focus = (source.checks_of(&nas), source.loads_of(&nas));
+        editing.set(false);
+        drop(activity);
+        for second in 2 + away..=61 + away {
+            clock.tick_at(second);
+        }
+
+        let got = (at_focus.0, at_focus.1, source.loads_of(&nas));
+        if got != expected || source.loads_of(&home) != 1 {
+            failures.push(format!(
+                "{row}: got (checks at focus, network loads at focus, network loads a minute \
+                 later) {got:?} and {} home loads, expected {expected:?} and 1",
+                source.loads_of(&home)
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn a_focus_relist_waits_for_the_relist_duty_cycle() {
+    let mut failures = Vec::new();
+    for (row, finished, left, back, changed, floor, checks) in [
+        ("back after 1 s to a change", 13, 14, 15, true, 113, 2),
+        ("back after 30 s", 13, 14, 44, false, 113, 2),
+        (
+            "back after 30 s while the re-list runs",
+            36,
+            4,
+            34,
+            false,
+            366,
+            1,
+        ),
+    ] {
+        let source = Rc::new(Folders::default());
+        let share = source.add("/freshness/duty", network(1), Some(Watching::Live));
+        let (browser, clock) = browser_on(&source);
+        let focus = |presence| {
+            browser.set_freshness(FreshnessInput {
+                presence,
+                ..browser.freshness_input()
+            });
+        };
+        let finish = || {
+            source.finish_held_loads();
+            source.hold_loads.set(false);
+        };
+        focus(Presence::Focused);
+        browser.navigate(share.clone());
+        source.change(&share, &["listed", "a"]);
+        source.hold_loads.set(true);
+        clock.tick_at(3);
+        if finished < left {
+            clock.at(finished);
+            finish();
+        }
+        if changed {
+            source.change(&share, &["listed", "a", "b"]);
+        }
+        clock.at(left);
+        focus(Presence::Visible);
+
+        clock.at(back);
+        focus(Presence::Focused);
+        let on_return = source.loads_of(&share);
+        if finished > back {
+            clock.at(finished);
+            finish();
+        }
+        for second in back.max(finished) + 1..floor {
+            clock.tick_at(second);
+        }
+        let before_the_floor = (source.loads_of(&share), source.checks_of(&share));
+        clock.tick_at(floor);
+
+        let got = (
+            on_return,
+            before_the_floor.0,
+            source.loads_of(&share),
+            before_the_floor.1,
+        );
+        let expected = (2, 2, 3, checks);
+        if got != expected {
+            failures.push(format!(
+                "{row}: got (loads on return, before {floor} s, at {floor} s, checks before \
+                 {floor} s) {got:?}, expected {expected:?}"
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
 #[test]

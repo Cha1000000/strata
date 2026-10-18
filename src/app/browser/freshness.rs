@@ -26,6 +26,7 @@ const UNCHANGED_BEFORE_SLOWING: u32 = 20;
 const MOST_SLOWING: u32 = 4;
 const POWER_SAVER_SLOWING: u32 = 4;
 const UNREACHABLE_RETRY: Duration = Duration::from_secs(30);
+const RELIST_AFTER_AWAY: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum Presence {
@@ -62,6 +63,7 @@ pub(super) struct ColumnFreshness {
     baseline: Option<DirectoryStamp>,
     listing: Option<Listing>,
     next_due: Option<Instant>,
+    quiet_until: Option<Instant>,
     confirm_at: Option<Instant>,
     confirming: bool,
     relist: bool,
@@ -95,17 +97,44 @@ pub(super) struct Freshness {
     input: Cell<FreshnessInput>,
     hold: RefCell<Option<Rc<dyn Fn() -> bool>>>,
     armed_for: Cell<Option<Instant>>,
+    left_focus: Cell<Option<Duration>>,
     timer: RefCell<Option<glib::SourceId>>,
     jobs: RefCell<Vec<(Rc<Cell<usize>>, LoadHandle)>>,
     #[cfg(test)]
-    clock: Cell<Option<Instant>>,
+    clock: Cell<Option<(Instant, Duration)>>,
 }
 
 impl Browser {
     pub fn set_freshness(self: &Rc<Self>, input: FreshnessInput) {
-        if self.freshness.input.replace(input) != input {
+        let previous = self.freshness.input.replace(input);
+        let focused = |input: FreshnessInput| input.presence == Presence::Focused;
+        if focused(previous) && !focused(input) {
+            self.freshness.left_focus.set(Some(self.boot_clock()));
+        }
+        if !focused(previous) && focused(input) {
+            self.regain_focus();
+        } else if previous != input {
             self.reschedule_freshness();
         }
+    }
+
+    fn regain_focus(self: &Rc<Self>) {
+        let now = self.freshness_now();
+        let reread = self
+            .freshness
+            .left_focus
+            .take()
+            .is_some_and(|left| self.boot_clock().saturating_sub(left) >= RELIST_AFTER_AWAY);
+        for (depth, column) in self.freshness_columns().into_iter().enumerate() {
+            let mut column = column.borrow_mut();
+            if !self.qualifies(depth, &column) {
+                continue;
+            }
+            column.unchanged = 0;
+            column.relist |= reread;
+            column.next_due = Some(now);
+        }
+        self.freshness_tick();
     }
 
     pub fn freshness_input(&self) -> FreshnessInput {
@@ -118,10 +147,20 @@ impl Browser {
 
     fn freshness_now(&self) -> Instant {
         #[cfg(test)]
-        if let Some(now) = self.freshness.clock.get() {
+        if let Some((now, _)) = self.freshness.clock.get() {
             return now;
         }
         Instant::now()
+    }
+
+    // Unlike `Instant`, this clock keeps counting while the computer sleeps.
+    fn boot_clock(&self) -> Duration {
+        #[cfg(test)]
+        if let Some((_, booted)) = self.freshness.clock.get() {
+            return booted;
+        }
+        Duration::try_from(rustix::time::clock_gettime(rustix::time::ClockId::Boottime))
+            .unwrap_or_default()
     }
 
     fn check_interval(&self, unchanged: u32) -> Duration {
@@ -205,11 +244,9 @@ impl Browser {
         let took = listing.as_ref().map_or(Duration::ZERO, |listing| {
             now.saturating_duration_since(listing.started)
         });
-        column.next_due = Some(
-            now + self
-                .check_interval(column.unchanged)
-                .max(took * RELIST_DUTY),
-        );
+        let quiet_until = now + took * RELIST_DUTY;
+        column.quiet_until = Some(quiet_until);
+        column.next_due = Some((now + self.check_interval(column.unchanged)).max(quiet_until));
         listing
     }
 
@@ -251,19 +288,21 @@ impl Browser {
     }
 
     fn watched(&self, depth: usize, column: &ColumnFreshness) -> bool {
-        !column.checking
-            && !matches!(
-                self.state
-                    .borrow()
-                    .columns
-                    .get(depth)
-                    .map(|column| &column.load_state),
-                Some(LoadState::Error(_))
-            )
-            && column
-                .baseline
-                .as_ref()
-                .is_some_and(|baseline| baseline.outside_writers || !self.column_has_monitor(depth))
+        !column.checking && self.qualifies(depth, column)
+    }
+
+    fn qualifies(&self, depth: usize, column: &ColumnFreshness) -> bool {
+        !matches!(
+            self.state
+                .borrow()
+                .columns
+                .get(depth)
+                .map(|column| &column.load_state),
+            Some(LoadState::Error(_))
+        ) && column
+            .baseline
+            .as_ref()
+            .is_some_and(|baseline| baseline.outside_writers || !self.column_has_monitor(depth))
             && match self.freshness.input.get().scope {
                 VisibleDepths::All => true,
                 VisibleDepths::Active => self.active_depth() == Some(depth),
@@ -309,6 +348,7 @@ impl Browser {
             .retain(|(unanswered, _)| unanswered.get() > 0);
         let mut groups: Vec<(Option<MountToken>, Vec<Checked>)> = Vec::new();
         if self.checking() {
+            self.start_relists();
             for (depth, column) in self.freshness_columns().into_iter().enumerate() {
                 let Some(location) = self.location_at(depth) else {
                     continue;
@@ -430,10 +470,15 @@ impl Browser {
                 Finding::Unchanged => column.unchanged.saturating_add(1),
                 _ => 0,
             };
+            let at_interval = now + self.check_interval(column.unchanged);
             column.next_due = match finding {
                 Finding::Unsupported => None,
                 Finding::Unreachable => Some(now + UNREACHABLE_RETRY),
-                _ => Some(now + self.check_interval(column.unchanged)),
+                _ => Some(
+                    column
+                        .quiet_until
+                        .map_or(at_interval, |quiet| at_interval.max(quiet)),
+                ),
             };
             (finding, std::mem::take(&mut column.confirming))
         };
@@ -478,6 +523,7 @@ impl Browser {
     }
 
     fn next_relist(&self) -> Option<usize> {
+        let now = self.freshness_now();
         let columns = self.freshness_columns();
         let busy: Vec<MountToken> = columns
             .iter()
@@ -493,26 +539,27 @@ impl Browser {
             .collect();
         for (depth, column) in columns.iter().enumerate() {
             let mut column = column.borrow_mut();
-            if !column.relist || column.mount().is_some_and(|mount| busy.contains(&mount)) {
+            if !column.relist
+                || column.mount().is_some_and(|mount| busy.contains(&mount))
+                || column.quiet_until.is_some_and(|quiet| quiet > now)
+            {
                 continue;
             }
-            column.relist = false;
             if self.settled(depth)
                 && self
                     .location_at(depth)
                     .is_some_and(|location| !Self::operation_touches(&location))
                 && !self.freshness_held()
             {
+                column.relist = false;
                 return Some(depth);
-            }
-            if std::mem::take(&mut column.confirming) {
-                column.confirm_at = column.next_due;
             }
         }
         None
     }
 
     pub(super) fn reschedule_freshness(self: &Rc<Self>) {
+        let now = self.freshness_now();
         let due = self
             .checking()
             .then(|| {
@@ -521,8 +568,18 @@ impl Browser {
                     .enumerate()
                     .filter_map(|(depth, column)| {
                         let column = column.borrow();
+                        let owed = column
+                            .quiet_until
+                            .filter(|quiet| column.relist && *quiet > now);
                         self.watched(depth, &column)
-                            .then(|| column.next_due.into_iter().chain(column.confirm_at).min())
+                            .then(|| {
+                                column
+                                    .next_due
+                                    .into_iter()
+                                    .chain(column.confirm_at)
+                                    .chain(owed)
+                                    .min()
+                            })
                             .flatten()
                     })
                     .min()
@@ -539,7 +596,7 @@ impl Browser {
         let Some(due) = due.filter(|_| !cfg!(test)) else {
             return;
         };
-        let wait = due.saturating_duration_since(self.freshness_now());
+        let wait = due.saturating_duration_since(now);
         let seconds = u32::try_from(wait.as_secs() + u64::from(wait.subsec_nanos() > 0))
             .unwrap_or(u32::MAX)
             .max(1);
