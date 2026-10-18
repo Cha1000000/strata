@@ -71,6 +71,7 @@ effect at once; **Refresh** does the same after edits made by hand.
 `STRATA_PROVIDER_CATALOG=<directory>` replaces the bundled catalog with a
 directory in the same layout, for developing an entry without rebuilding Strata.
 
+## Transport
 
 The child reads newline-delimited UTF-8 JSON requests on stdin and writes JSON
 responses/events on stdout. Flush each line. Stdin/stdout are a private full-duplex
