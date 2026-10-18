@@ -396,6 +396,10 @@ fn placement_parses_send_to_and_tolerates_future_values_on_any_node() {
         root.children.as_ref().expect("children")[0].sends_to(),
         "a child's placement is the host's to ignore, not a protocol error"
     );
+    let entry = parse("send-to-entry".into()).expect("entry placement");
+    let root = &entry.actions.expect("actions")[0];
+    assert!(root.sends_to());
+    assert_eq!(root.placement, Some(Placement::SendToEntry));
     let future = parse("float-to-top".into()).expect("future placement");
     let root = &future.actions.expect("actions")[0];
     assert!(!root.sends_to());

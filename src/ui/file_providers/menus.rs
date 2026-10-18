@@ -216,6 +216,8 @@ struct ProviderSection {
     provider: usize,
     model: gio::Menu,
     heading: bool,
+    /// Shown in Send to… as its single leaf instead of a submenu.
+    entry: bool,
     nodes: Vec<Node>,
 }
 
@@ -228,7 +230,8 @@ impl ProviderSection {
 }
 
 /// Provider sections of one menu model, in provider order. In Send to…, each
-/// provider is a submenu instead, like a removable drive.
+/// provider is a submenu instead, like a removable drive, or the single entry
+/// it asked for.
 struct Sections {
     model: gio::Menu,
     sections: Vec<ProviderSection>,
@@ -243,8 +246,14 @@ impl Sections {
         popover: Option<gtk::PopoverMenu>,
     ) -> bool {
         let mut changed = false;
+        let submenus = self.submenus;
+        let entry = |actions: &MenuResult| submenus && single_entry(actions);
         for index in (0..self.sections.len()).rev() {
-            if !groups.contains_key(&self.sections[index].provider) {
+            let section = &self.sections[index];
+            if !groups
+                .get(&section.provider)
+                .is_some_and(|actions| entry(actions) == section.entry)
+            {
                 self.sections.remove(index).retire(context);
                 self.model.remove(index as i32);
                 changed = true;
@@ -262,19 +271,29 @@ impl Sections {
                         provider: *provider,
                         model: gio::Menu::new(),
                         heading: false,
+                        entry: entry(actions),
                         nodes: Vec::new(),
                     },
                 );
             }
             let section = &mut self.sections[index];
-            changed |= reconcile(
+            let reconciled = reconcile(
                 context,
                 &section.model,
                 usize::from(section.heading),
                 &mut section.nodes,
                 actions,
             );
-            if new_section {
+            changed |= reconciled;
+            if section.entry {
+                if reconciled {
+                    if !new_section {
+                        self.model.remove(index as i32);
+                    }
+                    self.model
+                        .insert_item(index as i32, &send_to_entry(section));
+                }
+            } else if new_section {
                 if self.submenus {
                     self.model
                         .insert_item(index as i32, &destination_submenu(section));
@@ -341,7 +360,7 @@ impl Renderer {
         for (provider, mut action) in result {
             placed(&mut action, true, self.send_to.is_some());
             let target = match action.placement {
-                Some(Placement::SendTo) => &mut send_to_groups,
+                Some(Placement::SendTo | Placement::SendToEntry) => &mut send_to_groups,
                 Some(Placement::Unrecognized) | None => &mut groups,
             };
             target.entry(provider).or_default().push((provider, action));
@@ -354,6 +373,13 @@ impl Renderer {
         }
         changed
     }
+}
+
+fn single_entry(actions: &MenuResult) -> bool {
+    matches!(
+        actions.as_slice(),
+        [(_, action)] if action.placement == Some(Placement::SendToEntry) && action.children.is_none()
+    )
 }
 
 /// Placement only applies to root actions, and only where Send to… exists.
@@ -400,22 +426,33 @@ fn insert_section(
 
 /// Named and drawn with the provider's artwork, or its category icon.
 fn destination_submenu(section: &ProviderSection) -> gio::MenuItem {
-    let (name, artwork, category) = with_hub(|hub| {
-        let provider = &hub.providers[section.provider];
-        (
-            provider.name.clone(),
-            provider.heading_icon.clone(),
-            provider.category,
-        )
-    });
+    let name = with_hub(|hub| hub.providers[section.provider].name.clone());
     let item = gio::MenuItem::new_submenu(Some(&name.replace('_', "__")), &section.model);
+    set_provider_icon(&item, section.provider);
+    item.set_attribute_value("x-strata-send-to-device", Some(&true.to_variant()));
+    item.set_attribute_value("x-strata-description", Some(&name.to_variant()));
+    item
+}
+
+/// The leaf as the provider labelled it, drawn like a submenu when it has no icon.
+fn send_to_entry(section: &ProviderSection) -> gio::MenuItem {
+    let node = &section.nodes[0];
+    let item = node.item();
+    if node.data.icon.is_none() {
+        set_provider_icon(&item, section.provider);
+    }
+    item
+}
+
+fn set_provider_icon(item: &gio::MenuItem, provider: usize) {
+    let (artwork, category) = with_hub(|hub| {
+        let provider = &hub.providers[provider];
+        (provider.heading_icon.clone(), provider.category)
+    });
     match artwork {
         Some(artwork) => item.set_icon(&artwork),
         None => item.set_icon(&gio::ThemedIcon::new(super::category_icon(category))),
     }
-    item.set_attribute_value("x-strata-send-to-device", Some(&true.to_variant()));
-    item.set_attribute_value("x-strata-description", Some(&name.to_variant()));
-    item
 }
 
 fn heading(icon: &gtk::gdk::Texture, name: &str) -> gtk::Widget {

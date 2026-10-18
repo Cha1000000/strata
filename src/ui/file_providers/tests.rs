@@ -537,6 +537,125 @@ fn send_to_placement_fills_provider_submenus_or_falls_back_to_the_group() {
 }
 
 #[test]
+fn send_to_entry_is_a_single_item_only_while_it_is_the_providers_only_destination() {
+    crate::test_support::gtk_test(
+        "ui::file_providers::tests::send_to_entry_is_a_single_item_only_while_it_is_the_providers_only_destination",
+        || {
+            install_hub();
+            with_hub(|hub| {
+                hub.providers[0].category =
+                    Some(crate::services::integration_catalog::Category::Devices)
+            });
+            let placed = |id: &str, label: &str, placement, children| {
+                let mut action = action(id, label, children);
+                action.placement = Some(placement);
+                action
+            };
+            let string = |model: &gio::MenuModel, index: i32, attribute: &str| {
+                model
+                    .item_attribute_value(index, attribute, None)
+                    .and_then(|value| value.get::<String>())
+            };
+            let group = gio::SimpleActionGroup::new();
+            let model = gio::Menu::new();
+            let send_to = gio::Menu::new();
+            let mut renderer = menus::Renderer::new(
+                (model.clone(), Some(send_to.clone())),
+                group.clone(),
+                glib::WeakRef::new(),
+                glib::WeakRef::new(),
+                (vec!["/file".into()], false),
+                Rc::new(Cell::new(1)),
+                1,
+            );
+            let open = placed("open", "Open", Placement::SendToEntry, None);
+            assert!(renderer.update(vec![(0, open.clone())]));
+            assert_eq!(model.n_items(), 0);
+            assert_eq!(send_to.n_items(), 1);
+            assert_eq!(
+                string(send_to.upcast_ref(), 0, "label").as_deref(),
+                Some("Open")
+            );
+            assert_eq!(
+                string(send_to.upcast_ref(), 0, "action").as_deref(),
+                Some("provider.action-0-open"),
+                "the entry activates directly"
+            );
+            assert!(send_to.item_link(0, "submenu").is_none());
+            assert_eq!(
+                send_to
+                    .item_attribute_value(0, "x-strata-send-to-device", None)
+                    .and_then(|value| value.get::<bool>()),
+                Some(true)
+            );
+            let icon = send_to
+                .item_attribute_value(0, "icon", None)
+                .and_then(|icon| gio::Icon::deserialize(&icon))
+                .and_downcast::<gio::ThemedIcon>()
+                .expect("entry icon");
+            assert_eq!(
+                icon.names().first().map(|name| name.as_str()),
+                Some(crate::assets::icons::SMARTPHONE),
+                "an entry without its own icon is drawn like the provider's submenu"
+            );
+            let leaf = group.lookup_action("action-0-open").expect("entry leaf");
+
+            assert!(renderer.update(vec![(
+                0,
+                placed("open", "LocalSend", Placement::SendToEntry, None)
+            )]));
+            assert_eq!(
+                string(send_to.upcast_ref(), 0, "label").as_deref(),
+                Some("LocalSend")
+            );
+            assert_eq!(group.lookup_action("action-0-open"), Some(leaf.clone()));
+            assert!(leaf.is_enabled());
+
+            let pixel = placed("pixel", "Pixel", Placement::SendTo, None);
+            assert!(renderer.update(vec![(0, open.clone()), (0, pixel.clone())]));
+            assert_eq!(send_to.n_items(), 1);
+            assert_eq!(
+                string(send_to.upcast_ref(), 0, "label").as_deref(),
+                Some("Example Cloud"),
+                "several destinations fall back to the provider submenu"
+            );
+            let submenu = send_to.item_link(0, "submenu").expect("provider submenu");
+            assert_eq!(string(&submenu, 0, "label").as_deref(), Some("Open"));
+            assert_eq!(string(&submenu, 1, "label").as_deref(), Some("Pixel"));
+
+            for single in [
+                pixel,
+                placed(
+                    "open",
+                    "Open",
+                    Placement::SendToEntry,
+                    Some(vec![action("there", "There", None)]),
+                ),
+            ] {
+                renderer.update(vec![(0, single)]);
+                assert_eq!(
+                    string(send_to.upcast_ref(), 0, "label").as_deref(),
+                    Some("Example Cloud"),
+                    "one destination or branch stays in the submenu"
+                );
+                assert!(send_to.item_link(0, "submenu").is_some());
+            }
+
+            assert!(renderer.update(vec![(0, open)]));
+            assert_eq!(
+                string(send_to.upcast_ref(), 0, "label").as_deref(),
+                Some("Open")
+            );
+            assert!(send_to.item_link(0, "submenu").is_none());
+            assert!(renderer.update(Vec::new()));
+            assert_eq!(send_to.n_items(), 0);
+            assert!(group.list_actions().is_empty());
+            HUB.with(|cell| cell.replace(None));
+        },
+    );
+}
+
+#[test]
 fn retired_menu_does_not_remove_replacement_menu_actions() {
     crate::test_support::gtk_test(
         "ui::file_providers::tests::retired_menu_does_not_remove_replacement_menu_actions",

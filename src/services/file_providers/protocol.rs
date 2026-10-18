@@ -88,7 +88,10 @@ pub(crate) struct Decoration {
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum Placement {
+    /// A destination inside the provider's Send to… submenu.
     SendTo,
+    /// The provider's only Send to… item, shown in place of its submenu.
+    SendToEntry,
     #[serde(other)]
     Unrecognized,
 }
@@ -105,7 +108,10 @@ pub(crate) struct MenuAction {
 
 impl MenuAction {
     pub(crate) fn sends_to(&self) -> bool {
-        self.placement == Some(Placement::SendTo)
+        matches!(
+            self.placement,
+            Some(Placement::SendTo | Placement::SendToEntry)
+        )
     }
 }
 

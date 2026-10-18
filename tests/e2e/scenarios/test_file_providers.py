@@ -61,6 +61,8 @@ for line in sys.stdin:
      if (state.parent/'hide-inspect').exists(): result['actions'].pop(0)
     if (state.parent/'send-to').exists():
      result['actions']=[{'id':'pixel','label':'Test phone','placement':'send-to','icon':'badge'}]+([{'id':'tablet','label':'Test tablet','placement':'send-to'}] if mode=='kept' else [])+result['actions']
+    if (state.parent/'send-to-entry').exists():
+     result['actions']=[{'id':'handoff','label':'Hand-off app','placement':'send-to-entry'}]+result['actions']
    elif r['method']=='activate':
     record.write_text(json.dumps(r));state.write_text('kept');result['message']='Test pin accepted'
     if (state.parent/'disconnect').exists(): sys.exit(0)
@@ -163,6 +165,21 @@ def test_send_to_placement_lists_provider_destinations_under_send_to(strata, pro
     strata.wait(lambda: "Send to…" not in strata.menu_items(), "withdrawing the last destination removes Send to…")
     assert {"Open", "Cut", "Copy"}.issubset(strata.menu_items())
     strata.dismiss_menu()
+
+
+def test_send_to_entry_is_activated_directly_from_send_to(strata, provider_registration):
+    (provider_registration / "send-to-entry").touch()
+    strata.open_context_menu("todo.txt")
+    strata.wait(lambda: "Send to…" in strata.menu_items(), "Send to… appears for the entry")
+    strata.pointer.click(strata.menu_item("Send to…"))
+    strata.wait(lambda: "Hand-off app" in strata.menu_items(), "the entry sits directly in Send to…")
+    assert "Example Cloud" not in strata.menu_items(), "no provider submenu wraps the entry"
+    strata.choose_menu_item("Hand-off app")
+    record = provider_registration / "record"
+    strata.wait(record.exists, "entry activated")
+    request = json.loads(record.read_text())
+    assert request["action"] == "handoff"
+    assert request["paths"] == [str(strata.fixture.path("todo.txt"))]
 
 
 @pytest.mark.parametrize("invalidate", [False, True])
