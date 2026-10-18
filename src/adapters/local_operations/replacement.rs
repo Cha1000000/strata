@@ -993,22 +993,24 @@ pub(super) async fn replace_local(
 pub(super) struct MergePlan {
     pub(super) created: Vec<Location>,
     pub(super) overwritten: Vec<Location>,
+    pub(super) originals: HashMap<Location, ItemIdentity>,
     pub(super) placed: HashMap<Location, PlacedSnapshot>,
 }
 
 /// Unsupported native Trash triggers the set-aside fallback.
-pub(super) type StageOverwrite =
-    Rc<dyn Fn(Location, gio::Cancellable) -> Pin<Box<dyn Future<Output = Result<(), TrashError>>>>>;
+pub(super) type StageOverwrite = Rc<
+    dyn Fn(
+        Location,
+        gio::Cancellable,
+    ) -> Pin<Box<dyn Future<Output = Result<Option<ItemIdentity>, TrashError>>>>,
+>;
 
 pub(super) fn trash_stage_overwrite(
     location: Location,
     cancellable: gio::Cancellable,
-) -> Pin<Box<dyn Future<Output = Result<(), TrashError>>>> {
-    Box::pin(async move {
-        trash_with_cleanup(&gio_file_for_location(&location), &cancellable)
-            .await
-            .map(drop)
-    })
+) -> Pin<Box<dyn Future<Output = Result<Option<ItemIdentity>, TrashError>>>> {
+    let file = gio_file_for_location(&location);
+    Box::pin(async move { trash_with_cleanup(&file, &cancellable).await })
 }
 
 pub(super) struct MergeHooks<'a> {
@@ -1219,14 +1221,16 @@ pub(super) async fn merge_owing(
     // Originals go to Trash, or aside where Trash is unavailable, before
     // anything is copied.
     let mut trashed = Vec::new();
+    let mut originals = HashMap::new();
     let mut aside = None;
     for location in &plan.overwritten {
         let staged = if cancellable.is_cancelled() {
             Err(cancelled_local_operation())
         } else {
             match (hooks.stage_overwrite)(location.clone(), cancellable.clone()).await {
-                Ok(()) => {
+                Ok(identity) => {
                     trashed.push(location.clone());
+                    originals.extend(identity.map(|identity| (location.clone(), identity)));
                     Ok(())
                 }
                 Err(error) => match (target_path.as_deref(), location.native_path()) {
@@ -1249,6 +1253,7 @@ pub(super) async fn merge_owing(
         if let Err(error) = staged {
             (hooks.on_merged)(MergePlan {
                 overwritten: trashed,
+                originals,
                 ..MergePlan::default()
             });
             return Err(merge_aside::abandon(aside, error, HashMap::new()).await);
@@ -1303,6 +1308,7 @@ pub(super) async fn merge_owing(
     (hooks.on_merged)(MergePlan {
         created: plan.created,
         overwritten: trashed,
+        originals,
         ..MergePlan::default()
     });
     let mut owed = Owed::default();

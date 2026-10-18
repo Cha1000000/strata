@@ -3373,6 +3373,13 @@ impl OperationProvider for LocalOperationProvider {
                             names.clone(),
                             Some(operation.clone()),
                             &|plan| {
+                                for (location, identity) in plan.originals {
+                                    emit(OperationEvent::ItemTrashed {
+                                        request_id: request.id,
+                                        location,
+                                        identity,
+                                    });
+                                }
                                 emit(OperationEvent::Merged {
                                     request_id: request.id,
                                     source: item.source.clone(),
@@ -4054,10 +4061,13 @@ impl OperationProvider for LocalOperationProvider {
                         physical_path: item.entry.thumbnail_path,
                     })
                     .collect(),
-                RestoreSource::OriginalLocations(locations) => match trashed_entries_for_originals(
+                RestoreSource::OriginalLocations {
+                    locations,
+                    originals,
+                } => match trashed_entries_for_originals(
                     &locations,
                     &operation_cancellable,
-                    &HashMap::new(),
+                    &originals,
                 )
                 .await
                 {

@@ -90,6 +90,13 @@ type WatchCallback = Rc<dyn Fn(DirectoryChange)>;
 #[derive(Default)]
 struct FolderIdentities(RefCell<HashMap<Location, ItemIdentity>>);
 
+fn trash_undo(locations: Vec<Location>) -> UndoEntry {
+    UndoEntry::Trash {
+        locations,
+        originals: HashMap::new(),
+    }
+}
+
 fn folder_identity(inode: u64, born: i64) -> ItemIdentity {
     ItemIdentity {
         evidence: Evidence {
@@ -635,6 +642,7 @@ thread_local! {
     static UNDO_MERGE_REQUESTS: RefCell<Vec<UndoMergeRecord>> =
         const { RefCell::new(Vec::new()) };
     static UNDO_RENAME_REQUESTS: RefCell<Vec<(Location, Location)>> = const { RefCell::new(Vec::new()) };
+    static TRASHED_IDENTITIES: RefCell<HashMap<Location, ItemIdentity>> = RefCell::default();
     static FORWARD_RENAME_OUTCOME: Cell<Option<ForwardRenameOutcome>> = const { Cell::new(None) };
 }
 
@@ -645,6 +653,23 @@ enum ForwardRenameOutcome {
 }
 
 struct ImmediateOperationProvider;
+
+fn report_trashed(
+    request_id: OperationRequestId,
+    locations: &[Location],
+    emit: &Rc<dyn Fn(OperationEvent)>,
+) {
+    for location in locations {
+        let identity = TRASHED_IDENTITIES.with(|trashed| trashed.borrow().get(location).copied());
+        if let Some(identity) = identity {
+            emit(OperationEvent::ItemTrashed {
+                request_id,
+                location: location.clone(),
+                identity,
+            });
+        }
+    }
+}
 
 impl OperationProvider for ImmediateOperationProvider {
     fn rename(&self, request: RenameRequest, emit: Rc<dyn Fn(OperationEvent)>) -> LoadHandle {
@@ -791,6 +816,7 @@ impl OperationProvider for ImmediateOperationProvider {
 
     fn undo_copy(&self, request: UndoCopyRequest, emit: Rc<dyn Fn(OperationEvent)>) -> LoadHandle {
         UNDO_COPY_REQUESTS.with(|requests| requests.borrow_mut().push(request.locations.clone()));
+        report_trashed(request.id, &request.locations, &emit);
         emit(OperationEvent::Deleted {
             request_id: request.id,
             locations: request.locations,
@@ -820,13 +846,15 @@ impl OperationProvider for ImmediateOperationProvider {
     }
 
     fn delete(&self, request: DeleteRequest, emit: Rc<dyn Fn(OperationEvent)>) -> LoadHandle {
+        let locations: Vec<_> = request
+            .entries
+            .into_iter()
+            .map(|entry| entry.location)
+            .collect();
+        report_trashed(request.id, &locations, &emit);
         emit(OperationEvent::Deleted {
             request_id: request.id,
-            locations: request
-                .entries
-                .into_iter()
-                .map(|entry| entry.location)
-                .collect(),
+            locations,
         });
         LoadHandle::new(|| {})
     }
@@ -837,7 +865,7 @@ impl OperationProvider for ImmediateOperationProvider {
                 .iter()
                 .map(|item| Location::local(item.destination.clone()))
                 .collect(),
-            RestoreSource::OriginalLocations(locations) => locations.clone(),
+            RestoreSource::OriginalLocations { locations, .. } => locations.clone(),
         };
         emit(OperationEvent::Restored {
             request_id: request.id,

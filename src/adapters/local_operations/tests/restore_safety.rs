@@ -929,10 +929,19 @@ fn cancelling_restore_before_io_reports_every_item_as_unattempted() -> Result<()
             vec![location.clone()],
         ),
         (
-            RestoreSource::OriginalLocations(vec![location.clone()]),
+            RestoreSource::OriginalLocations {
+                locations: vec![location.clone()],
+                originals: HashMap::new(),
+            },
             vec![location],
         ),
-        (RestoreSource::OriginalLocations(Vec::new()), Vec::new()),
+        (
+            RestoreSource::OriginalLocations {
+                locations: Vec::new(),
+                originals: HashMap::new(),
+            },
+            Vec::new(),
+        ),
     ] {
         let events = Rc::new(RefCell::new(Vec::new()));
         let emitted = events.clone();

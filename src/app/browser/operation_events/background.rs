@@ -202,12 +202,13 @@ impl Browser {
                     undoing: false,
                     reveal_locations: job.created.borrow().clone(),
                 };
-                completion.record_trash_undo(&event, push_background_undo);
+                let trashed = context.location_changes.trashed.take();
+                completion.record_trash_undo(&event, &trashed, push_background_undo);
                 if job.copying {
                     completion.record_transfer_undo(
                         (&[], &HashMap::new(), &TransferReport::default()),
                         job.created.take(),
-                        job.merged.take(),
+                        (job.merged.take(), &trashed),
                         push_background_undo,
                     );
                     emit(BrowserEvent::TransferFinished {

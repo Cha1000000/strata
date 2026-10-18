@@ -20,7 +20,7 @@ use crate::{
     model::Location,
     services::{
         ItemIdentity, KeptCause, KeptItem, MoveRecord, OperationEvent, OperationRequestId,
-        PlacedSnapshot, RenameCause, RenamedItem, TransferReport,
+        PlacedSnapshot, Proof, RenameCause, RenamedItem, TransferReport,
     },
 };
 use gtk::{gio, glib, prelude::*};
@@ -378,12 +378,16 @@ pub(super) async fn move_restore(
     )))
 }
 
-async fn trashed_as(expected: ItemIdentity, path: PathBuf) -> bool {
-    gio::spawn_blocking(move || {
-        identity_at_path(&path).is_some_and(|current| expected.unchanged(&current))
-    })
-    .await
-    .unwrap_or(false)
+fn vouched(expected: &ItemIdentity, path: &Path) -> Option<bool> {
+    let current = identity_at_path(path)?;
+    (expected.proof(&current) != Proof::Different).then(|| expected.unchanged(&current))
+}
+
+async fn trashed_as(expected: ItemIdentity, path: PathBuf) -> Option<bool> {
+    gio::spawn_blocking(move || vouched(&expected, &path))
+        .await
+        .ok()
+        .flatten()
 }
 
 #[derive(Clone)]
@@ -453,7 +457,7 @@ pub(super) async fn trashed_entries_for_originals(
         }
         enumerator => enumerator?,
     };
-    let mut newest = HashMap::<PathBuf, (String, RestoreEntry)>::new();
+    let mut newest = HashMap::<PathBuf, ((bool, String), RestoreEntry)>::new();
     loop {
         if cancellable.is_cancelled() {
             return Err(cancelled_local_operation());
@@ -479,7 +483,7 @@ pub(super) async fn trashed_entries_for_originals(
                 continue;
             };
             let original_path = PathBuf::from(original_path.as_str());
-            if !requested.contains(&original_path) {
+            if !requested.contains(&original_path) || fallback.contains_key(&original_path) {
                 continue;
             }
             let deletion_date = info
@@ -490,8 +494,8 @@ pub(super) async fn trashed_entries_for_originals(
                 continue;
             };
             let original = Location::local(&original_path);
-            if let Some(&expected) = originals.get(&original) {
-                let matches = match plan_restore_for_location(
+            let vouched = match originals.get(&original) {
+                Some(&expected) => match plan_restore_for_location(
                     &location,
                     Some(&original),
                     None,
@@ -501,14 +505,15 @@ pub(super) async fn trashed_entries_for_originals(
                 .await
                 {
                     Ok(plan) => trashed_as(expected, plan.source_path).await,
-                    Err(_) => false,
-                };
-                if !matches {
-                    continue;
-                }
-            }
+                    Err(_) => None,
+                },
+                None => Some(true),
+            };
+            let Some(vouched) = vouched else {
+                continue;
+            };
             let candidate = (
-                deletion_date,
+                (vouched, deletion_date),
                 gvfs_trash_entry(location, &info, &original_path),
             );
             match newest.get(&original_path) {
@@ -1069,7 +1074,7 @@ pub(super) fn trash_entries_at(
     cancellable: &gio::Cancellable,
     originals: &HashMap<Location, ItemIdentity>,
 ) -> HashMap<PathBuf, RestoreEntry> {
-    let mut newest = HashMap::<PathBuf, (String, RestoreEntry)>::new();
+    let mut newest = HashMap::<PathBuf, ((bool, String), RestoreEntry)>::new();
     for trash_root in roots {
         newest_in_trash(trash_root, requested, cancellable, originals, &mut newest);
     }
@@ -1084,7 +1089,7 @@ fn newest_in_trash(
     requested: &HashSet<PathBuf>,
     cancellable: &gio::Cancellable,
     originals: &HashMap<Location, ItemIdentity>,
-    newest: &mut HashMap<PathBuf, (String, RestoreEntry)>,
+    newest: &mut HashMap<PathBuf, ((bool, String), RestoreEntry)>,
 ) {
     let info_root = trash_root.join("info");
     let files_root = trash_root.join("files");
@@ -1121,15 +1126,15 @@ fn newest_in_trash(
             continue;
         }
         let source_path = files_root.join(OsString::from_vec(file_name.to_vec()));
-        let found = match originals.get(&Location::local(&original_path)) {
-            Some(expected) => {
-                identity_at_path(&source_path).is_some_and(|current| expected.unchanged(&current))
-            }
-            None => std::fs::symlink_metadata(&source_path).is_ok(),
+        let vouched = match originals.get(&Location::local(&original_path)) {
+            Some(expected) => vouched(expected, &source_path),
+            None => std::fs::symlink_metadata(&source_path)
+                .is_ok()
+                .then_some(true),
         };
-        if !found {
+        let Some(vouched) = vouched else {
             continue;
-        }
+        };
         let entry = RestoreEntry {
             source: Location::local(&source_path),
             display_name: source_path
@@ -1141,10 +1146,11 @@ fn newest_in_trash(
             confirmed_destination: None,
             physical_path: Some(source_path.clone()),
         };
+        let rank = (vouched, deletion_date.to_owned());
         match newest.get(&original_path) {
-            Some((current_date, _)) if current_date.as_str() >= deletion_date => {}
+            Some((current, _)) if *current >= rank => {}
             _ => {
-                newest.insert(original_path, (deletion_date.to_owned(), entry));
+                newest.insert(original_path, (rank, entry));
             }
         }
     }

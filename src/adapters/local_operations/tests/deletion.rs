@@ -1147,7 +1147,10 @@ fn trashing_and_restoring_report_each_items_identity_and_a_permanent_delete_repo
                 let _operation = LocalOperationProvider.restore(
                     RestoreRequest {
                         id: OperationRequestId(96),
-                        source: RestoreSource::OriginalLocations(vec![Location::local(&folder)]),
+                        source: RestoreSource::OriginalLocations {
+                            locations: vec![Location::local(&folder)],
+                            originals: HashMap::new(),
+                        },
                     },
                     Rc::new(move |event| emitted.borrow_mut().push(event)),
                 );

@@ -39,6 +39,7 @@ struct LocationChanges {
     moving: bool,
     removed: RefCell<HashSet<Location>>,
     restored: RefCell<HashSet<Location>>,
+    trashed: RefCell<HashMap<Location, ItemIdentity>>,
 }
 
 struct OperationCompletion {
@@ -68,7 +69,12 @@ impl OperationCompletion {
         }
     }
 
-    fn record_trash_undo(&self, event: &OperationEvent, publish: fn(UndoEntry)) {
+    fn record_trash_undo(
+        &self,
+        event: &OperationEvent,
+        trashed: &HashMap<Location, ItemIdentity>,
+        publish: fn(UndoEntry),
+    ) {
         if !self.deleting || self.deletion_permanent || self.undoing {
             return;
         }
@@ -80,14 +86,14 @@ impl OperationCompletion {
             OperationEvent::Cancelled { result, .. } => result.completed.clone(),
             _ => Vec::new(),
         };
-        publish(UndoEntry::Trash(locations));
+        publish(UndoEntry::trashed(locations, trashed));
     }
 
     fn record_transfer_undo(
         &self,
         (moved, moved_to, report): (&[Location], &HashMap<Location, Location>, &TransferReport),
         created: Vec<Location>,
-        merged: MergeUndoState,
+        (merged, trashed): (MergeUndoState, &HashMap<Location, ItemIdentity>),
         publish: fn(UndoEntry),
     ) -> Vec<Location> {
         if self.undoing {
@@ -133,10 +139,14 @@ impl OperationCompletion {
                 let replaced = overwritten.iter().collect::<HashSet<_>>();
                 all_created.retain(|location| !replaced.contains(location));
                 retain_merge_records(&mut placed, &all_created, &overwritten);
+                let originals = overwritten
+                    .iter()
+                    .filter_map(|location| Some((location.clone(), *trashed.get(location)?)))
+                    .collect();
                 publish(UndoEntry::Merge {
                     created: all_created,
                     overwritten,
-                    originals: HashMap::new(),
+                    originals,
                     placed,
                 });
             }
@@ -179,6 +189,7 @@ impl Browser {
                 moving: self.transfer_operation.get() == Some(true),
                 removed: RefCell::default(),
                 restored: RefCell::default(),
+                trashed: RefCell::default(),
             },
         };
         let weak = Rc::downgrade(self);
@@ -220,7 +231,13 @@ impl Browser {
             }),
             OperationEvent::ItemTrashed {
                 location, identity, ..
-            } => self.publish_removal(changes, location, Some(*identity)),
+            } => {
+                changes
+                    .trashed
+                    .borrow_mut()
+                    .insert(location.clone(), *identity);
+                self.publish_removal(changes, location, Some(*identity));
+            }
             // A merged move staged these overwritten destination items in Trash.
             OperationEvent::Merged { overwritten, .. } if changes.moving => {
                 for location in overwritten {
@@ -405,7 +422,7 @@ impl Browser {
             match claim.borrow().as_ref() {
                 // A trash undo reports the trash item, so completion maps by
                 // request order onto the recorded locations.
-                Some((generation, UndoEntry::Trash(locations))) => {
+                Some((generation, UndoEntry::Trash { locations, .. })) => {
                     if let Some(location) = completed
                         .checked_sub(1)
                         .and_then(|index| locations.get(index))
@@ -450,17 +467,18 @@ impl Browser {
             .collect::<Vec<_>>();
         refresh_depths.sort_unstable();
         // Flush observers run before the undo claim is consumed, as on the provider path.
+        let trashed = context.location_changes.trashed.take();
         let undoing = self.undo_claim.take();
         if let Some((generation, entry)) = &undoing {
-            finish_claimed_replay(false, *generation, entry, &event);
+            finish_claimed_replay(false, *generation, entry, (&event, &trashed));
         }
         let redoing = self.redo_claim.take();
         if let Some((generation, entry)) = &redoing {
-            finish_claimed_replay(true, *generation, entry, &event);
+            finish_claimed_replay(true, *generation, entry, (&event, &trashed));
         }
         completion.undoing = undoing.is_some() || redoing.is_some();
-        completion.record_trash_undo(&event, push_pending_undo);
-        self.finish_transfer(&mut completion, &event);
+        completion.record_trash_undo(&event, &trashed, push_pending_undo);
+        self.finish_transfer(&mut completion, &event, &trashed);
         if completion.deleting {
             self.emit(BrowserEvent::DeletionFinished {
                 succeeded: matches!(&event, OperationEvent::Deleted { .. }),
@@ -497,6 +515,7 @@ impl Browser {
         self: &Rc<Self>,
         completion: &mut OperationCompletion,
         event: &OperationEvent,
+        trashed: &HashMap<Location, ItemIdentity>,
     ) {
         let Some(moving) = completion.moving else {
             return;
@@ -526,7 +545,7 @@ impl Browser {
         let kept_out_of_undo = completion.record_transfer_undo(
             (&moved, &moved_to, &self.transfer_report.borrow()),
             created,
-            self.merged_undo.take(),
+            (self.merged_undo.take(), trashed),
             push_pending_undo,
         );
         self.transfer_report.borrow_mut().kept_out_of_undo = kept_out_of_undo;
@@ -885,14 +904,19 @@ fn deleted_locations(event: &OperationEvent) -> Vec<Location> {
     }
 }
 
-fn finish_claimed_replay(redo: bool, generation: u64, entry: &UndoEntry, event: &OperationEvent) {
+fn finish_claimed_replay(
+    redo: bool,
+    generation: u64,
+    entry: &UndoEntry,
+    (event, trashed): (&OperationEvent, &HashMap<Location, ItemIdentity>),
+) {
     // A restore replay marks each landed item from progress events; a delete
     // or move replay marks from the locations the finish event reports. A
     // merge undo does both: originals mark through progress while its trashed
     // `created` items arrive in the finish event.
     let progress_marked = matches!(
         (entry, redo),
-        (UndoEntry::Trash(_), false) | (UndoEntry::Copy(_), true)
+        (UndoEntry::Trash { .. }, false) | (UndoEntry::Copy(_), true)
     );
     let completed = match entry {
         _ if progress_marked => Vec::new(),
@@ -905,7 +929,7 @@ fn finish_claimed_replay(redo: bool, generation: u64, entry: &UndoEntry, event: 
     }
     let restoring = matches!(
         (entry, redo),
-        (UndoEntry::Trash(_) | UndoEntry::Merge { .. }, false) | (UndoEntry::Copy(_), true)
+        (UndoEntry::Trash { .. } | UndoEntry::Merge { .. }, false) | (UndoEntry::Copy(_), true)
     );
     let succeeded = match entry {
         _ if restoring => matches!(event, OperationEvent::Restored { .. }),
@@ -925,7 +949,10 @@ fn finish_claimed_replay(redo: bool, generation: u64, entry: &UndoEntry, event: 
         return;
     };
     if redo {
-        push_regenerated_undo(applied);
+        push_regenerated_undo(match applied {
+            UndoEntry::Trash { locations, .. } => UndoEntry::trashed(locations, trashed),
+            applied => applied,
+        });
     } else if !matches!(applied, UndoEntry::Merge { .. } | UndoEntry::Group { .. }) {
         // A merge undo mixes deletes and restores, and a group undo a move
         // plus a trash, that no single redo operation can replay.

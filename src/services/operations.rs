@@ -213,7 +213,10 @@ pub struct RestoreTrashItem {
 #[derive(Clone, Debug)]
 pub enum RestoreSource {
     TrashEntries(Vec<RestoreTrashItem>),
-    OriginalLocations(Vec<Location>),
+    OriginalLocations {
+        locations: Vec<Location>,
+        originals: HashMap<Location, ItemIdentity>,
+    },
 }
 
 #[derive(Clone, Debug)]

@@ -385,7 +385,10 @@ const OPERATION_PUBLICATION_BATCH: usize = 512;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum UndoEntry {
-    Trash(Vec<Location>),
+    Trash {
+        locations: Vec<Location>,
+        originals: HashMap<Location, ItemIdentity>,
+    },
     Move(Vec<MoveRecord>),
     Copy(Vec<Location>),
     /// `created` paths are trashed, or deleted where Trash is unavailable;
@@ -408,7 +411,7 @@ pub enum UndoEntry {
 impl UndoEntry {
     fn is_empty(&self) -> bool {
         match self {
-            Self::Trash(locations) | Self::Copy(locations) => locations.is_empty(),
+            Self::Trash { locations, .. } | Self::Copy(locations) => locations.is_empty(),
             Self::Merge {
                 created,
                 overwritten,
@@ -421,7 +424,7 @@ impl UndoEntry {
 
     fn empty_like(&self) -> Self {
         match self {
-            Self::Trash(_) => Self::Trash(Vec::new()),
+            Self::Trash { .. } => Self::trashed(Vec::new(), &HashMap::new()),
             Self::Move(_) => Self::Move(Vec::new()),
             Self::Copy(_) => Self::Copy(Vec::new()),
             Self::Merge { .. } => Self::Merge {
@@ -440,8 +443,19 @@ impl UndoEntry {
 
     fn locations_mut(&mut self) -> Option<&mut Vec<Location>> {
         match self {
-            Self::Trash(locations) | Self::Copy(locations) => Some(locations),
+            Self::Trash { locations, .. } | Self::Copy(locations) => Some(locations),
             _ => None,
+        }
+    }
+
+    fn trashed(locations: Vec<Location>, identities: &HashMap<Location, ItemIdentity>) -> Self {
+        let originals = locations
+            .iter()
+            .filter_map(|location| Some((location.clone(), *identities.get(location)?)))
+            .collect();
+        Self::Trash {
+            locations,
+            originals,
         }
     }
 }
@@ -467,8 +481,11 @@ fn complete_undo_item(
             }
         }
         (
-            UndoEntry::Trash(locations) | UndoEntry::Copy(locations),
-            UndoEntry::Trash(done) | UndoEntry::Copy(done),
+            UndoEntry::Trash { locations, .. } | UndoEntry::Copy(locations),
+            UndoEntry::Trash {
+                locations: done, ..
+            }
+            | UndoEntry::Copy(done),
         ) => {
             if let Some(index) = locations.iter().position(|candidate| candidate == location) {
                 done.push(locations.remove(index));
@@ -2908,7 +2925,7 @@ impl Browser {
 
     pub fn pending_undo_trash(&self) -> Option<Vec<Location>> {
         match self.pending_replay_entry(false)? {
-            (_, UndoEntry::Trash(locations)) => Some(locations),
+            (_, UndoEntry::Trash { locations, .. }) => Some(locations),
             _ => None,
         }
     }
@@ -2963,16 +2980,16 @@ impl Browser {
         let Some((generation, entry)) = claim_pending_undo(None) else {
             return false;
         };
-        let UndoEntry::Trash(locations) = entry else {
+        let UndoEntry::Trash {
+            locations,
+            originals,
+        } = &entry
+        else {
             finish_undo(generation, false);
             return false;
         };
-        self.restore_original_locations(
-            false,
-            generation,
-            UndoEntry::Trash(locations.clone()),
-            locations,
-        )
+        let request = (locations.clone(), originals.clone());
+        self.restore_original_locations(false, generation, entry, request)
     }
 
     /// Moves completed transfers back. `generation` pins the undo the caller
@@ -3277,7 +3294,7 @@ impl Browser {
 
     pub fn pending_redo_trash(&self) -> Option<(u64, Vec<Location>)> {
         match self.pending_replay_entry(true)? {
-            (generation, UndoEntry::Trash(locations)) => Some((generation, locations)),
+            (generation, UndoEntry::Trash { locations, .. }) => Some((generation, locations)),
             _ => None,
         }
     }
@@ -3287,7 +3304,7 @@ impl Browser {
             true,
             generation,
             locations.clone(),
-            UndoEntry::Trash(locations),
+            UndoEntry::trashed(locations, &HashMap::new()),
             false,
         )
     }
@@ -3321,7 +3338,7 @@ impl Browser {
             return false;
         }
         if restore {
-            self.restore_original_locations(redo, generation, entry, locations)
+            self.restore_original_locations(redo, generation, entry, (locations, HashMap::new()))
         } else {
             retain_replay_locations(redo, generation, &locations);
             self.retrash_locations(redo, generation, entry, locations)
@@ -3434,7 +3451,7 @@ impl Browser {
         redo: bool,
         generation: u64,
         entry: UndoEntry,
-        locations: Vec<Location>,
+        (locations, originals): (Vec<Location>, HashMap<Location, ItemIdentity>),
     ) -> bool {
         let Some(provider) = self.operation_provider.borrow().clone() else {
             finish_replay(redo, generation, false);
@@ -3448,7 +3465,10 @@ impl Browser {
         let load = provider.restore(
             RestoreRequest {
                 id: request_id,
-                source: RestoreSource::OriginalLocations(locations),
+                source: RestoreSource::OriginalLocations {
+                    locations,
+                    originals,
+                },
             },
             self.operation_callback(request_id, false, HashSet::new()),
         );

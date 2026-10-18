@@ -56,7 +56,7 @@ fn rename_stage(staging: PathBuf) -> (StageOverwrite, Rc<RefCell<Vec<Location>>>
             })?;
             std::fs::rename(path, staging.join(format!("staged-{index}")))
                 .map_err(|error| glib::Error::new(gio::IOErrorEnum::Failed, &error.to_string()))?;
-            Ok(())
+            Ok(None)
         })
     });
     (stage, calls)
@@ -840,7 +840,7 @@ fn a_staging_failure_aborts_the_merge_and_reports_only_what_was_staged()
                 std::fs::rename(path, staging.join("staged")).map_err(|error| {
                     glib::Error::new(gio::IOErrorEnum::Failed, &error.to_string())
                 })?;
-                Ok(())
+                Ok(None)
             })
         });
 
@@ -1858,10 +1858,12 @@ fn merge_undo_uses_recorded_identity_when_trash_dates_collide() -> Result<(), Bo
 enum InTrash {
     Renumbered,
     NumberReused,
+    TrashedAfter,
 }
 
 #[test]
-fn a_trashed_original_is_found_only_by_what_its_mount_proves() -> Result<(), Box<dyn Error>> {
+fn a_trashed_original_is_passed_over_only_where_its_mount_proves_another()
+-> Result<(), Box<dyn Error>> {
     let _serial = serial()?;
     let reusing_ext4: Preset = || Quirks {
         reused_inodes: Some("report*"),
@@ -1871,14 +1873,15 @@ fn a_trashed_original_is_found_only_by_what_its_mount_proves() -> Result<(), Box
         reused_inodes: Some("report*"),
         ..Quirks::nfs3()
     };
-    let rows: [(Preset, bool, InTrash, bool); 5] = [
-        (Quirks::vfat, false, InTrash::Renumbered, true),
-        (Quirks::sshfs, false, InTrash::Renumbered, true),
-        (Quirks::sshfs, true, InTrash::Renumbered, false),
-        (reusing_ext4, false, InTrash::NumberReused, false),
-        (reusing_nfs3, false, InTrash::NumberReused, false),
+    let rows: [(Preset, bool, InTrash, Option<&str>); 6] = [
+        (Quirks::vfat, false, InTrash::Renumbered, Some("report")),
+        (Quirks::sshfs, false, InTrash::Renumbered, Some("report")),
+        (Quirks::sshfs, true, InTrash::Renumbered, Some("report")),
+        (Quirks::sshfs, true, InTrash::TrashedAfter, Some("report")),
+        (reusing_ext4, false, InTrash::NumberReused, None),
+        (reusing_nfs3, false, InTrash::NumberReused, None),
     ];
-    for (preset, folder, change, found) in rows {
+    for (preset, folder, change, chosen) in rows {
         let root = tempfile::tempdir()?;
         let _quirks = FsQuirks::install(root.path(), preset());
         let original = root.path().join("report");
@@ -1919,6 +1922,16 @@ fn a_trashed_original_is_found_only_by_what_its_mount_proves() -> Result<(), Box
                     .set_modified(modified)?;
                 super::fs_quirks::recreated(&trashed);
             }
+            InTrash::TrashedAfter => {
+                make(&trash_root.join("files/report.2"), b"later")?;
+                fs::write(
+                    trash_root.join("info/report.2.trashinfo"),
+                    format!(
+                        "[Trash Info]\nPath={}\nDeletionDate=2026-01-02T00:00:00\n",
+                        original.display()
+                    ),
+                )?;
+            }
         }
         let entries = trash_entries_at(
             std::slice::from_ref(&trash_root),
@@ -1927,8 +1940,8 @@ fn a_trashed_original_is_found_only_by_what_its_mount_proves() -> Result<(), Box
             &HashMap::from([(Location::local(&original), recorded)]),
         );
         assert_eq!(
-            entries.contains_key(&original),
-            found,
+            entries.get(&original).map(|entry| entry.source.clone()),
+            chosen.map(|name| Location::local(trash_root.join("files").join(name))),
             "{:?}, folder {folder}, {change:?}",
             preset().mount_type
         );
@@ -1946,6 +1959,7 @@ enum VolumeTrash {
 enum Undone {
     Replace,
     Delete,
+    Merge,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1953,6 +1967,7 @@ enum Trashed {
     Original,
     Nothing,
     OriginalBesideANewerOneBehindALink,
+    OnlyAnotherFromTheSamePath,
 }
 
 #[test]
@@ -1971,6 +1986,11 @@ fn undo_finds_an_original_in_the_trash_of_its_own_mount() {
                     VolumeTrash::PerUser,
                     Undone::Delete,
                     Trashed::OriginalBesideANewerOneBehindALink,
+                ),
+                (
+                    VolumeTrash::PerUser,
+                    Undone::Delete,
+                    Trashed::OnlyAnotherFromTheSamePath,
                 ),
             ] {
                 let row = format!("{layout:?} Trash, undo of a {undone:?}, {trashed:?}");
@@ -2015,6 +2035,7 @@ fn undo_finds_an_original_in_the_trash_of_its_own_mount() {
                     .expect("trash info");
                 };
                 let planted = volume.path().join("planted");
+                let mut originals = HashMap::new();
                 match trashed {
                     Trashed::Original => put_in_trash(&trash, "original", "2026-01-01"),
                     Trashed::Nothing => {}
@@ -2033,6 +2054,13 @@ fn undo_finds_an_original_in_the_trash_of_its_own_mount() {
                         std::os::unix::fs::symlink(&planted, shared.join(uid.to_string()))
                             .expect("linked user Trash");
                     }
+                    Trashed::OnlyAnotherFromTheSamePath => {
+                        fs::write(&original, b"original").expect("original");
+                        let recorded = identity_off_main(&original).expect("recorded identity");
+                        put_in_trash(&trash, "another", "2099-01-01");
+                        fs::remove_file(&original).expect("original purged");
+                        originals.insert(Location::local(&original), recorded);
+                    }
                 }
                 let location = Location::local(&original);
                 let events = Rc::new(RefCell::new(Vec::new()));
@@ -2048,16 +2076,19 @@ fn undo_finds_an_original_in_the_trash_of_its_own_mount() {
                                 id,
                                 created: Vec::new(),
                                 overwritten: vec![location.clone()],
-                                originals: HashMap::new(),
+                                originals,
                                 placed: placed_now(&[&original]),
                             },
                             emit,
                         )
                     }
-                    Undone::Delete => LocalOperationProvider.restore(
+                    Undone::Delete | Undone::Merge => LocalOperationProvider.restore(
                         RestoreRequest {
                             id,
-                            source: RestoreSource::OriginalLocations(vec![location.clone()]),
+                            source: RestoreSource::OriginalLocations {
+                                locations: vec![location.clone()],
+                                originals,
+                            },
                         },
                         emit,
                     ),
@@ -2073,7 +2104,7 @@ fn undo_finds_an_original_in_the_trash_of_its_own_mount() {
                     )
                 });
 
-                if let Trashed::Nothing = trashed {
+                if let Trashed::Nothing | Trashed::OnlyAnotherFromTheSamePath = trashed {
                     assert!(
                         matches!(
                             events.borrow().last(),
@@ -2084,6 +2115,13 @@ fn undo_finds_an_original_in_the_trash_of_its_own_mount() {
                         "{row}: {:?}",
                         events.borrow().last()
                     );
+                    if let Trashed::OnlyAnotherFromTheSamePath = trashed {
+                        assert_eq!(
+                            fs::read(trash.join("files/report.txt")).expect("left in Trash"),
+                            b"another",
+                            "{row}"
+                        );
+                    }
                     continue;
                 }
                 assert!(
@@ -4825,5 +4863,144 @@ fn check_a_merge_undo_drops_from_view_only_what_it_removed() -> Result<(), Box<d
         );
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+    Ok(())
+}
+
+#[test]
+fn an_undo_never_brings_back_another_item_trashed_later_from_the_same_path() {
+    crate::test_support::gtk_test(
+        "adapters::local_operations::tests::merge::an_undo_never_brings_back_another_item_trashed_later_from_the_same_path",
+        || {
+            for undone in [Undone::Delete, Undone::Replace, Undone::Merge] {
+                check_an_undo_never_brings_back_another_item_trashed_later(undone)
+                    .unwrap_or_else(|error| panic!("{undone:?}: {error}"));
+            }
+        },
+    );
+}
+
+fn check_an_undo_never_brings_back_another_item_trashed_later(
+    undone: Undone,
+) -> Result<(), Box<dyn Error>> {
+    use crate::app::{Browser, BrowserEvent};
+    let _serial = serial()?;
+    let context = glib::MainContext::default();
+    let root = tempfile::tempdir_in(glib::home_dir())?;
+    let target = root.path().join("folder/report.txt");
+    write_files(root.path(), &[("folder/report.txt", "original")])?;
+    let browser = Browser::new(Rc::new(Listing { watched: false }));
+    browser.set_operation_provider(Rc::new(LocalOperationProvider));
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let observed = events.clone();
+    browser.observe(move |event| {
+        observed
+            .borrow_mut()
+            .push(crate::test_support::operations::operation_event(event).clone());
+    });
+    let pump_until = |what: &str, done: &dyn Fn(&BrowserEvent) -> bool| {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !events.borrow().iter().any(done) {
+            if Instant::now() > deadline {
+                return Err(format!("timed out waiting until {what}"));
+            }
+            context.iteration(false);
+            thread::sleep(Duration::from_millis(1));
+        }
+        Ok(())
+    };
+    let incoming = |conflict| -> Result<(), Box<dyn Error>> {
+        write_files(
+            &root.path().join("incoming"),
+            &[("folder/report.txt", "incoming")],
+        )?;
+        let (source, destination) = match conflict {
+            TransferConflict::Merge => {
+                (root.path().join("incoming/folder"), root.path().to_owned())
+            }
+            _ => (
+                root.path().join("incoming/folder/report.txt"),
+                root.path().join("folder"),
+            ),
+        };
+        browser.transfer(
+            Location::local(destination),
+            vec![PasteItem {
+                source: Location::local(source),
+                conflict,
+                target_name: None,
+            }],
+            false,
+            false,
+        );
+        pump_until("the paste ends", &|event| {
+            matches!(event, BrowserEvent::TransferCompleted)
+        })?;
+        Ok(())
+    };
+    match undone {
+        Undone::Delete => {
+            browser.delete(vec![file_entry(&target)], false);
+            pump_until("the delete ends", &|event| {
+                matches!(event, BrowserEvent::DeletionFinished { .. })
+            })?;
+        }
+        Undone::Replace => incoming(TransferConflict::ReplaceExisting)?,
+        Undone::Merge => incoming(TransferConflict::Merge)?,
+    }
+    let trash = glib::user_data_dir().join("Trash");
+    let recorded = |info: &Path| {
+        fs::read_to_string(info).ok().and_then(|contents| {
+            contents
+                .lines()
+                .find_map(|line| line.strip_prefix("Path="))
+                .and_then(crate::adapters::trash_restore::decode_trashinfo_path)
+        })
+    };
+    let ours = fs::read_dir(trash.join("info"))?
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .find(|info| recorded(info).as_deref() == Some(target.as_path()))
+        .ok_or("the original's Trash entry")?;
+    let contents = fs::read_to_string(&ours)?;
+    fs::write(
+        &ours,
+        contents
+            .lines()
+            .map(|line| match line.strip_prefix("DeletionDate=") {
+                Some(_) => "DeletionDate=2000-01-01T00:00:00",
+                None => line,
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )?;
+    let later = trash.join("files/report.later.txt");
+    fs::write(&later, "trashed later")?;
+    fs::write(
+        trash.join("info/report.later.txt.trashinfo"),
+        format!(
+            "[Trash Info]\nPath={}\nDeletionDate=2099-01-01T00:00:00\n",
+            target.display()
+        ),
+    )?;
+    events.borrow_mut().clear();
+
+    let started = match undone {
+        Undone::Delete => browser.undo_last_trash(),
+        Undone::Replace | Undone::Merge => {
+            let (generation, created, overwritten) =
+                browser.pending_undo_merge().ok_or("the paste's undo")?;
+            browser.undo_merge(generation, created, overwritten)
+        }
+    };
+    assert!(started, "the undo starts");
+    pump_until("the undo ends", &|event| {
+        matches!(event, BrowserEvent::RestorationFinished { .. })
+    })?;
+
+    assert_eq!(fs::read_to_string(&target)?, "original");
+    assert_eq!(fs::read_to_string(&later)?, "trashed later");
+    fs::remove_file(later)?;
+    fs::remove_file(trash.join("info/report.later.txt.trashinfo"))?;
     Ok(())
 }
