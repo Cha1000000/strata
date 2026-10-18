@@ -138,6 +138,19 @@ fn held_thumb_ignores_reestimates_and_resynchronizes_without_scrolling_on_releas
                 "a held thumb must not undo GTK's anchor correction"
             );
 
+            document.configure(1_400.0, 10.0, 2_010.0, 10.0, 90.0, 100.0);
+            state.thumb.set_value(470.0);
+            assert!(
+                document.value() >= 1_400.0,
+                "downward thumb motion must not undo GTK's forward anchor correction"
+            );
+            document.configure(200.0, 10.0, 2_010.0, 10.0, 90.0, 100.0);
+            state.thumb.set_value(460.0);
+            assert!(
+                document.value() <= 200.0,
+                "upward thumb motion must not undo GTK's backward anchor correction"
+            );
+
             state.thumb.set_value(910.0);
             assert_eq!(
                 document.value(),

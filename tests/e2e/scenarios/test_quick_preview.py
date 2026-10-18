@@ -6,6 +6,7 @@ from __future__ import annotations
 import pytest
 from pathlib import Path
 import io
+import re
 import zipfile
 from PIL import Image
 
@@ -1102,21 +1103,45 @@ def test_document_scrollbar_holds_content_still_while_rows_recycle(strata, filen
     track = scrollbar.screen_bounds()
     pointer = strata.pointer.connection
     x = track.center[0]
-    strata.pointer.move_to(x, track.y + 1)
+
+    def sample_content(y, count):
+        samples = []
+
+        def sample():
+            pointer.motion(x, y)
+            samples.append(document_point_text(document))
+            return len(samples) >= count
+
+        strata.wait(sample, "scrollbar motion events to be processed")
+        return samples
+
+    y = track.y + 1
+    strata.pointer.move_to(x, y)
     pointer.button(1, True)
     try:
+        positions = []
+        for step in range(1, 101):
+            y = track.y + int((track.height - 2) * step / 100)
+            point = sample_content(y, 2)[-1]
+            if point is not None and point[0] == 0.5:
+                match = re.search(r"paragraph-(\d+)-word-(\d+)|Short paragraph (\d+)", point[2])
+                if match:
+                    position = (int(match[1] or match[3]), int(match[2] or 0))
+                    positions.append(position)
+        assert len(positions) >= 50, "the drag must sample document content, not just thumb values"
+        assert any(positions[0] < position < positions[-1] for position in positions), (
+            "dragging must visit interior content, not just snap between endpoints"
+        )
+        assert positions == sorted(positions), (
+            f"downward thumb movement moved document content backwards: {positions!r}"
+        )
+        pointer.motion(x, track.y + 1)
+        assert settled_content() == initial
         for fraction in (0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9):
             y = track.y + int(track.height * fraction)
             pointer.motion(x, y)
             expected = settled_content()
-            samples = []
-
-            def sample_held_content():
-                pointer.motion(x, y)
-                samples.append(document_point_text(document))
-                return len(samples) >= 12
-
-            strata.wait(sample_held_content, "held-thumb motion events to be processed")
+            samples = sample_content(y, 12)
             assert all(sample == expected for sample in samples), (
                 f"document content moved while the scrollbar pointer stayed still: {samples!r}"
             )
@@ -1125,11 +1150,16 @@ def test_document_scrollbar_holds_content_still_while_rows_recycle(strata, filen
         assert strata.preview_shows("paragraph-399-word-72"), "dragging to the bottom reaches the document tail"
         pointer.motion(x, track.y + 1)
         assert settled_content() == initial, "dragging to the top restores the initial content"
+        y = track.y + track.height // 2
+        pointer.motion(x, y)
+        before_release = settled_content()
     finally:
-        pointer.motion(*document.screen_bounds().center)
+        content = document.screen_bounds()
+        pointer.motion(content.x + content.width - 1, y)
         pointer.button(1, False)
 
     released = settled_content()
+    assert released == before_release, "releasing the thumb must not move the document"
     value = scrollbar.numeric_value
     strata.pointer.scroll(document.screen_bounds().center, clicks=3, down=True)
     strata.wait(lambda: document_point_text(document) != released, "wheel scrolling after release")

@@ -19,6 +19,7 @@ struct StableScrollbar {
     thumb: gtk::Adjustment,
     bar: glib::WeakRef<gtk::Scrollbar>,
     dragging: Cell<bool>,
+    previous_thumb_value: Cell<f64>,
     drag_generation: Cell<u64>,
     pending_edge: Cell<Option<u64>>,
     syncing: Cell<bool>,
@@ -33,6 +34,7 @@ impl StableScrollbar {
             bar: bar.downgrade(),
             thumb,
             dragging: Cell::new(false),
+            previous_thumb_value: Cell::new(0.0),
             drag_generation: Cell::new(0),
             pending_edge: Cell::new(None),
             syncing: Cell::new(false),
@@ -152,6 +154,7 @@ impl StableScrollbar {
         if self.syncing.get() {
             return;
         }
+        let previous = self.previous_thumb_value.replace(self.thumb.value());
         let value = if self.dragging.get() {
             let range = scrollable_range(&self.thumb);
             let fraction = if range > 0.0 {
@@ -159,7 +162,14 @@ impl StableScrollbar {
             } else {
                 0.0
             };
-            self.document.lower() + fraction * scrollable_range(&self.document)
+            let target = self.document.lower() + fraction * scrollable_range(&self.document);
+            // A height re-estimate can put the target behind GTK's visible-row
+            // anchor. Never scroll against the user's actual thumb movement.
+            if self.thumb.value() > previous {
+                target.max(self.document.value())
+            } else {
+                target.min(self.document.value())
+            }
         } else {
             self.thumb.value()
         };
@@ -167,6 +177,7 @@ impl StableScrollbar {
     }
 
     fn begin_drag(&self) {
+        self.previous_thumb_value.set(self.thumb.value());
         self.drag_generation
             .set(self.drag_generation.get().wrapping_add(1));
         self.dragging.set(true);
