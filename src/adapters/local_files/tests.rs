@@ -1714,6 +1714,72 @@ fn a_link_whose_target_stops_answering_trips_only_that_link() -> Result<(), Box<
     Ok(())
 }
 
+#[test]
+fn a_load_from_a_gvfs_backend_that_stopped_answering_is_refused_at_once()
+-> Result<(), Box<dyn Error>> {
+    use crate::adapters::mount_lanes;
+
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let stopped = [
+        Location::uri("sftp://strata-stopped-backend.invalid/share"),
+        Location::uri("trash://strata-stopped-trash.invalid/"),
+    ];
+    let answering = Location::uri("sftp://strata-answering-backend.invalid/share");
+    let stuck = stopped
+        .iter()
+        .map(|location| {
+            mount_lanes::admit_remote(
+                mount_lanes::authority(location.uri_value().unwrap_or_default()),
+                mount_lanes::Class::Interactive,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|refusal| format!("{refusal:?}"))?;
+    let admitted = Instant::now();
+    drain_until(|| admitted.elapsed() > mount_lanes::STALLED_AFTER + Duration::from_millis(200));
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let load = |location: &Location, id| {
+        let events = events.clone();
+        LocalFileSource.enumerate(
+            DirectoryRequest {
+                id: RequestId(id),
+                location: location.clone(),
+                batch_size: 64,
+                include_metadata: false,
+                max_entries: 100,
+                time_budget: Duration::from_secs(10),
+                background: false,
+            },
+            Rc::new(move |event| events.borrow_mut().push(event)),
+        )
+    };
+
+    let refused = [load(&stopped[0], 1), load(&stopped[1], 3)];
+    let elsewhere = load(&answering, 2);
+    drain_until(|| (1..=3).all(|id| outcome_of(&events, id).is_some()));
+
+    let timed_out = Some(Err("The operation timed out".to_owned()));
+    assert_eq!(
+        (
+            [outcome_of(&events, 1), outcome_of(&events, 3)],
+            stopped
+                .each_ref()
+                .map(|location| LocalFileSource.responsiveness(location)),
+            LocalFileSource.responsiveness(&answering),
+        ),
+        (
+            [timed_out.clone(), timed_out.clone()],
+            [Responsiveness::Stalled; 2],
+            Responsiveness::Answering
+        )
+    );
+    assert_ne!(outcome_of(&events, 2), timed_out);
+    drop((stuck, refused, elsewhere));
+    Ok(())
+}
+
 fn listing_request(path: &Path, max_entries: usize) -> DirectoryRequest {
     DirectoryRequest {
         id: RequestId(1),

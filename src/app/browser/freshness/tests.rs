@@ -48,6 +48,7 @@ struct Folders {
     truncate_loads: Cell<bool>,
     responsiveness: Cell<Responsiveness>,
     followers: RefCell<Vec<Rc<dyn Fn()>>>,
+    probes_run_out_of_time: Cell<bool>,
     hold_checks: Cell<bool>,
     held_checks: RefCell<Vec<Check>>,
     monitors: RefCell<HashMap<Location, Notify>>,
@@ -279,6 +280,15 @@ impl FileSource for Folders {
             emit(DirectoryEvent::Failed {
                 request_id: request.id,
                 message: "The operation timed out".to_owned(),
+            });
+            return LoadHandle::new(|| {});
+        }
+        if !self.answering() && self.probes_run_out_of_time.get() {
+            emit(DirectoryEvent::Finished {
+                request_id: request.id,
+                truncated: true,
+                can_trash: None,
+                can_delete: None,
             });
             return LoadHandle::new(|| {});
         }
@@ -1085,11 +1095,17 @@ fn a_time_truncated_relist_does_not_replace_a_complete_listing() {
 #[test]
 fn a_refresh_on_a_mount_that_stopped_answering_keeps_its_rows() {
     let mut failures = Vec::new();
-    for (stalled, relisting_truncated) in [(false, false), (true, false), (true, true)] {
+    for (stalled, relisting_truncated, probe_runs_out_of_time) in [
+        (false, false, false),
+        (true, false, false),
+        (true, true, false),
+        (true, false, true),
+    ] {
         let source = Rc::new(Folders::default());
         let share = source.add("/net/share", network(1), Some(Watching::Live));
         let (browser, clock) = browser_on(&source);
         source.truncate_loads.set(relisting_truncated);
+        source.probes_run_out_of_time.set(probe_runs_out_of_time);
         browser.navigate(share.clone());
         let events = recorded(&browser);
         if relisting_truncated {
@@ -1121,7 +1137,8 @@ fn a_refresh_on_a_mount_that_stopped_answering_keeps_its_rows() {
         );
         if got != expected {
             failures.push(format!(
-                "stalled {stalled}, re-listing a truncated listing {relisting_truncated}: \
+                "stalled {stalled}, re-listing a truncated listing {relisting_truncated}, \
+                 the refresh running out of time {probe_runs_out_of_time}: \
                  got {got:?}, expected {expected:?}"
             ));
         }

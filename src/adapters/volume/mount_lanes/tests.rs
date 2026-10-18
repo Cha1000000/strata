@@ -5,7 +5,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-use super::{Class, LaneKey, Lanes, Responsiveness, Target, Unanswered};
+use gtk::{gio, glib};
+
+use super::{Class, LaneKey, Lanes, Responsiveness, STALLED_AFTER, Target, Unanswered};
 use crate::adapters::volume::MountTable;
 
 const MOUNTS: &str = "\
@@ -384,4 +386,43 @@ fn the_stall_watch_runs_while_a_request_may_still_stop_answering() {
             ("all answered", false, false),
         ]
     );
+}
+
+#[test]
+fn a_gvfs_call_dropped_while_it_waits_leaves_its_backend_answering() {
+    let quiet = STALLED_AFTER + Duration::from_millis(200);
+    let mut failures = Vec::new();
+    for (row, authority, answers_after, given_up_after, expected) in [
+        (
+            "dropped while it waits",
+            "sftp://@strata-dropped-call.invalid:-1",
+            quiet * 2,
+            quiet,
+            (Responsiveness::Answering, true),
+        ),
+        (
+            "ended without an answer",
+            "sftp://@strata-unanswered-call.invalid:-1",
+            quiet,
+            quiet * 2,
+            (Responsiveness::Stalled, false),
+        ),
+    ] {
+        glib::MainContext::new().block_on(async {
+            let call = async {
+                glib::timeout_future(answers_after).await;
+                Err::<(), _>(glib::Error::new(gio::IOErrorEnum::TimedOut, "no answer"))
+            };
+            let laned = super::run_remote(authority.to_owned(), Class::Interactive, call);
+            drop(glib::future_with_timeout(given_up_after, laned).await);
+        });
+        let got = (
+            super::remote_responsiveness(authority.to_owned()),
+            super::admit_remote(authority.to_owned(), Class::Background).is_ok(),
+        );
+        if got != expected {
+            failures.push(format!("{row}: got {got:?}, expected {expected:?}"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

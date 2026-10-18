@@ -5,7 +5,7 @@ mod tests;
 
 use std::{
     any::Any,
-    cell::RefCell,
+    cell::{Cell, RefCell},
     collections::HashMap,
     future::Future,
     io,
@@ -336,6 +336,10 @@ impl Lanes {
         }
     }
 
+    fn withdraw(&mut self, ticket: u64) {
+        self.tickets.remove(&ticket);
+    }
+
     fn enter(&mut self, ticket: u64, path: &Path, lexical: Option<u64>, now: Instant) -> bool {
         let target = Target {
             key: self.key_for(path, lexical),
@@ -523,18 +527,30 @@ impl Progress {
 
 pub(crate) struct Admitted {
     progress: Progress,
+    calling: Cell<bool>,
 }
 
 impl Admitted {
     pub(crate) fn progress(&self) -> &Progress {
         &self.progress
     }
+
+    /// Dropping a pending GIO call parks nothing, and its answer would never be seen.
+    pub(crate) async fn call<F: Future>(&self, call: F) -> F::Output {
+        self.calling.set(true);
+        let answer = call.await;
+        self.calling.set(false);
+        answer
+    }
 }
 
 impl Drop for Admitted {
     fn drop(&mut self) {
         if let Some(ticket) = self.progress.ticket {
-            lanes().finish(ticket, Instant::now());
+            match self.calling.get() {
+                true => lanes().withdraw(ticket),
+                false => lanes().finish(ticket, Instant::now()),
+            }
         }
     }
 }
@@ -546,6 +562,7 @@ fn admitted(lanes: &mut Lanes, target: Target<'_>, class: Class) -> Result<Admit
     let ticket = lanes.admit(probe.unwrap_or(target.key), now);
     Ok(Admitted {
         progress: Progress::new(ticket, path, target.lexical, Arc::default()),
+        calling: Cell::new(false),
     })
 }
 
@@ -600,7 +617,7 @@ pub(crate) async fn run_remote<T: Outcome>(
     call: impl Future<Output = T>,
 ) -> Result<T, Unanswered> {
     let admitted = admit_remote(authority, class)?;
-    let answer = call.await;
+    let answer = admitted.call(call).await;
     admitted.progress().answered(&answer);
     Ok(answer)
 }
@@ -877,4 +894,13 @@ pub(crate) fn responsiveness(path: &Path) -> Responsiveness {
     let (lanes, mounts) = lanes_following_mounts();
     let target = lanes.target(path, &mounts);
     lanes.responsiveness(&target, Instant::now())
+}
+
+pub(crate) fn remote_responsiveness(authority: String) -> Responsiveness {
+    let target = Target {
+        key: LaneKey::Remote(authority),
+        path: None,
+        lexical: None,
+    };
+    lanes().responsiveness(&target, Instant::now())
 }

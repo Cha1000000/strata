@@ -235,9 +235,11 @@ impl Browser {
             .filter(|staged| staged.request_id == request_id)
             .map_or(0, |staged| staged.entries.len());
         listed < super::MAX_DIRECTORY_ENTRIES
-            && self.kept_listings.borrow().get(&depth).is_some_and(|kept| {
-                kept.request_id == request_id && kept.background && !kept.truncated
-            })
+            && self
+                .kept_listings
+                .borrow()
+                .get(&depth)
+                .is_some_and(|kept| kept.request_id == request_id && !kept.truncated)
     }
 
     fn keep_listing(self: &Rc<Self>, depth: usize, request_id: RequestId, failed: bool) -> bool {

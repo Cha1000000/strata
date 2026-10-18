@@ -1468,15 +1468,14 @@ impl FileSource for LocalFileSource {
         }
 
         let task = glib::MainContext::default().spawn_local(async move {
-            let admitted = request
-                .background
-                .then(|| {
-                    mount_lanes::admit_remote(
-                        mount_lanes::authority(location.uri_value().unwrap_or_default()),
-                        Class::Background,
-                    )
-                })
-                .transpose();
+            let class = match request.background {
+                true => Class::Background,
+                false => Class::Interactive,
+            };
+            let admitted = mount_lanes::admit_remote(
+                mount_lanes::authority(location.uri_value().unwrap_or_default()),
+                class,
+            );
             let Ok(admitted) = admitted else {
                 emit(DirectoryEvent::Failed {
                     request_id,
@@ -1484,11 +1483,8 @@ impl FileSource for LocalFileSource {
                 });
                 return;
             };
-            let beat = || {
-                if let Some(admitted) = &admitted {
-                    admitted.progress().beat();
-                }
-            };
+            let progress = admitted.progress();
+            let beat = || progress.beat();
             let directory = gio_file_for_location(&location);
             let deadline = started + request.time_budget;
             let finish_truncated = |entries: usize,
@@ -1518,15 +1514,16 @@ impl FileSource for LocalFileSource {
             }
             if stamped_remotely(&location) {
                 let read_at = SystemTime::now();
-                match glib::future_with_timeout(
-                    remaining,
-                    directory.query_info_future(
-                        STAMP_ATTRIBUTES,
-                        gio::FileQueryInfoFlags::NONE,
-                        glib::Priority::LOW,
-                    ),
-                )
-                .await
+                match admitted
+                    .call(glib::future_with_timeout(
+                        remaining,
+                        directory.query_info_future(
+                            STAMP_ATTRIBUTES,
+                            gio::FileQueryInfoFlags::NONE,
+                            glib::Priority::LOW,
+                        ),
+                    ))
+                    .await
                 {
                     Ok(Ok(info)) => {
                         beat();
@@ -1539,7 +1536,7 @@ impl FileSource for LocalFileSource {
                             )),
                         });
                     }
-                    Ok(Err(_)) => {}
+                    Ok(Err(error)) => progress.answered(&Err::<(), _>(error)),
                     Err(_) => {
                         finish_truncated(0, "time budget", can_trash, can_delete);
                         return;
@@ -1552,17 +1549,21 @@ impl FileSource for LocalFileSource {
             } else {
                 LIST_ATTRIBUTES
             };
-            let enumerator = match glib::future_with_timeout(
-                remaining,
-                directory.enumerate_children_future(
-                    attributes,
-                    gio::FileQueryInfoFlags::NONE,
-                    glib::Priority::DEFAULT,
-                ),
-            )
-            .await
+            let enumerator = match admitted
+                .call(glib::future_with_timeout(
+                    remaining,
+                    directory.enumerate_children_future(
+                        attributes,
+                        gio::FileQueryInfoFlags::NONE,
+                        glib::Priority::DEFAULT,
+                    ),
+                ))
+                .await
             {
-                Ok(Ok(enumerator)) => enumerator,
+                Ok(Ok(enumerator)) => {
+                    beat();
+                    enumerator
+                }
                 Ok(Err(error)) => {
                     tracing::warn!(
                         request_id = request_id.0,
@@ -1570,6 +1571,7 @@ impl FileSource for LocalFileSource {
                         error_code = error.code(),
                         "directory load failed"
                     );
+                    progress.answered(&Err::<(), _>(error.clone()));
                     emit(remote_directory_failure(request_id, &error));
                     return;
                 }
@@ -1588,12 +1590,13 @@ impl FileSource for LocalFileSource {
                     finish_truncated(total_entries, "time budget", can_trash, can_delete);
                     break;
                 }
-                match glib::future_with_timeout(
-                    remaining,
-                    enumerator
-                        .next_files_future(request.batch_size as i32, glib::Priority::DEFAULT),
-                )
-                .await
+                match admitted
+                    .call(glib::future_with_timeout(
+                        remaining,
+                        enumerator
+                            .next_files_future(request.batch_size as i32, glib::Priority::DEFAULT),
+                    ))
+                    .await
                 {
                     Ok(Ok(files)) if files.is_empty() => {
                         beat();
@@ -1661,6 +1664,7 @@ impl FileSource for LocalFileSource {
                             error_code = error.code(),
                             "directory load interrupted"
                         );
+                        progress.answered(&Err::<(), _>(error.clone()));
                         emit(remote_directory_failure(request_id, &error));
                         break;
                     }
@@ -1825,9 +1829,15 @@ impl FileSource for LocalFileSource {
     }
 
     fn responsiveness(&self, location: &Location) -> Responsiveness {
-        location
-            .native_path()
-            .map_or(Responsiveness::Answering, mount_lanes::responsiveness)
+        match location.native_path() {
+            Some(path) => mount_lanes::responsiveness(path),
+            None if location.is_recent_root() || location.is_camera_photo_root() => {
+                Responsiveness::Answering
+            }
+            None => mount_lanes::remote_responsiveness(mount_lanes::authority(
+                location.uri_value().unwrap_or_default(),
+            )),
+        }
     }
 
     fn follow_responsiveness(&self, notify: Rc<dyn Fn()>) -> LoadHandle {
