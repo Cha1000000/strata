@@ -284,6 +284,16 @@ already share, and preview drawers and thumbnails follow the registry's notices 
 `holders.rs` names the program that still has a file open; see
 [Files that are still open](filesystem-compatibility.md#files-that-are-still-open).
 
+Every hidden name Strata creates in a user's folder, and every one earlier builds created, is in
+the pure table `model/hidden_names.rs`, which adapters take their names from and which classifies a
+listed name by its whole form. `app/browser/leftovers.rs` classifies a settled column's names in
+memory, hides them while `file_activity` shows an operation in that folder, and emits
+`LeftoversChanged` for the pane button and the once-per-session dock card. The review dialog
+(`ui/browser/leftovers.rs`) reads the items through `OperationProvider::review_leftovers`, and
+`adapters/local_operations/leftovers.rs` restores originals (`recover`, behind the same
+`ActiveOperation` as every operation) and sweeps stale probes; see
+[Leftovers after a crash or unplug](filesystem-compatibility.md#leftovers-after-a-crash-or-unplug).
+
 Filesystem work for Trash lives in `adapters/trash.rs`. Measurement shares one entry/time budget
 across root and descendant batches; depth truncation and unreadable descendants remain branch-local.
 Deleting Trash streams its own batches, independently of any incomplete measurement. Native path

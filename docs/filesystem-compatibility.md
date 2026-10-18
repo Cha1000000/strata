@@ -32,6 +32,11 @@ one is deleted.
   [Moves across filesystems](#moves-across-filesystems).
 - **Show only complete copies.** A copy appears under its final name once it is complete, except
   on mounts where nothing can be placed; see [Publishing a copy](#publishing-a-copy).
+- **Never remove what an interrupted operation may have left of the user's data.** A crash or an
+  unplugged device can leave Strata's hidden names behind, and an original set aside always keeps
+  its own name inside one. Strata shows them where the user looks and offers to restore them; by
+  itself it removes only its own empty probes, and it deletes an incomplete copy only when the user
+  asks. See [Leftovers after a crash or unplug](#leftovers-after-a-crash-or-unplug).
 - **Never stand in an operation's way, and never remove another program's open file.** Before an
   operation changes an item, Strata stops its own previews, thumbnails and background reads of it
   and of everything inside it. A file another program still has open, which NFS, SMB and FUSE keep
@@ -365,16 +370,24 @@ Before copying anything, Replace chooses how to remove the original, in this ord
 
 1. **Trash**, when the location supports it. Undo restores the original.
 2. **Atomic exchange** (`RENAME_EXCHANGE`) on in-kernel local filesystems: ext4, XFS, btrfs, f2fs,
-   tmpfs, bcachefs, OpenZFS 2.2 and later, and vfat on Linux 6.0 and later. It is never used on
-   FUSE, where some daemons ignore the flag and overwrite the target. The filesystem type is read
-   fresh with `fstatfs` for every decision.
-3. **Set aside**: the original is placed at a hidden `.strata-replaced-<id>` name with the routine
-   above, the new item is placed at the original name, and the set-aside original is removed by
-   identity. If placing fails, the original is put back; if its name was taken meanwhile, it is
-   kept and the error names it. The original's name is briefly absent, as it is with Trash. On
-   mounts with neither `RENAME_NOREPLACE` nor usable hard links, these placements use the
-   [reserved-name step](#the-reserved-name-step-and-its-risk) for files, and for folders where
-   renaming over an empty folder is refused.
+   tmpfs, bcachefs, OpenZFS 2.2 and later, and vfat on Linux 6.0 and later. The finished copy is
+   first moved into a new hidden folder, `.strata-originals-<id>/`, beside the original and under
+   the original's name, then exchanged with the original across the two folders, so the original
+   ends in that folder under its own name and the copy at the name. It is never used or probed on
+   FUSE, where some daemons ignore the flag: exfat-fuse overwrote the target and destroyed it in the
+   lab. The filesystem type is read fresh with `fstatfs` for every decision. If the exchange is
+   refused, the copy goes back to its stage name and Replace sets the original aside instead; only
+   an `EINVAL` or "unsupported" is remembered for the mount, not a permission refusal from a
+   read-only copy or folder.
+3. **Set aside**: the original moves into a new `.strata-originals-<id>/` folder beside it, under
+   its own name, the new item is placed at the original name, and the set-aside original is then
+   removed by identity, its folder with it. The move into the folder is a plain rename followed by
+   an identity check, not the routine above: nothing else knows that folder, so the rename cannot
+   replace anything. If placing fails, the original is put back; if its name was taken meanwhile,
+   it stays in its folder and the error names it. The original's name is briefly absent, as it is
+   with Trash. On mounts with neither `RENAME_NOREPLACE` nor usable hard links, placing the new item
+   and putting the original back use the [reserved-name step](#the-reserved-name-step-and-its-risk)
+   for files, and for folders where renaming over an empty folder is refused.
 4. Otherwise Replace fails before any data is copied. This happens only where a probe cannot
    settle what the mount supports, or for a folder on a mount without `RENAME_NOREPLACE` that has
    hard links but cannot rename over an empty folder.
@@ -396,30 +409,50 @@ while it waits is still replaced; another item is refused as "The target changed
 was in progress". The original then goes on with the identity it has now. An original set aside is
 put back by the same rule, without the change time, which setting it aside changes. It is removed by
 its device, type, inode and birth time, the birth time standing in for the inode where the mount
-numbers entries afresh, as it sits at a hidden name only Strata uses. Archives replace their target
-the same way.
+numbers entries afresh, as it sits in a hidden folder only Strata uses. Archives replace their
+target the same way.
 
-Copies are written into a hidden `.strata-replacement-<id>` stage before they are placed. A file
-stage is created by the copy itself, exclusively, at a fresh name, so nothing is ever copied over
-a stage. Where the original or a moved source will be deleted, the stage is flushed to disk first;
-see [Durability](#durability). Where only a descriptor tells a file stage apart, as for the target
-above, it is held from its last write until it is published or removed, so it keeps its number
-once closed; archive stages too.
+A folder moves to another parent only if its `..` entry can be rewritten, so a folder the user
+owns with a mode that denies its owner write (0555) is made owner-writable for the instant of each
+move into or out of an originals folder, through a descriptor checked against its identity, and
+gets its exact mode back. A folder the user can neither write nor change the mode of, such as
+another user's folder on a mount that enforces modes, cannot be set aside: Replace without Trash
+and a case-only rename on a case-insensitive mount fail there with "Permission denied", as `mv`
+into another folder would.
+
+The originals folder costs, per Replace without Trash and next to setting the original aside under a
+flat hidden name as earlier builds did, 2 more requests on NFSv3, none on NFSv4.2 and one fewer on
+sshfs for a file, 1 to 3 more for a folder, and 14 more SMB commands for a file and 17 for a folder,
+under 1 ms on loopback. A crash or unplug at any point leaves the original at its name or in its
+folder, never only under a stage; see [Leftovers after a crash or
+unplug](#leftovers-after-a-crash-or-unplug).
+
+Copies are written into a hidden `.strata-copy-<id>` stage before they are placed, so a stage only
+ever holds a copy. A file stage is created by the copy itself, exclusively, at a fresh name, so
+nothing is ever copied over a stage. Where the original or a moved source will be deleted, the stage
+is flushed to disk first; see [Durability](#durability). Where only a descriptor tells a file stage
+apart, as for the target above, it is held from its last write until it is published or removed, so
+it keeps its number once closed; archive stages too.
 
 When Replace is part of a move within one filesystem, the source itself is placed after the
 original is out of the way, so nothing is copied unless no step can place it. Without Trash, a
 replaced original is gone for good: the replacement is not added to Undo, because undoing it could
-only delete the remaining copy. A replacing move keeps its Undo, which moves the item back.
+only delete the remaining copy. A replacing move keeps its Undo, which moves the item back. Where
+the original cannot be removed once the new item is in place and flushed, as when another program
+holds a file in it, a paste or move completes with its Undo and reports "“%{name}” was replaced,
+but its original could not be removed from “%{kept}”: %{error}", naming the originals folder that
+keeps it; an archive that replaced its original fails instead, naming that folder.
 
-Merge moves the files it overwrites to Trash. Without Trash, it sets them aside, never by
-exchange: the originals go into one hidden `.strata-merge-<id>` folder inside the merge target, are
-put back if the merge fails or is cancelled, and are removed once it succeeds and is flushed to
-disk. To put an original back over a copy the merge already placed at its name, the merge deletes
-that copy while it is still as placed; anything else at the name stays, and the original stays in
-the folder, which the error names. An original whose name the merge left free, because the incoming item was a special file the destination
-cannot store or a source that a merging move kept, is put back instead. It refuses to set a file
-aside where Replace would. How the incoming items are placed is described under
-[Merges](#merges).
+Merge moves the files it overwrites to Trash. Without Trash, it sets them aside, never by exchange:
+the originals go into one hidden `.strata-merge-<id>` folder inside the merge target, under their
+own names and the folders they sat in, each by a plain rename and an identity check, are put back if
+the merge fails or is cancelled, and are removed once it succeeds and is flushed to disk. To put an
+original back over a copy the merge already placed at its name, the merge deletes that copy while it
+is still as placed; anything else at the name stays, and the original stays in the folder, which the
+error names. An original whose name the merge left free, because the incoming item was a special
+file the destination cannot store or a source that a merging move kept, is put back instead. It
+refuses to set a file aside where Replace would. How the incoming items are placed is described
+under [Merges](#merges).
 
 ## Copying
 
@@ -448,7 +481,7 @@ item moved to one is deleted by Strata, as described under
 - **Elsewhere, and for folders,** the copy is built in a hidden `.strata-copy-*` stage in the
   destination folder and published with the [placement routine](#placing-an-item-without-replacing).
   A file stage is created exclusively, and its identity is read from its own descriptor. Replace
-  builds its copy under `.strata-replacement-*` and places it itself; see
+  builds its copy in such a stage too and places it itself; see
   [Replace and merge](#replace-and-merge).
 - **Where nothing can be placed,** because the mount's learned capabilities rule out every step for
   a folder or publishing a stage returns "unsupported", entries are created exclusively at their
@@ -461,8 +494,9 @@ item moved to one is deleted by Strata, as described under
   GVfs destinations are probed off the main thread, and the copy retries on "exists". After an
   unconfirmed publish, both names are kept and no other number is tried.
 
-A crash or an unplugged device can leave a `.strata-copy-*` stage behind. It holds only a partial
-copy whose source still exists, and is safe to delete; nothing removes it automatically.
+A crash or an unplugged device can leave a `.strata-copy-*` stage behind. It holds only a copy
+whose source still exists, and is safe to delete. Strata never removes it by itself; the folder's
+[leftover review](#leftovers-after-a-crash-or-unplug) offers to delete it.
 
 ### Data
 
@@ -800,9 +834,9 @@ report there.
 
 | Destination | Flush | Why |
 | --- | --- | --- |
-| ext2/3/4, XFS, btrfs, f2fs, tmpfs, bcachefs, ZFS, overlayfs, ntfs3, NFS | `syncfs` | `sync_fs` flushes the device; NFS commits to the server |
-| vfat, msdos, exFAT | `syncfs`, then `fsync` of the folder | `sync_fs` writes back without flushing the device's cache, which `fsync`, of folders too, does |
-| ntfs-3g, exfat-fuse | `syncfs`, then `fsync` of the folder | without `FUSE_SYNCFS`, `syncfs` writes the daemon's device pages back but flushes nothing; both daemons sync and flush their whole device for a folder's `fsync` |
+| ext2/3/4, XFS, btrfs, f2fs, tmpfs, bcachefs, ZFS, overlayfs, NFS | `syncfs` | `sync_fs` flushes the device; NFS commits to the server |
+| vfat, msdos, exFAT, ntfs3 | `fsync` of the folder, `syncfs`, then `fsync` of the folder again | `sync_fs` writes back without flushing the device's cache, which `fsync`, of folders too, does; on ntfs3 `syncfs` returned success for renames an unplugged device never got, which only a folder `fsync` made first reported |
+| ntfs-3g, exfat-fuse | `fsync` of the folder, `syncfs`, then `fsync` of the folder again | without `FUSE_SYNCFS`, `syncfs` writes the daemon's device pages back but flushes nothing; both daemons sync and flush their whole device for a folder's `fsync` |
 | other FUSE daemons, and `fuseblk` mounts udev cannot tell | `fdatasync` of each written file before it is closed, then `fsync` of the folder | a file's `fsync` reaches the daemon; the folder's covers names published after the files were synced |
 | SMB | `fdatasync` of each written file | only a file's `fsync` reaches the server, as an SMB FLUSH |
 | any other | `fdatasync` of each written file, then `syncfs` | |
@@ -811,8 +845,8 @@ report there.
   (`ID_FS_TYPE` in `/run/udev/data/b<major>:<minor>`), read off the main thread and cached with
   the mount's capabilities. The same record gives them, and FAT served by FUSE, their
   [name rules](#the-rules-each-destination-gets).
-- A removable device gets a folder `fsync` besides. Before Linux 5.8, every file is synced too,
-  since `syncfs` reports no writeback errors there.
+- A removable device of another family gets a folder `fsync` after its `syncfs`. Before Linux 5.8,
+  every file is synced too, since `syncfs` reports no writeback errors there.
 - If the flush fails, nothing behind it is deleted, both copies stay, and the error says the device
   could not finish writing.
 
@@ -1196,13 +1230,14 @@ chooses itself, such as "new folder", are not checked.
 
 Local renames go through the same routine instead of GIO's check-then-rename.
 
-- **Case-only renames** (`notes.txt` to `Notes.txt`) on case-insensitive folders — vfat, exFAT,
-  SMB shares, casefolded ext4, f2fs and tmpfs folders, ntfs3 with `nocase` — are done in two steps
-  through a hidden `.strata-rename-<id>` name, with rollback. A plain rename is a silent no-op
-  there, and a no-replace rename reports the name as taken. The SMB client caches the lookup of
-  the new spelling for about a second, so it is revalidated before the second step. exfat-fuse
-  and other path-keyed FUSE daemons give each spelling its own inode number, and so does cifs
-  once it has turned server numbers off, so there the new spelling counts as the item itself
+- **Case-only renames** (`notes.txt` to `Notes.txt`) on case-insensitive folders — vfat, exFAT, SMB
+  shares, casefolded ext4, f2fs and tmpfs folders, ntfs3 with `nocase` — are done in two steps
+  through a hidden `.strata-originals-<id>/` folder, with rollback: the item moves into it under its
+  old spelling, then out of it under the new one, and the folder is removed. A plain rename is a
+  silent no-op there, and a no-replace rename reports the name as taken. The SMB client caches the
+  lookup of the new spelling for about a second, so it is revalidated before the second step.
+  exfat-fuse and other path-keyed FUSE daemons give each spelling its own inode number, and so does
+  cifs once it has turned server numbers off, so there the new spelling counts as the item itself
   only when the folder lists no such name, the item's own name is the only one that matches it
   ignoring case, and type, size and modification time agree. The rename prompt decides "already
   exists" by the same rule, so it never refuses a case-only rename that the rename would accept.
@@ -1399,20 +1434,148 @@ directory handle from a listing never blocked a rename in the lab.
 - **The holder search** sees only processes on this computer that Strata may read, and its 200 ms
   limit is an estimate.
 
+## Leftovers after a crash or unplug
+
+A crash, a killed process or a device pulled out during an operation can leave Strata's hidden
+names in a folder. Strata recognises them when it lists that folder, offers to restore what may be
+the user's data, and removes nothing by itself except its own empty probes.
+
+### What an interrupted operation leaves
+
+Current builds leave only five kinds of hidden names (see [Hidden names](#hidden-names)), and the
+name alone says what each holds. A stage holds only a copy. An original that Replace, an archive's
+Replace or a case-only rename moves out of the way sits in a `.strata-originals-<id>/` folder under
+its own name, and the originals Merge moves aside sit in its `.strata-merge-<id>/` folder under
+their own names and folders, so Restore needs nothing but the folder. Where a crash can stop each
+step:
+
+- **Setting an original aside.** Right after the folder is made, it is empty, and Restore removes
+  it. Once the original is in it, the original's name is free, and Restore puts it back. Once the
+  new item is published, both exist, and Restore puts the original back as `name (1)`.
+- **Exchange.** Before the exchange, the folder holds the finished copy and the original is at its
+  name; after it, the other way round. Restore keeps both.
+- **Case-only rename.** The item sits in the folder under its old spelling, and Restore gives the
+  state before the rename back.
+- **Deleting a replaced folder.** Part of the original can remain in its folder. Restore returns
+  that part, and cannot tell that it is partial.
+
+In the lab, 932 kills during Replace and Merge on NFSv3, NFSv4.2, SMB and sshfs, and 200 unplugs
+(through a device-mapper error target) during Replace without Trash on vfat, exFAT and ntfs3, lost
+no original: each was intact, or deleted only once its replacement was durable at its name, and
+Restore emptied every folder it met. Earlier builds (released ones and #1615's nightlies) also left
+originals under flat hidden names, and stages that an exchange could turn into the original; Strata
+still recognises those names and classes them as possible originals.
+
+### Recognising them
+
+- **By the whole name.** A known prefix followed by a UUID, or for the two older stage prefixes the
+  6-character suffix older builds used. `.strata-copy-notes` or an unknown `.strata-x-<uuid>` is an
+  ordinary file. The table is `src/model/hidden_names.rs`.
+- **From the listing Strata makes anyway**, in memory, with no extra scan or file call; a folder
+  nobody opens is never looked at.
+- **Where the user looks.** In a browser window, not the portal chooser, in a folder the view shows
+  rather than a peek, on native folders and GVfs locations other than the Trash and Recent, once its
+  listing has settled.
+- **Not while they may be live.** While an operation of this Strata process changes a folder or
+  writes into it, in any window, and anywhere below a merge's targets while it runs, its hidden
+  names are not shown; they appear the moment the operation ends. Another process (another Strata
+  instance or file manager, or another computer on a share) cannot be seen, so the review says
+  another program or computer may still be using them.
+- **Never another program's.** `.nfs…`, `.fuse_hidden…`, `.__smbfile_silly…` and ntfs-3g's cut
+  names are not Strata's and are never listed as leftovers (see
+  [Files that are still open](#files-that-are-still-open)).
+
+### Where they show
+
+- **The pane header button**, icon-only, "Items left by an interrupted operation", in every column
+  in Columns and in the List and Icons pane, while the folder holds such names. It opens the
+  review.
+- **A dock card**, the first time in a session that a folder holding possible originals is shown:
+  "“%{folder}” holds originals that an interrupted operation set aside." with Review. Like other
+  cards it can be pinned and closes on its own after 15 s otherwise. Review opens the review, and
+  opens the folder first if it was closed meanwhile.
+- **The context menu's Restore**, on a single such row, which is visible when hidden files are
+  shown.
+
+### The review
+
+The review lists each item with what it may hold, its date and its hidden name. When it opens, a
+worker reads each item ("Reading what each item holds…") and lists what the originals and merge
+folders hold, up to 1,000 names and "and N more" (for a merge folder, at least that many). A folder
+holding only another program's open files says so, with the still-open wording, and offers no
+Restore; an item that went says "No longer here", and one that cannot be read shows the system's
+error. Its footer says: "Another program or computer may still be using these items. Restore never
+replaces an existing item."
+
+| Name | Shown as | Actions |
+| --- | --- | --- |
+| `.strata-originals-*` | Originals that were set aside, or a finished copy of a replaced item | Restore, Show |
+| `.strata-merge-*` | Originals that a merge set aside | Restore, Show |
+| older flat names | An original that was set aside under a hidden name | Restore, Show |
+| older stage names | May be a replaced original or an incomplete copy | Restore, Show |
+| `.strata-copy-*`, `.strata-extraction-*`, older copy names | An incomplete copy. Its source was not changed. | Delete…, Show |
+
+- **Restore of a folder of originals** puts each item back in the folder under its own name, or for
+  a merge under its own folders, which are made again where missing, by the identity it reads then.
+  It never replaces: a taken name gets the next Keep Both number and is reported under "These names
+  were already taken", and a name that already holds the item itself, as a hard link an interrupted
+  step left, only loses the hidden folder's name. Other programs' open files inside are left in
+  place, and a folder holding nothing else stays and is reported as still open. The emptied folders
+  and the hidden folder are then removed, deepest first, by the removal that waits for leftovers
+  about to go and never deletes recursively. Restore selects what came back and adds nothing to
+  Undo. It is not offered on GVfs locations.
+- **Restore of an older flat name**, whose own name is unknown, renames it to "Recovered item",
+  numbered if that is taken, and opens the name editor on it, as New Folder does; that rename has
+  the usual Undo.
+- **Show** reveals the item, turning hidden files on.
+- **Delete…** is offered only for incomplete copies, whose source still exists. It is the usual
+  confirmed Delete, to the Trash where the folder has one. The item is read again when the delete
+  runs, not held to what the review read, so a stage folder on exFAT whose birth time a rename into
+  it reset is still deleted.
+- Restore and Delete… refuse while an operation runs in the folder: "Wait for the running operation
+  to finish, then try again." Show never does.
+- An ntfs3 volume unplugged during a write often mounts only read-only until it is checked. Restore
+  then says "The drive is read-only. It may need to be checked for errors after it was unplugged
+  without being ejected."
+
+### Stale probes
+
+A `.strata-probe-*` name in a listed folder is removed in the background, through the mount's
+[request lane](#request-lanes), once per folder and name in a session, when `lstat` shows an empty
+file or a folder (removed with `rmdir`, so only when empty) whose modification time is over an hour
+old. Probes live for milliseconds. Any error, such as a read-only mount or share, a refusal or a
+device that went away, is ignored, never retried and never reported. On an unplugged FAT, exFAT or
+NTFS device an `unlink` can report success against the cache; such a probe is back after the
+device is plugged in again and goes then. vfat stores local times, so on a stick last written by a
+computer in a time zone to the west a fresh probe can look up to 26 hours old; removing such a live
+probe only costs that probe its answer.
+
+### Limits of the review
+
+- A folder is only checked when it is listed, so leftovers in a folder nobody opens stay.
+- Leftovers at visible names carry no marker: the empty placeholder the
+  [reserved-name step](#the-reserved-name-step-and-its-risk) can leave, entries created at their
+  final names where nothing could be placed, a restore copy cut off at its final names, and an
+  extraction's archive-named folder.
+- Another process's live hidden names can be shown as leftovers; Restore never replaces, and
+  Delete… only takes an incomplete copy after confirmation.
+
 ## Hidden names
 
-| Name | Purpose | After a crash |
-| --- | --- | --- |
-| `.strata-replacement-*` | Replace's staging copy; after an exchange, the swapped-out original until it is deleted | **may be the user's original** |
-| `.strata-copy-*` | a copy being built: a new item, or a merge's incoming items inside the merged folder | partial copy; safe to delete |
-| `.strata-compression-*` | archive being written; after an exchange, the replaced archive | **may be the user's original** |
-| `.strata-replaced-*` | original set aside by Replace | **may be the only copy of the user's item** |
-| `.strata-merge-*` | originals set aside by Merge | **may hold the only copies** |
-| `.strata-rename-*` | middle step of a case-only rename | **is the user's item** |
-| `.strata-extraction-*` | archive extraction staging | extracted output; see [Archives](archives.md) |
-| `.strata-probe-*` | capability probe | empty; safe to delete |
+| Name | Made by | Holds | After a crash |
+| --- | --- | --- | --- |
+| `.strata-probe-*` | capability probes in a destination folder | nothing | empty; removed once stale |
+| `.strata-copy-*` | copies and moves across filesystems, Replace and archive stages, a merge's incoming items in each merged folder | a copy being built | an incomplete copy whose source is unchanged; Delete… in the review |
+| `.strata-extraction-*` | archive extraction | members extracted so far | an incomplete copy, as the archive still holds them; see [Archives](archives.md) |
+| `.strata-originals-*` | Replace and archive Replace without Trash, also by exchange, and case-only renames | the original under its own name, or for a moment before an exchange the finished copy | **may hold the only copy of the user's item**; Restore |
+| `.strata-merge-*` | Merge without Trash | the originals under their own names and folders | **may hold the only copies**; Restore |
+| `.strata-replaced-*`, `.strata-rename-*` | earlier builds' Replace and case-only rename | an original under a hidden name | **may be the user's item**; Restore as "Recovered item" |
+| `.strata-replacement-*`, `.strata-compression-*` with a UUID | earlier builds' Replace and archive stages | a copy, or after an exchange the original | **may be the user's original**; Restore as "Recovered item" |
+| `.strata-replacement-*` with 6 characters | released builds' Replace stage | a copy, or after an exchange the original | **may be the user's original**; Restore as "Recovered item" |
+| `.strata-compression-*` with 6 characters, `.strata-symlink-*` | released builds' archive and symbolic link stages | a copy | an incomplete copy |
 
-The prefixes live in `placement.rs`. Names that may hold user data are never deleted or renamed automatically.
+The prefixes live in `src/model/hidden_names.rs`. Strata never deletes or renames by itself a name
+that may hold user data.
 
 ## Changes made elsewhere
 
@@ -1808,7 +1971,10 @@ on NFS, open files only on SMB and FUSE), how long it outlives the last close on
 what unlinking a held leftover returns, and SMB with POSIX extensions refusing `rmdir` instead.
 `fs_quirks::hold(path)` stands for another program keeping a file open, a quirk names the program a
 holder search finds (otherwise the search reads only the test process's own `/proc` entries), and
-another refuses SMB folder renames while a file below is held and for a set time after.
+another refuses SMB folder renames while a file below is held and for a set time after. For
+[leftovers after a crash or unplug](#leftovers-after-a-crash-or-unplug), a quirk unplugs the device
+after a given call: every later call under the scope fails with `EIO`, cleanup included, until
+`FsQuirks::replug()`.
 
 The checks of [changes made elsewhere](#changes-made-elsewhere) are tested on the app layer with a
 fake file source, on the scheduler's own clock: no timer runs under test, and tests call the tick.

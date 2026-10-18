@@ -22,8 +22,11 @@ so two members that sanitize to `report.txt` become `report.txt` and
 
 Strata writes members into a hidden `.strata-extraction-<id>` folder inside the
 destination, created when the first member is written. It is visible during
-extraction only when hidden files are shown. When the archive has been read,
-Strata publishes the folder:
+extraction only when hidden files are shown. A crash or an unplugged device can
+leave it behind; it holds nothing the archive does not, and the folder's
+[leftover review](filesystem-compatibility.md#leftovers-after-a-crash-or-unplug)
+offers to delete it. When the archive has been read, Strata publishes the
+folder:
 
 - A single top-level entry is moved up into the destination under its own
   name. It is renamed to `name (2)`, `name (3)` and so on only if the
@@ -223,19 +226,23 @@ at publication, never replacing anything apart from the narrow window of the
 [reserved-name step](filesystem-compatibility.md#the-reserved-name-step-and-its-risk);
 the sources are not compressed again for each collision.
 
-Replace moves the existing archive to Trash where the location supports it,
-and Undo restores it. Elsewhere, the original is swapped out atomically on
-filesystems known to support that, or moved to a hidden sibling, and it is
-deleted only after the new archive is in place and
-[flushed to the drive](filesystem-compatibility.md#durability). Such a
-replacement has no Undo, because the original no longer exists.
-If none of these is safe at the location, or the existing archive is replaced
-by another item while the new one is encoded, nothing is replaced; the refusal
-comes before encoding when possible.
+Replace moves the existing archive to Trash where the location supports it, and
+Undo restores it. Elsewhere, the original goes into a hidden
+`.strata-originals-<id>` folder beside it under its own name, swapped there
+atomically with the finished archive on filesystems known to support that, or
+moved there first, and it is deleted only after the new archive is in place and
+[flushed to the drive](filesystem-compatibility.md#durability). If it cannot be
+deleted then, the compression fails and names the folder that keeps it. Such a
+replacement has no Undo, because the original no longer exists. If none of these
+is safe at the location, or the existing archive is replaced by another item
+while the new one is encoded, nothing is replaced; the refusal comes before
+encoding when possible. The new archive is built in a hidden `.strata-copy-<id>`
+stage, which a crash can leave behind like any [incomplete
+copy](filesystem-compatibility.md#leftovers-after-a-crash-or-unplug).
 
 On filesystems without no-replace renames where a file cannot be hard-linked,
-such as sshfs and vboxsf, the new archive and a set-aside original are placed
-with the
+such as sshfs and vboxsf, the new archive, and an original put back after a
+failure, are placed with the
 [reserved-name step](filesystem-compatibility.md#the-reserved-name-step-and-its-risk).
 
 ## Feedback and cancellation
