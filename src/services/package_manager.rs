@@ -12,6 +12,7 @@ pub(crate) enum PackageManager {
 
 impl PackageManager {
     pub(crate) fn detect() -> Option<Self> {
+        crate::util::ui_thread::assert_off();
         let release = fs::read_to_string("/etc/os-release")
             .or_else(|_| fs::read_to_string("/usr/lib/os-release"))
             .ok()?;

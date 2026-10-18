@@ -233,10 +233,8 @@ fn refresh_format_validity(
     label_entry: &gtk::Entry,
     confirm_btn: &gtk::Button,
 ) {
-    let fs_type = available.get(fs_combo.selected() as usize).copied();
     refresh_format_selection(
-        fs_type,
-        fs_type.is_some_and(|fs| fs.available()),
+        available.get(fs_combo.selected() as usize).copied(),
         label_entry,
         confirm_btn,
     );
@@ -244,7 +242,6 @@ fn refresh_format_validity(
 
 fn refresh_format_selection(
     fs_type: Option<FilesystemType>,
-    tools_available: bool,
     label_entry: &gtk::Entry,
     confirm_btn: &gtk::Button,
 ) {
@@ -256,9 +253,7 @@ fn refresh_format_selection(
     if label_entry.max_length() != max_length {
         label_entry.set_max_length(max_length);
     }
-    confirm_btn.set_sensitive(
-        tools_available && label_entry.text().chars().count() <= fs_type.max_label_len(),
-    );
+    confirm_btn.set_sensitive(label_entry.text().chars().count() <= fs_type.max_label_len());
 }
 
 fn wire_entry_submission(entry: &gtk::Entry, confirm: &gtk::Button) {
@@ -830,53 +825,145 @@ fn format_filesystem_selector(
     selector
 }
 
+const FORMAT_FILESYSTEMS: [FilesystemType; 3] = [
+    FilesystemType::Fat32,
+    FilesystemType::Ntfs,
+    FilesystemType::Exfat,
+];
+
+enum FormatFacts {
+    Ready(DriveFacts),
+    MissingTools {
+        tools: Vec<FilesystemType>,
+        manager: Option<PackageManager>,
+    },
+}
+
+fn gather_format_facts(request: DriveFactsRequest) -> FormatFacts {
+    let tools: Vec<_> = FORMAT_FILESYSTEMS
+        .into_iter()
+        .filter(|fs| !fs.available())
+        .collect();
+    if tools.is_empty() {
+        FormatFacts::Ready(gather_drive_facts(request))
+    } else {
+        FormatFacts::MissingTools {
+            tools,
+            manager: PackageManager::detect(),
+        }
+    }
+}
+
+struct FormatTarget {
+    name: String,
+    device: Option<PathBuf>,
+    mount_root: Option<gio::File>,
+}
+
+struct FormatChoice {
+    fs_type: FilesystemType,
+    label: String,
+    quick: bool,
+}
+
 /// Format in two steps: configure on step one, then review a summary and
 /// press the confirm button a second time.
 pub(super) fn show_format_dialog(parent: &gtk::Widget, volume: &gio::Volume) {
-    let available = vec![
-        FilesystemType::Fat32,
-        FilesystemType::Ntfs,
-        FilesystemType::Exfat,
-    ];
-    let missing: Vec<_> = available
-        .iter()
-        .filter(|fs| !fs.available())
-        .map(|fs| required_drive_tool(*fs, fs.format_tool_name()))
-        .collect();
-    if !missing.is_empty() {
-        show_missing_tools(
-            parent,
-            &crate::i18n::tr("Formatting drives requires additional filesystem tools."),
-            &missing,
-        );
-        return;
-    }
-    let name = volume.name().to_string();
-    let block_device = drive_ops::block_device_for_volume(volume);
-    let current_filesystem = block_device
-        .as_deref()
-        .and_then(drive_ops::filesystem_label_for_device);
-    let device = block_device
+    let target = FormatTarget {
+        name: volume.name().to_string(),
+        device: drive_ops::block_device_for_volume(volume),
+        mount_root: volume.get_mount().map(|mount| mount.root()),
+    };
+    let volume = volume.clone();
+    open_format_dialog(
+        parent,
+        target,
+        gather_format_facts,
+        move |task_parent, choice| {
+            drive_ops::format_volume(
+                task_parent,
+                volume,
+                choice.fs_type,
+                choice.label,
+                choice.quick,
+            )
+        },
+    );
+}
+
+fn open_format_dialog<S, Fut>(
+    parent: &gtk::Widget,
+    target: FormatTarget,
+    gather: fn(DriveFactsRequest) -> FormatFacts,
+    start: S,
+) where
+    S: FnOnce(gtk::Widget, FormatChoice) -> Fut + 'static,
+    Fut: Future<Output = Result<(), drive_ops::DriveOpError>> + 'static,
+{
+    let device = target
+        .device
+        .as_ref()
         .map(|path| path.display().to_string())
         .unwrap_or_else(|| crate::i18n::tr("unknown device"));
-    let subtitle = format!("{name} ({device})");
-    let volume = volume.clone();
     let Some(shell) = modal_shell(
         parent,
         assets::icons::TRIANGLE_ALERT,
         &crate::i18n::tr("Format Drive"),
-        &subtitle,
+        &format!("{} ({device})", target.name),
         &crate::i18n::tr("Continue"),
         true,
     ) else {
         return;
     };
-
     shell.layout.content.set_width_request(560);
+    shell.layout.confirm.set_sensitive(false);
+    wire_modal_close_except_confirm(&shell);
+    shell.layout.cancel.grab_focus();
+    let request = DriveFactsRequest {
+        device: target.device.clone(),
+        mount_root: target.mount_root.clone(),
+    };
+    glib::MainContext::default().spawn_local(async move {
+        let Ok(facts) = gio::spawn_blocking(move || gather(request)).await else {
+            return;
+        };
+        if shell.layer.parent().is_none() || shell.layer.has_css_class("dismissing") {
+            return;
+        }
+        match facts {
+            FormatFacts::Ready(facts) => {
+                fill_format_dialog(&shell, target, device, &facts, start);
+            }
+            FormatFacts::MissingTools { tools, manager } => {
+                let tools: Vec<_> = tools
+                    .into_iter()
+                    .map(|fs| required_drive_tool(fs, fs.format_tool_name()))
+                    .collect();
+                show_missing_tools(
+                    &shell.overlay,
+                    &crate::i18n::tr("Formatting drives requires additional filesystem tools."),
+                    &tools,
+                    manager,
+                );
+                dismiss_modal_layer(&shell.layer, &shell.overlay, shell.blurred_root.as_ref());
+            }
+        }
+    });
+}
 
-    // Configuration
+fn fill_format_dialog<S, Fut>(
+    shell: &ModalShell,
+    target: FormatTarget,
+    device: String,
+    facts: &DriveFacts,
+    start: S,
+) where
+    S: FnOnce(gtk::Widget, FormatChoice) -> Fut + 'static,
+    Fut: Future<Output = Result<(), drive_ops::DriveOpError>> + 'static,
+{
+    let available = FORMAT_FILESYSTEMS;
     let step1 = gtk::Box::new(gtk::Orientation::Vertical, 12);
-    let fs_combo = format_filesystem_selector(&available, current_filesystem.as_deref());
+    let fs_combo = format_filesystem_selector(&available, facts.filesystem.as_deref());
     step1.append(&field_block("Filesystem", &fs_combo));
 
     let label_field = FormTextField::with_character_limit(
@@ -892,7 +979,7 @@ pub(super) fn show_format_dialog(parent: &gtk::Widget, volume: &gio::Volume) {
     check_row.append(&quick_check);
     step1.append(&check_row);
 
-    if volume.get_mount().is_some() {
+    if target.mount_root.is_some() {
         let mount_note = gtk::Label::new(Some(&crate::i18n::tr(
             "This volume is currently mounted. It will be unmounted to format it; click it in the sidebar afterwards to mount it again.",
         )));
@@ -905,7 +992,6 @@ pub(super) fn show_format_dialog(parent: &gtk::Widget, volume: &gio::Volume) {
     }
     shell.layout.body.append(&step1);
 
-    // Explicit confirmation
     let step2 = gtk::Box::new(gtk::Orientation::Vertical, 12);
     step2.set_visible(false);
     let summary = gtk::Label::new(None);
@@ -928,7 +1014,6 @@ pub(super) fn show_format_dialog(parent: &gtk::Widget, volume: &gio::Volume) {
 
     let confirm_btn = shell.layout.confirm.clone();
     {
-        let available = available.clone();
         let fs_combo = fs_combo.clone();
         let label_entry = label_entry.clone();
         let confirm_btn = confirm_btn.clone();
@@ -937,7 +1022,6 @@ pub(super) fn show_format_dialog(parent: &gtk::Widget, volume: &gio::Volume) {
         });
     }
     {
-        let available = available.clone();
         let fs_combo = fs_combo.clone();
         let label_entry = label_entry.clone();
         let confirm_btn = confirm_btn.clone();
@@ -953,27 +1037,24 @@ pub(super) fn show_format_dialog(parent: &gtk::Widget, volume: &gio::Volume) {
     let shell_layer = shell.layer.clone();
     let shell_overlay = shell.overlay.clone();
     let shell_root = shell.blurred_root.clone();
-    let parent = parent.clone();
+    let size = facts
+        .total_bytes
+        .map(crate::i18n::file_size)
+        .unwrap_or_else(|| crate::i18n::tr("unknown size"));
+    let name = target.name;
     let armed = Rc::new(Cell::new(false));
-    let fired = Rc::new(Cell::new(false));
+    let start = Cell::new(Some(start));
     let submitted_label_entry = label_entry.clone();
     let focus_selector = fs_combo.clone();
     shell.layout.confirm.connect_clicked(move |_| {
-        if fired.get() {
-            return;
-        }
         if !armed.get() {
             let Some(fs_type) = available.get(fs_combo.selected() as usize).copied() else {
                 return;
             };
             let label = submitted_label_entry.text().to_string();
-            if !fs_type.available() || label.chars().count() > fs_type.max_label_len() {
+            if label.chars().count() > fs_type.max_label_len() {
                 return;
             }
-            let size = drive_ops::block_device_for_volume(&volume)
-                .and_then(|device| drive_ops::device_size_bytes(&device))
-                .map(crate::i18n::file_size)
-                .unwrap_or_else(|| crate::i18n::tr("unknown size"));
             summary.set_text(&rust_i18n::t!("Drive: %{value1} (%{value2}, %{value3})\nFilesystem: %{value4}\nLabel: %{value5}\nMode: %{value6}", value1 = name, value2 = device, value3 = size, value4 = fs_type.label(), value5 = if label.is_empty() { crate::i18n::tr("(none)") } else { label.clone() }, value6 = crate::i18n::tr(if quick_check.is_active() {
                     "Quick format"
                 } else {
@@ -986,23 +1067,24 @@ pub(super) fn show_format_dialog(parent: &gtk::Widget, volume: &gio::Volume) {
             armed.set(true);
             return;
         }
-        fired.set(true);
+        let Some(start) = start.take() else {
+            return;
+        };
         dismiss_modal_layer(&shell_layer, &shell_overlay, shell_root.as_ref());
         let Some(fs_type) = available.get(fs_combo.selected() as usize).copied() else {
             return;
         };
-        let label = submitted_label_entry.text().to_string();
-        let quick = quick_check.is_active();
-        let task_volume = volume.clone();
+        let choice = FormatChoice {
+            fs_type,
+            label: submitted_label_entry.text().to_string(),
+            quick: quick_check.is_active(),
+        };
         run_format_with_feedback(
-            &parent,
+            shell_overlay.upcast_ref(),
             &format!("{name} ({device})"),
-            move |task_parent| async move {
-                drive_ops::format_volume(task_parent, task_volume, fs_type, label, quick).await
-            },
+            move |task_parent| start(task_parent, choice),
         );
     });
-    wire_modal_close_except_confirm(&shell);
     focus_selector.grab_focus();
 }
 

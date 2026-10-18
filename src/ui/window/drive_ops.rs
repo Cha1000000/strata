@@ -188,6 +188,7 @@ impl From<glib::Error> for DriveOpError {
 
 /// Locate an executable through `PATH` plus the usual sbin directories.
 fn tool_path(cmd: &str) -> Option<PathBuf> {
+    crate::util::ui_thread::assert_off();
     if cmd.contains('/') {
         let path = PathBuf::from(cmd);
         return is_executable(&path).then_some(path);
