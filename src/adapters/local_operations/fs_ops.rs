@@ -244,12 +244,18 @@ fn entry_stat(stat: &rustix::fs::Statx) -> EntryStat {
     }
 }
 
+/// `st_nlink` is `u64` on x86_64 but `u32` on aarch64; widening through a
+/// generic keeps the conversion valid on both without a same-type cast.
+fn link_count<N: Into<u64>>(nlink: N) -> u64 {
+    nlink.into()
+}
+
 fn legacy_stat(stat: &rustix::fs::Stat) -> EntryStat {
     EntryStat {
         identity: LocalFileIdentity::from_stat(stat),
         kind: FileType::from_raw_mode(stat.st_mode),
         mode: stat.st_mode & 0o7777,
-        nlink: stat.st_nlink,
+        nlink: link_count(stat.st_nlink),
         size: u64::try_from(stat.st_size).unwrap_or(u64::MAX),
         blocks: u64::try_from(stat.st_blocks).unwrap_or_default(),
         atime: (
