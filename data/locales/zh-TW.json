@@ -1409,7 +1409,6 @@
   "Installed": "已安裝",
   "Installed manually": "手動安裝",
   "Installed · Modified locally": "已安裝 · 本機已修改",
-  "Installing…": "正在安裝…",
   "Integrations": "整合",
   "Missing": "缺少",
   "No configuration folder is available.": "沒有可用的設定資料夾。",
@@ -1426,6 +1425,5 @@
   "This copy was not installed from the catalog. Its folder is deleted.": "此副本並非從目錄安裝。其資料夾將被刪除。",
   "Update": "更新",
   "Update available · Modified locally": "有可用更新 · 本機已修改",
-  "Updating…": "正在更新…",
   "VERSION CONTROL": "版本控制"
 }

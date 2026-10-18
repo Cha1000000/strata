@@ -265,6 +265,10 @@ impl Page {
         status.add_css_class(status_class(&row.status));
         status.set_valign(gtk::Align::Center);
         heading.append(&status);
+        let actions = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        actions.add_css_class("integration-actions");
+        actions.set_valign(gtk::Align::Center);
+        heading.append(&actions);
         copy.append(&heading);
         copy.append(&note(&crate::i18n::tr(&entry.description)));
         copy.append(&note(&rust_i18n::t!(
@@ -280,37 +284,32 @@ impl Page {
         confirmation.add_css_class("integration-confirmation");
         confirmation.set_visible(false);
         copy.append(&confirmation);
-        let actions = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-        actions.add_css_class("settings-integration-actions");
-        actions.set_halign(gtk::Align::End);
-        copy.append(&actions);
         let context = Rc::new(RowContext {
             page: Rc::downgrade(self),
             id: entry.id.clone(),
             name: name.clone(),
             message,
             confirmation,
-            actions: actions.clone(),
+            actions,
         });
         match &row.status {
             Status::NotInstalled => {
                 let install = context.button(
                     "Install",
+                    icons::DOWNLOADS,
                     &rust_i18n::t!("Install %{name}", name = name),
-                    "action-dialog-confirm",
+                    false,
                 );
                 let entry = entry.clone();
                 let context = context.clone();
-                install.connect_clicked(move |button| {
-                    button.set_label(&crate::i18n::tr("Installing…"));
-                    context.install(entry.clone());
-                });
+                install.connect_clicked(move |_| context.install(entry.clone()));
             }
             Status::Installed { update, modified } => {
                 let remove = context.button(
                     "Remove",
+                    icons::TRASH,
                     &rust_i18n::t!("Remove %{name}", name = name),
-                    "action-dialog-cancel",
+                    true,
                 );
                 let modified = *modified;
                 let removing = context.clone();
@@ -335,12 +334,13 @@ impl Page {
                 if *update {
                     let update = context.button(
                         "Update",
+                        icons::REFRESH,
                         &rust_i18n::t!("Update %{name}", name = name),
-                        "action-dialog-confirm",
+                        false,
                     );
                     let entry = entry.clone();
                     let updating = context.clone();
-                    update.connect_clicked(move |button| {
+                    update.connect_clicked(move |_| {
                         if modified {
                             let entry = entry.clone();
                             let context = updating.clone();
@@ -351,7 +351,6 @@ impl Page {
                                 Box::new(move || context.install(entry.clone())),
                             );
                         } else {
-                            button.set_label(&crate::i18n::tr("Updating…"));
                             updating.install(entry.clone());
                         }
                     });
@@ -360,8 +359,9 @@ impl Page {
             Status::Manual => {
                 let remove = context.button(
                     "Remove",
+                    icons::TRASH,
                     &rust_i18n::t!("Remove %{name}", name = name),
-                    "action-dialog-cancel",
+                    true,
                 );
                 let removing = context.clone();
                 remove.connect_clicked(move |_| {
@@ -385,13 +385,12 @@ impl Page {
     }
 
     fn manual_row(self: &Rc<Self>, installation: Installation) -> gtk::Box {
-        let widget = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+        let widget = gtk::Box::new(gtk::Orientation::Vertical, 3);
         widget.add_css_class("settings-option");
         widget.add_css_class("integration-row");
         widget.set_widget_name(&format!("integration-{}", installation.id));
         let copy = gtk::Box::new(gtk::Orientation::Vertical, 3);
         copy.set_hexpand(true);
-        copy.set_valign(gtk::Align::Center);
         let heading = gtk::Box::new(gtk::Orientation::Horizontal, 10);
         heading.append(&logo(installation.icon.as_deref(), Category::Other));
         let title = gtk::Label::new(Some(&installation.name));
@@ -400,6 +399,10 @@ impl Page {
         title.set_hexpand(true);
         title.add_css_class("settings-option-title");
         heading.append(&title);
+        let actions = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        actions.add_css_class("integration-actions");
+        actions.set_valign(gtk::Align::Center);
+        heading.append(&actions);
         copy.append(&heading);
         let message = note("");
         message.add_css_class("integration-message");
@@ -409,12 +412,7 @@ impl Page {
         confirmation.add_css_class("integration-confirmation");
         confirmation.set_visible(false);
         copy.append(&confirmation);
-        let actions = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-        actions.add_css_class("settings-integration-actions");
-        actions.set_halign(gtk::Align::End);
-        actions.set_valign(gtk::Align::Center);
         widget.append(&copy);
-        widget.append(&actions);
         let context = Rc::new(RowContext {
             page: Rc::downgrade(self),
             id: installation.id.clone(),
@@ -425,8 +423,9 @@ impl Page {
         });
         let remove = context.button(
             "Remove",
+            icons::TRASH,
             &rust_i18n::t!("Remove %{name}", name = installation.name),
-            "action-dialog-cancel",
+            true,
         );
         let removing = context.clone();
         remove.connect_clicked(move |_| {
@@ -521,9 +520,25 @@ struct RowContext {
 }
 
 impl RowContext {
-    fn button(&self, label: &str, accessible: &str, class: &str) -> gtk::Button {
-        let button = named_button(label, accessible);
-        button.add_css_class(class);
+    /// An icon button in the row heading, styled like the custom action rows.
+    fn button(&self, label: &str, icon: &str, accessible: &str, danger: bool) -> gtk::Button {
+        let image = if danger {
+            assets::danger_icon(icon, assets::CHROME_ICON_PX)
+        } else {
+            assets::text_icon(icon, assets::CHROME_ICON_PX)
+        };
+        image.set_halign(gtk::Align::Center);
+        image.set_valign(gtk::Align::Center);
+        let button = gtk::Button::builder()
+            .child(&image)
+            .tooltip_text(crate::i18n::tr(label))
+            .build();
+        accessibility::set_label(&button, accessible);
+        button.add_css_class("settings-action-button");
+        button.add_css_class("settings-action-icon-button");
+        if danger {
+            button.add_css_class("danger");
+        }
         button.set_widget_name(&format!("integration-{}-{}", self.id, label.to_lowercase()));
         self.actions.append(&button);
         button
