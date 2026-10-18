@@ -1102,7 +1102,7 @@ fn trashing_reports_each_items_identity_and_a_permanent_delete_reports_none() {
                 let root = tempfile::tempdir().expect("root");
                 let folder = root.path().join("folder");
                 fs::create_dir(&folder).expect("folder");
-                let identity = TrashedOriginal::at_path(&folder).expect("identity");
+                let identity = numbers_at(&folder);
                 let events = Rc::new(RefCell::new(Vec::new()));
                 let emitted = events.clone();
                 let _operation = LocalOperationProvider.delete(
@@ -1132,6 +1132,89 @@ fn trashing_reports_each_items_identity_and_a_permanent_delete_reports_none() {
                     } else {
                         vec![(Location::local(&folder), identity)]
                     }
+                );
+            }
+        },
+    );
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Swap {
+    Untouched,
+    RenamedOver,
+    MovedAside,
+}
+
+#[test]
+fn trash_reports_the_item_it_moved_when_another_took_the_name_first() {
+    crate::test_support::gtk_test(
+        "adapters::local_operations::tests::deletion::trash_reports_the_item_it_moved_when_another_took_the_name_first",
+        || {
+            let rows: [(Preset, Op, Swap, bool); 5] = [
+                (Quirks::ext4, Op::Trash, Swap::Untouched, false),
+                (Quirks::ext4, Op::Trash, Swap::RenamedOver, true),
+                (Quirks::ext4, Op::OpenAt, Swap::RenamedOver, true),
+                (Quirks::sshfs, Op::Trash, Swap::MovedAside, true),
+                (Quirks::nfs3, Op::Trash, Swap::RenamedOver, false),
+            ];
+            for (preset, op, swap, reports_arrival) in rows {
+                let root = tempfile::tempdir().expect("root");
+                let item = root.path().join("report.txt");
+                let arrival = root.path().join("arrival.txt");
+                fs::write(&item, b"checked").expect("item");
+                fs::write(&arrival, b"arrived later").expect("arrival");
+                let (checked, arrived) = (numbers_at(&item), numbers_at(&arrival));
+                let (from, to, aside) = (
+                    arrival.clone(),
+                    item.clone(),
+                    root.path().join("report.txt~"),
+                );
+                let racer: Racer = Box::new(move || match swap {
+                    Swap::Untouched => {}
+                    Swap::RenamedOver => fs::rename(&from, &to).expect("renamed over"),
+                    Swap::MovedAside => {
+                        fs::rename(&to, &aside).expect("moved aside");
+                        fs::rename(&from, &to).expect("renamed in");
+                    }
+                });
+                let _quirks = FsQuirks::install(
+                    root.path(),
+                    Quirks {
+                        before: vec![(op, "report.txt", 0, racer)],
+                        ..preset()
+                    },
+                );
+                let events = Rc::new(RefCell::new(Vec::new()));
+                let emitted = events.clone();
+                let _operation = LocalOperationProvider.delete(
+                    DeleteRequest {
+                        id: OperationRequestId(13),
+                        entries: vec![file_entry(&item)],
+                        permanent: false,
+                    },
+                    Rc::new(move |event| emitted.borrow_mut().push(event)),
+                );
+                wait_for_operation(&events, |event| {
+                    matches!(
+                        event,
+                        OperationEvent::Deleted { .. } | OperationEvent::CompletedWithErrors { .. }
+                    )
+                });
+
+                let events = events.borrow();
+                assert!(
+                    matches!(events.last(), Some(OperationEvent::Deleted { .. })),
+                    "{op:?}, {swap:?}: {:?}",
+                    events.last()
+                );
+                assert_eq!(
+                    trashed_items(&events),
+                    [(
+                        Location::local(&item),
+                        if reports_arrival { arrived } else { checked }
+                    )],
+                    "{:?}, {op:?}, {swap:?}",
+                    preset().mount_type
                 );
             }
         },
@@ -1194,7 +1277,8 @@ fn verified_trash_learns_fuse_refusals_and_cleans_leftovers_on_both_worker_route
                                 &path,
                                 &stat,
                                 &gio::Cancellable::new(),
-                            ))
+                            )
+                            .map(drop))
                         }))
                         .expect("worker")
                 } else {
@@ -1235,7 +1319,7 @@ fn a_trash_that_moves_nothing_is_retryable_and_records_no_undo() {
             let rows: [(Trash, Preset, Option<bool>); 5] = [
                 (Trash::FalseWithoutError, Quirks::default, None),
                 (Trash::SucceedsWithoutMoving, Quirks::default, None),
-                (Trash::SucceedsWithoutMoving, Quirks::vfat, Some(true)),
+                (Trash::SucceedsWithoutMoving, Quirks::vfat, Some(false)),
                 (Trash::SucceedsWithoutMoving, Quirks::sshfs, Some(false)),
                 (Trash::SucceedsWithoutMoving, Quirks::exfat, Some(false)),
             ];

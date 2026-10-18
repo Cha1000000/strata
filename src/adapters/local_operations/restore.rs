@@ -16,8 +16,8 @@ use crate::{
     },
     model::Location,
     services::{
-        KeptCause, KeptItem, MoveRecord, OperationEvent, OperationRequestId, PlacedSnapshot,
-        RenameCause, RenamedItem, TransferReport, TrashedOriginal,
+        ItemIdentity, KeptCause, KeptItem, MoveRecord, OperationEvent, OperationRequestId,
+        PlacedSnapshot, RenameCause, RenamedItem, TransferReport,
     },
 };
 use gtk::{gio, glib, prelude::*};
@@ -40,7 +40,9 @@ use super::{
     await_cancellable, cancelled_event, cancelled_local_operation, copy_engine,
     deletion::local_parent_worker_count,
     deletion_error_summary, deletion_undone_when_cancelled, io_error, item_error, kept_items,
-    native_fs::{open_local_parent_beneath, open_local_parent_directory, os_error_detail},
+    native_fs::{
+        identity_at_path, open_local_parent_beneath, open_local_parent_directory, os_error_detail,
+    },
 };
 
 use super::{
@@ -365,23 +367,12 @@ pub(super) async fn move_restore(
     )))
 }
 
-impl TrashedOriginal {
-    pub(super) fn from_metadata(metadata: &std::fs::Metadata) -> Self {
-        use std::os::unix::fs::MetadataExt;
-        Self {
-            device: metadata.dev(),
-            inode: metadata.ino(),
-        }
-    }
-
-    pub(super) async fn matches_path(self, path: PathBuf) -> bool {
-        gio::spawn_blocking(move || {
-            std::fs::symlink_metadata(path)
-                .is_ok_and(|metadata| self == Self::from_metadata(&metadata))
-        })
-        .await
-        .unwrap_or(false)
-    }
+async fn trashed_as(expected: ItemIdentity, path: PathBuf) -> bool {
+    gio::spawn_blocking(move || {
+        identity_at_path(&path).is_some_and(|current| expected.unchanged(&current))
+    })
+    .await
+    .unwrap_or(false)
 }
 
 #[derive(Clone)]
@@ -397,7 +388,7 @@ pub(super) struct RestoreEntry {
 pub(super) async fn trashed_entries_for_originals(
     original_locations: &[Location],
     cancellable: &gio::Cancellable,
-    originals: &HashMap<Location, TrashedOriginal>,
+    originals: &HashMap<Location, ItemIdentity>,
 ) -> Result<Vec<RestoreEntry>, glib::Error> {
     if cancellable.is_cancelled() {
         return Err(cancelled_local_operation());
@@ -490,7 +481,7 @@ pub(super) async fn trashed_entries_for_originals(
                 )
                 .await
                 {
-                    Ok(plan) => expected.matches_path(plan.source_path).await,
+                    Ok(plan) => trashed_as(expected, plan.source_path).await,
                     Err(_) => false,
                 };
                 if !matches {
@@ -665,7 +656,7 @@ pub(super) async fn restore_trash_entry(
 pub(super) fn trashed_merge_original(
     location: Location,
     cancellable: gio::Cancellable,
-    originals: HashMap<Location, TrashedOriginal>,
+    originals: HashMap<Location, ItemIdentity>,
 ) -> Pin<Box<dyn Future<Output = Result<RestoreEntry, glib::Error>>>> {
     Box::pin(async move {
         let entries = trashed_entries_for_originals(
@@ -1032,7 +1023,7 @@ pub(super) async fn run_merge_undo(
 pub(super) fn home_trash_entries(
     requested: &HashSet<PathBuf>,
     cancellable: &gio::Cancellable,
-    originals: &HashMap<Location, TrashedOriginal>,
+    originals: &HashMap<Location, ItemIdentity>,
 ) -> HashMap<PathBuf, RestoreEntry> {
     home_trash_entries_at(
         &glib::user_data_dir().join("Trash"),
@@ -1046,7 +1037,7 @@ pub(super) fn home_trash_entries_at(
     trash_root: &Path,
     requested: &HashSet<PathBuf>,
     cancellable: &gio::Cancellable,
-    originals: &HashMap<Location, TrashedOriginal>,
+    originals: &HashMap<Location, ItemIdentity>,
 ) -> HashMap<PathBuf, RestoreEntry> {
     let info_root = trash_root.join("info");
     let files_root = trash_root.join("files");
@@ -1083,13 +1074,13 @@ pub(super) fn home_trash_entries_at(
             continue;
         }
         let source_path = files_root.join(OsString::from_vec(file_name.to_vec()));
-        let Ok(metadata) = std::fs::symlink_metadata(&source_path) else {
-            continue;
+        let found = match originals.get(&Location::local(&original_path)) {
+            Some(expected) => {
+                identity_at_path(&source_path).is_some_and(|current| expected.unchanged(&current))
+            }
+            None => std::fs::symlink_metadata(&source_path).is_ok(),
         };
-        if originals
-            .get(&Location::local(&original_path))
-            .is_some_and(|expected| *expected != TrashedOriginal::from_metadata(&metadata))
-        {
+        if !found {
             continue;
         }
         let entry = RestoreEntry {

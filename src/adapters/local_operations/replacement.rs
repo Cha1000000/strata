@@ -7,7 +7,7 @@ use crate::{
         trash_support::{TrashError, trash_with_cleanup},
     },
     model::{Location, hidden_names::HiddenName},
-    services::{PlacedSnapshot, ReplacedOriginal, TransferReport, TrashedOriginal},
+    services::{ItemIdentity, PlacedSnapshot, ReplacedOriginal, TransferReport},
 };
 use gtk::{gio, glib, prelude::*};
 
@@ -252,7 +252,7 @@ pub(super) fn original_in_trash(error: &str) -> glib::Error {
 #[derive(Clone, Copy)]
 pub(super) enum Removal {
     Trash,
-    Trashed,
+    Trashed(Option<ItemIdentity>),
     Without(Displacement),
 }
 
@@ -288,10 +288,6 @@ impl ReplacePlan {
 
     pub(super) fn directory(&self) -> bool {
         self.source.is_directory()
-    }
-
-    pub(super) fn trashed_original(&self) -> TrashedOriginal {
-        self.target.identity.into()
     }
 
     pub(super) fn copy_stays_outside_source(&self) -> bool {
@@ -471,9 +467,9 @@ pub(super) async fn remove_displaced_original(
 }
 
 pub(super) enum SourcePlaced {
-    Trashed,
+    Trashed(Option<ItemIdentity>),
     SetAside(placement::SetAside),
-    CopyAfterTrash,
+    CopyAfterTrash(Option<ItemIdentity>),
     /// The original is back at its name, and the source must be copied.
     PutBack,
 }
@@ -488,9 +484,9 @@ pub(super) fn place_source(
     let expected = Some(plan.source.identity);
     let current = ensure_unchanged(target, &plan.target, &plan.target_pin)?;
     match trash::trash_verified(target, target_path, &current, cancellable) {
-        Ok(()) => {
+        Ok(trashed) => {
             return match placement::place(fs(), source, target, expected) {
-                Ok(_) => Ok(SourcePlaced::Trashed),
+                Ok(_) => Ok(SourcePlaced::Trashed(trashed)),
                 Err(
                     error @ (PlaceError::Exists
                     | PlaceError::Changed
@@ -502,7 +498,7 @@ pub(super) fn place_source(
                 Err(_) if !plan.copy_stays_outside_source() => Err(original_in_trash(
                     &crate::services::error_detail(placement_reason(PlaceError::IntoItself)),
                 )),
-                Err(_) => Ok(SourcePlaced::CopyAfterTrash),
+                Err(_) => Ok(SourcePlaced::CopyAfterTrash(trashed)),
             };
         }
         Err(error) if is_trash_unsupported_failure(false, &error) => {}
@@ -568,7 +564,7 @@ pub(super) async fn replace_through_stage(
     ): (Copying, Durability),
 ) -> Result<(StagedReplacement, StagedCopy), glib::Error> {
     let in_trash = |error: glib::Error, removal: Removal| match removal {
-        Removal::Trashed => original_in_trash(&crate::services::gio_error_detail(&error)),
+        Removal::Trashed(_) => original_in_trash(&crate::services::gio_error_detail(&error)),
         _ => error,
     };
     let options = copy_engine::Options {
@@ -593,7 +589,7 @@ pub(super) async fn replace_through_stage(
         let parent = staged.parent.clone();
         let step_plan = plan.clone();
         let step = match removal {
-            Removal::Trashed => {
+            Removal::Trashed(trashed) => {
                 let ownership =
                     publish_staged_replacement(staged, target_path.to_path_buf(), durable).await?;
                 if let Some(sources) = &mut copied.0 {
@@ -615,7 +611,7 @@ pub(super) async fn replace_through_stage(
                     .await
                 };
                 let replaced = StagedReplacement {
-                    original: ReplacedOriginal::Trashed(plan.trashed_original()),
+                    original: ReplacedOriginal::Trashed(trashed),
                     displaced: None,
                     placed,
                 };
@@ -640,7 +636,7 @@ pub(super) async fn replace_through_stage(
                     let current =
                         ensure_unchanged(target, &step_plan.target, &step_plan.target_pin)?;
                     match trash::trash_verified(target, &path, &current, &cancellable) {
-                        Ok(()) => Ok(Removal::Trashed),
+                        Ok(trashed) => Ok(Removal::Trashed(trashed)),
                         Err(error) if is_trash_unsupported_failure(false, &error) => {
                             displacement_without_trash(
                                 &parent,
@@ -835,8 +831,8 @@ pub(super) async fn replace_owing(
             let (step_plan, path, step_cancellable) =
                 (plan.clone(), target_path.clone(), cancellable.clone());
             match run_blocking(move || place_source(&step_plan, &path, &step_cancellable)).await? {
-                SourcePlaced::Trashed => {
-                    on_replaced(ReplacedOriginal::Trashed(plan.trashed_original()), None);
+                SourcePlaced::Trashed(trashed) => {
+                    on_replaced(ReplacedOriginal::Trashed(trashed), None);
                     return Ok(Owed::default());
                 }
                 // The source took its place by a rename, so it was not copied.
@@ -850,13 +846,13 @@ pub(super) async fn replace_owing(
                     remove_displaced_original(original, &plan.target_display()).await?;
                     return Ok(Owed::default());
                 }
-                SourcePlaced::CopyAfterTrash => Removal::Trashed,
+                SourcePlaced::CopyAfterTrash(trashed) => Removal::Trashed(trashed),
                 SourcePlaced::PutBack => Removal::Without(Displacement::SetAside),
             }
         }
     };
     let mut owed = Owed::default();
-    if move_source || !matches!(removal, Removal::Trashed) {
+    if move_source || !matches!(removal, Removal::Trashed(_)) {
         owed.barrier = Some(copy_engine::barrier(split_local_path(&target_path)?.0).await?);
     }
     let progress = copying.progress.clone();

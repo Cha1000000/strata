@@ -12,7 +12,7 @@ use crate::{
     adapters::local_operations::tests::fs_quirks::{
         FsQuirks, Op, Preset, Quirks, Trash, evict, recreated,
     },
-    services::{ArchiveFormat, ReplacedOriginal, TransferConflict, TrashedOriginal},
+    services::{ArchiveFormat, ItemIdentity, ReplacedOriginal, TransferConflict},
     test_support::ASYNC_MAIN_CONTEXT_DEFAULT,
 };
 use gtk::glib;
@@ -179,7 +179,7 @@ fn compression_staging_stays_private_while_encoding() -> Result<(), Box<dyn Erro
     let _trash = HomeTrashGuard::new(&archive);
     fs::write(&archive, b"original")?;
     fs::set_permissions(&archive, fs::Permissions::from_mode(0o640))?;
-    let original = TrashedOriginal::from_metadata(&fs::symlink_metadata(&archive)?);
+    let original = ItemIdentity::at_path(&archive).ok_or("identity")?;
     let writer = HeldWriter::default();
     let hold = writer.hold();
     let worker_destination = destination.clone();
@@ -203,12 +203,10 @@ fn compression_staging_stays_private_while_encoding() -> Result<(), Box<dyn Erro
 
     writer.release();
     let (name, replaced, placed) = glib::MainContext::default().block_on(task)??;
-    assert_eq!(
-        (name, replaced),
-        (
-            "existing.zip".to_owned(),
-            Some(ReplacedOriginal::Trashed(original))
-        )
+    assert_eq!(name, "existing.zip");
+    assert!(
+        matches!(replaced, Some(ReplacedOriginal::Trashed(Some(trashed))) if trashed.same(&original)),
+        "{replaced:?}"
     );
     assert!(placed.is_some(), "the archive is recorded for undo");
     assert_eq!(fs::read(&archive)?, b"replacement");

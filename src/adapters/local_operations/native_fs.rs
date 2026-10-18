@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 
 use super::fs_ops::{Entry, EntryStat, FsOps, OffMain, assert_off_main_thread, fs};
-use crate::services::{Attributes, Evidence, IdentityTraits, InodeNumbers, Proof, TrashedOriginal};
+use crate::services::{Attributes, Evidence, IdentityTraits, InodeNumbers, ItemIdentity, Proof};
 use std::{
     ffi::{OsStr, OsString},
     io,
@@ -76,6 +76,7 @@ pub(super) fn unchanged(
 }
 
 /// An `O_PATH` hold keeps the kernel from evicting an entry, so it keeps its number.
+#[derive(Default)]
 pub(super) struct Pinned {
     pin: Option<OffMain<OwnedFd>>,
 }
@@ -89,25 +90,38 @@ impl Pinned {
     ) -> Self {
         let unproven = stat.identity.birth.is_none_or(|birth| birth == (0, 0))
             || (stat.is_directory() && !traits.folder_births);
-        let pin = (traits.numbers == InodeNumbers::Renewed && unproven)
-            .then(|| {
-                fs.open_at(
-                    entry,
-                    rustix::fs::OFlags::PATH
-                        | rustix::fs::OFlags::NOFOLLOW
-                        | rustix::fs::OFlags::CLOEXEC,
-                    rustix::fs::Mode::empty(),
-                    None,
-                )
-                .ok()
-            })
-            .flatten()
-            .filter(|pin| {
-                fs.stat_fd(pin.as_fd())
-                    .is_ok_and(|pinned| pinned.identity == stat.identity)
-            })
-            .map(OffMain::new);
-        Self { pin }
+        if traits.numbers == InodeNumbers::Renewed && unproven {
+            Self::open(fs, entry, stat)
+        } else {
+            Self { pin: None }
+        }
+    }
+
+    pub(super) fn open(fs: &dyn FsOps, entry: Entry<'_>, stat: &EntryStat) -> Self {
+        match Self::hold(fs, entry) {
+            Some((held, pin)) if held.identity == stat.identity => pin,
+            _ => Self { pin: None },
+        }
+    }
+
+    pub(super) fn hold(fs: &dyn FsOps, entry: Entry<'_>) -> Option<(EntryStat, Self)> {
+        let pin = OffMain::new(
+            fs.open_at(
+                entry,
+                rustix::fs::OFlags::PATH
+                    | rustix::fs::OFlags::NOFOLLOW
+                    | rustix::fs::OFlags::CLOEXEC,
+                rustix::fs::Mode::empty(),
+                None,
+            )
+            .ok()?,
+        );
+        let held = fs.stat_fd(pin.as_fd()).ok()?;
+        Some((held, Self { pin: Some(pin) }))
+    }
+
+    pub(super) fn location(&self) -> Option<PathBuf> {
+        opened_path(self.pin.as_ref()?.as_fd()).ok()
     }
 
     pub(super) fn holds(&self, fs: &dyn FsOps, current: &EntryStat) -> Option<bool> {
@@ -151,13 +165,22 @@ pub(super) fn birth_reset_folder(
         && reported(current.identity.birth)
 }
 
-impl From<LocalFileIdentity> for TrashedOriginal {
-    fn from(identity: LocalFileIdentity) -> Self {
-        Self {
-            device: identity.device,
-            inode: identity.inode,
-        }
+/// Without the change time, which a move to Trash changes.
+pub(super) fn trashed_identity(stat: &EntryStat, traits: IdentityTraits) -> ItemIdentity {
+    ItemIdentity {
+        evidence: stat.identity.evidence(stat.kept_attributes()),
+        traits,
     }
+}
+
+pub(super) fn identity_at_path(path: &Path) -> Option<ItemIdentity> {
+    let (parent, name) = (path.parent()?, path.file_name()?);
+    let parent = open_local_parent_directory(parent).ok()?;
+    let stat = fs().stat(Entry::new(&parent, name), false).ok()?;
+    Some(trashed_identity(
+        &stat,
+        super::mount_profile::identity_at(fs(), parent.as_fd()),
+    ))
 }
 
 pub(super) fn retry_local_open(

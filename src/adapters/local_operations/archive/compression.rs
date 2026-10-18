@@ -31,7 +31,7 @@ use super::{
 };
 use crate::{
     model::hidden_names::HiddenName,
-    services::{PlacedSnapshot, ReplacedOriginal, TransferConflict, TrashedOriginal, error_detail},
+    services::{ItemIdentity, PlacedSnapshot, ReplacedOriginal, TransferConflict, error_detail},
 };
 use gtk::{gio, glib};
 use rustix::fs::AtFlags;
@@ -131,7 +131,7 @@ enum Replacement {
 
 enum Displaced {
     None,
-    Trashed(TrashedOriginal, Option<PlacedSnapshot>),
+    Trashed(Option<ItemIdentity>, Option<PlacedSnapshot>),
     Aside(DisplacedOriginal),
 }
 
@@ -369,14 +369,13 @@ impl Publication {
         current: &EntryStat,
         cancelled: &AtomicBool,
     ) -> Result<Published, ArchiveError> {
-        let identity = current.identity;
-        match trash_verified(
+        let trashed = match trash_verified(
             Entry::new(&*stage.parent, OsStr::new(&self.name)),
             &self.destination.join(&self.name),
             current,
             &gio::Cancellable::new(),
         ) {
-            Ok(()) => {}
+            Ok(trashed) => trashed,
             Err(error) if error.is_unsupported() => {
                 let replacement = self.without_trash(&stage.parent)?;
                 return self.publish(stage, Strategy::Replace(replacement, target), cancelled);
@@ -388,7 +387,7 @@ impl Publication {
                     error = crate::services::gio_error_detail(&error.error)
                 )));
             }
-        }
+        };
         stage
             .place(OsStr::new(&self.name))
             .map(|()| {
@@ -401,7 +400,7 @@ impl Publication {
                         cancelled,
                     )
                 });
-                self.published(Displaced::Trashed(identity.into(), placed))
+                self.published(Displaced::Trashed(trashed, placed))
             })
             .map_err(|error| {
                 archive_failed(rust_i18n::t!(

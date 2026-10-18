@@ -237,9 +237,15 @@ fn superseded_operations_still_report_each_location_they_changed() {
     let item = Location::local("/fixture/docs");
     let landed = Location::local("/fixture/archive/docs");
     let overwritten = Location::local("/fixture/archive/docs/note.txt");
-    let identity = TrashedOriginal {
-        device: 1,
-        inode: 2,
+    let identity = ItemIdentity {
+        evidence: crate::services::Evidence {
+            device: 1,
+            inode: 2,
+            kind: rustix::fs::FileType::RegularFile,
+            birth: None,
+            attributes: None,
+        },
+        traits: crate::services::IdentityTraits::default(),
     };
     let cancelled_with_item = |request_id| OperationEvent::Cancelled {
         request_id,

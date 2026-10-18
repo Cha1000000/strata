@@ -1094,7 +1094,7 @@ fn undoing_a_grouping_reports_the_trashed_group_folder() {
             let group = root.path().join("group");
             fs::create_dir(&group).expect("group folder");
             fs::write(group.join("report.txt"), b"contents").expect("grouped item");
-            let identity = TrashedOriginal::at_path(&group).expect("identity");
+            let identity = numbers_at(&group);
             let events = Rc::new(RefCell::new(Vec::new()));
             let emitted = events.clone();
             let _operation = LocalOperationProvider.undo_move(

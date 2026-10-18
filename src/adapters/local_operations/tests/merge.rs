@@ -1790,7 +1790,7 @@ fn merge_undo_uses_recorded_identity_when_trash_dates_collide() -> Result<(), Bo
                 entry.source.native_path().expect("staged path").to_owned(),
             );
         }
-        let original = TrashedOriginal::from_metadata(&fs::symlink_metadata(&staged[chosen])?);
+        let original = ItemIdentity::at_path(&staged[chosen]).ok_or("identity")?;
         if chosen == "removed.zip" {
             fs::remove_file(&staged[chosen])?;
         }
@@ -1804,14 +1804,22 @@ fn merge_undo_uses_recorded_identity_when_trash_dates_collide() -> Result<(), Bo
         let originals = HashMap::from([(location.clone(), original)]);
         let lookup: StagedOriginalLookup = Rc::new(move |location, cancellable| {
             let path = location.native_path().expect("local original").to_owned();
-            let entry = home_trash_entries_at(
-                &trash_root,
-                &HashSet::from([path.clone()]),
-                &cancellable,
-                &originals,
-            )
-            .remove(&path);
-            Box::pin(async move { entry.ok_or_else(|| io_error("Recorded original is missing")) })
+            let (trash_root, originals) = (trash_root.clone(), originals.clone());
+            Box::pin(async move {
+                gio::spawn_blocking(move || {
+                    home_trash_entries_at(
+                        &trash_root,
+                        &HashSet::from([path.clone()]),
+                        &cancellable,
+                        &originals,
+                    )
+                    .remove(&path)
+                })
+                .await
+                .ok()
+                .flatten()
+                .ok_or_else(|| io_error("Recorded original is missing"))
+            })
         });
         let events = Rc::new(RefCell::new(Vec::new()));
         let emitted = events.clone();
@@ -1846,6 +1854,88 @@ fn merge_undo_uses_recorded_identity_when_trash_dates_collide() -> Result<(), Bo
     Ok(())
 }
 
+#[derive(Clone, Copy, Debug)]
+enum InTrash {
+    Renumbered,
+    NumberReused,
+}
+
+#[test]
+fn a_trashed_original_is_found_only_by_what_its_mount_proves() -> Result<(), Box<dyn Error>> {
+    let _serial = serial()?;
+    let reusing_ext4: Preset = || Quirks {
+        reused_inodes: Some("report*"),
+        ..Quirks::ext4()
+    };
+    let reusing_nfs3: Preset = || Quirks {
+        reused_inodes: Some("report*"),
+        ..Quirks::nfs3()
+    };
+    let rows: [(Preset, bool, InTrash, bool); 5] = [
+        (Quirks::vfat, false, InTrash::Renumbered, true),
+        (Quirks::sshfs, false, InTrash::Renumbered, true),
+        (Quirks::sshfs, true, InTrash::Renumbered, false),
+        (reusing_ext4, false, InTrash::NumberReused, false),
+        (reusing_nfs3, false, InTrash::NumberReused, true),
+    ];
+    for (preset, folder, change, found) in rows {
+        let root = tempfile::tempdir()?;
+        let _quirks = FsQuirks::install(root.path(), preset());
+        let original = root.path().join("report");
+        let make = |path: &Path, contents: &[u8]| {
+            if folder {
+                fs::create_dir(path)
+            } else {
+                fs::write(path, contents)
+            }
+        };
+        make(&original, b"original")?;
+        let recorded =
+            super::super::native_fs::identity_at_path(&original).ok_or("recorded identity")?;
+        let trash_root = root
+            .path()
+            .join(format!(".Trash-{}", rustix::process::getuid().as_raw()));
+        fs::create_dir_all(trash_root.join("files"))?;
+        fs::create_dir_all(trash_root.join("info"))?;
+        fs::write(
+            trash_root.join("info/report.trashinfo"),
+            format!(
+                "[Trash Info]\nPath={}\nDeletionDate=2026-01-01T00:00:00\n",
+                original.display()
+            ),
+        )?;
+        let trashed = trash_root.join("files/report");
+        let modified = fs::symlink_metadata(&original)?.modified()?;
+        fs::rename(&original, &trashed)?;
+        super::super::native_fs::identity_at_path(&trashed).ok_or("seen in Trash")?;
+        match change {
+            InTrash::Renumbered => assert!(super::fs_quirks::evict(&trashed)),
+            InTrash::NumberReused => {
+                fs::remove_file(&trashed)?;
+                make(&trashed, b"original")?;
+                fs::File::options()
+                    .write(true)
+                    .open(&trashed)?
+                    .set_modified(modified)?;
+                super::fs_quirks::recreated(&trashed);
+            }
+        }
+        let entries = home_trash_entries_at(
+            &trash_root,
+            &HashSet::from([original.clone()]),
+            &gio::Cancellable::new(),
+            &HashMap::from([(Location::local(&original), recorded)]),
+        );
+        assert_eq!(
+            entries.contains_key(&original),
+            found,
+            "{:?}, folder {folder}, {change:?}",
+            preset().mount_type
+        );
+    }
+    Ok(())
+}
+
 #[test]
 fn merge_undo_restores_staged_originals_and_removes_created() {
     crate::test_support::gtk_test(
@@ -1872,7 +1962,7 @@ fn check_merge_undo_restores_staged_originals_and_removes_created() -> Result<()
         &bookmarks,
         format!("{}{}{}", pin(&shared), pin(&incoming), pin(&stays)),
     )?;
-    let incoming_identity = TrashedOriginal::at_path(&incoming).ok_or("identity")?;
+    let incoming_identity = numbers_at(&incoming);
     let staged = staged_trash_fixture(root.path(), "shared.txt", &shared, b"old")?;
     let staged_path = staged
         .source

@@ -117,6 +117,7 @@ fn an_item_is_known_again_only_by_what_its_mount_proves() {
             FOLDER,
             KEPT,
             true,
+            true,
         ),
         (
             "number reused by a new item",
@@ -124,6 +125,7 @@ fn an_item_is_known_again_only_by_what_its_mount_proves() {
             FOLDER,
             reborn(FOLDER),
             KEPT,
+            false,
             false,
         ),
         (
@@ -133,6 +135,7 @@ fn an_item_is_known_again_only_by_what_its_mount_proves() {
             renumbered(FOLDER),
             KEPT,
             false,
+            false,
         ),
         (
             "renumbered, birth kept",
@@ -140,6 +143,7 @@ fn an_item_is_known_again_only_by_what_its_mount_proves() {
             FOLDER,
             renumbered(FOLDER),
             RENEWED,
+            true,
             true,
         ),
         (
@@ -149,6 +153,7 @@ fn an_item_is_known_again_only_by_what_its_mount_proves() {
             reborn(renumbered(FOLDER)),
             RENEWED,
             false,
+            false,
         ),
         (
             "renumbered file, no births, same size and time",
@@ -156,6 +161,7 @@ fn an_item_is_known_again_only_by_what_its_mount_proves() {
             without_birth(FILE),
             without_birth(renumbered(FILE)),
             RENEWED,
+            true,
             true,
         ),
         (
@@ -165,6 +171,7 @@ fn an_item_is_known_again_only_by_what_its_mount_proves() {
             rewritten,
             RENEWED,
             false,
+            false,
         ),
         (
             "renumbered folder, no births",
@@ -172,6 +179,7 @@ fn an_item_is_known_again_only_by_what_its_mount_proves() {
             without_birth(FOLDER),
             without_birth(renumbered(FOLDER)),
             RENEWED,
+            false,
             false,
         ),
         (
@@ -181,6 +189,7 @@ fn an_item_is_known_again_only_by_what_its_mount_proves() {
             renumbered(folder_with_attributes),
             RENEWED,
             false,
+            false,
         ),
         (
             "renumbered folder, zero births",
@@ -188,6 +197,25 @@ fn an_item_is_known_again_only_by_what_its_mount_proves() {
             zero_birth(FOLDER),
             zero_birth(renumbered(FOLDER)),
             RENEWED,
+            false,
+            false,
+        ),
+        (
+            "folder, no births, number still the same",
+            RENEWED,
+            without_birth(FOLDER),
+            without_birth(FOLDER),
+            RENEWED,
+            false,
+            true,
+        ),
+        (
+            "exFAT folder whose birth a rename reset, number still the same",
+            EXFAT,
+            FOLDER,
+            reborn(FOLDER),
+            EXFAT,
+            false,
             false,
         ),
         (
@@ -197,6 +225,7 @@ fn an_item_is_known_again_only_by_what_its_mount_proves() {
             renumbered(FOLDER),
             EXFAT,
             false,
+            false,
         ),
         (
             "exFAT file, birth kept",
@@ -204,6 +233,7 @@ fn an_item_is_known_again_only_by_what_its_mount_proves() {
             FILE,
             renumbered(FILE),
             EXFAT,
+            true,
             true,
         ),
         (
@@ -213,6 +243,7 @@ fn an_item_is_known_again_only_by_what_its_mount_proves() {
             FOLDER,
             UNKNOWN,
             true,
+            true,
         ),
         (
             "unknown mount, renumbered",
@@ -220,6 +251,7 @@ fn an_item_is_known_again_only_by_what_its_mount_proves() {
             FOLDER,
             renumbered(FOLDER),
             UNKNOWN,
+            false,
             false,
         ),
         (
@@ -229,6 +261,7 @@ fn an_item_is_known_again_only_by_what_its_mount_proves() {
             without_birth(FOLDER),
             UNKNOWN,
             true,
+            true,
         ),
         (
             "read where numbers were kept, now renewed",
@@ -236,6 +269,7 @@ fn an_item_is_known_again_only_by_what_its_mount_proves() {
             FOLDER,
             renumbered(FOLDER),
             RENEWED,
+            true,
             true,
         ),
         (
@@ -245,6 +279,7 @@ fn an_item_is_known_again_only_by_what_its_mount_proves() {
             changed(renumbered(FILE), 5),
             RENEWED,
             true,
+            true,
         ),
         (
             "SMB file, birth and attributes kept",
@@ -252,6 +287,7 @@ fn an_item_is_known_again_only_by_what_its_mount_proves() {
             FILE,
             renumbered(FILE),
             SMB,
+            true,
             true,
         ),
         (
@@ -261,6 +297,7 @@ fn an_item_is_known_again_only_by_what_its_mount_proves() {
             changed(renumbered(FILE), 6),
             SMB,
             false,
+            false,
         ),
         (
             "SMB file whose cached number and birth outlived a replacement",
@@ -268,6 +305,7 @@ fn an_item_is_known_again_only_by_what_its_mount_proves() {
             FILE,
             changed(FILE, 5),
             SMB,
+            false,
             false,
         ),
         (
@@ -277,6 +315,7 @@ fn an_item_is_known_again_only_by_what_its_mount_proves() {
             without_birth(renumbered(FILE)),
             SMB,
             true,
+            true,
         ),
         (
             "SMB folder, birth kept",
@@ -284,6 +323,7 @@ fn an_item_is_known_again_only_by_what_its_mount_proves() {
             FOLDER,
             renumbered(FOLDER),
             SMB,
+            true,
             true,
         ),
         (
@@ -293,6 +333,7 @@ fn an_item_is_known_again_only_by_what_its_mount_proves() {
             renumbered(FILE),
             SMB_SERVER_NUMBERS,
             false,
+            false,
         ),
         (
             "SMB file read with server numbers, decided after they went",
@@ -301,11 +342,28 @@ fn an_item_is_known_again_only_by_what_its_mount_proves() {
             changed(renumbered(FILE), 5),
             SMB,
             false,
+            false,
         ),
-        ("another device", KEPT, FOLDER, moved_away, KEPT, false),
-        ("another kind", RENEWED, FILE, another_kind, RENEWED, false),
+        (
+            "another device",
+            KEPT,
+            FOLDER,
+            moved_away,
+            KEPT,
+            false,
+            false,
+        ),
+        (
+            "another kind",
+            RENEWED,
+            FILE,
+            another_kind,
+            RENEWED,
+            false,
+            false,
+        ),
     ];
-    for (row, recorded_on, recorded, current, current_on, same) in rows {
+    for (row, recorded_on, recorded, current, current_on, same, unchanged) in rows {
         let recorded = ItemIdentity {
             evidence: recorded,
             traits: recorded_on,
@@ -320,5 +378,6 @@ fn an_item_is_known_again_only_by_what_its_mount_proves() {
             same,
             "{row}, compared the other way"
         );
+        assert_eq!(recorded.unchanged(&current), unchanged, "{row}, unchanged");
     }
 }

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 
 use crate::model::{FolderColor, FolderColorValue, Location};
-use crate::services::TrashedOriginal;
+use crate::services::ItemIdentity;
 use crate::ui::controls::{focus_button, modal_layout};
 use crate::ui::keys::{self, bindings::ESCAPE_ANY};
 use crate::ui::modal::{
@@ -24,7 +24,7 @@ pub(super) fn relocate_item_customizations(from: &Location, to: &Location, merge
 
 pub(super) fn forget_item_customizations(
     location: &Location,
-    trash_identity: Option<TrashedOriginal>,
+    trash_identity: Option<ItemIdentity>,
 ) {
     if let Some(path) = location.native_path() {
         PreferenceManager::shared().forget_item_customizations(path, trash_identity);

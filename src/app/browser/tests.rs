@@ -622,7 +622,7 @@ impl FileSource for CountingFileSource {
 type UndoMergeRecord = (
     Vec<Location>,
     Vec<Location>,
-    HashMap<Location, TrashedOriginal>,
+    HashMap<Location, ItemIdentity>,
     HashMap<Location, crate::services::PlacedSnapshot>,
 );
 
@@ -1344,7 +1344,7 @@ enum LocationChange {
     },
     Removed {
         location: Location,
-        trash_identity: Option<TrashedOriginal>,
+        trash_identity: Option<ItemIdentity>,
     },
     Restored(Location),
 }

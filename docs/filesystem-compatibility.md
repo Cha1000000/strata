@@ -95,9 +95,14 @@ Residual limits:
 - ext4, ntfs3, NFS and SMB give a freed inode number straight to the next item created. Where no
   birth time is reported (NFSv3, ntfs-3g, exfat-fuse), an item deleted and recreated at the same
   name with the same type passes for the original.
-- Undo and restore find an item Strata moved to Trash (by Delete, Replace or Merge) by original
-  path, device and inode number, without birth time. If another item trashed from the same path got
-  that inode number, they can bring back that item instead; they never overwrite anything.
+- Undo and restore find an item Strata moved to Trash by its original path and the newest deletion
+  date. Undo of an archive that replaced its original, and the saved views and colors of a trashed
+  item, also need the Trash item to pass the mount's identity rule: type, the birth time where both
+  report one, the inode number where the mount keeps numbers, and for files size and modification
+  time where it renumbers them. Undo of a Delete and of a paste's Replace go by path and date alone.
+  Where the mount keeps inode numbers but reports no birth time (NFSv3, ntfs-3g), another item
+  trashed from the same path that got the inode number can be brought back instead; nothing is
+  ever overwritten.
 - On SMB2/3, gvfsd-fuse and FUSE daemons that ignore rename flags, the no-replace check is made
   by the client kernel, so it protects against local processes but not against another client
   creating the same name at the same moment.
@@ -1100,6 +1105,12 @@ report entry types (GLib issue #4060). Strata therefore checks that a trashed lo
 before reporting success or recording Undo: an item still at its name by the mount's identity
 rule, or held across the call where only a descriptor tells it (see
 [Replace and merge](#replace-and-merge)), was not trashed, whatever number the kernel gave it.
+GLib trashes whatever holds the name when it gets there. Strata holds the item at the name across
+the call, except on NFS, where a held file another program removes stays under a `.nfs` name, and
+reports that item only once the kernel shows it inside a Trash. Replace stops as changed when the
+held item is not the target it checked. If another item took the name after the hold, Strata
+reports the newest Trash entry GLib made for that path instead, so Undo and saved views follow what
+actually went to Trash.
 
 ## Hidden names
 

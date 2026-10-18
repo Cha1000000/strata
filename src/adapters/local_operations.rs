@@ -3402,7 +3402,7 @@ impl OperationProvider for LocalOperationProvider {
                                     return;
                                 }
                             };
-                            if let Some(target) = &replaced_target {
+                            if let (Some(target), Some(identity)) = (&replaced_target, identity) {
                                 emit(OperationEvent::ItemTrashed {
                                     request_id: request.id,
                                     location: target.clone(),
@@ -3755,7 +3755,7 @@ impl OperationProvider for LocalOperationProvider {
                         Some(&mut affected_locations),
                         copying,
                         &|original, _| {
-                            if let ReplacedOriginal::Trashed(identity) = original {
+                            if let ReplacedOriginal::Trashed(Some(identity)) = original {
                                 emit(OperationEvent::ItemTrashed {
                                     request_id: request.id,
                                     location: item.record.original.clone(),

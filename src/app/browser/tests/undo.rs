@@ -1464,13 +1464,7 @@ fn a_cancelled_merge_still_records_the_staged_originals_for_undo() {
 fn a_partial_merge_undo_keeps_the_paths_still_to_revert() {
     let first = Location::local("/fixture/archive/first.txt");
     let second = Location::local("/fixture/archive/second.txt");
-    let originals = HashMap::from([(
-        second.clone(),
-        TrashedOriginal {
-            device: 1,
-            inode: 42,
-        },
-    )]);
+    let originals = HashMap::from([(second.clone(), folder_identity(42, 1))]);
     let placed = HashMap::from([(second.clone(), PlacedSnapshot::new(()))]);
     push_pending_undo(UndoEntry::Merge {
         created: vec![first.clone()],
@@ -1912,10 +1906,7 @@ fn a_replaced_archive_restores_the_original_on_undo_even_after_a_cancel_request(
     let browser = Browser::new(Rc::new(FakeFileSource));
     browser.set_operation_provider(Rc::new(ImmediateOperationProvider));
     let archive = Location::local("/fixture/report.zip");
-    let original = TrashedOriginal {
-        device: 1,
-        inode: 42,
-    };
+    let original = folder_identity(42, 1);
     for cancel_requested in [false, true] {
         UNDO_MERGE_REQUESTS.with(|requests| requests.borrow_mut().clear());
         let request_id = browser.begin_operation();
@@ -1930,7 +1921,7 @@ fn a_replaced_archive_restores_the_original_on_undo_even_after_a_cancel_request(
             request_id,
             archive_name: "report.zip".to_owned(),
             archive: archive.clone(),
-            original: Some(ReplacedOriginal::Trashed(original)),
+            original: Some(ReplacedOriginal::Trashed(Some(original))),
             placed: Some(placed.clone()),
         });
 

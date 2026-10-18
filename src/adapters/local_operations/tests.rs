@@ -212,10 +212,10 @@ use crate::{
     adapters::volume::FAT32_MAX_FILE_SIZE,
     model::{EntryKind, FileEntry, Location, MetadataValue, hidden_names::HiddenName},
     services::{
-        DeleteRequest, LoadHandle, MoveRecord, NameMode, OperationEvent, OperationProvider,
-        OperationRequestId, PasteItem, PasteRequest, PlacedSnapshot, RestoreRequest, RestoreSource,
-        RestoreTrashItem, TransferConflict, TrashedOriginal, UndoMoveItem, UndoMoveRequest,
-        UndoRenameRequest,
+        DeleteRequest, ItemIdentity, LoadHandle, MoveRecord, NameMode, OperationEvent,
+        OperationProvider, OperationRequestId, PasteItem, PasteRequest, PlacedSnapshot,
+        RestoreRequest, RestoreSource, RestoreTrashItem, TransferConflict, UndoMoveItem,
+        UndoMoveRequest, UndoRenameRequest,
     },
 };
 
@@ -495,16 +495,24 @@ fn item_moves(events: &[OperationEvent]) -> Vec<(Location, Location)> {
         .collect()
 }
 
-fn trashed_items(events: &[OperationEvent]) -> Vec<(Location, TrashedOriginal)> {
+fn trashed_items(events: &[OperationEvent]) -> Vec<(Location, (u64, u64))> {
     events
         .iter()
         .filter_map(|event| match event {
             OperationEvent::ItemTrashed {
                 location, identity, ..
-            } => Some((location.clone(), *identity)),
+            } => Some((location.clone(), numbers(*identity))),
             _ => None,
         })
         .collect()
+}
+
+fn numbers(identity: ItemIdentity) -> (u64, u64) {
+    (identity.evidence.device, identity.evidence.inode)
+}
+
+fn numbers_at(path: &Path) -> (u64, u64) {
+    numbers(ItemIdentity::at_path(path).expect("identity"))
 }
 
 fn pump_until_transfer(events: &RefCell<Vec<OperationEvent>>) {

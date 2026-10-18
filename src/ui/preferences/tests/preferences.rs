@@ -1759,7 +1759,7 @@ fn item_customizations_follow_relocations_and_removals() {
                         }
                         Forget { root, trashed } => {
                             let identity = trashed
-                                .then(|| crate::services::TrashedOriginal::at_path(&path(root)))
+                                .then(|| crate::services::ItemIdentity::at_path(&path(root)))
                                 .flatten();
                             manager.forget_item_customizations(&path(root), identity);
                             manager.forget_folder_views_within(&location(root), identity);

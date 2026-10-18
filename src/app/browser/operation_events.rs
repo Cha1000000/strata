@@ -9,8 +9,8 @@ use std::{
 use crate::{
     model::Location,
     services::{
-        OperationEvent, OperationRequestId, PlacedSnapshot, ReplacedOriginal, TransferReport,
-        TrashedOriginal,
+        ItemIdentity, OperationEvent, OperationRequestId, PlacedSnapshot, ReplacedOriginal,
+        TransferReport,
     },
 };
 
@@ -259,7 +259,7 @@ impl Browser {
         &self,
         changes: &LocationChanges,
         location: &Location,
-        trash_identity: Option<TrashedOriginal>,
+        trash_identity: Option<ItemIdentity>,
     ) {
         if changes.removed.borrow_mut().insert(location.clone()) {
             self.emit(BrowserEvent::ItemRemoved {
@@ -805,7 +805,7 @@ impl Browser {
 
 fn replaced_archive_undo(
     archive: Location,
-    original: TrashedOriginal,
+    original: Option<ItemIdentity>,
     placed: Option<PlacedSnapshot>,
 ) -> UndoEntry {
     UndoEntry::Merge {
@@ -814,7 +814,9 @@ fn replaced_archive_undo(
         placed: placed
             .map(|placed| HashMap::from([(archive.clone(), placed)]))
             .unwrap_or_default(),
-        originals: HashMap::from([(archive, original)]),
+        originals: original
+            .map(|original| HashMap::from([(archive, original)]))
+            .unwrap_or_default(),
     }
 }
 

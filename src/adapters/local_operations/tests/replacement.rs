@@ -486,36 +486,39 @@ fn replace_accepts_a_symlink_in_the_sources_parent_path() -> Result<(), Box<dyn 
 #[test]
 fn replacement_stops_before_exchanging_a_substituted_target() -> Result<(), Box<dyn Error>> {
     let _serial = serial()?;
-    let root = tempfile::tempdir()?;
-    let source = root.path().join("source.txt");
-    let target = root.path().join("target.txt");
-    let original_target = root.path().join("original-target.txt");
-    fs::write(&source, b"replacement")?;
-    fs::write(&target, b"original target")?;
-    let _scope = FsQuirks::install(
-        root.path(),
-        Quirks {
-            before: vec![(Op::Clone, "*", 0, substitute(&target, &original_target))],
-            ..Quirks::default()
-        },
-    );
+    for (op, name) in [(Op::Clone, "*"), (Op::OpenAt, "target.txt")] {
+        let root = tempfile::tempdir()?;
+        let source = root.path().join("source.txt");
+        let target = root.path().join("target.txt");
+        let original_target = root.path().join("original-target.txt");
+        fs::write(&source, b"replacement")?;
+        fs::write(&target, b"original target")?;
+        let _scope = FsQuirks::install(
+            root.path(),
+            Quirks {
+                before: vec![(op, name, 0, substitute(&target, &original_target))],
+                ..Quirks::default()
+            },
+        );
 
-    let result = glib::MainContext::default().block_on(replace_local(
-        gio::File::for_path(&source),
-        gio::File::for_path(&target),
-        false,
-        gio::Cancellable::new(),
-        None,
-    ));
+        let result = glib::MainContext::default().block_on(replace_local(
+            gio::File::for_path(&source),
+            gio::File::for_path(&target),
+            false,
+            gio::Cancellable::new(),
+            None,
+        ));
 
-    let error = result.expect_err("a substituted target must fail identity validation");
-    assert!(error.to_string().contains("changed"), "{error}");
-    assert_eq!(fs::read(target)?, b"new arrival");
-    assert_eq!(fs::read(original_target)?, b"original target");
-    assert_eq!(
-        names(root.path())?,
-        ["original-target.txt", "source.txt", "target.txt"]
-    );
+        let error = result.expect_err("a substituted target must fail identity validation");
+        assert!(error.to_string().contains("changed"), "{op:?}: {error}");
+        assert_eq!(fs::read(target)?, b"new arrival", "{op:?}");
+        assert_eq!(fs::read(original_target)?, b"original target", "{op:?}");
+        assert_eq!(
+            names(root.path())?,
+            ["original-target.txt", "source.txt", "target.txt"],
+            "{op:?}"
+        );
+    }
     Ok(())
 }
 

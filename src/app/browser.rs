@@ -18,9 +18,8 @@ use crate::{
         MoveRecord, NameMode, OperationEvent, OperationProvider, OperationRequestId,
         PasswordFailure, PasteItem, PasteRequest, PlacedSnapshot, RenameRecord, RenameRequest,
         RenamedItem, RequestId, RestoreRequest, RestoreSource, RestoreTrashItem, StampAnswer,
-        TransferConflict, TransferReport, TrashedOriginal, UndoCopyRequest, UndoMergeRequest,
-        UndoMoveItem, UndoMoveRequest, UndoRenameRequest, Watching, validate_basename,
-        validate_uri_credentials,
+        TransferConflict, TransferReport, UndoCopyRequest, UndoMergeRequest, UndoMoveItem,
+        UndoMoveRequest, UndoRenameRequest, Watching, validate_basename, validate_uri_credentials,
     },
 };
 
@@ -295,7 +294,7 @@ pub enum BrowserEvent {
     /// `trash_identity` identifies an item moved to Trash; others were deleted.
     ItemRemoved {
         location: Location,
-        trash_identity: Option<TrashedOriginal>,
+        trash_identity: Option<ItemIdentity>,
     },
     /// An item an operation of this browser brought back from Trash to `location`.
     ItemRestored {
@@ -395,7 +394,7 @@ pub enum UndoEntry {
     Merge {
         created: Vec<Location>,
         overwritten: Vec<Location>,
-        originals: HashMap<Location, TrashedOriginal>,
+        originals: HashMap<Location, ItemIdentity>,
         placed: HashMap<Location, PlacedSnapshot>,
     },
     Rename(RenameRecord),

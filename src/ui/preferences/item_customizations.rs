@@ -12,7 +12,7 @@ use std::{
 
 use gtk::glib;
 
-use crate::{model::rebase_path, services::TrashedOriginal};
+use crate::{model::rebase_path, services::ItemIdentity};
 
 use super::{PreferenceManager, Preferences, trashed::TrashedValues};
 
@@ -64,7 +64,7 @@ impl PreferenceManager {
     pub fn forget_item_customizations(
         self: &Rc<Self>,
         root: &Path,
-        trash_identity: Option<TrashedOriginal>,
+        trash_identity: Option<ItemIdentity>,
     ) {
         let root = key_path(root);
         let changed = {

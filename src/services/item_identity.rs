@@ -112,6 +112,22 @@ impl ItemIdentity {
         self.proof(other) == Proof::Same
     }
 
+    /// Where the rule proves nothing either way, the exact number and any birth time decide.
+    pub fn unchanged(&self, other: &Self) -> bool {
+        match self.proof(other) {
+            Proof::Same => true,
+            Proof::Different => false,
+            Proof::Unproven => {
+                let (recorded, now) = (self.evidence, other.evidence);
+                recorded.inode == now.inode
+                    && recorded
+                        .birth
+                        .zip(now.birth)
+                        .is_none_or(|(recorded, now)| recorded == now)
+            }
+        }
+    }
+
     pub fn proof(&self, other: &Self) -> Proof {
         let numbers = match (self.traits.numbers, other.traits.numbers) {
             (InodeNumbers::Kept, InodeNumbers::Kept) => InodeNumbers::Kept,

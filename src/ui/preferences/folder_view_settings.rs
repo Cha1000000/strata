@@ -13,7 +13,7 @@ use gtk::{gio, glib, prelude::*};
 use crate::{
     adapters::probes,
     model::{FolderSort, Location, SortDirection, SortKey},
-    services::TrashedOriginal,
+    services::ItemIdentity,
 };
 
 use super::{
@@ -328,7 +328,7 @@ impl PreferenceManager {
     pub(in crate::ui) fn forget_folder_views_within(
         &self,
         location: &Location,
-        trash_identity: Option<TrashedOriginal>,
+        trash_identity: Option<ItemIdentity>,
     ) {
         let Some(key) = key_for_location(location) else {
             return;
