@@ -1841,6 +1841,7 @@ enum SourceMeanwhile {
     Closes,
     IsSwapped,
     StaysOpen(Option<&'static str>),
+    DeletedBefore { closes: bool },
 }
 
 #[test]
@@ -1848,7 +1849,7 @@ fn a_moved_folder_goes_once_another_program_closes_its_file_within_the_mount_s_w
 -> Result<(), Box<dyn Error>> {
     use SourceMeanwhile::*;
     let _serial = serial()?;
-    let rows: [(&str, super::fs_quirks::Preset, SourceMeanwhile); 6] = [
+    let rows: [(&str, super::fs_quirks::Preset, SourceMeanwhile); 9] = [
         ("nfs42", Quirks::nfs42, Closes),
         ("nfs42", Quirks::nfs42, IsSwapped),
         ("nfs42", Quirks::nfs42, StaysOpen(None)),
@@ -1859,6 +1860,9 @@ fn a_moved_folder_goes_once_another_program_closes_its_file_within_the_mount_s_w
             Quirks::cifs_posix,
             StaysOpen(Some("Text Editor")),
         ),
+        ("nfs42", Quirks::nfs42, DeletedBefore { closes: false }),
+        ("nfs42", Quirks::nfs42, DeletedBefore { closes: true }),
+        ("sshfs", Quirks::sshfs, DeletedBefore { closes: false }),
     ];
     for (mount, preset, meanwhile) in rows {
         let row = format!("{mount}, {meanwhile:?}");
@@ -1869,6 +1873,7 @@ fn a_moved_folder_goes_once_another_program_closes_its_file_within_the_mount_s_w
         let moved = source_dir.join("folder.moved");
         fs::create_dir_all(&folder)?;
         fs::write(folder.join("open.txt"), b"open elsewhere")?;
+        fs::write(folder.join("other.txt"), b"other")?;
         let held = Arc::new(std::sync::Mutex::new(None));
         let release = held.clone();
         let (live, aside) = (folder.clone(), moved.clone());
@@ -1877,10 +1882,10 @@ fn a_moved_folder_goes_once_another_program_closes_its_file_within_the_mount_s_w
                 fs::rename(&live, &aside).expect("move the folder");
                 fs::create_dir(&live).expect("make another folder");
             })),
-            Closes => Some(Box::new(move || {
+            Closes | DeletedBefore { closes: true } => Some(Box::new(move || {
                 drop(release.lock().expect("the hold").take());
             })),
-            StaysOpen(_) => None,
+            StaysOpen(_) | DeletedBefore { closes: false } => None,
         };
         let holder = match meanwhile {
             StaysOpen(Some(program)) => Some(Holder::Program(program.to_owned())),
@@ -1898,6 +1903,13 @@ fn a_moved_folder_goes_once_another_program_closes_its_file_within_the_mount_s_w
             },
         );
         *held.lock().map_err(|_| "the hold")? = Some(hold(&folder.join("open.txt")));
+        if let DeletedBefore { .. } = meanwhile {
+            let dir = open_local_parent_directory(&folder)?;
+            super::super::fs_ops::fs().unlink(
+                super::super::fs_ops::Entry::new(&dir, OsStr::new("open.txt")),
+                rustix::fs::AtFlags::empty(),
+            )?;
+        }
         let destination = root.path().join("destination");
         fs::create_dir_all(&destination)?;
         let _destination = FsQuirks::install(&destination, Quirks::default());
@@ -1913,14 +1925,19 @@ fn a_moved_folder_goes_once_another_program_closes_its_file_within_the_mount_s_w
             ),
             "{row}"
         );
-        assert_eq!(
-            fs::read(destination.join("folder/open.txt"))?,
-            b"open elsewhere",
-            "{row}"
-        );
+        let copied = destination.join("folder");
+        if let DeletedBefore { .. } = meanwhile {
+            assert_eq!(names(&copied)?, ["other.txt"], "{row}");
+        } else {
+            assert_eq!(
+                fs::read(copied.join("open.txt"))?,
+                b"open elsewhere",
+                "{row}"
+            );
+        }
         let report = reported(&events);
         match meanwhile {
-            Closes => {
+            Closes | DeletedBefore { closes: true } => {
                 assert!(!folder.exists(), "{row}");
                 assert!(report.kept.is_empty(), "{row}: {:?}", report.kept);
             }
@@ -1932,6 +1949,18 @@ fn a_moved_folder_goes_once_another_program_closes_its_file_within_the_mount_s_w
                 );
                 assert!(names(&folder)?.is_empty(), "{row}");
                 assert!(moved.is_dir(), "{row}");
+            }
+            DeletedBefore { closes: false } => {
+                assert_eq!(
+                    report.kept,
+                    [kept(folder.clone(), KeptCause::StillOpen(None))],
+                    "{row}"
+                );
+                let [leftover] = names(&folder)?.try_into().map_err(|_| "one leftover")?;
+                assert!(
+                    crate::model::hidden_names::foreign_leftover(OsStr::new(&leftover)).is_some(),
+                    "{row}: {leftover}"
+                );
             }
             StaysOpen(_) => {
                 let cause = match (mount, holder) {

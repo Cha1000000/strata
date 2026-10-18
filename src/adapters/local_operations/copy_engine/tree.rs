@@ -41,7 +41,7 @@ use crate::{
             cancelled_local_operation,
             fs_ops::{Entry, EntryStat, FsOps},
             io_error,
-            leftovers::Refused,
+            leftovers::{self, Refused},
             mount_profile::{FolderRules, Site, crosses},
             names::{Key, PlanEntry, Planned, numbered_names, plan_names},
             native_fs::{LocalFileIdentity, compare, os_error_detail},
@@ -755,6 +755,9 @@ fn file_name(path: &Path) -> OsString {
 
 fn children(fs: &dyn FsOps, folder: BorrowedFd<'_>) -> Result<Vec<(OsString, FileType)>, Failure> {
     let mut children = fs.list(folder)?;
+    children.retain(|(name, kind)| {
+        *kind == FileType::Directory || !leftovers::is_leftover(fs, folder, name)
+    });
     children.sort_by(|(left, _), (right, _)| left.cmp(right));
     for (name, kind) in &mut children {
         if *kind == FileType::Unknown {
