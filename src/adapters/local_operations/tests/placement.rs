@@ -567,7 +567,16 @@ fn a_lost_reply_over_a_placeholder_removes_only_one_proven_untouched() -> Result
         fail: vec![(Op::MountType, "*", 0, Errno::ACCESS)],
         ..without_flags(Errno::NOSYS)
     };
-    let rows: [(Preset, bool, InodeNumbers); 7] = [
+    let share = || Quirks {
+        mount_type: Quirks::cifs().mount_type,
+        ..without_flags(Errno::NOSYS)
+    };
+    let share_without_server_numbers = || Quirks {
+        mount_type: Quirks::cifs_noserverino().mount_type,
+        lost_renames_keep_inodes: true,
+        ..without_flags(Errno::NOSYS)
+    };
+    let rows: [(Preset, bool, InodeNumbers); 9] = [
         (Quirks::sshfs, false, InodeNumbers::Renewed),
         (Quirks::sshfs, true, InodeNumbers::Renewed),
         (vboxsf, false, InodeNumbers::Renewed),
@@ -575,6 +584,8 @@ fn a_lost_reply_over_a_placeholder_removes_only_one_proven_untouched() -> Result
         (folders, true, InodeNumbers::Kept),
         (unknown_type, false, InodeNumbers::Unknown),
         (unread_type, true, InodeNumbers::Unknown),
+        (share, true, InodeNumbers::Kept),
+        (share_without_server_numbers, true, InodeNumbers::Renewed),
     ];
     for (preset, folder, numbers) in rows {
         for performed in [true, false] {

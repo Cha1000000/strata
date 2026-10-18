@@ -28,6 +28,8 @@ pub(super) trait FsEnvironment: Send + Sync {
         flags: gio::FileMonitorFlags,
     ) -> Result<gio::FileMonitor, glib::Error>;
     fn unwatch_folder(&self, folder: &gio::File, monitor: gio::FileMonitor);
+    /// The kernel's table, not the watcher's: cifs changes options without a mount-table event.
+    fn current_mount_type(&self, fd: BorrowedFd<'_>) -> Option<MountType>;
     /// udev's `ID_FS_TYPE`, when the device has a database record.
     fn device_format(&self, fd: BorrowedFd<'_>) -> Result<Option<String>, Errno>;
     fn rotational(&self, fd: BorrowedFd<'_>) -> Option<bool>;
@@ -73,19 +75,9 @@ impl FsEnvironment for System {
 
     fn mount_type(&self, fd: BorrowedFd<'_>) -> Option<(MountType, MountSite)> {
         assert_off_main_thread();
-        match rustix::fs::statx(
-            fd,
-            "",
-            AtFlags::EMPTY_PATH | AtFlags::STATX_DONT_SYNC,
-            StatxFlags::MNT_ID,
-        ) {
-            Ok(stat)
-                if StatxFlags::from_bits_retain(stat.stx_mask).contains(StatxFlags::MNT_ID) =>
-            {
-                mount_of(stat.stx_mnt_id)
-            }
-            // Before Linux 5.8.
-            _ => MountTable::current()
+        match mount_id(fd) {
+            Some(id) => mount_of(id),
+            None => MountTable::current()
                 .mount_at(&opened_path(fd).ok()?)
                 .map(|(mount_type, site)| (mount_type.clone(), site.clone())),
         }
@@ -119,6 +111,16 @@ impl FsEnvironment for System {
     fn unwatch_folder(&self, _folder: &gio::File, monitor: gio::FileMonitor) {
         assert_off_main_thread();
         monitor.cancel();
+    }
+
+    fn current_mount_type(&self, fd: BorrowedFd<'_>) -> Option<MountType> {
+        assert_off_main_thread();
+        let table = MountTable::current();
+        let mount = match mount_id(fd) {
+            Some(id) => table.mount_of(id),
+            None => table.mount_at(&opened_path(fd).ok()?),
+        };
+        mount.map(|(mount_type, _)| mount_type.clone())
     }
 
     fn device_format(&self, fd: BorrowedFd<'_>) -> Result<Option<String>, Errno> {
@@ -159,6 +161,19 @@ fn mount_of(id: u64) -> Option<(MountType, MountSite)> {
         .mount_of(id)
         .map(owned)
         .or_else(|| MountTable::current().mount_of(id).map(owned))
+}
+
+/// `None` before Linux 5.8.
+fn mount_id(fd: BorrowedFd<'_>) -> Option<u64> {
+    rustix::fs::statx(
+        fd,
+        "",
+        AtFlags::EMPTY_PATH | AtFlags::STATX_DONT_SYNC,
+        StatxFlags::MNT_ID,
+    )
+    .ok()
+    .filter(|stat| StatxFlags::from_bits_retain(stat.stx_mask).contains(StatxFlags::MNT_ID))
+    .map(|stat| stat.stx_mnt_id)
 }
 
 #[cfg(test)]

@@ -45,7 +45,7 @@ use super::{
     fs_ops::{Entry, EntryStat, FsOps, fs},
     io_error,
     leftovers::{self, Deadline},
-    mount_profile::{FolderRules, NamePolicy, Site, known_mount},
+    mount_profile::{self, FolderRules, NamePolicy, Site, known_mount},
     names::{Taken, may_be_refused, numbered_names, stricter_names},
     native_fs::{
         LocalFileIdentity, compare, open_local_parent_directory, os_error_detail, os_error_text,
@@ -1635,6 +1635,10 @@ impl Mount {
     /// one the server set since, such as once the deferred close of a file written there lands.
     fn caches_attributes(&self) -> bool {
         self.attribute_cache.is_some()
+    }
+
+    fn identity_now(&self, fs: &dyn FsOps, dir: BorrowedFd<'_>) -> IdentityTraits {
+        mount_profile::identity_now(fs, dir, self.family, self.identity)
     }
 
     fn may_be(&self, recorded: LocalFileIdentity, current: &EntryStat) -> bool {

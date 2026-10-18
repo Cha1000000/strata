@@ -53,18 +53,11 @@ impl MountType {
     /// FAT and exFAT, libfuse without `use_ino` and cifs without server inode numbers number an
     /// entry afresh once the kernel has evicted it, and vboxsf keeps a name's number for whatever
     /// a rename puts there. The kernel's exFAT driver stamps a folder's birth time at each rename
-    /// into or within it.
+    /// into or within it. cifs can turn server inode numbers off at any time.
     pub(crate) fn identity(&self) -> IdentityTraits {
+        let smb = family(&self.fs_type) == Family::Smb;
         let numbers = match (family(&self.fs_type), self.fs_type.as_str()) {
-            (Family::Fat | Family::Fuse, _) | (_, "vboxsf") => InodeNumbers::Renewed,
-            (Family::Smb, _)
-                if self
-                    .super_options
-                    .split(',')
-                    .any(|option| option == "noserverino") =>
-            {
-                InodeNumbers::Renewed
-            }
+            (Family::Fat | Family::Fuse | Family::Smb, _) | (_, "vboxsf") => InodeNumbers::Renewed,
             (
                 Family::Other,
                 "9p" | "virtiofs" | "ecryptfs" | "ceph" | "hfs" | "hfsplus" | "ntfs" | "ramfs",
@@ -75,7 +68,17 @@ impl MountType {
         IdentityTraits {
             numbers,
             folder_births: self.fs_type != "exfat",
+            made_up_births: smb,
         }
+    }
+
+    /// cifs drops `serverino` when it turns server numbers off, and never prints `noserverino`.
+    pub(crate) fn server_numbers(&self) -> bool {
+        family(&self.fs_type) == Family::Smb
+            && self
+                .super_options
+                .split(',')
+                .any(|option| option == "serverino")
     }
 
     /// How long the SMB client keeps a closed file's handle open

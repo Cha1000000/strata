@@ -102,6 +102,7 @@ fn folder_identity(inode: u64, born: i64) -> ItemIdentity {
         traits: IdentityTraits {
             numbers: InodeNumbers::Kept,
             folder_births: true,
+            made_up_births: false,
         },
     }
 }

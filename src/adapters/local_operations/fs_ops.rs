@@ -99,6 +99,7 @@ impl EntryStat {
         Attributes {
             size: self.size,
             mtime: self.mtime,
+            ctime: Some(self.ctime),
         }
     }
 }

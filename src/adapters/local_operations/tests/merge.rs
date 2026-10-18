@@ -3061,11 +3061,16 @@ fn a_merge_undo_compares_what_it_placed_as_a_move_compares_its_sources()
     let rows: [(&str, MakeQuirks, &str, bool); 6] = [
         (
             "cifs noserverino",
-            Box::new(cifs("rw,noserverino")),
+            Box::new(cifs("rw,vers=3.1.1")),
             "evicted",
             true,
         ),
-        ("cifs", Box::new(cifs("rw,serverino")), "evicted", false),
+        (
+            "cifs",
+            Box::new(cifs("rw,vers=3.1.1,serverino")),
+            "evicted",
+            false,
+        ),
         ("vfat", Box::new(coarse), "untouched", true),
         ("vfat", Box::new(coarse), "rewritten", false),
         ("vfat", Box::new(coarse), "rewritten in a folder", false),

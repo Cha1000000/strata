@@ -31,7 +31,7 @@ use crate::{
         holds_symlinks, learn_mount_capability, max_file_size, mount_capabilities,
         teach_mount_capability,
     },
-    services::{IdentityTraits, NameMode},
+    services::{IdentityTraits, InodeNumbers, NameMode},
 };
 
 pub(super) fn known_mount(fs: &dyn FsOps, dir: BorrowedFd<'_>) -> (MountKey, MountCapabilities) {
@@ -45,6 +45,25 @@ pub(super) fn known(fs: &dyn FsOps, dir: BorrowedFd<'_>, key: MountKey) -> Mount
         return capabilities;
     }
     learn_mount_type(fs, dir, key)
+}
+
+pub(super) fn identity_now(
+    fs: &dyn FsOps,
+    dir: BorrowedFd<'_>,
+    family: Family,
+    identity: IdentityTraits,
+) -> IdentityTraits {
+    if family == Family::Smb
+        && fs
+            .current_mount_type(dir)
+            .is_some_and(|mount| mount.server_numbers())
+    {
+        return IdentityTraits {
+            numbers: InodeNumbers::Kept,
+            ..identity
+        };
+    }
+    identity
 }
 
 /// For `fuseblk`, udev's record of the device tells which daemon serves it. What another

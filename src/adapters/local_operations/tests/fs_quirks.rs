@@ -228,6 +228,16 @@ pub(crate) struct CachedListing {
     pub renewed_by_use: bool,
 }
 
+/// Samba makes a creation time up from a file's times; the client keeps the first one it saw.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[expect(dead_code, reason = "the Replace target rows make them up")]
+pub(crate) enum Births {
+    #[default]
+    Reported,
+    MadeUpElsewhere,
+    MadeUp,
+}
+
 pub(crate) type Racer = Box<dyn FnMut() + Send>;
 pub(crate) type Preset = fn() -> Quirks;
 
@@ -281,9 +291,7 @@ pub(crate) struct Quirks {
     pub reused_inodes: Option<&'static str>,
     /// As on NFSv3, ntfs-3g and exfat-fuse.
     pub no_birth_time: bool,
-    /// The birth time reports the earlier of the modification and change times, as Samba makes
-    /// one up for a file whose DOS attributes it does not store.
-    pub made_up_births: bool,
+    pub births: Births,
     /// The change time reports the modification time, as on FAT and exFAT,
     /// which store none.
     pub ctime_is_mtime: bool,
@@ -566,6 +574,13 @@ impl Quirks {
         }
     }
 
+    pub(crate) fn cifs_noserverino() -> Self {
+        Self {
+            mount_type: Some(("cifs", CIFS_NOSERVERINO_OPTIONS)),
+            ..Self::cifs()
+        }
+    }
+
     pub(crate) fn cifs_nocase() -> Self {
         Self {
             mount_type: Some(("cifs", CIFS_NOCASE_OPTIONS)),
@@ -638,6 +653,10 @@ const NTFS3_WINDOWS_NAMES_OPTIONS: &str =
 const CIFS_OPTIONS: &str = concat!(
     "rw,vers=3.1.1,cache=strict,uid=1000,forceuid,gid=1000,forcegid,soft,nounix,serverino,",
     "mapposix,reparse=nfs,nativesocket,symlink=native,actimeo=1,closetimeo=1"
+);
+const CIFS_NOSERVERINO_OPTIONS: &str = concat!(
+    "rw,vers=3.1.1,cache=strict,uid=1000,forceuid,gid=1000,forcegid,soft,nounix,mapposix,",
+    "reparse=nfs,nativesocket,symlink=native,actimeo=1,closetimeo=1"
 );
 const CIFS_NOCASE_OPTIONS: &str = concat!(
     "rw,vers=3.1.1,cache=strict,uid=1000,forceuid,gid=1000,forcegid,nocase,soft,nounix,",
@@ -929,6 +948,9 @@ struct State {
     own_changes: u64,
     unplugged: bool,
     serverino_disabled: bool,
+    cached: HashMap<PathBuf, (u64, Option<(i64, u32)>)>,
+    created: HashSet<(u64, u64)>,
+    made_up: HashMap<(u64, u64), (i64, u32)>,
     holds: HashMap<(u64, u64), usize>,
     leftovers: Vec<SillyLeftover>,
     silly_renames: u64,
@@ -993,6 +1015,9 @@ impl FsQuirks {
                 holds: HashMap::new(),
                 leftovers: Vec::new(),
                 silly_renames: 0,
+                cached: HashMap::new(),
+                created: HashSet::new(),
+                made_up: HashMap::new(),
             }),
         });
         scopes().push(scope.clone());
@@ -1307,6 +1332,9 @@ impl Scope {
             stat.identity.device = device;
         }
         let mut state = self.state();
+        let cached = path
+            .as_ref()
+            .and_then(|path| state.cached.get(path).copied());
         if let Some(&birth) = state.reset_births.get(&key).filter(|_| stat.is_directory()) {
             stat.identity.birth = Some(birth);
         }
@@ -1347,8 +1375,14 @@ impl Scope {
             stat.ctime = stat.ctime.min(tick);
             stat.identity.birth = stat.identity.birth.map(|birth| birth.min(tick));
         }
-        if state.quirks.made_up_births {
-            stat.identity.birth = Some(stat.mtime.min(stat.ctime));
+        let made_up = match state.quirks.births {
+            Births::Reported => false,
+            Births::MadeUpElsewhere => !state.created.contains(&key),
+            Births::MadeUp => true,
+        };
+        if made_up {
+            let earliest = stat.atime.min(stat.mtime).min(stat.ctime);
+            stat.identity.birth = Some(*state.made_up.entry(key).or_insert(earliest));
         }
         if state.quirks.no_birth_time {
             stat.identity.birth = None;
@@ -1361,6 +1395,10 @@ impl Scope {
         }
         if state.quirks.virtual_sizes && stat.kind == FileType::RegularFile {
             stat.size = 0;
+        }
+        if let Some((inode, birth)) = cached {
+            stat.identity.inode = inode;
+            stat.identity.birth = birth;
         }
         stat
     }
@@ -1403,22 +1441,11 @@ impl Scope {
     fn mount(&self) -> Option<(MountType, MountSite)> {
         self.run(Op::MountType, &[], |scope| {
             let root = scope.quirk(|quirks| quirks.mount_root).unwrap_or("/");
-            let serverino_disabled = scope.state().serverino_disabled;
-            let (fs_type, super_options) = scope.quirk(|quirks| quirks.mount_type).unwrap_or(EXT4);
-            let super_options = super_options
-                .split(',')
-                .filter(|option| !serverino_disabled || *option != "serverino")
-                .collect::<Vec<_>>()
-                .join(",");
-            let mount_type = MountType {
-                fs_type: fs_type.to_owned(),
-                super_options,
-            };
             let site = MountSite {
                 point: scope.root.clone(),
                 root: PathBuf::from(root),
             };
-            Ok(Some((mount_type, site)))
+            Ok(Some((scope.mount_type(), site)))
         })
         .ok()
         .flatten()
@@ -1457,6 +1484,30 @@ impl Scope {
 
     fn quirk<T>(&self, read: impl FnOnce(&Quirks) -> T) -> T {
         read(&self.state().quirks)
+    }
+
+    fn mount_type(&self) -> MountType {
+        let serverino_disabled = self.state().serverino_disabled;
+        let (fs_type, super_options) = self.quirk(|quirks| quirks.mount_type).unwrap_or(EXT4);
+        let super_options = super_options
+            .split(',')
+            .filter(|option| !serverino_disabled || *option != "serverino")
+            .collect::<Vec<_>>()
+            .join(",");
+        MountType {
+            fs_type: fs_type.to_owned(),
+            super_options,
+        }
+    }
+
+    fn server_numbers(&self) -> bool {
+        let mount = self.mount_type();
+        mount.server_numbers()
+            || (mount.fs_type == "cifs"
+                && mount
+                    .super_options
+                    .split(',')
+                    .any(|option| option == "posix"))
     }
 
     fn invalid(&self, name: &OsStr) -> Option<Errno> {
@@ -1588,17 +1639,25 @@ impl Scope {
             return Err(self.collision());
         }
         let stored = self.stored(at.name);
-        create(Entry {
+        let stored = Entry {
             dir: at.dir,
             name: &stored,
-        })
-        .map_err(|error| {
+        };
+        let created = create(stored).map_err(|error| {
             if error == Errno::EXIST {
                 self.collision()
             } else {
                 error
             }
-        })
+        })?;
+        if self.quirk(|quirks| quirks.births != Births::Reported)
+            && let Ok(stat) = System.stat(stored, false)
+        {
+            self.state()
+                .created
+                .insert((stat.identity.device, stat.identity.inode));
+        }
+        Ok(created)
     }
 
     fn rename(&self, from: Entry<'_>, to: Entry<'_>, flags: RenameFlags) -> Result<(), Errno> {
@@ -1747,6 +1806,11 @@ impl Scope {
             return;
         };
         let mut state = self.state();
+        let cached = state.cached.remove(&from);
+        state.cached.remove(&to);
+        if let Some(cached) = cached {
+            state.cached.insert(to.clone(), cached);
+        }
         let moved = state.link_names.remove(&from);
         let displaced = state.link_names.remove(&to);
         if let Some(moved) = moved {
@@ -1780,6 +1844,7 @@ impl Scope {
             let mut state = self.state();
             state.link_names.remove(&path);
             state.renumbered.remove(&path);
+            state.cached.remove(&path);
         }
     }
 
@@ -2067,11 +2132,26 @@ fn renumber(path: &Path) -> bool {
     })
 }
 
-/// As [`renumbered`], unless a descriptor of this process holds it, which keeps it from eviction.
+/// As [`renumbered`], unless a descriptor of this process holds it or cifs keeps server numbers.
 pub(crate) fn evict(path: &Path) -> bool {
-    let held =
-        rustix::fs::lstat(path).is_ok_and(|stat| held_by_this_process(stat.st_dev, stat.st_ino));
-    !held && renumber(path)
+    let Ok(stat) = rustix::fs::lstat(path) else {
+        return false;
+    };
+    let held = held_by_this_process(stat.st_dev, stat.st_ino);
+    let Some(scope) = scope_for_path(path).filter(|_| !held) else {
+        return false;
+    };
+    {
+        let mut state = scope.state();
+        state.made_up.remove(&(stat.st_dev, stat.st_ino));
+        if let (Some(parent), Some(name)) = (
+            path.parent().and_then(|parent| parent.canonicalize().ok()),
+            path.file_name(),
+        ) {
+            state.cached.remove(&parent.join(name));
+        }
+    }
+    !scope.server_numbers() && renumber(path)
 }
 
 /// Another program opens the file at `path` and keeps it open until the guard drops.
@@ -2083,23 +2163,32 @@ pub(crate) fn hold(path: &Path) -> HoldGuard {
     HoldGuard { scope, key }
 }
 
-/// As the cifs client turns server inode numbers off after a collision, with no mount-table event.
-#[expect(dead_code, reason = "the SMB identity rows use it")]
+/// As the cifs client turns server inode numbers off after a collision, with no mount-table event:
+/// cached entries keep their numbers and birth times, even across replacements, until evicted.
 pub(crate) fn autodisable_serverino(path: &Path) -> bool {
     let Some(scope) = scope_containing(path) else {
         return false;
     };
     scope.state().serverino_disabled = true;
+    if scope.server_numbers() {
+        return true;
+    }
     let mut folders = vec![scope.root.clone()];
     while let Some(folder) = folders.pop() {
+        let Ok(dir) = std::fs::File::open(&folder) else {
+            continue;
+        };
         for entry in std::fs::read_dir(&folder).into_iter().flatten().flatten() {
             if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
                 folders.push(entry.path());
             }
-            let held = rustix::fs::lstat(entry.path())
-                .is_ok_and(|stat| held_by_this_process(stat.st_dev, stat.st_ino));
-            if !held {
-                scope.state().renumbered.insert(entry.path());
+            let name = entry.file_name();
+            if let Ok(stat) = System.stat(Entry::new(&dir, &name), false) {
+                let stat = scope.reported(Some(entry.path()), stat);
+                scope
+                    .state()
+                    .cached
+                    .insert(entry.path(), (stat.identity.inode, stat.identity.birth));
             }
         }
     }
@@ -2233,6 +2322,16 @@ impl FsEnvironment for Scoped {
             });
         }
         System.unwatch_folder(folder, monitor);
+    }
+
+    fn current_mount_type(&self, fd: BorrowedFd<'_>) -> Option<MountType> {
+        assert_off_main_thread();
+        match scope_for(fd) {
+            Some(scope) => scope
+                .run(Op::MountType, &[], |scope| Ok(scope.mount_type()))
+                .ok(),
+            None => System.current_mount_type(fd),
+        }
     }
 
     fn device_format(&self, fd: BorrowedFd<'_>) -> Result<Option<String>, Errno> {

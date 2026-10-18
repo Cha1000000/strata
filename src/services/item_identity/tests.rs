@@ -7,18 +7,27 @@ use super::{Attributes, Evidence, IdentityTraits, InodeNumbers, ItemIdentity};
 const KEPT: IdentityTraits = IdentityTraits {
     numbers: InodeNumbers::Kept,
     folder_births: true,
+    made_up_births: false,
 };
 const RENEWED: IdentityTraits = IdentityTraits {
     numbers: InodeNumbers::Renewed,
-    folder_births: true,
+    ..KEPT
 };
 const EXFAT: IdentityTraits = IdentityTraits {
-    numbers: InodeNumbers::Renewed,
     folder_births: false,
+    ..RENEWED
 };
 const UNKNOWN: IdentityTraits = IdentityTraits {
     numbers: InodeNumbers::Unknown,
-    folder_births: true,
+    ..KEPT
+};
+const SMB: IdentityTraits = IdentityTraits {
+    made_up_births: true,
+    ..RENEWED
+};
+const SMB_SERVER_NUMBERS: IdentityTraits = IdentityTraits {
+    numbers: InodeNumbers::Kept,
+    ..SMB
 };
 
 const FOLDER: Evidence = Evidence {
@@ -33,6 +42,7 @@ const FILE: Evidence = Evidence {
     attributes: Some(Attributes {
         size: 5,
         mtime: (90, 0),
+        ctime: Some((95, 0)),
     }),
     ..FOLDER
 };
@@ -58,6 +68,18 @@ fn without_birth(evidence: Evidence) -> Evidence {
     }
 }
 
+fn changed(evidence: Evidence, size: u64) -> Evidence {
+    let attributes = evidence.attributes.map(|attributes| Attributes {
+        size,
+        ctime: Some((120, 0)),
+        ..attributes
+    });
+    Evidence {
+        attributes,
+        ..evidence
+    }
+}
+
 fn zero_birth(evidence: Evidence) -> Evidence {
     Evidence {
         birth: Some((0, 0)),
@@ -71,6 +93,7 @@ fn an_item_is_known_again_only_by_what_its_mount_proves() {
         attributes: Some(Attributes {
             size: 6,
             mtime: (95, 0),
+            ctime: Some((95, 0)),
         }),
         ..without_birth(renumbered(FILE))
     };
@@ -214,6 +237,70 @@ fn an_item_is_known_again_only_by_what_its_mount_proves() {
             renumbered(FOLDER),
             RENEWED,
             true,
+        ),
+        (
+            "change time moved where births are real",
+            RENEWED,
+            FILE,
+            changed(renumbered(FILE), 5),
+            RENEWED,
+            true,
+        ),
+        (
+            "SMB file, birth and attributes kept",
+            SMB,
+            FILE,
+            renumbered(FILE),
+            SMB,
+            true,
+        ),
+        (
+            "SMB file replaced elsewhere, its time kept and its birth repeated",
+            SMB,
+            FILE,
+            changed(renumbered(FILE), 6),
+            SMB,
+            false,
+        ),
+        (
+            "SMB file whose cached number and birth outlived a replacement",
+            SMB,
+            FILE,
+            changed(FILE, 5),
+            SMB,
+            false,
+        ),
+        (
+            "SMB file, no births, attributes kept",
+            SMB,
+            without_birth(FILE),
+            without_birth(renumbered(FILE)),
+            SMB,
+            true,
+        ),
+        (
+            "SMB folder, birth kept",
+            SMB,
+            FOLDER,
+            renumbered(FOLDER),
+            SMB,
+            true,
+        ),
+        (
+            "SMB file, another server number and a repeated birth",
+            SMB_SERVER_NUMBERS,
+            FILE,
+            renumbered(FILE),
+            SMB_SERVER_NUMBERS,
+            false,
+        ),
+        (
+            "SMB file read with server numbers, decided after they went",
+            SMB_SERVER_NUMBERS,
+            FILE,
+            changed(renumbered(FILE), 5),
+            SMB,
+            false,
         ),
         ("another device", KEPT, FOLDER, moved_away, KEPT, false),
         ("another kind", RENEWED, FILE, another_kind, RENEWED, false),

@@ -5,7 +5,7 @@ use std::os::fd::AsFd;
 use rustix::fs::{AtFlags, Mode, OFlags, StatxFlags};
 
 use super::{FsEnvironment, System};
-use crate::adapters::volume::{MountTable, mount_watch};
+use crate::adapters::volume::{MountTable, MountType, mount_watch};
 
 #[test]
 fn mount_types_come_from_the_table_the_watcher_read() {
@@ -42,6 +42,28 @@ fn mount_types_come_from_the_table_the_watcher_read() {
                     .map(|(kind, _)| kind.fs_type.clone());
                 assert!(current.is_some());
                 assert_eq!(fs_type(), current, "a mount the watcher has not read yet");
+
+                let options = |options: &str| {
+                    format!("{id} 1 0:90 / /share rw - cifs //server/share rw,{options}\n")
+                };
+                mount_watch::publish_for_isolated_test(Some(MountTable::parse(options(
+                    "vers=3.1.1,serverino,mapposix",
+                ))));
+                crate::adapters::volume::set_mountinfo_for_isolated_test(Some(options(
+                    "vers=3.1.1,mapposix",
+                )));
+                let options_of = |mount: Option<MountType>| mount.map(|mount| mount.super_options);
+                assert_eq!(
+                    options_of(System.mount_type(folder.as_fd()).map(|(mount, _)| mount))
+                        .as_deref(),
+                    Some("rw,vers=3.1.1,serverino,mapposix")
+                );
+                assert_eq!(
+                    options_of(System.current_mount_type(folder.as_fd())).as_deref(),
+                    Some("rw,vers=3.1.1,mapposix"),
+                    "options the kernel changed without a mount-table event"
+                );
+                crate::adapters::volume::set_mountinfo_for_isolated_test(None);
             })
             .join()
             .expect("worker");

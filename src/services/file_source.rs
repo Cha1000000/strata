@@ -446,7 +446,7 @@ pub enum Watching {
 
 #[derive(Clone, Debug)]
 pub enum StampAnswer {
-    Stamp(DirectoryStamp),
+    Stamp(Box<DirectoryStamp>),
     Missing,
     Inaccessible,
     Unreachable,

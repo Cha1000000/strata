@@ -104,7 +104,8 @@ Residual limits:
 - On a case-insensitive SMB share without POSIX extensions, the Linux cifs client turns server
   inode numbers off for the whole mount once a folder is looked up under a second spelling, as the
   check before a case-only folder rename does ("Autodisabling the use of server inode numbers" in
-  the kernel log). Hard links then report different inode numbers, so Strata stops using them
+  the kernel log). On any SMB mount it does the same once another client renames a folder this
+  client has looked up. Hard links then report different inode numbers, so Strata stops using them
   there, as on sshfs; `RENAME_NOREPLACE` still places items there. A paste never looks a name up
   under a second spelling there, as it numbers names that differ only in case before copying.
 - After a lost reply while placing over a placeholder (to the placeholder's `mkdir` or exclusive
@@ -534,10 +535,20 @@ if it is still what the copy read:
   one more round trip per entry, and moving or undoing after a paste there, or after reading the
   files, does not keep unchanged entries as changed. Elsewhere, and on SMB mounts with `actimeo=0`,
   which cache nothing, the record takes no extra round trip.
-- **Relaxed identity.** FUSE daemons without `use_ino`, vfat and exFAT, and cifs mounted with
-  `noserverino` give an entry a new inode number once the kernel evicts it. There, the type and the
+- **Relaxed identity.** FUSE daemons without `use_ino`, vfat and exFAT, and cifs without server
+  inode numbers give an entry a new inode number once the kernel evicts it. There, the type and the
   birth time, where both stats report a non-zero one, stand in for the inode, and the change time is
   compared only for files with one link.
+- **SMB.** The cifs client can turn server inode numbers off at any moment (see the residual limits
+  above), and then only drops `serverino` from the mount's options, without a mount-table event; a
+  share mounted `noserverino` shows neither. So the check before deleting reads the mount's options
+  again, once per moved item, and compares inode numbers only while `serverino` still shows. The
+  server's creation time stands in for the inode otherwise. Samba makes that time up from a file's
+  times for any file it did not create itself with stored DOS attributes, so a replacement that
+  keeps the modification time repeats it; while `serverino` shows, the inode number tells the two
+  apart. Once it is gone, the client keeps the number and creation time it cached for an entry
+  across a replacement another client makes, so a file must also keep its size and modification
+  time, and a source its change time.
 - **Racily clean files.** Where timestamps are coarse, as on every filesystem before Linux 6.13, a
   same-size rewrite can leave a file's times as they were. Such files are compared by content; see
   [Racily clean files](#racily-clean-files).
@@ -557,7 +568,7 @@ if it is still what the copy read:
 Each entry of the copy must keep its device and type, a file or symbolic link its recorded size and
 modification time, and a file its contents where those times cannot tell. Where the destination
 keeps inode numbers, an entry must also keep its inode and available birth time. Where it numbers
-an evicted entry afresh (vfat and exFAT, cifs with `noserverino`, FUSE daemons without `use_ino`),
+an evicted entry afresh (vfat and exFAT, cifs without `serverino`, FUSE daemons without `use_ino`),
 the birth time, where both stats report one, stands in for the inode, so an entry renumbered after
 a rename or a cache eviction still proves the copy, and the move deletes its sources. Without a
 birth time (sshfs, exfat-fuse, vboxsf), the inode must still match, as another file of the copy's
@@ -1137,12 +1148,15 @@ reset (exFAT), times stamped within one tick of a coarse clock (kernels without 
 timestamps), single link counts (sshfs), entries renumbered after eviction (never one a descriptor
 holds), SMB's refusal to open two names of one file at once or, during its deferred close, another
 name of a file just written, its stale read-only folders, change times answered from its attribute
-cache, server inode numbers turned off after a collision and creation times Samba makes up, folder
-stamps that plain stats answer from NFS's and SMB's attribute caches and that sshfs answers from
-its daemon's cache even when forced, folder stamps without a mount id (kernels before 5.8),
-listings that repeat a cached directory (SMB, renewed by each use) or the daemon's cache (sshfs),
-and writeback errors that `syncfs` reports. Tests can also pretend to run on another kernel
-release, freeze the clock that the racily clean check, the wait for SMB's deferred close and the emulated attribute cache
+cache, server inode numbers turned off after a collision (entries the client cached keep their
+numbers and creation times, also across a replacement made elsewhere, until evicted; with POSIX
+extensions new lookups keep the server's numbers), creation times Samba makes up for entries it did
+not create, or for all of them, which the client keeps as it first saw them, folder stamps that
+plain stats answer from NFS's and SMB's attribute caches and that sshfs answers from its daemon's
+cache even when forced, folder stamps without a mount id (kernels before 5.8), listings that repeat
+a cached directory (SMB, renewed by each use) or the daemon's cache (sshfs), and writeback errors
+that `syncfs` reports. Tests can also pretend to run on another kernel release, freeze the clock
+that the racily clean check, the wait for SMB's deferred close and the emulated attribute cache
 read, and set a paste's batch limits and clock. The seam also asserts that no call runs on the main
 context's thread.
 

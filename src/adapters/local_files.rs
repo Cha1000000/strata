@@ -1723,7 +1723,7 @@ impl FileSource for LocalFileSource {
                 )
                 .await;
                 emit(match stamp.as_deref() {
-                    Ok(Ok(stamp)) => StampAnswer::Stamp(stamp.clone()),
+                    Ok(Ok(stamp)) => StampAnswer::Stamp(Box::new(stamp.clone())),
                     Ok(Err(error)) => stamp_failure(*error),
                     Err(Unanswered::Failed) => StampAnswer::Unreachable,
                     Err(Unanswered::TimedOut | Unanswered::Skipped) => StampAnswer::Unresponsive,
@@ -1752,7 +1752,7 @@ impl FileSource for LocalFileSource {
                 .await
                 {
                     Ok(Ok(info)) if info.file_type() == gio::FileType::Directory => {
-                        StampAnswer::Stamp(remote_stamp(&uri, &info, read_at))
+                        StampAnswer::Stamp(Box::new(remote_stamp(&uri, &info, read_at)))
                     }
                     Ok(Ok(_)) => StampAnswer::Missing,
                     Ok(Err(error)) => remote_stamp_failure(&error),

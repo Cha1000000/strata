@@ -1750,7 +1750,7 @@ fn probed_stamp(path: &Path) -> StampAnswer {
 
 fn stamp_of(answer: StampAnswer) -> DirectoryStamp {
     match answer {
-        StampAnswer::Stamp(stamp) => stamp,
+        StampAnswer::Stamp(stamp) => *stamp,
         other => panic!("no stamp: {other:?}"),
     }
 }
@@ -1937,7 +1937,7 @@ fn a_folder_put_back_to_its_old_time_still_reads_as_changed() -> Result<(), Box<
 #[test]
 fn a_renamed_folder_is_followed_where_its_mount_proves_it_is_the_same() -> Result<(), Box<dyn Error>>
 {
-    use crate::adapters::{FsQuirks, Quirks, evict};
+    use crate::adapters::{Births, FsQuirks, Quirks, evict};
 
     type Row = (&'static str, fn() -> Quirks, bool, bool);
     let rows: [Row; 4] = [
@@ -1945,7 +1945,7 @@ fn a_renamed_folder_is_followed_where_its_mount_proves_it_is_the_same() -> Resul
         (
             "renumbered, birth kept",
             || Quirks {
-                made_up_births: true,
+                births: Births::MadeUp,
                 ..Quirks::vfat()
             },
             true,

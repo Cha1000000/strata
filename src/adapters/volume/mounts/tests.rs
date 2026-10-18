@@ -50,39 +50,49 @@ fn parses_mount_points_and_filesystem_types() {
 fn only_mount_types_known_to_keep_inode_numbers_are_trusted_to() {
     let table = MountTable::parse(
         "\
-70 22 0:60 / /mnt/a rw - cifs //server/a rw,vers=3.1.1,serverino,cache=strict
-71 22 0:61 / /mnt/b rw - cifs //server/b rw,vers=3.1.1,noserverino,cache=strict
+70 22 0:60 / /mnt/a rw - cifs //server/a rw,vers=3.1.1,cache=strict,serverino,mapposix
+71 22 0:61 / /mnt/b rw - cifs //server/b rw,vers=3.1.1,cache=strict,mapposix
 72 22 0:62 / /mnt/c rw - fuse.sshfs host:/ rw,user_id=1000
 73 22 0:63 / /mnt/d rw - ext4 /dev/sdc1 rw,relatime
-74 22 0:64 / /mnt/e rw - smb3 //server/e rw,vers=3.1.1,noserverino
+74 22 0:64 / /mnt/e rw - smb3 //server/e rw,vers=3.1.1,posix,serverino
 75 22 8:33 / /mnt/f rw - vfat /dev/sdc2 rw,flush
 76 22 8:34 / /mnt/g rw - exfat /dev/sdc3 rw
 77 22 8:35 / /mnt/h rw - msdos /dev/sdc4 rw
 78 22 0:65 / /mnt/i rw - vboxsf share rw,nodev,relatime,iocharset=utf8
 79 22 0:66 / /mnt/j rw - 9p share rw,trans=virtio
 80 22 8:36 / /mnt/k rw - jfs /dev/sdc5 rw
+81 22 0:67 / /mnt/l rw - nfs server:/l rw,vers=3,serverino
 ",
     );
     let rows = [
-        (70, InodeNumbers::Kept, true),
-        (71, InodeNumbers::Renewed, true),
-        (72, InodeNumbers::Renewed, true),
-        (73, InodeNumbers::Kept, true),
-        (74, InodeNumbers::Renewed, true),
-        (75, InodeNumbers::Renewed, true),
-        (76, InodeNumbers::Renewed, false),
-        (77, InodeNumbers::Renewed, true),
-        (78, InodeNumbers::Renewed, true),
-        (79, InodeNumbers::Kept, true),
-        (80, InodeNumbers::Unknown, true),
+        (70, InodeNumbers::Renewed, true, true),
+        (71, InodeNumbers::Renewed, true, false),
+        (72, InodeNumbers::Renewed, true, false),
+        (73, InodeNumbers::Kept, true, false),
+        (74, InodeNumbers::Renewed, true, true),
+        (75, InodeNumbers::Renewed, true, false),
+        (76, InodeNumbers::Renewed, false, false),
+        (77, InodeNumbers::Renewed, true, false),
+        (78, InodeNumbers::Renewed, true, false),
+        (79, InodeNumbers::Kept, true, false),
+        (80, InodeNumbers::Unknown, true, false),
+        (81, InodeNumbers::Kept, true, false),
     ];
-    for (id, numbers, folder_births) in rows {
+    for (id, numbers, folder_births, server_numbers) in rows {
+        let mount = table.mount_of(id).map(|(mount, _)| mount);
+        let smb = matches!(id, 70 | 71 | 74);
         assert_eq!(
-            table.mount_of(id).map(|(mount, _)| mount.identity()),
+            mount.map(MountType::identity),
             Some(IdentityTraits {
                 numbers,
-                folder_births
+                folder_births,
+                made_up_births: smb,
             }),
+            "mount {id}"
+        );
+        assert_eq!(
+            mount.map(MountType::server_numbers),
+            Some(server_numbers),
             "mount {id}"
         );
     }

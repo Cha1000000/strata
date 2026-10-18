@@ -1322,7 +1322,7 @@ fn rewrite(path: &Path, contents: &'static [u8]) -> super::fs_quirks::Racer {
 fn a_rewrite_that_keeps_the_size_and_times_is_kept_at_the_source() -> Result<(), Box<dyn Error>> {
     let _serial = serial()?;
     let unstable = || Quirks {
-        mount_type: Some(("cifs", "rw,noserverino")),
+        mount_type: Some(("cifs", "rw,vers=3.1.1")),
         ..Quirks::default()
     };
     for (row, quirks) in [
@@ -1561,7 +1561,7 @@ fn moves_off_mounts_without_stable_inodes_keep_only_what_changed() -> Result<(),
         }
     });
     let quirks = Quirks {
-        mount_type: Some(("cifs", "rw,noserverino")),
+        mount_type: Some(("cifs", "rw,vers=3.1.1")),
         before: vec![(Op::OpenDir, "folder", 1, racer)],
         ..Quirks::default()
     };
@@ -1658,18 +1658,44 @@ fn moves_compare_inode_numbers_only_where_the_source_keeps_them() -> Result<(), 
             ..Quirks::default()
         }
     };
+    let share = |preset: Preset, no_birth_time| {
+        move || Quirks {
+            mount_type: preset().mount_type,
+            no_birth_time,
+            ..Quirks::default()
+        }
+    };
     type MakeQuirks = Box<dyn Fn() -> Quirks>;
-    let cases: [(&str, MakeQuirks, bool); 4] = [
-        ("sshfs", Box::new(Quirks::sshfs), false),
+    let cases: [(&str, MakeQuirks, bool, bool); 7] = [
+        ("sshfs", Box::new(Quirks::sshfs), false, false),
         (
             "cifs noserverino",
-            Box::new(mounted("cifs", "rw,noserverino")),
+            Box::new(share(Quirks::cifs_noserverino, false)),
+            false,
             false,
         ),
-        ("cifs", Box::new(mounted("cifs", "rw,serverino")), true),
-        ("vfat", Box::new(mounted("vfat", "rw,flush")), false),
+        ("cifs", Box::new(share(Quirks::cifs, false)), false, true),
+        (
+            "cifs without creation times",
+            Box::new(share(Quirks::cifs, true)),
+            false,
+            true,
+        ),
+        (
+            "cifs, server inode numbers turned off",
+            Box::new(share(Quirks::cifs, false)),
+            true,
+            false,
+        ),
+        (
+            "cifs without creation times, server inode numbers turned off",
+            Box::new(share(Quirks::cifs, true)),
+            true,
+            false,
+        ),
+        ("vfat", Box::new(mounted("vfat", "rw,flush")), false, false),
     ];
-    for (case, quirks, kept_at_source) in cases {
+    for (case, quirks, turned_off, kept_at_source) in cases {
         let root = tempfile::tempdir()?;
         let source_dir = root.path().join("source");
         let folder = source_dir.join("folder");
@@ -1682,21 +1708,42 @@ fn moves_compare_inode_numbers_only_where_the_source_keeps_them() -> Result<(), 
             folder.join("sub"),
             folder.join("sub/b.txt"),
         ];
-        let racer: super::fs_quirks::Racer = Box::new(move || {
-            for path in &evicted {
-                super::fs_quirks::renumbered(path);
-            }
-        });
+        let switched = Arc::new(AtomicBool::new(!turned_off));
+        let (renumbering, turning_off) = if turned_off {
+            let at = source_dir.clone();
+            let switching = switched.clone();
+            let racer: super::fs_quirks::Racer = Box::new(move || {
+                switching.store(
+                    super::fs_quirks::autodisable_serverino(&at)
+                        && evicted.iter().all(|path| super::fs_quirks::evict(path)),
+                    Ordering::Release,
+                );
+            });
+            (Vec::new(), vec![(Op::Rename, "folder", 0, racer)])
+        } else {
+            let racer: super::fs_quirks::Racer = Box::new(move || {
+                for path in &evicted {
+                    super::fs_quirks::renumbered(path);
+                }
+            });
+            (vec![(Op::OpenDir, "folder", 1, racer)], Vec::new())
+        };
         let _source = FsQuirks::install(
             &source_dir,
             Quirks {
-                before: vec![(Op::OpenDir, "folder", 1, racer)],
+                before: renumbering,
                 ..quirks()
             },
         );
         let destination = root.path().join("destination");
         fs::create_dir_all(&destination)?;
-        let _destination = FsQuirks::install(&destination, Quirks::default());
+        let _destination = FsQuirks::install(
+            &destination,
+            Quirks {
+                after: turning_off,
+                ..Quirks::default()
+            },
+        );
 
         let (_operation, events) =
             paste_move(95, &destination, &folder, TransferConflict::FailIfExists);
@@ -1710,6 +1757,7 @@ fn moves_compare_inode_numbers_only_where_the_source_keeps_them() -> Result<(), 
             "{case}: {:?}",
             events.borrow()
         );
+        assert!(switched.load(Ordering::Acquire), "{case}");
         assert_eq!(
             fs::read(destination.join("folder/sub/b.txt"))?,
             b"b",
@@ -2573,7 +2621,7 @@ fn copied_links_a_mount_numbers_afresh_are_known_by_their_size_and_time()
 -> Result<(), Box<dyn Error>> {
     let _serial = serial()?;
     let noserverino = || Quirks {
-        mount_type: Some(("cifs", "rw,noserverino")),
+        mount_type: Some(("cifs", "rw,vers=3.1.1")),
         ..Quirks::default()
     };
     let sshfs_renaming = || Quirks {

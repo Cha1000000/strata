@@ -26,8 +26,8 @@ use super::{
 };
 use crate::{
     adapters::volume::{
-        LONGEST_NAME_NTFS_3G_RENAMES_OVER, MountCapabilities, MountKey, learn_mount_capability,
-        mount_capabilities,
+        Family, LONGEST_NAME_NTFS_3G_RENAMES_OVER, MountCapabilities, MountKey,
+        learn_mount_capability, mount_capabilities,
     },
     model::hidden_names::HiddenName,
     services::InodeNumbers,
@@ -126,9 +126,9 @@ impl<'a> Mount<'a> {
     /// Whether an inode number still found at a name proves the entry is
     /// the one it was read from, as the mount's type tells.
     fn numbers_kept(&self) -> bool {
-        mount_profile::known(self.fs, self.dir, self.key())
-            .identity
-            .numbers
+        let capabilities = mount_profile::known(self.fs, self.dir, self.key());
+        let family = capabilities.family.unwrap_or(Family::Other);
+        mount_profile::identity_now(self.fs, self.dir, family, capabilities.identity).numbers
             == InodeNumbers::Kept
     }
 

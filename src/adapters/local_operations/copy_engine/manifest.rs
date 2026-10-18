@@ -219,10 +219,11 @@ impl SourceSnapshot {
         let recorded = Attributes {
             size: self.size,
             mtime: self.mtime,
+            ctime: None,
         };
         let same = native_fs::compare(traits, self.identity, Some(recorded), current)
             == Proof::Same
-            && current.attributes() == recorded;
+            && (current.size, current.mtime) == (self.size, self.mtime);
         if traits.numbers == InodeNumbers::Renewed {
             // Nothing tells which names of a file this deletion removed. Where
             // times are as coarse as FAT's, only a birth time tells a file put
@@ -601,7 +602,7 @@ impl Ownership {
         let Ok(stat) = fs.stat(at, true) else {
             return false;
         };
-        let traits = Mount::new(fs, at.dir).identity;
+        let traits = Mount::new(fs, at.dir).identity_now(fs, at.dir);
         if !self.holds(fs, (at, Path::new("")), &stat, traits) {
             return false;
         }
@@ -1018,7 +1019,7 @@ fn walk(
     own_folders: bool,
 ) -> Removed {
     let mount = Mount::new(fs, parent.as_fd());
-    let identity = mount.identity;
+    let identity = mount.identity_now(fs, parent.as_fd());
     let mut linked = HashMap::new();
     if identity.numbers != InodeNumbers::Renewed && !compare_only {
         linked_names(root, Path::new(""), &mut linked);

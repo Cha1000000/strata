@@ -10,6 +10,8 @@ pub struct IdentityTraits {
     pub numbers: InodeNumbers,
     /// Whether a folder keeps its birth time when an entry is renamed into or within it.
     pub folder_births: bool,
+    /// Samba makes up file birth times, which a replacement keeping the mtime repeats.
+    pub made_up_births: bool,
 }
 
 impl Default for IdentityTraits {
@@ -17,6 +19,7 @@ impl Default for IdentityTraits {
         Self {
             numbers: InodeNumbers::Unknown,
             folder_births: true,
+            made_up_births: false,
         }
     }
 }
@@ -41,6 +44,18 @@ pub enum Proof {
 pub struct Attributes {
     pub size: u64,
     pub mtime: (i64, u32),
+    pub ctime: Option<(i64, u32)>,
+}
+
+impl Attributes {
+    fn matches(&self, now: &Self, traits: IdentityTraits) -> bool {
+        let changed = traits.made_up_births
+            && self
+                .ctime
+                .zip(now.ctime)
+                .is_some_and(|(recorded, now)| recorded != now);
+        self.size == now.size && self.mtime == now.mtime && !changed
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -59,7 +74,7 @@ impl Evidence {
             return Proof::Different;
         }
         let folder = self.kind == FileType::Directory;
-        // FUSE daemons can report a birth time of zero for none.
+        // SMB and NFSv4 servers without one, and some FUSE daemons, report a birth time of zero.
         let reported = |birth: Option<(i64, u32)>| birth.filter(|&birth| birth != (0, 0));
         let births = reported(self.birth)
             .zip(reported(current.birth))
@@ -74,11 +89,12 @@ impl Evidence {
                 Proof::Different
             };
         }
-        if births.is_some() {
+        let attributes = self.attributes.zip(current.attributes).filter(|_| !folder);
+        if births.is_some() && !(traits.made_up_births && attributes.is_some()) {
             return Proof::Same;
         }
-        match self.attributes.zip(current.attributes).filter(|_| !folder) {
-            Some((recorded, now)) if recorded == now => Proof::Same,
+        match attributes {
+            Some((recorded, now)) if recorded.matches(&now, traits) => Proof::Same,
             Some(_) => Proof::Different,
             None => Proof::Unproven,
         }
@@ -105,6 +121,7 @@ impl ItemIdentity {
         let traits = IdentityTraits {
             numbers,
             folder_births: self.traits.folder_births && other.traits.folder_births,
+            made_up_births: self.traits.made_up_births || other.traits.made_up_births,
         };
         self.evidence.compare(traits, &other.evidence)
     }

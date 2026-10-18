@@ -914,7 +914,7 @@ struct LateMonitorSource {
 impl LateMonitorSource {
     fn new(baseline: DirectoryStamp) -> Self {
         Self {
-            gap_answer: RefCell::new(StampAnswer::Stamp(baseline.clone())),
+            gap_answer: RefCell::new(StampAnswer::Stamp(Box::new(baseline.clone()))),
             baseline,
             watches: RefCell::default(),
             loads: RefCell::default(),
@@ -1058,25 +1058,25 @@ fn a_change_between_the_stamp_and_the_live_monitor_is_listed_once_more() {
         (
             "unchanged",
             settled.clone(),
-            StampAnswer::Stamp(settled.clone()),
+            StampAnswer::Stamp(Box::new(settled.clone())),
             false,
         ),
         (
             "moved",
             settled.clone(),
-            StampAnswer::Stamp(stamp_at(200, Duration::from_secs(1_000))),
+            StampAnswer::Stamp(Box::new(stamp_at(200, Duration::from_secs(1_000)))),
             true,
         ),
         (
             "coarse times changed just before the load",
             changed_at_the_read.clone(),
-            StampAnswer::Stamp(changed_at_the_read),
+            StampAnswer::Stamp(Box::new(changed_at_the_read)),
             true,
         ),
         (
             "fine-grained times changed just before the load",
             fine_grained_at_the_read.clone(),
-            StampAnswer::Stamp(fine_grained_at_the_read),
+            StampAnswer::Stamp(Box::new(fine_grained_at_the_read)),
             false,
         ),
         ("gone", settled.clone(), StampAnswer::Missing, true),
