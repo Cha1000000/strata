@@ -985,5 +985,6 @@
   "Remove %{name}": "移除 %{name}",
   "The change failed: %{error}": "變更失敗：%{error}",
   "Update %{name}": "更新 %{name}",
-  "Installed integrations are stored in %{path}.": "已安裝的整合儲存在 %{path}。"
+  "Installed integrations are stored in %{path}.": "已安裝的整合儲存在 %{path}。",
+  "Enable %{name}": "啟用 %{name}"
 }

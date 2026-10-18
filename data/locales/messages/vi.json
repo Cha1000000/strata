@@ -985,5 +985,6 @@
   "“%{path}” does not contain an action.toml file": "“%{path}” không chứa tệp action.toml",
   "“%{path}” is not an absolute path, so it cannot be passed to an action": "“%{path}” không phải là đường dẫn tuyệt đối nên không thể chuyển cho hành động",
   "“%{program}” was not found on your PATH": "Không tìm thấy “%{program}” trong PATH",
-  "Installed integrations are stored in %{path}.": "Các tích hợp đã cài đặt được lưu trong %{path}."
+  "Installed integrations are stored in %{path}.": "Các tích hợp đã cài đặt được lưu trong %{path}.",
+  "Enable %{name}": "Bật %{name}"
 }

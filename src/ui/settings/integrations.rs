@@ -32,6 +32,8 @@ pub(super) struct Source {
     pub catalog: Box<dyn Fn() -> Vec<Entry>>,
     pub root: Option<PathBuf>,
     pub check: Checker,
+    /// Shows the registration directory in the browser, when a window hosts the page.
+    pub open_folder: Option<super::OpenFolder>,
 }
 
 impl Default for Source {
@@ -40,12 +42,16 @@ impl Default for Source {
             catalog: Box::new(provider_catalog::catalog),
             root: crate::services::file_providers::config_root(),
             check: Arc::new(provider_catalog::check_requirements),
+            open_folder: None,
         }
     }
 }
 
-pub(super) fn integrations_page() -> gtk::Widget {
-    integrations_page_with(Source::default())
+pub(super) fn integrations_page(open_folder: Option<super::OpenFolder>) -> gtk::Widget {
+    integrations_page_with(Source {
+        open_folder,
+        ..Source::default()
+    })
 }
 
 pub(super) fn integrations_page_with(source: Source) -> gtk::Widget {
@@ -74,6 +80,16 @@ pub(super) fn integrations_page_with(source: Source) -> gtk::Widget {
             path = root.display()
         ));
         copy.append(&location);
+        if let Some(open_folder) = source.open_folder.clone() {
+            let open = gtk::Button::with_label(&crate::i18n::tr("Open folder"));
+            open.add_css_class("settings-action-button");
+            open.set_widget_name("integrations-open-folder");
+            open.set_halign(gtk::Align::End);
+            open.set_margin_top(6);
+            let root = root.clone();
+            open.connect_clicked(move |_| open_folder(root.clone()));
+            copy.append(&open);
+        }
     }
     row.append(&copy);
     settings_group(&content, "").append(&row);
@@ -133,6 +149,7 @@ struct Page {
 struct Row {
     entry: Entry,
     status: Status,
+    enabled: bool,
 }
 
 impl Page {
@@ -150,6 +167,9 @@ impl Page {
                         status: root.as_deref().map_or(Status::NotInstalled, |root| {
                             provider_catalog::status(&entry, root)
                         }),
+                        enabled: root
+                            .as_deref()
+                            .is_none_or(|root| provider_catalog::enabled(root, &entry.id)),
                         entry,
                     })
                     .collect();
@@ -251,6 +271,8 @@ impl Page {
         widget.set_widget_name(&format!("integration-{}", entry.id));
         let copy = gtk::Box::new(gtk::Orientation::Vertical, 3);
         copy.set_hexpand(true);
+        // Rows share a minimum height; keep short copy centered within it.
+        copy.set_valign(gtk::Align::Center);
         let heading = gtk::Box::new(gtk::Orientation::Horizontal, 10);
         heading.append(&logo(entry.icon_bytes(), entry.category));
         let name = crate::i18n::tr(&entry.name);
@@ -260,9 +282,9 @@ impl Page {
         title.set_hexpand(true);
         title.add_css_class("settings-option-title");
         heading.append(&title);
-        let status = gtk::Label::new(Some(&status_label(&row.status)));
+        let status = gtk::Label::new(Some(&status_label(&row.status, row.enabled)));
         status.add_css_class("integration-status");
-        status.add_css_class(status_class(&row.status));
+        status.add_css_class(status_class(&row.status, row.enabled));
         status.set_valign(gtk::Align::Center);
         heading.append(&status);
         let actions = gtk::Box::new(gtk::Orientation::Horizontal, 6);
@@ -292,6 +314,9 @@ impl Page {
             confirmation,
             actions,
         });
+        if row.status != Status::NotInstalled {
+            context.toggle(row.enabled);
+        }
         match &row.status {
             Status::NotInstalled => {
                 let install = context.button(
@@ -391,6 +416,8 @@ impl Page {
         widget.set_widget_name(&format!("integration-{}", installation.id));
         let copy = gtk::Box::new(gtk::Orientation::Vertical, 3);
         copy.set_hexpand(true);
+        // Rows share a minimum height; keep short copy centered within it.
+        copy.set_valign(gtk::Align::Center);
         let heading = gtk::Box::new(gtk::Orientation::Horizontal, 10);
         heading.append(&logo(installation.icon.as_deref(), Category::Other));
         let title = gtk::Label::new(Some(&installation.name));
@@ -421,6 +448,7 @@ impl Page {
             confirmation,
             actions,
         });
+        context.toggle(installation.enabled);
         let remove = context.button(
             "Remove",
             icons::TRASH,
@@ -544,6 +572,22 @@ impl RowContext {
         button
     }
 
+    /// A switch that keeps the registration installed but stops it loading.
+    fn toggle(self: &Rc<Self>, enabled: bool) {
+        let switch = gtk::Switch::builder()
+            .active(enabled)
+            .valign(gtk::Align::Center)
+            .build();
+        accessibility::set_label(&switch, &rust_i18n::t!("Enable %{name}", name = self.name));
+        switch.set_widget_name(&format!("integration-{}-enabled", self.id));
+        let context = self.clone();
+        switch.connect_state_set(move |_, enabled| {
+            context.set_enabled(enabled);
+            glib::Propagation::Proceed
+        });
+        self.actions.append(&switch);
+    }
+
     fn busy(&self, busy: bool) {
         let mut child = self.actions.first_child();
         while let Some(button) = child {
@@ -598,6 +642,17 @@ impl RowContext {
             return;
         };
         self.run(move || provider_catalog::install(&entry, &root).map(|_| ()));
+    }
+
+    fn set_enabled(self: &Rc<Self>, enabled: bool) {
+        let Some(page) = self.page.upgrade() else {
+            return;
+        };
+        let Some(root) = page.source.root.clone() else {
+            return;
+        };
+        let id = self.id.clone();
+        self.run(move || provider_catalog::set_enabled(&root, &id, enabled));
     }
 
     fn remove(self: &Rc<Self>) {
@@ -681,10 +736,12 @@ fn heading(category: Category) -> &'static str {
     }
 }
 
-fn status_label(status: &Status) -> String {
+fn status_label(status: &Status, enabled: bool) -> String {
     let tr = crate::i18n::tr;
     match status {
         Status::NotInstalled => tr("Not installed"),
+        Status::Installed { update: true, .. } if !enabled => tr("Update available · Disabled"),
+        _ if !enabled => tr("Disabled"),
         Status::Installed {
             update: true,
             modified: true,
@@ -702,9 +759,10 @@ fn status_label(status: &Status) -> String {
     }
 }
 
-fn status_class(status: &Status) -> &'static str {
+fn status_class(status: &Status, enabled: bool) -> &'static str {
     match status {
         Status::NotInstalled => "absent",
+        Status::Installed { update: false, .. } | Status::Manual if !enabled => "absent",
         Status::Installed { update: true, .. } => "update",
         Status::Installed { .. } | Status::Manual => "installed",
     }

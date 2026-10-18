@@ -815,6 +815,9 @@ fn uses_compact_navigation(dialog_width: i32) -> bool {
     dialog_width < COMPACT_NAVIGATION_BREAKPOINT
 }
 
+/// Shows a directory in the hosting window's browser.
+pub(crate) type OpenFolder = Rc<dyn Fn(std::path::PathBuf)>;
+
 #[expect(
     deprecated,
     reason = "GTK 4.12 deprecated translate_coordinates and allocation without a replacement for click-in-bounds checks"
@@ -825,6 +828,7 @@ pub fn build_layer(
     preferences: Rc<PreferenceManager>,
     update_notice: UpdateNoticeHandler,
     install_guard: InstallGuard,
+    open_folder: OpenFolder,
 ) -> gtk::Box {
     let layer = gtk::Box::new(gtk::Orientation::Vertical, 0);
     layer.add_css_class("app-modal-layer");
@@ -916,6 +920,13 @@ pub fn build_layer(
         ["general", "diagnostics", "about"].into_iter().collect(),
     ));
     let dismiss_hooks = DismissHooks::default();
+    let close_settings: Rc<dyn Fn()> = {
+        let layer = layer.clone();
+        let button = settings_button.clone();
+        let root = root.clone();
+        let hooks = dismiss_hooks.clone();
+        Rc::new(move || hide(&layer, &button, &root, &hooks))
+    };
     let nav_buttons: Rc<RefCell<Vec<(gtk::Button, &'static str)>>> =
         Rc::new(RefCell::new(Vec::new()));
     for entry in &NAVIGATION {
@@ -939,6 +950,8 @@ pub fn build_layer(
         let responsive_panel = responsive_panel.clone();
         let search_state = settings_search.state.clone();
         let dismiss_hooks = dismiss_hooks.clone();
+        let open_folder = open_folder.clone();
+        let close_settings = close_settings.clone();
         button.connect_clicked(move |clicked| {
             for (candidate, _) in buttons.borrow().iter() {
                 if candidate == clicked {
@@ -965,7 +978,12 @@ pub fn build_layer(
                         stack.add_named(&page, Some("actions"));
                     }
                     "integrations" => {
-                        let page = integrations::integrations_page();
+                        let open_folder = open_folder.clone();
+                        let close_settings = close_settings.clone();
+                        let page = integrations::integrations_page(Some(Rc::new(move |path| {
+                            close_settings();
+                            open_folder(path);
+                        })));
                         search::apply(&page, &search_state);
                         stack.add_named(&page, Some("integrations"));
                     }
@@ -1031,13 +1049,6 @@ pub fn build_layer(
     layer.append(&row);
     layer.append(&bottom);
 
-    let close_settings: Rc<dyn Fn()> = {
-        let layer = layer.clone();
-        let button = settings_button.clone();
-        let root = root.clone();
-        let hooks = dismiss_hooks.clone();
-        Rc::new(move || hide(&layer, &button, &root, &hooks))
-    };
     // A window closed mid-preview never runs `hide`; the preview is process-wide.
     layer.connect_unrealize(move |_| dismiss_hooks.run());
     let close_hide = close_settings.clone();

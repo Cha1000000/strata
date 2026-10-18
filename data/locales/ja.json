@@ -1425,5 +1425,8 @@
   "SYSTEM": "システム",
   "Run in terminal": "ターミナルで実行",
   "Press Enter to close.": "Enter キーを押すと閉じます。",
-  "The command opened in your terminal. Run diagnostics again when it finishes.": "コマンドをターミナルで開きました。完了したら、もう一度診断を実行してください。"
+  "The command opened in your terminal. Run diagnostics again when it finishes.": "コマンドをターミナルで開きました。完了したら、もう一度診断を実行してください。",
+  "Disabled": "無効",
+  "Update available · Disabled": "更新があります · 無効",
+  "Open folder": "フォルダーを開く"
 }

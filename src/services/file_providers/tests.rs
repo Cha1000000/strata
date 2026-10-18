@@ -26,6 +26,13 @@ fn discovery_refuses_symlinks_writable_registration_and_relative_programs() {
     let t = tempfile::tempdir().expect("temp");
     let d = registration(t.path(), vec![python(), "-c".into(), "pass".into()]);
     assert_eq!(discover(t.path()).len(), 1);
+    fs::write(d.join(DISABLED_FILE), b"").expect("marker");
+    assert!(
+        discover(t.path()).is_empty(),
+        "a disabled marker skips the registration"
+    );
+    fs::remove_file(d.join(DISABLED_FILE)).expect("marker");
+    assert_eq!(discover(t.path()).len(), 1);
     fs::set_permissions(d.join("provider.json"), fs::Permissions::from_mode(0o666)).expect("chmod");
     assert!(discover(t.path()).is_empty());
     fs::set_permissions(d.join("provider.json"), fs::Permissions::from_mode(0o600)).expect("chmod");

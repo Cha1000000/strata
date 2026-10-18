@@ -166,6 +166,7 @@ fn settings_layer(manager: &Rc<PreferenceManager>) -> (gtk::Widget, gtk::Entry, 
         manager.clone(),
         Rc::new(|_| {}),
         super::super::install_guard(),
+        Rc::new(|_| {}),
     );
     layer.set_visible(true);
     let layer: gtk::Widget = layer.upcast();
@@ -501,7 +502,7 @@ fn every_page_row_is_registered_for_search() {
                 ("actions", super::super::actions::actions_page()),
                 (
                     "integrations",
-                    super::super::integrations::integrations_page(),
+                    super::super::integrations::integrations_page(None),
                 ),
                 (
                     "updates",

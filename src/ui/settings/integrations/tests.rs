@@ -107,6 +107,7 @@ fn the_page_installs_updates_and_removes_catalog_entries() {
                         })
                         .collect()
                 }),
+                open_folder: None,
             });
             let window = gtk::Window::builder()
                 .child(&page)
@@ -152,6 +153,24 @@ fn the_page_installs_updates_and_removes_catalog_entries() {
             );
             assert!(named(&page, "integration-example-install").is_none());
             assert!(named(&page, "integration-example-update").is_none());
+
+            let switch = |page: &gtk::Widget| {
+                named(page, "integration-example-enabled")
+                    .and_downcast::<gtk::Switch>()
+                    .expect("enable switch")
+            };
+            assert!(switch(&page).is_active());
+            switch(&page).set_active(false);
+            wait_until("disabled", || {
+                status_text(&page).as_deref() == Some("Disabled")
+            });
+            assert!(root.join("example/disabled").exists());
+            assert!(!switch(&page).is_active());
+            switch(&page).set_active(true);
+            wait_until("enabled again", || {
+                status_text(&page).as_deref() == Some("Installed")
+            });
+            assert!(!root.join("example/disabled").exists());
 
             catalog.replace(vec![example(b"#!/bin/sh\nexec cat\n")]);
             remap(&window, &page);
@@ -232,6 +251,7 @@ fn an_empty_catalog_explains_itself() {
                 catalog: Box::new(Vec::new),
                 root: Some(config.path().join("providers")),
                 check: Arc::new(|_| Vec::new()),
+                open_folder: None,
             });
             let window = gtk::Window::builder()
                 .child(&page)

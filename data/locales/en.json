@@ -1425,5 +1425,8 @@
   "SYSTEM": "SYSTEM",
   "Run in terminal": "Run in terminal",
   "Press Enter to close.": "Press Enter to close.",
-  "The command opened in your terminal. Run diagnostics again when it finishes.": "The command opened in your terminal. Run diagnostics again when it finishes."
+  "The command opened in your terminal. Run diagnostics again when it finishes.": "The command opened in your terminal. Run diagnostics again when it finishes.",
+  "Disabled": "Disabled",
+  "Update available · Disabled": "Update available · Disabled",
+  "Open folder": "Open folder"
 }

@@ -1425,5 +1425,8 @@
   "SYSTEM": "HỆ THỐNG",
   "Run in terminal": "Chạy trong terminal",
   "Press Enter to close.": "Nhấn Enter để đóng.",
-  "The command opened in your terminal. Run diagnostics again when it finishes.": "Lệnh đã được mở trong terminal. Hãy chạy lại chẩn đoán khi lệnh hoàn tất."
+  "The command opened in your terminal. Run diagnostics again when it finishes.": "Lệnh đã được mở trong terminal. Hãy chạy lại chẩn đoán khi lệnh hoàn tất.",
+  "Disabled": "Đã tắt",
+  "Update available · Disabled": "Có bản cập nhật · Đã tắt",
+  "Open folder": "Mở thư mục"
 }

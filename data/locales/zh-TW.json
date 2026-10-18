@@ -1425,5 +1425,8 @@
   "This copy was not installed from the catalog. Its folder is deleted.": "此副本並非從目錄安裝。其資料夾將被刪除。",
   "Update": "更新",
   "Update available · Modified locally": "有可用更新 · 本機已修改",
-  "VERSION CONTROL": "版本控制"
+  "VERSION CONTROL": "版本控制",
+  "Disabled": "已停用",
+  "Update available · Disabled": "有可用更新 · 已停用",
+  "Open folder": "開啟資料夾"
 }

@@ -985,5 +985,6 @@
   "“%{path}” does not contain an action.toml file": "“%{path}”中没有 action.toml 文件",
   "“%{path}” is not an absolute path, so it cannot be passed to an action": "“%{path}”不是绝对路径，无法传递给操作",
   "“%{program}” was not found on your PATH": "在 PATH 中找不到“%{program}”",
-  "Installed integrations are stored in %{path}.": "已安装的集成存储在 %{path}。"
+  "Installed integrations are stored in %{path}.": "已安装的集成存储在 %{path}。",
+  "Enable %{name}": "启用 %{name}"
 }

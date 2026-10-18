@@ -1425,5 +1425,8 @@
   "SYSTEM": "SYSTÈME",
   "Run in terminal": "Exécuter dans le terminal",
   "Press Enter to close.": "Appuyez sur Entrée pour fermer.",
-  "The command opened in your terminal. Run diagnostics again when it finishes.": "La commande s’est ouverte dans votre terminal. Relancez le diagnostic une fois qu’elle est terminée."
+  "The command opened in your terminal. Run diagnostics again when it finishes.": "La commande s’est ouverte dans votre terminal. Relancez le diagnostic une fois qu’elle est terminée.",
+  "Disabled": "Désactivé",
+  "Update available · Disabled": "Nouvelle version · Désactivé",
+  "Open folder": "Ouvrir le dossier"
 }

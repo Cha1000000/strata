@@ -242,8 +242,22 @@ fn install_registers_a_resolved_command_and_tracks_updates_and_edits() {
             id: "example".into(),
             name: "Example Cloud".into(),
             icon: next.icon_bytes().map(<[u8]>::to_vec),
+            enabled: true,
         }]
     );
+
+    set_enabled(&root, "example", false).expect("disable");
+    assert!(!enabled(&root, "example"));
+    assert!(!manual_installations(&root, &[])[0].enabled);
+    install(&next, &root).expect("reinstall");
+    assert!(
+        !enabled(&root, "example"),
+        "an update keeps the registration disabled"
+    );
+    set_enabled(&root, "example", true).expect("enable");
+    assert!(enabled(&root, "example"));
+    assert!(set_enabled(&root, "missing", false).is_err());
+    assert!(set_enabled(&root, "../example", false).is_err());
 
     remove(&root, "example").expect("remove");
     assert_eq!(status(&next, &root), Status::NotInstalled);

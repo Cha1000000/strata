@@ -1425,5 +1425,8 @@
   "SYSTEM": "SYSTEM",
   "Run in terminal": "Im Terminal ausführen",
   "Press Enter to close.": "Drücken Sie die Eingabetaste zum Schließen.",
-  "The command opened in your terminal. Run diagnostics again when it finishes.": "Der Befehl wurde in Ihrem Terminal geöffnet. Führen Sie die Diagnose erneut aus, wenn er abgeschlossen ist."
+  "The command opened in your terminal. Run diagnostics again when it finishes.": "Der Befehl wurde in Ihrem Terminal geöffnet. Führen Sie die Diagnose erneut aus, wenn er abgeschlossen ist.",
+  "Disabled": "Deaktiviert",
+  "Update available · Disabled": "Update verfügbar · Deaktiviert",
+  "Open folder": "Ordner öffnen"
 }

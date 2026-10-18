@@ -1425,5 +1425,8 @@
   "SYSTEM": "시스템",
   "Run in terminal": "터미널에서 실행",
   "Press Enter to close.": "닫으려면 Enter 키를 누르세요.",
-  "The command opened in your terminal. Run diagnostics again when it finishes.": "터미널에서 명령을 열었습니다. 완료되면 진단을 다시 실행하세요."
+  "The command opened in your terminal. Run diagnostics again when it finishes.": "터미널에서 명령을 열었습니다. 완료되면 진단을 다시 실행하세요.",
+  "Disabled": "비활성화됨",
+  "Update available · Disabled": "업데이트 가능 · 비활성화됨",
+  "Open folder": "폴더 열기"
 }

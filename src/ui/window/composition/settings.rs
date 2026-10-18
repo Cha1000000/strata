@@ -2,12 +2,14 @@
 
 use std::{
     cell::{Cell, RefCell},
+    path::PathBuf,
     rc::Rc,
 };
 
 use gtk::{glib, prelude::*};
 
 use crate::{
+    model::Location,
     services::{
         BuildKind, InstallRequest, InstallSource, ManagedInstall, ReleaseMetadata, UpdateMethod,
     },
@@ -97,12 +99,19 @@ impl SettingsLauncher {
         if let Some(layer) = self.layer.borrow().clone() {
             return layer;
         }
+        let browser = self.browser.clone();
+        let open_folder: settings::OpenFolder = Rc::new(move |path: PathBuf| {
+            if let Some(browser) = browser.upgrade() {
+                browser.navigate_location(Location::local(path));
+            }
+        });
         let layer = settings::build_layer(
             &self.button,
             &self.blurred_root,
             self.preferences.clone(),
             self.notice.clone(),
             self.guard.clone(),
+            open_folder,
         );
         self.overlay.add_overlay(&layer);
         self.focus_restore

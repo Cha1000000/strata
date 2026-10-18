@@ -78,6 +78,14 @@ def test_catalog_entries_install_update_and_remove(strata, catalog):
         "restart notice",
     )
 
+    switch = strata.wait(lambda: strata.window.find(name="Enable Example Cloud"), "enable switch")
+    strata.pointer.click(switch)
+    strata.wait(lambda: "Disabled" in labels(strata), "disabled status")
+    assert (installed / "disabled").exists()
+    strata.pointer.click(strata.window.find(name="Enable Example Cloud"))
+    strata.wait(lambda: not (installed / "disabled").exists(), "marker removed")
+    strata.wait(lambda: "Installed" in labels(strata), "enabled status")
+
     (catalog / "provider.py").write_text(PROVIDER + "# release 2\n")
     reopen_integrations(strata, "Update Example Cloud")
     strata.wait(lambda: "Update available" in labels(strata), "update offered")
@@ -126,3 +134,10 @@ def test_catalog_entries_install_update_and_remove(strata, catalog):
     assert handmade.exists()
     assert confirm.activate()
     strata.wait(lambda: not handmade.exists(), "manual provider removed")
+
+    assert strata.window.find(role="button", name="Open folder").activate()
+    strata.wait(
+        lambda: strata.window.find(role="button", name="Close settings") is None,
+        "settings closed",
+    )
+    strata.wait_for_directory(installed.parent.name)

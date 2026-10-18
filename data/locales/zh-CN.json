@@ -1425,5 +1425,8 @@
   "SYSTEM": "系统",
   "Run in terminal": "在终端中运行",
   "Press Enter to close.": "按 Enter 键关闭。",
-  "The command opened in your terminal. Run diagnostics again when it finishes.": "已在终端中打开命令。完成后请重新运行诊断。"
+  "The command opened in your terminal. Run diagnostics again when it finishes.": "已在终端中打开命令。完成后请重新运行诊断。",
+  "Disabled": "已禁用",
+  "Update available · Disabled": "有可用更新 · 已禁用",
+  "Open folder": "打开文件夹"
 }

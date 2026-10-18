@@ -19,6 +19,8 @@ pub(crate) use protocol::{
 pub(crate) use transport::{Client, Update, start};
 pub(crate) const PATH_LIMIT: usize = 200;
 pub(crate) const ICON_LIMIT: u64 = 65536;
+/// An empty file beside `provider.json` that keeps the registration from loading.
+pub(crate) const DISABLED_FILE: &str = "disabled";
 
 #[derive(Clone, Deserialize)]
 pub(crate) struct Manifest {
@@ -137,6 +139,9 @@ pub(crate) fn discover(root: &Path) -> Vec<Registration> {
     dirs.sort();
     dirs.iter()
         .filter_map(|path| {
+            if path.join(DISABLED_FILE).exists() {
+                return None;
+            }
             let loaded = load(path);
             if loaded.is_none() {
                 let id = path

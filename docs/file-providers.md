@@ -36,7 +36,9 @@ Commands are literal argv with an absolute executable; no shell interpolation,
 PATH lookup, placeholder expansion or working-directory executable lookup is
 performed. The child runs with `/` as its working directory. Nothing in a browsed
 folder registers a provider. Removing the registration and restarting Strata
-uninstalls it. Editing a registration takes effect on restart.
+uninstalls it. Editing a registration takes effect on restart. An empty file
+named `disabled` beside `provider.json` keeps the registration installed but
+stops it from loading; **Settings → Integrations** toggles it with a switch.
 
 Registration directories/manifests and icon files must be owned by the current
 user or root, must not be group/world writable, and cannot be symlinks. Executable
@@ -59,8 +61,10 @@ and records a content hash in `catalog-install.json`. **Remove** deletes the
 directory. When a release changes a bundled provider, installed copies show
 **Update available**; nothing updates on its own, and local edits are detected
 and confirmed before they are replaced. Registrations without an install record
-are listed as installed manually with **Remove** only. Changes take effect after
-Strata restarts, which the page offers.
+are listed as installed manually with **Remove** only. Every installed
+registration has a switch that disables it without removing it, and **Open
+folder** shows the registration directory in the browser. Changes take effect
+after Strata restarts, which the page offers.
 
 `STRATA_PROVIDER_CATALOG=<directory>` replaces the bundled catalog with a
 directory in the same layout, for developing an entry without rebuilding Strata.

@@ -1425,5 +1425,8 @@
   "SYSTEM": "СИСТЕМА",
   "Run in terminal": "Выполнить в терминале",
   "Press Enter to close.": "Нажмите Enter, чтобы закрыть.",
-  "The command opened in your terminal. Run diagnostics again when it finishes.": "Команда открыта в терминале. Когда она завершится, снова запустите диагностику."
+  "The command opened in your terminal. Run diagnostics again when it finishes.": "Команда открыта в терминале. Когда она завершится, снова запустите диагностику.",
+  "Disabled": "Отключено",
+  "Update available · Disabled": "Есть обновление · Отключено",
+  "Open folder": "Открыть папку"
 }

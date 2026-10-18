@@ -443,6 +443,35 @@ pub(crate) struct Installation {
     pub name: String,
     /// The declared icon, when the registration loads as a trusted provider.
     pub icon: Option<Vec<u8>>,
+    pub enabled: bool,
+}
+
+/// Whether the installed registration loads; a `disabled` marker turns it off.
+pub(crate) fn enabled(root: &Path, id: &str) -> bool {
+    !root.join(id).join(file_providers::DISABLED_FILE).exists()
+}
+
+/// Writes or removes the `disabled` marker of an installed registration.
+pub(crate) fn set_enabled(root: &Path, id: &str, enabled: bool) -> Result<(), String> {
+    if !file_providers::slug(id) {
+        return Err(format!("{id}: not a provider id"));
+    }
+    let directory = root.join(id);
+    if fs::symlink_metadata(&directory).is_ok_and(|metadata| metadata.file_type().is_symlink())
+        || !directory.is_dir()
+    {
+        return Err(format!("{id}: not installed"));
+    }
+    let marker = directory.join(file_providers::DISABLED_FILE);
+    if enabled {
+        match fs::remove_file(&marker) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(format!("{}: {error}", marker.display())),
+        }
+    } else {
+        write_private(&marker, b"")
+    }
 }
 
 /// Provider directories that no catalog entry owns.
@@ -472,7 +501,13 @@ pub(crate) fn manual_installations(root: &Path, catalog: &[Entry]) -> Vec<Instal
                 let icon = registration.manifest.icon.as_ref()?;
                 registration.icons.get(icon).cloned()
             });
-            Some(Installation { id, name, icon })
+            let enabled = !path.join(file_providers::DISABLED_FILE).exists();
+            Some(Installation {
+                id,
+                name,
+                icon,
+                enabled,
+            })
         })
         .collect();
     installations.sort_by(|a, b| a.id.cmp(&b.id));
