@@ -22,7 +22,7 @@ one is deleted.
   the residual limits below. Replace only ever removes the item the user confirmed, identified by
   the mount's identity rule: device, type and inode where the mount keeps inode numbers, the birth
   time where it reports one, and a file's size and times where neither tells (see
-  [Replace and merge](#replace-and-merge)).
+  [Identity](#identity)).
 - **Never remove a name on a guess.** A name is unlinked only after Strata has proven which inode
   it holds. When the outcome of a step cannot be proven, both names are kept and the operation
   reports that the result could not be confirmed.
@@ -101,15 +101,10 @@ Residual limits:
   is never moved back. An item swapped in at the source name between that check and the rename
   is therefore left at the destination too; where that is a hidden name Strata chose (an original
   set aside, a case-only rename's temporary name), the error names it.
-- ext4, ntfs3, NFS and SMB give a freed inode number straight to the next item created. Where no
-  birth time is reported (or a zero one) on NFS and on ext2, ext3 and ext4, Strata also reads the
-  file handle right after each stat, at no extra round trip, and an item whose handle changed is
-  another one: the handle carries the inode's generation, which reuse changes (measured on knfsd
-  exports with `no_subtree_check`). Exports with `subtree_check` and servers other than knfsd were
-  not measured; where their handle changes as a file moves between folders, a moved item counts as
-  another and is kept, the safe side. FUSE handles change once the kernel evicts an entry, so they
-  are never used. On ntfs-3g and exfat-fuse, which report no birth time, an item deleted and
-  recreated at the same name with the same type passes for the original.
+- ext4, ntfs3, NFS and SMB give a freed inode number straight to the next item created. Birth
+  times tell the new item apart, and where NFS and ext2, ext3 and ext4 report none, the file
+  handle does (see [Identity](#identity)). On ntfs-3g and exfat-fuse, which report neither, an item
+  deleted and recreated at the same name with the same type passes for the original.
 - Undo and restore find an item Strata moved to Trash by its original path and the newest deletion
   date. Undo reads the Trash folders itself, the home Trash and the `.Trash/$uid` and
   `.Trash-$uid` folders of the item's mount, so it needs no GVfs. As in GLib, a mount's Trash
@@ -225,12 +220,12 @@ Replace and Merge without Trash, would still be refused on these mounts.
 Strata learns capabilities per mount instead of trusting the filesystem type. The cache lives in
 `src/adapters/volume/mount_capabilities.rs`. It is keyed by the mount id from `statx`:
 `STATX_MNT_ID_UNIQUE`, which is never reused, on Linux 6.8 and later, otherwise `STATX_MNT_ID` with
-the device number. Entries are dropped whenever Strata's mount monitor reports a change.
+the device number. Entries are dropped whenever the mount table changes.
 
 - It records whether `RENAME_NOREPLACE`, `RENAME_EXCHANGE`, hard links, symbolic links and renaming
-  over an empty folder work, and what the mount's type says of the [names](#names) it stores and of
-  file sizes: FAT holds no file of 4 GiB or more, so a paste that selects one fails before copying
-  anything.
+  over an empty folder work, and what the mount's type says of the [names](#names) it stores, of
+  file sizes and of [identity](#identity): FAT holds no file of 4 GiB or more, so a paste that
+  selects one fails before copying anything.
 - A capability is recorded only from a definitive answer (`ENOSYS`, `EOPNOTSUPP`, or a rejected
   exchange), from Strata's own placeholder, or from a probe on Strata's own temporary names
   (`.strata-probe-*`) in the destination. An `EINVAL` or `EPERM` from placing a user's item never
@@ -246,6 +241,123 @@ the device number. Entries are dropped whenever Strata's mount monitor reports a
   stale entry can let any placement take it, with that step's narrow window.
 - The common case costs nothing extra: step 1 always runs first, and the cache is read only after
   it fails.
+
+## Identity
+
+Strata often has to tell whether an item it read earlier is still the one at a name: before Replace
+removes its target, before a move deletes a source, when it puts an original back, when Undo looks
+for an item in the Trash, and when an open folder was renamed. Mounts disagree about what can prove
+that. vfat, exFAT, FUSE daemons and SMB without server inode numbers give an entry a new inode
+number once the kernel evicts it; ext4, NFS and SMB give a freed number straight to the next item;
+and only some mounts report birth times. So every such decision goes through one rule per mount:
+`compare` in `src/adapters/local_operations/native_fs.rs` during an operation, and `ItemIdentity` in
+`src/services/item_identity.rs` for records kept after it. The mount's traits are learned once, with
+its [capabilities](#what-a-mount-supports), from its type and udev's format.
+
+The rule weighs what both readings carry, in this order:
+
+1. Another device or type, or another file handle where both readings have one, is another item.
+2. A birth time both report, other than zero, must match. A folder's counts only where the mount
+   keeps folder births.
+3. Where the mount keeps inode numbers, the number decides.
+4. Where it renumbers entries, a matching birth time proves the item. On SMB, where that time may
+   be made up, a file must also keep the size and times its site recorded (below).
+5. Without a birth time, a file is proven by its size and modification time.
+6. Where numbers are renewed and no birth time proves an item, a folder, or a file whose site
+   recorded no size and times, is unproven. A site that removes, replaces or puts back an item then
+   needs the exact inode number it read, with any birth time and file handle, so there only an
+   entry that was held (below) or stayed cached passes. A site that writes into a folder the copy
+   made, or checks a folder's entries one by one and then removes it only if it is empty
+   (`rmdir`), accepts an unproven folder unless the rule finds it different. Following a renamed
+   folder needs proof.
+
+| Mount | Inode numbers | Birth times | What proves an item |
+| --- | --- | --- | --- |
+| ext4 with 256-byte inodes, XFS, btrfs, f2fs, tmpfs, bcachefs, ZFS, ntfs3, NFSv4 over a filesystem with births | kept | yes | device, type, inode and birth time |
+| ext2 and ext3, ext4 with 128-byte inodes, NFSv3, NFSv4 entries without a birth | kept, and reused at once | no | device, type and inode, and the file handle, whose generation changes when a number is reused |
+| ntfs-3g, and other FUSE daemons whose probe link keeps the number | renewed until such a probe, then kept | no | device, type and inode; a reused number passes |
+| vfat, exFAT files | renewed | yes, 10 ms | device, type and birth time |
+| exFAT folders | renewed | reset by every rename into or within the folder | device and type; their entries are checked one by one |
+| SMB | the server's while the mount shows `serverino`, both when the item was read and when Strata decides | the server's creation time, which Samba may make up | birth time, plus the number while `serverino` shows; once it is gone, a file also the size and times its site recorded |
+| sshfs, exfat-fuse, rclone and other FUSE daemons, vboxsf, msdos | renewed | none | files: size and modification time; folders: type only; single items are held (below) |
+| 9p, virtiofs, ceph, eCryptfs, overlayfs, HFS+, and other types | kept | where reported | device, type, inode and any birth time |
+
+- **File handles.** On NFS and on ext2, ext3 and ext4 without birth times (or with a zero one),
+  Strata reads the file handle right after each stat of an item it records, at no extra round
+  trip, and keeps a 64-bit digest of it. The lab saw the handle change in every one of 198 reuses
+  of an NFSv3 fileid, and stay put across renames, moves between folders and eviction. FUSE
+  handles change once an entry is evicted, so they are never read there, and exFAT and SMB refuse
+  them.
+- **Held items.** Where numbers are renewed and no birth time proves an item (sshfs, exfat-fuse,
+  vboxsf, and folders on kernel exFAT), a single item that one worker reads and later decides about
+  is held with an `O_PATH` descriptor from the first stat until the decision: a Replace or
+  archive-Replace target, and a file stage from its last write until it is published or removed. The
+  item under the [Trash check](#trash) is held on every mount except NFS. The kernel cannot evict a
+  held entry, so it keeps its number, and an `O_PATH` descriptor opens nothing on a FUSE daemon or
+  SMB server and leaves no leftover there. A held entry that is unlinked, or that another file is
+  renamed over through the mount, fails its `fstat` with `ESTALE` or `ENOENT`, which counts as
+  another item, never as a reason to stat the name again. NFS keeps inode numbers and is never held:
+  a held file unlinked there would become a `.nfs` leftover. Sites that track many items (a move's
+  sources, a merge's originals, undo records) record what they read instead.
+- **FUSE link probe.** A FUSE daemon whose probe link keeps the file's number and counts two links,
+  as ntfs-3g does, counts from then on as keeping inode numbers. sshfs gives a link a number of its
+  own and one link, so it keeps renewing.
+- **SMB.** The cifs client can turn server inode numbers off at any moment, and then only drops
+  `serverino` from the mount's options, without a mount-table event. It does so after a lookup of a
+  folder under a second spelling on a case-insensitive share, and on any SMB mount once another
+  client renames a folder this client has looked up. So a decision on SMB reads the mount's options
+  again, once per moved item or per Replace, and compares numbers only while `serverino` showed at
+  both readings. The creation time stands in otherwise. Samba makes that time up from a file's
+  times for any file it did not create itself with stored DOS attributes, so a replacement that
+  keeps the modification time repeats it; while `serverino` shows, the number told them apart in
+  all 37 such cases in the lab. Once it is gone, the client keeps the number and birth it cached
+  for an entry across a replacement another client makes, and only the change time and size show
+  it. So from then on a file must also keep the size and modification time its site recorded, and
+  a Replace or archive-Replace target its change time as well; a move's source keeps its own check
+  of the change time. An original put back is matched by size and modification time, as setting it
+  aside changes its change time, and so are Trash items, as moving to Trash changes it. Strata's
+  own hidden names that it removes, a set-aside original among them, are matched by the birth time
+  alone, as nothing else uses them.
+  A birth of exactly 0 s 0 ns, as SMB and NFSv4 report for a server without births, counts as none.
+- **Records kept after an operation.** `ItemIdentity` carries the traits of the mount it was read
+  on, and a comparison uses the weaker of two. It identifies Trash items for restore and Undo, the
+  saved views and colors of a trashed item, and an open folder for following a rename. An open
+  folder's identity comes from the change stamp its load starts with, so loading it takes no
+  second stat.
+
+Where each operation uses the rule, and what it does with another item (rule 6 says when an unproven
+one counts as another):
+
+| Site | Another item means |
+| --- | --- |
+| Replace and archive-Replace target, checked before it is removed | "The target changed while the operation was in progress" |
+| an original set aside and put back, or removed once the copy is flushed | kept aside, and the error names it |
+| a move's sources before deletion, and the copy that must still hold them | the source stays, reported as changed or as an item whose copy was moved away |
+| the [Trash check](#trash) after GLib reports success | not trashed |
+| restore and Undo looking an item up in the Trash | another item; see the residual limits under [Placing an item without replacing](#placing-an-item-without-replacing) |
+| case-only renames, the rename prompt's "already exists", and case aliases in a paste | not the same item, so the name counts as taken; see [Rename](#rename) |
+| an open folder that disappears from its parent | not renamed: the view leaves it as departed |
+
+Limits of the rule:
+
+- **Reuse without a birth or handle.** On ntfs-3g, an item deleted and recreated at the same name
+  with the same type can get the freed number and pass for the original, and on exfat-fuse and
+  sshfs one with the same type, size and times does, unless it is held. On sshfs and vboxsf, a
+  folder that the server or another client puts at a held Replace target's name keeps the name's
+  number and passes too.
+- **Births in one tick.** On vfat and exFAT, a file made at a name within the same 10 ms tick as the
+  one it replaced passes the rule; the size and time checks of each site still apply. Following a
+  renamed folder on vfat can follow a sibling folder made in the same tick after the open folder
+  was deleted; this only moves the view.
+- **SMB copies after a switch-off.** The check that a moved copy is still the one Strata made does
+  not compare the change time once `serverino` is gone, since whether a fresh SMB copy's change
+  time stays put was not measured. A same-size replacement of such a copy that keeps its
+  modification time, made by another client before the move deletes its sources, passes.
+- **NFS Trash check.** Nothing holds the item across GLib's Trash call on NFS, so an item swapped
+  in at the name during the call is not noticed there.
+- **File handles** were measured on knfsd exports with `no_subtree_check` only. Where an export
+  with `subtree_check`, or another server, changes a file's handle as it moves between folders, a
+  moved item counts as another and is kept, the safe side.
 
 ## Replace and merge
 
@@ -267,25 +379,25 @@ Before copying anything, Replace chooses how to remove the original, in this ord
    settle what the mount supports, or for a folder on a mount without `RENAME_NOREPLACE` that has
    hard links but cannot rename over an empty folder.
 
-Right before it removes the original, after the whole copy, Replace checks that the item at its
-name is still the one it read before copying, by the mount's identity rule. Where the mount keeps
-inode numbers, that is the device, type, inode and birth time; vfat, exFAT and SMB without server
-inode numbers number an entry afresh once the kernel evicts it, so there the birth time stands in
-for the inode, and on SMB a file must also keep its size, modification time and change time (see
-[Moves across filesystems](#moves-across-filesystems)). Where a mount neither keeps numbers nor
-reports birth times, as sshfs, exfat-fuse and vboxsf, and for a folder on kernel exFAT, Replace
-holds the target from when it reads it until it is gone, with an `O_PATH` descriptor, which opens
-nothing on a FUSE daemon or SMB server. The kernel cannot evict a held entry, so it keeps its
-number, and a file another program renames over it through the mount is refused. sshfs and vboxsf
-keep that number for a file put at the name on the server or by another client, so a file must
-still keep its size and modification time, as where no descriptor could be opened, and a folder its
-inode and any birth time. NFS keeps inode numbers and is never held this way; a held file unlinked
-there would leave a `.nfs` leftover. An original renumbered while it waits is still replaced;
-another item is refused as "The target changed while the operation was in progress". The original
-then goes on with the identity it has now. An original set aside is put back by the same rule,
-without the change time, which setting it aside changes. It is removed by its device, type, inode
-and birth time, the birth time standing in for the inode where the mount numbers entries afresh, as
-it sits at a hidden name only Strata uses. Archives replace their target the same way.
+Right before it removes the original, after the whole copy, Replace checks that the item at its name
+is still the one it read before copying, by the mount's [identity rule](#identity). Where the mount
+keeps inode numbers, that is the device, type, inode and birth time; vfat, exFAT and SMB without
+server inode numbers number an entry afresh once the kernel evicts it, so there the birth time
+stands in for the inode, and on SMB a file must also keep its size, modification time and change
+time. Where a mount neither keeps numbers nor reports birth times, as sshfs, exfat-fuse and vboxsf,
+and for a folder on kernel exFAT, Replace holds the target from when it reads it until it is gone,
+with an `O_PATH` descriptor, which opens nothing on a FUSE daemon or SMB server. The kernel cannot
+evict a held entry, so it keeps its number, and a file another program renames over it through the
+mount is refused. sshfs and vboxsf keep that number for a file put at the name on the server or by
+another client, so a file must still keep its size and modification time, as where no descriptor
+could be opened, and a folder its inode and any birth time. NFS keeps inode numbers and is never
+held this way; a held file unlinked there would leave a `.nfs` leftover. An original renumbered
+while it waits is still replaced; another item is refused as "The target changed while the operation
+was in progress". The original then goes on with the identity it has now. An original set aside is
+put back by the same rule, without the change time, which setting it aside changes. It is removed by
+its device, type, inode and birth time, the birth time standing in for the inode where the mount
+numbers entries afresh, as it sits at a hidden name only Strata uses. Archives replace their target
+the same way.
 
 Copies are written into a hidden `.strata-replacement-<id>` stage before they are placed. A file
 stage is created by the copy itself, exclusively, at a fresh name, so nothing is ever copied over
@@ -588,17 +700,12 @@ if it is still what the copy read:
 - **Relaxed identity.** FUSE daemons without `use_ino`, vfat and exFAT, and cifs without server
   inode numbers give an entry a new inode number once the kernel evicts it. There, the type and the
   birth time, where both stats report a non-zero one, stand in for the inode, and the change time is
-  compared only for files with one link.
-- **SMB.** The cifs client can turn server inode numbers off at any moment (see the residual limits
-  above), and then only drops `serverino` from the mount's options, without a mount-table event; a
-  share mounted `noserverino` shows neither. So the check before deleting reads the mount's options
-  again, once per moved item, and compares inode numbers only while `serverino` still shows. The
-  server's creation time stands in for the inode otherwise. Samba makes that time up from a file's
-  times for any file it did not create itself with stored DOS attributes, so a replacement that
-  keeps the modification time repeats it; while `serverino` shows, the inode number tells the two
-  apart. Once it is gone, the client keeps the number and creation time it cached for an entry
-  across a replacement another client makes, so a file must also keep its size and modification
-  time, and a source its change time.
+  compared only for files with one link; see [Identity](#identity).
+- **SMB.** The check before deleting reads the mount's options again, once per moved item, and
+  compares inode numbers only while `serverino` still shows; a share mounted `noserverino` shows
+  neither it nor `noserverino`. Otherwise the server's creation time stands in for the inode, and a
+  file must also keep its size and modification time and a source its change time, as
+  [Identity](#identity) explains.
 - **Racily clean files.** Where timestamps are coarse, as on every filesystem before Linux 6.13, a
   same-size rewrite can leave a file's times as they were. Such files are compared by content; see
   [Racily clean files](#racily-clean-files).

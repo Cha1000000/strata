@@ -266,9 +266,12 @@ what a move read so that only unchanged sources are deleted. `owed.rs` batches t
 paste owes behind one durability barrier per destination filesystem, and the completion report
 reaches the UI as `OperationEvent::ItemsReported`. Replacement/merge, deletion, restore/undo and
 progress orchestration live in their adjacent `replacement`, `deletion`, `restore` and `progress`
-modules. `native_fs` owns shared descriptor and identity primitives; the syscall seam composes
+modules. `native_fs` owns shared descriptor primitives, the per-mount identity rule (`compare`)
+and `Pinned`, the `O_PATH` hold for items nothing else proves; the syscall seam composes
 `FsEnvironment` for Trash, mount-table, udev and `/proc` holder queries without a second injection
-registry.
+registry. Identities that outlive an operation (Trash items, saved views of trashed items, a
+folder's load stamp) are `services/item_identity.rs`'s `ItemIdentity`, which carries its mount's
+traits and compares without I/O.
 
 Every mutating `OperationProvider` entry, Empty Trash and a drive's unmount hold an
 `ActiveOperation` (`adapters/local_operations/release.rs`) until their final event. It registers
@@ -394,9 +397,11 @@ that report to the parent column's monitor, which sees the departure as a change
 its entries; any other column, including the depth-0 folder, is checked in
 `directory_changes.rs`. A folder that validates again (deleted and recreated) reloads in
 place, which renews its monitor. A missing depth-0 folder is looked up in its parent by
-the identity it had when it loaded: device, inode and, where the filesystem records it,
-birth time, queried off the main thread (`FileSource::query_location_identity`). The birth
-time keeps a new folder that reuses the inode from passing for a rename. Found there
+the identity its load's change stamp recorded off the main thread (an `ItemIdentity`),
+compared by the mount's [identity rule](filesystem-compatibility.md#identity): a birth time
+keeps a new folder that reuses the inode from passing for a rename, and on mounts that
+renumber folders without reporting their birth times (sshfs, exFAT) nothing proves a
+folder, so it counts as departed. Found there
 (`find_by_identity`), the folder was renamed in place: the search indexes are rebased and
 the open columns relocate (`ColumnsRelocated`), as for an in-app rename. Not found, with a
 parent that cannot be listed, or before its identity is known, it departed: the nearest
