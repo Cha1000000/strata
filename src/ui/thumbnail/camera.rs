@@ -3,6 +3,7 @@
 use std::io::Write;
 
 use super::*;
+use crate::adapters::gio_close::Closing;
 
 const MAX_ICON_BYTES: usize = 1024 * 1024;
 const ICON_TIMEOUT: Duration = Duration::from_secs(15);
@@ -48,10 +49,12 @@ pub(super) async fn render(path: &Path, cancellation: &Cancellation) -> Result<V
             .attribute_object("preview::icon")
             .and_then(|object| object.downcast::<gio::LoadableIcon>().ok())
             .ok_or("The camera did not provide a thumbnail")?;
-        let stream = load_icon_stream(&icon)
-            .await
-            .map_err(|error| error.to_string())?;
-        let bytes = read_icon(&stream, MAX_ICON_BYTES).await?;
+        let stream = Closing::new(
+            load_icon_stream(&icon)
+                .await
+                .map_err(|error| error.to_string())?,
+        );
+        let bytes = read_icon(&*stream, MAX_ICON_BYTES).await?;
         stream
             .close_future(glib::Priority::DEFAULT)
             .await

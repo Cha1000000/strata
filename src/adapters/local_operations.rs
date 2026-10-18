@@ -181,7 +181,7 @@ use placement::{PlaceError, RenameFailure};
 
 use crate::{
     adapters::{
-        gio_file_for_location, location_for_file,
+        gio_close, gio_file_for_location, location_for_file,
         trash_restore::RestoreContext,
         trash_support::{TrashError, TrashFailure, trash_with_cleanup},
         volume::{NameProfile, mount_watch},
@@ -808,21 +808,18 @@ fn transfer_size(
             });
         }
 
-        let enumerator = await_cancellable(&file, &cancellable, |file, cancellable, result| {
-            file.enumerate_children_async(
-                "standard::name",
-                gio::FileQueryInfoFlags::NOFOLLOW_SYMLINKS,
-                glib::Priority::DEFAULT,
-                Some(cancellable),
-                move |output| result.resolve(output),
-            );
-        })
+        let enumerator = gio_close::enumerate_children(
+            &file,
+            "standard::name",
+            gio::FileQueryInfoFlags::NOFOLLOW_SYMLINKS,
+            Some(&cancellable),
+        )
         .await?;
         let mut total = Some(0_u64);
         let mut files = 0_usize;
         loop {
             let children = await_cancellable(
-                &enumerator,
+                &*enumerator,
                 &cancellable,
                 |enumerator, cancellable, result| {
                     enumerator.next_files_async(
@@ -1591,21 +1588,48 @@ fn renamed_item(
 /// Children whose names are fixed come once the folder is listed, numbered past every sibling.
 /// Where the mount takes two names for one, the whole folder is listed first.
 struct NamedChildren<'a> {
-    enumerator: &'a gio::FileEnumerator,
+    children: Children<'a>,
     names: FolderNames,
     kept: Vec<OsString>,
     held: Vec<(OsString, gio::FileType)>,
     listed: bool,
 }
 
+enum Children<'a> {
+    Enumerated(&'a gio::FileEnumerator),
+    Listed(Vec<(OsString, gio::FileType)>),
+}
+
 impl<'a> NamedChildren<'a> {
     fn new(enumerator: &'a gio::FileEnumerator, names: FolderNames) -> Self {
+        Self::of(Children::Enumerated(enumerator), names)
+    }
+
+    fn listed(children: Vec<(OsString, gio::FileType)>, names: FolderNames) -> Self {
+        Self::of(Children::Listed(children), names)
+    }
+
+    fn of(children: Children<'a>, names: FolderNames) -> Self {
         Self {
-            enumerator,
+            children,
             names,
             kept: Vec::new(),
             held: Vec::new(),
             listed: false,
+        }
+    }
+
+    async fn batch(
+        &mut self,
+        cancellable: &gio::Cancellable,
+    ) -> Result<Vec<(OsString, gio::FileType)>, glib::Error> {
+        match &mut self.children {
+            Children::Enumerated(enumerator) => Ok(next_children(enumerator, cancellable)
+                .await?
+                .iter()
+                .map(|child| (child.name().into_os_string(), child.file_type()))
+                .collect()),
+            Children::Listed(children) => Ok(std::mem::take(children)),
         }
     }
 
@@ -1618,11 +1642,9 @@ impl<'a> NamedChildren<'a> {
             cause: None,
         };
         while !self.listed {
-            let batch = next_children(self.enumerator, cancellable).await?;
+            let batch = self.batch(cancellable).await?;
             self.listed = batch.is_empty();
-            let children = batch
-                .iter()
-                .map(|child| (child.name().into_os_string(), child.file_type()));
+            let children = batch.into_iter();
             if !self.names.fixing {
                 return Ok(children
                     .map(|(name, kind)| (name.clone(), kind, kept(name)))
@@ -1914,17 +1936,13 @@ fn copy_recursively_with_progress(
                 CopyRecord::Root(_) => CopyRecord::Nothing,
                 record => record,
             };
-            let enumerator =
-                await_cancellable(&source, &cancellable, |source, cancellable, result| {
-                    source.enumerate_children_async(
-                        "standard::name,standard::type",
-                        gio::FileQueryInfoFlags::NOFOLLOW_SYMLINKS,
-                        glib::Priority::DEFAULT,
-                        Some(cancellable),
-                        move |output| result.resolve(output),
-                    );
-                })
-                .await?;
+            let enumerator = gio_close::enumerate_children(
+                &source,
+                "standard::name,standard::type",
+                gio::FileQueryInfoFlags::NOFOLLOW_SYMLINKS,
+                Some(&cancellable),
+            )
+            .await?;
             let names = names.within(folder);
             let mut renamed = Vec::new();
             let mut listed = NamedChildren::new(&enumerator, folder.names);

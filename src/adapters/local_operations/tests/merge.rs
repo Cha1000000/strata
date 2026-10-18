@@ -554,6 +554,24 @@ fn merging_recurses_into_subdirectories_shared_by_both_sides() -> Result<(), Box
     fs::write(target.join("nested/shared.txt"), b"old")?;
     let (stage, _) = rename_stage(root.path().join("staging"));
     let (plans, on_merged) = recorded_plans();
+    let listed_on = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let listing = |folder: &'static str| -> (Op, &'static str, usize, Racer) {
+        let listed_on = listed_on.clone();
+        let racer: Racer = Box::new(move || {
+            listed_on
+                .lock()
+                .expect("listings")
+                .push((folder, thread::current().id()));
+        });
+        (Op::ListChunks, folder, 0, racer)
+    };
+    let _scope = FsQuirks::install(
+        root.path(),
+        Quirks {
+            before: vec![listing("source"), listing("nested")],
+            ..Quirks::default()
+        },
+    );
 
     let result = glib::MainContext::default().block_on(merge_local_with(
         gio::File::for_path(&source),
@@ -576,6 +594,20 @@ fn merging_recurses_into_subdirectories_shared_by_both_sides() -> Result<(), Box
         b"incoming wins"
     );
     assert_eq!(fs::read(target.join("nested/stays.txt"))?, b"keep me");
+    let ui = thread::current().id();
+    let listed_on = listed_on.lock().expect("listings");
+    assert_eq!(
+        listed_on
+            .iter()
+            .map(|(folder, _)| *folder)
+            .collect::<Vec<_>>(),
+        ["source", "nested"],
+        "each local source folder is listed through the filesystem seam"
+    );
+    assert!(
+        listed_on.iter().all(|(_, thread)| *thread != ui),
+        "and never on the UI thread"
+    );
     let plans = plans.borrow();
     assert_eq!(plans.len(), 2);
     assert_eq!(

@@ -76,6 +76,25 @@ reports `EINTR`; retrying could close a descriptor another thread has since reus
 The copy and archive regressions inject delayed close errors and require publication
 to fail without deleting originals.
 
+### Background close of enumerators and streams
+
+Location: `src/adapters/gio_close.rs::Closable::close_in_background`
+
+Reason: GLib closes an enumerator or stream still open at its last unref in place, so one
+the UI thread lets go of would close there, waiting on a dead NFS or SMB server, a stopped
+FUSE daemon or a GVfs backend. Strata starts the close with `g_file_enumerator_close_async`
+or `g_input_stream_close_async`, which run it on GLib's worker pool or, for GVfs, without
+blocking. gio-rs requires a Rust callback, which glib-rs binds to the thread that started the
+close; a close that outlives a test would then abort the next test that dispatches the default
+main context. Strata passes no callback, which GIO annotates as allowed.
+
+The object is alive for the call, and GLib holds its own reference until the close ends. The
+cancellable, callback and user data are null. The calls run only on the UI thread, and only
+when no other operation is pending on the object; `Closing` rechecks pending objects until
+then. Written streams are never closed this way, as their close reports lost data. The
+regression test closes a probe enumerator and stream let go after and during a call, and
+requires each close to run off the UI thread.
+
 ### Browser sandbox fork boundary
 
 Location: `src/sandbox/browser/process.rs::{fork,namespaces}`

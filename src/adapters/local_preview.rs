@@ -14,6 +14,7 @@ use gtk::{gio, glib, prelude::*};
 
 use crate::{
     adapters::{
+        gio_close::Closing,
         gio_file_for_location,
         local_operations::{ArchiveListingStatus, decode_archive_listing},
     },
@@ -893,7 +894,11 @@ async fn read_text(
             }
         }
     }
-    let stream = file.read_future(glib::Priority::DEFAULT).await?;
+    let stream = Closing::new(
+        file.read_future(glib::Priority::DEFAULT)
+            .await?
+            .upcast::<gio::InputStream>(),
+    );
     let bytes = stream
         .read_bytes_future(byte_limit.saturating_add(1), glib::Priority::DEFAULT)
         .await?;

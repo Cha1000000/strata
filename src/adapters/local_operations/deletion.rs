@@ -3,7 +3,7 @@
 use super::fs_ops::{Entry, fs};
 use crate::{
     adapters::{
-        gio_file_for_location,
+        gio_close, gio_file_for_location,
         trash_support::{LeftoverWatch, SystemTrash, TrashEnvironment, TrashError, TrashFailure},
     },
     model::{FileEntry, Location},
@@ -46,19 +46,16 @@ pub(super) fn permanently_delete(
 ) -> Pin<Box<dyn Future<Output = Result<(), glib::Error>>>> {
     Box::pin(async move {
         if directory {
-            let enumerator = await_cancellable(&file, &cancellable, |file, cancellable, result| {
-                file.enumerate_children_async(
-                    "standard::name,standard::type",
-                    gio::FileQueryInfoFlags::NOFOLLOW_SYMLINKS,
-                    glib::Priority::DEFAULT,
-                    Some(cancellable),
-                    move |output| result.resolve(output),
-                );
-            })
+            let enumerator = gio_close::enumerate_children(
+                &file,
+                "standard::name,standard::type",
+                gio::FileQueryInfoFlags::NOFOLLOW_SYMLINKS,
+                Some(&cancellable),
+            )
             .await?;
             loop {
                 let children = await_cancellable(
-                    &enumerator,
+                    &*enumerator,
                     &cancellable,
                     |enumerator, cancellable, result| {
                         enumerator.next_files_async(
@@ -104,15 +101,12 @@ pub(super) fn permanently_delete_keeping(
         if !kept.iter().any(|kept| kept.has_prefix(&file)) {
             return permanently_delete(file, true, cancellable).await;
         }
-        let enumerator = await_cancellable(&file, &cancellable, |file, cancellable, result| {
-            file.enumerate_children_async(
-                "standard::name,standard::type",
-                gio::FileQueryInfoFlags::NOFOLLOW_SYMLINKS,
-                glib::Priority::DEFAULT,
-                Some(cancellable),
-                move |output| result.resolve(output),
-            );
-        })
+        let enumerator = gio_close::enumerate_children(
+            &file,
+            "standard::name,standard::type",
+            gio::FileQueryInfoFlags::NOFOLLOW_SYMLINKS,
+            Some(&cancellable),
+        )
         .await?;
         loop {
             let children = next_children(&enumerator, &cancellable).await?;

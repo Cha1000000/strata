@@ -12,6 +12,7 @@ use std::{
 
 use gio::prelude::*;
 
+use super::gio_close::{self, Closing};
 use super::local_files::{info_is_hidden, info_is_symlink};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -78,11 +79,12 @@ impl MeasurementBudget {
     }
 }
 
-async fn enumerate_children(file: &gio::File) -> Result<gio::FileEnumerator, glib::Error> {
-    file.enumerate_children_future(
+async fn enumerate_children(file: &gio::File) -> Result<Closing<gio::FileEnumerator>, glib::Error> {
+    gio_close::enumerate_children(
+        file,
         DIRECTORY_ATTRIBUTES,
         gio::FileQueryInfoFlags::NOFOLLOW_SYMLINKS,
-        glib::Priority::DEFAULT,
+        None,
     )
     .await
 }
@@ -118,7 +120,7 @@ async fn summarize_directory_with_budget(
 
 async fn measure_children(
     directory: &gio::File,
-    enumerator: gio::FileEnumerator,
+    enumerator: Closing<gio::FileEnumerator>,
     child_depth: usize,
     hidden_ancestor: bool,
     budget: Rc<MeasurementBudget>,

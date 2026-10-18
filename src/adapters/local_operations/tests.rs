@@ -32,6 +32,7 @@ fn serial() -> Result<crate::test_support::MainContextGuard<'static>, String> {
 }
 
 mod aliases;
+mod closes;
 mod conflicts;
 mod copy;
 mod create_entry;

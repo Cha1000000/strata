@@ -30,6 +30,7 @@ use ashpd::{
 use futures_channel::oneshot;
 use gio::prelude::*;
 
+use crate::adapters::gio_close;
 use crate::model::{FileEntry, Location};
 
 const BACKEND_NAME: &str = "org.freedesktop.impl.portal.desktop.strata";
@@ -579,14 +580,14 @@ async fn accessible_folder(suggestion: Option<PathBuf>) -> ashpd::backend::Resul
 }
 
 async fn directory_is_accessible(path: &Path) -> bool {
-    gio::File::for_path(path)
-        .enumerate_children_future(
-            gio::FILE_ATTRIBUTE_STANDARD_TYPE,
-            gio::FileQueryInfoFlags::NONE,
-            glib::Priority::DEFAULT,
-        )
-        .await
-        .is_ok()
+    gio_close::enumerate_children(
+        &gio::File::for_path(path),
+        gio::FILE_ATTRIBUTE_STANDARD_TYPE,
+        gio::FileQueryInfoFlags::NONE,
+        None,
+    )
+    .await
+    .is_ok()
 }
 
 async fn save_file_suggestion(

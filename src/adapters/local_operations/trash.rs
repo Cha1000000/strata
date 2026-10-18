@@ -83,7 +83,7 @@ fn verify_trash(
     ))
 }
 
-fn errno_error(error: Errno) -> glib::Error {
+pub(super) fn errno_error(error: Errno) -> glib::Error {
     glib::Error::new(
         gio::io_error_from_errno(error.raw_os_error()),
         &os_error_text(error),

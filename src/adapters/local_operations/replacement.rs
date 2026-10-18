@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 
-use super::fs_ops::{Entry, EntryStat, OffMain, fs};
+use super::fs_ops::{Entry, EntryStat, OffMain, fs, list_folder};
 use crate::{
     adapters::{
         gio_file_for_location, location_for_file,
@@ -19,6 +19,7 @@ use std::{
     collections::{HashMap, HashSet},
     ffi::{OsStr, OsString},
     future::Future,
+    ops::ControlFlow,
     os::fd::{AsFd, OwnedFd},
     path::{Path, PathBuf},
     pin::Pin,
@@ -978,17 +979,24 @@ pub(super) fn classify_merge<'a>(
     (policy, folder): (&'a NamePolicy, TargetFolder),
 ) -> Pin<Box<dyn Future<Output = Result<(), glib::Error>> + 'a>> {
     Box::pin(async move {
-        let enumerator = await_cancellable(source, cancellable, |source, cancellable, result| {
-            source.enumerate_children_async(
-                "standard::name,standard::type",
-                gio::FileQueryInfoFlags::NOFOLLOW_SYMLINKS,
-                glib::Priority::DEFAULT,
-                Some(cancellable),
-                move |output| result.resolve(output),
-            );
-        })
-        .await?;
-        let mut listed = NamedChildren::new(&enumerator, folder.names);
+        let enumerator;
+        let mut listed = match native_children(source, cancellable).await? {
+            Some(children) => NamedChildren::listed(children, folder.names),
+            None => {
+                enumerator =
+                    await_cancellable(source, cancellable, |source, cancellable, result| {
+                        source.enumerate_children_async(
+                            "standard::name,standard::type",
+                            gio::FileQueryInfoFlags::NOFOLLOW_SYMLINKS,
+                            glib::Priority::DEFAULT,
+                            Some(cancellable),
+                            move |output| result.resolve(output),
+                        );
+                    })
+                    .await?;
+                NamedChildren::new(&enumerator, folder.names)
+            }
+        };
         loop {
             let children = listed.next(cancellable).await?;
             if children.is_empty() {
@@ -1008,6 +1016,42 @@ pub(super) fn classify_merge<'a>(
             }
         }
     })
+}
+
+async fn native_children(
+    folder: &gio::File,
+    cancellable: &gio::Cancellable,
+) -> Result<Option<Vec<(OsString, gio::FileType)>>, glib::Error> {
+    let Some(path) = folder.path().filter(|_| folder.is_native()) else {
+        return Ok(None);
+    };
+    let cancellable = cancellable.clone();
+    run_blocking(move || {
+        let mut children = Vec::new();
+        let listed = list_folder(&path, &mut |chunk| {
+            children.extend(chunk.into_iter().map(|(name, kind)| (name, gio_kind(kind))));
+            if cancellable.is_cancelled() {
+                ControlFlow::Break(())
+            } else {
+                ControlFlow::Continue(())
+            }
+        });
+        if cancellable.is_cancelled() {
+            return Err(cancelled_local_operation());
+        }
+        listed.map_err(trash::errno_error)?;
+        Ok(Some(children))
+    })
+    .await
+}
+
+fn gio_kind(kind: rustix::fs::FileType) -> gio::FileType {
+    match kind {
+        rustix::fs::FileType::Directory => gio::FileType::Directory,
+        rustix::fs::FileType::Symlink => gio::FileType::SymbolicLink,
+        rustix::fs::FileType::RegularFile => gio::FileType::Regular,
+        _ => gio::FileType::Special,
+    }
 }
 
 async fn classify_merge_child(
