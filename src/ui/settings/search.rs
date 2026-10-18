@@ -335,7 +335,7 @@ const TARGETS: &[Target] = &[
         id: "integrations",
         page: "integrations",
         title: "Integrations",
-        aliases: "add-ons addons plugins extensions providers catalog install kde connect nextcloud dropbox cloud devices phone",
+        aliases: "add-ons addons plugins extensions providers catalog install kde connect localsend nextcloud dropbox cloud devices phone",
     },
     Target {
         id: "diagnostics",
