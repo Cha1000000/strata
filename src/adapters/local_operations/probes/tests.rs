@@ -8,7 +8,10 @@ use std::{
 use gtk::{gio, glib};
 use rustix::io::Errno;
 
-use super::{Presence, child_folders, folder, folder_was_deleted, presence, writable_folder};
+use super::{
+    Presence, child_folders, destination_folder, folder, folder_was_deleted, presence,
+    writable_folder,
+};
 use crate::{
     adapters::{
         local_operations::tests::fs_quirks::{FsQuirks, Op, Quirks},
@@ -93,14 +96,29 @@ fn a_folder_checks_out_once_it_can_be_listed() -> Result<(), Box<dyn std::error:
             ..Quirks::default()
         },
     );
-    for (name, expected) in [
-        ("folder", Ok(())),
-        ("link", Ok(())),
-        ("file", Err(LocationValidationError::NotDirectory)),
-        ("missing", Err(LocationValidationError::Missing)),
-        ("locked", Err(LocationValidationError::Inaccessible)),
+    let real = root.path().canonicalize()?;
+    for (name, listable, destination) in [
+        ("folder", Ok(()), Ok(real.join("folder"))),
+        ("link", Ok(()), Ok(real.join("folder"))),
+        (
+            "file",
+            Err(LocationValidationError::NotDirectory),
+            Err(LocationValidationError::NotDirectory),
+        ),
+        (
+            "missing",
+            Err(LocationValidationError::Missing),
+            Err(LocationValidationError::Missing),
+        ),
+        (
+            "locked",
+            Err(LocationValidationError::Inaccessible),
+            Ok(real.join("locked")),
+        ),
     ] {
-        assert_eq!(answer(folder(&root.path().join(name))), expected, "{name}");
+        let path = root.path().join(name);
+        assert_eq!(answer(folder(&path)), listable, "{name}");
+        assert_eq!(answer(destination_folder(&path)), destination, "{name}");
     }
     Ok(())
 }

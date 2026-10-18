@@ -408,3 +408,33 @@ pub(crate) async fn child_folders(
     .await
     .map_or_else(|_| Vec::new(), Arc::unwrap_or_clone)
 }
+
+/// The folder's real path; search permission is enough, so write-only folders qualify.
+pub(crate) async fn destination_folder(path: &Path) -> Result<PathBuf, LocationValidationError> {
+    let folder = path.to_owned();
+    mount_lanes::run_joined(path, "destination folder".to_owned(), move |progress, _| {
+        progress.begin_reading();
+        let real = folder.canonicalize();
+        progress.answered(&real);
+        let real = real?;
+        let stamp = folder_stamp(&real, false);
+        progress.answered(&stamp);
+        let stamp = stamp.map_err(|error| LocationValidationError::from(io::Error::from(error)))?;
+        if let Some(id) = stamp.mount_id {
+            progress.learn(id);
+        }
+        if stamp.kind != FileType::Directory {
+            return Err(LocationValidationError::NotDirectory);
+        }
+        Ok(real)
+    })
+    .await
+    .map_or_else(
+        |refused| {
+            Err(LocationValidationError::Unavailable(io_error_detail(
+                &unanswered(refused),
+            )))
+        },
+        Arc::unwrap_or_clone,
+    )
+}

@@ -14,7 +14,7 @@ use super::{
 use crate::{
     adapters::local_operations::{
         LocalOperationProvider,
-        tests::fs_quirks::{FsQuirks, Preset, Quirks},
+        tests::fs_quirks::{FsQuirks, Op, Preset, Quirks},
     },
     model::Location,
     services::{
@@ -779,6 +779,25 @@ fn failed_extraction_removes_a_newly_created_empty_destination() -> Result<(), B
     let archive = root.path().join("fake.zip");
     fs::write(&archive, b"not an archive")?;
     let destination = root.path().join("leftover");
+    let on_ui_thread = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let seen = |step: &'static str| {
+        let seen = on_ui_thread.clone();
+        Box::new(move || {
+            seen.lock()
+                .expect("steps")
+                .push((step, crate::util::ui_thread::is_current()));
+        }) as Box<dyn FnMut() + Send>
+    };
+    let _scope = FsQuirks::install(
+        root.path(),
+        Quirks {
+            before: vec![
+                (Op::FolderStamp, "fake.zip", 0, seen("archive check")),
+                (Op::Unlink, "leftover", 0, seen("cleanup")),
+            ],
+            ..Quirks::default()
+        },
+    );
     let events = run_extraction(ExtractRequest {
         id: OperationRequestId(908),
         entry: test_file_entry(&archive),
@@ -794,6 +813,11 @@ fn failed_extraction_removes_a_newly_created_empty_destination() -> Result<(), B
     assert!(
         !destination.exists(),
         "leftover destination was not cleaned up"
+    );
+    assert_eq!(
+        *on_ui_thread.lock().expect("steps"),
+        [("archive check", false), ("cleanup", false)],
+        "the archive is checked and the folder removed off the UI thread"
     );
     Ok(())
 }

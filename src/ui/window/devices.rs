@@ -143,17 +143,6 @@ fn send_to_mount_identity(mount: &gio::Mount) -> Option<String> {
     )
 }
 
-fn root_is_writable_directory(root: &gio::File) -> bool {
-    root.query_info(
-        "standard::type,access::can-write",
-        gio::FileQueryInfoFlags::NONE,
-        None::<&gio::Cancellable>,
-    )
-    .is_ok_and(|info| {
-        info.file_type() == gio::FileType::Directory && info.boolean("access::can-write")
-    })
-}
-
 fn candidate_for_mount(mount: &gio::Mount) -> Option<RemovableDestination> {
     let root = mount.root().path();
     let facts = RemovableMountFacts {
@@ -411,14 +400,6 @@ pub(in crate::ui) fn offer_removable_destinations_for_test(offered: Vec<Removabl
     REMOVABLE.with(|cache| cache.offered_for_test.replace(Some(offered)));
     start_removable_destinations();
     queue_removable_refresh();
-}
-
-pub(in crate::ui) fn resolve_removable_destination(id: &str) -> Option<PathBuf> {
-    let destination = removable_destinations()
-        .into_iter()
-        .find(|destination| destination.id == id)?;
-    let root = std::fs::canonicalize(destination.root).ok()?;
-    root_is_writable_directory(&gio::File::for_path(&root)).then_some(root)
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]

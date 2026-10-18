@@ -66,7 +66,7 @@ mod volume_password;
 pub(super) use devices::offer_removable_destinations_for_test;
 pub(super) use devices::{
     RemovableDestination, RemovableWatch, removable_destination_root, removable_destinations,
-    resolve_removable_destination, watch_removable_destinations,
+    watch_removable_destinations,
 };
 pub(in crate::ui) use keyboard::{ChooserKeys, ChooserPolicy, edit_focused_text};
 

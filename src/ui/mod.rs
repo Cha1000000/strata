@@ -66,7 +66,7 @@ pub(crate) use window::default_save_folder;
 pub(in crate::ui) use window::offer_removable_destinations_for_test;
 pub(in crate::ui) use window::{
     RemovableDestination, RemovableWatch, removable_destination_root, removable_destinations,
-    resolve_removable_destination, watch_removable_destinations,
+    watch_removable_destinations,
 };
 pub use window::{UnlockTarget, present, present_open, present_reveal, present_unlock};
 

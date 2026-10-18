@@ -69,7 +69,8 @@ use super::{
 };
 
 type Completion = Box<dyn FnOnce(ashpd::backend::Result<SelectedFiles>)>;
-type DestinationValidator = Rc<dyn Fn(&Path) -> Result<PathBuf, String>>;
+type DestinationValidator =
+    Rc<dyn Fn(&Path) -> futures_lite::future::BoxedLocal<Result<PathBuf, String>>>;
 
 thread_local! {
     static CHOOSERS: RefCell<HashMap<String, glib::WeakRef<gtk::Window>>> = RefCell::new(HashMap::new());
@@ -1001,10 +1002,7 @@ impl ChooserState {
                     open_selection(&entries, &current, *directory, *multiple),
                     self.destination_host.as_ref(),
                 ) {
-                    (Ok(paths), Some(host)) => match (host.validate)(&paths[0]) {
-                        Ok(path) => self.complete_paths(vec![path], None),
-                        Err(message) => self.show_error(&message),
-                    },
+                    (Ok(paths), Some(host)) => self.accept_destination((host.validate)(&paths[0])),
                     (Ok(paths), None) => self.complete_paths(
                         paths,
                         self.read_only
@@ -1026,6 +1024,31 @@ impl ChooserState {
                 self.accept_destinations(folder, names.clone());
             }
         }
+    }
+
+    fn accept_destination(
+        self: &Rc<Self>,
+        validation: futures_lite::future::BoxedLocal<Result<PathBuf, String>>,
+    ) {
+        self.destination_check.set(true);
+        self.accept_button.set_sensitive(false);
+        let generation = self.accept_generation.get();
+        let weak = Rc::downgrade(self);
+        let _task = glib::MainContext::default().spawn_local(async move {
+            let result = validation.await;
+            let Some(state) = weak.upgrade() else {
+                return;
+            };
+            state.destination_check.set(false);
+            if state.completion.borrow().is_none() || state.accept_generation.get() != generation {
+                return;
+            }
+            state.accept_button.set_sensitive(true);
+            match result {
+                Ok(path) => state.complete_paths(vec![path], None),
+                Err(message) => state.show_error(&message),
+            }
+        });
     }
 
     fn accept_open_name(self: &Rc<Self>, name: &str) {

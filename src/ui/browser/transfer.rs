@@ -22,8 +22,10 @@ use crate::ui::keys::{
     bindings::{ENTER_ANY, ESCAPE_ANY},
 };
 use crate::ui::modal::{ModalHost, dismiss_modal_layer, modal_layer, show_error_dialog};
+use futures_lite::future::BoxedLocal;
 use gtk::prelude::*;
 use gtk::{gio, glib};
+use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::Duration;
@@ -1357,7 +1359,7 @@ impl ViewState {
         self.show_send_to_folder_dialog_with_resolver(
             id,
             sources,
-            Rc::new(crate::ui::resolve_removable_destination),
+            Rc::new(crate::ui::removable_destination_root),
         );
     }
 
@@ -1370,29 +1372,41 @@ impl ViewState {
         if sources.is_empty() {
             return;
         }
-        let Some(root) = resolve(&id)
-            .and_then(|root| crate::ui::browser::destination::canonical_existing_directory(&root))
-        else {
-            show_error_dialog(
-                &self.overlay,
-                &crate::i18n::tr("Destination unavailable"),
-                &crate::i18n::tr("The removable device is no longer available."),
-            );
-            return;
-        };
-        self.show_destination_dialog(
-            sources,
-            TransferDialogOptions {
-                base: root.clone(),
-                root_limit: Some(root.clone()),
-                allow_create: false,
-                completion: TransferDialogCompletion::SendTo {
-                    device_id: id,
-                    opened_root: root,
-                    resolve,
+        let root = resolve(&id);
+        let weak = Rc::downgrade(self);
+        glib::MainContext::default().spawn_local(async move {
+            let root = match root {
+                Some(root) => crate::adapters::probes::writable_folder(&root)
+                    .await
+                    .ok()
+                    .flatten(),
+                None => None,
+            };
+            let Some(state) = weak.upgrade() else {
+                return;
+            };
+            let Some(root) = root else {
+                show_error_dialog(
+                    &state.overlay,
+                    &crate::i18n::tr("Destination unavailable"),
+                    &crate::i18n::tr("The removable device is no longer available."),
+                );
+                return;
+            };
+            state.show_destination_dialog(
+                sources,
+                TransferDialogOptions {
+                    base: root.clone(),
+                    root_limit: Some(root.clone()),
+                    allow_create: false,
+                    completion: TransferDialogCompletion::SendTo {
+                        device_id: id,
+                        opened_root: root,
+                        resolve,
+                    },
                 },
-            },
-        );
+            );
+        });
     }
 
     fn show_destination_dialog(
@@ -1420,33 +1434,41 @@ impl ViewState {
             _ => crate::i18n::tr("Copy to"),
         };
         let validation_completion = completion.clone();
-        let validate = Rc::new(move |path: &Path| {
-            if let TransferDialogCompletion::SendTo {
+        let validated_root = Rc::new(RefCell::new(None));
+        let validated = validated_root.clone();
+        let validate = Rc::new(move |path: &Path| -> BoxedLocal<Result<PathBuf, String>> {
+            let TransferDialogCompletion::SendTo {
                 device_id,
                 opened_root,
                 resolve,
             } = &validation_completion
-            {
-                let current_root = resolve(device_id)
-                    .and_then(|root| {
-                        crate::ui::browser::destination::canonical_existing_directory(&root)
-                    })
-                    .ok_or_else(|| {
-                        crate::i18n::tr("The removable device is no longer available.")
-                    })?;
-                crate::ui::browser::destination::rebind_directory_within_root(
-                    opened_root,
-                    path,
-                    &current_root,
-                )
-                .ok_or_else(|| {
-                    crate::i18n::tr("Choose an existing folder inside this removable device.")
-                })
-            } else if path.is_dir() {
-                Ok(path.to_path_buf())
-            } else {
-                Err(crate::i18n::tr("Choose an existing folder."))
-            }
+            else {
+                return crate::ui::browser::destination::existing_folder(path);
+            };
+            let root = resolve(device_id);
+            let relative = path.strip_prefix(opened_root).map(Path::to_path_buf);
+            let validated = validated.clone();
+            Box::pin(async move {
+                let unavailable =
+                    || crate::i18n::tr("The removable device is no longer available.");
+                let root = root.ok_or_else(unavailable)?;
+                let current_root = crate::adapters::probes::writable_folder(&root)
+                    .await
+                    .ok()
+                    .flatten()
+                    .ok_or_else(unavailable)?;
+                let outside =
+                    || crate::i18n::tr("Choose an existing folder inside this removable device.");
+                let relative = relative.map_err(|_| outside())?;
+                let destination =
+                    crate::adapters::probes::destination_folder(&current_root.join(relative))
+                        .await
+                        .ok()
+                        .filter(|destination| destination.starts_with(&current_root))
+                        .ok_or_else(outside)?;
+                validated.replace(Some(current_root));
+                Ok(destination)
+            })
         });
         let state = self.clone();
         crate::ui::chooser::present_destination_chooser(
@@ -1467,13 +1489,10 @@ impl ViewState {
                 if let TransferDialogCompletion::SendTo {
                     device_id,
                     opened_root,
-                    resolve,
+                    ..
                 } = &completion
                 {
-                    // Revalidate at dispatch as well: the chooser may outlive a remount.
-                    let Some(current_root) = resolve(device_id).and_then(|root| {
-                        crate::ui::browser::destination::canonical_existing_directory(&root)
-                    }) else {
+                    let Some(current_root) = validated_root.take() else {
                         show_error_dialog(
                             &state.overlay,
                             &crate::i18n::tr("Destination unavailable"),
@@ -1481,27 +1500,12 @@ impl ViewState {
                         );
                         return;
                     };
-                    let Some(destination) =
-                        crate::ui::browser::destination::canonical_directory_within(
-                            &current_root,
-                            &path,
-                        )
-                    else {
-                        show_error_dialog(
-                            &state.overlay,
-                            &crate::i18n::tr("Destination unavailable"),
-                            &crate::i18n::tr(
-                                "Choose an existing folder inside this removable device.",
-                            ),
-                        );
-                        return;
-                    };
-                    if let Ok(relative) = destination.strip_prefix(&current_root) {
+                    if let Ok(relative) = path.strip_prefix(&current_root) {
                         crate::ui::preferences::PreferenceManager::shared()
                             .remember_send_to_destination(device_id, relative, None);
                     }
                     state.send_to(
-                        Location::local(destination),
+                        Location::local(path),
                         sources,
                         SendToTransferContext {
                             device_name: send_to_display_name(device_id, opened_root),

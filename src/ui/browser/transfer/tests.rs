@@ -915,7 +915,11 @@ fn choose_folder_uses_the_current_root_after_a_remount() {
             std::fs::remove_dir_all(&opened_root).expect("old mount removed");
             confirm_destination(&chooser_window);
             wait_until(
-                || visible_error_message(&chooser_overlay).is_some(),
+                || {
+                    visible_texts(&chooser_overlay).iter().any(|text| {
+                        text == "Choose an existing folder inside this removable device."
+                    }) && destination_accept(&chooser_window).is_sensitive()
+                },
                 "the missing corresponding folder error",
             );
             assert!(!current_root.join("nested").exists());
@@ -1277,6 +1281,235 @@ fn extract_to_focused_enter_extracts_destination() {
             );
             view.browser().clear_observer();
             window.destroy();
+        },
+    );
+}
+
+#[derive(Clone, Copy)]
+enum ChosenFor {
+    Copy,
+    Move,
+    Extract,
+    SendTo,
+}
+
+#[derive(Clone, Copy)]
+enum ChosenFolder {
+    SlowToAnswer,
+    Failing(rustix::io::Errno, &'static str),
+    WriteOnly,
+}
+
+#[test]
+fn a_chosen_folder_is_checked_off_the_ui_thread_while_the_chooser_stays_open() {
+    crate::test_support::gtk_test(
+        "ui::browser::transfer::tests::a_chosen_folder_is_checked_off_the_ui_thread_while_the_chooser_stays_open",
+        || {
+            use std::os::unix::fs::PermissionsExt;
+
+            for (case, chosen_for, chosen) in [
+                (
+                    "copy to a folder slow to answer",
+                    ChosenFor::Copy,
+                    ChosenFolder::SlowToAnswer,
+                ),
+                (
+                    "extract to a folder slow to answer",
+                    ChosenFor::Extract,
+                    ChosenFolder::SlowToAnswer,
+                ),
+                (
+                    "send to a device slow to answer",
+                    ChosenFor::SendTo,
+                    ChosenFolder::SlowToAnswer,
+                ),
+                (
+                    "copy to a folder that is gone",
+                    ChosenFor::Copy,
+                    ChosenFolder::Failing(rustix::io::Errno::NOENT, "Choose an existing folder."),
+                ),
+                (
+                    "extract to a folder that fails",
+                    ChosenFor::Extract,
+                    ChosenFolder::Failing(rustix::io::Errno::IO, "Unable to open that location: "),
+                ),
+                (
+                    "move to a write-only folder",
+                    ChosenFor::Move,
+                    ChosenFolder::WriteOnly,
+                ),
+                (
+                    "extract to a write-only folder",
+                    ChosenFor::Extract,
+                    ChosenFolder::WriteOnly,
+                ),
+            ] {
+                let (_fixture, work, destination) =
+                    focused_enter_destination_fixture("chosen folder fixture");
+                let archive = work.join("bundle.tar");
+                crate::adapters::write_compression_fixture(
+                    &archive,
+                    &[work.join("photo.txt")],
+                    crate::services::ArchiveFormat::Tar,
+                    None,
+                )
+                .expect("fixture archive");
+                let (view, _overlay, window, events) = open_transfer_browser(&work);
+                let source = work.join("photo.txt");
+                match chosen_for {
+                    ChosenFor::Copy | ChosenFor::Move => view.state.show_transfer_dialog(
+                        vec![transfer_entry(&source)],
+                        matches!(chosen_for, ChosenFor::Move),
+                    ),
+                    ChosenFor::Extract => {
+                        view.state.show_extract_to_dialog(transfer_entry(&archive))
+                    }
+                    ChosenFor::SendTo => {
+                        let root = destination.clone();
+                        view.state.show_send_to_folder_dialog_with_resolver(
+                            "volume:chosen-device".to_owned(),
+                            vec![Location::local(&source)],
+                            Rc::new(move |_| Some(root.clone())),
+                        );
+                    }
+                }
+                let (chooser_window, chooser) = destination_chooser(&window);
+                navigate_destination(&chooser, &destination);
+                wait_until(
+                    || {
+                        chooser
+                            .browser()
+                            .column_snapshot(0)
+                            .is_some_and(|snapshot| !snapshot.loading)
+                    },
+                    &format!("{case}: the chosen folder's listing"),
+                );
+                let write_only = matches!(chosen, ChosenFolder::WriteOnly);
+                if write_only {
+                    std::fs::set_permissions(&destination, std::fs::Permissions::from_mode(0o300))
+                        .expect("write-only destination");
+                }
+                let chooser_overlay = chooser_window
+                    .child()
+                    .expect("chooser content")
+                    .downcast::<gtk::Overlay>()
+                    .expect("chooser overlay");
+                let (release, held) = std::sync::mpsc::channel::<()>();
+                let checked = std::sync::Arc::new(std::sync::Mutex::new(None));
+                let seen = checked.clone();
+                let slow = matches!(chosen, ChosenFolder::SlowToAnswer);
+                let _scope = crate::adapters::FsQuirks::install(
+                    destination.parent().expect("fixture root"),
+                    crate::adapters::Quirks {
+                        before: vec![(
+                            crate::adapters::FsOp::FolderStamp,
+                            "destination",
+                            0,
+                            Box::new(move || {
+                                *seen.lock().expect("check thread") =
+                                    Some(crate::util::ui_thread::is_current());
+                                if slow {
+                                    let _released = held.recv();
+                                }
+                            }),
+                        )],
+                        fail: match chosen {
+                            ChosenFolder::Failing(error, _) => {
+                                vec![(crate::adapters::FsOp::FolderStamp, "destination", 0, error)]
+                            }
+                            ChosenFolder::SlowToAnswer | ChosenFolder::WriteOnly => Vec::new(),
+                        },
+                        ..crate::adapters::Quirks::ext4()
+                    },
+                );
+                let started = view.browser().last_started_operation();
+
+                confirm_destination(&chooser_window);
+
+                wait_until(
+                    || checked.lock().expect("check thread").is_some(),
+                    &format!("{case}: the chosen folder to be checked"),
+                );
+                assert_eq!(
+                    *checked.lock().expect("check thread"),
+                    Some(false),
+                    "{case}: the folder is checked off the UI thread"
+                );
+                match chosen {
+                    ChosenFolder::SlowToAnswer => {
+                        for _ in 0..20 {
+                            glib::MainContext::default().iteration(false);
+                        }
+                        assert!(
+                            chooser_window.is_visible()
+                                && !destination_accept(&chooser_window).is_sensitive(),
+                            "{case}: the chooser waits for the folder, open and without a second accept"
+                        );
+                        assert_eq!(
+                            view.browser().last_started_operation(),
+                            started,
+                            "{case}: nothing starts before the folder answers"
+                        );
+                        release.send(()).expect("held check");
+                        wait_until(
+                            || destination.join("photo.txt").exists(),
+                            &format!("{case}: the item to land in the chosen folder"),
+                        );
+                    }
+                    ChosenFolder::Failing(_, message) => {
+                        wait_until(
+                            || {
+                                visible_error_message(&chooser_overlay)
+                                    .is_some_and(|shown| shown.starts_with(message))
+                            },
+                            &format!("{case}: the chooser to say what is wrong"),
+                        );
+                        assert!(
+                            chooser_window.is_visible()
+                                && destination_accept(&chooser_window).is_sensitive(),
+                            "{case}: the chooser stays open for another folder"
+                        );
+                        assert_eq!(view.browser().last_started_operation(), started);
+                        assert!(!destination.join("photo.txt").exists());
+                    }
+                    ChosenFolder::WriteOnly => {
+                        wait_until(
+                            || {
+                                !chooser_window.is_visible()
+                                    && view.browser().last_started_operation() != started
+                            },
+                            &format!("{case}: the chooser to accept the write-only folder"),
+                        );
+                        if matches!(chosen_for, ChosenFor::Extract) {
+                            wait_until(
+                                || {
+                                    events.borrow().iter().any(|event| {
+                                        matches!(
+                                            event,
+                                            crate::app::BrowserEvent::OperationFailed { message, .. }
+                                                if message.starts_with("Could not open extraction destination")
+                                        )
+                                    })
+                                },
+                                &format!(
+                                    "{case}: extraction, which lists its destination, to say so"
+                                ),
+                            );
+                        } else {
+                            wait_until(
+                                || destination.join("photo.txt").exists(),
+                                &format!("{case}: the item to land in the write-only folder"),
+                            );
+                        }
+                    }
+                }
+                if write_only {
+                    std::fs::set_permissions(&destination, std::fs::Permissions::from_mode(0o700))
+                        .expect("readable destination");
+                }
+                view.browser().clear_observer();
+                window.destroy();
+            }
         },
     );
 }

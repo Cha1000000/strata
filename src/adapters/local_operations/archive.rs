@@ -26,6 +26,7 @@ pub(crate) use fixtures::write_compression_fixture;
 #[cfg(test)]
 mod tests;
 
+use super::fs_ops::{Entry, folder_stamp, fs};
 use crate::{
     model::Location,
     services::{
@@ -41,6 +42,10 @@ use decoders::extract_rar;
 use decoders::{extract_7z_from_reader, extract_tar, extract_zip_from_archive};
 use extraction::ArchiveOutcome;
 use gtk::{gio, glib};
+use rustix::{
+    fs::{AtFlags, FileType, Mode, OFlags},
+    io::Errno,
+};
 use std::{
     collections::HashSet,
     ffi::OsStr,
@@ -212,21 +217,6 @@ pub(super) fn extract(request: ExtractRequest, emit: Rc<dyn Fn(OperationEvent)>)
             });
             return;
         };
-        // Recheck stale listings before a decoder can block opening a FIFO.
-        if let Ok(metadata) = std::fs::metadata(&archive_path)
-            && !metadata.is_file()
-        {
-            emit(OperationEvent::Failed {
-                request_id: request.id,
-                message: rust_i18n::t!(
-                    "Not an archive: “%{name}”",
-                    name = request.entry.display_name
-                )
-                .into_owned(),
-                password_failure: None,
-            });
-            return;
-        }
         let Some(dest_dir) = request.destination.native_path().map(Path::to_path_buf) else {
             emit(OperationEvent::Failed {
                 request_id: request.id,
@@ -235,20 +225,7 @@ pub(super) fn extract(request: ExtractRequest, emit: Rc<dyn Fn(OperationEvent)>)
             });
             return;
         };
-        let created_dest = request.created_destination || !dest_dir.exists();
-        if created_dest && let Err(e) = std::fs::create_dir_all(&dest_dir) {
-            emit(OperationEvent::Failed {
-                request_id: request.id,
-                message: rust_i18n::t!(
-                    "Could not create folder: %{error}",
-                    error = crate::services::io_error_detail(&e)
-                )
-                .into_owned(),
-                password_failure: None,
-            });
-            return;
-        }
-        let dest_dir_for_cleanup = dest_dir.clone();
+        let created_destination = request.created_destination;
         let format = ArchiveFormat::from_extension(&request.entry.display_name);
         let password = request.password.clone();
         let display_name = request.entry.display_name.clone();
@@ -264,6 +241,24 @@ pub(super) fn extract(request: ExtractRequest, emit: Rc<dyn Fn(OperationEvent)>)
         let work_total = total.clone();
         let result = gio::spawn_blocking(move || {
             let mut report = TransferReport::default();
+            // Recheck stale listings before a decoder can block opening a FIFO.
+            if folder_stamp(&archive_path, false)
+                .is_ok_and(|stamp| stamp.kind != FileType::RegularFile)
+            {
+                return Err(
+                    rust_i18n::t!("Not an archive: “%{name}”", name = display_name).into_owned(),
+                );
+            }
+            let created = created_destination
+                || folder_stamp(&dest_dir, false).is_err_and(|error| error == Errno::NOENT);
+            if created && let Err(e) = std::fs::create_dir_all(&dest_dir) {
+                return Err(rust_i18n::t!(
+                    "Could not create folder: %{error}",
+                    error = crate::services::io_error_detail(&e)
+                )
+                .into_owned());
+            }
+            let mut created = CreatedFolder(created.then_some(dest_dir.as_path()));
             let extracted = (|| match format {
                 Some(ArchiveFormat::Zip) => {
                     let file = std::fs::File::open(&archive_path)
@@ -334,26 +329,33 @@ pub(super) fn extract(request: ExtractRequest, emit: Rc<dyn Fn(OperationEvent)>)
                     name = display_name
                 ))),
             })();
-            (extracted, report)
+            if matches!(extracted, Ok(ArchiveOutcome::Completed(_))) {
+                created.0 = None;
+            }
+            Ok((extracted, report))
         })
         .await;
         timer_id.remove();
-        let result = result.map(|(extracted, report)| {
-            if !report.is_empty() {
-                emit(OperationEvent::ItemsReported {
+        let result = match result {
+            Ok(Err(message)) => {
+                emit(OperationEvent::Failed {
                     request_id: request.id,
-                    report,
+                    message,
+                    password_failure: None,
                 });
+                return;
             }
-            extracted
-        });
-        if created_dest
-            && !matches!(result, Ok(Ok(ArchiveOutcome::Completed(_))))
-            && std::fs::read_dir(&dest_dir_for_cleanup)
-                .is_ok_and(|mut entries| entries.next().is_none())
-        {
-            let _ = std::fs::remove_dir(&dest_dir_for_cleanup);
-        }
+            Ok(Ok((extracted, report))) => {
+                if !report.is_empty() {
+                    emit(OperationEvent::ItemsReported {
+                        request_id: request.id,
+                        report,
+                    });
+                }
+                Ok(extracted)
+            }
+            Err(panic) => Err(panic),
+        };
         match result {
             Ok(Ok(ArchiveOutcome::Completed(first_name))) => emit(OperationEvent::Extracted {
                 request_id: request.id,
@@ -396,6 +398,27 @@ pub(super) fn extract(request: ExtractRequest, emit: Rc<dyn Fn(OperationEvent)>)
     LoadHandle::new(move || {
         cancelled.store(true, Ordering::Relaxed);
     })
+}
+
+/// Also removes the folder when the extraction panics.
+struct CreatedFolder<'a>(Option<&'a Path>);
+
+impl Drop for CreatedFolder<'_> {
+    fn drop(&mut self) {
+        let Some((parent, name)) = self
+            .0
+            .and_then(|folder| Some((folder.parent()?, folder.file_name()?)))
+        else {
+            return;
+        };
+        if let Ok(parent) = fs().open_path(
+            parent.as_os_str(),
+            OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC,
+            Mode::empty(),
+        ) {
+            let _ = fs().unlink(Entry::new(&parent, name), AtFlags::REMOVEDIR);
+        }
+    }
 }
 
 pub(crate) const PASSWORD_REQUIRED: &str = "A password is required to extract this archive.";
