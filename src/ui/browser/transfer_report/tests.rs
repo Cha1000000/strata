@@ -181,6 +181,11 @@ fn items_left_out_or_left_behind_make_the_report_a_warning_or_follow_a_stop() {
             saved_as: Location::local("/source/run/data_1"),
             error: reason.clone(),
         }),
+        kept(KeptCause::StillOpen(Some(Holder::Program(
+            "Text Editor".to_owned(),
+        )))),
+        kept(KeptCause::StillOpen(Some(Holder::Strata))),
+        kept(KeptCause::StillOpen(None)),
     ];
     let left_in_trash = [
         in_trash(KeptCause::Changed),
@@ -191,8 +196,8 @@ fn items_left_out_or_left_behind_make_the_report_a_warning_or_follow_a_stop() {
         (0, 2, 0, 0),
         (1, 2, 0, 0),
         (3, 2, 0, 0),
-        (0, 0, 5, 0),
-        (1, 2, 5, 0),
+        (0, 0, 8, 0),
+        (1, 2, 8, 0),
         (0, 0, 0, 3),
     ] {
         let row = format!("{renamed_count}, {skipped_count}, {kept_count}, {in_trash_count}");
@@ -238,6 +243,27 @@ fn items_left_out_or_left_behind_make_the_report_a_warning_or_follow_a_stop() {
             error = reason
         );
         assert_eq!(detail.contains(&*unrestored), kept_count > 0, "{row}");
+        let still_open = [
+            rust_i18n::t!(
+                "“%{name}” was left in “%{folder}”, as a file in it is still open in %{program}",
+                name = "data",
+                folder = "run",
+                program = "Text Editor"
+            ),
+            rust_i18n::t!(
+                "“%{name}” was left in “%{folder}”, as a file in it is still in use by Strata",
+                name = "data",
+                folder = "run"
+            ),
+            rust_i18n::t!(
+                "“%{name}” was left in “%{folder}”, as a file in it is still open in another program",
+                name = "data",
+                folder = "run"
+            ),
+        ];
+        for line in still_open {
+            assert_eq!(detail.contains(&*line), kept_count > 0, "{row}: {line}");
+        }
         let heading = crate::i18n::count("items_kept_in_trash", in_trash_count);
         assert_eq!(detail.contains(&heading), in_trash_count > 0, "{row}");
         let changed = rust_i18n::t!(

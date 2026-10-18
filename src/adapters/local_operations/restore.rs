@@ -2,6 +2,7 @@
 
 use super::{
     fs_ops::{Entry, fs},
+    holders,
     placement::{PlaceError, RenameFailure},
     release::{self, ActiveOperation},
 };
@@ -704,13 +705,20 @@ pub(super) async fn remove_unchanged(
     *deleting = removed.removed;
     removed.result?;
     if let Some((path, error)) = removed.kept.iter().find_map(|(path, cause)| match cause {
-        KeptCause::Undeletable(error) => Some((path, *error)),
+        KeptCause::Undeletable(error) => Some((
+            path,
+            crate::services::io_error_detail(&io::Error::from_raw_os_error(*error)),
+        )),
+        KeptCause::StillOpen(holder) => Some((
+            path,
+            crate::services::error_detail(holders::held(holder.as_ref())),
+        )),
         _ => None,
     }) {
         return Err(io_error(rust_i18n::t!(
             "Could not delete “%{name}”: %{error}",
             name = path.file_name().unwrap_or_default().to_string_lossy(),
-            error = crate::services::io_error_detail(&io::Error::from_raw_os_error(error))
+            error = error
         )));
     }
     Ok(removed.kept.is_empty())

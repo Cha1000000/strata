@@ -9,7 +9,7 @@ use rustix::io::Errno;
 
 use super::fs_quirks::{NameOpens, Op, Support, hold};
 use super::*;
-use crate::services::{KeptCause, KeptItem, SpecialKind, TransferReport};
+use crate::services::{Holder, KeptCause, KeptItem, SpecialKind, TransferReport};
 
 #[test]
 fn moving_a_directory_falls_back_to_a_safe_copy_when_the_move_needs_one()
@@ -1836,11 +1836,33 @@ fn a_source_entry_that_cannot_be_deleted_is_kept_with_the_reason() -> Result<(),
     Ok(())
 }
 
+#[derive(Clone, Copy, Debug)]
+enum SourceMeanwhile {
+    Closes,
+    IsSwapped,
+    StaysOpen(Option<&'static str>),
+}
+
 #[test]
 fn a_moved_folder_goes_once_another_program_closes_its_file_within_the_mount_s_wait()
 -> Result<(), Box<dyn Error>> {
+    use SourceMeanwhile::*;
     let _serial = serial()?;
-    for swapped in [false, true] {
+    let rows: [(&str, super::fs_quirks::Preset, SourceMeanwhile); 6] = [
+        ("nfs42", Quirks::nfs42, Closes),
+        ("nfs42", Quirks::nfs42, IsSwapped),
+        ("nfs42", Quirks::nfs42, StaysOpen(None)),
+        ("nfs42", Quirks::nfs42, StaysOpen(Some("Text Editor"))),
+        ("cifs-posix", Quirks::cifs_posix, StaysOpen(None)),
+        (
+            "cifs-posix",
+            Quirks::cifs_posix,
+            StaysOpen(Some("Text Editor")),
+        ),
+    ];
+    for (mount, preset, meanwhile) in rows {
+        let row = format!("{mount}, {meanwhile:?}");
+        let _clock = ClockGuard::set(SystemTime::now());
         let root = tempfile::tempdir()?;
         let source_dir = root.path().join("source");
         let folder = source_dir.join("folder");
@@ -1850,19 +1872,29 @@ fn a_moved_folder_goes_once_another_program_closes_its_file_within_the_mount_s_w
         let held = Arc::new(std::sync::Mutex::new(None));
         let release = held.clone();
         let (live, aside) = (folder.clone(), moved.clone());
-        let meanwhile: super::fs_quirks::Racer = if swapped {
-            Box::new(move || {
+        let racer: Option<super::fs_quirks::Racer> = match meanwhile {
+            IsSwapped => Some(Box::new(move || {
                 fs::rename(&live, &aside).expect("move the folder");
                 fs::create_dir(&live).expect("make another folder");
-            })
-        } else {
-            Box::new(move || drop(release.lock().expect("the hold").take()))
+            })),
+            Closes => Some(Box::new(move || {
+                drop(release.lock().expect("the hold").take());
+            })),
+            StaysOpen(_) => None,
+        };
+        let holder = match meanwhile {
+            StaysOpen(Some(program)) => Some(Holder::Program(program.to_owned())),
+            _ => None,
         };
         let _source = FsQuirks::install(
             &source_dir,
             Quirks {
-                after: vec![(Op::Unlink, "folder", 0, meanwhile)],
-                ..Quirks::nfs42()
+                after: racer
+                    .map(|racer| (Op::Unlink, "folder", 0, racer))
+                    .into_iter()
+                    .collect(),
+                holder: holder.clone(),
+                ..preset()
             },
         );
         *held.lock().map_err(|_| "the hold")? = Some(hold(&folder.join("open.txt")));
@@ -1874,23 +1906,43 @@ fn a_moved_folder_goes_once_another_program_closes_its_file_within_the_mount_s_w
             paste_move(1590, &destination, &folder, TransferConflict::FailIfExists);
         pump_until_transfer(&events);
 
-        assert!(matches!(
-            terminal_transfer(&events.borrow()),
-            Some(OperationEvent::Pasted { .. })
-        ));
+        assert!(
+            matches!(
+                terminal_transfer(&events.borrow()),
+                Some(OperationEvent::Pasted { .. })
+            ),
+            "{row}"
+        );
         assert_eq!(
             fs::read(destination.join("folder/open.txt"))?,
-            b"open elsewhere"
+            b"open elsewhere",
+            "{row}"
         );
         let report = reported(&events);
-        if swapped {
-            assert_eq!(report.kept, [kept(folder.clone(), KeptCause::Changed)]);
-            assert!(names(&folder)?.is_empty());
-            assert!(moved.is_dir());
-        } else {
-            assert!(!folder.exists());
-            assert!(report.kept.is_empty(), "{:?}", report.kept);
+        match meanwhile {
+            Closes => {
+                assert!(!folder.exists(), "{row}");
+                assert!(report.kept.is_empty(), "{row}: {:?}", report.kept);
+            }
+            IsSwapped => {
+                assert_eq!(
+                    report.kept,
+                    [kept(folder.clone(), KeptCause::Changed)],
+                    "{row}"
+                );
+                assert!(names(&folder)?.is_empty(), "{row}");
+                assert!(moved.is_dir(), "{row}");
+            }
+            StaysOpen(_) => {
+                let cause = match (mount, holder) {
+                    ("cifs-posix", None) => KeptCause::Undeletable(Errno::ACCESS.raw_os_error()),
+                    (_, holder) => KeptCause::StillOpen(holder),
+                };
+                assert_eq!(report.kept, [kept(folder.clone(), cause)], "{row}");
+                assert!(folder.is_dir(), "{row}");
+            }
         }
+        drop(held.lock().map_err(|_| "the hold")?.take());
     }
     Ok(())
 }

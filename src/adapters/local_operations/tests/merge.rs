@@ -2898,6 +2898,7 @@ fn undoing_a_replace_deletes_what_it_placed_only_if_all_of_it_is_unchanged()
         (true, "added to"),
         (true, "edited during the undo"),
         (true, "undeletable"),
+        (true, "still open in another program"),
     ];
     for (directory, change) in rows {
         let row = format!("{change} {}", if directory { "folder" } else { "file" });
@@ -2954,6 +2955,12 @@ fn undoing_a_replace_deletes_what_it_placed_only_if_all_of_it_is_unchanged()
                 fail: vec![(Op::Unlink, "a.txt", 0, Errno::ACCESS)],
                 ..Quirks::default()
             }),
+            "still open in another program" => Some(Quirks {
+                mount_type: Some(("nfs4", "rw,vers=4.2")),
+                silly_rename: Some(super::fs_quirks::Silly::nfs()),
+                holder: Some(crate::services::Holder::Program("Text Editor".to_owned())),
+                ..Quirks::default()
+            }),
             // Once the comparison found it unchanged, before its deletion.
             "edited during the undo" => Some(Quirks {
                 before: vec![(
@@ -2967,6 +2974,10 @@ fn undoing_a_replace_deletes_what_it_placed_only_if_all_of_it_is_unchanged()
             _ => None,
         }
         .map(|quirks| FsQuirks::install(root.path(), quirks));
+        let _clock = (change == "still open in another program")
+            .then(|| ClockGuard::set(std::time::SystemTime::now()));
+        let _held =
+            (change == "still open in another program").then(|| hold(&target.join("sub/b.txt")));
 
         let undo = || {
             run_undo(
@@ -2981,6 +2992,23 @@ fn undoing_a_replace_deletes_what_it_placed_only_if_all_of_it_is_unchanged()
 
         let events = undo();
 
+        if change == "still open in another program" {
+            let Some(OperationEvent::CompletedWithErrors { message, .. }) = events.last() else {
+                panic!("{row}: {events:?}");
+            };
+            let error = rust_i18n::t!(
+                "Could not delete “%{name}”: %{error}",
+                name = "sub",
+                error = rust_i18n::t!(
+                    "A file in it is still open in %{program}. Close it there and try again.",
+                    program = "Text Editor"
+                )
+            );
+            assert!(message.contains(&*error), "{message}");
+            assert!(kept_in_trash(&events).is_empty());
+            assert!(trash.join("info/target.trashinfo").exists());
+            continue;
+        }
         if change == "undeletable" {
             let Some(OperationEvent::CompletedWithErrors { message, .. }) = events.last() else {
                 panic!("{row}: {events:?}");

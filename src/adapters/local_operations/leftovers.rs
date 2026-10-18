@@ -16,9 +16,12 @@ use super::{
     copy_engine::now,
     deferred_close::{self, Pause, Wait},
     fs_ops::{Entry, FsOps},
+    holders,
     mount_profile::known_mount,
 };
-use crate::{adapters::volume::SillyNames, model::hidden_names::foreign_leftover};
+use crate::{
+    adapters::volume::SillyNames, model::hidden_names::foreign_leftover, services::Holder,
+};
 
 /// How long a leftover may outlive the last close on NFS and FUSE: the lab saw 84 ms at
 /// most over loopback, and a network adds round trips.
@@ -77,6 +80,21 @@ pub(super) fn remove_folder(
             return Err(Refused::Changed(errno));
         }
     }
+}
+
+pub(super) fn holder(fs: &dyn FsOps, at: Entry<'_>) -> Option<Holder> {
+    let leftovers: Vec<_> = fs
+        .names(at)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|name| foreign_leftover(name).is_some())
+        .collect();
+    holders::find(fs, at, &leftovers)
+}
+
+pub(super) fn still_open(fs: &dyn FsOps, at: Entry<'_>) -> Option<String> {
+    holders::held_inside(holder(fs, at).as_ref())
+        .or_else(|| holders::held_elsewhere(known_mount(fs, at.dir).1.silly_names))
 }
 
 pub(super) fn is_leftover(fs: &dyn FsOps, dir: BorrowedFd<'_>, name: &OsStr) -> bool {

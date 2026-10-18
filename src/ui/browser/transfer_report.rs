@@ -4,7 +4,7 @@ use std::{ffi::OsStr, time::Duration};
 
 use crate::model::Location;
 use crate::services::{
-    KeptCause, KeptItem, RenameCause, RenamedItem, SkippedItem, SpecialKind, TransferReport,
+    Holder, KeptCause, KeptItem, RenameCause, RenamedItem, SkippedItem, SpecialKind, TransferReport,
 };
 use crate::ui::browser::ViewState;
 
@@ -115,6 +115,25 @@ fn kept_line(item: &KeptItem, in_trash: bool) -> String {
         .into_owned(),
         KeptCause::CopyGone => rust_i18n::t!(
             "“%{name}” was left in “%{folder}”, as its copy was no longer where the move put it",
+            name = name,
+            folder = folder()
+        )
+        .into_owned(),
+        KeptCause::StillOpen(Some(Holder::Program(program))) => rust_i18n::t!(
+            "“%{name}” was left in “%{folder}”, as a file in it is still open in %{program}",
+            name = name,
+            folder = folder(),
+            program = program
+        )
+        .into_owned(),
+        KeptCause::StillOpen(Some(Holder::Strata)) => rust_i18n::t!(
+            "“%{name}” was left in “%{folder}”, as a file in it is still in use by Strata",
+            name = name,
+            folder = folder()
+        )
+        .into_owned(),
+        KeptCause::StillOpen(None) => rust_i18n::t!(
+            "“%{name}” was left in “%{folder}”, as a file in it is still open in another program",
             name = name,
             folder = folder()
         )

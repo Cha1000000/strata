@@ -5,7 +5,11 @@ use crate::adapters::local_operations::{
     parallel_delete_local_with, process_local_delete_job, retry_local_open,
     run_local_delete_workers,
 };
-use crate::{adapters::trash_support::SystemTrash, model::hidden_names::foreign_leftover};
+use crate::{
+    adapters::trash_support::SystemTrash,
+    model::hidden_names::foreign_leftover,
+    services::{Holder, file_activity},
+};
 use std::sync::{Barrier, Mutex, atomic::Ordering, mpsc};
 
 #[test]
@@ -1339,8 +1343,17 @@ fn waited_since(start: SystemTime) -> Result<Duration, Box<dyn Error>> {
 }
 
 #[derive(Clone, Copy, Debug)]
+enum Holding {
+    Unnamed,
+    Program,
+    StrataRead,
+    StrataOperation,
+    TheDeleteItself,
+}
+
+#[derive(Clone, Copy, Debug)]
 enum Meanwhile {
-    StaysOpen,
+    StaysOpen(Holding),
     Closes,
     ClosesAsTheWaitEnds,
     IsSwappedForAnEmptyFolder,
@@ -1356,7 +1369,7 @@ fn meanwhile_racer(
 ) -> Option<(Op, &'static str, usize, Racer)> {
     let (holds, folder) = (holds.clone(), folder.to_path_buf());
     match meanwhile {
-        Meanwhile::StaysOpen => None,
+        Meanwhile::StaysOpen(_) => None,
         Meanwhile::Closes => Some((Op::Unlink, "folder", 0, releasing(&holds))),
         Meanwhile::ClosesAsTheWaitEnds => Some((
             Op::Unlink,
@@ -1384,28 +1397,47 @@ fn meanwhile_racer(
 #[test]
 fn a_folder_only_leftovers_keep_goes_once_they_do_within_the_mount_s_wait()
 -> Result<(), Box<dyn Error>> {
+    use Holding::*;
     use Meanwhile::*;
     let _serial = serial()?;
     let smb = Duration::from_millis(1500);
     let fuse_and_nfs = Duration::from_secs(2);
-    let renamed = [
-        StaysOpen,
-        Closes,
-        ClosesAsTheWaitEnds,
-        IsSwappedForAnEmptyFolder,
-    ];
+    let renamed = |holding| {
+        [
+            StaysOpen(Unnamed),
+            StaysOpen(holding),
+            Closes,
+            ClosesAsTheWaitEnds,
+            IsSwappedForAnEmptyFolder,
+        ]
+    };
     let rows: [(&str, Preset, Duration, &[Meanwhile]); 6] = [
-        ("nfs3", Quirks::nfs3, fuse_and_nfs, &renamed),
-        ("nfs42", Quirks::nfs42, fuse_and_nfs, &renamed),
-        ("cifs", Quirks::cifs, smb, &renamed),
+        ("nfs3", Quirks::nfs3, fuse_and_nfs, &renamed(StrataRead)),
+        ("nfs42", Quirks::nfs42, fuse_and_nfs, &renamed(Program)),
+        ("cifs", Quirks::cifs, smb, &renamed(StrataOperation)),
         (
             "cifs-posix",
             Quirks::cifs_posix,
             smb,
-            &[StaysOpen, Closes, IsSwappedForAnEmptyFolder],
+            &[
+                StaysOpen(Unnamed),
+                StaysOpen(Program),
+                Closes,
+                IsSwappedForAnEmptyFolder,
+            ],
         ),
-        ("sshfs", Quirks::sshfs, fuse_and_nfs, &renamed),
-        ("exfat-fuse", Quirks::exfat_fuse, fuse_and_nfs, &renamed),
+        (
+            "sshfs",
+            Quirks::sshfs,
+            fuse_and_nfs,
+            &renamed(TheDeleteItself),
+        ),
+        (
+            "exfat-fuse",
+            Quirks::exfat_fuse,
+            fuse_and_nfs,
+            &renamed(Unnamed),
+        ),
     ];
     for (mount, preset, budget, cases) in rows {
         for &meanwhile in cases {
@@ -1415,16 +1447,39 @@ fn a_folder_only_leftovers_keep_goes_once_they_do_within_the_mount_s_wait()
             let root = tempfile::tempdir()?;
             let folder = root.path().join("folder");
             let holds = Holds::default();
-            let _scope = FsQuirks::install(
+            let holding = match meanwhile {
+                StaysOpen(holding) => holding,
+                _ => Unnamed,
+            };
+            let scope = FsQuirks::install(
                 root.path(),
                 Quirks {
                     after: meanwhile_racer(meanwhile, &folder, &holds, start + budget)
                         .into_iter()
                         .collect(),
+                    holder: matches!(holding, Program)
+                        .then(|| Holder::Program("Text Editor".to_owned())),
                     ..preset()
                 },
             );
             folder_with_an_open_file(&folder, &holds)?;
+            let real_folder = folder.canonicalize()?;
+            let read_by_strata = real_folder.join("open.txt");
+            let _read = matches!(holding, StrataRead)
+                .then(|| file_activity::hold([&read_by_strata], || {}))
+                .transpose()?;
+            let _other_operation = matches!(holding, StrataOperation).then(|| {
+                file_activity::begin(file_activity::OperationScope {
+                    roots: vec![read_by_strata.clone()],
+                    folders: Vec::new(),
+                })
+            });
+            let _this_delete = matches!(holding, TheDeleteItself).then(|| {
+                file_activity::begin(file_activity::OperationScope {
+                    roots: vec![real_folder.clone(), read_by_strata.clone()],
+                    folders: Vec::new(),
+                })
+            });
 
             let events = delete_permanently(std::slice::from_ref(&folder));
 
@@ -1445,10 +1500,47 @@ fn a_folder_only_leftovers_keep_goes_once_they_do_within_the_mount_s_wait()
                         assert!(waited < budget, "{row}: {waited:?}");
                     }
                 }
-                StaysOpen => {
+                StaysOpen(holding) => {
                     assert!(!deleted, "{row}: {events:?}");
                     assert_eq!(waited, budget, "{row}");
                     assert!(leftovers_only(&folder)?, "{row}");
+                    let reason = match (holding, mount) {
+                        (Program, _) => rust_i18n::t!(
+                            "A file in it is still open in %{program}. Close it there and try again.",
+                            program = "Text Editor"
+                        )
+                        .into_owned(),
+                        (StrataRead | StrataOperation, _) => crate::i18n::tr(
+                            "A file in it is still in use by Strata. Try again when its other operation or search ends.",
+                        ),
+                        (Unnamed | TheDeleteItself, "cifs") => crate::i18n::tr(
+                            "A file in it is still open in a program on this or another computer.",
+                        ),
+                        (Unnamed | TheDeleteItself, "cifs-posix") => crate::services::io_error_detail(
+                            &io::Error::from_raw_os_error(rustix::io::Errno::ACCESS.raw_os_error()),
+                        ),
+                        (Unnamed | TheDeleteItself, _) => crate::i18n::tr(
+                            "A file in it is still open in another program. Close it and try again.",
+                        ),
+                    };
+                    let line = rust_i18n::t!(
+                        "Could not delete “%{name}”: %{error}",
+                        name = "folder",
+                        error = reason
+                    );
+                    assert!(
+                        matches!(
+                            events.last(),
+                            Some(OperationEvent::CompletedWithErrors { message, .. })
+                                if message.contains(&*line)
+                        ),
+                        "{row}: {events:?}"
+                    );
+                    let scanned = scope.count(Op::Holders);
+                    match holding {
+                        StrataRead | StrataOperation => assert_eq!(scanned, 0, "{row}"),
+                        Unnamed | Program | TheDeleteItself => assert_eq!(scanned, 1, "{row}"),
+                    }
                 }
                 IsSwappedForAnEmptyFolder => {
                     assert!(!deleted, "{row}: {events:?}");

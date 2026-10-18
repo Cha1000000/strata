@@ -529,5 +529,19 @@ pub(crate) fn is_active_in(folder: &Path) -> bool {
     registry().folders.contains(folder)
 }
 
+/// An operation that also covers `folder` is the caller's own.
+pub(crate) fn in_use_within(folder: &Path) -> bool {
+    let below = |path: &Path| path != folder && path.starts_with(folder);
+    let registry = registry();
+    registry
+        .readers
+        .values()
+        .any(|reader| reader.paths.iter().any(|path| below(path)))
+        || registry.operations.values().any(|operation| {
+            operation.roots.iter().any(|root| below(root))
+                && !operation.roots.iter().any(|root| folder.starts_with(root))
+        })
+}
+
 #[cfg(test)]
 mod tests;

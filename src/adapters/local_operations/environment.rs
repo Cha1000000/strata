@@ -3,15 +3,20 @@
 use super::{
     deletion::local_device_is_rotational,
     fs_ops::{System, assert_off_main_thread},
+    holders,
     native_fs::opened_path,
 };
-use crate::adapters::volume::{MountSite, MountTable, MountType, mount_watch};
+use crate::{
+    adapters::volume::{MountSite, MountTable, MountType, mount_watch},
+    services::Holder,
+};
 use gtk::{gio, glib, prelude::*};
 use rustix::{
     fs::{AtFlags, Mode, OFlags, StatxFlags},
     io::Errno,
 };
 use std::{
+    ffi::OsString,
     os::fd::{AsFd, BorrowedFd},
     path::Path,
 };
@@ -33,6 +38,7 @@ pub(super) trait FsEnvironment: Send + Sync {
     /// udev's `ID_FS_TYPE`, when the device has a database record.
     fn device_format(&self, fd: BorrowedFd<'_>) -> Result<Option<String>, Errno>;
     fn rotational(&self, fd: BorrowedFd<'_>) -> Option<bool>;
+    fn holders(&self, folder: BorrowedFd<'_>, leftovers: &[OsString]) -> Option<Holder>;
 }
 
 impl FsEnvironment for System {
@@ -152,6 +158,11 @@ impl FsEnvironment for System {
 
     fn rotational(&self, fd: BorrowedFd<'_>) -> Option<bool> {
         local_device_is_rotational(fd)
+    }
+
+    fn holders(&self, folder: BorrowedFd<'_>, leftovers: &[OsString]) -> Option<Holder> {
+        assert_off_main_thread();
+        holders::scan(folder, leftovers, &holders::processes())
     }
 }
 

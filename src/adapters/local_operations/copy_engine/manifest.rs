@@ -1455,9 +1455,12 @@ impl At {
                 return deletion.keep(self.path.clone(), KeptCause::Changed);
             }
             Err(Refused::Stopped(_)) => {}
+            Err(Refused::StillOpen(errno)) => match leftovers::holder(fs, self.entry_at()) {
+                None if errno == Errno::ACCESS => deletion.failed(self.path.clone(), errno),
+                holder => deletion.keep(self.path.clone(), KeptCause::StillOpen(holder)),
+            },
             // Entries added meanwhile stay, and so does their folder.
-            Err(Refused::Os(Errno::NOTEMPTY | Errno::EXIST))
-            | Err(Refused::StillOpen(Errno::NOTEMPTY | Errno::EXIST)) => {
+            Err(Refused::Os(Errno::NOTEMPTY | Errno::EXIST)) => {
                 if deletion.holds_others(self.entry_at(), &self.path) {
                     deletion.keep(self.path.clone(), KeptCause::Changed);
                 }

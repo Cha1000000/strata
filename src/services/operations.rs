@@ -352,6 +352,12 @@ pub struct SkippedItem {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Holder {
+    Strata,
+    Program(String),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum KeptCause {
     Changed,
     /// What replaced it may have changed afterwards, so undo kept that instead.
@@ -361,6 +367,7 @@ pub enum KeptCause {
     Skipped(SpecialKind),
     /// Its copy was no longer where the move put it.
     CopyGone,
+    StillOpen(Option<Holder>),
     NameNotRestored {
         saved_as: Location,
         error: String,

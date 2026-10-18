@@ -33,8 +33,12 @@ use super::super::environment::FsEnvironment;
 use super::super::fs_ops::{
     Entry, EntryStat, FolderStamp, FsOps, FsStat, Listed, System, assert_off_main_thread,
 };
+use super::super::holders;
 use super::super::native_fs::LocalFileIdentity;
-use crate::adapters::volume::{MountKey, MountSite, MountType, forget_test_mount_capabilities};
+use crate::{
+    adapters::volume::{MountKey, MountSite, MountType, forget_test_mount_capabilities},
+    services::Holder,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Op {
@@ -95,6 +99,7 @@ pub(crate) enum Op {
     OpenWrite,
     FileFlags,
     SetLinkTimes,
+    Holders,
 }
 
 impl Op {
@@ -336,6 +341,8 @@ pub(crate) struct Quirks {
     /// Unlinking a file a [`HoldGuard`] or a descriptor of this process holds puts it aside
     /// instead, as network and FUSE clients do until the last close.
     pub silly_rename: Option<Silly>,
+    /// The program a `/proc` scan names; without one, only this process is scanned.
+    pub holder: Option<Holder>,
     /// Files report a size of 0 whatever they hold, so `copy_file_range`
     /// copies nothing from them, as virtual files on FUSE (lxcfs) do.
     pub virtual_sizes: bool,
@@ -2353,6 +2360,22 @@ impl FsEnvironment for Scoped {
         match scope_for(fd) {
             Some(scope) => scope.quirk(|quirks| quirks.rotational),
             None => System.rotational(fd),
+        }
+    }
+
+    fn holders(&self, folder: BorrowedFd<'_>, leftovers: &[OsString]) -> Option<Holder> {
+        assert_off_main_thread();
+        let this_process = || holders::scan(folder, leftovers, &[std::process::id()]);
+        match scope_for(folder) {
+            Some(scope) => scope
+                .run(Op::Holders, &[], |scope| {
+                    Ok(scope
+                        .quirk(|quirks| quirks.holder.clone())
+                        .or_else(this_process))
+                })
+                .ok()
+                .flatten(),
+            None => this_process(),
         }
     }
 }
