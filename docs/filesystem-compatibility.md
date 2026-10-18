@@ -1414,6 +1414,147 @@ directory handle from a listing never blocked a rename in the lab.
 
 The prefixes live in `placement.rs`. Names that may hold user data are never deleted or renamed automatically.
 
+## Changes made elsewhere
+
+A folder's change monitor sees only changes made through this computer's kernel. Another computer
+writing to an NFS export or an SMB share, a program on an sshfs server, or a sync client writing
+into the backing folder of a FUSE overlay sends no event: the lab saw none for 300 such changes
+on NFS, SMB and sshfs. So Strata checks the folders it shows on those mounts, in
+`src/app/browser/freshness.rs`.
+
+### Which folders are checked
+
+An open folder is checked when:
+
+- its mount has writers outside this computer: NFS, SMB, 9p, virtiofs, vboxsf, ceph, AFS,
+  GlusterFS, GFS2, OCFS2, Lustre and other network filesystems, every FUSE mount except `fuseblk`
+  (sshfs, rclone, s3fs, gvfsd-fuse, mergerfs, gocryptfs), and every GVfs location except
+  `admin://`, `mtp://` and `gphoto2://`; or
+- it has no live change monitor: a GVfs backend that offers none, or a monitor that could not be
+  created or is still being created.
+
+A folder is classified by the mount that its load's change stamp names, so a folder reached
+through a symbolic link or a bind mount counts as the mount it is really on. Columns checks every
+open column, List and Icons the open folder. **Watch network folders** (on by default; see
+[Saved preferences](preferences.md)) turns off the checks of the first kind; folders without a
+live monitor on other mounts are checked either way. A folder that shows a load error is not
+checked until it loads again.
+
+### How a check works
+
+Every load starts with a forced `statx` (`AT_STATX_FORCE_SYNC`) of the folder, or a GIO query on
+a GVfs location, and keeps its modification time, change time and [identity](#identity) as the
+folder's stamp. A check reads the same stamp again, as background work on the mount's
+[request lane](#request-lanes), and compares:
+
+| The check finds | Strata |
+| --- | --- |
+| the same stamp | nothing to do |
+| a stamp that moved | re-lists the folder in the background |
+| the folder gone, or another item at its path | runs the same departure check as a monitor's report: follows a rename, reloads a folder replaced in place, or leaves for the nearest folder that still exists |
+| another error, such as `EIO`, `EHOSTDOWN` or a lost connection | keeps the listing and checks again in 30 s |
+| a permission refusal | re-lists, so the folder shows the failure |
+
+The change time makes a stamp move even when a tool such as `rsync -a` or `cp -a` puts a folder's
+modification time back, as a change time cannot be set. On NFS a load is fresh by itself, because
+opening a folder revalidates it (close-to-open consistency); the forced stat is the baseline for
+later checks.
+
+- **Re-lists keep the rows.** A background re-list keeps the listing interactive until the
+  complete new one replaces it, with the column's spinner meanwhile. One that fails, is refused
+  by a busy lane, or stops at the load's time budget where the previous listing was complete keeps
+  the previous listing, with no error page. One cut at the entry limit is shown, marked as cut.
+  A re-list waits while an inline rename is open or a rename is being submitted.
+- **Operations come first.** A folder that an operation changes, or writes into, is not checked or
+  re-listed until it ends, so a check never lists a half-done operation and never holds a handle
+  in an SMB folder an operation is renaming.
+- **One background job per mount.** The due folders on one mount are checked in one job, one after
+  another. While the mount's lane is busy or stalled, checks are skipped, never queued, and the
+  re-lists a window owes on one mount run one at a time.
+
+### Cadence
+
+- Every 3 s for the folders a focused window shows, every 15 s in a window that is shown without
+  focus, and never in a hidden or minimized window, on another workspace where the compositor
+  reports the window as suspended, or in a tab that is not selected. No timer runs then, nor while
+  nothing shown is checked. The portal chooser follows its own window the same way.
+- In power-saver mode, focused checks run 4 times less often, and unfocused ones stop.
+- After 20 unchanged checks in a row the interval doubles, and after 40 it is four times as long;
+  a change, regaining focus and navigating reset it.
+- After any listing, the next check waits at least 10 times as long as that listing took, so a
+  folder that takes 3 s to list is re-read at most every 30 s however often it changes.
+- Regaining focus checks those folders at once. After 30 s or more away, counted on a clock that
+  keeps running through suspend, they are re-listed instead, which also updates the sizes and
+  dates of files edited in place elsewhere, as those do not move the folder's stamp.
+
+### Coarse stamps
+
+Where times have whole seconds (sshfs, GVfs SFTP, FAT-backed shares), two changes within one
+second can leave the stamp as a listing between them saw it. A listing whose stamp lies within
+the mount's [coarse window](#racily-clean-files) of when it was read is confirmed once, by a check
+that re-lists after the window has passed, and never twice. On sshfs the confirmation comes no
+earlier than 21 s after the stamp was read: sshfs answers stats and listings, forced ones too,
+from its own cache for its `dcache_timeout` (20 s by default) on a whole-second clock. Its options
+do not show in mountinfo, so a mount with `-o dcache_timeout=N` gets the same 21 s; with `N=1` the
+lab saw changes within about 2 s.
+
+Fine-grained stamps (NFS, SMB, local FUSE overlays) are never confirmed. On Linux 7.2 servers, a
+forced stat marks the folder's times as queried, so the next change gets a distinct time: none of
+4,000 pairs of changes made within one clock tick around a forced stat shared a stamp. Servers
+without multigrain timestamps (before Linux 6.13) were not measured.
+
+### Mounts whose stamp never moves
+
+Some mounts never move a folder's stamp: 9p with `cache=loose`, object stores served by FUSE
+(rclone or s3fs on a bucket), and servers that do not update folder times. When a load finds a
+folder's stamp as the previous load left it, outside its coarse window, but its complete listing
+holds other names, Strata marks that mount for the session. Its checked folders are then
+re-listed instead of checked, at most every 15 s, and less often while nothing changes, under the
+same duty cycle and lane rules. A stamp that moved while the names stayed the same is never taken
+as evidence, and sshfs is never marked. The mark follows the mount's id, so a mount that later gets
+the same id is re-listed too, which costs listings and never data.
+
+### What a check costs
+
+Measured in the lab over loopback:
+
+| Mount | Requests per check | Bytes | Time (p50) |
+| --- | --- | --- | --- |
+| NFSv3 | one `GETATTR` | 212 B | 13 µs |
+| NFSv4.2 | one `GETATTR`, none while the client holds a directory delegation on a folder it listed (1 request in 1,000 checks) | 420 B | 9 µs |
+| SMB | one create, query and close compound for the folder and one for each component of its path whose 1 s attribute cache lapsed: 5 compounds per check at a 3 s cadence for a folder 4 levels below the share | 904 B per compound, 1,032 B with POSIX extensions; 4.5 to 5.1 KB per check | 19 µs per compound, 33 µs with POSIX extensions |
+| sshfs | none while sshfs's cache holds the folder (20 s), otherwise one SFTP request | 108 B | 181 µs |
+| FUSE overlays on local disks | a local stat | — | — |
+
+With four network folders in a focused window that is 1.3 requests a second on NFS, about 0.6 KB
+a second on NFSv4.2 and almost nothing while it holds delegations, and about 6.7 compounds and
+6 KB a second on SMB. A check's cost does not depend on the folder's size. The forced stat that
+starts a load costs one more `GETATTR` per load on NFSv3 and nothing on a delegated NFSv4.2
+folder. A GVfs check is one D-Bus call and one backend request.
+
+### Limits of the checks
+
+- **Samba directory leases.** On a Samba share with directory leases (Samba's default), a change
+  made on the server's own filesystem (an app on the NAS, an NFS export of the same folder, `rsync`
+  over ssh) moves the folder's stamp, but the client keeps listing from its cached directory, and
+  every check and listing renews that cache, so the change does not appear while the folder stays
+  shown. F5 does not help: a listing every second stayed stale for 120 s. The cache lapses 46 to
+  66 s after its last use, and the re-list after time away comes from it too. Changes made through
+  SMB by other clients break the lease and appear at once. Mounting with `nohandlecache` fixes it,
+  unless another mount of the same share on this computer already holds the connection without
+  it.
+- **Files edited in place** keep their old size and date in the listing until it is re-listed:
+  after time away, on F5, or with the next change to the folder. On SMB, plain stats of such files
+  stayed stale in 10 of 36 trials; checks use forced stats only.
+- **sshfs** shows changes made on the server up to 21 s late, or later with a longer
+  `dcache_timeout`.
+- **Clock skew.** On mounts with whole-second stamps, a server clock more than the coarse window
+  behind ours can still hide a change.
+- **Compositors.** A window on another workspace is treated as hidden only where the compositor
+  reports it as suspended (not verified on Hyprland and GNOME); elsewhere it keeps the 15 s
+  interval.
+- **No change notifications.** Strata does not ask SMB servers for change notifications.
+
 ## Unresponsive mounts
 
 When an NFS or SMB server stops, an sshfs connection hangs, a FUSE daemon stops or a GVfs backend
@@ -1483,11 +1624,13 @@ interface thread makes, and its stall watchdog names the call the interface thre
 
 These worker requests go through their mount's lane in `src/adapters/volume/mount_lanes.rs`: folder
 loads, probes, monitor creation, the release before an operation, the leftover review and its sweep
-of stale probes, and imports, exports and program checks of custom actions. A lane is keyed by the
+of stale probes, imports, exports and program checks of custom actions, and the checks and
+background re-lists of [changes made elsewhere](#changes-made-elsewhere). A lane is keyed by the
 mount's id once a `statx` answer has named it. Until then a request is keyed by its path and the
 mount the table places it on, so a dead target of a symbolic link trips only that path and what lies
 below it, never the home folder the link sits in. A GVfs location is keyed by its scheme, user,
-server and port.
+server and port. GVfs never times out its own requests, so there the 2 s count from when each
+request, a folder load included, started.
 
 - **Progress.** A request makes progress when it gets an answer: success, "not found", "not a
   folder", a stale handle or a permission refusal. `EIO`, `ETIMEDOUT`, `EHOSTDOWN`, `ENOTCONN`, a
@@ -1514,6 +1657,16 @@ that. Without the lanes, each such action parked another thread of GLib's worker
 thumbnails, the folder size in Properties, search walks and file operations do not go through the
 lanes, so each of those that reaches a dead mount waits there, on its own thread or helper
 process, until the server answers.
+
+Once a lane stalls, F5 and Retry on its folders keep their rows rather than blanking them, on GVfs
+locations too, and checks and background re-lists there are skipped. After 10 s without progress, a
+folder on that mount also shows "Not responding. This list may be out of date." above its listing,
+in Columns, List and Icons, also over a first load stuck there but not over an error page. The
+notice follows the lane, whichever request stalled it (a load, a check, a paste or drag probe, a
+search, a monitor, another window), and clears as soon as a request there answers. A mount that
+ended its stuck request with an error, as SMB does with `EHOSTDOWN` after a few minutes, or a
+failing FUSE daemon does, leaves no request to answer, so the notice stays until F5, Retry or
+navigating sends one. A GVfs request abandoned while it waits never marks its backend.
 
 ### What a dead server does
 
@@ -1553,8 +1706,9 @@ Trash, Strata's settings files, custom themes and the Omarchy theme folders. GLi
 creates, cancels and delivers every monitor in a process under one lock, and creating a monitor
 walks its path, which blocks on a dead mount like any lookup. So while a creation is stuck on a
 mount that stopped answering, monitors on every folder deliver nothing, and later creations and
-cancels wait, until that server answers. The window stays usable, but folders stop updating by
-themselves meanwhile.
+cancels wait, until that server answers. The window stays usable, and folders that are
+[checked](#changes-made-elsewhere) still are, but other folders stop updating by themselves
+meanwhile.
 
 A column counts as unmonitored until its monitor is live. Once it is, the folder's change stamp is
 read again, and a change since the load re-lists the folder once. Before Linux 6.13, a change in
@@ -1656,6 +1810,9 @@ what unlinking a held leftover returns, and SMB with POSIX extensions refusing `
 holder search finds (otherwise the search reads only the test process's own `/proc` entries), and
 another refuses SMB folder renames while a file below is held and for a set time after.
 
+The checks of [changes made elsewhere](#changes-made-elsewhere) are tested on the app layer with a
+fake file source, on the scheduler's own clock: no timer runs under test, and tests call the tick.
+
 For names they emulate the errno each lab mount returned for a name it refuses, names stored or
 listed as others (vfat dropping trailing dots, SMB reading private-use characters back and listing
 device names under 8.3 aliases, `?` for malformed bytes on SMB with POSIX extensions), length
@@ -1700,6 +1857,12 @@ absolute path to the tests as `TMPDIR`, which `tempfile::tempdir()` honours; not
 inherited. Results, logs and leftovers per mount go to `target/fslab/runs/`. The summary flags a
 mount on which the kernel cifs client turned server inode numbers off during the run, because
 failures after that point can be artefacts of that mount state.
+
+`fslab test` exports no backing folder of its servers, so a change "made elsewhere" is made by hand
+in the container (`docker exec strata-fslab …`) in a server's own folder (`/srv/nfs/v42/tmp`,
+`/srv/nfs/v3/tmp`, `/srv/smb/cifs/tmp`, `/srv/smb/posix/tmp`, `/srv/sshfs/tmp`), then looked for
+through the client mount. Such a change goes to the server's filesystem directly, not through nfsd,
+smbd or sftp-server.
 
 Unit tests layer quirks on a fully featured filesystem, so on a limited mount some of them fail by
 design: a test expecting a plain rename sees the ladder link instead on NFS, fixtures with

@@ -384,6 +384,18 @@ and coalesced-tail paths. Completion carries truncation and both filesystem capa
 together. Requests outside the open-load gate retain their existing peek/failure handling;
 stale work is still checked against the owning directory or peek request.
 
+A load's `DirectoryEvent::Stamp` arrives before its first batch: it requests the column's change
+monitor, which `directory_changes.rs` checks once it is live, and becomes the column's baseline for
+`app/browser/freshness.rs` when the listing is shown. That scheduler checks the visible folders that
+other writers can change, or that have no live monitor, through `FileSource::check_stamps`, one
+background job per mount, and re-lists a moved one through a background request that keeps the
+listing if it fails or falls short. A check that finds the folder gone or replaced feeds the same
+departure check as a monitor's removal report. Its inputs come from the interface: focus,
+visibility and power saver from `ui/presence.rs`, which follows each window, and the "Watch network
+folders" preference. It also follows each column's mount and emits `ColumnNotResponding` for the
+notice. See
+[Changes made elsewhere](filesystem-compatibility.md#changes-made-elsewhere).
+
 `loading/metadata.rs` separates full-sort fills, applied by location, from viewport fills,
 validated against directory identity and row-position/location tokens. Metadata chunks
 never complete a sort; `MetadataFinished` retains that responsibility. Both modules release
@@ -554,7 +566,7 @@ shared Settings/F1 presentation; default F1 navigation remains view-specific.
 
 ### File source
 
-Enumerates locations, retrieves metadata, watches changes, identifies folders across renames, and reports supported actions. Begin with local files. Avoid designing a universal remote filesystem API before a second backend exists.
+Enumerates locations, retrieves metadata, watches changes, identifies folders across renames, and reports supported actions. Every load reports the folder's change stamp (`DirectoryEvent::Stamp`) before its first batch and a digest of the listed names before it finishes; `probe_stamp` and `check_stamps` read a stamp again on request, `check_stamps` as background work grouped per mount, and `responsiveness` says, without I/O, whether a location's mount still answers. Begin with local files. Avoid designing a universal remote filesystem API before a second backend exists.
 
 ### Operation service
 

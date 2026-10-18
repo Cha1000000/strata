@@ -114,11 +114,15 @@ request — selects that target instead of restoring the remembered position.
 
 ## Refreshing a directory
 
-F5, the pane's Refresh button, and the rescan after a burst of external changes
-keep the selection, the keyboard cursor and the keyboard focus in
+F5, the pane's Refresh button, the rescan after a burst of external changes, and
+the re-read that a check of a network folder starts when it finds a change keep
+the selection, the keyboard cursor and the keyboard focus in
 every view: a focused row stays focused, and a focused Ctrl+F field keeps focus and
 its text. Icons and List also keep the scroll position. When the item under the
 cursor is gone, the cursor moves to the item now in its place without selecting it.
+On a mount that stopped answering, F5 and Refresh keep the rows as they are
+instead of clearing them; see
+[Unresponsive mounts](filesystem-compatibility.md#unresponsive-mounts).
 
 ## Creating files and folders
 
@@ -180,7 +184,10 @@ unchanged.
 
 Results follow the watched folders live: the open folder, and in Columns every open
 column. A matching file that another program creates or renames there appears within
-about a second, and a deleted one leaves the results as soon as the listing drops it.
+about a second, and one that another computer adds to a network folder at its next
+check, at first every 3 s in a focused window and less often otherwise
+([Cadence](filesystem-compatibility.md#cadence) says when checks slow down or stop).
+A deleted one leaves the results as soon as the listing drops it.
 With [Include subfolders](preferences.md#filter-scope) on, changes in folders below
 those reach the results on **F5**, the rescan after a burst of external changes, or
 when the filter is cleared and opened again.
