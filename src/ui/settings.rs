@@ -3079,7 +3079,7 @@ static NAVIGATION: [NavigationEntry; 7] = [
     NavigationEntry {
         page: "integrations",
         label: "Integrations",
-        subtitle: "Add-ons from the catalog",
+        subtitle: "Apps and services",
         icon: icons::BLOCKS,
         accessible_label: None,
     },
