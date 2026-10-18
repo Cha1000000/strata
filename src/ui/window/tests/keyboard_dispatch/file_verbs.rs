@@ -849,7 +849,7 @@ fn tenxer_numbered_actions_run_the_listed_match_on_the_current_targets() {
                     "runtime = \"command\"\nconfirm = true",
                 );
             std::fs::write(&confirming, manifest).expect("confirming action");
-            crate::ui::actions::shared().reload();
+            gtk::glib::MainContext::default().block_on(crate::ui::actions::shared().reload());
             std::fs::write(directory.join("notes.md"), "notes").expect("markdown");
             enable_tenxer(&fixture);
             let browser = fixture.view.browser();
@@ -942,11 +942,39 @@ fn tenxer_numbered_actions_run_the_listed_match_on_the_current_targets() {
             move_to_named(&fixture, &browser, "notes.md");
             plain(&fixture, Key::semicolon);
             write_action("aa-new", "Aa new", "submenu", "\"md\"", "", &unlisted);
-            crate::ui::actions::shared().reload();
+            gtk::glib::MainContext::default().block_on(crate::ui::actions::shared().reload());
             plain(&fixture, Key::_1);
             assert_eq!(feedback(&fixture), "Actions changed");
             run_jobs(Duration::from_millis(300));
             assert!(!unlisted.exists() && !modal_visible(&fixture.overlay));
+
+            let held = crate::storage::writer::hold();
+            let manifest = crate::storage::config_directory().join("actions/aa-new/action.toml");
+            let edited = std::fs::read_to_string(&manifest)
+                .expect("manifest")
+                .replace(
+                    "runtime = \"command\"",
+                    "runtime = \"command\"\nconfirm = true",
+                );
+            std::fs::write(&manifest, edited).expect("edited outside Strata");
+            plain(&fixture, Key::semicolon);
+            plain(&fixture, Key::_1);
+            run_jobs(Duration::from_millis(300));
+            drop(held);
+            crate::storage::writer::settle();
+            wait_until(|| modal_visible(&fixture.overlay));
+            run_jobs(Duration::from_millis(300));
+            assert!(
+                !unlisted.exists(),
+                "an action edited since the chord was armed does not run"
+            );
+            assert!(
+                label_texts(fixture.overlay.upcast_ref())
+                    .iter()
+                    .any(|text| text == "Actions changed")
+            );
+            assert!(click_class(&fixture.overlay, "action-dialog-close"));
+            wait_until(|| !modal_visible(&fixture.overlay));
 
             open_empty_folder(&fixture);
             plain(&fixture, Key::semicolon);

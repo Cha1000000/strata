@@ -378,6 +378,16 @@ dashboard shows the invocation, its output, and its exit status. A definition th
 cannot load appears under **Settings → Actions → Problems** with the reason, and
 never silently disappears from the menus.
 
+Strata reads and writes the actions folder on its background settings writer, never
+on the interface thread. A menu, the 10xer action chord and **Settings → Actions**
+show the actions as last read and read the folder again in the background, so an
+action changed outside Strata appears once that read finishes, usually from the
+next opening. Choosing an action reads its definition again first: an action
+changed or removed since the menu or chord listed it does not run, and Strata says
+the actions changed. Programs and interpreters are looked up, and actions imported
+or exported, on a separate worker through the same per-mount limits as folder
+loads, so a server that stops answering never holds up saving settings.
+
 ## Service-dependent actions and badges
 
 For asynchronous eligibility based on external state and live file decorations,

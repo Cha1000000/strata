@@ -305,6 +305,7 @@ pub(super) fn present_target(
     crate::assets::register_icon_theme();
     let _theme_manager = super::theme::ThemeManager::shared();
     let preference_manager = super::preferences::PreferenceManager::shared();
+    super::actions::shared();
     tracing::debug!(
         elapsed_ms = present_started.elapsed().as_millis() as u64,
         "present theme and styles ready"

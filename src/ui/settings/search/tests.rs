@@ -506,6 +506,7 @@ fn every_page_row_is_registered_for_search() {
                     .collect::<Vec<_>>(),
                 "build every navigation page"
             );
+            gtk::glib::MainContext::default().block_on(crate::ui::actions::shared().reload());
             let (_, actions_page) = pages
                 .iter()
                 .find(|(page, _)| *page == "actions")
