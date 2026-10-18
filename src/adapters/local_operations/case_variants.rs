@@ -4,7 +4,7 @@
 //! case-insensitive destination whose rules do not fold, such as a casefolded
 //! folder, only looking a later name up shows that an earlier item took it.
 
-use std::{collections::HashMap, ffi::OsString};
+use std::{collections::HashMap, ffi::OsString, path::PathBuf};
 
 use gtk::{gio, prelude::*};
 
@@ -12,12 +12,15 @@ use super::{
     copy_engine::stage::collision_key,
     fs_ops::{Entry, fs},
     native_fs::{LocalFileIdentity, open_local_parent_directory},
+    placement,
 };
+
+pub(super) type Saved = (PathBuf, LocalFileIdentity);
 
 pub(super) struct CaseVariants {
     /// The other items of each one, by index, whose names differ only in case.
     others: HashMap<usize, Vec<usize>>,
-    saved: HashMap<usize, LocalFileIdentity>,
+    saved: HashMap<usize, Saved>,
 }
 
 impl CaseVariants {
@@ -62,27 +65,55 @@ impl CaseVariants {
             .others
             .get(&index)
             .is_some_and(|others| others.iter().any(|&other| other > index));
-        if precedes && let Some(identity) = identity(target).await {
-            self.saved.insert(index, identity);
+        if precedes
+            && let Some(path) = target.path()
+            && let Some(identity) = identity(target).await
+        {
+            self.saved.insert(index, (path, identity));
         }
     }
 
-    pub(super) fn earlier(&self, index: usize) -> Vec<LocalFileIdentity> {
+    pub(super) fn earlier(&self, index: usize) -> Vec<Saved> {
         self.others
             .get(&index)
             .into_iter()
             .flatten()
             .filter(|&&other| other < index)
-            .filter_map(|other| self.saved.get(other).copied())
+            .filter_map(|other| self.saved.get(other).cloned())
             .collect()
     }
 }
 
-pub(super) async fn taken_by(target: &gio::File, earlier: &[LocalFileIdentity]) -> bool {
-    !earlier.is_empty()
-        && identity(target)
-            .await
-            .is_some_and(|found| earlier.contains(&found))
+/// Path-keyed FUSE daemons number each spelling of one item as its own node.
+pub(super) async fn taken_by(target: &gio::File, earlier: Vec<Saved>) -> bool {
+    let Some(path) = target.path().filter(|_| !earlier.is_empty()) else {
+        return false;
+    };
+    gio::spawn_blocking(move || {
+        let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
+            return false;
+        };
+        let Ok(dir) = open_local_parent_directory(parent) else {
+            return false;
+        };
+        let to = Entry::new(&dir, name);
+        let Ok(found) = fs().stat(to, false) else {
+            return false;
+        };
+        earlier.iter().any(|(saved, identity)| {
+            found.identity == *identity
+                || saved
+                    .parent()
+                    .zip(saved.file_name())
+                    .and_then(|(parent, name)| {
+                        let saved_dir = open_local_parent_directory(parent).ok()?;
+                        placement::alias_of(fs(), Entry::new(&saved_dir, name), to)
+                    })
+                    .is_some_and(|alias| alias == *identity)
+        })
+    })
+    .await
+    .unwrap_or(false)
 }
 
 async fn identity(target: &gio::File) -> Option<LocalFileIdentity> {

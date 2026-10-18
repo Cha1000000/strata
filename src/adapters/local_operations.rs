@@ -161,7 +161,9 @@ pub(in crate::adapters) use fs_ops::{
 #[cfg(test)]
 pub(crate) use tests::fs_quirks::{Births, FsQuirks, Op as FsOp, Quirks, evict};
 pub(crate) use transfer_targets::transfer_targets;
-pub(crate) use typed_names::refused_in as typed_name_refusal;
+pub(crate) use typed_names::{
+    refused_in as typed_name_refusal, rename_taken as typed_rename_is_taken,
+};
 
 use std::{
     cell::{Cell, RefCell},
@@ -1239,7 +1241,7 @@ async fn execute_parallel_copy_plans(
                 );
                 context.spawn_local(async move {
                     let target = gio::File::for_path(&plan.written_path);
-                    let taken = if case_variants::taken_by(&target, &earlier).await {
+                    let taken = if case_variants::taken_by(&target, earlier).await {
                         Taken::Number
                     } else {
                         Taken::Fail
@@ -3432,7 +3434,7 @@ impl OperationProvider for LocalOperationProvider {
                     .map(|owed| (target, owed))
                 } else {
                     if taken == Taken::Fail
-                        && case_variants::taken_by(&target, &variants.earlier(index)).await
+                        && case_variants::taken_by(&target, variants.earlier(index)).await
                     {
                         taken = Taken::Number;
                         aliased = true;

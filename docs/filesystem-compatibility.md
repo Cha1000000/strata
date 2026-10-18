@@ -960,9 +960,11 @@ in bytes is numbered as an alias, among a paste's top-level items too (`Readme.t
 `README.txt`); a share set to compare case still gets those numbers. Elsewhere, a top-level item
 whose name, looked up once before it is copied, leads to an earlier item of the same paste saved
 under another spelling, as in casefolded folders for `makefile` after `Makefile`, is numbered and
-reported as an alias too. Any other item at the name, including one that took the earlier item's
-place since, keeps it taken. In a merge, a planned name equal to an existing item replaces that
-item like any other same-named one. A paste's top-level items from different folders that share a
+reported as an alias too; where the lookup reports a number of its own, as path-keyed FUSE
+daemons do for each spelling, the rule for [case-only renames](#rename) tells the earlier item.
+Any other item at the name, including one that took the earlier item's place since, keeps it
+taken. In a merge, a planned name equal to an existing item replaces that item like any other
+same-named one. A paste's top-level items from different folders that share a
 name are numbered on every destination, the later one in the paste's order, before anything is
 copied, and reported as names already taken: `notes.txt` from two folders becomes `notes.txt` and
 `notes (1).txt`, also in a move within one filesystem. An item copied into its own folder is
@@ -1070,9 +1072,11 @@ Local renames go through the same routine instead of GIO's check-then-rename.
   through a hidden `.strata-rename-<id>` name, with rollback. A plain rename is a silent no-op
   there, and a no-replace rename reports the name as taken. The SMB client caches the lookup of
   the new spelling for about a second, so it is revalidated before the second step. exfat-fuse
-  gives each spelling its own inode number, so there the new spelling counts as the item itself
+  and other path-keyed FUSE daemons give each spelling its own inode number, and so does cifs
+  once it has turned server numbers off, so there the new spelling counts as the item itself
   only when the folder lists no such name, the item's own name is the only one that matches it
-  ignoring case, and type, size and modification time agree.
+  ignoring case, and type, size and modification time agree. The rename prompt decides "already
+  exists" by the same rule, so it never refuses a case-only rename that the rename would accept.
 - On mounts with neither `RENAME_NOREPLACE` nor usable hard links, renaming a file takes the
   [reserved-name step](#the-reserved-name-step-and-its-risk) like any other placement, and so does
   renaming a folder where renaming over an empty folder is refused.

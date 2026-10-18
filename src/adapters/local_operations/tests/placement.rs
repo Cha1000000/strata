@@ -1125,6 +1125,50 @@ fn a_case_only_rename_goes_through_a_temporary_name() -> Result<(), Box<dyn Erro
 }
 
 #[test]
+fn a_case_only_rename_is_not_refused_as_taken_where_each_spelling_has_its_own_number()
+-> Result<(), Box<dyn Error>> {
+    let exfat_fuse = || Quirks {
+        alias_inodes: true,
+        ..Quirks::exfat_fuse()
+    };
+    // The lookup of a second spelling after cifs turned server numbers off gets a number of its own.
+    let cifs_nocase = || Quirks {
+        alias_inodes: true,
+        ..Quirks::cifs_nocase()
+    };
+    let rows: [(Preset, bool, bool, bool); 6] = [
+        (Quirks::default, false, false, false),
+        (Quirks::default, true, false, true),
+        (exfat_fuse, false, false, false),
+        (exfat_fuse, true, false, true),
+        (cifs_nocase, false, true, false),
+        (cifs_nocase, true, true, true),
+    ];
+    for (quirks, another_item, serverino_off, taken) in rows {
+        for folder in [false, true] {
+            let root = tempfile::tempdir()?;
+            let _scope = FsQuirks::install(root.path(), case_insensitive(quirks()));
+            let (current, wanted) = (root.path().join("report"), root.path().join("Report"));
+            make(&current, folder)?;
+            if another_item {
+                fs::write(&wanted, b"another item")?;
+            }
+            if serverino_off {
+                assert!(super::fs_quirks::autodisable_serverino(root.path()));
+            }
+
+            assert_eq!(
+                super::super::typed_names::rename_taken(&current, &wanted),
+                taken,
+                "{:?}, folder: {folder}, another item: {another_item}",
+                quirks().mount_type
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn a_hard_link_is_never_taken_for_a_case_alias() -> Result<(), Box<dyn Error>> {
     let root = tempfile::tempdir()?;
     let _scope = FsQuirks::install(root.path(), case_insensitive(Quirks::default()));

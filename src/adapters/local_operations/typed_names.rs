@@ -3,11 +3,16 @@
 //! Names the user types for an item, refused before anything changes where
 //! the location would store another name.
 
+use std::path::Path;
+
 use gtk::gio;
 
 use super::{
+    fs_ops::{Entry, fs},
     mount_profile::folder_name_rules,
     names::fix::{Refusal, refusal},
+    native_fs::open_local_parent_directory,
+    placement,
 };
 use crate::adapters::volume::NameProfile;
 
@@ -35,6 +40,23 @@ pub(super) fn refused(name: &str, rules: &NameProfile, new_folder: bool) -> Opti
 
 pub(crate) async fn refused_in(folder: &gio::File, name: &str, new_folder: bool) -> Option<String> {
     refused(name, &folder_name_rules(folder).await?, new_folder)
+}
+
+/// By placement's alias rule, which the rename applies a moment later.
+pub(crate) fn rename_taken(current: &Path, wanted: &Path) -> bool {
+    let entry = |path: &Path| {
+        let dir = open_local_parent_directory(path.parent()?).ok()?;
+        Some((dir, path.file_name()?.to_owned()))
+    };
+    let Some((wanted_dir, wanted_name)) = entry(wanted) else {
+        return false;
+    };
+    let to = Entry::new(&wanted_dir, &wanted_name);
+    if fs().stat(to, false).is_err() {
+        return false;
+    }
+    entry(current)
+        .is_none_or(|(dir, name)| placement::alias_of(fs(), Entry::new(&dir, &name), to).is_none())
 }
 
 /// Its code point where it shows nothing of its own: control and format characters, spaces,
