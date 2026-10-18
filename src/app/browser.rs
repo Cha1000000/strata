@@ -28,6 +28,7 @@ pub use crate::app::navigation::{ColumnEntryCounts, CursorToggle, VisualKind, Vi
 mod deferred;
 mod directory_changes;
 mod folder_sorts;
+mod freshness;
 mod loading;
 mod navigation_lifecycle;
 mod operation_events;
@@ -37,6 +38,7 @@ mod remote;
 mod sorting;
 
 use folder_sorts::SortOrigin;
+pub use freshness::{FreshnessInput, VisibleDepths};
 use publication::{PublicationPlan, PublishTerminal, StagedPublish};
 use remote::RemoteState;
 
@@ -1100,6 +1102,7 @@ struct ColumnMonitor {
     state: Rc<Cell<MonitorState>>,
     watch: Option<LoadHandle>,
     gap_check: Rc<RefCell<Option<LoadHandle>>>,
+    freshness: Rc<RefCell<freshness::ColumnFreshness>>,
 }
 
 pub struct Browser {
@@ -1111,6 +1114,7 @@ pub struct Browser {
     root_identity: RefCell<Option<(Location, ItemIdentity)>>,
     /// The current step of the one departure check that runs at a time.
     departure_probe: RefCell<Option<LoadHandle>>,
+    freshness: freshness::Freshness,
     metadata_pending: RefCell<HashMap<usize, Vec<ViewportTarget>>>,
     metadata_idle: RefCell<Option<gio::glib::SourceId>>,
     staging: RefCell<HashMap<usize, StagingLoad>>,
@@ -1198,6 +1202,7 @@ impl Browser {
             monitors: RefCell::new(Vec::new()),
             root_identity: RefCell::new(None),
             departure_probe: RefCell::new(None),
+            freshness: freshness::Freshness::default(),
             metadata_pending: RefCell::new(HashMap::new()),
             metadata_idle: RefCell::new(None),
             staging: RefCell::new(HashMap::new()),
@@ -4071,6 +4076,9 @@ impl Browser {
     /// A folder that vanished before its reload keeps the identity it loaded with.
     pub(super) fn record_stamp(&self, request_id: RequestId, stamp: DirectoryStamp) {
         let depth = self.state.borrow().depth_for_request(request_id);
+        if let Some(depth) = depth {
+            self.record_baseline(depth, request_id, &stamp);
+        }
         if depth == Some(0)
             && let (Some(identity), Some(location)) = (stamp.identity, self.location_at(0))
         {
@@ -4107,15 +4115,19 @@ impl Browser {
         });
         let weak: Weak<Self> = Rc::downgrade(self);
         let (reported, checked, baseline) = (state.clone(), location.clone(), baseline.cloned());
-        let report = Rc::new(
-            move |watching| match (watching, weak.upgrade(), &baseline) {
+        let report = Rc::new(move |watching| {
+            let browser = weak.upgrade();
+            match (watching, &browser, &baseline) {
                 (Watching::Unavailable, ..) => reported.set(MonitorState::Unavailable),
                 (Watching::Live, Some(browser), Some(baseline)) => {
                     browser.check_monitor_gap(depth, &reported, &gap_check, &checked, baseline);
                 }
                 (Watching::Live, ..) => reported.set(MonitorState::Active),
-            },
-        );
+            }
+            if let Some(browser) = browser {
+                browser.reschedule_freshness();
+            }
+        });
         let watch =
             self.source
                 .start_watch(location, self.preferences.get().show_hidden, notify, report);
@@ -4148,6 +4160,7 @@ impl Browser {
                 let Some(browser) = weak.upgrade() else {
                     return;
                 };
+                browser.reschedule_freshness();
                 let current = browser
                     .monitors
                     .borrow()
@@ -4587,6 +4600,7 @@ impl Browser {
         location: Location,
         request_id: RequestId,
     ) -> LoadHandle {
+        self.note_listing_started(depth, request_id);
         let weak: Weak<Self> = Rc::downgrade(self);
         let emit = Rc::new(move |event| {
             if let Some(browser) = weak.upgrade() {

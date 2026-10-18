@@ -274,6 +274,14 @@ impl FileSource for ChooserFileSource {
         self.source.probe_stamp(location, emit)
     }
 
+    fn check_stamps(
+        &self,
+        locations: Vec<Location>,
+        emit: Rc<dyn Fn(Location, StampAnswer)>,
+    ) -> LoadHandle {
+        self.source.check_stamps(locations, emit)
+    }
+
     fn find_by_identity(
         &self,
         parent: Location,

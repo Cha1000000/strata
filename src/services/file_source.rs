@@ -653,6 +653,18 @@ pub trait FileSource {
         LoadHandle::new(|| {})
     }
 
+    /// Background checks of folders on one mount, each answered once.
+    fn check_stamps(
+        &self,
+        locations: Vec<Location>,
+        emit: Rc<dyn Fn(Location, StampAnswer)>,
+    ) -> LoadHandle {
+        for location in locations {
+            emit(location, StampAnswer::Unsupported);
+        }
+        LoadHandle::new(|| {})
+    }
+
     /// Finds the folder in `parent` that is provably `identity`, such as one renamed in place.
     /// Emits `None` when nothing is, or `parent` cannot be listed.
     fn find_by_identity(

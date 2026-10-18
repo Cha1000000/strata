@@ -1935,6 +1935,62 @@ fn a_folder_put_back_to_its_old_time_still_reads_as_changed() -> Result<(), Box<
 }
 
 #[test]
+fn a_hung_mount_holds_one_worker_and_answers_unresponsive() -> Result<(), Box<dyn Error>> {
+    use crate::adapters::{FsOp, FsQuirks, Quirks};
+
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let root = tempfile::tempdir()?;
+    let (hung, healthy) = (root.path().join("hung"), root.path().join("healthy"));
+    fs::create_dir(&hung)?;
+    fs::create_dir(&healthy)?;
+    let gate = Gate::default();
+    let scope = FsQuirks::install(
+        &hung,
+        Quirks {
+            before: vec![(FsOp::FolderStamp, "*", 0, gate.racer())],
+            ..Quirks::default()
+        },
+    );
+    let answers: Rc<RefCell<Vec<(Location, StampAnswer)>>> = Rc::default();
+    let check = |folder: &Path| {
+        let answers = answers.clone();
+        LocalFileSource.check_stamps(
+            vec![Location::local(folder)],
+            Rc::new(move |location, answer| answers.borrow_mut().push((location, answer))),
+        )
+    };
+    let answered = |folder: &Path| {
+        answers
+            .borrow()
+            .iter()
+            .filter(|(location, _)| *location == Location::local(folder))
+            .map(|(_, answer)| match answer {
+                StampAnswer::Stamp(_) => "stamp",
+                StampAnswer::Unresponsive => "unresponsive",
+                _ => "other",
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let first = check(&hung);
+    drain_until(|| gate.reached());
+    let repeats = [check(&hung), check(&hung)];
+    let elsewhere = check(&healthy);
+    drain_until(|| answers.borrow().len() == 3);
+    let while_hung = (answered(&hung), answered(&healthy));
+    gate.release();
+    drain_until(|| answers.borrow().len() == 4);
+
+    assert_eq!(while_hung, (vec!["unresponsive"; 2], vec!["stamp"]));
+    assert_eq!(answered(&hung), ["unresponsive", "unresponsive", "stamp"]);
+    assert_eq!(scope.count(FsOp::FolderStamp), 1);
+    drop((first, repeats, elsewhere));
+    Ok(())
+}
+
+#[test]
 fn a_renamed_folder_is_followed_where_its_mount_proves_it_is_the_same() -> Result<(), Box<dyn Error>>
 {
     use crate::adapters::{Births, FsQuirks, Quirks, evict};

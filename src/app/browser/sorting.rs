@@ -161,6 +161,7 @@ impl Browser {
                 .is_some()
         {
             self.finish_sorted_load(task);
+            self.note_listing_finished(task.depth);
             self.emit(BrowserEvent::LoadFinished {
                 depth: task.depth,
                 truncated: task.plan.completion.truncated,

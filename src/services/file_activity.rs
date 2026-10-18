@@ -521,10 +521,6 @@ pub(crate) fn notify(notice: &Notice<'_>) {
 }
 
 /// Only `folder` itself: an operation writing into its subfolders lists those.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "step 7's checks and step 8's leftovers read it")
-)]
 pub(crate) fn is_active_in(folder: &Path) -> bool {
     registry().folders.contains(folder)
 }

@@ -1,0 +1,387 @@
+// SPDX-License-Identifier: MIT
+
+use std::{
+    cell::{Cell, RefCell},
+    rc::{Rc, Weak},
+    time::{Duration, Instant},
+};
+
+use gtk::glib;
+
+use crate::{
+    app::navigation::LoadState,
+    model::Location,
+    services::{DirectoryStamp, LoadHandle, MountToken, RequestId, StampAnswer, file_activity},
+};
+
+use super::Browser;
+
+const FOCUSED_INTERVAL: Duration = Duration::from_secs(3);
+const VISIBLE_INTERVAL: Duration = Duration::from_secs(15);
+const RELIST_DUTY: u32 = 10;
+const UNCHANGED_BEFORE_SLOWING: u32 = 20;
+const MOST_SLOWING: u32 = 4;
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum Presence {
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "step 7's presence wiring sets it")
+    )]
+    Focused,
+    #[default]
+    Visible,
+    Hidden,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum VisibleDepths {
+    #[default]
+    All,
+    Active,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct FreshnessInput {
+    pub presence: Presence,
+    pub scope: VisibleDepths,
+}
+
+struct Listing {
+    request: RequestId,
+    started: Instant,
+    stamp: Option<DirectoryStamp>,
+}
+
+#[derive(Default)]
+pub(super) struct ColumnFreshness {
+    baseline: Option<DirectoryStamp>,
+    listing: Option<Listing>,
+    next_due: Option<Instant>,
+    unchanged: u32,
+    checking: bool,
+}
+
+type Checked = (usize, Location, Weak<RefCell<ColumnFreshness>>);
+
+#[derive(Default)]
+pub(super) struct Freshness {
+    input: Cell<FreshnessInput>,
+    hold: RefCell<Option<Rc<dyn Fn() -> bool>>>,
+    armed_for: Cell<Option<Instant>>,
+    timer: RefCell<Option<glib::SourceId>>,
+    jobs: RefCell<Vec<(Rc<Cell<usize>>, LoadHandle)>>,
+    #[cfg(test)]
+    clock: Cell<Option<Instant>>,
+}
+
+impl Browser {
+    pub fn set_freshness(self: &Rc<Self>, input: FreshnessInput) {
+        self.freshness.input.set(input);
+        self.reschedule_freshness();
+    }
+
+    pub fn freshness_input(&self) -> FreshnessInput {
+        self.freshness.input.get()
+    }
+
+    pub fn set_freshness_hold(&self, hold: impl Fn() -> bool + 'static) {
+        self.freshness.hold.replace(Some(Rc::new(hold)));
+    }
+
+    fn freshness_now(&self) -> Instant {
+        #[cfg(test)]
+        if let Some(now) = self.freshness.clock.get() {
+            return now;
+        }
+        Instant::now()
+    }
+
+    fn check_interval(&self, unchanged: u32) -> Duration {
+        let interval = match self.freshness.input.get().presence {
+            Presence::Focused => FOCUSED_INTERVAL,
+            Presence::Visible | Presence::Hidden => VISIBLE_INTERVAL,
+        };
+        interval
+            * 2u32
+                .saturating_pow(unchanged / UNCHANGED_BEFORE_SLOWING)
+                .min(MOST_SLOWING)
+    }
+
+    fn column_freshness(&self, depth: usize) -> Option<Rc<RefCell<ColumnFreshness>>> {
+        self.monitors
+            .borrow()
+            .get(depth)
+            .map(|monitor| monitor.freshness.clone())
+    }
+
+    pub(super) fn record_baseline(
+        &self,
+        depth: usize,
+        request_id: RequestId,
+        stamp: &DirectoryStamp,
+    ) {
+        if let Some(column) = self.column_freshness(depth)
+            && let Some(listing) = column
+                .borrow_mut()
+                .listing
+                .as_mut()
+                .filter(|listing| listing.request == request_id)
+        {
+            listing.stamp = Some(stamp.clone());
+        }
+    }
+
+    pub(super) fn note_listing_started(&self, depth: usize, request_id: RequestId) {
+        if let Some(column) = self.column_freshness(depth) {
+            column.borrow_mut().listing = Some(Listing {
+                request: request_id,
+                started: self.freshness_now(),
+                stamp: None,
+            });
+        }
+    }
+
+    pub(super) fn note_listing_finished(self: &Rc<Self>, depth: usize) {
+        let Some(column) = self.column_freshness(depth) else {
+            return;
+        };
+        let now = self.freshness_now();
+        let current = self.state.borrow().request_id_for_depth(depth);
+        {
+            let mut column = column.borrow_mut();
+            let listing = column
+                .listing
+                .take()
+                .filter(|listing| Some(listing.request) == current);
+            let took = listing.as_ref().map_or(Duration::ZERO, |listing| {
+                now.saturating_duration_since(listing.started)
+            });
+            if let Some(stamp) = listing.and_then(|listing| listing.stamp) {
+                column.baseline = Some(stamp);
+            }
+            column.next_due = Some(
+                now + self
+                    .check_interval(column.unchanged)
+                    .max(took * RELIST_DUTY),
+            );
+        }
+        self.reschedule_freshness();
+    }
+
+    fn awaits_check(&self, depth: usize, column: &ColumnFreshness) -> bool {
+        !column.checking
+            && !matches!(
+                self.state
+                    .borrow()
+                    .columns
+                    .get(depth)
+                    .map(|column| &column.load_state),
+                Some(LoadState::Error(_))
+            )
+            && column.next_due.is_some()
+            && column
+                .baseline
+                .as_ref()
+                .is_some_and(|baseline| baseline.outside_writers || !self.column_has_monitor(depth))
+            && match self.freshness.input.get().scope {
+                VisibleDepths::All => true,
+                VisibleDepths::Active => self.active_depth() == Some(depth),
+            }
+    }
+
+    fn settled(&self, depth: usize) -> bool {
+        matches!(
+            self.state
+                .borrow()
+                .columns
+                .get(depth)
+                .map(|column| &column.load_state),
+            Some(LoadState::Ready | LoadState::Empty)
+        ) && !self.staging.borrow().contains_key(&depth)
+            && !self.sorting.borrow().contains_key(&depth)
+    }
+
+    fn operation_touches(location: &Location) -> bool {
+        location.native_path().is_some_and(|path| {
+            file_activity::is_changing(path) || file_activity::is_active_in(path)
+        })
+    }
+
+    fn freshness_held(&self) -> bool {
+        let hold = self.freshness.hold.borrow().clone();
+        hold.is_some_and(|hold| hold())
+    }
+
+    fn freshness_columns(&self) -> Vec<Rc<RefCell<ColumnFreshness>>> {
+        self.monitors
+            .borrow()
+            .iter()
+            .map(|monitor| monitor.freshness.clone())
+            .collect()
+    }
+
+    pub(crate) fn freshness_tick(self: &Rc<Self>) {
+        let now = self.freshness_now();
+        self.freshness
+            .jobs
+            .borrow_mut()
+            .retain(|(unanswered, _)| unanswered.get() > 0);
+        let mut groups: Vec<(Option<MountToken>, Vec<Checked>)> = Vec::new();
+        if self.freshness.input.get().presence != Presence::Hidden {
+            for (depth, column) in self.freshness_columns().into_iter().enumerate() {
+                let Some(location) = self.location_at(depth) else {
+                    continue;
+                };
+                let mount = {
+                    let column = column.borrow();
+                    if !self.awaits_check(depth, &column)
+                        || column.next_due.is_some_and(|due| due > now)
+                    {
+                        continue;
+                    }
+                    column
+                        .baseline
+                        .as_ref()
+                        .and_then(|baseline| baseline.mount.clone())
+                };
+                if !self.settled(depth) || Self::operation_touches(&location) {
+                    let mut column = column.borrow_mut();
+                    column.next_due = Some(now + self.check_interval(column.unchanged));
+                    continue;
+                }
+                column.borrow_mut().checking = true;
+                let checked = (depth, location, Rc::downgrade(&column));
+                match groups
+                    .iter_mut()
+                    .find(|(token, _)| mount.is_some() && *token == mount)
+                {
+                    Some((_, group)) => group.push(checked),
+                    None => groups.push((mount, vec![checked])),
+                }
+            }
+        }
+        for (_, group) in groups {
+            self.check_columns(group);
+        }
+        self.reschedule_freshness();
+    }
+
+    fn check_columns(self: &Rc<Self>, group: Vec<Checked>) {
+        let mut locations: Vec<Location> = Vec::new();
+        for (_, location, _) in &group {
+            if !locations.contains(location) {
+                locations.push(location.clone());
+            }
+        }
+        let unanswered = Rc::new(Cell::new(locations.len()));
+        let left = unanswered.clone();
+        let weak = Rc::downgrade(self);
+        let emit = Rc::new(move |location: Location, answer: StampAnswer| {
+            left.set(left.get().saturating_sub(1));
+            let Some(browser) = weak.upgrade() else {
+                return;
+            };
+            for (depth, _, column) in group.iter().filter(|(_, checked, _)| *checked == location) {
+                browser.apply_check(*depth, column, &location, answer.clone());
+            }
+        });
+        let job = self.source.check_stamps(locations, emit);
+        if unanswered.get() > 0 {
+            self.freshness.jobs.borrow_mut().push((unanswered, job));
+        }
+    }
+
+    fn apply_check(
+        self: &Rc<Self>,
+        depth: usize,
+        column: &Weak<RefCell<ColumnFreshness>>,
+        location: &Location,
+        answer: StampAnswer,
+    ) {
+        let Some(column) = column.upgrade() else {
+            return;
+        };
+        column.borrow_mut().checking = false;
+        let current = self
+            .column_freshness(depth)
+            .is_some_and(|known| Rc::ptr_eq(&known, &column))
+            && self.location_at(depth).as_ref() == Some(location);
+        if !current {
+            return;
+        }
+        let now = self.freshness_now();
+        let stale = {
+            let mut column = column.borrow_mut();
+            let stale = match &answer {
+                StampAnswer::Stamp(stamp) => column
+                    .baseline
+                    .as_ref()
+                    .is_none_or(|baseline| stamp.moved_since(baseline)),
+                StampAnswer::Inaccessible => true,
+                _ => false,
+            };
+            column.unchanged = match &answer {
+                StampAnswer::Stamp(_) if !stale => column.unchanged.saturating_add(1),
+                _ => 0,
+            };
+            column.next_due = match &answer {
+                StampAnswer::Unsupported => None,
+                _ => Some(now + self.check_interval(column.unchanged)),
+            };
+            stale
+        };
+        if stale
+            && !self.freshness_held()
+            && self.settled(depth)
+            && !Self::operation_touches(location)
+        {
+            self.refresh_column_preserving_entries(depth);
+        }
+        self.reschedule_freshness();
+    }
+
+    pub(super) fn reschedule_freshness(self: &Rc<Self>) {
+        let due = (self.freshness.input.get().presence != Presence::Hidden)
+            .then(|| {
+                self.freshness_columns()
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(depth, column)| {
+                        let column = column.borrow();
+                        self.awaits_check(depth, &column)
+                            .then_some(column.next_due)
+                            .flatten()
+                    })
+                    .min()
+            })
+            .flatten();
+        if due == self.freshness.armed_for.get() {
+            return;
+        }
+        self.freshness.armed_for.set(due);
+        if let Some(timer) = self.freshness.timer.take() {
+            timer.remove();
+        }
+        // Tests tick by hand: a timer would fire on another test's thread.
+        let Some(due) = due.filter(|_| !cfg!(test)) else {
+            return;
+        };
+        let wait = due.saturating_duration_since(self.freshness_now());
+        let seconds = u32::try_from(wait.as_secs() + u64::from(wait.subsec_nanos() > 0))
+            .unwrap_or(u32::MAX)
+            .max(1);
+        let weak = Rc::downgrade(self);
+        let timer = glib::timeout_add_seconds_local_once(seconds, move || {
+            if let Some(browser) = weak.upgrade() {
+                browser.freshness.timer.take();
+                browser.freshness.armed_for.set(None);
+                browser.freshness_tick();
+            }
+        });
+        self.freshness.timer.replace(Some(timer));
+    }
+}
+
+#[cfg(test)]
+mod tests;

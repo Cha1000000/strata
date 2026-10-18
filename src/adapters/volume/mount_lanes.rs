@@ -32,7 +32,6 @@ const LEARNED_PATHS: usize = 4096;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Class {
     Interactive,
-    #[cfg_attr(not(test), expect(dead_code, reason = "step 7's checks run in it"))]
     Background,
 }
 
@@ -495,10 +494,6 @@ pub(crate) fn admit(path: &Path, class: Class) -> Result<Admitted, Unanswered> {
     admitted(&mut lanes, target, class)
 }
 
-#[expect(
-    dead_code,
-    reason = "step 4's release and step 7's checks run through it"
-)]
 pub(crate) fn run<T: Send + 'static>(
     path: &Path,
     class: Class,

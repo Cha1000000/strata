@@ -385,6 +385,74 @@ fn remote_stamp_failure(error: &glib::Error) -> StampAnswer {
     }
 }
 
+fn read_stamp(path: &Path, progress: &Progress) -> Result<DirectoryStamp, rustix::io::Errno> {
+    let read_at = SystemTime::now();
+    let stamp = super::local_operations::folder_stamp(path, true);
+    progress.answered(&stamp);
+    stamp.map(|stamp| {
+        if let Some(id) = stamp.mount_id {
+            progress.learn(id);
+        }
+        directory_stamp(path, &stamp, read_at)
+    })
+}
+
+fn stamp_answer(stamp: Result<DirectoryStamp, rustix::io::Errno>) -> StampAnswer {
+    match stamp {
+        Ok(stamp) => StampAnswer::Stamp(Box::new(stamp)),
+        Err(error) => stamp_failure(error),
+    }
+}
+
+fn unanswered_stamp(refusal: Unanswered) -> StampAnswer {
+    match refusal {
+        Unanswered::Failed => StampAnswer::Unreachable,
+        Unanswered::TimedOut | Unanswered::Skipped => StampAnswer::Unresponsive,
+    }
+}
+
+async fn query_remote_stamp(uri: String, class: Class) -> StampAnswer {
+    let read_at = SystemTime::now();
+    let query = gio::File::for_uri(&uri).query_info_future(
+        STAMP_ATTRIBUTES,
+        gio::FileQueryInfoFlags::NONE,
+        glib::Priority::LOW,
+    );
+    match mount_lanes::run_remote(mount_lanes::authority(&uri), class, query).await {
+        Ok(Ok(info)) if info.file_type() == gio::FileType::Directory => {
+            StampAnswer::Stamp(Box::new(remote_stamp(&uri, &info, read_at)))
+        }
+        Ok(Ok(_)) => StampAnswer::Missing,
+        Ok(Err(error)) => remote_stamp_failure(&error),
+        Err(refusal) => unanswered_stamp(refusal),
+    }
+}
+
+fn check_native_stamps(
+    locations: Vec<Location>,
+    emit: Rc<dyn Fn(Location, StampAnswer)>,
+) -> glib::JoinHandle<()> {
+    let paths: Vec<PathBuf> = locations
+        .iter()
+        .filter_map(|location| location.native_path().map(Path::to_path_buf))
+        .collect();
+    let job = mount_lanes::run(&paths[0].clone(), Class::Background, move |progress| {
+        paths
+            .iter()
+            .map(|path| stamp_answer(read_stamp(path, progress)))
+            .collect::<Vec<_>>()
+    });
+    glib::MainContext::default().spawn_local(async move {
+        let answers = match job.await {
+            Ok(answers) => answers,
+            Err(refusal) => vec![unanswered_stamp(refusal); locations.len()],
+        };
+        for (location, answer) in locations.into_iter().zip(answers) {
+            emit(location, answer);
+        }
+    })
+}
+
 fn name_hash(name: &OsStr) -> u64 {
     use std::hash::{DefaultHasher, Hash, Hasher};
     let mut hasher = DefaultHasher::new();
@@ -756,16 +824,8 @@ fn scan_native_directory(
     let failed = |error: rustix::io::Errno| {
         NativeEnumeration::Failed(crate::services::io_error_message(&error.into()))
     };
-    let read_at = SystemTime::now();
-    let stamp = super::local_operations::folder_stamp(path, true);
-    progress.answered(&stamp);
-    let stamp = match stamp {
-        Ok(stamp) => {
-            if let Some(id) = stamp.mount_id {
-                progress.learn(id);
-            }
-            directory_stamp(path, &stamp, read_at)
-        }
+    let stamp = match read_stamp(path, progress) {
+        Ok(stamp) => stamp,
         Err(error) => return failed(error),
     };
     let _ = stamped.send(stamp.clone());
@@ -1711,23 +1771,13 @@ impl FileSource for LocalFileSource {
                     "change stamp".to_owned(),
                     move |progress, _| {
                         progress.begin_reading();
-                        let read_at = SystemTime::now();
-                        let stamp = super::local_operations::folder_stamp(&folder, true);
-                        progress.answered(&stamp);
-                        stamp.map(|stamp| {
-                            if let Some(id) = stamp.mount_id {
-                                progress.learn(id);
-                            }
-                            directory_stamp(&folder, &stamp, read_at)
-                        })
+                        read_stamp(&folder, progress)
                     },
                 )
                 .await;
                 emit(match stamp.as_deref() {
-                    Ok(Ok(stamp)) => StampAnswer::Stamp(Box::new(stamp.clone())),
-                    Ok(Err(error)) => stamp_failure(*error),
-                    Err(Unanswered::Failed) => StampAnswer::Unreachable,
-                    Err(Unanswered::TimedOut | Unanswered::Skipped) => StampAnswer::Unresponsive,
+                    Ok(stamp) => stamp_answer(stamp.clone()),
+                    Err(refusal) => unanswered_stamp(*refusal),
                 });
             });
             return LoadHandle::new(move || task.abort());
@@ -1738,31 +1788,42 @@ impl FileSource for LocalFileSource {
         }
         let uri = location.uri_value().unwrap_or_default().to_owned();
         let task = glib::MainContext::default().spawn_local(async move {
-            let read_at = SystemTime::now();
-            let query = gio::File::for_uri(&uri).query_info_future(
-                STAMP_ATTRIBUTES,
-                gio::FileQueryInfoFlags::NONE,
-                glib::Priority::LOW,
-            );
-            emit(
-                match mount_lanes::run_remote(
-                    mount_lanes::authority(&uri),
-                    Class::Interactive,
-                    query,
-                )
-                .await
-                {
-                    Ok(Ok(info)) if info.file_type() == gio::FileType::Directory => {
-                        StampAnswer::Stamp(Box::new(remote_stamp(&uri, &info, read_at)))
-                    }
-                    Ok(Ok(_)) => StampAnswer::Missing,
-                    Ok(Err(error)) => remote_stamp_failure(&error),
-                    Err(Unanswered::Failed) => StampAnswer::Unreachable,
-                    Err(Unanswered::TimedOut | Unanswered::Skipped) => StampAnswer::Unresponsive,
-                },
-            );
+            emit(query_remote_stamp(uri, Class::Interactive).await);
         });
         LoadHandle::new(move || task.abort())
+    }
+
+    fn check_stamps(
+        &self,
+        locations: Vec<Location>,
+        emit: Rc<dyn Fn(Location, StampAnswer)>,
+    ) -> LoadHandle {
+        let (native, others): (Vec<_>, Vec<_>) = locations
+            .into_iter()
+            .partition(|location| location.native_path().is_some());
+        let (remote, unsupported): (Vec<_>, Vec<_>) =
+            others.into_iter().partition(stamped_remotely);
+        for location in unsupported {
+            emit(location, StampAnswer::Unsupported);
+        }
+        let native = (!native.is_empty()).then(|| check_native_stamps(native, emit.clone()));
+        let remote = (!remote.is_empty()).then(|| {
+            glib::MainContext::default().spawn_local(async move {
+                let mut answers = Vec::with_capacity(remote.len());
+                for location in &remote {
+                    let uri = location.uri_value().unwrap_or_default().to_owned();
+                    answers.push(query_remote_stamp(uri, Class::Background).await);
+                }
+                for (location, answer) in remote.into_iter().zip(answers) {
+                    emit(location, answer);
+                }
+            })
+        });
+        LoadHandle::new(move || {
+            for task in [native, remote].into_iter().flatten() {
+                task.abort();
+            }
+        })
     }
 
     fn find_by_identity(
