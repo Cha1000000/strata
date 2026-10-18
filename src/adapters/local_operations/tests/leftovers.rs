@@ -3,9 +3,22 @@
 use rustix::io::Errno;
 
 use super::super::fs_ops::{Entry, fs};
-use super::fs_quirks::{Op, Support};
+use super::super::placement::{PlaceError, RenameFailure, rename_in_place};
+use super::fs_quirks::{Op, Support, Trash};
 use super::*;
 use crate::model::hidden_names::{Leftover, classify};
+
+fn originals_in(folder: &Path) -> Result<(String, Vec<String>), Box<dyn Error>> {
+    let found: Vec<_> = names(folder)?
+        .into_iter()
+        .filter(|name| classify(OsStr::new(name)) == Some(Leftover::Originals))
+        .collect();
+    let [originals] = found.as_slice() else {
+        return Err(format!("one originals folder in {:?}", names(folder)?).into());
+    };
+    let inside = names(&folder.join(originals))?;
+    Ok((originals.clone(), inside))
+}
 
 #[test]
 fn a_copy_cut_off_by_an_unplug_leaves_only_its_stage() -> Result<(), Box<dyn Error>> {
@@ -78,5 +91,93 @@ fn a_copy_cut_off_by_an_unplug_leaves_only_its_stage() -> Result<(), Box<dyn Err
     copy()?;
     assert_eq!(fs::read(&target)?, b"copied");
     assert_eq!(names(&destination)?, [stage.as_str(), "copy.bin"]);
+    Ok(())
+}
+
+#[test]
+fn an_unplug_after_setting_aside_keeps_the_original_under_its_name() -> Result<(), Box<dyn Error>> {
+    let _serial = serial()?;
+    // A copy publishes a stage after setting the original aside; a move on its
+    // own filesystem renames the source over the name.
+    for (quirks, moving) in [(Quirks::nfs3(), false), (Quirks::ext4(), true)] {
+        let row = format!("moving: {moving}");
+        let root = tempfile::tempdir()?;
+        let source = root.path().join("source");
+        let target = root.path().join("target");
+        fs::write(&source, b"new")?;
+        fs::write(&target, b"old")?;
+        let scope = FsQuirks::install(
+            root.path(),
+            Quirks {
+                trash: Trash::Unsupported,
+                unplugged_after: Some((Op::Rename, "target", 0)),
+                ..quirks
+            },
+        );
+
+        let result = glib::MainContext::default().block_on(replace_local(
+            gio::File::for_path(&source),
+            gio::File::for_path(&target),
+            moving,
+            gio::Cancellable::new(),
+            None,
+        ));
+
+        assert!(result.is_err(), "{row}");
+        scope.replug();
+        let (originals, inside) = originals_in(root.path())?;
+        assert_eq!(inside, ["target"], "{row}");
+        assert_eq!(
+            fs::read(root.path().join(&originals).join("target"))?,
+            b"old"
+        );
+        assert_eq!(fs::read(&source)?, b"new", "{row}");
+        for name in names(root.path())? {
+            if name != originals && name != "source" {
+                assert_eq!(fs::read(root.path().join(&name))?, b"new", "{row}: {name}");
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn an_unplug_mid_case_only_rename_keeps_the_old_spelling() -> Result<(), Box<dyn Error>> {
+    let _serial = serial()?;
+    let root = tempfile::tempdir()?;
+    let item = root.path().join("report");
+    fs::write(&item, b"data")?;
+    // Skips the direct rename, which the old spelling already answers.
+    let scope = FsQuirks::install(
+        root.path(),
+        Quirks {
+            case_insensitive: true,
+            unplugged_after: Some((Op::Rename, "report", 1)),
+            ..Quirks::ext4()
+        },
+    );
+    let parent = open_local_parent_directory(root.path())?;
+
+    let renamed = rename_in_place(
+        fs(),
+        Entry::new(&parent, OsStr::new("report")),
+        Entry::new(&parent, OsStr::new("Report")),
+    );
+
+    scope.replug();
+    let (originals, inside) = originals_in(root.path())?;
+    assert_eq!(names(root.path())?, [originals.as_str()]);
+    assert_eq!(inside, ["report"]);
+    assert_eq!(
+        fs::read(root.path().join(&originals).join("report"))?,
+        b"data"
+    );
+    assert_eq!(
+        renamed,
+        Err(RenameFailure::Stranded {
+            temporary: Path::new(&originals).join("report").into_os_string(),
+            error: PlaceError::Unconfirmed,
+        })
+    );
     Ok(())
 }

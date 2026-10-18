@@ -487,7 +487,7 @@ fn an_archive_replaced_without_trash_deletes_its_original() -> Result<(), Box<dy
         assert_eq!(fs::metadata(&archive)?.permissions().mode() & 0o777, 0o640);
         assert_eq!(names(root.path())?, ["existing.zip"]);
         assert_eq!(
-            quirks.used_name(".strata-replaced-*"),
+            quirks.used_name(".strata-originals-*"),
             sets_aside,
             "{trash:?} {fs_type:#x}"
         );
@@ -740,17 +740,21 @@ fn a_name_taken_during_replacement_keeps_the_original_aside() -> Result<(), Box<
         let names = names(root.path())?;
         let [kept] = names
             .iter()
-            .filter(|name| name.starts_with(".strata-replaced-"))
+            .filter(|name| name.starts_with(".strata-originals-"))
             .collect::<Vec<_>>()[..]
         else {
             return Err(format!("expected one kept original, found {names:?}").into());
         };
-        assert!(message.contains(kept.as_str()), "{saves_over}: {message}");
+        assert!(
+            message.contains(&format!("{kept}/existing.zip")),
+            "{saves_over}: {message}"
+        );
+        let original = root.path().join(kept).join("existing.zip");
         if saves_over {
-            assert_eq!(fs::read(root.path().join(kept))?, b"racer");
+            assert_eq!(fs::read(original)?, b"racer");
             assert_eq!(names, [kept.as_str()]);
         } else {
-            assert_eq!(fs::read(root.path().join(kept))?, b"original");
+            assert_eq!(fs::read(original)?, b"original");
             assert_eq!(fs::read(&archive)?, b"racer");
         }
         assert!(stages(root.path(), COMPRESSION_STAGE)?.is_empty());

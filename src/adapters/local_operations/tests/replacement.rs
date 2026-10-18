@@ -43,6 +43,12 @@ fn replace_reporting(
     (result, replaced.into_inner())
 }
 
+fn originals_folder(folder: &Path) -> Result<Option<String>, io::Error> {
+    Ok(names(folder)?
+        .into_iter()
+        .find(|name| name.starts_with(".strata-originals-")))
+}
+
 fn write_item(path: &Path, directory: bool, contents: &[u8]) -> Result<(), io::Error> {
     if directory {
         fs::create_dir(path)?;
@@ -755,28 +761,45 @@ fn replacing_a_directory_cleans_up_a_symlink_in_the_old_contents_without_followi
 #[test]
 fn replace_without_trash_or_exchange_sets_the_original_aside() -> Result<(), Box<dyn Error>> {
     let _serial = serial()?;
-    let mounts: [(FsWord, Preset); 3] = [
-        (NFS_SUPER_MAGIC, Quirks::without_rename_flags),
-        (FUSE_SUPER_MAGIC, Quirks::sshfs),
-        (FUSE_SUPER_MAGIC, Quirks::vboxsf),
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum Item {
+        File,
+        Folder,
+        EmptyReadOnlyFolder,
+    }
+    let plain: &[Item] = &[Item::File, Item::Folder];
+    let mounts: [(FsWord, Preset, &[Item]); 3] = [
+        (
+            NFS_SUPER_MAGIC,
+            Quirks::without_rename_flags,
+            &[Item::File, Item::Folder, Item::EmptyReadOnlyFolder],
+        ),
+        (FUSE_SUPER_MAGIC, Quirks::sshfs, plain),
+        (FUSE_SUPER_MAGIC, Quirks::vboxsf, plain),
     ];
-    for (fs_type, quirks) in mounts {
-        for directory in [false, true] {
+    for (fs_type, quirks, items) in mounts {
+        for &item in items {
+            let directory = item != Item::File;
             let root = tempfile::tempdir()?;
             let source = root.path().join("source");
             let target = root.path().join("target");
             write_item(&source, directory, b"new")?;
-            write_item(&target, directory, b"old")?;
+            if let Item::EmptyReadOnlyFolder = item {
+                fs::create_dir(&target)?;
+                fs::set_permissions(&target, fs::Permissions::from_mode(0o555))?;
+            } else {
+                write_item(&target, directory, b"old")?;
+            }
             let quirks = FsQuirks::install(root.path(), without_trash(fs_type, quirks()));
 
             let (result, replaced) = replace_reporting(&source, &target, false);
 
-            assert!(result.is_ok(), "{result:?}");
+            assert!(result.is_ok(), "{item:?}: {result:?}");
             assert_eq!(replaced, [ReplacedOriginal::Deleted]);
             assert_eq!(read_item(&target, directory)?, b"new");
             assert_eq!(read_item(&source, directory)?, b"new");
             assert_eq!(names(root.path())?, ["source", "target"]);
-            assert!(quirks.used_name(".strata-replaced-*"));
+            assert!(quirks.used_name(".strata-originals-*"));
             assert_eq!(quirks.count(Op::Exchange), 0);
         }
     }
@@ -810,7 +833,7 @@ fn replace_falls_back_to_aside_when_trash_lies() -> Result<(), Box<dyn Error>> {
         assert_eq!(quirks.count(Op::Trash), 1);
         assert_eq!(replaced, [ReplacedOriginal::Deleted]);
         assert_eq!(fs::read(&target)?, b"new");
-        assert!(quirks.used_name(".strata-replaced-*"));
+        assert!(quirks.used_name(".strata-originals-*"));
         assert_eq!(
             names(root.path())?,
             if move_source {
@@ -896,16 +919,30 @@ fn a_failed_publication_puts_the_original_back() -> Result<(), Box<dyn Error>> {
     enum Item {
         File,
         Folder,
+        ReadOnlyFolder,
         Symlink,
     }
-    for (item, quirks, op, evicted) in [
-        (Item::File, Quirks::default(), Op::Rename, false),
-        (Item::Folder, Quirks::default(), Op::Rename, false),
-        (Item::File, Quirks::without_rename_flags(), Op::Link, false),
-        (Item::File, vfat, Op::Rename, true),
-        (Item::Symlink, Quirks::sshfs(), Op::Rename, false),
+    // The rename into the originals folder comes first; it never links, and a
+    // read-only folder retries it once it is writable.
+    for (item, quirks, (op, skip), evicted) in [
+        (Item::File, Quirks::default(), (Op::Rename, 1), false),
+        (Item::Folder, Quirks::default(), (Op::Rename, 1), false),
+        (
+            Item::ReadOnlyFolder,
+            Quirks::default(),
+            (Op::Rename, 2),
+            false,
+        ),
+        (
+            Item::File,
+            Quirks::without_rename_flags(),
+            (Op::Link, 0),
+            false,
+        ),
+        (Item::File, vfat, (Op::Rename, 1), true),
+        (Item::Symlink, Quirks::sshfs(), (Op::Rename, 1), false),
     ] {
-        let directory = item == Item::Folder;
+        let directory = matches!(item, Item::Folder | Item::ReadOnlyFolder);
         let root = tempfile::tempdir()?;
         let source = root.path().join("source");
         let target = root.path().join("target");
@@ -914,25 +951,28 @@ fn a_failed_publication_puts_the_original_back() -> Result<(), Box<dyn Error>> {
             Item::Symlink => std::os::unix::fs::symlink("old", &target)?,
             _ => write_item(&target, directory, b"old")?,
         }
-        let original = inode(&target)?;
+        let mode = |mode| fs::Permissions::from_mode(mode);
+        if let Item::ReadOnlyFolder = item {
+            fs::set_permissions(&target, mode(0o555))?;
+        }
+        let original = (inode(&target)?, fs::symlink_metadata(&target)?.mode());
         let folder = root.path().to_path_buf();
         let evicting: Racer = Box::new(move || {
-            let aside = names(&folder)
+            let originals = originals_folder(&folder)
                 .expect("list the folder")
-                .into_iter()
-                .find(|name| name.starts_with(".strata-replaced-"))
                 .expect("the original is aside");
-            assert!(super::fs_quirks::evict(&folder.join(aside)));
+            assert!(super::fs_quirks::evict(
+                &folder.join(originals).join("target")
+            ));
         });
-        // The first match sets the original aside; the second publishes.
         let quirks = FsQuirks::install(
             root.path(),
             without_trash(
                 quirks.fs_type.unwrap_or(NFS_SUPER_MAGIC),
                 Quirks {
-                    fail: vec![(op, "target", 1, Errno::IO)],
+                    fail: vec![(op, "target", skip, Errno::IO)],
                     before: if evicted {
-                        vec![(op, "target", 1, evicting)]
+                        vec![(op, "target", skip, evicting)]
                     } else {
                         Vec::new()
                     },
@@ -943,14 +983,20 @@ fn a_failed_publication_puts_the_original_back() -> Result<(), Box<dyn Error>> {
 
         let (result, replaced) = replace_reporting(&source, &target, false);
 
-        assert!(result.is_err(), "{item:?} {op:?}");
+        let left = (inode(&target)?, fs::symlink_metadata(&target)?.mode());
+        if let Item::ReadOnlyFolder = item {
+            fs::set_permissions(&target, mode(0o755))?;
+        }
+        let error = result.expect_err("the publication fails");
+        let injected = super::super::native_fs::os_error_detail(Errno::IO);
+        assert!(error.message().contains(&injected), "{item:?}: {error}");
         assert!(replaced.is_empty());
-        assert!(quirks.used_name(".strata-replaced-*"));
+        assert!(quirks.used_name(".strata-originals-*"));
         assert_eq!(names(root.path())?, ["source", "target"], "{item:?} {op:?}");
         if item == Item::Symlink {
             assert_eq!(fs::read_link(&target)?, Path::new("old"));
         } else {
-            assert_eq!(inode(&target)?, original);
+            assert_eq!(left, original, "{item:?}");
             assert_eq!(read_item(&target, directory)?, b"old");
         }
     }
@@ -998,16 +1044,17 @@ fn a_taken_name_keeps_the_original_aside_and_names_it() -> Result<(), Box<dyn Er
 
         let row = format!("{op:?}, saves over: {saves_over}, moving: {move_source}");
         let error = result.expect_err("the racer keeps its item");
-        let kept = names(root.path())?
-            .into_iter()
-            .find(|name| name.starts_with(".strata-replaced-"))
-            .ok_or("the original was not kept")?;
-        assert!(error.message().contains(&kept), "{row}: {error}");
+        let kept = originals_folder(root.path())?.ok_or("the original was not kept")?;
+        assert!(
+            error.message().contains(&format!("{kept}/target")),
+            "{row}: {error}"
+        );
+        let original = root.path().join(&kept).join("target");
         if saves_over {
-            assert_eq!(fs::read(root.path().join(&kept))?, b"racer", "{row}");
+            assert_eq!(fs::read(original)?, b"racer", "{row}");
             assert_eq!(names(root.path())?, [kept.as_str(), "source"], "{row}");
         } else {
-            assert_eq!(fs::read(root.path().join(&kept))?, b"old", "{row}");
+            assert_eq!(fs::read(original)?, b"old", "{row}");
             assert_eq!(fs::read(&target)?, b"racer", "{row}");
             assert_eq!(
                 names(root.path())?,
@@ -1061,11 +1108,7 @@ fn the_original_is_deleted_only_once_its_replacement_is_flushed() -> Result<(), 
         let aside_during_flush = Arc::new(std::sync::Mutex::new(Vec::new()));
         let (record, watched) = (aside_during_flush.clone(), root.path().to_path_buf());
         let racer: super::fs_quirks::Racer = Box::new(move || {
-            let kept = names(&watched).is_ok_and(|names| {
-                names
-                    .iter()
-                    .any(|name| name.starts_with(".strata-replaced-"))
-            });
+            let kept = originals_folder(&watched).is_ok_and(|folder| folder.is_some());
             record
                 .lock()
                 .unwrap_or_else(|error| error.into_inner())
@@ -1102,11 +1145,8 @@ fn the_original_is_deleted_only_once_its_replacement_is_flushed() -> Result<(), 
             assert_eq!(names(root.path())?, ["source", "target"]);
             continue;
         }
-        let aside = names(root.path())?
-            .into_iter()
-            .find(|name| name.starts_with(".strata-replaced-"))
-            .ok_or("the original stays aside")?;
-        assert_eq!(fs::read(root.path().join(&aside))?, b"old");
+        let aside = originals_folder(root.path())?.ok_or("the original stays aside")?;
+        assert_eq!(fs::read(root.path().join(&aside).join("target"))?, b"old");
         let error = result.expect_err("the original is kept");
         assert!(
             error.message().contains(&aside)
@@ -1221,7 +1261,7 @@ fn same_filesystem_replacing_move_restores_the_original_when_placement_fails()
 
     assert!(result.is_err());
     assert!(replaced.is_empty());
-    assert!(quirks.used_name(".strata-replaced-*"));
+    assert!(quirks.used_name(".strata-originals-*"));
     assert_eq!(inode(&target)?, original);
     assert_eq!(fs::read(&target)?, b"old");
     assert_eq!(fs::read(&source)?, b"incoming");

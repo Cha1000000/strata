@@ -174,7 +174,7 @@ fn items_left_out_or_left_behind_make_the_report_a_warning_or_follow_a_stop() {
     let reason = crate::services::io_error_detail(&std::io::Error::from_raw_os_error(denied));
     let left_behind = [
         kept(KeptCause::Changed),
-        kept(KeptCause::Undeletable(denied)),
+        kept(KeptCause::OriginalNotRemoved(reason.clone())),
         kept(KeptCause::Skipped(SpecialKind::Socket)),
         kept(KeptCause::CopyGone),
         kept(KeptCause::NameNotRestored {
@@ -243,6 +243,13 @@ fn items_left_out_or_left_behind_make_the_report_a_warning_or_follow_a_stop() {
             error = reason
         );
         assert_eq!(detail.contains(&*unrestored), kept_count > 0, "{row}");
+        let original = rust_i18n::t!(
+            "“%{name}” was replaced, but its original could not be removed from “%{kept}”: %{error}",
+            name = "data",
+            kept = "run",
+            error = reason
+        );
+        assert_eq!(detail.contains(&*original), kept_count > 0, "{row}");
         let still_open = [
             rust_i18n::t!(
                 "“%{name}” was left in “%{folder}”, as a file in it is still open in %{program}",
@@ -283,7 +290,7 @@ fn items_left_out_or_left_behind_make_the_report_a_warning_or_follow_a_stop() {
         );
         assert_eq!(
             detail.matches(&*undeletable).count(),
-            usize::from(kept_count > 0) + usize::from(in_trash_count > 0),
+            usize::from(in_trash_count > 0),
             "{row}"
         );
         assert_eq!(

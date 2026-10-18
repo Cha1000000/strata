@@ -770,19 +770,10 @@ fn set_aside_refuses_a_substituted_item_or_names_where_it_went() -> Result<(), B
         Swap::AsACaseOnlyRenameParksIt,
     ] {
         let root = tempfile::tempdir()?;
-        let (name, kind, parking, mut quirks) = match swap {
-            Swap::AsACaseOnlyRenameParksIt => (
-                "report",
-                HiddenName::Rename,
-                ".strata-rename-*",
-                case_insensitive(Quirks::default()),
-            ),
-            _ => (
-                "target",
-                HiddenName::Replaced,
-                ".strata-replaced-*",
-                Quirks::default(),
-            ),
+        // The rename into the originals folder; a case-only rename tries the new spelling first.
+        let (name, skip, mut quirks) = match swap {
+            Swap::AsACaseOnlyRenameParksIt => ("report", 1, case_insensitive(Quirks::default())),
+            _ => ("target", 0, Quirks::default()),
         };
         let item = root.path().join(name);
         fs::write(&item, b"original")?;
@@ -794,21 +785,14 @@ fn set_aside_refuses_a_substituted_item_or_names_where_it_went() -> Result<(), B
         });
         match swap {
             Swap::BeforeSettingAside => racer(),
-            _ => quirks.before = vec![(Op::Rename, parking, 0, racer)],
+            _ => quirks.before = vec![(Op::Rename, name, skip, racer)],
         }
         let scope = FsQuirks::install(root.path(), quirks);
         let parent = open_local_parent_directory(root.path())?;
 
         let result = match swap {
             Swap::AsACaseOnlyRenameParksIt => rename_in(root.path(), "report", "Report").map(drop),
-            _ => set_aside(
-                fs(),
-                Entry::new(&parent, OsStr::new(name)),
-                kind,
-                expected,
-                None,
-            )
-            .map(drop),
+            _ => set_aside(fs(), Entry::new(&parent, OsStr::new(name)), expected, None).map(drop),
         };
 
         assert_eq!(
@@ -827,16 +811,24 @@ fn set_aside_refuses_a_substituted_item_or_names_where_it_went() -> Result<(), B
         let [hidden, _] = &left[..] else {
             return Err(format!("{swap:?}: expected two names, found {left:?}").into());
         };
-        assert!(hidden.starts_with(kind.prefix()), "{swap:?}: {left:?}");
+        assert!(
+            hidden.starts_with(HiddenName::Originals.prefix()),
+            "{swap:?}: {left:?}"
+        );
+        assert_eq!(names(&root.path().join(hidden))?, [name], "{swap:?}");
         assert_eq!(
             result,
             Err(RenameFailure::Stranded {
-                temporary: OsString::from(hidden),
+                temporary: Path::new(hidden).join(name).into_os_string(),
                 error: PlaceError::Unconfirmed,
             }),
             "{swap:?}"
         );
-        assert_eq!(fs::read(root.path().join(hidden))?, b"stranger", "{swap:?}");
+        assert_eq!(
+            fs::read(root.path().join(hidden).join(name))?,
+            b"stranger",
+            "{swap:?}"
+        );
     }
     Ok(())
 }
@@ -1099,26 +1091,56 @@ fn a_case_only_rename_goes_through_a_temporary_name() -> Result<(), Box<dyn Erro
         alias_inodes: true,
         ..Quirks::exfat_fuse()
     };
-    let shapes: [Preset; 4] = [Quirks::default, Quirks::vboxsf, smb, exfat_fuse];
-    for quirks in shapes {
-        for folder in [false, true] {
+    #[derive(Clone, Copy, Debug)]
+    enum Item {
+        File,
+        Folder,
+        ReadOnlyFolder,
+    }
+    let plain: &[Item] = &[Item::File, Item::Folder];
+    let shapes: [(Preset, &[Item]); 4] = [
+        (
+            Quirks::default,
+            &[Item::File, Item::Folder, Item::ReadOnlyFolder],
+        ),
+        (Quirks::vboxsf, plain),
+        (smb, plain),
+        (exfat_fuse, plain),
+    ];
+    for (quirks, items) in shapes {
+        for &item in items {
             let root = tempfile::tempdir()?;
             let _scope = FsQuirks::install(root.path(), case_insensitive(quirks()));
             let source = root.path().join("report");
-            make(&source, folder)?;
+            make(&source, !matches!(item, Item::File))?;
+            let mode = |path: &Path| fs::metadata(path).map(|metadata| metadata.mode() & 0o7777);
+            let set_mode =
+                |path: &Path, mode| fs::set_permissions(path, fs::Permissions::from_mode(mode));
+            if let Item::ReadOnlyFolder = item {
+                set_mode(&source, 0o555)?;
+            }
             let original = identity(&source);
+            let original_mode = mode(&source)?;
 
             assert_eq!(
                 rename_in(root.path(), "report", "report"),
                 Ok(Renamed::Unchanged)
             );
-            assert_eq!(
-                rename_in(root.path(), "report", "Report"),
-                Ok(Renamed::CaseOnly)
-            );
+            let renamed = rename_in(root.path(), "report", "Report");
 
-            assert_eq!(names(root.path())?, ["Report"], "folder: {folder}");
+            let left = names(root.path())?;
+            let modes: Vec<_> = left
+                .iter()
+                .map(|name| {
+                    let path = root.path().join(name);
+                    let kept = mode(&path).ok();
+                    set_mode(&path, 0o755).map(|()| kept)
+                })
+                .collect::<Result<_, _>>()?;
+            assert_eq!(renamed, Ok(Renamed::CaseOnly), "{item:?}");
+            assert_eq!(left, ["Report"], "{item:?}");
             assert_eq!(identity(&root.path().join("Report")), original);
+            assert_eq!(modes, [Some(original_mode)], "{item:?}");
         }
     }
     Ok(())
@@ -1256,16 +1278,21 @@ fn a_failed_case_only_rename_moves_back_or_names_the_temporary() -> Result<(), B
 
         let left = names(root.path())?;
         assert_eq!(left.len(), 1);
-        assert_eq!(identity(&root.path().join(&left[0])), original);
         if moves_back {
             assert_eq!(result, Err(RenameFailure::Place(PlaceError::Io(Errno::IO))));
             assert_eq!(left, ["report"]);
+            assert_eq!(identity(&source), original);
         } else {
-            assert!(left[0].starts_with(".strata-rename-"), "{left:?}");
+            assert!(left[0].starts_with(".strata-originals-"), "{left:?}");
+            assert_eq!(names(&root.path().join(&left[0]))?, ["report"]);
+            assert_eq!(
+                identity(&root.path().join(&left[0]).join("report")),
+                original
+            );
             assert_eq!(
                 result,
                 Err(RenameFailure::Stranded {
-                    temporary: OsString::from(&left[0]),
+                    temporary: Path::new(&left[0]).join("report").into_os_string(),
                     error: PlaceError::Io(Errno::IO),
                 })
             );

@@ -76,7 +76,12 @@ impl Deletion {
                 }
                 permanently_delete_keeping(source, Rc::new(kept), cancellable.clone()).await
             }
-            Self::Displaced(original, name) => remove_displaced_original(original, &name).await,
+            Self::Displaced(original, name) => {
+                let kept = original.kept_in().to_os_string();
+                remove_displaced_original(original, unlinks.leftovers())
+                    .await
+                    .map_err(|error| io_error(original_not_removed(&name, &kept, &error)))
+            }
             Self::Aside(aside) => aside.remove().await,
         }
     }
@@ -85,7 +90,7 @@ impl Deletion {
         match self {
             Self::Sources(..) | Self::Source(..) => flush.to_owned(),
             Self::Displaced(original, name) => {
-                original_not_removed(name, &original.name, &io_error(flush))
+                original_not_removed(name, original.kept_in(), &io_error(flush))
             }
             Self::Aside(aside) => aside.not_removed(&io_error(flush)).message().to_owned(),
         }

@@ -354,6 +354,7 @@ pub enum KeptCause {
         saved_as: Location,
         error: String,
     },
+    OriginalNotRemoved(String),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

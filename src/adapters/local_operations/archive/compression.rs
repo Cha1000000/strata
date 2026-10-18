@@ -350,6 +350,7 @@ impl Publication {
         match exchange(fs(), stage.entry(), target) {
             Ok(true) => Ok(self.published(Displaced::Aside(DisplacedOriginal {
                 parent: OffMain::new(stage.parent.clone()),
+                originals: None,
                 name: stage.name.clone(),
                 identity: current.identity,
             }))),
@@ -419,7 +420,6 @@ impl Publication {
         let aside = match set_aside(
             fs(),
             Entry::new(&*stage.parent, target),
-            HiddenName::Replaced,
             current.identity,
             current.kept_attributes(),
         ) {
@@ -439,16 +439,15 @@ impl Publication {
             }
         };
         match stage.place(target) {
-            Ok(()) => Ok(self.published(Displaced::Aside(DisplacedOriginal {
-                parent: OffMain::new(stage.parent.clone()),
-                name: aside.name,
-                identity: aside.identity,
-            }))),
+            Ok(()) => Ok(self.published(Displaced::Aside(DisplacedOriginal::aside(
+                stage.parent.clone(),
+                aside,
+            )))),
             Err(error) => match put_back(fs(), stage.parent.as_fd(), &aside, target) {
                 Ok(()) => Err(self.creation_failed(placement_reason(error))),
                 Err(_) => Err(archive_failed(original_kept_aside(
                     &self.name,
-                    &aside.name,
+                    &aside.kept(),
                     &error_detail(placement_reason(error)),
                 ))),
             },

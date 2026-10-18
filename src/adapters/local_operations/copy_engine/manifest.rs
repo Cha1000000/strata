@@ -51,6 +51,12 @@ pub(in crate::adapters::local_operations) struct Unlinks {
     leftovers: Deadline,
 }
 
+impl Unlinks {
+    pub(in crate::adapters::local_operations) fn leftovers(&self) -> &Deadline {
+        &self.leftovers
+    }
+}
+
 #[derive(Default)]
 struct Unlinked {
     /// Link counts just before each removal; those at or below a snapshot's count followed it.

@@ -145,6 +145,13 @@ fn kept_line(item: &KeptItem, in_trash: bool) -> String {
         )
         .into_owned(),
         KeptCause::Skipped(kind) => special_line(&name, *kind),
+        KeptCause::OriginalNotRemoved(error) => rust_i18n::t!(
+            "“%{name}” was replaced, but its original could not be removed from “%{kept}”: %{error}",
+            name = name,
+            kept = folder(),
+            error = error
+        )
+        .into_owned(),
         KeptCause::NameNotRestored { saved_as, error } => rust_i18n::t!(
             "“%{new_name}” could not be renamed back to “%{name}”: %{error}",
             new_name = display_name(saved_as),

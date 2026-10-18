@@ -7,7 +7,9 @@ use crate::{
         trash_support::{TrashError, trash_with_cleanup},
     },
     model::{Location, hidden_names::HiddenName},
-    services::{ItemIdentity, PlacedSnapshot, ReplacedOriginal, TransferReport},
+    services::{
+        ItemIdentity, KeptCause, KeptItem, PlacedSnapshot, ReplacedOriginal, TransferReport,
+    },
 };
 use gtk::{gio, glib, prelude::*};
 
@@ -31,8 +33,13 @@ use super::{
     CopyInto, CopyRecord, GioNames, LeftOut, NamedChildren, TargetFolder, await_cancellable,
     blocking_join_message, cancelled_local_operation, copy_engine, copy_failure_after_cleanup,
     copy_recursively_with_progress,
-    deletion::{PinnedEntry, parallel_delete_local},
-    device, existing_folder_names, io_error, is_trash_unsupported_failure, merge_aside,
+    deletion::{
+        PinnedEntry, local_delete_worker_count, parallel_delete_local,
+        parallel_delete_local_blocking_with_workers, parallel_delete_local_with,
+    },
+    device, existing_folder_names, io_error, is_trash_unsupported_failure,
+    leftovers::Deadline,
+    merge_aside,
     mount_profile::{self, NamePolicy, known_mount},
     native_fs::{LocalFileIdentity, Pinned, open_local_parent_directory, os_error_detail},
     native_path, os_io_error, placement, placement_error_kind, placement_failure, placement_reason,
@@ -445,25 +452,65 @@ pub(super) fn set_aside_failure(failure: RenameFailure, name: &str) -> glib::Err
 /// An original kept under a hidden name until its replacement is safe on disk.
 pub(super) struct DisplacedOriginal {
     pub(super) parent: OffMain<Arc<OwnedFd>>,
+    /// The folder of the operation's own it is kept in, under its own name;
+    /// without one, it sits in `parent` at a hidden `name`.
+    pub(super) originals: Option<placement::Originals>,
     pub(super) name: OsString,
     pub(super) identity: LocalFileIdentity,
 }
 
+impl DisplacedOriginal {
+    pub(super) fn aside(parent: Arc<OwnedFd>, aside: placement::SetAside) -> Self {
+        Self {
+            parent: OffMain::new(parent),
+            originals: Some(aside.originals),
+            name: aside.name,
+            identity: aside.identity,
+        }
+    }
+
+    pub(super) fn kept_in(&self) -> &OsStr {
+        self.originals
+            .as_ref()
+            .map_or(&self.name, |originals| &originals.name)
+    }
+}
+
 pub(super) async fn remove_displaced_original(
     original: DisplacedOriginal,
-    name: &str,
+    deadline: &Deadline,
 ) -> Result<(), glib::Error> {
-    let kept = original.name.clone();
-    parallel_delete_local(
-        vec![PinnedEntry {
-            parent: original.parent.into_inner(),
-            name: original.name,
-            identity: Some(original.identity),
-        }],
-        gio::Cancellable::new(),
-    )
+    let DisplacedOriginal {
+        parent,
+        originals,
+        name,
+        identity,
+    } = original;
+    let Some(originals) = originals else {
+        return parallel_delete_local(
+            vec![PinnedEntry {
+                parent: parent.into_inner(),
+                name,
+                identity: Some(identity),
+            }],
+            gio::Cancellable::new(),
+        )
+        .await;
+    };
+    let roots = vec![PinnedEntry {
+        parent: originals.handle(),
+        name,
+        identity: Some(identity),
+    }];
+    let deadline = deadline.clone();
+    parallel_delete_local_with(roots, gio::Cancellable::new(), move |roots, cancelled| {
+        let workers = local_delete_worker_count(&roots);
+        parallel_delete_local_blocking_with_workers(roots, cancelled, workers, &deadline)?;
+        originals
+            .remove(fs(), parent.as_fd(), &deadline)
+            .map_err(|refused| originals.refusal(fs(), parent.as_fd(), refused))
+    })
     .await
-    .map_err(|error| io_error(original_not_removed(name, &kept, &error)))
 }
 
 pub(super) enum SourcePlaced {
@@ -505,14 +552,8 @@ pub(super) fn place_source(
         Err(error) => return Err(error.error),
     }
     let name = plan.target_display();
-    let aside = placement::set_aside(
-        fs(),
-        target,
-        HiddenName::Replaced,
-        current.identity,
-        current.kept_attributes(),
-    )
-    .map_err(|error| set_aside_failure(error, &name))?;
+    let aside = placement::set_aside(fs(), target, current.identity, current.kept_attributes())
+        .map_err(|error| set_aside_failure(error, &name))?;
     let error = match placement::place(fs(), source, target, expected) {
         Ok(_) => return Ok(SourcePlaced::SetAside(aside)),
         Err(error) => error,
@@ -520,7 +561,7 @@ pub(super) fn place_source(
     if placement::put_back(fs(), plan.target_parent.as_fd(), &aside, &plan.target_name).is_err() {
         return Err(io_error(original_kept_aside(
             &name,
-            &aside.name,
+            &aside.kept(),
             &crate::services::error_detail(placement_reason(error)),
         )));
     }
@@ -685,6 +726,7 @@ pub(super) async fn replace_through_stage(
                             original: ReplacedOriginal::Deleted,
                             displaced: Some(DisplacedOriginal {
                                 parent: OffMain::new(staged.parent),
+                                originals: None,
                                 name: staged.name,
                                 identity: original,
                             }),
@@ -733,14 +775,8 @@ pub(super) async fn set_aside_and_publish(
     let aside = run_blocking(move || {
         let target = Entry::new(&*parent, &step_plan.target_name);
         let current = ensure_unchanged(target, &step_plan.target, &step_plan.target_pin)?;
-        placement::set_aside(
-            fs(),
-            target,
-            HiddenName::Replaced,
-            current.identity,
-            current.kept_attributes(),
-        )
-        .map_err(|error| set_aside_failure(error, &step_name))
+        placement::set_aside(fs(), target, current.identity, current.kept_attributes())
+            .map_err(|error| set_aside_failure(error, &step_name))
     })
     .await;
     let aside = match aside {
@@ -763,7 +799,7 @@ pub(super) async fn set_aside_and_publish(
         Ok(ownership) => ownership,
         Err(error) => {
             let detail = crate::services::gio_error_detail(&error);
-            let kept = aside.name.clone();
+            let kept = aside.kept();
             let step_plan = plan.clone();
             let restored = run_blocking(move || {
                 placement::put_back(fs(), parent.as_fd(), &aside, &step_plan.target_name)
@@ -779,11 +815,7 @@ pub(super) async fn set_aside_and_publish(
     Ok((
         StagedReplacement {
             original: ReplacedOriginal::Deleted,
-            displaced: Some(DisplacedOriginal {
-                parent: OffMain::new(parent),
-                name: aside.name,
-                identity: aside.identity,
-            }),
+            displaced: Some(DisplacedOriginal::aside(parent, aside)),
             placed: None,
         },
         ownership,
@@ -838,12 +870,24 @@ pub(super) async fn replace_owing(
                 // The source took its place by a rename, so it was not copied.
                 SourcePlaced::SetAside(aside) => {
                     on_replaced(ReplacedOriginal::Deleted, None);
-                    let original = DisplacedOriginal {
-                        parent: OffMain::new(plan.target_parent.clone()),
-                        name: aside.name,
-                        identity: aside.identity,
-                    };
-                    remove_displaced_original(original, &plan.target_display()).await?;
+                    let kept = target_path
+                        .with_file_name(&aside.originals.name)
+                        .join(&aside.name);
+                    let original = DisplacedOriginal::aside(plan.target_parent.clone(), aside);
+                    if let Err(error) =
+                        remove_displaced_original(original, &Deadline::default()).await
+                        && let Some(progress) = &copying.progress
+                    {
+                        progress.report(TransferReport {
+                            kept: vec![KeptItem {
+                                location: Location::local(kept),
+                                cause: KeptCause::OriginalNotRemoved(
+                                    crate::services::gio_error_detail(&error),
+                                ),
+                            }],
+                            ..TransferReport::default()
+                        });
+                    }
                     return Ok(Owed::default());
                 }
                 SourcePlaced::CopyAfterTrash(trashed) => Removal::Trashed(trashed),

@@ -10,16 +10,19 @@
 use std::{
     cell::Cell,
     ffi::{OsStr, OsString},
-    os::fd::{AsFd, BorrowedFd},
+    os::fd::{AsFd, BorrowedFd, OwnedFd},
+    path::Path,
+    sync::Arc,
 };
 
 use rustix::{
-    fs::{AtFlags, FileType, Mode, RenameFlags},
+    fs::{AtFlags, FileType, Mode, OFlags, RenameFlags, ResolveFlags},
     io::Errno,
 };
 
 use super::{
-    fs_ops::{Entry, EntryStat, FsOps},
+    fs_ops::{Entry, EntryStat, FsOps, OffMain},
+    leftovers::{self, Deadline, Refused},
     mount_profile,
     names::fix::units,
     native_fs::{self, LocalFileIdentity},
@@ -854,14 +857,133 @@ fn remove_probe_file(fs: &dyn FsOps, entry: Entry<'_>, made: LocalFileIdentity) 
     }
 }
 
-#[derive(Debug)]
-pub(super) struct SetAside {
+pub(super) struct Originals {
     pub name: OsString,
-    /// As observed after the move; a recreated symlink is a new inode.
+    handle: OffMain<Arc<OwnedFd>>,
+}
+
+impl Originals {
+    pub(super) fn create(fs: &dyn FsOps, dir: BorrowedFd<'_>) -> Result<Self, PlaceError> {
+        let (name, identity) = reserve_hidden_name(HiddenName::Originals, |name| {
+            fs.mkdir(at(dir, name), Mode::from_raw_mode(0o700))
+                .map_err(creation_error)?;
+            fs.stat(at(dir, name), false)
+                .map(|stat| stat.identity)
+                .map_err(PlaceError::Io)
+        })
+        .map_err(|error| match error {
+            PlaceError::InvalidName => PlaceError::Unsupported,
+            error => error,
+        })?;
+        let opened = open_beneath(fs, dir, Path::new(&name)).and_then(|handle| {
+            match fs.stat_fd(handle.as_fd()) {
+                Ok(stat) if stat.identity == identity => Ok(handle),
+                Ok(_) => Err(PlaceError::Changed),
+                Err(error) => Err(PlaceError::Io(error)),
+            }
+        });
+        match opened {
+            Ok(handle) => Ok(Self {
+                name,
+                handle: OffMain::new(Arc::new(handle)),
+            }),
+            Err(error) => {
+                remove_if_unchanged(fs, at(dir, &name), identity, AtFlags::REMOVEDIR);
+                Err(error)
+            }
+        }
+    }
+
+    pub(super) fn entry<'a>(&'a self, name: &'a OsStr) -> Entry<'a> {
+        Entry::new(&**self.handle, name)
+    }
+
+    pub(super) fn handle(&self) -> Arc<OwnedFd> {
+        Arc::clone(&self.handle)
+    }
+
+    pub(super) fn kept(&self, name: &OsStr) -> OsString {
+        Path::new(&self.name).join(name).into_os_string()
+    }
+
+    pub(super) fn remove(
+        &self,
+        fs: &dyn FsOps,
+        dir: BorrowedFd<'_>,
+        deadline: &Deadline,
+    ) -> Result<(), Refused> {
+        let folder = at(dir, &self.name);
+        let unchanged = || match (fs.stat(folder, false), fs.stat_fd(self.handle.as_fd())) {
+            (Ok(named), Ok(held)) => named.identity == held.identity,
+            _ => false,
+        };
+        if !unchanged() {
+            return Err(Refused::Changed(Errno::NOENT));
+        }
+        leftovers::remove_folder(fs, folder, deadline, &|| false, &unchanged)
+    }
+
+    pub(super) fn refusal(&self, fs: &dyn FsOps, dir: BorrowedFd<'_>, refused: Refused) -> String {
+        let folder = at(dir, &self.name);
+        match refused {
+            Refused::StillOpen(_) => {
+                leftovers::still_open(fs, folder).map(crate::services::error_detail)
+            }
+            Refused::Changed(_) => Some(
+                rust_i18n::t!(
+                    "%{name} changed while the operation was in progress",
+                    name = self.name.to_string_lossy()
+                )
+                .into_owned(),
+            ),
+            _ => None,
+        }
+        .unwrap_or_else(|| native_fs::os_error_detail(refused.errno()))
+    }
+}
+
+pub(super) struct SetAside {
+    pub originals: Originals,
+    pub name: OsString,
     pub identity: LocalFileIdentity,
     pub attributes: Option<Attributes>,
 }
 
+impl SetAside {
+    pub(super) fn entry(&self) -> Entry<'_> {
+        self.originals.entry(&self.name)
+    }
+
+    pub(super) fn kept(&self) -> OsString {
+        self.originals.kept(&self.name)
+    }
+}
+
+pub(super) fn open_beneath(
+    fs: &dyn FsOps,
+    dir: BorrowedFd<'_>,
+    relative: &Path,
+) -> Result<OwnedFd, PlaceError> {
+    native_fs::retry_local_open(|| {
+        fs.open_at(
+            at(dir, relative.as_os_str()),
+            OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC,
+            Mode::empty(),
+            Some(
+                ResolveFlags::BENEATH
+                    | ResolveFlags::NO_SYMLINKS
+                    | ResolveFlags::NO_MAGICLINKS
+                    | ResolveFlags::NO_XDEV,
+            ),
+        )
+    })
+    .map_err(|error| match error {
+        Errno::XDEV => PlaceError::CrossDevice,
+        error => PlaceError::Io(error),
+    })
+}
+
+/// Only into a folder this operation just made, so a plain rename clobbers nothing.
 pub(super) fn move_aside(
     fs: &dyn FsOps,
     from: Entry<'_>,
@@ -869,39 +991,48 @@ pub(super) fn move_aside(
     expected: LocalFileIdentity,
     attributes: Option<Attributes>,
 ) -> Result<(LocalFileIdentity, Option<Attributes>), PlaceError> {
-    if place(fs, from, to, Some(expected))? != Placed::RecreatedSymlink {
-        return Ok((expected, attributes));
+    match fs.stat(from, false) {
+        Ok(current) if current.identity == expected => {}
+        Ok(_) | Err(Errno::NOENT) => return Err(PlaceError::Changed),
+        Err(error) => return Err(PlaceError::Io(error)),
     }
-    fs.stat(to, true)
-        .map(|stat| (stat.identity, stat.kept_attributes()))
-        .map_err(|_| PlaceError::Unconfirmed)
+    match fs.rename(from, to, RenameFlags::empty()) {
+        Ok(()) => verified(fs, to, Some(expected), Ok(Placed::Renamed)),
+        Err(Errno::XDEV) => Err(PlaceError::CrossDevice),
+        Err(error) if may_have_lost_reply(error) => {
+            resolve(fs, from, to, Some(expected), error).map(|()| Placed::Renamed)
+        }
+        Err(error) => Err(PlaceError::Io(error)),
+    }
+    .map(|_| (expected, attributes))
 }
 
 pub(super) fn set_aside(
     fs: &dyn FsOps,
     entry: Entry<'_>,
-    hidden: HiddenName,
     expected: LocalFileIdentity,
     attributes: Option<Attributes>,
 ) -> Result<SetAside, RenameFailure> {
-    let mut reserved = OsString::new();
-    reserve_hidden_name(hidden, |name| {
-        reserved = name.to_os_string();
-        move_aside(fs, entry, at(entry.dir, name), expected, attributes)
-    })
-    .map(|(name, (identity, attributes))| SetAside {
-        name,
-        identity,
-        attributes,
-    })
-    .map_err(|error| match error {
-        PlaceError::Unconfirmed => RenameFailure::Stranded {
-            temporary: reserved,
+    let originals = Originals::create(fs, entry.dir).map_err(RenameFailure::Place)?;
+    let moved = with_owner_write(fs, entry, expected, attributes, || {
+        move_aside(fs, entry, originals.entry(entry.name), expected, attributes)
+    });
+    match moved {
+        Ok((identity, attributes)) => Ok(SetAside {
+            originals,
+            name: entry.name.to_os_string(),
+            identity,
+            attributes,
+        }),
+        Err(error @ PlaceError::Unconfirmed) => Err(RenameFailure::Stranded {
+            temporary: originals.kept(entry.name),
             error,
-        },
-        PlaceError::InvalidName => RenameFailure::Place(PlaceError::Unsupported),
-        error => RenameFailure::Place(error),
-    })
+        }),
+        Err(error) => {
+            let _ = originals.remove(fs, entry.dir, &Deadline::default());
+            Err(RenameFailure::Place(error))
+        }
+    }
 }
 
 pub(super) fn put_back(
@@ -912,12 +1043,13 @@ pub(super) fn put_back(
 ) -> Result<(), PlaceError> {
     place_back(
         fs,
-        at(dir, &aside.name),
+        aside.entry(),
         at(dir, name),
         aside.identity,
         aside.attributes,
-    )
-    .map(drop)
+    )?;
+    let _ = aside.originals.remove(fs, dir, &Deadline::default());
+    Ok(())
 }
 
 pub(super) fn place_back(
@@ -939,7 +1071,44 @@ pub(super) fn place_back(
     ) {
         return Err(PlaceError::Changed);
     }
-    place(fs, from, to, Some(current.identity))
+    with_owner_write(fs, from, current.identity, None, || {
+        place(fs, from, to, Some(current.identity))
+    })
+}
+
+// Linux moves a folder to another parent only if its `..` can be rewritten.
+fn with_owner_write<T>(
+    fs: &dyn FsOps,
+    folder: Entry<'_>,
+    expected: LocalFileIdentity,
+    attributes: Option<Attributes>,
+    moved: impl Fn() -> Result<T, PlaceError>,
+) -> Result<T, PlaceError> {
+    let refused = match moved() {
+        Err(refused @ PlaceError::Io(Errno::ACCESS)) => refused,
+        result => return result,
+    };
+    let Ok(opened) = fs.open_dir(folder) else {
+        return Err(refused);
+    };
+    let locked = fs.stat_fd(opened.as_fd()).ok().filter(|stat| {
+        stat.mode & 0o200 == 0
+            && native_fs::unchanged(
+                mount_profile::identity_at(fs, folder.dir),
+                expected,
+                attributes,
+                stat,
+            )
+    });
+    let Some(locked) = locked else {
+        return Err(refused);
+    };
+    if fs.chmod_fd(opened.as_fd(), locked.mode | 0o200).is_err() {
+        return Err(refused);
+    }
+    let result = moved();
+    let _ = fs.chmod_fd(opened.as_fd(), locked.mode);
+    result
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1091,21 +1260,24 @@ pub(super) fn rename_in_place(
     let Some(identity) = alias_of(fs, from, to) else {
         return Err(RenameFailure::Place(PlaceError::Exists));
     };
-    let aside = set_aside(fs, from, HiddenName::Rename, identity, None)?;
-    let parked = at(from.dir, &aside.name);
+    let aside = set_aside(fs, from, identity, None)?;
     // The SMB client keeps answering for the lookup of `to` for about a
     // second; revalidating drops it.
     let _ = fs.stat(to, true);
-    match place(fs, parked, to, Some(aside.identity)) {
+    let renamed = match place_back(fs, aside.entry(), to, aside.identity, None) {
         Ok(_) => Ok(Renamed::CaseOnly),
-        Err(error) => match place(fs, parked, from, Some(aside.identity)) {
+        Err(error) => match place_back(fs, aside.entry(), from, aside.identity, None) {
             Ok(_) => Err(RenameFailure::Place(error)),
-            Err(_) => Err(RenameFailure::Stranded {
-                temporary: aside.name,
-                error,
-            }),
+            Err(_) => {
+                return Err(RenameFailure::Stranded {
+                    temporary: aside.kept(),
+                    error,
+                });
+            }
         },
-    }
+    };
+    let _ = aside.originals.remove(fs, from.dir, &Deadline::default());
+    renamed
 }
 
 fn same_directory(fs: &dyn FsOps, left: BorrowedFd<'_>, right: BorrowedFd<'_>) -> bool {

@@ -15,7 +15,7 @@ use std::{
 
 use gtk::{gio, glib};
 use rustix::{
-    fs::{AtFlags, Mode, OFlags, ResolveFlags},
+    fs::{AtFlags, Mode},
     io::Errno,
 };
 
@@ -24,7 +24,7 @@ use super::{
     deletion::{PinnedEntry, parallel_delete_local},
     fs_ops::{Entry, drop_off_main_thread, fs},
     io_error,
-    native_fs::{LocalFileIdentity, open_local_parent_directory, retry_local_open},
+    native_fs::{LocalFileIdentity, open_local_parent_directory},
     placement::{self, Feasibility, PlaceError},
     placement_reason, run_blocking, was_cancelled,
 };
@@ -74,26 +74,6 @@ fn could_not_set_aside(name: &str, error: PlaceError) -> glib::Error {
     ))
 }
 
-fn open_beneath(dir: &OwnedFd, relative: &Path) -> Result<OwnedFd, PlaceError> {
-    retry_local_open(|| {
-        fs().open_at(
-            Entry::new(dir, relative.as_os_str()),
-            OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC,
-            Mode::empty(),
-            Some(
-                ResolveFlags::BENEATH
-                    | ResolveFlags::NO_SYMLINKS
-                    | ResolveFlags::NO_MAGICLINKS
-                    | ResolveFlags::NO_XDEV,
-            ),
-        )
-    })
-    .map_err(|error| match error {
-        Errno::XDEV => PlaceError::CrossDevice,
-        error => PlaceError::Io(error),
-    })
-}
-
 fn create_folder(target: &OwnedFd) -> Result<Folder, PlaceError> {
     let (name, identity) = placement::reserve_hidden_name(HiddenName::Merge, |name| {
         let entry = Entry::new(target, name);
@@ -107,13 +87,13 @@ fn create_folder(target: &OwnedFd) -> Result<Folder, PlaceError> {
         PlaceError::InvalidName => PlaceError::Unsupported,
         error => error,
     })?;
-    let opened = open_beneath(target, Path::new(&name)).and_then(|handle| {
-        match fs().stat_fd(handle.as_fd()) {
+    let opened = placement::open_beneath(fs(), target.as_fd(), Path::new(&name)).and_then(
+        |handle| match fs().stat_fd(handle.as_fd()) {
             Ok(stat) if stat.identity == identity => Ok(handle),
             Ok(_) => Err(PlaceError::Changed),
             Err(error) => Err(PlaceError::Io(error)),
-        }
-    });
+        },
+    );
     match opened {
         Ok(handle) => Ok(Folder {
             name,
@@ -188,7 +168,7 @@ impl MergeAside {
         let parent = if relative.as_os_str().is_empty() {
             target
         } else {
-            Arc::new(open_beneath(&target, relative).map_err(failed)?)
+            Arc::new(placement::open_beneath(fs(), target.as_fd(), relative).map_err(failed)?)
         };
         let aside_parent = self.mirror(relative).map_err(failed)?;
         let entry = Entry::new(&*parent, file_name);
@@ -233,7 +213,8 @@ impl MergeAside {
             let entry = Entry::new(&*current, component);
             fs().mkdir(entry, Mode::from_raw_mode(0o700))
                 .map_err(placement::creation_error)?;
-            let handle = match open_beneath(&current, Path::new(component)) {
+            let handle = match placement::open_beneath(fs(), current.as_fd(), Path::new(component))
+            {
                 Ok(handle) => Arc::new(handle),
                 Err(error) => {
                     let _ = fs().unlink(entry, AtFlags::REMOVEDIR);

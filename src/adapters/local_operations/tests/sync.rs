@@ -497,7 +497,8 @@ fn the_barrier_before_deleting_a_moved_source_follows_the_destination_family()
     const FAILS: Device = Some(Err(Errno::ACCESS));
     const FS: &[Op] = &[Op::SyncFs];
     const DIR: &[Op] = &[Op::SyncDir];
-    const BOTH: &[Op] = &[Op::SyncFs, Op::SyncDir];
+    const BOTH: &[Op] = &[Op::SyncDir, Op::SyncFs, Op::SyncDir];
+    const FS_THEN_DIR: &[Op] = &[Op::SyncFs, Op::SyncDir];
     type Row = (
         &'static str,
         Device,
@@ -507,9 +508,10 @@ fn the_barrier_before_deleting_a_moved_source_follows_the_destination_family()
         bool,
         &'static [Op],
     );
-    let rows: [Row; 12] = [
+    let rows: [Row; 13] = [
         ("ext4", None, None, false, true, false, FS),
         ("vfat", None, None, false, true, false, BOTH),
+        ("ntfs3", None, None, false, true, false, BOTH),
         ("fuseblk", None, None, false, true, true, DIR),
         ("fuseblk", NTFS, None, false, true, false, BOTH),
         ("fuseblk", EXFAT, None, false, true, false, BOTH),
@@ -517,7 +519,7 @@ fn the_barrier_before_deleting_a_moved_source_follows_the_destination_family()
         ("fuseblk", FAILS, None, false, true, true, DIR),
         ("cifs", None, None, false, true, true, &[]),
         ("9p", None, None, false, true, true, FS),
-        ("ext4", None, None, true, true, false, BOTH),
+        ("ext4", None, None, true, true, false, FS_THEN_DIR),
         ("cifs", None, None, false, false, false, &[]),
         ("ext4", None, Some((5, 4, 0)), false, true, true, FS),
     ];
