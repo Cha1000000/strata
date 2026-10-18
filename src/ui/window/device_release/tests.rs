@@ -758,3 +758,66 @@ fn start_release_claims_unplug_only_when_the_drive_is_removable_or_ejectable() {
         },
     );
 }
+
+#[test]
+fn start_release_ends_strata_s_reads_on_the_drive_before_unmounting_it() {
+    crate::test_support::gtk_test(
+        "ui::window::device_release::tests::start_release_ends_strata_s_reads_on_the_drive_before_unmounting_it",
+        || {
+            reset_releases();
+            let root = tempfile::tempdir().expect("mount root");
+            let mount = root.path().to_path_buf();
+            let song = mount.join("Music/song.ogg");
+            std::fs::create_dir_all(song.parent().expect("folder")).expect("music folder");
+            std::fs::write(&song, b"held").expect("song");
+            let file = std::fs::File::open(&song).expect("a preview opens the song");
+            let (stop, stopped) = std::sync::mpsc::channel();
+            let hold = crate::services::file_activity::hold([&song], move || {
+                let _ = stop.send(());
+            })
+            .expect("a preview outside any operation");
+            let read_ended = Arc::new(AtomicBool::new(false));
+            let ended = Arc::clone(&read_ended);
+            let reader = thread::spawn(move || {
+                let _ = stopped.recv_timeout(Duration::from_secs(10));
+                drop(file);
+                ended.store(true, Ordering::SeqCst);
+                drop(hold);
+            });
+            crate::adapters::install_sync_probe(None, false);
+            let (overlay, window) = host();
+            let settled = Rc::new(Cell::new(false));
+            let ended_at_unmount = Rc::new(Cell::new(None));
+            let settled_for_release = Rc::clone(&settled);
+            let seen = Rc::clone(&ended_at_unmount);
+            let ended = Arc::clone(&read_ended);
+            assert!(start_release(
+                overlay.upcast_ref(),
+                None,
+                None,
+                release_key("USB Backup", mount.clone()),
+                ReleaseKind::Unmount,
+                true,
+                Some(mount.clone()),
+                None,
+                move || settled_for_release.set(true),
+                move |_| {
+                    seen.set(Some(ended.load(Ordering::SeqCst)));
+                    async { Ok(()) }
+                },
+            ));
+            let settled_for_wait = Rc::clone(&settled);
+            wait_until(move || settled_for_wait.get());
+            reader.join().expect("the preview's worker");
+
+            assert_eq!(
+                ended_at_unmount.get(),
+                Some(true),
+                "the preview's read ended before the unmount began"
+            );
+            window.destroy();
+            crate::adapters::clear_sync_probe();
+            reset_releases();
+        },
+    );
+}

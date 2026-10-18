@@ -885,6 +885,12 @@ where
                 .and_then(|browser| browser.active_location());
             #[cfg(test)]
             note_release_before_flush(browser.as_ref());
+            let _operation = crate::adapters::ActiveOperation::begin([]);
+            if let Some(root) = sync_root.clone() {
+                _operation
+                    .release_lexically(vec![root], &gio::Cancellable::new())
+                    .await;
+            }
             let flush_root = sync_root.clone();
             let flush = flush_mount(sync_root).await;
             let decision = match flush {
