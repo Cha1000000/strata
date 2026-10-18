@@ -299,6 +299,7 @@ pub enum BrowserEvent {
     /// An item an operation of this browser brought back from Trash to `location`.
     ItemRestored {
         location: Location,
+        identity: Option<ItemIdentity>,
     },
     DeletionStarted {
         total: usize,

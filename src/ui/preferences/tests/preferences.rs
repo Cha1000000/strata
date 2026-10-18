@@ -1544,11 +1544,20 @@ enum ItemStep {
     },
     Forget {
         root: &'static str,
-        trashed: bool,
+        trashed: Option<TrashMount>,
     },
     Restore(&'static str),
+    RestoreRenumbered(&'static str),
     /// Puts a different folder at `path`, keeping the original alive elsewhere.
     ReplaceOnDisk(&'static str),
+}
+
+#[derive(Clone, Copy)]
+enum TrashMount {
+    KeepsNumbers,
+    RenewsNumbers,
+    RenewsNumbersWithoutBirths,
+    RenewsNumbersInOneBirthTick,
 }
 
 #[test]
@@ -1558,7 +1567,11 @@ fn item_customizations_follow_relocations_and_removals() {
         || {
             use crate::assets::icons::{FILE_CODE, PICTURES};
             use crate::model::FolderColor::{Blue, Green, Red};
-            use ItemStep::{Forget, Relocate, ReplaceOnDisk, Restore};
+            use ItemStep::{Forget, Relocate, ReplaceOnDisk, Restore, RestoreRenumbered};
+            use TrashMount::{
+                KeepsNumbers, RenewsNumbers, RenewsNumbersInOneBirthTick,
+                RenewsNumbersWithoutBirths,
+            };
 
             seed_saved_preferences_for_test();
             let manager = PreferenceManager::shared();
@@ -1572,7 +1585,11 @@ fn item_customizations_follow_relocations_and_removals() {
             };
             let trash = |root| Forget {
                 root,
-                trashed: true,
+                trashed: Some(KeepsNumbers),
+            };
+            let trash_on = |root, mount| Forget {
+                root,
+                trashed: Some(mount),
             };
             let customized_docs = [
                 ("docs", Some(Red), Some(FILE_CODE)),
@@ -1597,7 +1614,7 @@ fn item_customizations_follow_relocations_and_removals() {
                 usize,
             );
             // One coalesced color save and one folder sort change per step that changed something.
-            let cases: [Case<'_>; 10] = [
+            let cases: [Case<'_>; 15] = [
                 (
                     "a rename carries the root and descendants but not a look-alike sibling",
                     &customized_docs,
@@ -1696,12 +1713,61 @@ fn item_customizations_follow_relocations_and_removals() {
                     &[
                         Forget {
                             root: "docs",
-                            trashed: false,
+                            trashed: None,
                         },
                         Restore("docs"),
                     ],
                     &forgotten_docs,
                     1,
+                ),
+                (
+                    "a trashed item its mount renumbered gets its keys back by its birth time",
+                    &customized_docs,
+                    &[trash_on("docs", RenewsNumbers), RestoreRenumbered("docs")],
+                    &customized_docs,
+                    2,
+                ),
+                (
+                    "another number where numbers are kept is another item",
+                    &customized_docs,
+                    &[trash_on("docs", KeepsNumbers), RestoreRenumbered("docs")],
+                    &forgotten_docs,
+                    1,
+                ),
+                (
+                    "where only the number tells, the same number gets the keys back",
+                    &customized_docs,
+                    &[
+                        trash_on("docs", RenewsNumbersWithoutBirths),
+                        Restore("docs"),
+                    ],
+                    &customized_docs,
+                    2,
+                ),
+                (
+                    "where only the number tells, another number gets nothing",
+                    &customized_docs,
+                    &[
+                        trash_on("docs", RenewsNumbersWithoutBirths),
+                        RestoreRenumbered("docs"),
+                    ],
+                    &forgotten_docs,
+                    1,
+                ),
+                (
+                    "a sibling sharing the trashed folder's birth tick keeps its keys apart",
+                    &customized_docs,
+                    &[
+                        trash_on("docs", RenewsNumbersInOneBirthTick),
+                        trash_on("docs2", RenewsNumbersInOneBirthTick),
+                        Restore("docs"),
+                    ],
+                    &[
+                        ("docs", Some(Red), Some(FILE_CODE)),
+                        ("docs/inner", Some(Blue), None),
+                        ("docs2", None, None),
+                    ],
+                    3,
                 ),
                 (
                     "uncustomized items change nothing",
@@ -1730,6 +1796,36 @@ fn item_customizations_follow_relocations_and_removals() {
                 let root = tempfile::tempdir().expect("case root");
                 let path = |relative: &str| root.path().join(relative);
                 let location = |relative: &str| Location::local(path(relative));
+                // What the operations report; the birth time stands in for one a mount stores.
+                let identity = |relative: &str, mount: TrashMount, renumbered: bool| {
+                    use std::os::unix::fs::MetadataExt;
+                    let metadata = fs::symlink_metadata(path(relative)).expect("identity");
+                    let numbers = match mount {
+                        KeepsNumbers => crate::services::InodeNumbers::Kept,
+                        RenewsNumbers
+                        | RenewsNumbersWithoutBirths
+                        | RenewsNumbersInOneBirthTick => crate::services::InodeNumbers::Renewed,
+                    };
+                    let born = match mount {
+                        RenewsNumbersInOneBirthTick => 1,
+                        _ => metadata.ino() as i64,
+                    };
+                    crate::services::ItemIdentity {
+                        evidence: crate::services::Evidence {
+                            device: metadata.dev(),
+                            inode: metadata.ino() + u64::from(renumbered),
+                            kind: rustix::fs::FileType::Directory,
+                            birth: (!matches!(mount, RenewsNumbersWithoutBirths))
+                                .then_some((born, 0)),
+                            attributes: None,
+                        },
+                        traits: crate::services::IdentityTraits {
+                            numbers,
+                            ..Default::default()
+                        },
+                    }
+                };
+                let mut trashed_on = KeepsNumbers;
                 fs::create_dir_all(path("docs")).expect("docs folder");
                 for (relative, color, icon) in seed {
                     fs::create_dir_all(path(relative)).expect("customized folder");
@@ -1758,15 +1854,16 @@ fn item_customizations_follow_relocations_and_removals() {
                             manager.relocate_folder_views(&location(from), &to, merged);
                         }
                         Forget { root, trashed } => {
-                            let identity = trashed
-                                .then(|| crate::services::ItemIdentity::at_path(&path(root)))
-                                .flatten();
+                            trashed_on = trashed.unwrap_or(trashed_on);
+                            let identity = trashed.map(|mount| identity(root, mount, false));
                             manager.forget_item_customizations(&path(root), identity);
                             manager.forget_folder_views_within(&location(root), identity);
                         }
-                        Restore(root) => {
-                            manager.restore_item_customizations(&path(root));
-                            manager.restore_folder_views(&location(root));
+                        Restore(root) | RestoreRenumbered(root) => {
+                            let renumbered = matches!(step, RestoreRenumbered(_));
+                            let restored = identity(root, trashed_on, renumbered);
+                            manager.restore_item_customizations(&path(root), restored);
+                            manager.restore_folder_views(&location(root), Some(restored));
                         }
                         ReplaceOnDisk(relative) => {
                             fs::rename(path(relative), root.path().join("kept-alive"))

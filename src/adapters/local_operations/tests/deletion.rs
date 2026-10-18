@@ -1094,9 +1094,9 @@ fn an_already_cancelled_recursive_delete_preserves_the_root() -> Result<(), Box<
 }
 
 #[test]
-fn trashing_reports_each_items_identity_and_a_permanent_delete_reports_none() {
+fn trashing_and_restoring_report_each_items_identity_and_a_permanent_delete_reports_none() {
     crate::test_support::gtk_test(
-        "adapters::local_operations::tests::deletion::trashing_reports_each_items_identity_and_a_permanent_delete_reports_none",
+        "adapters::local_operations::tests::deletion::trashing_and_restoring_report_each_items_identity_and_a_permanent_delete_reports_none",
         || {
             for permanent in [false, true] {
                 let root = tempfile::tempdir().expect("root");
@@ -1120,18 +1120,60 @@ fn trashing_reports_each_items_identity_and_a_permanent_delete_reports_none() {
                     )
                 });
 
-                let events = events.borrow();
-                assert!(matches!(
-                    events.last(),
-                    Some(OperationEvent::Deleted { .. })
-                ));
-                assert_eq!(
-                    trashed_items(&events),
-                    if permanent {
-                        Vec::new()
-                    } else {
-                        vec![(Location::local(&folder), identity)]
-                    }
+                let trashed = {
+                    let events = events.borrow();
+                    assert!(matches!(
+                        events.last(),
+                        Some(OperationEvent::Deleted { .. })
+                    ));
+                    assert_eq!(
+                        trashed_items(&events),
+                        if permanent {
+                            Vec::new()
+                        } else {
+                            vec![(Location::local(&folder), identity)]
+                        }
+                    );
+                    events.iter().find_map(|event| match event {
+                        OperationEvent::ItemTrashed { identity, .. } => Some(*identity),
+                        _ => None,
+                    })
+                };
+                let Some(trashed) = trashed else {
+                    continue;
+                };
+                let restoring = Rc::new(RefCell::new(Vec::new()));
+                let emitted = restoring.clone();
+                let _operation = LocalOperationProvider.restore(
+                    RestoreRequest {
+                        id: OperationRequestId(96),
+                        source: RestoreSource::OriginalLocations(vec![Location::local(&folder)]),
+                    },
+                    Rc::new(move |event| emitted.borrow_mut().push(event)),
+                );
+                wait_for_operation(&restoring, |event| {
+                    matches!(
+                        event,
+                        OperationEvent::Restored { .. }
+                            | OperationEvent::RestoreCompletedWithErrors { .. }
+                            | OperationEvent::Failed { .. }
+                    )
+                });
+                let restoring = restoring.borrow();
+                let restored = restoring
+                    .iter()
+                    .filter_map(|event| match event {
+                        OperationEvent::ItemRestored {
+                            location, identity, ..
+                        } => Some((location.clone(), *identity)),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                assert!(
+                    matches!(&restored[..], [(location, restored)]
+                        if *location == Location::local(&folder) && restored.unchanged(&trashed)),
+                    "{restored:?} after {:?}",
+                    restoring.last()
                 );
             }
         },

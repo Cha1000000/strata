@@ -31,9 +31,9 @@ pub(super) fn forget_item_customizations(
     }
 }
 
-pub(super) fn restore_item_customizations(location: &Location) {
-    if let Some(path) = location.native_path() {
-        PreferenceManager::shared().restore_item_customizations(path);
+pub(super) fn restore_item_customizations(location: &Location, identity: Option<ItemIdentity>) {
+    if let (Some(path), Some(identity)) = (location.native_path(), identity) {
+        PreferenceManager::shared().restore_item_customizations(path, identity);
     }
 }
 

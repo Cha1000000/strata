@@ -4158,7 +4158,7 @@ impl OperationProvider for LocalOperationProvider {
                             failed_locations.push(entry.source.clone());
                             None
                         }
-                        Ok(report) => {
+                        Ok((report, identity)) => {
                             if !report.is_empty() {
                                 emit(OperationEvent::ItemsReported {
                                     request_id: request.id,
@@ -4167,6 +4167,11 @@ impl OperationProvider for LocalOperationProvider {
                             }
                             restored_locations.push(entry.source.clone());
                             let destination = restored_destination(&entry);
+                            emit(OperationEvent::ItemRestored {
+                                request_id: request.id,
+                                location: destination.clone(),
+                                identity,
+                            });
                             restored.push(destination.clone());
                             Some(destination)
                         }

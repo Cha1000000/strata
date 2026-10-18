@@ -369,7 +369,32 @@ fn superseded_operations_still_report_each_location_they_changed() {
             vec![removed(&item)],
         ),
         (
-            "a restore",
+            "a restore that reports the identity of what it placed",
+            None,
+            Box::new(|request_id| {
+                vec![
+                    OperationEvent::ItemRestored {
+                        request_id,
+                        location: item.clone(),
+                        identity,
+                    },
+                    OperationEvent::RestoreProgress {
+                        request_id,
+                        completed: 1,
+                        total: 1,
+                        restored_location: Some(item.clone()),
+                    },
+                    OperationEvent::Restored {
+                        request_id,
+                        locations: vec![Location::uri("trash:///docs")],
+                        restored: vec![item.clone()],
+                    },
+                ]
+            }),
+            vec![LocationChange::Restored(item.clone(), Some(identity))],
+        ),
+        (
+            "a restore that reports no identity",
             None,
             Box::new(|request_id| {
                 vec![
@@ -386,7 +411,7 @@ fn superseded_operations_still_report_each_location_they_changed() {
                     },
                 ]
             }),
-            vec![LocationChange::Restored(item.clone())],
+            vec![LocationChange::Restored(item.clone(), None)],
         ),
     ];
 

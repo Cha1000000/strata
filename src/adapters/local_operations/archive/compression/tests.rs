@@ -12,7 +12,7 @@ use crate::{
     adapters::local_operations::tests::fs_quirks::{
         FsQuirks, Op, Preset, Quirks, Trash, evict, recreated,
     },
-    services::{ArchiveFormat, ItemIdentity, ReplacedOriginal, TransferConflict},
+    services::{ArchiveFormat, ReplacedOriginal, TransferConflict},
     test_support::ASYNC_MAIN_CONTEXT_DEFAULT,
 };
 use gtk::glib;
@@ -179,7 +179,16 @@ fn compression_staging_stays_private_while_encoding() -> Result<(), Box<dyn Erro
     let _trash = HomeTrashGuard::new(&archive);
     fs::write(&archive, b"original")?;
     fs::set_permissions(&archive, fs::Permissions::from_mode(0o640))?;
-    let original = ItemIdentity::at_path(&archive).ok_or("identity")?;
+    let original = {
+        let archive = archive.clone();
+        std::thread::spawn(move || {
+            crate::adapters::local_operations::native_fs::identity_at_path(&archive)
+        })
+        .join()
+        .ok()
+        .flatten()
+        .ok_or("identity")?
+    };
     let writer = HeldWriter::default();
     let hold = writer.hold();
     let worker_destination = destination.clone();

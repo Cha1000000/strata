@@ -12,13 +12,15 @@ fn restore_path(
     destination: &Path,
     allowed: &Path,
 ) -> Result<TransferReport, glib::Error> {
-    glib::MainContext::default().block_on(move_restore_path(
-        source.to_path_buf(),
-        destination.to_path_buf(),
-        allowed.to_path_buf(),
-        Arc::default(),
-        gio::Cancellable::new(),
-    ))
+    glib::MainContext::default()
+        .block_on(move_restore_path(
+            source.to_path_buf(),
+            destination.to_path_buf(),
+            allowed.to_path_buf(),
+            Arc::default(),
+            gio::Cancellable::new(),
+        ))
+        .map(|(report, _)| report)
 }
 
 #[test]

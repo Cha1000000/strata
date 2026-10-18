@@ -234,14 +234,17 @@ impl Browser {
                     self.publish_removal(changes, location, None);
                 }
             }
+            OperationEvent::ItemRestored {
+                location, identity, ..
+            } => self.publish_restoration(changes, location, Some(*identity)),
             OperationEvent::RestoreProgress {
                 restored_location: Some(location),
                 ..
-            } => self.publish_restoration(changes, location),
+            } => self.publish_restoration(changes, location, None),
             OperationEvent::Restored { restored, .. }
             | OperationEvent::RestoreCompletedWithErrors { restored, .. } => {
                 for location in restored {
-                    self.publish_restoration(changes, location);
+                    self.publish_restoration(changes, location, None);
                 }
             }
             // Restores also list completed items in these terminals, so only a
@@ -269,10 +272,16 @@ impl Browser {
         }
     }
 
-    fn publish_restoration(&self, changes: &LocationChanges, location: &Location) {
+    fn publish_restoration(
+        &self,
+        changes: &LocationChanges,
+        location: &Location,
+        identity: Option<ItemIdentity>,
+    ) {
         if changes.restored.borrow_mut().insert(location.clone()) {
             self.emit(BrowserEvent::ItemRestored {
                 location: location.clone(),
+                identity,
             });
         }
     }
@@ -358,7 +367,9 @@ impl Browser {
                 }
                 return true;
             }
-            OperationEvent::ItemTrashed { .. } => return true,
+            OperationEvent::ItemTrashed { .. } | OperationEvent::ItemRestored { .. } => {
+                return true;
+            }
             OperationEvent::ItemKept { location, .. } => {
                 self.mark_merged_undo_item_completed(location);
                 return true;
@@ -686,6 +697,7 @@ impl Browser {
             | OperationEvent::ItemsReported { .. }
             | OperationEvent::ItemMoved { .. }
             | OperationEvent::ItemTrashed { .. }
+            | OperationEvent::ItemRestored { .. }
             | OperationEvent::ItemKept { .. }
             | OperationEvent::ArchiveStarted { .. }
             | OperationEvent::ArchiveProgress { .. }
@@ -828,6 +840,7 @@ fn operation_event_id(event: &OperationEvent) -> OperationRequestId {
         | OperationEvent::Pasted { request_id, .. }
         | OperationEvent::ItemMoved { request_id, .. }
         | OperationEvent::ItemTrashed { request_id, .. }
+        | OperationEvent::ItemRestored { request_id, .. }
         | OperationEvent::ItemKept { request_id, .. }
         | OperationEvent::FlushingToDevice { request_id }
         | OperationEvent::ItemsReported { request_id, .. }

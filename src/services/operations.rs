@@ -15,7 +15,7 @@ use std::{
 
 use crate::model::{FileEntry, Location};
 
-use super::{Attributes, Evidence, IdentityTraits, ItemIdentity, LoadHandle};
+use super::{ItemIdentity, LoadHandle};
 
 pub fn validate_basename(name: &str) -> Result<(), &'static str> {
     if name.trim().is_empty() {
@@ -126,43 +126,6 @@ pub struct UndoRenameRequest {
 pub struct UndoCopyRequest {
     pub id: OperationRequestId,
     pub locations: Vec<Location>,
-}
-
-impl ItemIdentity {
-    /// The identity of whatever is at `path` now, without following a final symlink.
-    pub fn at_path(path: &std::path::Path) -> Option<Self> {
-        use std::os::unix::fs::MetadataExt;
-        let metadata = std::fs::symlink_metadata(path).ok()?;
-        let kind = rustix::fs::FileType::from_raw_mode(metadata.mode());
-        let birth = metadata
-            .created()
-            .ok()
-            .and_then(|born| born.duration_since(std::time::UNIX_EPOCH).ok())
-            .and_then(|born| Some((i64::try_from(born.as_secs()).ok()?, born.subsec_nanos())));
-        let mtime = (
-            metadata.mtime(),
-            u32::try_from(metadata.mtime_nsec()).unwrap_or(0),
-        );
-        let attributes = matches!(
-            kind,
-            rustix::fs::FileType::RegularFile | rustix::fs::FileType::Symlink
-        )
-        .then_some(Attributes {
-            size: metadata.size(),
-            mtime,
-            ctime: None,
-        });
-        Some(Self {
-            evidence: Evidence {
-                device: metadata.dev(),
-                inode: metadata.ino(),
-                kind,
-                birth,
-                attributes,
-            },
-            traits: IdentityTraits::default(),
-        })
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -513,6 +476,11 @@ pub enum OperationEvent {
     /// item a Replace or a cleanup displaced. `identity` survives the move, so
     /// a restore can tell this item from another that left the same path.
     ItemTrashed {
+        request_id: OperationRequestId,
+        location: Location,
+        identity: ItemIdentity,
+    },
+    ItemRestored {
         request_id: OperationRequestId,
         location: Location,
         identity: ItemIdentity,

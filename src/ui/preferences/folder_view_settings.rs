@@ -351,11 +351,17 @@ impl PreferenceManager {
         self.folder_views_changed(store, Affects::Sorts);
     }
 
-    pub(in crate::ui) fn restore_folder_views(&self, location: &Location) {
-        let (Some(store), Some(root)) = (self.folder_views.get(), location.native_path()) else {
+    pub(in crate::ui) fn restore_folder_views(
+        &self,
+        location: &Location,
+        identity: Option<ItemIdentity>,
+    ) {
+        let (Some(store), Some(root), Some(identity)) =
+            (self.folder_views.get(), location.native_path(), identity)
+        else {
             return;
         };
-        let taken = store.trashed.borrow_mut().take_restored(root);
+        let taken = store.trashed.borrow_mut().take_restored(root, identity);
         if let Some(taken) = taken {
             self.change_folder_views(Affects::Sorts, |views| views.put_back(taken));
         }

@@ -96,13 +96,13 @@ impl PreferenceManager {
 
     /// Re-applies what [`Self::forget_item_customizations`] kept for the very
     /// item now back at `root`; another item restored there gets nothing.
-    pub fn restore_item_customizations(self: &Rc<Self>, root: &Path) {
+    pub fn restore_item_customizations(self: &Rc<Self>, root: &Path, identity: ItemIdentity) {
         let root = key_path(root);
         let item = self
             .item_customizations
             .trashed
             .borrow_mut()
-            .take_restored(&root);
+            .take_restored(&root, identity);
         let Some(item) = item else {
             return;
         };

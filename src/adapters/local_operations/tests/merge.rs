@@ -1790,7 +1790,7 @@ fn merge_undo_uses_recorded_identity_when_trash_dates_collide() -> Result<(), Bo
                 entry.source.native_path().expect("staged path").to_owned(),
             );
         }
-        let original = ItemIdentity::at_path(&staged[chosen]).ok_or("identity")?;
+        let original = identity_off_main(&staged[chosen]).ok_or("identity")?;
         if chosen == "removed.zip" {
             fs::remove_file(&staged[chosen])?;
         }

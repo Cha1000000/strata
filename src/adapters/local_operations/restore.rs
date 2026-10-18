@@ -27,7 +27,7 @@ use std::{
     future::Future,
     io,
     os::{
-        fd::OwnedFd,
+        fd::{AsFd, OwnedFd},
         unix::ffi::{OsStrExt, OsStringExt},
     },
     path::{Path, PathBuf},
@@ -40,8 +40,10 @@ use super::{
     await_cancellable, cancelled_event, cancelled_local_operation, copy_engine,
     deletion::local_parent_worker_count,
     deletion_error_summary, deletion_undone_when_cancelled, io_error, item_error, kept_items,
+    mount_profile::identity_at,
     native_fs::{
         identity_at_path, open_local_parent_beneath, open_local_parent_directory, os_error_detail,
+        trashed_identity,
     },
 };
 
@@ -241,7 +243,7 @@ pub(super) async fn move_restore_path(
     allowed_root: PathBuf,
     unlinks: Arc<copy_engine::Unlinks>,
     cancellable: gio::Cancellable,
-) -> Result<TransferReport, glib::Error> {
+) -> Result<(TransferReport, ItemIdentity), glib::Error> {
     if cancellable.is_cancelled() {
         return Err(cancelled_local_operation());
     }
@@ -273,22 +275,28 @@ pub(super) async fn move_restore_path(
         )?);
         let from = Entry::new(&*source_parent, &step_source_name);
         let to = Entry::new(&*target_parent, &target_name);
-        let identity = fs()
+        let stat = fs()
             .stat(from, false)
-            .map_err(|error| could_not_restore(&step_display_name, &os_error_detail(error)))?
-            .identity;
+            .map_err(|error| could_not_restore(&step_display_name, &os_error_detail(error)))?;
+        let trashed = trashed_identity(&stat, identity_at(fs(), source_parent.as_fd()));
         if step_cancellable.is_cancelled() {
             return Ok(None);
         }
-        let placed = placement::place(fs(), from, to, Some(identity));
-        Ok(Some((source_parent, target_parent, identity, placed)))
+        let placed = placement::place(fs(), from, to, Some(stat.identity));
+        Ok(Some((
+            source_parent,
+            target_parent,
+            stat.identity,
+            trashed,
+            placed,
+        )))
     })
     .await?;
-    let Some((source_parent, target_parent, source_identity, placed)) = placed else {
+    let Some((source_parent, target_parent, source_identity, trashed, placed)) = placed else {
         return Err(cancelled_local_operation());
     };
     match placed {
-        Ok(_) => return Ok(TransferReport::default()),
+        Ok(_) => return Ok((TransferReport::default(), trashed)),
         Err(PlaceError::Unsupported) => {}
         Err(PlaceError::CrossDevice) => {
             return Err(io_error(rust_i18n::t!(
@@ -335,7 +343,7 @@ pub(super) async fn move_restore_path(
         ))
     })?;
     report.kept_in_trash = kept_items(&trash_path, kept);
-    Ok(report)
+    Ok((report, trashed))
 }
 
 pub(super) fn restore_destination_exists(display_name: &str) -> glib::Error {
@@ -351,7 +359,7 @@ pub(super) async fn move_restore(
     allowed_root: PathBuf,
     unlinks: Arc<copy_engine::Unlinks>,
     cancellable: gio::Cancellable,
-) -> Result<TransferReport, glib::Error> {
+) -> Result<(TransferReport, ItemIdentity), glib::Error> {
     if cancellable.is_cancelled() {
         return Err(cancelled_local_operation());
     }
@@ -589,7 +597,7 @@ pub(super) async fn restore_trash_entry(
     affected_locations: &mut HashSet<Location>,
     unlinks: &Arc<copy_engine::Unlinks>,
     cancellable: &gio::Cancellable,
-) -> Result<TransferReport, glib::Error> {
+) -> Result<(TransferReport, ItemIdentity), glib::Error> {
     let plan = match plan_restore_for_location(
         &entry.source,
         entry.original_target.as_ref(),
@@ -625,7 +633,7 @@ pub(super) async fn restore_trash_entry(
     }
     let source = gio::File::for_path(&plan.source_path);
     let target = gio::File::for_path(&plan.destination);
-    let report = move_restore(
+    let (report, trashed) = move_restore(
         source,
         target,
         plan.allowed_root,
@@ -650,7 +658,7 @@ pub(super) async fn restore_trash_entry(
             tracing::warn!(%error, "unable to remove restored trash metadata");
         }
     }
-    Ok(report)
+    Ok((report, trashed))
 }
 
 pub(super) fn trashed_merge_original(
@@ -675,7 +683,7 @@ pub(super) fn trashed_merge_original(
 }
 
 pub(super) enum Reverted {
-    Restored(TransferReport),
+    Restored(TransferReport, Box<ItemIdentity>),
     Kept,
 }
 
@@ -754,7 +762,7 @@ pub(super) async fn undo_merged_overwrite(
     }
     restore_trash_entry(staged, context, affected_locations, unlinks, cancellable)
         .await
-        .map(Reverted::Restored)
+        .map(|(report, trashed)| Reverted::Restored(report, Box::new(trashed)))
 }
 
 pub(super) type StagedOriginalLookup = Rc<
@@ -823,10 +831,15 @@ pub(super) async fn run_merge_undo(
             Err(error) => Err(error),
         };
         let restored_location = match result {
-            Ok(Reverted::Restored(report)) => {
+            Ok(Reverted::Restored(report, identity)) => {
                 if !report.is_empty() {
                     emit(OperationEvent::ItemsReported { request_id, report });
                 }
+                emit(OperationEvent::ItemRestored {
+                    request_id,
+                    location: location.clone(),
+                    identity: *identity,
+                });
                 completed_locations.push(location.clone());
                 restored.push(location.clone());
                 Some(location.clone())

@@ -1726,7 +1726,7 @@ fn an_undone_trash_operation_can_be_redone() {
         location_changes(&events.borrow()),
         [
             removed(&location),
-            LocationChange::Restored(location.clone()),
+            LocationChange::Restored(location.clone(), None),
             removed(&location)
         ]
     );

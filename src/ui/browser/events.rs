@@ -798,9 +798,10 @@ impl ViewState {
                 crate::ui::preferences::PreferenceManager::shared()
                     .forget_folder_views_within(location, *trash_identity);
             }
-            BrowserEvent::ItemRestored { location } => {
-                customization::restore_item_customizations(location);
-                crate::ui::preferences::PreferenceManager::shared().restore_folder_views(location);
+            BrowserEvent::ItemRestored { location, identity } => {
+                customization::restore_item_customizations(location, *identity);
+                crate::ui::preferences::PreferenceManager::shared()
+                    .restore_folder_views(location, *identity);
             }
             BrowserEvent::DeletionStarted { total } => {
                 let browser = self.browser.clone();

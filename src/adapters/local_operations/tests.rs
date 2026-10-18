@@ -512,7 +512,17 @@ fn numbers(identity: ItemIdentity) -> (u64, u64) {
 }
 
 fn numbers_at(path: &Path) -> (u64, u64) {
-    numbers(ItemIdentity::at_path(path).expect("identity"))
+    use std::os::unix::fs::MetadataExt;
+    let metadata = fs::symlink_metadata(path).expect("identity");
+    (metadata.dev(), metadata.ino())
+}
+
+fn identity_off_main(path: &Path) -> Option<ItemIdentity> {
+    let path = path.to_owned();
+    std::thread::spawn(move || super::native_fs::identity_at_path(&path))
+        .join()
+        .ok()
+        .flatten()
 }
 
 fn pump_until_transfer(events: &RefCell<Vec<OperationEvent>>) {

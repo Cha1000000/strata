@@ -175,6 +175,7 @@ impl Browser {
             }
             OperationEvent::ItemMoved { .. }
             | OperationEvent::ItemTrashed { .. }
+            | OperationEvent::ItemRestored { .. }
             | OperationEvent::ItemKept { .. } => {}
             OperationEvent::ArchiveStarted { total, .. } => {
                 emit(BrowserEvent::ArchiveStarted { total });

@@ -1346,7 +1346,7 @@ enum LocationChange {
         location: Location,
         trash_identity: Option<ItemIdentity>,
     },
-    Restored(Location),
+    Restored(Location, Option<ItemIdentity>),
 }
 
 fn location_changes(events: &[BrowserEvent]) -> Vec<LocationChange> {
@@ -1365,8 +1365,8 @@ fn location_changes(events: &[BrowserEvent]) -> Vec<LocationChange> {
                 location: location.clone(),
                 trash_identity: *trash_identity,
             }),
-            BrowserEvent::ItemRestored { location } => {
-                Some(LocationChange::Restored(location.clone()))
+            BrowserEvent::ItemRestored { location, identity } => {
+                Some(LocationChange::Restored(location.clone(), *identity))
             }
             _ => None,
         })

@@ -65,13 +65,8 @@ impl<T> TrashedValues<T> {
         }
     }
 
-    /// What was kept for the very item now back at `root`; another item
-    /// restored there gets nothing.
-    pub(super) fn take_restored(&mut self, root: &Path) -> Option<T> {
-        if !self.items.iter().any(|item| item.root == root) {
-            return None;
-        }
-        let identity = ItemIdentity::at_path(root)?;
+    /// What was kept for the very item restored at `root`; another item there gets nothing.
+    pub(super) fn take_restored(&mut self, root: &Path, identity: ItemIdentity) -> Option<T> {
         let index = self
             .items
             .iter()
