@@ -3,7 +3,7 @@
 //! Browser composition and public commands. Feature modules share this view's state and the
 //! application controller; they must not create independent navigation or operation state.
 
-use crate::app::{Browser, FreshnessInput, VisibleDepths};
+use crate::app::{Browser, FreshnessInput, Presence, VisibleDepths};
 use crate::model::{FileEntry, Location};
 use crate::services::{FileSource, LoadHandle, OperationProvider};
 use crate::ui::browser::clipboard::{copy_locations, register_cut_view};
@@ -281,7 +281,6 @@ pub(super) struct ViewState {
     pending_empty_trash: RefCell<Option<LoadHandle>>,
     trash_loading: RefCell<Option<TrashLoadingView>>,
     unlock_slots: RefCell<Vec<UnlockProgressSlot>>,
-    auto_refresh: RefCell<Option<glib::SourceId>>,
     trash_button: glib::WeakRef<gtk::Button>,
     recent_removal: crate::adapters::RecentRemovalState,
     drag_autoscroll: RefCell<Option<Rc<columns::drag_scroll::DragAutoscroll>>>,
@@ -667,7 +666,6 @@ impl BrowserView {
             pending_empty_trash: RefCell::new(None),
             trash_loading: RefCell::new(None),
             unlock_slots: RefCell::new(Vec::new()),
-            auto_refresh: RefCell::new(None),
             trash_button: glib::WeakRef::new(),
             recent_removal: crate::adapters::RecentRemovalState::new(),
             drag_autoscroll: RefCell::new(None),
@@ -1996,8 +1994,13 @@ impl BrowserView {
         self.state.refresh_browser();
     }
 
-    pub fn set_auto_refresh_interval(&self, secs: u32) {
-        self.state.set_auto_refresh_interval(secs);
+    pub fn set_presence(&self, presence: Presence, power_saver: bool) {
+        let browser = &self.state.browser;
+        browser.set_freshness(FreshnessInput {
+            presence,
+            power_saver,
+            ..browser.freshness_input()
+        });
     }
 
     pub fn show_location_properties(&self, location: &Location) {
@@ -2642,28 +2645,6 @@ impl ViewState {
         }
     }
 
-    pub(super) fn set_auto_refresh_interval(self: &Rc<Self>, secs: u32) {
-        if let Some(source) = self.auto_refresh.take() {
-            source.remove();
-        }
-        if secs == 0 {
-            return;
-        }
-        let weak_state = Rc::downgrade(self);
-        let source = glib::timeout_add_local(Duration::from_secs(u64::from(secs)), move || {
-            let Some(state) = weak_state.upgrade() else {
-                return glib::ControlFlow::Break;
-            };
-            // A submitted rename also waits for the listing to show its result.
-            if state.inline_edit_is_open() || state.rename_operation_pending() {
-                return glib::ControlFlow::Continue;
-            }
-            state.refresh_browser();
-            glib::ControlFlow::Continue
-        });
-        self.auto_refresh.replace(Some(source));
-    }
-
     fn enter_mode(self: &Rc<Self>, mode: BrowserMode) {
         self.mode.set(mode);
         let scope = match mode {
@@ -2677,7 +2658,7 @@ impl ViewState {
     }
 
     /// A reload rebinds the rows an inline edit leases, which would discard the typed
-    /// name, so window commands and auto-refresh wait while this holds.
+    /// name, so window commands and background re-lists wait while this holds.
     pub(super) fn inline_edit_is_open(&self) -> bool {
         self.pending_new_entry.borrow().is_some()
             || self.active_rename.borrow().is_some()

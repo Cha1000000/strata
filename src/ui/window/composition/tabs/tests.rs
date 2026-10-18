@@ -645,6 +645,70 @@ fn hidden_tabs_and_new_tabs_apply_live_browsing_preferences() {
     );
 }
 
+fn freshness(view: &BrowserView) -> (Presence, bool) {
+    let input = view.browser().freshness_input();
+    (input.presence, input.power_saver)
+}
+
+#[test]
+fn only_the_active_tab_checks() {
+    gtk_test(
+        "ui::window::composition::tabs::tests::only_the_active_tab_checks",
+        || {
+            let (window, tabs) = open();
+            let first_id = tabs.active.get();
+            let first = tabs.active_browser();
+            tabs.new_tab();
+            let second = tabs.active_browser();
+            tabs.set_presence(Presence::Focused, false);
+            let with_the_second_active = (freshness(&first).0, freshness(&second).0);
+            tabs.select(first_id);
+            let with_the_first_active = (freshness(&first).0, freshness(&second).0);
+            tabs.new_tab();
+            let third = tabs.active_browser();
+
+            assert_eq!(
+                with_the_second_active,
+                (Presence::Hidden, Presence::Focused)
+            );
+            assert_eq!(with_the_first_active, (Presence::Focused, Presence::Hidden));
+            assert_eq!(
+                [&first, &second, &third].map(|view| freshness(view).0),
+                [Presence::Hidden, Presence::Hidden, Presence::Focused]
+            );
+            window.destroy();
+        },
+    );
+}
+
+#[test]
+fn presence_reaches_the_browser_of_the_active_tab() {
+    gtk_test(
+        "ui::window::composition::tabs::tests::presence_reaches_the_browser_of_the_active_tab",
+        || {
+            let (window, tabs) = open();
+            let first = tabs.active_browser();
+            tabs.new_tab();
+            let second = tabs.active_browser();
+            let shown = freshness(&second).0;
+            window.set_visible(false);
+            let hidden = (freshness(&first).0, freshness(&second).0);
+            window.present();
+            let shown_again = freshness(&second).0;
+            tabs.set_presence(Presence::Visible, true);
+
+            assert_ne!(shown, Presence::Hidden);
+            assert_eq!(hidden, (Presence::Hidden, Presence::Hidden));
+            assert_ne!(shown_again, Presence::Hidden);
+            assert_eq!(
+                (freshness(&first), freshness(&second)),
+                ((Presence::Hidden, true), (Presence::Visible, true))
+            );
+            window.destroy();
+        },
+    );
+}
+
 #[test]
 fn operations_in_inactive_tabs_prevent_tab_and_window_closure() {
     gtk_test(

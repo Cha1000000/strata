@@ -9,6 +9,7 @@ use gtk::{gio, glib, prelude::*};
 
 use crate::{
     adapters::location_for_file,
+    app::Presence,
     model::Location,
     ui::{
         blur::BlurBin,
@@ -44,6 +45,7 @@ pub(in crate::ui::window) struct TabWindow {
     active: Cell<u64>,
     next_id: Cell<u64>,
     hints: Cell<bool>,
+    presence: Cell<(Presence, bool)>,
     restoring: Cell<bool>,
     persist: bool,
 }
@@ -77,6 +79,7 @@ impl TabWindow {
             active: Cell::new(0),
             next_id: Cell::new(1),
             hints: Cell::new(false),
+            presence: Cell::new((Presence::default(), false)),
             restoring: Cell::new(false),
             persist,
             drag_token: glib::uuid_string_random().to_string(),
@@ -145,7 +148,32 @@ impl TabWindow {
                 state.show_hints(false);
             }
         });
+        let weak = Rc::downgrade(&state);
+        crate::ui::presence::follow(window, move |presence, power_saver| {
+            if let Some(state) = weak.upgrade() {
+                state.set_presence(presence, power_saver);
+            }
+        });
         state
+    }
+
+    fn set_presence(&self, presence: Presence, power_saver: bool) {
+        self.presence.set((presence, power_saver));
+        self.share_presence();
+    }
+
+    fn share_presence(&self) {
+        let (presence, power_saver) = self.presence.get();
+        let browsers: Vec<_> = self
+            .tabs
+            .borrow()
+            .iter()
+            .map(|tab| (tab.id == self.active.get(), tab.content.browser.clone()))
+            .collect();
+        for (active, browser) in browsers {
+            let presence = if active { presence } else { Presence::Hidden };
+            browser.set_presence(presence, power_saver);
+        }
     }
 
     fn active_tab(&self) -> Rc<Tab> {
@@ -238,6 +266,7 @@ impl TabWindow {
             content.sidebar.schedule_after_first_paint(&content.overlay);
         }
         self.select(id);
+        self.share_presence();
         self.refresh_chrome();
         if let Some(location) = location {
             content.browser.navigate_location(location);
@@ -262,6 +291,7 @@ impl TabWindow {
             previous.content.browser.cancel_location_edit();
         }
         self.active.set(id);
+        self.share_presence();
         self.stack.set_visible_child(&tab.content.overlay);
         tab.content.activate_actions(&window);
         self.refresh_chrome();

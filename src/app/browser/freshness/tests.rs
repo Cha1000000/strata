@@ -588,6 +588,42 @@ fn checks_stop_while_hidden_and_resume_on_focus() {
 }
 
 #[test]
+fn power_saver_slows_focused_checks_and_stops_unfocused_ones() {
+    let source = Rc::new(Folders::default());
+    let share = source.add("/net/share", network(1), Some(Watching::Live));
+    let (browser, clock) = browser_on(&source);
+    browser.set_freshness(FreshnessInput {
+        presence: Presence::Focused,
+        power_saver: true,
+        ..browser.freshness_input()
+    });
+    browser.navigate(share.clone());
+    let armed_focused = clock.armed();
+
+    clock.tick_at(11);
+    let before_four_intervals = source.checks_of(&share);
+    clock.tick_at(12);
+    let at_four_intervals = source.checks_of(&share);
+    browser.set_freshness(FreshnessInput {
+        presence: Presence::Visible,
+        ..browser.freshness_input()
+    });
+    let armed_unfocused = clock.armed();
+    clock.tick_at(60);
+    let unfocused = source.checks_of(&share);
+    browser.set_freshness(FreshnessInput {
+        power_saver: false,
+        ..browser.freshness_input()
+    });
+    clock.tick_at(61);
+
+    assert_eq!(armed_focused, Some(Duration::from_secs(12)));
+    assert_eq!((before_four_intervals, at_four_intervals), (0, 1));
+    assert_eq!((armed_unfocused, unfocused), (None, 1));
+    assert_eq!(source.checks_of(&share), 2);
+}
+
+#[test]
 fn a_stale_folder_waits_for_an_open_inline_edit() {
     let source = Rc::new(Folders::default());
     let share = source.add("/net/share", network(1), Some(Watching::Live));

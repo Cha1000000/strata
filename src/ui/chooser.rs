@@ -1602,6 +1602,12 @@ fn build_chooser_hosted(
         .modal(request.modal)
         .build();
     crate::ui::decoration::claim_titlebar(&window);
+    let presence_view = view.downgrade();
+    super::presence::follow(&window, move |presence, power_saver| {
+        if let Some(view) = presence_view.upgrade() {
+            view.set_presence(presence, power_saver);
+        }
+    });
     if let Some(host) = &host {
         window.set_transient_for(Some(&host.parent));
         window.set_destroy_with_parent(true);

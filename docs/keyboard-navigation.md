@@ -111,8 +111,8 @@ request — selects that target instead of restoring the remembered position.
 
 ## Refreshing a directory
 
-F5, the pane's Refresh button, Auto-refresh, and the rescan after a burst of
-external changes keep the selection, the keyboard cursor and the keyboard focus in
+F5, the pane's Refresh button, and the rescan after a burst of external changes
+keep the selection, the keyboard cursor and the keyboard focus in
 every view: a focused row stays focused, and a focused Ctrl+F field keeps focus and
 its text. Icons and List also keep the scroll position. When the item under the
 cursor is gone, the cursor moves to the item now in its place without selecting it.
@@ -179,8 +179,8 @@ Results follow the watched folders live: the open folder, and in Columns every o
 column. A matching file that another program creates or renames there appears within
 about a second, and a deleted one leaves the results as soon as the listing drops it.
 With [Include subfolders](preferences.md#filter-scope) on, changes in folders below
-those reach the results on **F5**, Auto-refresh, the rescan after a burst of external
-changes, or when the filter is cleared and opened again.
+those reach the results on **F5**, the rescan after a burst of external changes, or
+when the filter is cleared and opened again.
 When another program renames the open folder itself, the view follows it and a filter
 typed in that folder ends, while filters and **Ctrl+K** searches rooted above it follow
 the rename. When the open folder is deleted or moved into another folder, the view

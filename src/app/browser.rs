@@ -38,7 +38,7 @@ mod remote;
 mod sorting;
 
 use folder_sorts::SortOrigin;
-pub use freshness::{FreshnessInput, VisibleDepths};
+pub use freshness::{FreshnessInput, Presence, VisibleDepths};
 use publication::{PublicationPlan, PublishTerminal, StagedPublish};
 use remote::RemoteState;
 

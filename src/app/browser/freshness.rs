@@ -24,14 +24,11 @@ const VISIBLE_INTERVAL: Duration = Duration::from_secs(15);
 const RELIST_DUTY: u32 = 10;
 const UNCHANGED_BEFORE_SLOWING: u32 = 20;
 const MOST_SLOWING: u32 = 4;
+const POWER_SAVER_SLOWING: u32 = 4;
 const UNREACHABLE_RETRY: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum Presence {
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "step 7's presence wiring sets it")
-    )]
     Focused,
     #[default]
     Visible,
@@ -49,6 +46,7 @@ pub enum VisibleDepths {
 pub struct FreshnessInput {
     pub presence: Presence,
     pub scope: VisibleDepths,
+    pub power_saver: bool,
 }
 
 struct Listing {
@@ -105,8 +103,9 @@ pub(super) struct Freshness {
 
 impl Browser {
     pub fn set_freshness(self: &Rc<Self>, input: FreshnessInput) {
-        self.freshness.input.set(input);
-        self.reschedule_freshness();
+        if self.freshness.input.replace(input) != input {
+            self.reschedule_freshness();
+        }
     }
 
     pub fn freshness_input(&self) -> FreshnessInput {
@@ -126,14 +125,30 @@ impl Browser {
     }
 
     fn check_interval(&self, unchanged: u32) -> Duration {
-        let interval = match self.freshness.input.get().presence {
+        let input = self.freshness.input.get();
+        let interval = match input.presence {
             Presence::Focused => FOCUSED_INTERVAL,
             Presence::Visible | Presence::Hidden => VISIBLE_INTERVAL,
         };
+        let saving = if input.power_saver {
+            POWER_SAVER_SLOWING
+        } else {
+            1
+        };
         interval
+            * saving
             * 2u32
                 .saturating_pow(unchanged / UNCHANGED_BEFORE_SLOWING)
                 .min(MOST_SLOWING)
+    }
+
+    fn checking(&self) -> bool {
+        let input = self.freshness.input.get();
+        match input.presence {
+            Presence::Focused => true,
+            Presence::Visible => !input.power_saver,
+            Presence::Hidden => false,
+        }
     }
 
     fn column_freshness(&self, depth: usize) -> Option<Rc<RefCell<ColumnFreshness>>> {
@@ -293,7 +308,7 @@ impl Browser {
             .borrow_mut()
             .retain(|(unanswered, _)| unanswered.get() > 0);
         let mut groups: Vec<(Option<MountToken>, Vec<Checked>)> = Vec::new();
-        if self.freshness.input.get().presence != Presence::Hidden {
+        if self.checking() {
             for (depth, column) in self.freshness_columns().into_iter().enumerate() {
                 let Some(location) = self.location_at(depth) else {
                     continue;
@@ -498,7 +513,8 @@ impl Browser {
     }
 
     pub(super) fn reschedule_freshness(self: &Rc<Self>) {
-        let due = (self.freshness.input.get().presence != Presence::Hidden)
+        let due = self
+            .checking()
             .then(|| {
                 self.freshness_columns()
                     .iter()
