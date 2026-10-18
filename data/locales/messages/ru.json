@@ -985,6 +985,5 @@
   "“%{path}” does not contain an action.toml file": "«%{path}» не содержит файла action.toml",
   "“%{path}” is not an absolute path, so it cannot be passed to an action": "«%{path}» не является абсолютным путём, поэтому его нельзя передать действию",
   "“%{program}” was not found on your PATH": "«%{program}» не найден в PATH",
-  "Installed integrations are stored in %{path}.": "Установленные интеграции хранятся в %{path}.",
   "Enable %{name}": "Включить %{name}"
 }

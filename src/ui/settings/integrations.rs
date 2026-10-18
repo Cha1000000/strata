@@ -77,13 +77,6 @@ pub(super) fn integrations_page_with(source: Source) -> gtk::Widget {
     description.add_css_class("settings-option-description");
     copy.append(&title);
     copy.append(&description);
-    if let Some(root) = &source.root {
-        let location = note(&rust_i18n::t!(
-            "Installed integrations are stored in %{path}.",
-            path = root.display()
-        ));
-        copy.append(&location);
-    }
     let actions = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     actions.add_css_class("settings-integration-actions");
     actions.set_halign(gtk::Align::End);
