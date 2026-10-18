@@ -1469,8 +1469,14 @@ pub(in crate::ui) fn install_resolved_item_context_menu(
         });
     });
     for button in [&restore, &restore_multiple] {
-        connect_selection_action(button, &popover, state, &target, |state, entries| {
-            state.request_restore(entries);
+        connect_selection_action(button, &popover, state, &target, move |state, entries| {
+            if let [entry] = entries.as_slice()
+                && let Some(kind) = state.leftover_kind(depth, entry)
+            {
+                state.restore_leftover(depth, entry.clone(), kind);
+            } else {
+                state.request_restore(entries);
+            }
         });
     }
     for button in [&remove_from_recent, &remove_from_recent_multiple] {
@@ -1667,7 +1673,8 @@ pub(in crate::ui) fn install_resolved_item_context_menu(
                 .iter()
                 .all(|entry| can_remove_location(&entry.location));
             let restorable = entries.iter().all(|entry| is_trash_item(&entry.location));
-            restore.set_visible(restorable);
+            let leftover = entries.len() == 1 && state.leftover_kind(depth, &entry).is_some();
+            restore.set_visible(restorable || leftover);
             restore_multiple.set_visible(restorable);
             let recent_removable = in_recent
                 && !entries.is_empty()

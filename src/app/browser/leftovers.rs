@@ -1,12 +1,20 @@
 // SPDX-License-Identifier: MIT
 
-use std::{cell::RefCell, collections::HashSet, ffi::OsString, rc::Weak};
+use std::{
+    cell::RefCell,
+    collections::HashSet,
+    ffi::OsString,
+    rc::{Rc, Weak},
+};
 
 use super::{Browser, BrowserEvent};
 use crate::{
     app::navigation::LoadState,
     model::{FileEntry, Location, hidden_names::Leftover},
-    services::file_activity::{self, Notice, Subscription},
+    services::{
+        LoadHandle, RecoverRequest, ReviewedLeftover, TransferReport,
+        file_activity::{self, Notice, Subscription},
+    },
 };
 
 thread_local! {
@@ -43,10 +51,84 @@ impl Browser {
         })
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the leftover review lists them")
-    )]
+    pub fn request_leftover_review(&self, depth: usize) {
+        self.emit(BrowserEvent::LeftoverReviewRequested { depth });
+    }
+
+    pub(crate) fn leftovers_busy(folder: &Location) -> bool {
+        Self::operation_touches(folder)
+    }
+
+    pub(crate) fn review_leftovers(
+        &self,
+        folder: &Location,
+        names: Vec<OsString>,
+        done: Box<dyn FnOnce(Vec<ReviewedLeftover>)>,
+    ) -> LoadHandle {
+        match self.operation_provider.borrow().clone() {
+            Some(provider) => provider.review_leftovers(folder, names, done),
+            None => {
+                done(Vec::new());
+                LoadHandle::new(|| {})
+            }
+        }
+    }
+
+    pub fn recover(self: &Rc<Self>, container: Location) {
+        let Some(provider) = self.operation_provider.borrow().clone() else {
+            self.emit(BrowserEvent::OperationFailed {
+                message: crate::i18n::tr("File operations are unavailable"),
+                password_failure: None,
+                report: TransferReport::default(),
+            });
+            return;
+        };
+        let Some(request_id) = self.try_begin_operation() else {
+            return;
+        };
+        self.recovery_operation.set(true);
+        let folder = container.parent().into_iter().collect();
+        let load = provider.recover(
+            RecoverRequest {
+                id: request_id,
+                container,
+            },
+            self.operation_callback(request_id, false, folder),
+        );
+        self.install_operation_load(request_id, load);
+    }
+
+    pub(super) fn publish_recovery(
+        self: &Rc<Self>,
+        folders: &HashSet<Location>,
+        restored: &[Location],
+    ) {
+        for folder in folders {
+            let mut shown: Vec<Location> = Vec::new();
+            for location in restored {
+                let top = std::iter::successors(Some(location.clone()), Location::parent)
+                    .find(|ancestor| ancestor.parent().as_ref() == Some(folder));
+                if let Some(top) = top
+                    && !shown.contains(&top)
+                {
+                    shown.push(top);
+                }
+            }
+            if shown.is_empty() {
+                for depth in self.depths_showing([folder]) {
+                    if !self.column_has_monitor(depth) {
+                        self.refresh_column(depth);
+                    }
+                }
+            } else {
+                self.emit(BrowserEvent::TransferReveal {
+                    destination: folder.clone(),
+                    locations: shown,
+                });
+            }
+        }
+    }
+
     pub(crate) fn column_leftovers(&self, depth: usize) -> Vec<(FileEntry, Leftover)> {
         let Some(positions) = self.surfaced_positions(depth) else {
             return Vec::new();

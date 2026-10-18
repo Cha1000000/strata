@@ -231,6 +231,22 @@ pub struct RecoverRequest {
     pub container: Location,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReviewedLeftover {
+    pub name: OsString,
+    pub modified: Option<i64>,
+    pub inside: LeftoverInside,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum LeftoverInside {
+    Item,
+    Items { names: Vec<PathBuf>, more: usize },
+    StillOpen(String),
+    Gone,
+    Unreadable(String),
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ArchiveFormat {
     Zip,
@@ -638,12 +654,17 @@ pub trait OperationProvider {
     -> LoadHandle;
     fn delete(&self, request: DeleteRequest, emit: Rc<dyn Fn(OperationEvent)>) -> LoadHandle;
     fn restore(&self, request: RestoreRequest, emit: Rc<dyn Fn(OperationEvent)>) -> LoadHandle;
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "step 8's Restore action calls it")
-    )]
     fn recover(&self, request: RecoverRequest, emit: Rc<dyn Fn(OperationEvent)>) -> LoadHandle;
     fn sweep_probes(&self, _folder: &Location, _names: &[OsString]) {}
+    fn review_leftovers(
+        &self,
+        _folder: &Location,
+        _names: Vec<OsString>,
+        done: Box<dyn FnOnce(Vec<ReviewedLeftover>)>,
+    ) -> LoadHandle {
+        done(Vec::new());
+        LoadHandle::new(|| {})
+    }
     fn compress(&self, request: CompressRequest, emit: Rc<dyn Fn(OperationEvent)>) -> LoadHandle;
     fn extract(&self, request: ExtractRequest, emit: Rc<dyn Fn(OperationEvent)>) -> LoadHandle;
 }

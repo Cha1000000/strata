@@ -359,12 +359,11 @@ pub enum BrowserEvent {
         location: Location,
     },
     EmptyTrashRequested,
+    LeftoverReviewRequested {
+        depth: usize,
+    },
     /// What interrupted operations left in the column changed; `announce` marks the
     /// first time this session that a folder holding set-aside originals shows them.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the leftover button and dock card read them")
-    )]
     LeftoversChanged {
         depth: usize,
         announce: bool,
@@ -1176,6 +1175,7 @@ pub struct Browser {
     deferred_file_operation_changes: RefCell<DeferredDirectoryChanges>,
     operation_rescan_depths: RefCell<HashSet<usize>>,
     restoration_operation: Cell<bool>,
+    recovery_operation: Cell<bool>,
     archive_operation: Cell<bool>,
     transfer_destination: RefCell<Option<Location>>,
     /// Whether a completed transfer should navigate to/reveal its destination.
@@ -1261,6 +1261,7 @@ impl Browser {
             deferred_file_operation_changes: RefCell::new(HashMap::new()),
             operation_rescan_depths: RefCell::new(HashSet::new()),
             restoration_operation: Cell::new(false),
+            recovery_operation: Cell::new(false),
             archive_operation: Cell::new(false),
             transfer_destination: RefCell::new(None),
             transfer_reveal: Cell::new(true),

@@ -368,3 +368,24 @@ pub(in crate::ui) fn empty_trash_button(browser: &Rc<Browser>) -> gtk::Button {
     });
     button
 }
+
+pub(in crate::ui) fn leftovers_button(browser: &Rc<Browser>, depth: usize) -> gtk::Button {
+    let label = crate::i18n::tr("Items left by an interrupted operation");
+    let button = gtk::Button::builder()
+        .tooltip_text(&label)
+        .visible(!browser.column_leftovers(depth).is_empty())
+        .build();
+    button.set_child(Some(&crate::assets::chrome_icon(
+        crate::assets::icons::TRIANGLE_ALERT,
+    )));
+    crate::ui::controls::pane_header_action(&button);
+    button.add_css_class("leftovers-button");
+    crate::ui::accessibility::set_label(&button, &label);
+    let weak_browser = Rc::downgrade(browser);
+    button.connect_clicked(move |_| {
+        if let Some(browser) = weak_browser.upgrade() {
+            browser.request_leftover_review(depth);
+        }
+    });
+    button
+}

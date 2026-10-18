@@ -53,6 +53,7 @@ mod file_commands;
 pub(in crate::ui) mod find;
 pub(super) mod fly_to_trash;
 mod inline_edit;
+mod leftovers;
 mod listing_filter;
 mod listing_search;
 mod location;
@@ -108,8 +109,8 @@ pub(in crate::ui) use crate::ui::browser::listing_filter::{
     FilterFocus, FilterStatus, results_step_target, scroll_results_to, selected_cursor,
 };
 pub(super) use crate::ui::browser::pane_header::{
-    column_sort_direction_toggle, column_sort_menu, empty_trash_button, pane_new_folder_button,
-    pane_refresh_button, sync_column_sort_direction,
+    column_sort_direction_toggle, column_sort_menu, empty_trash_button, leftovers_button,
+    pane_new_folder_button, pane_refresh_button, sync_column_sort_direction,
 };
 pub(super) use crate::ui::browser::paths::is_trash_root;
 pub use crate::ui::browser::peek::PeekBehavior;
@@ -278,6 +279,7 @@ pub(super) struct ViewState {
     pending_navigate: RefCell<Option<Location>>,
     pending_location_credentials: RefCell<Option<MountCredentials>>,
     pending_trash_lookup: RefCell<Option<LoadHandle>>,
+    leftovers: leftovers::LeftoverState,
     pending_empty_trash: RefCell<Option<LoadHandle>>,
     trash_loading: RefCell<Option<TrashLoadingView>>,
     unlock_slots: RefCell<Vec<UnlockProgressSlot>>,
@@ -663,6 +665,7 @@ impl BrowserView {
             pending_navigate: RefCell::new(None),
             pending_location_credentials: RefCell::new(None),
             pending_trash_lookup: RefCell::new(None),
+            leftovers: leftovers::LeftoverState::default(),
             pending_empty_trash: RefCell::new(None),
             trash_loading: RefCell::new(None),
             unlock_slots: RefCell::new(Vec::new()),

@@ -4237,6 +4237,15 @@ impl OperationProvider for LocalOperationProvider {
         leftovers::start_sweep(folder, names);
     }
 
+    fn review_leftovers(
+        &self,
+        folder: &Location,
+        names: Vec<OsString>,
+        done: Box<dyn FnOnce(Vec<crate::services::ReviewedLeftover>)>,
+    ) -> LoadHandle {
+        leftovers::start_review(folder, names, done)
+    }
+
     fn compress(&self, request: CompressRequest, emit: Rc<dyn Fn(OperationEvent)>) -> LoadHandle {
         archive::compress(request, emit)
     }

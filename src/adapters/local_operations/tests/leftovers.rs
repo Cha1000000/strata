@@ -12,7 +12,8 @@ use crate::{
     adapters::mount_lanes,
     model::hidden_names::{Leftover, classify},
     services::{
-        Holder, KeptCause, KeptItem, RecoverRequest, RenameCause, RenamedItem, TransferReport,
+        Holder, KeptCause, KeptItem, LeftoverInside, RecoverRequest, RenameCause, RenamedItem,
+        ReviewedLeftover, TransferReport,
     },
 };
 
@@ -771,5 +772,168 @@ fn stale_probes_go_only_when_empty_and_old() -> Result<(), Box<dyn Error>> {
         [mount_lanes::Responsiveness::Answering],
         "a slow sweep that keeps answering never stalls its mount"
     );
+    Ok(())
+}
+
+#[test]
+fn a_review_lists_what_each_leftover_holds_up_to_its_bound() -> Result<(), Box<dyn Error>> {
+    let _serial = serial()?;
+    let root = tempfile::tempdir()?;
+    let unreadable = root.path().join(HiddenName::Originals.fresh());
+    fs::create_dir(&unreadable)?;
+    fs::write(unreadable.join("song.flac"), b"old")?;
+    let partly_unreadable = root.path().join(HiddenName::Merge.fresh());
+    fs::create_dir_all(partly_unreadable.join("sub"))?;
+    fs::write(partly_unreadable.join("sub/c.txt"), b"c")?;
+    let originals = root.path().join(HiddenName::Originals.fresh());
+    fs::create_dir_all(originals.join("album"))?;
+    fs::write(originals.join("song.flac"), b"old")?;
+    let merge = root.path().join(HiddenName::Merge.fresh());
+    fs::create_dir_all(merge.join("sub/deep"))?;
+    fs::write(merge.join("sub/deep/a.txt"), b"a")?;
+    fs::write(merge.join("b.txt"), b"b")?;
+    let held = root.path().join(HiddenName::Originals.fresh());
+    fs::create_dir(&held)?;
+    fs::write(held.join("song.flac"), b"old")?;
+    let crowded = root.path().join(HiddenName::Originals.fresh());
+    fs::create_dir(&crowded)?;
+    for index in 0..1_002 {
+        fs::write(crowded.join(format!("{index:04}")), b"")?;
+    }
+    let empty = root.path().join(HiddenName::Originals.fresh());
+    fs::create_dir(&empty)?;
+    let stage = root.path().join(HiddenName::Copy.fresh());
+    fs::write(&stage, b"partial")?;
+    let gone = root.path().join(HiddenName::Replaced.fresh());
+    let scope = FsQuirks::install(
+        root.path(),
+        Quirks {
+            holder: Some(Holder::Program("Text Editor".to_owned())),
+            fail: vec![
+                (Op::Names, ".", 0, Errno::IO),
+                (Op::Names, ".", 1, Errno::IO),
+            ],
+            ..Quirks::nfs3()
+        },
+    );
+    let hold = super::fs_quirks::hold(&held.join("song.flac"));
+    let dir = open_local_parent_directory(&held)?;
+    fs().unlink(
+        Entry::new(&dir, OsStr::new("song.flac")),
+        rustix::fs::AtFlags::empty(),
+    )?;
+    let name = |path: &Path| path.file_name().map(OsStr::to_os_string).ok_or("a name");
+    let listed = [
+        &unreadable,
+        &partly_unreadable,
+        &originals,
+        &merge,
+        &held,
+        &crowded,
+        &empty,
+        &stage,
+        &gone,
+    ]
+    .into_iter()
+    .map(|path| name(path))
+    .collect::<Result<Vec<_>, _>>()?;
+    let modified = |path: &Path| fs::symlink_metadata(path).map(|metadata| Some(metadata.mtime()));
+    let mut crowded_names: Vec<PathBuf> = (0..1_000)
+        .map(|index| format!("{index:04}").into())
+        .collect();
+    crowded_names.sort();
+
+    let reviewed = super::super::leftovers::review(
+        fs(),
+        root.path(),
+        &listed,
+        &mount_lanes::Progress::unlaned(),
+    );
+
+    let failed_read = crate::services::io_error_detail(&Errno::IO.into());
+    let expected = [
+        (&unreadable, LeftoverInside::Unreadable(failed_read.clone())),
+        (&partly_unreadable, LeftoverInside::Unreadable(failed_read)),
+        (
+            &originals,
+            LeftoverInside::Items {
+                names: vec!["album".into(), "song.flac".into()],
+                more: 0,
+            },
+        ),
+        (
+            &merge,
+            LeftoverInside::Items {
+                names: vec!["b.txt".into(), "sub/deep/a.txt".into()],
+                more: 0,
+            },
+        ),
+        (
+            &held,
+            LeftoverInside::StillOpen(
+                "A file in it is still open in Text Editor. Close it there and try again."
+                    .to_owned(),
+            ),
+        ),
+        (
+            &crowded,
+            LeftoverInside::Items {
+                names: crowded_names,
+                more: 2,
+            },
+        ),
+        (
+            &empty,
+            LeftoverInside::Items {
+                names: Vec::new(),
+                more: 0,
+            },
+        ),
+        (&stage, LeftoverInside::Item),
+    ];
+    let mut want = expected
+        .into_iter()
+        .map(|(path, inside)| {
+            Ok(ReviewedLeftover {
+                name: name(path)?,
+                modified: modified(path)?,
+                inside,
+            })
+        })
+        .collect::<Result<Vec<_>, Box<dyn Error>>>()?;
+    want.push(ReviewedLeftover {
+        name: name(&gone)?,
+        modified: None,
+        inside: LeftoverInside::Gone,
+    });
+    assert_eq!(reviewed, want);
+    let touched: Vec<_> = scope
+        .calls()
+        .into_iter()
+        .filter(|call| matches!(call.op, Op::Rename | Op::Unlink | Op::Link | Op::Mkdir))
+        .collect();
+    assert_eq!(touched.len(), 1, "only the fixture's unlink: {touched:?}");
+
+    let answer = Rc::new(RefCell::new(None));
+    let answered = answer.clone();
+    let _review = LocalOperationProvider.review_leftovers(
+        &Location::local(root.path()),
+        vec![name(&stage)?],
+        Box::new(move |reviewed| {
+            answered.replace(Some(reviewed));
+        }),
+    );
+    while answer.borrow().is_none() {
+        glib::MainContext::default().iteration(true);
+    }
+    assert_eq!(
+        answer.take(),
+        Some(vec![ReviewedLeftover {
+            name: name(&stage)?,
+            modified: modified(&stage)?,
+            inside: LeftoverInside::Item,
+        }])
+    );
+    drop(hold);
     Ok(())
 }

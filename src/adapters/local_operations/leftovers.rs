@@ -45,8 +45,8 @@ use crate::{
         hidden_names::{Leftover, classify, foreign_leftover},
     },
     services::{
-        Holder, KeptCause, KeptItem, LoadHandle, OperationEvent, RecoverRequest, RenameCause,
-        RenamedItem, TransferReport,
+        Holder, KeptCause, KeptItem, LeftoverInside, LoadHandle, OperationEvent, RecoverRequest,
+        RenameCause, RenamedItem, ReviewedLeftover, TransferReport,
     },
 };
 
@@ -55,6 +55,7 @@ use crate::{
 const LINGERS: Duration = Duration::from_secs(2);
 /// vfat keeps local times: from another time zone a fresh probe can look up to 26 hours old.
 const PROBES_STALE_AFTER: Duration = Duration::from_secs(60 * 60);
+const REVIEWED_ENTRIES: usize = 1_000;
 
 static SWEPT: LazyLock<Mutex<HashSet<(PathBuf, OsString)>>> = LazyLock::new(Mutex::default);
 
@@ -644,4 +645,122 @@ pub(super) fn sweep_probes(fs: &dyn FsOps, folder: &Path, names: &[OsString], pr
             progress.answered(&fs.unlink(entry, flags));
         }
     }
+}
+
+pub(super) fn start_review(
+    folder: &Location,
+    names: Vec<OsString>,
+    done: Box<dyn FnOnce(Vec<ReviewedLeftover>)>,
+) -> LoadHandle {
+    let Some(folder) = folder.native_path().map(Path::to_path_buf) else {
+        done(Vec::new());
+        return LoadHandle::new(|| {});
+    };
+    let lane = folder.clone();
+    let reviewed = mount_lanes::run(&lane, Class::Interactive, move |progress| {
+        review(fs(), &folder, &names, progress)
+    });
+    let task = glib::MainContext::default().spawn_local(async move {
+        done(reviewed.await.unwrap_or_default());
+    });
+    LoadHandle::new(move || task.abort())
+}
+
+pub(super) fn review(
+    fs: &dyn FsOps,
+    folder: &Path,
+    names: &[OsString],
+    progress: &Progress,
+) -> Vec<ReviewedLeftover> {
+    let reviewed = |name: &OsString, modified, inside| ReviewedLeftover {
+        name: name.clone(),
+        modified,
+        inside,
+    };
+    let dir = match open_local_parent_directory(folder) {
+        Ok(dir) => dir,
+        Err(error) => {
+            return names
+                .iter()
+                .map(|name| reviewed(name, None, LeftoverInside::Unreadable(error.clone())))
+                .collect();
+        }
+    };
+    progress.beat();
+    names
+        .iter()
+        .map(|name| {
+            let entry = Entry::new(&dir, name);
+            let stat = fs.stat(entry, false);
+            progress.answered(&stat);
+            let stat = match stat {
+                Ok(stat) => stat,
+                Err(Errno::NOENT) => return reviewed(name, None, LeftoverInside::Gone),
+                Err(error) => {
+                    let message = crate::services::io_error_message(&error.into());
+                    return reviewed(name, None, LeftoverInside::Unreadable(message));
+                }
+            };
+            let inside = match classify(name) {
+                Some(Leftover::Originals) if stat.is_directory() => {
+                    contents(fs, entry, false, progress)
+                }
+                Some(Leftover::MergeOriginals) if stat.is_directory() => {
+                    contents(fs, entry, true, progress)
+                }
+                _ => LeftoverInside::Item,
+            };
+            reviewed(name, Some(stat.mtime.0), inside)
+        })
+        .collect()
+}
+
+fn contents(
+    fs: &dyn FsOps,
+    container: Entry<'_>,
+    mirrors: bool,
+    progress: &Progress,
+) -> LeftoverInside {
+    let held = match placement::open_beneath(fs, container.dir, Path::new(container.name)) {
+        Ok(held) => held,
+        Err(error) => return LeftoverInside::Unreadable(placement_reason(error)),
+    };
+    let mut shown = Vec::new();
+    let mut more = 0;
+    let mut held_open = false;
+    let mut folders = vec![(held, PathBuf::new())];
+    while let Some((folder, relative)) = folders.pop() {
+        let names = listed(fs, &folder);
+        progress.answered(&names);
+        let names = match names {
+            Ok(names) => names,
+            Err(error) => return LeftoverInside::Unreadable(os_error_detail(error)),
+        };
+        for name in names {
+            if is_leftover(fs, folder.as_fd(), &name) {
+                held_open = true;
+                continue;
+            }
+            let path = relative.join(&name);
+            if shown.len() >= REVIEWED_ENTRIES {
+                more += 1;
+                continue;
+            }
+            let entry = Entry::new(&folder, &name);
+            if mirrors && fs.stat(entry, false).is_ok_and(|stat| stat.is_directory()) {
+                match placement::open_beneath(fs, folder.as_fd(), Path::new(&name)) {
+                    Ok(mirror) => folders.push((mirror, path)),
+                    Err(error) => return LeftoverInside::Unreadable(placement_reason(error)),
+                }
+                continue;
+            }
+            shown.push(path);
+        }
+    }
+    if shown.is_empty() && more == 0 && held_open {
+        let reason = still_open(fs, container).unwrap_or_else(|| holders::held(None));
+        return LeftoverInside::StillOpen(reason);
+    }
+    shown.sort();
+    LeftoverInside::Items { names: shown, more }
 }

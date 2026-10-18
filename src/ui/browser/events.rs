@@ -684,6 +684,9 @@ impl ViewState {
             }
             BrowserEvent::RenameCompleted { request_id } => {
                 self.complete_pending_rename(*request_id);
+                if let Some(recovered) = self.take_recovered_item() {
+                    self.rename_created_entry(&recovered);
+                }
                 self.prune_stale_search_results();
                 self.finish_keyboard_refocus(
                     super::file_commands::KeyboardRefocus::Rename(*request_id),
@@ -692,12 +695,18 @@ impl ViewState {
             }
             BrowserEvent::RenameAbandoned { request_id } => {
                 self.abandon_pending_rename(*request_id);
+                if self.take_recovered_item().is_some() {
+                    self.cancel_new_entry();
+                }
             }
             BrowserEvent::RenameFailed {
                 request_id,
                 message,
             } => {
                 self.fail_pending_rename_from_browser(*request_id);
+                if self.take_recovered_item().is_some() {
+                    self.cancel_new_entry();
+                }
                 if let Some(request_id) = request_id {
                     self.finish_keyboard_refocus(
                         super::file_commands::KeyboardRefocus::Rename(*request_id),
@@ -1020,7 +1029,12 @@ impl ViewState {
             BrowserEvent::EmptyTrashRequested => {
                 self.load_trash_summary();
             }
-            BrowserEvent::LeftoversChanged { .. } => {}
+            BrowserEvent::LeftoverReviewRequested { depth } => {
+                self.show_leftover_review(*depth);
+            }
+            BrowserEvent::LeftoversChanged { depth, announce } => {
+                self.follow_leftovers(*depth, *announce);
+            }
             BrowserEvent::LocationNavigationRejected { error } => {
                 let credentials = self.pending_location_credentials.take();
                 match error {

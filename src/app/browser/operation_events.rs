@@ -47,6 +47,7 @@ struct OperationCompletion {
     deleting: bool,
     deletion_permanent: bool,
     restoring: bool,
+    recovering: bool,
     archiving: bool,
     destination: Option<Location>,
     reveal: bool,
@@ -61,6 +62,7 @@ impl OperationCompletion {
             deleting: browser.deletion_operation.replace(false),
             deletion_permanent: browser.deletion_permanent.replace(false),
             restoring: browser.restoration_operation.replace(false),
+            recovering: browser.recovery_operation.replace(false),
             archiving: browser.archive_operation.replace(false),
             destination: browser.transfer_destination.replace(None),
             reveal: browser.transfer_reveal.replace(true),
@@ -628,10 +630,13 @@ impl Browser {
                 ..
             } => {
                 if completion.restoring && !completion.undoing && !restored.is_empty() {
-                    push_pending_undo(UndoEntry::Copy(restored));
+                    push_pending_undo(UndoEntry::Copy(restored.clone()));
                 }
                 self.remove_deleted_locations(&locations, rescanning);
                 self.refresh_unmonitored_restore_locations(context, &completion);
+                if completion.recovering {
+                    self.publish_recovery(&context.refresh_locations, &restored);
+                }
             }
             OperationEvent::RestoreCompletedWithErrors {
                 restored_locations,
@@ -640,10 +645,13 @@ impl Browser {
                 ..
             } => {
                 if completion.restoring && !completion.undoing && !restored.is_empty() {
-                    push_pending_undo(UndoEntry::Copy(restored));
+                    push_pending_undo(UndoEntry::Copy(restored.clone()));
                 }
                 self.remove_deleted_locations(&restored_locations, rescanning);
                 self.refresh_unmonitored_restore_locations(context, &completion);
+                if completion.recovering {
+                    self.publish_recovery(&context.refresh_locations, &[]);
+                }
                 self.emit(BrowserEvent::OperationCompletedWithErrors {
                     message,
                     retryable_locations: Vec::new(),

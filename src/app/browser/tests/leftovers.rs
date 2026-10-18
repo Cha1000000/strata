@@ -169,19 +169,30 @@ fn leftovers_wait_for_an_operation_in_their_folder_only() {
 
         browser.navigate(parent.clone());
         browser.show_child(0, child.clone());
+        let busy = || {
+            columns
+                .iter()
+                .map(Browser::leftovers_busy)
+                .collect::<Vec<_>>()
+        };
         let got_during = (
             announced(&events),
             vec![surfaced(&browser, 0), surfaced(&browser, 1)],
+            busy(),
         );
         events.borrow_mut().clear();
         drop(activity);
         let got_after = (
             announced(&events),
             vec![surfaced(&browser, 0), surfaced(&browser, 1)],
+            busy(),
         );
 
-        let want_during = (during.clone(), shown(&during));
-        let want_after = (after, shown(&[(0, true), (1, false)]));
+        let busy_during = (0..2)
+            .map(|depth| !during.iter().any(|(shown, _)| *shown == depth))
+            .collect();
+        let want_during = (during.clone(), shown(&during), busy_during);
+        let want_after = (after, shown(&[(0, true), (1, false)]), vec![false, false]);
         if got_during != want_during || got_after != want_after {
             failures.push(format!(
                 "{row}: during {got_during:?}, want {want_during:?}; after {got_after:?}, want {want_after:?}"

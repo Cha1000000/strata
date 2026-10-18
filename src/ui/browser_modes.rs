@@ -399,6 +399,7 @@ struct Pane {
     filter_entry: Option<gtk::Entry>,
     filter_button: Option<gtk::ToggleButton>,
     empty_trash_button: Option<gtk::Button>,
+    leftovers_button: gtk::Button,
     show_hidden: Rc<Cell<bool>>,
     filter: gtk::CustomFilter,
     filter_query: Rc<RefCell<String>>,
@@ -1783,6 +1784,12 @@ impl ModeViews {
             .collect()
     }
 
+    pub(crate) fn show_leftovers(&self, depth: usize, shown: bool) {
+        for pane in self.panes_at(depth) {
+            pane.leftovers_button.set_visible(shown);
+        }
+    }
+
     /// The Icons or List pane showing `depth`.
     fn mode_pane(&self, depth: usize) -> Option<&Pane> {
         self.panes_at(depth).into_iter().next()
@@ -2198,6 +2205,7 @@ struct IconsControls {
     thumbnail_value: gtk::Label,
     thumbnail_popover: gtk::Popover,
     empty_trash_button: Option<gtk::Button>,
+    leftovers_button: gtk::Button,
 }
 
 /// `tooltip` names the filter shortcut with `%{keys}`.
@@ -2302,6 +2310,8 @@ fn icons_controls(browser: &Rc<Browser>, depth: usize, thumbnail_size: i32) -> I
     thumbnail_menu.set_child(Some(&crate::assets::chrome_icon(
         crate::assets::icons::PICTURES,
     )));
+    let leftovers = super::browser::leftovers_button(browser, depth);
+    actions.append(&leftovers);
     let empty_trash = super::browser::empty_trash_button(browser);
     let is_trash = browser
         .location_at(depth)
@@ -2328,6 +2338,7 @@ fn icons_controls(browser: &Rc<Browser>, depth: usize, thumbnail_size: i32) -> I
         thumbnail_value,
         thumbnail_popover,
         empty_trash_button: is_trash.then_some(empty_trash),
+        leftovers_button: leftovers,
     }
 }
 
@@ -2680,6 +2691,7 @@ fn build_icons_pane(
         filter_entry: Some(controls.filter_entry),
         filter_button: Some(controls.filter_button),
         empty_trash_button: controls.empty_trash_button,
+        leftovers_button: controls.leftovers_button,
         sort_direction_button: Some(controls.sort_direction_button),
         show_hidden,
         filter: filter_for_pane,
@@ -3654,6 +3666,8 @@ fn build_list_pane(
 
     let actions = gtk::Box::new(gtk::Orientation::Horizontal, 0);
     actions.add_css_class("icons-header-actions");
+    let leftovers = super::browser::leftovers_button(&browser, depth);
+    actions.append(&leftovers);
     let empty_trash = super::browser::empty_trash_button(&browser);
     let is_trash = browser
         .location_at(depth)
@@ -3958,6 +3972,7 @@ fn build_list_pane(
         filter_entry: Some(filter_entry),
         filter_button: Some(filter_button),
         empty_trash_button: is_trash.then_some(empty_trash),
+        leftovers_button: leftovers,
         sort_direction_button: None,
         show_hidden,
         filter: filter_for_pane,
@@ -5327,6 +5342,8 @@ fn apply_snapshot(pane: &Pane, snapshot: &BrowserColumnSnapshot, browser: &Brows
         scroll_pane_to_source(pane, focused);
     }
     pane.truncated_hint.set_visible(snapshot.truncated);
+    pane.leftovers_button
+        .set_visible(!browser.column_leftovers(pane.depth).is_empty());
     if snapshot.loading {
         pane.spinner.start();
         if restarts_loading {

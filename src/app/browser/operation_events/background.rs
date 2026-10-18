@@ -196,6 +196,7 @@ impl Browser {
                     deleting: job.deleting,
                     deletion_permanent: job.deletion_permanent,
                     restoring: false,
+                    recovering: false,
                     archiving: !job.copying && !job.deleting,
                     destination: job.destination.clone(),
                     reveal: job.reveal,

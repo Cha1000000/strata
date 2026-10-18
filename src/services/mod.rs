@@ -71,12 +71,13 @@ pub(crate) use native_fs::{
 pub(crate) use navigation_history::NavigationHistory;
 pub use operations::{
     ArchiveFormat, CancelledOperation, CompressRequest, CreateDirectoryRequest, CreateFileRequest,
-    DeleteRequest, ExtractRequest, Holder, KeptCause, KeptItem, MoveRecord, NameMode,
-    OperationEvent, OperationProvider, OperationRequestId, PasswordFailure, PasteItem,
+    DeleteRequest, ExtractRequest, Holder, KeptCause, KeptItem, LeftoverInside, MoveRecord,
+    NameMode, OperationEvent, OperationProvider, OperationRequestId, PasswordFailure, PasteItem,
     PasteRequest, PlacedSnapshot, RecoverRequest, RenameCause, RenameRecord, RenameRequest,
-    RenamedItem, ReplacedOriginal, RestoreRequest, RestoreSource, RestoreTrashItem, ShownName,
-    SkippedItem, SpecialKind, TransferConflict, TransferReport, UndoCopyRequest, UndoMergeRequest,
-    UndoMoveItem, UndoMoveRequest, UndoRenameRequest, validate_basename,
+    RenamedItem, ReplacedOriginal, RestoreRequest, RestoreSource, RestoreTrashItem,
+    ReviewedLeftover, ShownName, SkippedItem, SpecialKind, TransferConflict, TransferReport,
+    UndoCopyRequest, UndoMergeRequest, UndoMoveItem, UndoMoveRequest, UndoRenameRequest,
+    validate_basename,
 };
 pub(crate) use path_match::{PathMatcher, PathQuery};
 pub use preview::{

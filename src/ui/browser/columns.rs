@@ -17,8 +17,8 @@ use crate::ui::browser::find::{
     HitRanges, highlight_hit_name, highlight_listing_name, search_hit_ranges,
 };
 use crate::ui::browser::pane_header::{
-    column_sort_direction_toggle, column_sort_menu, empty_trash_button, pane_new_folder_button,
-    pane_refresh_button,
+    column_sort_direction_toggle, column_sort_menu, empty_trash_button, leftovers_button,
+    pane_new_folder_button, pane_refresh_button,
 };
 use crate::ui::browser::paths::is_trash_root;
 use crate::ui::browser::presentation::LoadPresentation;
@@ -463,6 +463,7 @@ pub(super) struct ColumnView {
     pub(super) spinner_delay: Rc<RefCell<Option<glib::SourceId>>>,
     pub(super) truncated_hint: gtk::Image,
     pub(super) empty_trash_button: Option<gtk::Button>,
+    pub(super) leftovers_button: gtk::Button,
     pub(super) show_hidden: Rc<Cell<bool>>,
     pub(super) filter: gtk::CustomFilter,
     pub(super) search_results: Rc<RefCell<Vec<crate::services::SearchItem>>>,
@@ -1329,6 +1330,8 @@ impl ViewState {
         header.append(&spinner);
         let header_actions = gtk::Box::new(gtk::Orientation::Horizontal, 0);
         header_actions.add_css_class("column-header-actions");
+        let leftovers = leftovers_button(&self.browser, depth);
+        header_actions.append(&leftovers);
         let empty_trash = empty_trash_button(&self.browser);
         let is_trash = is_trash_root(location);
         empty_trash.set_visible(is_trash);
@@ -2152,6 +2155,7 @@ impl ViewState {
             spinner_delay: Rc::new(RefCell::new(None)),
             truncated_hint,
             empty_trash_button: is_trash.then_some(empty_trash),
+            leftovers_button: leftovers,
             show_hidden,
             filter: filter_for_column,
             search_results,

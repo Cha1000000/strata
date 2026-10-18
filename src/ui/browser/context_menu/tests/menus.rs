@@ -572,3 +572,51 @@ fn label_texts(menu: &gtk::Popover) -> Vec<String> {
         .map(|label| label.text().to_string())
         .collect()
 }
+
+#[test]
+fn a_leftover_row_offers_restore_once_hidden_files_are_shown() {
+    crate::test_support::gtk_test(
+        "ui::browser::context_menu::tests::menus::a_leftover_row_offers_restore_once_hidden_files_are_shown",
+        || {
+            let fixture = tempfile::tempdir().expect("menu fixture");
+            let set_aside = crate::model::hidden_names::HiddenName::Replaced.fresh();
+            let set_aside = set_aside.to_string_lossy().into_owned();
+            std::fs::write(fixture.path().join(&set_aside), b"original").expect("set aside");
+            std::fs::write(fixture.path().join("notes.txt"), b"notes").expect("file");
+            let view = BrowserView::new(
+                Rc::new(crate::adapters::LocalFileSource),
+                PeekBehavior::default(),
+            );
+            view.set_operation_provider(Rc::new(crate::adapters::LocalOperationProvider));
+            let window = gtk::Window::builder()
+                .child(&view.widget())
+                .default_width(1000)
+                .default_height(850)
+                .build();
+            window.present();
+            view.browser().navigate(Location::local(fixture.path()));
+            wait_until(|| label(&view.widget(), "notes.txt").is_some());
+            if !view.browser().preferences().show_hidden {
+                view.browser().toggle_hidden();
+            }
+            wait_until(|| label(&view.widget(), &set_aside).is_some());
+            let restore = crate::i18n::tr("Restore");
+
+            let menu = open_menu(&view, Some("notes.txt"));
+            let ordinary = label_texts(&menu);
+            menu.popdown();
+            wait_until(|| !menu.is_mapped());
+            let menu = open_menu(&view, Some(&set_aside));
+            let leftover = label_texts(&menu);
+            assert!(!ordinary.contains(&restore), "{ordinary:?}");
+            assert!(leftover.contains(&restore), "{leftover:?}");
+            menu_item(&menu, &restore).emit_by_name::<()>("clicked", &[]);
+
+            let recovered = fixture.path().join(crate::i18n::tr("Recovered item"));
+            wait_until(|| recovered.exists());
+            assert_eq!(std::fs::read(recovered).expect("recovered"), b"original");
+            view.browser().clear_observer();
+            window.destroy();
+        },
+    );
+}
