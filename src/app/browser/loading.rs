@@ -30,7 +30,10 @@ impl Browser {
                 self.watch_answered_folder(request_id, Some(&stamp));
                 self.record_stamp(request_id, *stamp);
             }
-            DirectoryEvent::ListingDigest { .. } => {}
+            DirectoryEvent::ListingDigest {
+                request_id,
+                names_digest,
+            } => self.record_digest(request_id, names_digest),
             DirectoryEvent::Batch {
                 request_id,
                 entries,

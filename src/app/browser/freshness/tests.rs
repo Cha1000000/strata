@@ -82,6 +82,12 @@ impl Folders {
         folder.names = names.iter().map(|name| (*name).to_owned()).collect();
     }
 
+    fn change_names_only(&self, location: &Location, names: &[&str]) {
+        let mut folders = self.folders.borrow_mut();
+        let folder = folders.get_mut(location).expect("a known folder");
+        folder.names = names.iter().map(|name| (*name).to_owned()).collect();
+    }
+
     fn loads_of(&self, location: &Location) -> usize {
         self.loads
             .borrow()
@@ -128,6 +134,14 @@ impl Folders {
                 .map(|name| entry(&request.location, name))
                 .collect(),
         });
+        if !self.truncate_loads.get() {
+            emit(DirectoryEvent::ListingDigest {
+                request_id,
+                names_digest: names
+                    .iter()
+                    .fold(0, |digest: u64, name| digest.wrapping_add(name_hash(name))),
+            });
+        }
         true
     }
 
@@ -353,6 +367,13 @@ impl FileSource for Folders {
         }
         LoadHandle::new(|| {})
     }
+}
+
+fn name_hash(name: &str) -> u64 {
+    use std::hash::{DefaultHasher, Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    name.hash(&mut hasher);
+    hasher.finish()
 }
 
 fn entry(folder: &Location, name: &str) -> FileEntry {
@@ -1548,4 +1569,141 @@ fn a_confirmation_and_a_check_due_together_on_one_mount_both_go_through() {
 
     assert_eq!(source.loads_of(&share), 2);
     assert_eq!(names_at(&browser, 1), ["added elsewhere", "listed"]);
+}
+
+#[derive(Clone, Copy)]
+enum Elsewhere {
+    Moved(&'static [&'static str]),
+    Names(&'static [&'static str]),
+    Refresh,
+    Tick(u64),
+}
+
+#[test]
+fn a_listing_that_changed_under_an_equal_stamp_switches_its_mount_to_relisting() {
+    use Elsewhere::{Moved, Names, Refresh, Tick};
+    const ADDED: &[&str] = &["listed", "added elsewhere"];
+    let mut failures = Vec::new();
+    for (mount, case, baseline, before, expected) in [
+        (
+            50,
+            "names changed under an equal stamp",
+            network(1),
+            &[Names(ADDED), Refresh][..],
+            (0, 0, 0, 1, true, 2),
+        ),
+        (
+            51,
+            "the stamp moved and the names stayed",
+            network(1),
+            &[Moved(&["listed"]), Refresh],
+            (1, 0, 2, 0, false, 2),
+        ),
+        (
+            52,
+            "names changed under a coarse stamp read within its window",
+            coarse((1_000, 0), 1_000_500, Some(2), None),
+            &[Names(ADDED), Refresh],
+            (1, 1, 2, 1, true, 2),
+        ),
+        (
+            53,
+            "names a client cache kept under a moved stamp changed later",
+            network(1),
+            &[Moved(&["listed"]), Tick(3), Refresh, Names(ADDED), Refresh],
+            (2, 0, 3, 0, false, 3),
+        ),
+        (
+            54,
+            "names a daemon cache refreshed before the stamp",
+            coarse((1_000, 0), 1_030_000, Some(1), Some(21)),
+            &[Names(ADDED), Refresh],
+            (1, 0, 2, 0, false, 2),
+        ),
+    ] {
+        let source = Rc::new(Folders::default());
+        let baseline = DirectoryStamp {
+            mount: Some(MountToken::Native(mount)),
+            ..baseline
+        };
+        let share = source.add("/net/blind", baseline, Some(Watching::Live));
+        let other = source.add("/net/blind/other", stamp(NFS + 1, 2, true), None);
+        let (browser, clock) = browser_on(&source);
+        browser.set_freshness(FreshnessInput {
+            presence: Presence::Focused,
+            ..browser.freshness_input()
+        });
+        browser.navigate(share.clone());
+        browser.show_child(0, other.clone());
+        let mut now = 0;
+        for step in before {
+            match *step {
+                Moved(names) => source.change(&share, names),
+                Names(names) => source.change_names_only(&share, names),
+                Refresh => browser.refresh_all(),
+                Tick(second) => {
+                    now = second;
+                    clock.tick_at(second);
+                }
+            }
+        }
+        let loads = source.loads_of(&share);
+        source.change_names_only(&share, &["listed", "added elsewhere", "added later"]);
+
+        clock.tick_at(now + 3);
+        let at_three = (source.checks_of(&share), source.loads_of(&share) - loads);
+        clock.tick_at(now + 15);
+
+        let got = (
+            at_three.0,
+            at_three.1,
+            source.checks_of(&share),
+            source.loads_of(&share) - loads,
+            names_at(&browser, 0).contains(&"added later".to_owned()),
+            source.checks_of(&other),
+        );
+        if got != expected {
+            failures.push(format!("{case}: got {got:?}, expected {expected:?}"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn a_relisted_mount_slows_down_until_its_listing_changes() {
+    let source = Rc::new(Folders::default());
+    let blind = DirectoryStamp {
+        mount: Some(MountToken::Native(60)),
+        ..network(1)
+    };
+    let share = source.add("/net/blind", blind, Some(Watching::Live));
+    let (browser, clock) = browser_on(&source);
+    browser.navigate(share.clone());
+    source.change_names_only(&share, &["listed", "added elsewhere"]);
+    browser.refresh_all();
+    let learned = source.loads_of(&share);
+    let relists = || source.loads_of(&share) - learned;
+
+    for second in (15..=300).step_by(15) {
+        clock.tick_at(second);
+    }
+    let after_twenty_unchanged = relists();
+    clock.tick_at(315);
+    let at_the_usual_interval = relists();
+    clock.tick_at(330);
+    let at_twice_the_interval = relists();
+    source.change_names_only(&share, &["listed", "added elsewhere", "added later"]);
+    clock.tick_at(360);
+    clock.tick_at(375);
+
+    assert_eq!(
+        (
+            after_twenty_unchanged,
+            at_the_usual_interval,
+            at_twice_the_interval
+        ),
+        (20, 20, 21)
+    );
+    assert_eq!(relists(), 23);
+    assert_eq!(source.checks_of(&share), 0);
 }

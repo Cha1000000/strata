@@ -495,9 +495,7 @@ pub enum DirectoryEvent {
     },
     /// Order-independent, just before `Finished` of a load that was not truncated.
     ListingDigest {
-        #[cfg_attr(not(test), expect(dead_code, reason = "step 7 compares listings"))]
         request_id: RequestId,
-        #[cfg_attr(not(test), expect(dead_code, reason = "step 7 compares listings"))]
         names_digest: u64,
     },
     Finished {

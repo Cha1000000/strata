@@ -2,6 +2,7 @@
 
 use std::{
     cell::{Cell, RefCell},
+    collections::HashSet,
     rc::{Rc, Weak},
     time::{Duration, Instant},
 };
@@ -27,6 +28,14 @@ const MOST_SLOWING: u32 = 4;
 const POWER_SAVER_SLOWING: u32 = 4;
 const UNREACHABLE_RETRY: Duration = Duration::from_secs(30);
 const RELIST_AFTER_AWAY: Duration = Duration::from_secs(30);
+
+thread_local! {
+    static BLIND_MOUNTS: RefCell<HashSet<MountToken>> = RefCell::default();
+}
+
+fn blind(mount: &MountToken) -> bool {
+    BLIND_MOUNTS.with(|mounts| mounts.borrow().contains(mount))
+}
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum Presence {
@@ -66,6 +75,7 @@ struct Listing {
     request: RequestId,
     started: Instant,
     stamp: Option<(DirectoryStamp, Instant)>,
+    digest: Option<u64>,
     background: bool,
     confirming: bool,
 }
@@ -73,6 +83,7 @@ struct Listing {
 #[derive(Default)]
 pub(super) struct ColumnFreshness {
     baseline: Option<DirectoryStamp>,
+    digest: Option<u64>,
     listing: Option<Listing>,
     next_due: Option<Instant>,
     quiet_until: Option<Instant>,
@@ -82,6 +93,7 @@ pub(super) struct ColumnFreshness {
     unchanged: u32,
     checking: bool,
     not_responding: bool,
+    names_may_lag: bool,
 }
 
 impl ColumnFreshness {
@@ -89,6 +101,10 @@ impl ColumnFreshness {
         self.baseline
             .as_ref()
             .and_then(|baseline| baseline.mount.clone())
+    }
+
+    fn on_blind_mount(&self) -> bool {
+        self.mount().is_some_and(|mount| blind(&mount))
     }
 }
 
@@ -200,6 +216,14 @@ impl Browser {
                 .min(MOST_SLOWING)
     }
 
+    fn column_interval(&self, column: &ColumnFreshness) -> Duration {
+        let interval = self.check_interval(column.unchanged);
+        match column.on_blind_mount() {
+            true => interval.max(VISIBLE_INTERVAL),
+            false => interval,
+        }
+    }
+
     fn checking(&self) -> bool {
         let input = self.freshness.input.get();
         match input.presence {
@@ -233,6 +257,19 @@ impl Browser {
         }
     }
 
+    pub(super) fn record_digest(&self, request_id: RequestId, digest: u64) {
+        let depth = self.state.borrow().depth_for_request(request_id);
+        if let Some(column) = depth.and_then(|depth| self.column_freshness(depth))
+            && let Some(listing) = column
+                .borrow_mut()
+                .listing
+                .as_mut()
+                .filter(|listing| listing.request == request_id)
+        {
+            listing.digest = Some(digest);
+        }
+    }
+
     pub(super) fn note_listing_started(
         self: &Rc<Self>,
         depth: usize,
@@ -247,6 +284,7 @@ impl Browser {
                 request: request_id,
                 started: self.freshness_now(),
                 stamp: None,
+                digest: None,
                 background,
                 confirming,
             });
@@ -266,8 +304,43 @@ impl Browser {
         });
         let quiet_until = now + took * RELIST_DUTY;
         column.quiet_until = Some(quiet_until);
-        column.next_due = Some((now + self.check_interval(column.unchanged)).max(quiet_until));
+        column.next_due = Some((now + self.column_interval(column)).max(quiet_until));
         listing
+    }
+
+    fn learn_blind_mounts(&self, depth: usize, column: &mut ColumnFreshness) {
+        let current = self.state.borrow().request_id_for_depth(depth);
+        let Some(Listing {
+            stamp: Some((stamp, _)),
+            digest: Some(digest),
+            ..
+        }) = column
+            .listing
+            .as_ref()
+            .filter(|listing| Some(listing.request) == current)
+        else {
+            return;
+        };
+        let (Some(baseline), Some(before), Some(mount)) =
+            (column.baseline.as_ref(), column.digest, stamp.mount.clone())
+        else {
+            return;
+        };
+        let moved = stamp.moved_since(baseline);
+        let same_names = *digest == before;
+        let lagged = column.names_may_lag;
+        column.names_may_lag = same_names && (moved || lagged);
+        let unchanged = !moved && !baseline.may_hide_changes();
+        let cached = stamp.daemon_cache.is_some() || baseline.daemon_cache.is_some();
+        if unchanged && !same_names && !lagged && !cached {
+            BLIND_MOUNTS.with(|mounts| mounts.borrow_mut().insert(mount.clone()));
+        }
+        if blind(&mount) {
+            column.unchanged = match unchanged && same_names {
+                true => column.unchanged.saturating_add(1),
+                false => 0,
+            };
+        }
     }
 
     pub(super) fn note_listing_finished(self: &Rc<Self>, depth: usize) {
@@ -276,8 +349,10 @@ impl Browser {
         };
         {
             let mut column = column.borrow_mut();
+            self.learn_blind_mounts(depth, &mut column);
             if let Some(Listing {
                 stamp: Some((stamp, stamped)),
+                digest,
                 confirming,
                 ..
             }) = self.end_listing(depth, &mut column)
@@ -287,6 +362,7 @@ impl Browser {
                     .filter(|_| !confirming)
                     .map(|after| stamped + after);
                 column.baseline = Some(stamp);
+                column.digest = digest;
             }
         }
         self.reschedule_freshness();
@@ -389,8 +465,14 @@ impl Browser {
                 if !check && !confirm {
                     continue;
                 }
-                let later =
-                    |column: &ColumnFreshness| Some(now + self.check_interval(column.unchanged));
+                let later = |column: &ColumnFreshness| Some(now + self.column_interval(column));
+                if mount.as_ref().is_some_and(blind) {
+                    let mut column = column.borrow_mut();
+                    column.relist = true;
+                    column.confirm_at = None;
+                    column.next_due = later(&column);
+                    continue;
+                }
                 if !self.settled(depth) || Self::operation_touches(&location) {
                     let mut column = column.borrow_mut();
                     if check {
@@ -421,6 +503,9 @@ impl Browser {
         }
         for (_, group) in groups {
             self.check_columns(group);
+        }
+        if self.checking() {
+            self.start_relists();
         }
         self.reschedule_freshness();
         self.follow_responsiveness();
