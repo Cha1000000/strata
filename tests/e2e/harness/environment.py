@@ -59,7 +59,7 @@ DEFAULT_PREFERENCES: dict[str, object] = {
     "sort_key": "name",
     "sort_direction": "ascending",
     "check_for_updates": False,
-    "auto_refresh_interval": 0,
+    "watch_network_folders": True,
     "cross_volume_drop_strategy": "always-ask",
     "release_channel": "stable",
     "video_preview_backend": "automatic",

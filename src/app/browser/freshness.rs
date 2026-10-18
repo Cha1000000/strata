@@ -43,11 +43,23 @@ pub enum VisibleDepths {
     Active,
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct FreshnessInput {
     pub presence: Presence,
     pub scope: VisibleDepths,
     pub power_saver: bool,
+    pub watch_network_folders: bool,
+}
+
+impl Default for FreshnessInput {
+    fn default() -> Self {
+        Self {
+            presence: Presence::default(),
+            scope: VisibleDepths::default(),
+            power_saver: false,
+            watch_network_folders: true,
+        }
+    }
 }
 
 struct Listing {
@@ -299,14 +311,16 @@ impl Browser {
                 .get(depth)
                 .map(|column| &column.load_state),
             Some(LoadState::Error(_))
-        ) && column
-            .baseline
-            .as_ref()
-            .is_some_and(|baseline| baseline.outside_writers || !self.column_has_monitor(depth))
-            && match self.freshness.input.get().scope {
-                VisibleDepths::All => true,
-                VisibleDepths::Active => self.active_depth() == Some(depth),
+        ) && column.baseline.as_ref().is_some_and(|baseline| {
+            if baseline.outside_writers {
+                self.freshness.input.get().watch_network_folders
+            } else {
+                !self.column_has_monitor(depth)
             }
+        }) && match self.freshness.input.get().scope {
+            VisibleDepths::All => true,
+            VisibleDepths::Active => self.active_depth() == Some(depth),
+        }
     }
 
     pub(super) fn settled(&self, depth: usize) -> bool {

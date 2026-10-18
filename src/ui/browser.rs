@@ -1994,6 +1994,14 @@ impl BrowserView {
         self.state.refresh_browser();
     }
 
+    pub fn set_watch_network_folders(&self, enabled: bool) {
+        let browser = &self.state.browser;
+        browser.set_freshness(FreshnessInput {
+            watch_network_folders: enabled,
+            ..browser.freshness_input()
+        });
+    }
+
     pub fn set_presence(&self, presence: Presence, power_saver: bool) {
         let browser = &self.state.browser;
         browser.set_freshness(FreshnessInput {

@@ -560,6 +560,34 @@ fn a_folder_without_a_monitor_is_checked() {
 }
 
 #[test]
+fn with_network_folders_unwatched_only_local_folders_without_a_monitor_are_checked() {
+    let source = Rc::new(Folders::default());
+    let docs = source.add("/home/me/docs", local(1), None);
+    let nas = source.add("/home/me/docs/nas", network(2), None);
+    let (browser, clock) = browser_on(&source);
+    let watch = |watch_network_folders| {
+        browser.set_freshness(FreshnessInput {
+            presence: Presence::Focused,
+            watch_network_folders,
+            ..browser.freshness_input()
+        });
+    };
+    watch(false);
+    browser.navigate(docs.clone());
+    browser.show_child(0, nas.clone());
+    source.change(&nas, &["listed", "added elsewhere"]);
+
+    clock.tick_at(3);
+    let unwatched = (source.checks_of(&docs), source.checks_of(&nas));
+    watch(true);
+    clock.tick_at(6);
+
+    assert_eq!(unwatched, (1, 0));
+    assert_eq!((source.checks_of(&docs), source.checks_of(&nas)), (2, 1));
+    assert_eq!(names_at(&browser, 1), ["added elsewhere", "listed"]);
+}
+
+#[test]
 fn checks_stop_while_hidden_and_resume_on_focus() {
     let source = Rc::new(Folders::default());
     let share = source.add("/net/share", network(1), Some(Watching::Live));

@@ -2,7 +2,7 @@
 
 use std::{
     cell::RefCell,
-    collections::HashMap,
+    collections::{BTreeSet, HashMap},
     path::{Path, PathBuf},
     rc::Rc,
     time::Duration,
@@ -249,10 +249,23 @@ fn assert_recovered_preferences_survive_save(
     manager.set_folder_peeking(false);
     crate::storage::writer::settle();
 
-    let persisted: Preferences =
-        toml::from_str(&fs::read_to_string(settings_path()).expect("saved file"))
-            .expect("save repairs invalid preferences");
+    let saved = fs::read_to_string(settings_path()).expect("saved file");
+    let persisted: Preferences = toml::from_str(&saved).expect("save repairs invalid preferences");
     assert_eq!(persisted, expected);
+    let saved_keys: BTreeSet<String> = toml::from_str::<toml::Table>(&saved)
+        .expect("saved TOML")
+        .into_iter()
+        .map(|(key, _)| key)
+        .collect();
+    let known_keys: BTreeSet<String> = toml::Table::try_from(&expected)
+        .expect("known preferences")
+        .into_iter()
+        .map(|(key, _)| key)
+        .collect();
+    assert_eq!(
+        saved_keys, known_keys,
+        "a save keeps only known preferences"
+    );
     crate::storage::writer::settle();
     assert_eq!(read_preferences().expect("saved preferences"), expected);
 }
@@ -642,61 +655,19 @@ fn multiple_invalid_preferences_do_not_block_later_valid_entries() {
         || {
             assert_recovered_preferences_survive_save(
                 |saved| {
-                    saved.insert("auto_refresh_interval".into(), (-1).into());
+                    saved.insert("watch_network_folders".into(), "no".into());
                     saved.insert("hardware_accelerated_video_previews".into(), "no".into());
                     saved.insert("show_hidden".into(), "yes".into());
                     saved.insert("future_preference".into(), true.into());
+                    saved.insert("auto_refresh_interval".into(), 600.into());
                 },
                 Preferences {
-                    auto_refresh_interval: 0,
+                    watch_network_folders: true,
                     hardware_accelerated_video_previews: None,
                     show_hidden: false,
                     ..non_default_preferences()
                 },
             );
-        },
-    );
-}
-
-#[test]
-fn unlisted_auto_refresh_intervals_round_up_on_load_and_set() {
-    gtk_test(
-        "ui::preferences::tests::preferences::unlisted_auto_refresh_intervals_round_up_on_load_and_set",
-        || {
-            for (stored, expected) in [
-                (0, 0),
-                (1, 60),
-                (59, 60),
-                (60, 60),
-                (61, 300),
-                (120, 300),
-                (601, 600),
-                (3600, 600),
-            ] {
-                assert_recovered_preferences_survive_save(
-                    |saved| {
-                        saved.insert("auto_refresh_interval".into(), i64::from(stored).into());
-                    },
-                    Preferences {
-                        auto_refresh_interval: expected,
-                        ..non_default_preferences()
-                    },
-                );
-            }
-
-            seed_saved_preferences_for_test();
-            let manager = PreferenceManager::shared();
-            for (requested, expected) in [(45, 60), (u32::MAX, 600), (300, 300), (0, 0)] {
-                manager.set_auto_refresh_interval(requested);
-                assert_eq!(manager.auto_refresh_interval(), expected);
-                crate::storage::writer::settle();
-                assert_eq!(
-                    read_preferences()
-                        .expect("saved preferences")
-                        .auto_refresh_interval,
-                    expected
-                );
-            }
         },
     );
 }
@@ -976,7 +947,7 @@ fn every_saved_preference_loads_before_any_settings_page_exists() {
             assert_eq!(manager.preview_volume(), 0.35);
             assert!(manager.preview_text_wrap());
             assert!(manager.preview_autoplay());
-            assert_eq!(manager.auto_refresh_interval(), 600);
+            assert!(!manager.watch_network_folders());
             assert_eq!(manager.thumbnail_workers(), 6);
             assert!(!manager.show_thumbnails());
             assert_eq!(
@@ -1370,7 +1341,7 @@ fn all_preference_setters_publish_and_persist_without_duplicate_notifications() 
                 |m| m.set_preview_volume(0.8),
                 |m| m.set_preview_text_wrap(false),
                 |m| m.set_preview_autoplay(false),
-                |m| m.set_auto_refresh_interval(60),
+                |m| m.set_watch_network_folders(true),
                 |m| m.set_thumbnail_workers(3),
                 |m| m.set_show_thumbnails(true),
                 |m| m.set_icons_thumbnail_size(96),

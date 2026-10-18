@@ -192,8 +192,8 @@ pub(in crate::ui) struct Preferences {
     preview_text_wrap: bool,
     #[serde(default)]
     preview_autoplay: bool,
-    #[serde(default)]
-    auto_refresh_interval: u32,
+    #[serde(default = "default_enabled")]
+    watch_network_folders: bool,
     #[serde(default = "crate::sandbox::browser::default_worker_limit")]
     thumbnail_workers: usize,
     #[serde(default = "default_enabled")]
@@ -410,7 +410,7 @@ impl Default for Preferences {
             preview_volume: default_full_volume(),
             preview_text_wrap: false,
             preview_autoplay: false,
-            auto_refresh_interval: 0,
+            watch_network_folders: true,
             thumbnail_workers: crate::sandbox::browser::default_worker_limit(),
             show_thumbnails: true,
             icons_thumbnail_size: default_icons_thumbnail_size(),
@@ -544,29 +544,6 @@ fn normalized_volume(volume: f64) -> f64 {
     }
 }
 
-/// The Settings menu's choices are the only intervals the browser runs.
-pub(in crate::ui) const AUTO_REFRESH_CHOICES: [(&str, u32); 4] =
-    [("Off", 0), ("1 min", 60), ("5 min", 300), ("10 min", 600)];
-
-// `normalized_auto_refresh_interval` picks the first choice at or above a value.
-const _: () = {
-    let mut index = 1;
-    while index < AUTO_REFRESH_CHOICES.len() {
-        assert!(AUTO_REFRESH_CHOICES[index - 1].1 < AUTO_REFRESH_CHOICES[index].1);
-        index += 1;
-    }
-};
-
-/// Unlisted intervals round up to the next choice so a hand-written value keeps
-/// auto-refresh on without reloading faster than the fastest menu option.
-fn normalized_auto_refresh_interval(secs: u32) -> u32 {
-    AUTO_REFRESH_CHOICES
-        .iter()
-        .map(|(_, interval)| *interval)
-        .find(|interval| *interval >= secs)
-        .unwrap_or(AUTO_REFRESH_CHOICES[AUTO_REFRESH_CHOICES.len() - 1].1)
-}
-
 pub(in crate::ui) const SEARCH_TIME_LIMIT_CHOICES: [(&str, u32); 6] = [
     ("10 s", 10),
     ("30 s", 30),
@@ -645,8 +622,6 @@ impl PreferenceManager {
             }
         };
         preferences.preview_volume = normalized_volume(preferences.preview_volume);
-        preferences.auto_refresh_interval =
-            normalized_auto_refresh_interval(preferences.auto_refresh_interval);
         preferences.search_time_limit =
             normalized_search_limit(preferences.search_time_limit, &SEARCH_TIME_LIMIT_CHOICES);
         preferences.search_entry_limit =
@@ -1301,13 +1276,12 @@ impl PreferenceManager {
             .collect()
     }
 
-    pub fn auto_refresh_interval(&self) -> u32 {
-        self.preferences.borrow().auto_refresh_interval
+    pub fn watch_network_folders(&self) -> bool {
+        self.preferences.borrow().watch_network_folders
     }
 
-    pub fn set_auto_refresh_interval(&self, secs: u32) {
-        self.preferences.borrow_mut().auto_refresh_interval =
-            normalized_auto_refresh_interval(secs);
+    pub fn set_watch_network_folders(&self, enabled: bool) {
+        self.preferences.borrow_mut().watch_network_folders = enabled;
         self.save_preferences();
     }
 

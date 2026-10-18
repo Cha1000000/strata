@@ -1738,6 +1738,51 @@ fn list_column_customization_preserves_saved_and_live_folder_sorts() {
 }
 
 #[test]
+fn watching_network_folders_applies_before_settings_and_follows_changes_across_windows() {
+    gtk_test(
+        "ui::window::tests::preferences::watching_network_folders_applies_before_settings_and_follows_changes_across_windows",
+        || {
+            write_settings("watch_network_folders = false\n");
+            let manager = PreferenceManager::shared();
+            let first = OpenWindow::open();
+            let second = OpenWindow::open();
+            let watching = || {
+                [&first, &second].map(|open| {
+                    open.content
+                        .browser
+                        .browser()
+                        .freshness_input()
+                        .watch_network_folders
+                })
+            };
+            let saved = watching();
+            let closed_at_startup = settings_closed(&first) && settings_closed(&second);
+            first.content.settings_button().emit_clicked();
+            settle();
+            let page = class_in_shown_pane(first.content.overlay().upcast_ref(), "settings-dialog")
+                .into_iter()
+                .next()
+                .expect("Settings page");
+            let switch = switch_named(&page, "Watch network folders");
+            let shown_off = !switch.is_active();
+            switch.set_active(true);
+            let switched_on = (manager.watch_network_folders(), watching());
+            close_settings(&first);
+            manager.set_watch_network_folders(false);
+            for mode in [BrowserMode::List, BrowserMode::Icons, BrowserMode::Columns] {
+                first.content.browser.set_view_mode(mode);
+                second.content.browser.set_view_mode(mode);
+            }
+
+            assert_eq!(saved, [false, false]);
+            assert!(closed_at_startup && shown_off);
+            assert_eq!(switched_on, (true, [true, true]));
+            assert_eq!(watching(), [false, false]);
+        },
+    );
+}
+
+#[test]
 fn show_thumbnails_saved_and_live_preferences_apply_across_windows_and_views() {
     gtk_test(
         "ui::window::tests::preferences::show_thumbnails_saved_and_live_preferences_apply_across_windows_and_views",
