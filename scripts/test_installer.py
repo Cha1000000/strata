@@ -848,7 +848,9 @@ exit 23
             ("vi", "C.UTF-8", f"Cài đặt vào {path}"),
             ("it", "C.UTF-8", f"Installa in {path}"),
             ("ru", "C.UTF-8", f"Установить в {path}"),
-            ("zh_TW", "C.UTF-8", f"安装到 {path}"),
+            ("zh_CN", "C.UTF-8", f"安装到 {path}"),
+            ("zh_TW", "C.UTF-8", f"安裝到 {path}"),
+            ("zh-Hant-HK", "C.UTF-8", f"安裝到 {path}"),
         ):
             with self.subTest(language=language, locale=locale):
                 result = bash(

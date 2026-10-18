@@ -598,6 +598,9 @@ source's own times need no comparison.
   have been rewritten unnoticed until the clock reaches its time. While the clock is before it, it
   is deleted without being read again; after, it is compared like the others.
 - If the clock was set back to before the copy read a file, the file is kept as changed.
+- Only the first name of a hard-linked file is read; its other names are compared with that
+  name's digest. SMB refuses to open another name of a file it recently opened, so there the
+  other names of a file read for a digest are kept as changed.
 
 ### Durability
 

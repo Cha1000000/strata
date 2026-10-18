@@ -31,6 +31,7 @@ fn dates_follow_the_app_language_without_installed_system_locales() {
                 ("ko", "2026년 9월 7일 14:30", "월요일"),
                 ("ru", "7 сентября 2026 г., 14:30", "понедельник"),
                 ("zh-CN", "2026年9月7日 14:30", "星期一"),
+                ("zh-TW", "2026年9月7日 14:30", "星期一"),
             ] {
                 rust_i18n::set_locale(locale);
                 assert_eq!(modified_date_at(&modified, &now, DateFormat::Long), long);

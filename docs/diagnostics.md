@@ -19,7 +19,7 @@ binary:
   same `sandbox::browser` paths as the file list.
 - Helper tools such as `ffmpeg`, `ffprobe`, `ffmpegthumbnailer`, the RAW
   converters, and `unsquashfs` are looked up with `sandbox::sandbox_tool`, which
-  searches the build-time `STRATA_SANDBOX_PATH`, not the user's `PATH`, because
+  searches the configured `STRATA_SANDBOX_PATH`, not the user's `PATH`, because
   helpers run inside the sandbox.
 - **Audio playback** looks up the GStreamer elements the preview audio pipeline
   links and the highest-ranked audio sink.

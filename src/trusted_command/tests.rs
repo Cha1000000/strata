@@ -2,7 +2,7 @@
 
 use std::{fs, path::Path};
 
-use super::{SEARCH_ROOTS, TRUST_ROOTS, command, resolve, resolve_in};
+use super::{SEARCH_ROOTS, TRUST_ROOTS, command, resolve, resolve_in, search_roots};
 
 fn scratch() -> tempfile::TempDir {
     tempfile::tempdir().expect("scratch directory")
@@ -115,4 +115,57 @@ fn host_helpers_use_absolute_allowlisted_paths() {
         }
     }
     assert!(command("strata-missing-trusted-helper").is_err());
+}
+
+#[test]
+fn configured_directories_search_after_fixed_roots_and_must_sit_under_a_trust_root() {
+    let root = scratch();
+    let store = root.path().join("nix/store");
+    let packaged = store.join("hash-bubblewrap/bin");
+    let profile = root.path().join("sw/bin");
+    let user_owned = root.path().join("home/alice/bin");
+    fs::create_dir_all(&profile).expect("create profile bin");
+    fs::create_dir_all(&user_owned).expect("create user bin");
+    write_helper(&packaged, "bwrap");
+    let missing = store.join("absent/bin");
+    let profile_text = profile.to_str().expect("utf-8 scratch path");
+
+    let configured = format!(
+        "{}::relative/bin:{}:{}",
+        user_owned.display(),
+        packaged.display(),
+        missing.display(),
+    );
+    let searched = search_roots(&[profile_text], &configured, &[store.as_path()]);
+
+    assert_eq!(searched, [profile.clone(), packaged.clone()]);
+
+    let search: Vec<&Path> = searched.iter().map(std::path::PathBuf::as_path).collect();
+    let resolved = resolve_in("bwrap", &search, &[store.as_path()]).expect("packaged bwrap");
+    assert_eq!(resolved, packaged.join("bwrap"));
+
+    std::os::unix::fs::symlink(packaged.join("bwrap"), profile.join("bwrap"))
+        .expect("profile symlink into store");
+    let resolved = resolve_in("bwrap", &search, &[store.as_path()]).expect("profile bwrap");
+    assert_eq!(resolved, profile.join("bwrap"), "fixed roots keep priority");
+}
+
+#[test]
+fn configured_directory_cannot_launder_an_untrusted_helper() {
+    let root = scratch();
+    let store = root.path().join("nix/store");
+    let packaged = store.join("hash-tools/bin");
+    let outside = root.path().join("home/alice/bin");
+    write_helper(&outside, "bwrap");
+    fs::create_dir_all(&packaged).expect("create packaged bin");
+    std::os::unix::fs::symlink(outside.join("bwrap"), packaged.join("bwrap"))
+        .expect("symlink out of the store");
+    let packaged_text = packaged.to_str().expect("utf-8 scratch path");
+
+    let searched = search_roots(&[], packaged_text, &[store.as_path()]);
+    assert_eq!(searched, std::slice::from_ref(&packaged));
+    let search: Vec<&Path> = searched.iter().map(std::path::PathBuf::as_path).collect();
+    assert!(resolve_in("bwrap", &search, &[store.as_path()]).is_err());
+
+    assert!(search_roots(&[], "", &[store.as_path()]).is_empty());
 }

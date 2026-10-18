@@ -11,7 +11,8 @@
     "vi": "%{count} mục",
     "it": "%{count} elemento",
     "ru": "%{count} элемент",
-    "zh-CN": "%{count} 个项目"
+    "zh-CN": "%{count} 个项目",
+    "zh-TW": "%{count} 個項目"
   },
   "counts.items.other": {
     "en": "%{count} items",
@@ -24,7 +25,8 @@
     "vi": "%{count} mục",
     "it": "%{count} elementi",
     "ru": "%{count} элементов",
-    "zh-CN": "%{count} 个项目"
+    "zh-CN": "%{count} 个项目",
+    "zh-TW": "%{count} 個項目"
   },
   "counts.items.few": {
     "en": "%{count} items",
@@ -37,7 +39,8 @@
     "vi": "%{count} mục",
     "it": "%{count} elementi",
     "ru": "%{count} элемента",
-    "zh-CN": "%{count} 个项目"
+    "zh-CN": "%{count} 个项目",
+    "zh-TW": "%{count} 個項目"
   },
   "counts.items.many": {
     "en": "%{count} items",
@@ -50,7 +53,8 @@
     "vi": "%{count} mục",
     "it": "%{count} elementi",
     "ru": "%{count} элементов",
-    "zh-CN": "%{count} 个项目"
+    "zh-CN": "%{count} 个项目",
+    "zh-TW": "%{count} 個項目"
   },
   "counts.files.one": {
     "en": "%{count} file",
@@ -63,7 +67,8 @@
     "vi": "%{count} tệp",
     "it": "%{count} file",
     "ru": "%{count} файл",
-    "zh-CN": "%{count} 个文件"
+    "zh-CN": "%{count} 个文件",
+    "zh-TW": "%{count} 個檔案"
   },
   "counts.files.other": {
     "en": "%{count} files",
@@ -76,7 +81,8 @@
     "vi": "%{count} tệp",
     "it": "%{count} file",
     "ru": "%{count} файлов",
-    "zh-CN": "%{count} 个文件"
+    "zh-CN": "%{count} 个文件",
+    "zh-TW": "%{count} 個檔案"
   },
   "counts.files.few": {
     "en": "%{count} files",
@@ -89,7 +95,8 @@
     "vi": "%{count} tệp",
     "it": "%{count} file",
     "ru": "%{count} файла",
-    "zh-CN": "%{count} 个文件"
+    "zh-CN": "%{count} 个文件",
+    "zh-TW": "%{count} 個檔案"
   },
   "counts.files.many": {
     "en": "%{count} files",
@@ -102,7 +109,8 @@
     "vi": "%{count} tệp",
     "it": "%{count} file",
     "ru": "%{count} файлов",
-    "zh-CN": "%{count} 个文件"
+    "zh-CN": "%{count} 个文件",
+    "zh-TW": "%{count} 個檔案"
   },
   "counts.folders.one": {
     "en": "%{count} folder",
@@ -115,7 +123,8 @@
     "vi": "%{count} thư mục",
     "it": "%{count} cartella",
     "ru": "%{count} папка",
-    "zh-CN": "%{count} 个文件夹"
+    "zh-CN": "%{count} 个文件夹",
+    "zh-TW": "%{count} 個資料夾"
   },
   "counts.folders.other": {
     "en": "%{count} folders",
@@ -128,7 +137,8 @@
     "vi": "%{count} thư mục",
     "it": "%{count} cartelle",
     "ru": "%{count} папок",
-    "zh-CN": "%{count} 个文件夹"
+    "zh-CN": "%{count} 个文件夹",
+    "zh-TW": "%{count} 個資料夾"
   },
   "counts.folders.few": {
     "en": "%{count} folders",
@@ -141,7 +151,8 @@
     "vi": "%{count} thư mục",
     "it": "%{count} cartelle",
     "ru": "%{count} папки",
-    "zh-CN": "%{count} 个文件夹"
+    "zh-CN": "%{count} 个文件夹",
+    "zh-TW": "%{count} 個資料夾"
   },
   "counts.folders.many": {
     "en": "%{count} folders",
@@ -154,7 +165,8 @@
     "vi": "%{count} thư mục",
     "it": "%{count} cartelle",
     "ru": "%{count} папок",
-    "zh-CN": "%{count} 个文件夹"
+    "zh-CN": "%{count} 个文件夹",
+    "zh-TW": "%{count} 個資料夾"
   },
   "%{items} selected": {
     "en": "%{items} selected",
@@ -167,7 +179,8 @@
     "vi": "Đã chọn %{items}",
     "it": "Selezione: %{items}",
     "ru": "Выбрано: %{items}",
-    "zh-CN": "已选择 %{items}"
+    "zh-CN": "已选择 %{items}",
+    "zh-TW": "已選擇 %{items}"
   },
   "%{files}, %{folders}": {
     "en": "%{files}, %{folders}",
@@ -180,7 +193,8 @@
     "vi": "%{files}, %{folders}",
     "it": "%{files}, %{folders}",
     "ru": "%{files}, %{folders}",
-    "zh-CN": "%{files}、%{folders}"
+    "zh-CN": "%{files}、%{folders}",
+    "zh-TW": "%{files}、%{folders}"
   },
   "%{count}m ago": {
     "en": "%{count}m ago",
@@ -193,7 +207,8 @@
     "vi": "%{count} phút trước",
     "it": "%{count} min fa",
     "ru": "%{count} мин. назад",
-    "zh-CN": "%{count} 分钟前"
+    "zh-CN": "%{count} 分钟前",
+    "zh-TW": "%{count} 分鐘前"
   },
   "%{count}h ago": {
     "en": "%{count}h ago",
@@ -206,7 +221,8 @@
     "vi": "%{count} giờ trước",
     "it": "%{count} h fa",
     "ru": "%{count} ч назад",
-    "zh-CN": "%{count} 小时前"
+    "zh-CN": "%{count} 小时前",
+    "zh-TW": "%{count} 小時前"
   },
   "%{count}w ago": {
     "en": "%{count}w ago",
@@ -219,7 +235,8 @@
     "vi": "%{count} tuần trước",
     "it": "%{count} sett. fa",
     "ru": "%{count} нед. назад",
-    "zh-CN": "%{count} 周前"
+    "zh-CN": "%{count} 周前",
+    "zh-TW": "%{count} 週前"
   },
   "counts.more_items.one": {
     "en": "… and %{count} more item",
@@ -232,7 +249,8 @@
     "vi": "… và %{count} mục khác",
     "it": "… e %{count} altro elemento",
     "ru": "… и ещё %{count} элемент",
-    "zh-CN": "… 还有 %{count} 个项目"
+    "zh-CN": "… 还有 %{count} 个项目",
+    "zh-TW": "… 還有 %{count} 個項目"
   },
   "counts.more_items.other": {
     "en": "… and %{count} more items",
@@ -245,7 +263,8 @@
     "vi": "… và %{count} mục khác",
     "it": "… e %{count} altri elementi",
     "ru": "… и ещё %{count} элементов",
-    "zh-CN": "… 还有 %{count} 个项目"
+    "zh-CN": "… 还有 %{count} 个项目",
+    "zh-TW": "… 還有 %{count} 個項目"
   },
   "counts.more_items.few": {
     "en": "… and %{count} more items",
@@ -258,7 +277,8 @@
     "vi": "… và %{count} mục khác",
     "it": "… e %{count} altri elementi",
     "ru": "… и ещё %{count} элемента",
-    "zh-CN": "… 还有 %{count} 个项目"
+    "zh-CN": "… 还有 %{count} 个项目",
+    "zh-TW": "… 還有 %{count} 個項目"
   },
   "counts.more_items.many": {
     "en": "… and %{count} more items",
@@ -271,7 +291,8 @@
     "vi": "… và %{count} mục khác",
     "it": "… e %{count} altri elementi",
     "ru": "… и ещё %{count} элементов",
-    "zh-CN": "… 还有 %{count} 个项目"
+    "zh-CN": "… 还有 %{count} 个项目",
+    "zh-TW": "… 還有 %{count} 個項目"
   },
   "counts.items_renamed.one": {
     "en": "%{count} item was saved under a new name",
@@ -284,7 +305,8 @@
     "vi": "%{count} mục đã được lưu với tên mới",
     "it": "%{count} elemento è stato salvato con un nuovo nome",
     "ru": "%{count} элемент сохранён под новым именем",
-    "zh-CN": "%{count} 个项目已用新名称保存"
+    "zh-CN": "%{count} 个项目已用新名称保存",
+    "zh-TW": "%{count} 個項目已用新名称保存"
   },
   "counts.items_renamed.other": {
     "en": "%{count} items were saved under new names",
@@ -297,7 +319,8 @@
     "vi": "%{count} mục đã được lưu với tên mới",
     "it": "%{count} elementi sono stati salvati con nuovi nomi",
     "ru": "%{count} элементов сохранено под новыми именами",
-    "zh-CN": "%{count} 个项目已用新名称保存"
+    "zh-CN": "%{count} 个项目已用新名称保存",
+    "zh-TW": "%{count} 個項目已用新名称保存"
   },
   "counts.items_renamed.few": {
     "en": "%{count} items were saved under new names",
@@ -310,7 +333,8 @@
     "vi": "%{count} mục đã được lưu với tên mới",
     "it": "%{count} elementi sono stati salvati con nuovi nomi",
     "ru": "%{count} элемента сохранены под новыми именами",
-    "zh-CN": "%{count} 个项目已用新名称保存"
+    "zh-CN": "%{count} 个项目已用新名称保存",
+    "zh-TW": "%{count} 個項目已用新名称保存"
   },
   "counts.items_renamed.many": {
     "en": "%{count} items were saved under new names",
@@ -323,7 +347,8 @@
     "vi": "%{count} mục đã được lưu với tên mới",
     "it": "%{count} elementi sono stati salvati con nuovi nomi",
     "ru": "%{count} элементов сохранено под новыми именами",
-    "zh-CN": "%{count} 个项目已用新名称保存"
+    "zh-CN": "%{count} 个项目已用新名称保存",
+    "zh-TW": "%{count} 個項目已用新名称保存"
   },
   "counts.items_kept.one": {
     "en": "%{count} item was left in its original folder",
@@ -336,7 +361,8 @@
     "vi": "%{count} mục được giữ lại trong thư mục gốc",
     "it": "%{count} elemento è rimasto nella cartella originale",
     "ru": "%{count} элемент остался в исходной папке",
-    "zh-CN": "%{count} 个项目留在了原来的文件夹中"
+    "zh-CN": "%{count} 个项目留在了原来的文件夹中",
+    "zh-TW": "%{count} 個項目留在了原来的資料夾中"
   },
   "counts.items_kept.other": {
     "en": "%{count} items were left in their original folders",
@@ -349,7 +375,8 @@
     "vi": "%{count} mục được giữ lại trong thư mục gốc",
     "it": "%{count} elementi sono rimasti nelle cartelle originali",
     "ru": "%{count} элементов осталось в исходных папках",
-    "zh-CN": "%{count} 个项目留在了原来的文件夹中"
+    "zh-CN": "%{count} 个项目留在了原来的文件夹中",
+    "zh-TW": "%{count} 個項目留在了原来的資料夾中"
   },
   "counts.items_kept.few": {
     "en": "%{count} items were left in their original folders",
@@ -362,7 +389,8 @@
     "vi": "%{count} mục được giữ lại trong thư mục gốc",
     "it": "%{count} elementi sono rimasti nelle cartelle originali",
     "ru": "%{count} элемента остались в исходных папках",
-    "zh-CN": "%{count} 个项目留在了原来的文件夹中"
+    "zh-CN": "%{count} 个项目留在了原来的文件夹中",
+    "zh-TW": "%{count} 個項目留在了原来的資料夾中"
   },
   "counts.items_kept.many": {
     "en": "%{count} items were left in their original folders",
@@ -375,7 +403,8 @@
     "vi": "%{count} mục được giữ lại trong thư mục gốc",
     "it": "%{count} elementi sono rimasti nelle cartelle originali",
     "ru": "%{count} элементов осталось в исходных папках",
-    "zh-CN": "%{count} 个项目留在了原来的文件夹中"
+    "zh-CN": "%{count} 个项目留在了原来的文件夹中",
+    "zh-TW": "%{count} 個項目留在了原来的資料夾中"
   },
   "counts.items_kept_in_trash.one": {
     "en": "%{count} item was left in the Trash",
@@ -388,7 +417,8 @@
     "vi": "%{count} mục được giữ lại trong Thùng rác",
     "it": "%{count} elemento è rimasto nel cestino",
     "ru": "%{count} элемент остался в корзине",
-    "zh-CN": "%{count} 个项目留在了回收站中"
+    "zh-CN": "%{count} 个项目留在了回收站中",
+    "zh-TW": "%{count} 個項目留在了回收站中"
   },
   "counts.items_kept_in_trash.other": {
     "en": "%{count} items were left in the Trash",
@@ -401,7 +431,8 @@
     "vi": "%{count} mục được giữ lại trong Thùng rác",
     "it": "%{count} elementi sono rimasti nel cestino",
     "ru": "%{count} элементов осталось в корзине",
-    "zh-CN": "%{count} 个项目留在了回收站中"
+    "zh-CN": "%{count} 个项目留在了回收站中",
+    "zh-TW": "%{count} 個項目留在了回收站中"
   },
   "counts.items_kept_in_trash.few": {
     "en": "%{count} items were left in the Trash",
@@ -414,7 +445,8 @@
     "vi": "%{count} mục được giữ lại trong Thùng rác",
     "it": "%{count} elementi sono rimasti nel cestino",
     "ru": "%{count} элемента остались в корзине",
-    "zh-CN": "%{count} 个项目留在了回收站中"
+    "zh-CN": "%{count} 个项目留在了回收站中",
+    "zh-TW": "%{count} 個項目留在了回收站中"
   },
   "counts.items_kept_in_trash.many": {
     "en": "%{count} items were left in the Trash",
@@ -427,7 +459,8 @@
     "vi": "%{count} mục được giữ lại trong Thùng rác",
     "it": "%{count} elementi sono rimasti nel cestino",
     "ru": "%{count} элементов осталось в корзине",
-    "zh-CN": "%{count} 个项目留在了回收站中"
+    "zh-CN": "%{count} 个项目留在了回收站中",
+    "zh-TW": "%{count} 個項目留在了回收站中"
   },
   "counts.jobs_running.one": {
     "en": "%{count} job running",
@@ -440,7 +473,8 @@
     "vi": "Đang chạy %{count} tác vụ",
     "it": "%{count} attività in esecuzione",
     "ru": "Выполняется %{count} задание",
-    "zh-CN": "%{count} 个任务正在运行"
+    "zh-CN": "%{count} 个任务正在运行",
+    "zh-TW": "%{count} 個任務正在執行"
   },
   "counts.jobs_running.other": {
     "en": "%{count} jobs running",
@@ -453,7 +487,8 @@
     "vi": "Đang chạy %{count} tác vụ",
     "it": "%{count} attività in esecuzione",
     "ru": "Выполняется %{count} заданий",
-    "zh-CN": "%{count} 个任务正在运行"
+    "zh-CN": "%{count} 个任务正在运行",
+    "zh-TW": "%{count} 個任務正在執行"
   },
   "counts.jobs_running.few": {
     "en": "%{count} jobs running",
@@ -466,7 +501,8 @@
     "vi": "Đang chạy %{count} tác vụ",
     "it": "%{count} attività in esecuzione",
     "ru": "Выполняются %{count} задания",
-    "zh-CN": "%{count} 个任务正在运行"
+    "zh-CN": "%{count} 个任务正在运行",
+    "zh-TW": "%{count} 個任務正在執行"
   },
   "counts.jobs_running.many": {
     "en": "%{count} jobs running",
@@ -479,7 +515,8 @@
     "vi": "Đang chạy %{count} tác vụ",
     "it": "%{count} attività in esecuzione",
     "ru": "Выполняется %{count} заданий",
-    "zh-CN": "%{count} 个任务正在运行"
+    "zh-CN": "%{count} 个任务正在运行",
+    "zh-TW": "%{count} 個任務正在執行"
   },
   "counts.jobs_finished.one": {
     "en": "%{count} job finished",
@@ -492,7 +529,8 @@
     "vi": "Đã hoàn tất %{count} tác vụ",
     "it": "%{count} attività completata",
     "ru": "%{count} задание завершено",
-    "zh-CN": "%{count} 个任务已完成"
+    "zh-CN": "%{count} 个任务已完成",
+    "zh-TW": "%{count} 個任務已完成"
   },
   "counts.jobs_finished.other": {
     "en": "%{count} jobs finished",
@@ -505,7 +543,8 @@
     "vi": "Đã hoàn tất %{count} tác vụ",
     "it": "%{count} attività completate",
     "ru": "%{count} заданий завершено",
-    "zh-CN": "%{count} 个任务已完成"
+    "zh-CN": "%{count} 个任务已完成",
+    "zh-TW": "%{count} 個任務已完成"
   },
   "counts.jobs_finished.few": {
     "en": "%{count} jobs finished",
@@ -518,7 +557,8 @@
     "vi": "Đã hoàn tất %{count} tác vụ",
     "it": "%{count} attività completate",
     "ru": "%{count} задания завершены",
-    "zh-CN": "%{count} 个任务已完成"
+    "zh-CN": "%{count} 个任务已完成",
+    "zh-TW": "%{count} 個任務已完成"
   },
   "counts.jobs_finished.many": {
     "en": "%{count} jobs finished",
@@ -531,7 +571,8 @@
     "vi": "Đã hoàn tất %{count} tác vụ",
     "it": "%{count} attività completate",
     "ru": "%{count} заданий завершено",
-    "zh-CN": "%{count} 个任务已完成"
+    "zh-CN": "%{count} 个任务已完成",
+    "zh-TW": "%{count} 個任務已完成"
   },
   "counts.selected_items.one": {
     "en": "%{count} selected item",
@@ -544,7 +585,8 @@
     "vi": "%{count} mục đã chọn",
     "it": "%{count} elemento selezionato",
     "ru": "%{count} выбранного элемента",
-    "zh-CN": "%{count} 个所选项目"
+    "zh-CN": "%{count} 个所选项目",
+    "zh-TW": "%{count} 個所選項目"
   },
   "counts.selected_items.other": {
     "en": "%{count} selected items",
@@ -557,7 +599,8 @@
     "vi": "%{count} mục đã chọn",
     "it": "%{count} elementi selezionati",
     "ru": "%{count} выбранных элементов",
-    "zh-CN": "%{count} 个所选项目"
+    "zh-CN": "%{count} 个所选项目",
+    "zh-TW": "%{count} 個所選項目"
   },
   "counts.selected_items.few": {
     "en": "%{count} selected items",
@@ -570,7 +613,8 @@
     "vi": "%{count} mục đã chọn",
     "it": "%{count} elementi selezionati",
     "ru": "%{count} выбранных элементов",
-    "zh-CN": "%{count} 个所选项目"
+    "zh-CN": "%{count} 个所选项目",
+    "zh-TW": "%{count} 個所選項目"
   },
   "counts.selected_items.many": {
     "en": "%{count} selected items",
@@ -583,7 +627,8 @@
     "vi": "%{count} mục đã chọn",
     "it": "%{count} elementi selezionati",
     "ru": "%{count} выбранных элементов",
-    "zh-CN": "%{count} 个所选项目"
+    "zh-CN": "%{count} 个所选项目",
+    "zh-TW": "%{count} 個所選項目"
   },
   "counts.changes.one": {
     "en": "%{count} change",
@@ -596,7 +641,8 @@
     "vi": "%{count} thay đổi",
     "it": "%{count} modifica",
     "ru": "%{count} изменение",
-    "zh-CN": "%{count} 项更改"
+    "zh-CN": "%{count} 项更改",
+    "zh-TW": "%{count} 項更改"
   },
   "counts.changes.few": {
     "en": "%{count} changes",
@@ -609,7 +655,8 @@
     "vi": "%{count} thay đổi",
     "it": "%{count} modifiche",
     "ru": "%{count} изменения",
-    "zh-CN": "%{count} 项更改"
+    "zh-CN": "%{count} 项更改",
+    "zh-TW": "%{count} 項更改"
   },
   "counts.changes.many": {
     "en": "%{count} changes",
@@ -622,7 +669,8 @@
     "vi": "%{count} thay đổi",
     "it": "%{count} modifiche",
     "ru": "%{count} изменений",
-    "zh-CN": "%{count} 项更改"
+    "zh-CN": "%{count} 项更改",
+    "zh-TW": "%{count} 項更改"
   },
   "counts.changes.other": {
     "en": "%{count} changes",
@@ -635,7 +683,8 @@
     "vi": "%{count} thay đổi",
     "it": "%{count} modifiche",
     "ru": "%{count} изменения",
-    "zh-CN": "%{count} 项更改"
+    "zh-CN": "%{count} 项更改",
+    "zh-TW": "%{count} 項更改"
   },
   "counts.chars_remaining.one": {
     "en": "%{count} char remaining",
@@ -648,7 +697,8 @@
     "vi": "Còn lại %{count} ký tự",
     "it": "%{count} carattere rimanente",
     "ru": "Остался %{count} символ",
-    "zh-CN": "还可输入 %{count} 个字符"
+    "zh-CN": "还可输入 %{count} 个字符",
+    "zh-TW": "還可輸入 %{count} 個字元"
   },
   "counts.chars_remaining.other": {
     "en": "%{count} chars remaining",
@@ -661,7 +711,8 @@
     "vi": "Còn lại %{count} ký tự",
     "it": "%{count} caratteri rimanenti",
     "ru": "Осталось %{count} символов",
-    "zh-CN": "还可输入 %{count} 个字符"
+    "zh-CN": "还可输入 %{count} 个字符",
+    "zh-TW": "還可輸入 %{count} 個字元"
   },
   "counts.chars_remaining.few": {
     "en": "%{count} chars remaining",
@@ -674,7 +725,8 @@
     "vi": "Còn lại %{count} ký tự",
     "it": "%{count} caratteri rimanenti",
     "ru": "Осталось %{count} символа",
-    "zh-CN": "还可输入 %{count} 个字符"
+    "zh-CN": "还可输入 %{count} 个字符",
+    "zh-TW": "還可輸入 %{count} 個字元"
   },
   "counts.chars_remaining.many": {
     "en": "%{count} chars remaining",
@@ -687,7 +739,8 @@
     "vi": "Còn lại %{count} ký tự",
     "it": "%{count} caratteri rimanenti",
     "ru": "Осталось %{count} символов",
-    "zh-CN": "还可输入 %{count} 个字符"
+    "zh-CN": "还可输入 %{count} 个字符",
+    "zh-TW": "還可輸入 %{count} 個字元"
   },
   "counts.selected_of_items.one": {
     "en": "%{selected} of %{count} item selected.",
@@ -700,7 +753,8 @@
     "vi": "Đã chọn %{selected} trên %{count} mục.",
     "it": "Selezione: %{selected} di %{count} elemento.",
     "ru": "Выбрано %{selected} из %{count} элемента.",
-    "zh-CN": "已选择 %{selected} 个，共 %{count} 个项目。"
+    "zh-CN": "已选择 %{selected} 个，共 %{count} 个项目。",
+    "zh-TW": "已選擇 %{selected} 個，共 %{count} 個項目。"
   },
   "counts.selected_of_items.few": {
     "en": "%{selected} of %{count} items selected.",
@@ -713,7 +767,8 @@
     "vi": "Đã chọn %{selected} trên %{count} mục.",
     "it": "Selezione: %{selected} di %{count} elementi.",
     "ru": "Выбрано %{selected} из %{count} элементов.",
-    "zh-CN": "已选择 %{selected} 个，共 %{count} 个项目。"
+    "zh-CN": "已选择 %{selected} 个，共 %{count} 个项目。",
+    "zh-TW": "已選擇 %{selected} 個，共 %{count} 個項目。"
   },
   "counts.selected_of_items.many": {
     "en": "%{selected} of %{count} items selected.",
@@ -726,7 +781,8 @@
     "vi": "Đã chọn %{selected} trên %{count} mục.",
     "it": "Selezione: %{selected} di %{count} elementi.",
     "ru": "Выбрано %{selected} из %{count} элементов.",
-    "zh-CN": "已选择 %{selected} 个，共 %{count} 个项目。"
+    "zh-CN": "已选择 %{selected} 个，共 %{count} 个项目。",
+    "zh-TW": "已選擇 %{selected} 個，共 %{count} 個項目。"
   },
   "counts.selected_of_items.other": {
     "en": "%{selected} of %{count} items selected.",
@@ -739,7 +795,8 @@
     "vi": "Đã chọn %{selected} trên %{count} mục.",
     "it": "Selezione: %{selected} di %{count} elementi.",
     "ru": "Выбрано %{selected} из %{count} элементов.",
-    "zh-CN": "已选择 %{selected} 个，共 %{count} 个项目。"
+    "zh-CN": "已选择 %{selected} 个，共 %{count} 个项目。",
+    "zh-TW": "已選擇 %{selected} 個，共 %{count} 個項目。"
   },
   "counts.items_completed.one": {
     "en": "%{count} item completed",
@@ -752,7 +809,8 @@
     "vi": "hoàn tất %{count} mục",
     "it": "%{count} elemento completato",
     "ru": "выполнено: %{count} элемент",
-    "zh-CN": "已完成 %{count} 项"
+    "zh-CN": "已完成 %{count} 项",
+    "zh-TW": "已完成 %{count} 項"
   },
   "counts.items_completed.few": {
     "en": "%{count} items completed",
@@ -765,7 +823,8 @@
     "vi": "hoàn tất %{count} mục",
     "it": "%{count} elementi completati",
     "ru": "выполнено: %{count} элемента",
-    "zh-CN": "已完成 %{count} 项"
+    "zh-CN": "已完成 %{count} 项",
+    "zh-TW": "已完成 %{count} 項"
   },
   "counts.items_completed.many": {
     "en": "%{count} items completed",
@@ -778,7 +837,8 @@
     "vi": "hoàn tất %{count} mục",
     "it": "%{count} elementi completati",
     "ru": "выполнено: %{count} элементов",
-    "zh-CN": "已完成 %{count} 项"
+    "zh-CN": "已完成 %{count} 项",
+    "zh-TW": "已完成 %{count} 項"
   },
   "counts.items_completed.other": {
     "en": "%{count} items completed",
@@ -791,7 +851,8 @@
     "vi": "hoàn tất %{count} mục",
     "it": "%{count} elementi completati",
     "ru": "выполнено: %{count} элементов",
-    "zh-CN": "已完成 %{count} 项"
+    "zh-CN": "已完成 %{count} 项",
+    "zh-TW": "已完成 %{count} 項"
   },
   "counts.items_failed.one": {
     "en": "%{count} item failed",
@@ -804,7 +865,8 @@
     "vi": "thất bại %{count} mục",
     "it": "%{count} elemento non riuscito",
     "ru": "с ошибкой: %{count} элемент",
-    "zh-CN": "失败 %{count} 项"
+    "zh-CN": "失败 %{count} 项",
+    "zh-TW": "失敗 %{count} 項"
   },
   "counts.items_failed.few": {
     "en": "%{count} items failed",
@@ -817,7 +879,8 @@
     "vi": "thất bại %{count} mục",
     "it": "%{count} elementi non riusciti",
     "ru": "с ошибкой: %{count} элемента",
-    "zh-CN": "失败 %{count} 项"
+    "zh-CN": "失败 %{count} 项",
+    "zh-TW": "失敗 %{count} 項"
   },
   "counts.items_failed.many": {
     "en": "%{count} items failed",
@@ -830,7 +893,8 @@
     "vi": "thất bại %{count} mục",
     "it": "%{count} elementi non riusciti",
     "ru": "с ошибкой: %{count} элементов",
-    "zh-CN": "失败 %{count} 项"
+    "zh-CN": "失败 %{count} 项",
+    "zh-TW": "失敗 %{count} 項"
   },
   "counts.items_failed.other": {
     "en": "%{count} items failed",
@@ -843,7 +907,8 @@
     "vi": "thất bại %{count} mục",
     "it": "%{count} elementi non riusciti",
     "ru": "с ошибкой: %{count} элементов",
-    "zh-CN": "失败 %{count} 项"
+    "zh-CN": "失败 %{count} 项",
+    "zh-TW": "失敗 %{count} 項"
   },
   "counts.items_not_attempted.one": {
     "en": "%{count} item not attempted",
@@ -856,7 +921,8 @@
     "vi": "chưa xử lý %{count} mục",
     "it": "%{count} elemento non elaborato",
     "ru": "не обработано: %{count} элемент",
-    "zh-CN": "未处理 %{count} 项"
+    "zh-CN": "未处理 %{count} 项",
+    "zh-TW": "未處理 %{count} 項"
   },
   "counts.items_not_attempted.few": {
     "en": "%{count} items not attempted",
@@ -869,7 +935,8 @@
     "vi": "chưa xử lý %{count} mục",
     "it": "%{count} elementi non elaborati",
     "ru": "не обработано: %{count} элемента",
-    "zh-CN": "未处理 %{count} 项"
+    "zh-CN": "未处理 %{count} 项",
+    "zh-TW": "未處理 %{count} 項"
   },
   "counts.items_not_attempted.many": {
     "en": "%{count} items not attempted",
@@ -882,7 +949,8 @@
     "vi": "chưa xử lý %{count} mục",
     "it": "%{count} elementi non elaborati",
     "ru": "не обработано: %{count} элементов",
-    "zh-CN": "未处理 %{count} 项"
+    "zh-CN": "未处理 %{count} 项",
+    "zh-TW": "未處理 %{count} 項"
   },
   "counts.items_not_attempted.other": {
     "en": "%{count} items not attempted",
@@ -895,7 +963,8 @@
     "vi": "chưa xử lý %{count} mục",
     "it": "%{count} elementi non elaborati",
     "ru": "не обработано: %{count} элементов",
-    "zh-CN": "未处理 %{count} 项"
+    "zh-CN": "未处理 %{count} 项",
+    "zh-TW": "未處理 %{count} 項"
   },
   "counts.rendering_triangles.one": {
     "en": "Rendering %{count} triangle…",
@@ -908,7 +977,8 @@
     "vi": "Đang kết xuất %{count} tam giác…",
     "it": "Rendering di %{count} triangolo…",
     "ru": "Отрисовка %{count} треугольника…",
-    "zh-CN": "正在渲染 %{count} 个三角形…"
+    "zh-CN": "正在渲染 %{count} 个三角形…",
+    "zh-TW": "正在渲染 %{count} 個三角形…"
   },
   "counts.rendering_triangles.other": {
     "en": "Rendering %{count} triangles…",
@@ -921,7 +991,8 @@
     "vi": "Đang kết xuất %{count} tam giác…",
     "it": "Rendering di %{count} triangoli…",
     "ru": "Отрисовка %{count} треугольника…",
-    "zh-CN": "正在渲染 %{count} 个三角形…"
+    "zh-CN": "正在渲染 %{count} 个三角形…",
+    "zh-TW": "正在渲染 %{count} 個三角形…"
   },
   "counts.rendering_triangles.few": {
     "en": "Rendering %{count} triangles…",
@@ -934,7 +1005,8 @@
     "vi": "Đang kết xuất %{count} tam giác…",
     "it": "Rendering di %{count} triangoli…",
     "ru": "Отрисовка %{count} треугольников…",
-    "zh-CN": "正在渲染 %{count} 个三角形…"
+    "zh-CN": "正在渲染 %{count} 个三角形…",
+    "zh-TW": "正在渲染 %{count} 個三角形…"
   },
   "counts.rendering_triangles.many": {
     "en": "Rendering %{count} triangles…",
@@ -947,7 +1019,8 @@
     "vi": "Đang kết xuất %{count} tam giác…",
     "it": "Rendering di %{count} triangoli…",
     "ru": "Отрисовка %{count} треугольников…",
-    "zh-CN": "正在渲染 %{count} 个三角形…"
+    "zh-CN": "正在渲染 %{count} 个三角形…",
+    "zh-TW": "正在渲染 %{count} 個三角形…"
   },
   "counts.bytes.one": {
     "en": "%{count} byte",
@@ -960,7 +1033,8 @@
     "vi": "%{count} byte",
     "it": "%{count} byte",
     "ru": "%{count} байт",
-    "zh-CN": "%{count} 字节"
+    "zh-CN": "%{count} 字节",
+    "zh-TW": "%{count} 位元組"
   },
   "counts.bytes.few": {
     "en": "%{count} bytes",
@@ -973,7 +1047,8 @@
     "vi": "%{count} byte",
     "it": "%{count} byte",
     "ru": "%{count} байта",
-    "zh-CN": "%{count} 字节"
+    "zh-CN": "%{count} 字节",
+    "zh-TW": "%{count} 位元組"
   },
   "counts.bytes.many": {
     "en": "%{count} bytes",
@@ -986,7 +1061,8 @@
     "vi": "%{count} byte",
     "it": "%{count} byte",
     "ru": "%{count} байт",
-    "zh-CN": "%{count} 字节"
+    "zh-CN": "%{count} 字节",
+    "zh-TW": "%{count} 位元組"
   },
   "counts.bytes.other": {
     "en": "%{count} bytes",
@@ -999,6 +1075,7 @@
     "vi": "%{count} byte",
     "it": "%{count} byte",
     "ru": "%{count} байта",
-    "zh-CN": "%{count} 字节"
+    "zh-CN": "%{count} 字节",
+    "zh-TW": "%{count} 位元組"
   }
 }

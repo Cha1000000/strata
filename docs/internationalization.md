@@ -18,8 +18,8 @@ user-defined names, or the locale environment inherited by other programs.
   shared with the standalone Bash installer. After editing, regenerate its
   embedded catalog with `python3 scripts/installer_messages.py --write`.
 
-Locales are `en`, `fr`, `de`, `es`, `ja`, `pt-BR`, `ko`, `vi`, `it`, `ru`, and
-`zh-CN`.
+Locales are `en`, `fr`, `de`, `es`, `ja`, `pt-BR`, `ko`, `vi`, `it`, `ru`,
+`zh-CN`, and `zh-TW`.
 JSON keys normally contain the original English message. Semantic keys are used
 for grammatical count forms and calendar data, and for an English word that needs
 a different translation in one context. Those context keys are prefixed with their
@@ -84,6 +84,23 @@ classifier and the same text in every plural form, lists join with "、", and
 dates and durations put no space between digits and Han: "2026年9月7日",
 "1小时2分", "2分5秒", and "45秒". Key names, unit symbols, and product names stay
 as in English.
+
+Traditional Chinese values (zh-TW) follow Taiwan terminology and conventions
+rather than being converted from Simplified Chinese: use 檔案 (not 文件) for
+files, 資料夾 for folders, 預設 for defaults, 網路 for networks, 資訊 for
+information, 軟體 for software, 使用者 for users, and 剪貼簿, 捷徑, 圖示,
+視窗, 滑鼠, 鍵盤, 螢幕, 列印, 搜尋, 設定, 偏好設定 for the corresponding
+concepts. Address the user as 你 and omit the pronoun where Chinese UI text does.
+Punctuation inside Chinese text is full width (，。：；？！（）、), with no space
+after it, so nested templates read `%{name}：%{error}`. Quote names and paths with
+“…” (‘…’ inside them), never 「…」 or ASCII quotes. Put one ASCII space between
+Han characters and Latin letters, digits, or placeholders (`%{count} 個檔案`,
+`按 %{keys} 開啟`), but none next to full-width punctuation or the quotation
+marks. Keep the ellipsis (…) wherever the English has one. Counts use a
+classifier and the same text in every plural form, lists join with "、", and
+dates and durations put no space between digits and Han: "2026年9月7日",
+"1小時2分", "2分5秒", and "45秒". Key names, unit symbols, and product names
+stay as in English.
 
 Translate each string exactly once. The shared modal builders (`modal_layout`,
 `message_dialog_layout`) display their title, subtitle, and confirm label as given,
@@ -180,16 +197,16 @@ GTK uses Fontconfig fallback for characters absent from the selected font.
 Japanese, Korean, and Simplified Chinese require installed CJK fonts, such as
 Noto Sans CJK (commonly packaged as `noto-fonts-cjk` or `fonts-noto-cjk`);
 Simplified Chinese needs one with Simplified Chinese glyphs, such as Noto Sans
-CJK SC. Chinese and Japanese text share Han code points, whose regional glyph
+CJK SC, and Traditional Chinese needs one with Traditional glyphs, such as Noto
+Sans CJK TC. Chinese and Japanese text share Han code points, whose regional glyph
 forms Pango chooses from the text language. GTK takes that language from the
 process locale (`LC_CTYPE`), not from Strata's language setting. If the locale is
 neither Chinese nor Japanese, Pango uses the first Chinese or Japanese entry in
 `PANGO_LANGUAGE` (or `LANGUAGE` when that is unset); without one, the forms are
-the defaults of whichever CJK font Fontconfig picks. A manual 简体中文 choice can
-therefore show Japanese, Korean, or Traditional forms, and auto-detected Chinese
-on a `zh_TW` or `zh_HK` locale uses that region's forms. To see Simplified forms
-on a locale that is neither Chinese nor Japanese, run Strata with
-`PANGO_LANGUAGE=zh-cn`. Strata does not download or install fonts. A minimal
+the defaults of whichever CJK font Fontconfig picks. A manual 简体中文 or 正體中文
+choice can therefore show another region's forms. To see Simplified or
+Traditional forms on a locale that is neither Chinese nor Japanese, run Strata
+with `PANGO_LANGUAGE=zh-cn` or `PANGO_LANGUAGE=zh-tw`. Strata does not download or install fonts. A minimal
 container without CJK fonts can expose correct accessible text while rendering
 missing-glyph boxes; check actual rendering with suitable fonts installed, rather
 than relying only on accessibility tests.

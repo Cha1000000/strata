@@ -299,18 +299,27 @@ pub(super) struct Pending {
     folder: Arc<Folder>,
     name: OsString,
     snapshot: SourceSnapshot,
+    /// Whether the deletion may open this name to compare its contents.
+    openable: bool,
 }
 
 impl Pending {
-    pub(super) fn new(folder: Arc<Folder>, name: &OsStr, stat: &EntryStat) -> Self {
+    pub(super) fn new(folder: Arc<Folder>, name: &OsStr, stat: &EntryStat, openable: bool) -> Self {
         Self {
             folder,
             name: name.to_os_string(),
             snapshot: SourceSnapshot::of(stat, None),
+            openable,
         }
     }
 
-    pub(super) fn made(self) {
+    /// `contents` are the first name's: a later name is never read, and
+    /// its times cannot tell a same-size rewrite within the tick.
+    pub(super) fn made(mut self, contents: Option<Contents>) {
+        if contents.is_some() && !self.openable {
+            return self.keep(KeptCause::Changed);
+        }
+        self.snapshot.contents = contents.map(Box::new);
         self.folder.add(&self.name, Node::Entry(self.snapshot));
     }
 

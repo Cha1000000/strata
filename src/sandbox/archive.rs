@@ -143,7 +143,7 @@ fn rar_extraction_command(
     command.args(["--setenv", "MALLOC_ARENA_MAX", "1"]);
     command.arg("--");
     command
-        .arg(super::PRLIMIT)
+        .arg(&super::runtime::current().prlimit)
         .arg(format!("--as={ADDRESS_SPACE_LIMIT_BYTES}"))
         .arg(format!("--cpu={RAR_CPU_TIME_LIMIT_SECS}"))
         .arg("--fsize=0")

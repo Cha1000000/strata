@@ -75,6 +75,7 @@ fn release_dates_follow_the_app_language() {
                 ("de", "20. Sept. 2026"),
                 ("ja", "2026年9月20日"),
                 ("zh-CN", "2026年9月20日"),
+                ("zh-TW", "2026年9月20日"),
                 ("ru", "20 сент. 2026 г."),
             ] {
                 rust_i18n::set_locale(locale);

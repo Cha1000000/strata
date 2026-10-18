@@ -13,6 +13,9 @@ fn main() {
     write_provider_bundle();
     glib_build_tools::compile_resources(&["data"], "data/strata.gresource.xml", "strata.gresource");
 
+    println!("cargo::rerun-if-env-changed=STRATA_TRUSTED_COMMAND_PATH");
+    validate_trusted_command_path();
+
     println!("cargo::rerun-if-env-changed=STRATA_BUILD_COMMIT");
     track_git_metadata();
 
@@ -45,6 +48,23 @@ fn main() {
         })
         .unwrap_or_else(|| "stable".to_owned());
     println!("cargo::rustc-env=STRATA_BUILD_KIND={build_kind}");
+}
+
+/// Extra host helper directories are embedded verbatim, so a relative or empty
+/// entry would be an unsearchable mistake; reject it where the packager sees it.
+fn validate_trusted_command_path() {
+    let Some(value) = env::var_os("STRATA_TRUSTED_COMMAND_PATH") else {
+        return;
+    };
+    let value = value
+        .to_str()
+        .expect("STRATA_TRUSTED_COMMAND_PATH must be valid UTF-8");
+    for directory in value.split(':') {
+        assert!(
+            Path::new(directory).is_absolute(),
+            "STRATA_TRUSTED_COMMAND_PATH entry {directory:?} must be an absolute directory"
+        );
+    }
 }
 
 /// Embeds the catalogs as static tables. rust-i18n's own `i18n!` loader emits one

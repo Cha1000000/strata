@@ -278,8 +278,9 @@ preferences.
 
 **Settings → General → Language** offers **Auto-detect** (the default) and
 English, French, German, Spanish, Japanese, Brazilian Portuguese, Korean,
-Vietnamese, Italian, Russian, and Simplified Chinese. Language names use their
-native spelling so the selector remains recognizable after an accidental choice.
+Vietnamese, Italian, Russian, Simplified Chinese, and Traditional Chinese.
+Language names use their native spelling so the selector remains recognizable
+after an accidental choice.
 Save a manual choice as `language = "fr"` or `language = "zh-CN"`, for example,
 or `language = "auto"` to follow the system again. Missing and unknown language
 values recover to Auto-detect.
@@ -295,8 +296,8 @@ message locale selected by the first nonempty `LC_ALL`, `LC_MESSAGES`, or `LANG`
 An explicit `C` or `POSIX` message locale means English and suppresses
 `LANGUAGE`. Encoding and modifier suffixes are ignored; regional variants use
 the supported base language (all Portuguese variants use Brazilian Portuguese,
-and every Chinese variant, including Traditional Chinese locales such as `zh_TW`
-and `zh_HK`, uses Simplified Chinese).
+`zh_TW`, `zh_HK`, `zh_MO`, and any `zh-Hant` variant use Traditional Chinese,
+and every other Chinese locale, including bare `zh`, uses Simplified Chinese).
 Unsupported languages fall back to English. Strata does not modify the desktop
 locale or the environment inherited by launched programs. System/provider error
 messages, externally supplied content, and toolkit-owned strings can therefore

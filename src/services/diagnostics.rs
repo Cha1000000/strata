@@ -361,7 +361,7 @@ fn preview_checks(sender: &Sender<Check>) {
         Ok(samples) => {
             send(preview_sandbox(
                 crate::trusted_command::resolve("bwrap").is_ok(),
-                Path::new(sandbox::PRLIMIT),
+                Path::new(&sandbox::runtime::current().prlimit),
                 || render_one_shot(&samples.image),
             ));
             send(workers(sandbox::browser::workers_supported(), || {

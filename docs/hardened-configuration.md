@@ -54,9 +54,10 @@ selected. Turning them off means an untrusted file is parsed only when you
 explicitly open its preview. This matters most when browsing downloads, removable
 media, or network shares from unknown sources.
 
-Leave the `STRATA_SANDBOX_*` environment variables unset unless your distribution
-requires them. They change which runtime tree and helpers the sandbox binds, so
-only point them at trusted, read-only system paths.
+Leave the `STRATA_SANDBOX_*` environment variables unset, at build time and at
+launch, unless your distribution requires them. They change which runtime tree
+and helpers the sandbox binds, so only point them at trusted, read-only system
+paths. See [Preview sandbox](preview-sandbox.md#packaging-non-fhs-runtimes).
 
 ## Custom actions
 

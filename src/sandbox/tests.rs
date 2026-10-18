@@ -167,9 +167,12 @@ fn sandbox_command_starts_absolute_bubblewrap() {
     assert!(joined.contains("--unshare-all"));
     assert!(joined.contains("--clearenv"));
     let arguments: Vec<_> = command.get_args().collect();
-    let path = option_env!("STRATA_SANDBOX_PATH").unwrap_or("/usr/bin");
-    let root = option_env!("STRATA_SANDBOX_ROOT").unwrap_or("/usr");
-    let prlimit = option_env!("STRATA_SANDBOX_PRLIMIT").unwrap_or("/usr/bin/prlimit");
+    let runtime = super::runtime::current();
+    let (path, root, prlimit) = (
+        runtime.path.as_str(),
+        runtime.root.as_str(),
+        runtime.prlimit.as_str(),
+    );
     assert!(
         arguments
             .windows(3)
@@ -185,7 +188,7 @@ fn sandbox_command_starts_absolute_bubblewrap() {
             .windows(3)
             .any(|args| args == ["--", prlimit, "--as=2147483648"])
     );
-    match option_env!("STRATA_SANDBOX_GDK_PIXBUF_MODULE_FILE") {
+    match &runtime.gdk_pixbuf_module_file {
         Some(loaders) => assert!(
             arguments
                 .windows(3)
@@ -423,9 +426,11 @@ fn media_previews_use_bounded_streaming_instead_of_driver_wide_resource_limits()
         .map(|argument| argument.to_string_lossy())
         .collect::<Vec<_>>()
         .join(" ");
-    assert!(!command.get_args().any(|argument| {
-        argument == option_env!("STRATA_SANDBOX_PRLIMIT").unwrap_or("/usr/bin/prlimit")
-    }));
+    assert!(
+        !command
+            .get_args()
+            .any(|argument| argument == super::runtime::current().prlimit.as_str())
+    );
     assert!(!joined.contains("--as="));
     assert!(!joined.contains("--cpu="));
     assert!(!joined.contains("--fsize="));

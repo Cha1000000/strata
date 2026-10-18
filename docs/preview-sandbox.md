@@ -9,11 +9,39 @@ FHS, `/run/wrappers/bin`, `/nix/store`, or `/gnu/store`.
 
 ## Packaging non-FHS runtimes
 
-Packagers can set these optional environment variables **when compiling Strata**.
-They are embedded in the executable; setting them when launching Strata has no
-effect and does not override the sandbox's cleared environment.
+Two kinds of configuration cover packages whose runtime does not live under
+`/usr`: where the host finds bubblewrap and the other helpers it runs directly,
+and which runtime tree and helper paths the sandbox binds and runs inside.
 
-| Build-time variable | Default | Purpose |
+### Host helper directories
+
+`STRATA_TRUSTED_COMMAND_PATH` is a colon-separated list of additional directories
+in which the host looks for helpers such as `bwrap`, `xdg-mime`, and the
+provider runtimes. It is read **only when compiling Strata**, so a package can
+point it at the `bin` directories of its runtime closure without requiring users
+to install those tools into a system profile:
+
+```sh
+STRATA_TRUSTED_COMMAND_PATH='/nix/store/<bubblewrap>/bin:/nix/store/<xdg-utils>/bin' \
+cargo build --release --locked
+```
+
+The fixed system directories are always searched first, so `/run/wrappers/bin`
+and the system profiles keep priority over configured directories. Every entry
+must be an absolute directory; the build fails on empty or relative entries. At
+run time a configured directory is searched only when it canonicalizes under one
+of the trust roots above, and the helper found there must still canonicalize
+under a trust root. The user's `PATH` and home directory are never consulted,
+and a required helper that cannot be found in a trusted directory still fails
+closed.
+
+### Sandbox runtime paths
+
+These variables select the runtime tree and helper paths inside the sandbox.
+Each one is resolved in this order: a value set **when launching Strata**, then
+a value embedded **when compiling Strata**, then the default.
+
+| Variable | Default | Purpose |
 | --- | --- | --- |
 | `STRATA_SANDBOX_PATH` | `/usr/bin` | Colon-separated helper binary directories inside the sandbox |
 | `STRATA_SANDBOX_ROOT` | `/usr` | System runtime tree, bound read-only at the same absolute path |
@@ -30,6 +58,17 @@ STRATA_SANDBOX_GDK_PIXBUF_MODULE_FILE='/nix/store/<pixbuf-loaders>/lib/gdk-pixbu
 cargo build --release --locked
 ```
 
+A prebuilt release can be configured the same way at launch, once its ELF
+dependencies are available and bubblewrap is installed in a trusted system
+directory:
+
+```sh
+STRATA_SANDBOX_PATH='/nix/store/<ffmpeg>/bin:/nix/store/<imagemagick>/bin' \
+STRATA_SANDBOX_ROOT='/nix/store' \
+STRATA_SANDBOX_PRLIMIT='/nix/store/<util-linux>/bin/prlimit' \
+strata
+```
+
 Replace the illustrative store paths with package dependency paths and include
 all required helper binary directories. The root replaces `/usr`, rather than
 adding another mount. The launcher, helpers, loaders cache, and its referenced
@@ -37,6 +76,13 @@ modules and runtime dependencies must be reachable within the sandbox mounts.
 Use only trusted, admin-managed runtime trees: binding `/` or a user-data tree
 would expose private files to untrusted decoders. Values are taken literally;
 leave variables unset to use defaults, rather than setting empty values.
+
+Launch-time values are validated before use. Every path must be absolute and
+free of `..` components, and a launch-time `STRATA_SANDBOX_ROOT` must be `/usr`,
+`/nix/store`, or `/gnu/store`, or a directory inside one of them. A value
+that fails validation is logged and ignored, and the embedded or default value
+stays in effect. The launch-time variables are read by the host only; the
+sandbox still starts with a cleared environment.
 
 These settings apply to one-shot, pooled browser, media, and RAR extraction
 sandboxes. They do not change host-side trusted bubblewrap lookup, namespace

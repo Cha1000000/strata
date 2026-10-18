@@ -1467,6 +1467,14 @@ fn moves_off_mounts_without_stable_inodes_keep_only_what_changed() -> Result<(),
         fs::write(folder.join(first), contents)?;
         fs::hard_link(folder.join(first), folder.join(second))?;
     }
+    // Settled times, so a rewrite shows in them on any kernel.
+    let hour_before = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)?
+        .as_secs()
+        - 3600;
+    for file in ["a.txt", "sub/b.txt", "x", "m", "p"] {
+        set_times(&folder.join(file), hour_before, 0)?;
+    }
     let evicted = [
         "",
         "a.txt",
@@ -2602,12 +2610,68 @@ fn a_replacing_move_keeps_the_actual_copy_out_identity() -> Result<(), Box<dyn E
 }
 
 #[test]
+fn later_names_rewritten_within_the_tick_are_kept() -> Result<(), Box<dyn Error>> {
+    let _serial = serial()?;
+    let _kernel = KernelGuard::set(Some((6, 12, 0)));
+    // Within one coarse tick only a digest tells a same-size rewrite. SMB
+    // refuses to open a later name, so none of them can be compared there.
+    for (row, quirks, kept_names) in [
+        ("ext4", Quirks::ext4 as fn() -> Quirks, &["m", "sub/n"][..]),
+        ("smb", smb_with_one_name_open, &["m", "sub/n", "sub/y"][..]),
+    ] {
+        let tick = SystemTime::now() - Duration::from_secs(1);
+        let _clock = ClockGuard::set(tick);
+        let root = tempfile::tempdir()?;
+        let folder = root.path().join("source/folder");
+        fs::create_dir_all(folder.join("sub"))?;
+        for (first, second) in [("x", "sub/y"), ("m", "sub/n")] {
+            fs::write(folder.join(first), first)?;
+            fs::hard_link(folder.join(first), folder.join(second))?;
+        }
+        let rewritten = folder.join("m");
+        let racer: super::fs_quirks::Racer =
+            Box::new(move || fs::write(&rewritten, b"M").expect("rewrite m"));
+        let quirks = Quirks {
+            before: vec![(Op::OpenDir, "folder", 1, racer)],
+            coarse_clock: Some(tick),
+            ..quirks()
+        };
+
+        let (moved, report, _) = move_across_volumes(&folder, quirks)?;
+
+        assert_eq!(fs::read(moved.join("sub/n"))?, b"m", "{row}");
+        let mut left = report.kept;
+        left.sort_by_key(|item| item.location.native_path().map(Path::to_path_buf));
+        let expected = kept_names
+            .iter()
+            .map(|path| kept(folder.join(path), KeptCause::Changed))
+            .collect::<Vec<_>>();
+        assert_eq!(left, expected, "{row}");
+        assert!(!folder.join("x").exists(), "{row}");
+    }
+    Ok(())
+}
+
+fn smb_with_one_name_open() -> Quirks {
+    Quirks {
+        mount_type: Some(("cifs", "rw")),
+        name_opens: NameOpens::OneAtATime,
+        ..Quirks::default()
+    }
+}
+
+#[test]
 fn linked_names_on_an_smb_source_are_never_open_at_once() -> Result<(), Box<dyn Error>> {
     let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let folder = root.path().join("source/folder");
     fs::create_dir_all(folder.join("sub"))?;
     fs::write(folder.join("a"), b"linked")?;
+    let hour_before = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)?
+        .as_secs()
+        - 3600;
+    set_times(&folder.join("a"), hour_before, 0)?;
     fs::hard_link(folder.join("a"), folder.join("sub/b"))?;
     fs::hard_link(folder.join("a"), folder.join("sub/c"))?;
     let smb = Quirks {

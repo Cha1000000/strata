@@ -17,7 +17,7 @@ use rustix::{fs::AtFlags, io::Errno};
 
 use super::{
     Copy, Created, Failure, FileCopy, Mount, is_fatal, lock,
-    manifest::Pending,
+    manifest::{Contents, Pending},
     metadata::Snapshot,
     restrictive, stable_inodes,
     tree::{self, Names},
@@ -57,6 +57,7 @@ pub(super) struct Name {
 #[derive(Default)]
 struct First {
     written: Option<(PathBuf, LocalFileIdentity)>,
+    contents: Option<Contents>,
     torn: bool,
 }
 
@@ -129,9 +130,16 @@ impl Links {
         }
     }
 
-    pub(super) fn written(&self, key: Key, path: PathBuf, identity: LocalFileIdentity) {
+    pub(super) fn written(
+        &self,
+        key: Key,
+        path: PathBuf,
+        identity: LocalFileIdentity,
+        contents: Option<Contents>,
+    ) {
         if let Some(first) = lock(&self.state).firsts.get_mut(&key) {
             first.written = Some((path, identity));
+            first.contents = contents;
         }
     }
 
@@ -194,7 +202,10 @@ impl Links {
                 .iter()
                 .filter_map(|name| {
                     let first = state.firsts.get(&name.key)?;
-                    Some((name.key, (first.written.clone(), first.torn)))
+                    Some((
+                        name.key,
+                        (first.written.clone(), first.contents.clone(), first.torn),
+                    ))
                 })
                 .collect::<HashMap<_, _>>();
             (later, firsts, retimed)
@@ -204,10 +215,10 @@ impl Links {
         for mut name in later {
             copy.check_cancelled()?;
             let made = match firsts.get(&name.key) {
-                Some((Some((path, identity)), _)) => {
+                Some((Some((path, identity)), _, _)) => {
                     make(copy, (root, base), (path, *identity), &name, &mut linking)
                 }
-                Some((None, true)) => {
+                Some((None, _, true)) => {
                     leave(copy, (root, base), &name)
                         .map_err(|failure| failure.named(&name.source))?;
                     if let Some(recorded) = name.recorded.take() {
@@ -225,7 +236,10 @@ impl Links {
                 created.add(path, made);
             }
             if let Some(recorded) = name.recorded.take() {
-                recorded.made();
+                let contents = firsts
+                    .get(&name.key)
+                    .and_then(|(_, contents, _)| contents.clone());
+                recorded.made(contents);
             }
             copy.add_file(name.size);
         }

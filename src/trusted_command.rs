@@ -27,13 +27,43 @@ pub(crate) const TRUST_ROOTS: &[&str] = &[
     "/gnu/store",
 ];
 
+/// Colon-separated helper directories a package embeds at build time, such as
+/// the `bin` directories of its Nix runtime closure.
+const CONFIGURED_SEARCH_PATH: &str = match option_env!("STRATA_TRUSTED_COMMAND_PATH") {
+    Some(path) => path,
+    None => "",
+};
+
 #[cfg(test)]
 mod tests;
 
 pub(crate) fn resolve(name: &str) -> Result<PathBuf, String> {
-    let search: Vec<&Path> = SEARCH_ROOTS.iter().copied().map(Path::new).collect();
     let trust: Vec<&Path> = TRUST_ROOTS.iter().copied().map(Path::new).collect();
+    let search = search_roots(SEARCH_ROOTS, CONFIGURED_SEARCH_PATH, &trust);
+    let search: Vec<&Path> = search.iter().map(PathBuf::as_path).collect();
     resolve_in(name, &search, &trust)
+}
+
+/// Fixed roots keep priority so NixOS wrappers still win. A configured directory
+/// is searched only when it exists and canonicalizes under a trust root, which
+/// keeps user-writable locations out even if a build embeds one.
+fn search_roots(fixed: &[&str], configured: &str, trust_roots: &[&Path]) -> Vec<PathBuf> {
+    fixed
+        .iter()
+        .map(PathBuf::from)
+        .chain(
+            configured
+                .split(':')
+                .map(Path::new)
+                .filter(|directory| directory.is_absolute())
+                .filter(|directory| {
+                    directory
+                        .canonicalize()
+                        .is_ok_and(|canonical| sits_under(&canonical, trust_roots))
+                })
+                .map(Path::to_path_buf),
+        )
+        .collect()
 }
 
 pub(crate) fn command(name: &str) -> Result<Command, String> {

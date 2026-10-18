@@ -1078,10 +1078,10 @@ impl File {
                 claimed: self.claimed,
                 names: self.names.clone(),
                 size: stat.size,
-                recorded: self
-                    .recorded_in
-                    .clone()
-                    .map(|folder| Pending::new(folder, &self.name, &stat)),
+                recorded: self.recorded_in.clone().map(|folder| {
+                    let openable = !tree.opens_one_name_per_file();
+                    Pending::new(folder, &self.name, &stat, openable)
+                }),
             };
             tree.links.role(fs, &self.mount, name)
         } else {
@@ -1173,11 +1173,12 @@ impl File {
             return Ok(role);
         };
         copy.wrote(created.identity, &read);
+        if role == Role::First {
+            tree.links
+                .written(key, path, created.identity, read.contents.clone());
+        }
         if let Some(folder) = &self.recorded_in {
             folder.file(&self.name, read);
-        }
-        if role == Role::First {
-            tree.links.written(key, path, created.identity);
         }
         Ok(role)
     }
