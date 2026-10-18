@@ -175,7 +175,7 @@ pub(super) fn resolve_update_method_async(callback: impl FnOnce(UpdateMethod) + 
     let spawned = std::thread::Builder::new()
         .name("strata-update-method".into())
         .spawn(move || {
-            let method = *UPDATE_METHOD_CACHE.get_or_init(services::update_method);
+            let method = *UPDATE_METHOD_CACHE.get_or_init(detect_update_method);
             let _sent = sender.send(method);
         });
     if spawned.is_err() {
@@ -203,6 +203,14 @@ pub(super) fn resolve_update_method_async(callback: impl FnOnce(UpdateMethod) + 
         }
     });
 }
+
+fn detect_update_method() -> UpdateMethod {
+    if let Some(managed) = InstallSource::detect().managed() {
+        managed.find_installed_aur_helper();
+    }
+    services::update_method()
+}
+
 const UPDATE_DUE_INTERVAL: Duration = Duration::from_secs(24 * 3600);
 
 fn update_check_due(last: Option<Instant>, now: Instant) -> bool {
@@ -2781,17 +2789,7 @@ async fn launch_aur_update() -> Result<String, String> {
     let managed = InstallSource::detect()
         .managed()
         .ok_or_else(|| crate::i18n::tr("missing package metadata"))?;
-    launch_aur_update_with(managed, || managed.aur_update_target()).await
-}
-
-async fn launch_aur_update_with(
-    managed: &'static ManagedInstall,
-    find_helper: impl FnOnce() -> Option<(&'static str, &'static str)> + Send + 'static,
-) -> Result<String, String> {
-    let target = gio::spawn_blocking(find_helper)
-        .await
-        .map_err(|_| crate::i18n::tr(crate::services::UNEXPECTED_SYSTEM_ERROR))?;
-    if let Some((helper, package)) = target {
+    if let Some((helper, package)) = managed.aur_update_target() {
         return terminal::spawn_reaped(move || {
             let terminal =
                 terminal::Terminal::resolve().ok_or_else(terminal::no_terminal_message)?;

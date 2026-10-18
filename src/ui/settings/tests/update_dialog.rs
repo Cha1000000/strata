@@ -452,23 +452,46 @@ fn omarchy_update_without_a_terminal_reports_and_reenables_the_action() {
 }
 
 #[test]
-fn aur_update_looks_for_its_helper_off_the_ui_thread() {
+fn aur_helpers_are_found_off_the_ui_thread_and_the_update_actions_use_that_answer() {
+    let bin = tempfile::tempdir().expect("isolated PATH");
     gtk_test_with_env(
-        "ui::settings::tests::update_dialog::aur_update_looks_for_its_helper_off_the_ui_thread",
-        NO_TERMINAL,
+        "ui::settings::tests::update_dialog::aur_helpers_are_found_off_the_ui_thread_and_the_update_actions_use_that_answer",
+        [
+            ("PATH", bin.path().as_os_str()),
+            ("TERMINAL", std::ffi::OsStr::new("")),
+        ],
         || {
-            let managed: &'static ManagedInstall = Box::leak(Box::default());
+            use std::os::unix::fs::PermissionsExt;
+            let bin = std::path::PathBuf::from(std::env::var_os("PATH").expect("isolated PATH"));
+            let helper = bin.join("paru");
+            std::fs::write(&helper, "#!/bin/sh\n").expect("AUR helper stub");
+            std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755))
+                .expect("executable AUR helper stub");
+            InstallSource::seed_for_test(
+                "manager = \"pacman\"\npackage = \"strata-bin\"\naur_helpers = [\"yay\", \"paru\"]\n",
+            );
+            let managed = InstallSource::detect()
+                .managed()
+                .expect("a managed install");
+            assert_eq!(aur_update_action_label(), "View on AUR");
+
+            let resolved = Rc::new(std::cell::Cell::new(None));
+            let answer = resolved.clone();
+            resolve_update_method_async(move |method| answer.set(Some(method)));
+            wait_until("the update method", || resolved.get().is_some());
+            assert_eq!(resolved.get(), Some(UpdateMethod::Aur));
+            assert_eq!(aur_update_action_label(), "Open AUR Update");
+            let summary = managed_install_summary(managed);
+            assert!(
+                summary.contains("Update Strata with: paru -Syu strata-bin"),
+                "{summary}"
+            );
+
             let answer = Rc::new(RefCell::new(None));
             let launched = answer.clone();
             glib::MainContext::default().spawn_local(async move {
-                let result = launch_aur_update_with(managed, || {
-                    crate::util::ui_thread::assert_off();
-                    Some(("paru", "strata-bin"))
-                })
-                .await;
-                launched.replace(Some(result));
+                launched.replace(Some(launch_aur_update().await));
             });
-
             wait_until("the AUR launch to answer", || answer.borrow().is_some());
             let error = answer
                 .take()
