@@ -11,7 +11,10 @@ use gtk::glib;
 use crate::{
     app::navigation::LoadState,
     model::Location,
-    services::{DirectoryStamp, LoadHandle, MountToken, RequestId, StampAnswer, file_activity},
+    services::{
+        DirectoryChange, DirectoryStamp, LoadHandle, MountToken, RequestId, StampAnswer,
+        file_activity,
+    },
 };
 
 use super::Browser;
@@ -21,6 +24,7 @@ const VISIBLE_INTERVAL: Duration = Duration::from_secs(15);
 const RELIST_DUTY: u32 = 10;
 const UNCHANGED_BEFORE_SLOWING: u32 = 20;
 const MOST_SLOWING: u32 = 4;
+const UNREACHABLE_RETRY: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum Presence {
@@ -73,6 +77,17 @@ impl ColumnFreshness {
 }
 
 type Checked = (usize, Location, Weak<RefCell<ColumnFreshness>>);
+
+#[derive(Clone, Copy)]
+enum Finding {
+    Unchanged,
+    Stale,
+    Departed,
+    Inaccessible,
+    Unreachable,
+    Unanswered,
+    Unsupported,
+}
 
 #[derive(Default)]
 pub(super) struct Freshness {
@@ -236,7 +251,7 @@ impl Browser {
             && !self.sorting.borrow().contains_key(&depth)
     }
 
-    fn operation_touches(location: &Location) -> bool {
+    pub(super) fn operation_touches(location: &Location) -> bool {
         location.native_path().is_some_and(|path| {
             file_activity::is_changing(path) || file_activity::is_active_in(path)
         })
@@ -311,13 +326,17 @@ impl Browser {
         let unanswered = Rc::new(Cell::new(locations.len()));
         let left = unanswered.clone();
         let weak = Rc::downgrade(self);
+        let departed = Cell::new(None::<usize>);
         let emit = Rc::new(move |location: Location, answer: StampAnswer| {
             left.set(left.get().saturating_sub(1));
             let Some(browser) = weak.upgrade() else {
                 return;
             };
             for (depth, _, column) in group.iter().filter(|(_, checked, _)| *checked == location) {
-                browser.apply_check(*depth, column, &location, answer.clone());
+                let below_departed = departed.get().is_some_and(|above| above < *depth);
+                if browser.apply_check(*depth, column, &location, answer.clone(), below_departed) {
+                    departed.set(Some(*depth));
+                }
             }
             browser.start_relists();
         });
@@ -333,9 +352,10 @@ impl Browser {
         column: &Weak<RefCell<ColumnFreshness>>,
         location: &Location,
         answer: StampAnswer,
-    ) {
+        below_departed: bool,
+    ) -> bool {
         let Some(column) = column.upgrade() else {
-            return;
+            return false;
         };
         column.borrow_mut().checking = false;
         let current = self
@@ -343,40 +363,57 @@ impl Browser {
             .is_some_and(|known| Rc::ptr_eq(&known, &column))
             && self.location_at(depth).as_ref() == Some(location);
         if !current {
-            return;
+            return false;
         }
         let now = self.freshness_now();
-        let stale = {
+        let finding = {
             let mut column = column.borrow_mut();
-            let stale = match &answer {
-                StampAnswer::Stamp(stamp) => column
-                    .baseline
-                    .as_ref()
-                    .is_none_or(|baseline| stamp.moved_since(baseline)),
-                StampAnswer::Inaccessible => true,
-                _ => false,
+            let finding = match (&answer, column.baseline.as_ref()) {
+                (StampAnswer::Stamp(stamp), Some(baseline)) if stamp.replaced(baseline) => {
+                    Finding::Departed
+                }
+                (StampAnswer::Stamp(stamp), Some(baseline)) if !stamp.moved_since(baseline) => {
+                    Finding::Unchanged
+                }
+                (StampAnswer::Stamp(_), _) => Finding::Stale,
+                (StampAnswer::Missing, _) => Finding::Departed,
+                (StampAnswer::Inaccessible, _) => Finding::Inaccessible,
+                (StampAnswer::Unreachable, _) => Finding::Unreachable,
+                (StampAnswer::Unresponsive, _) => Finding::Unanswered,
+                (StampAnswer::Unsupported, _) => Finding::Unsupported,
             };
-            column.unchanged = match &answer {
-                StampAnswer::Stamp(_) if !stale => column.unchanged.saturating_add(1),
+            column.unchanged = match finding {
+                Finding::Unchanged => column.unchanged.saturating_add(1),
                 _ => 0,
             };
-            column.next_due = match &answer {
-                StampAnswer::Unsupported => None,
+            column.next_due = match finding {
+                Finding::Unsupported => None,
+                Finding::Unreachable => Some(now + UNREACHABLE_RETRY),
                 _ => Some(now + self.check_interval(column.unchanged)),
             };
-            stale
+            finding
         };
-        if stale
-            && !self.freshness_held()
-            && self.settled(depth)
-            && !Self::operation_touches(location)
-        {
-            match answer {
-                StampAnswer::Inaccessible => self.refresh_column_preserving_entries(depth),
-                _ => column.borrow_mut().relist = true,
-            }
+        let free = self.settled(depth) && !Self::operation_touches(location);
+        if matches!(finding, Finding::Stale) && free && !self.freshness_held() {
+            column.borrow_mut().relist = true;
         }
+        let departed = match finding {
+            Finding::Inaccessible if free && !self.freshness_held() => {
+                self.refresh_column_preserving_entries(depth);
+                false
+            }
+            Finding::Departed if free && !below_departed => {
+                self.handle_root_departure(
+                    depth,
+                    location,
+                    DirectoryChange::Remove(location.clone()),
+                );
+                true
+            }
+            _ => false,
+        };
         self.reschedule_freshness();
+        departed
     }
 
     fn start_relists(self: &Rc<Self>) {

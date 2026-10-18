@@ -31,6 +31,11 @@ struct Folder {
 type Emit = Rc<dyn Fn(DirectoryEvent)>;
 type Check = (Location, Rc<dyn Fn(Location, StampAnswer)>);
 type Notify = Rc<dyn Fn(DirectoryChange)>;
+type Validation = (
+    Location,
+    Rc<dyn Fn(Result<(), LocationValidationError>)>,
+    Rc<Cell<bool>>,
+);
 
 #[derive(Default)]
 struct Folders {
@@ -45,6 +50,10 @@ struct Folders {
     hold_checks: Cell<bool>,
     held_checks: RefCell<Vec<Check>>,
     monitors: RefCell<HashMap<Location, Notify>>,
+    watch_requests: RefCell<Vec<Location>>,
+    validations: RefCell<Vec<Location>>,
+    hold_validations: Cell<bool>,
+    held_validations: RefCell<Vec<Validation>>,
 }
 
 impl Folders {
@@ -151,6 +160,40 @@ impl Folders {
         folders.get_mut(location).expect("a known folder").answer = answer;
     }
 
+    fn remove(&self, location: &Location) {
+        self.folders.borrow_mut().remove(location);
+    }
+
+    fn replace(&self, location: &Location, inode: u64, names: &[&str]) {
+        let mut folders = self.folders.borrow_mut();
+        let folder = folders.get_mut(location).expect("a known folder");
+        if let StampAnswer::Stamp(stamp) = &mut folder.answer
+            && let Some(identity) = &mut stamp.identity
+        {
+            identity.evidence.inode = inode;
+        }
+        folder.names = names.iter().map(|name| (*name).to_owned()).collect();
+    }
+
+    fn answer_held_checks_for(&self, folder: &Location, answer: &StampAnswer) {
+        let held = self.held_checks.take();
+        for (location, emit) in held {
+            let answer = match location == *folder {
+                true => answer.clone(),
+                false => self.answer_of(&location),
+            };
+            emit(location, answer);
+        }
+    }
+
+    fn monitors_requested(&self, location: &Location) -> usize {
+        self.watch_requests
+            .borrow()
+            .iter()
+            .filter(|watched| *watched == location)
+            .count()
+    }
+
     fn notify(&self, location: &Location, change: DirectoryChange) {
         let notify = self.monitors.borrow().get(location).cloned();
         notify.expect("a requested monitor")(change);
@@ -160,6 +203,26 @@ impl Folders {
         let held = self.held_checks.take();
         for (location, emit) in held {
             emit(location.clone(), self.answer_of(&location));
+        }
+    }
+
+    fn answer_held_check(&self, folder: &Location) {
+        let held = std::mem::take(&mut *self.held_checks.borrow_mut());
+        let (answered, waiting): (Vec<_>, Vec<_>) = held
+            .into_iter()
+            .partition(|(location, _)| location == folder);
+        self.held_checks.replace(waiting);
+        for (location, emit) in answered {
+            emit(location.clone(), self.answer_of(&location));
+        }
+    }
+
+    fn answer_held_validations(&self) {
+        let held = self.held_validations.take();
+        for (location, emit, cancelled) in held {
+            if !cancelled.get() {
+                emit(self.validate_location(&location));
+            }
         }
     }
 
@@ -191,6 +254,23 @@ impl FileSource for Folders {
         }
     }
 
+    fn validate_location_async(
+        &self,
+        location: Location,
+        emit: Rc<dyn Fn(Result<(), LocationValidationError>)>,
+    ) -> LoadHandle {
+        self.validations.borrow_mut().push(location.clone());
+        if !self.hold_validations.get() {
+            emit(self.validate_location(&location));
+            return LoadHandle::new(|| {});
+        }
+        let cancelled = Rc::new(Cell::new(false));
+        self.held_validations
+            .borrow_mut()
+            .push((location, emit, cancelled.clone()));
+        LoadHandle::new(move || cancelled.set(true))
+    }
+
     fn enumerate(&self, request: DirectoryRequest, emit: Emit) -> LoadHandle {
         self.loads.borrow_mut().push(request.location.clone());
         if request.background && self.lane_busy(&request.location) {
@@ -219,6 +299,7 @@ impl FileSource for Folders {
         report: Rc<dyn Fn(Watching)>,
     ) -> LoadHandle {
         self.monitors.borrow_mut().insert(location.clone(), notify);
+        self.watch_requests.borrow_mut().push(location.clone());
         let watching = self
             .folders
             .borrow()
@@ -752,10 +833,11 @@ fn a_time_truncated_relist_does_not_replace_a_complete_listing() {
         let got = (
             names_at(&browser, 0).len(),
             browser.state.borrow().columns[0].truncated,
+            source.validations.borrow().len(),
         );
         let expected = match kept {
-            true => (1, false),
-            false => (listed, true),
+            true => (1, false, 0),
+            false => (listed, true, 0),
         };
         if got != expected {
             failures.push(format!("{row}: got {got:?}, expected {expected:?}"));
@@ -833,4 +915,141 @@ fn a_folder_found_inaccessible_shows_the_failure_and_is_no_longer_checked() {
     );
     assert_eq!(armed_after_the_failure, None);
     assert_eq!(source.checks_of(&private), 1);
+}
+
+#[test]
+fn a_check_finding_the_folder_gone_runs_the_departure_check_under_a_watching_parent() {
+    let mut failures = Vec::new();
+    for (parent, found_by_a_relist) in [
+        (Some(Watching::Live), false),
+        (None, false),
+        (Some(Watching::Live), true),
+        (None, true),
+    ] {
+        let source = Rc::new(Folders::default());
+        let share = source.add("/net/share", network(1), parent);
+        let sub = source.add("/net/share/sub", network(2), Some(Watching::Live));
+        let (browser, clock) = browser_on(&source);
+        browser.navigate(share.clone());
+        browser.show_child(0, sub.clone());
+        source.hold_checks.set(true);
+
+        clock.tick_at(15);
+        let moved = match source.answer_of(&sub) {
+            StampAnswer::Stamp(mut stamp) => {
+                stamp.modified.0 += 1;
+                StampAnswer::Stamp(stamp)
+            }
+            other => other,
+        };
+        source.remove(&sub);
+        match found_by_a_relist {
+            true => source.answer_held_checks_for(&sub, &moved),
+            false => source.answer_held_checks(),
+        }
+
+        let got = (browser.location_at(0), browser.location_at(1));
+        if got != (Some(share.clone()), None) {
+            failures.push(format!(
+                "parent monitor {parent:?}, found by a re-list {found_by_a_relist}: {got:?}"
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn a_folder_removed_with_its_open_subfolder_leaves_for_the_folder_above_both() {
+    let source = Rc::new(Folders::default());
+    let share = source.add("/net/share", network(1), Some(Watching::Live));
+    let outer = source.add("/net/share/outer", network(2), Some(Watching::Live));
+    let inner = source.add("/net/share/outer/inner", network(3), Some(Watching::Live));
+    let (browser, clock) = browser_on(&source);
+    browser.navigate(share.clone());
+    browser.show_child(0, outer.clone());
+    browser.show_child(1, inner.clone());
+    source.remove(&outer);
+    source.remove(&inner);
+    source.hold_validations.set(true);
+
+    clock.tick_at(15);
+    source.hold_validations.set(false);
+    source.answer_held_validations();
+
+    assert_eq!(
+        (browser.location_at(0), browser.location_at(1)),
+        (Some(share), None)
+    );
+}
+
+#[test]
+fn a_failed_relist_leaves_a_departure_check_in_flight_alone() {
+    let source = Rc::new(Folders::default());
+    let share = source.add("/net/share", network(1), Some(Watching::Live));
+    let sub = source.add(
+        "/net/share/sub",
+        stamp(NFS + 1, 2, true),
+        Some(Watching::Live),
+    );
+    let (browser, clock) = browser_on(&source);
+    browser.navigate(share.clone());
+    browser.show_child(0, sub.clone());
+    source.change(&share, &["listed", "added elsewhere"]);
+    source.hold_checks.set(true);
+    source.hold_validations.set(true);
+    source.fail_loads.set(true);
+
+    clock.tick_at(15);
+    source.remove(&sub);
+    source.answer_held_check(&sub);
+    source.answer_held_check(&share);
+    source.hold_validations.set(false);
+    source.answer_held_validations();
+
+    assert_eq!(
+        (browser.location_at(0), browser.location_at(1)),
+        (Some(share), None)
+    );
+}
+
+#[test]
+fn a_check_finding_the_folder_replaced_reloads_it_in_place() {
+    let source = Rc::new(Folders::default());
+    let share = source.add("/net/share", network(1), Some(Watching::Live));
+    let (browser, clock) = browser_on(&source);
+    browser.navigate(share.clone());
+    source.replace(&share, 9, &["made anew"]);
+
+    clock.tick_at(15);
+
+    assert_eq!(browser.location_at(0), Some(share.clone()));
+    assert_eq!(names_at(&browser, 0), ["made anew"]);
+    assert_eq!(
+        (source.loads_of(&share), source.monitors_requested(&share)),
+        (2, 2)
+    );
+}
+
+#[test]
+fn an_unreachable_folder_keeps_its_listing_and_is_retried_later() {
+    let source = Rc::new(Folders::default());
+    let share = source.add("/net/share", network(1), Some(Watching::Live));
+    let (browser, clock) = browser_on(&source);
+    browser.navigate(share.clone());
+    source.hold_checks.set(true);
+
+    clock.tick_at(15);
+    source.answer_held_checks_for(&share, &StampAnswer::Unreachable);
+    clock.tick_at(30);
+    let checked_at_the_usual_interval = source.checks_of(&share);
+    clock.tick_at(45);
+
+    assert_eq!(checked_at_the_usual_interval, 1);
+    assert_eq!(source.checks_of(&share), 2);
+    assert_eq!(browser.location_at(0), Some(share));
+    assert_eq!(names_at(&browser, 0), ["listed"]);
+    assert_eq!(
+        browser.state.borrow().columns[0].load_state,
+        LoadState::Ready
+    );
 }

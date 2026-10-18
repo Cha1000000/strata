@@ -1120,7 +1120,7 @@ pub struct Browser {
     /// The depth-0 folder's identity when it loaded, which finds it after a rename.
     root_identity: RefCell<Option<(Location, ItemIdentity)>>,
     /// The current step of the one departure check that runs at a time.
-    departure_probe: RefCell<Option<LoadHandle>>,
+    departure_probe: RefCell<Option<directory_changes::DepartureProbe>>,
     freshness: freshness::Freshness,
     metadata_pending: RefCell<HashMap<usize, Vec<ViewportTarget>>>,
     metadata_idle: RefCell<Option<gio::glib::SourceId>>,

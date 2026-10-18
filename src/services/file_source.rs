@@ -415,11 +415,15 @@ impl DirectoryStamp {
     pub fn moved_since(&self, baseline: &Self) -> bool {
         self.modified != baseline.modified
             || self.changed != baseline.changed
-            || match (&self.identity, &baseline.identity) {
-                (Some(identity), Some(baseline)) => identity.proof(baseline) == Proof::Different,
-                (None, None) => false,
-                _ => true,
-            }
+            || self.replaced(baseline)
+    }
+
+    pub fn replaced(&self, baseline: &Self) -> bool {
+        match (&self.identity, &baseline.identity) {
+            (Some(identity), Some(baseline)) => identity.proof(baseline) == Proof::Different,
+            (None, None) => false,
+            _ => true,
+        }
     }
 
     /// On coarse times, a change soon after the last one may have left them as they were.

@@ -7,7 +7,7 @@ use crate::{
     services::{DirectoryEvent, RequestId},
 };
 
-use super::{Browser, BrowserEvent, remote::RemoteTerminal};
+use super::{Browser, BrowserEvent, directory_changes::DepartureEvidence, remote::RemoteTerminal};
 
 mod metadata;
 
@@ -152,7 +152,7 @@ impl Browser {
         if let Some(OpenLoad::Native(depth)) = target
             && completion.truncated
             && self.cut_short_of_a_complete_listing(depth, request_id)
-            && self.keep_listing(depth, request_id)
+            && self.keep_listing(depth, request_id, false)
         {
             return;
         }
@@ -192,7 +192,7 @@ impl Browser {
 
     fn receive_failure(self: &Rc<Self>, request_id: RequestId, message: String) {
         let depth = self.state.borrow().depth_for_request(request_id);
-        if depth.is_some_and(|depth| self.keep_listing(depth, request_id)) {
+        if depth.is_some_and(|depth| self.keep_listing(depth, request_id, true)) {
             return;
         }
         match self.open_load_target(request_id) {
@@ -240,7 +240,7 @@ impl Browser {
             })
     }
 
-    fn keep_listing(self: &Rc<Self>, depth: usize, request_id: RequestId) -> bool {
+    fn keep_listing(self: &Rc<Self>, depth: usize, request_id: RequestId, failed: bool) -> bool {
         let kept = self
             .kept_listings
             .borrow()
@@ -275,6 +275,14 @@ impl Browser {
         });
         for (watched, change) in deltas {
             self.handle_directory_change(depth, &watched, change);
+        }
+        if let Some(location) = self.location_at(depth).filter(|location| {
+            failed
+                && kept.background
+                && !Self::operation_touches(location)
+                && !self.departure_check_pending()
+        }) {
+            self.check_departed_directory(depth, location, DepartureEvidence::FailedLoad);
         }
         true
     }
