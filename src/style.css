@@ -6234,6 +6234,22 @@ two-column presentation. */
   margin-top: 4px;
 }
 
+.integration-separator {
+  background: alpha(@strata_border, 0.55);
+  margin: 3px 2px;
+  min-width: 1px;
+}
+
+.integration-actions .settings-action-button.borderless,
+.integration-actions .settings-action-button.danger.borderless:focus-visible {
+  border-color: transparent;
+}
+
+.integration-actions .settings-action-button.danger.borderless:hover,
+.integration-actions .settings-action-button.danger.borderless:active {
+  border-color: transparent;
+}
+
 .settings-group {
   background: mix(@strata_bg, @strata_muted, 0.25);
   border: 1px solid alpha(@strata_border, 0.55);

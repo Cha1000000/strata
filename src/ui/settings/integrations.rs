@@ -104,8 +104,7 @@ pub(super) fn integrations_page_with(source: Source) -> gtk::Widget {
         manager: PackageManager::detect(),
         generation: Cell::new(0),
     });
-    let refresh = gtk::Button::with_label(&crate::i18n::tr("Refresh"));
-    refresh.add_css_class("settings-action-button");
+    let refresh = icon_label_button(icons::REFRESH, "Refresh");
     refresh.set_widget_name("integrations-refresh");
     let refreshing = Rc::downgrade(&page);
     refresh.connect_clicked(move |_| {
@@ -116,8 +115,7 @@ pub(super) fn integrations_page_with(source: Source) -> gtk::Widget {
     });
     actions.append(&refresh);
     if let (Some(root), Some(open_folder)) = (&page.source.root, page.source.open_folder.clone()) {
-        let open = gtk::Button::with_label(&crate::i18n::tr("Open folder"));
-        open.add_css_class("settings-action-button");
+        let open = icon_label_button(icons::FOLDER_OPEN, "Open folder");
         open.set_widget_name("integrations-open-folder");
         let root = root.clone();
         open.connect_clicked(move |_| open_folder(root.clone()));
@@ -567,14 +565,22 @@ impl RowContext {
         button.add_css_class("settings-action-icon-button");
         if danger {
             button.add_css_class("danger");
+            button.add_css_class("borderless");
         }
         button.set_widget_name(&format!("integration-{}-{}", self.id, label.to_lowercase()));
         self.actions.append(&button);
         button
     }
 
-    /// A switch that keeps the registration installed but stops it loading.
+    /// A labelled switch that keeps the registration installed but stops it
+    /// loading, separated from the row's buttons.
     fn toggle(self: &Rc<Self>, enabled: bool) {
+        let group = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        group.add_css_class("integration-toggle");
+        group.set_valign(gtk::Align::Center);
+        let state = gtk::Label::new(Some(&toggle_label(enabled)));
+        state.add_css_class("settings-option-description");
+        group.append(&state);
         let switch = gtk::Switch::builder()
             .active(enabled)
             .valign(gtk::Align::Center)
@@ -583,10 +589,15 @@ impl RowContext {
         switch.set_widget_name(&format!("integration-{}-enabled", self.id));
         let context = self.clone();
         switch.connect_state_set(move |_, enabled| {
+            state.set_text(&toggle_label(enabled));
             context.set_enabled(enabled);
             glib::Propagation::Proceed
         });
-        self.actions.append(&switch);
+        group.append(&switch);
+        self.actions.append(&group);
+        let separator = gtk::Separator::new(gtk::Orientation::Vertical);
+        separator.add_css_class("integration-separator");
+        self.actions.append(&separator);
     }
 
     fn busy(&self, busy: bool) {
@@ -704,6 +715,25 @@ fn named_button(label: &str, accessible: &str) -> gtk::Button {
     button.set_child(Some(&gtk::Label::new(Some(&crate::i18n::tr(label)))));
     button.add_css_class("text-button");
     accessibility::set_label(&button, accessible);
+    button
+}
+
+fn toggle_label(enabled: bool) -> String {
+    crate::i18n::tr(if enabled { "Enabled" } else { "Disabled" })
+}
+
+/// A text button with a leading icon; the accessible name is the label.
+fn icon_label_button(icon: &str, label: &str) -> gtk::Button {
+    let content = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    content.set_halign(gtk::Align::Center);
+    let image = assets::text_icon(icon, assets::CHROME_ICON_PX);
+    image.set_valign(gtk::Align::Center);
+    content.append(&image);
+    let text = crate::i18n::tr(label);
+    content.append(&gtk::Label::new(Some(&text)));
+    let button = gtk::Button::builder().child(&content).build();
+    button.add_css_class("settings-action-button");
+    accessibility::set_label(&button, &text);
     button
 }
 
