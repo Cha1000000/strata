@@ -92,7 +92,26 @@ submenus, or a mixture within their section:
 ```
 
 Only leaves activate; a branch's nonempty `children` array is navigation only.
-Branches cannot have `context`. Across the entire tree, allow at most 64 nodes,
+Branches cannot have `context`.
+
+A root action whose selection is a *destination*, such as a paired phone, can ask
+to appear inside Strata's **Send to…** submenu instead of the provider section:
+
+```json
+{"version":1,"id":2,"actions":[{"id":"pixel","label":"Pixel","icon":"phone","placement":"send-to","context":"opaque-selection-token"},{"id":"tablet","label":"Tablet","icon":"tablet","placement":"send-to","context":"opaque-selection-token"}]}
+```
+
+Removable drives keep the first, unlabelled group of **Send to…**; each provider's
+destinations follow in a group labelled with its registered name, so labels should
+be the bare destination name. **Send to…** appears as soon as any destination
+exists, including ones that arrive while the menu is open, and disappears when
+the last one is withdrawn. Destinations may have `children`, with the usual tree
+bounds, and their leaves activate exactly like section leaves. `placement` is
+read on root actions only; it is ignored on children, on background (folder)
+menus and in menus without a Send to… entry, where the action stays in the
+provider section. Unrecognized values also keep the section, so a provider that
+uses `placement` degrades to a heading section on older Strata versions without
+a handshake. Across the entire tree, allow at most 64 nodes,
 four levels (roots are level one), and unique ids of 1–64 ASCII letters, digits
 or dashes. Labels are nonempty plain text, at most 128 UTF-8 bytes, without control
 characters. Icons are optional declared icon ids. Leaf `context` is an optional
