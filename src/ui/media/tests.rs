@@ -59,8 +59,13 @@ fn open_restoring(path: &str, position: u64) -> (DecodedMedia, Rc<RefCell<Vec<u3
 
 #[test]
 fn reopening_resumes_where_the_preview_closed() {
-    gtk::init().expect("GTK display");
+    crate::test_support::gtk_test(
+        "ui::media::tests::reopening_resumes_where_the_preview_closed",
+        resume_where_the_preview_closed,
+    );
+}
 
+fn resume_where_the_preview_closed() {
     let (media, calls) = open_restoring("/remembered", media::timestamp(900));
     let deadline = Instant::now() + Duration::from_secs(15);
     while (media.timestamp() as u64) < media::timestamp(900) {
