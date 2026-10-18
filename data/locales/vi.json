@@ -956,6 +956,7 @@
   "The device is not available": "Thiết bị không khả dụng",
   "The device may still be writing. Wait for the transfer to finish or fail before starting another file operation. Do not unplug until you can safely eject it.": "Thiết bị có thể vẫn đang ghi. Hãy đợi quá trình truyền hoàn tất hoặc thất bại trước khi bắt đầu thao tác tệp khác. Không rút thiết bị cho đến khi có thể đẩy ra an toàn.",
   "The device started, but no mountable volume appeared.": "Thiết bị đã khởi động nhưng không xuất hiện phân vùng có thể gắn kết.",
+  "The drive is read-only. It may need to be checked for errors after it was unplugged without being ejected.": "Ổ đĩa chỉ đọc. Nếu ổ đã bị rút ra mà chưa được đẩy ra, có thể cần kiểm tra lỗi ổ đĩa.",
   "The disk quota has been exceeded": "Đã vượt quá hạn mức ổ đĩa",
   "The download stopped unexpectedly. Try again.": "Quá trình tải xuống đã dừng đột ngột. Hãy thử lại.",
   "The file does not match the selected filter": "Tệp không khớp với bộ lọc đã chọn",

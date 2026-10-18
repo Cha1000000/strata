@@ -225,6 +225,12 @@ pub struct RestoreRequest {
     pub source: RestoreSource,
 }
 
+#[derive(Clone, Debug)]
+pub struct RecoverRequest {
+    pub id: OperationRequestId,
+    pub container: Location,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ArchiveFormat {
     Zip,
@@ -632,6 +638,16 @@ pub trait OperationProvider {
     -> LoadHandle;
     fn delete(&self, request: DeleteRequest, emit: Rc<dyn Fn(OperationEvent)>) -> LoadHandle;
     fn restore(&self, request: RestoreRequest, emit: Rc<dyn Fn(OperationEvent)>) -> LoadHandle;
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "step 8's Restore action calls it")
+    )]
+    fn recover(&self, request: RecoverRequest, emit: Rc<dyn Fn(OperationEvent)>) -> LoadHandle;
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "step 8's leftover detection calls it")
+    )]
+    fn sweep_probes(&self, _folder: &Location, _names: &[OsString]) {}
     fn compress(&self, request: CompressRequest, emit: Rc<dyn Fn(OperationEvent)>) -> LoadHandle;
     fn extract(&self, request: ExtractRequest, emit: Rc<dyn Fn(OperationEvent)>) -> LoadHandle;
 }

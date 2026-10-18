@@ -956,6 +956,7 @@
   "The device is not available": "Устройство недоступно",
   "The device may still be writing. Wait for the transfer to finish or fail before starting another file operation. Do not unplug until you can safely eject it.": "Возможно, устройство всё ещё записывает данные. Дождитесь завершения или сбоя передачи, прежде чем начинать другую операцию с файлами. Не отключайте устройство, пока его нельзя будет безопасно извлечь.",
   "The device started, but no mountable volume appeared.": "Устройство запустилось, но подключаемый том не появился.",
+  "The drive is read-only. It may need to be checked for errors after it was unplugged without being ejected.": "Диск доступен только для чтения. Если его отключили без извлечения, возможно, его нужно проверить на ошибки.",
   "The disk quota has been exceeded": "Превышена дисковая квота",
   "The download stopped unexpectedly. Try again.": "Загрузка неожиданно прервалась. Повторите попытку.",
   "The file does not match the selected filter": "Файл не соответствует выбранному фильтру",

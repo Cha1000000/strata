@@ -876,6 +876,19 @@ impl OperationProvider for ImmediateOperationProvider {
         LoadHandle::new(|| {})
     }
 
+    fn recover(
+        &self,
+        request: crate::services::RecoverRequest,
+        emit: Rc<dyn Fn(OperationEvent)>,
+    ) -> LoadHandle {
+        emit(OperationEvent::Restored {
+            request_id: request.id,
+            locations: vec![request.container],
+            restored: Vec::new(),
+        });
+        LoadHandle::new(|| {})
+    }
+
     fn compress(&self, request: CompressRequest, emit: Rc<dyn Fn(OperationEvent)>) -> LoadHandle {
         let archive = request
             .destination
@@ -964,6 +977,14 @@ impl OperationProvider for HeldExtractProvider {
 
     fn restore(&self, request: RestoreRequest, emit: Rc<dyn Fn(OperationEvent)>) -> LoadHandle {
         ImmediateOperationProvider.restore(request, emit)
+    }
+
+    fn recover(
+        &self,
+        request: crate::services::RecoverRequest,
+        emit: Rc<dyn Fn(OperationEvent)>,
+    ) -> LoadHandle {
+        ImmediateOperationProvider.recover(request, emit)
     }
 
     fn compress(&self, request: CompressRequest, emit: Rc<dyn Fn(OperationEvent)>) -> LoadHandle {

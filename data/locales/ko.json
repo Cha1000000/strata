@@ -956,6 +956,7 @@
   "The device is not available": "장치를 사용할 수 없습니다",
   "The device may still be writing. Wait for the transfer to finish or fail before starting another file operation. Do not unplug until you can safely eject it.": "장치가 아직 쓰는 중일 수 있습니다. 전송이 완료되거나 실패할 때까지 기다린 후 다른 파일 작업을 시작하세요. 안전하게 꺼낼 수 있을 때까지 분리하지 마세요.",
   "The device started, but no mountable volume appeared.": "장치가 시작되었지만 마운트할 수 있는 볼륨이 나타나지 않았습니다.",
+  "The drive is read-only. It may need to be checked for errors after it was unplugged without being ejected.": "드라이브가 읽기 전용입니다. 꺼내지 않고 분리했다면 오류 검사가 필요할 수 있습니다.",
   "The disk quota has been exceeded": "디스크 할당량을 초과했습니다",
   "The download stopped unexpectedly. Try again.": "다운로드가 예기치 않게 중지되었습니다. 다시 시도하세요.",
   "The file does not match the selected filter": "파일이 선택한 필터와 일치하지 않습니다",

@@ -956,6 +956,7 @@
   "The device is not available": "Le périphérique n’est pas disponible",
   "The device may still be writing. Wait for the transfer to finish or fail before starting another file operation. Do not unplug until you can safely eject it.": "Le périphérique écrit peut-être encore. Attendez la fin ou l’échec du transfert avant de lancer une autre opération. Ne le débranchez pas avant de pouvoir l’éjecter en toute sécurité.",
   "The device started, but no mountable volume appeared.": "Le périphérique a démarré, mais aucun volume montable n’est apparu.",
+  "The drive is read-only. It may need to be checked for errors after it was unplugged without being ejected.": "Le lecteur est en lecture seule. S’il a été débranché sans avoir été éjecté, il doit peut-être être vérifié.",
   "The disk quota has been exceeded": "Le quota de disque est dépassé",
   "The download stopped unexpectedly. Try again.": "Le téléchargement s’est arrêté de façon inattendue. Réessayez.",
   "The file does not match the selected filter": "Le fichier ne correspond pas au filtre sélectionné",

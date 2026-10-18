@@ -956,6 +956,7 @@
   "The device is not available": "O dispositivo não está disponível",
   "The device may still be writing. Wait for the transfer to finish or fail before starting another file operation. Do not unplug until you can safely eject it.": "Talvez o dispositivo ainda esteja gravando. Aguarde a transferência terminar ou falhar antes de iniciar outra operação de arquivo. Não desconecte até que seja possível ejetá-lo com segurança.",
   "The device started, but no mountable volume appeared.": "O dispositivo foi iniciado, mas nenhum volume montável apareceu.",
+  "The drive is read-only. It may need to be checked for errors after it was unplugged without being ejected.": "A unidade está somente leitura. Se ela foi desconectada sem ser ejetada, talvez seja preciso verificar se há erros.",
   "The disk quota has been exceeded": "A cota de disco foi excedida",
   "The download stopped unexpectedly. Try again.": "O download parou inesperadamente. Tente novamente.",
   "The file does not match the selected filter": "O arquivo não corresponde ao filtro selecionado",

@@ -73,10 +73,10 @@ pub use operations::{
     ArchiveFormat, CancelledOperation, CompressRequest, CreateDirectoryRequest, CreateFileRequest,
     DeleteRequest, ExtractRequest, Holder, KeptCause, KeptItem, MoveRecord, NameMode,
     OperationEvent, OperationProvider, OperationRequestId, PasswordFailure, PasteItem,
-    PasteRequest, PlacedSnapshot, RenameCause, RenameRecord, RenameRequest, RenamedItem,
-    ReplacedOriginal, RestoreRequest, RestoreSource, RestoreTrashItem, ShownName, SkippedItem,
-    SpecialKind, TransferConflict, TransferReport, UndoCopyRequest, UndoMergeRequest, UndoMoveItem,
-    UndoMoveRequest, UndoRenameRequest, validate_basename,
+    PasteRequest, PlacedSnapshot, RecoverRequest, RenameCause, RenameRecord, RenameRequest,
+    RenamedItem, ReplacedOriginal, RestoreRequest, RestoreSource, RestoreTrashItem, ShownName,
+    SkippedItem, SpecialKind, TransferConflict, TransferReport, UndoCopyRequest, UndoMergeRequest,
+    UndoMoveItem, UndoMoveRequest, UndoRenameRequest, validate_basename,
 };
 pub(crate) use path_match::{PathMatcher, PathQuery};
 pub use preview::{

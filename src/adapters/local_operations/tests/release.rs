@@ -319,6 +319,7 @@ fn every_operation_releases_a_preview_of_what_it_changes_before_changing_it()
         "undo a merge",
         "restore from Trash",
         "compress over an archive",
+        "restore what an interrupted operation set aside",
     ];
     for row in rows {
         let root = tempfile::tempdir()?;
@@ -350,6 +351,9 @@ fn every_operation_releases_a_preview_of_what_it_changes_before_changing_it()
                 volume_trash_entry(root, "a.txt", &original.to_string_lossy(), b"a")?.0
             }
             "compress over an archive" => root.join("archive.zip"),
+            "restore what an interrupted operation set aside" => {
+                root.join(HiddenName::Originals.fresh()).join("a.txt")
+            }
             _ => root.join("a.txt"),
         };
         if !item.exists() {
@@ -453,6 +457,13 @@ fn every_operation_releases_a_preview_of_what_it_changes_before_changing_it()
                         entry: file_entry(&item),
                         destination: root.join("c.txt"),
                     }]),
+                },
+                emit,
+            ),
+            "restore what an interrupted operation set aside" => LocalOperationProvider.recover(
+                crate::services::RecoverRequest {
+                    id,
+                    container: Location::local(item.parent().expect("its folder")),
                 },
                 emit,
             ),

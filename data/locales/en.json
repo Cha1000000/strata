@@ -956,6 +956,7 @@
   "The device is not available": "The device is not available",
   "The device may still be writing. Wait for the transfer to finish or fail before starting another file operation. Do not unplug until you can safely eject it.": "The device may still be writing. Wait for the transfer to finish or fail before starting another file operation. Do not unplug until you can safely eject it.",
   "The device started, but no mountable volume appeared.": "The device started, but no mountable volume appeared.",
+  "The drive is read-only. It may need to be checked for errors after it was unplugged without being ejected.": "The drive is read-only. It may need to be checked for errors after it was unplugged without being ejected.",
   "The disk quota has been exceeded": "The disk quota has been exceeded",
   "The download stopped unexpectedly. Try again.": "The download stopped unexpectedly. Try again.",
   "The file does not match the selected filter": "The file does not match the selected filter",

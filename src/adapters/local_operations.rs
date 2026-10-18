@@ -200,10 +200,10 @@ use crate::{
     services::{
         CancelledOperation, CompressRequest, CreateDirectoryRequest, CreateFileRequest,
         DeleteRequest, ExtractRequest, KeptCause, KeptItem, LoadHandle, NameMode, OperationEvent,
-        OperationProvider, OperationRequestId, PasteItem, PasteRequest, RenameCause, RenameRequest,
-        RenamedItem, ReplacedOriginal, RestoreRequest, RestoreSource, SkippedItem, SpecialKind,
-        TransferConflict, TransferReport, UndoCopyRequest, UndoMergeRequest, UndoMoveRequest,
-        UndoRenameRequest, validate_basename,
+        OperationProvider, OperationRequestId, PasteItem, PasteRequest, RecoverRequest,
+        RenameCause, RenameRequest, RenamedItem, ReplacedOriginal, RestoreRequest, RestoreSource,
+        SkippedItem, SpecialKind, TransferConflict, TransferReport, UndoCopyRequest,
+        UndoMergeRequest, UndoMoveRequest, UndoRenameRequest, validate_basename,
     },
 };
 
@@ -4227,6 +4227,14 @@ impl OperationProvider for LocalOperationProvider {
             }
         });
         operation_handle(cancellable)
+    }
+
+    fn recover(&self, request: RecoverRequest, emit: Rc<dyn Fn(OperationEvent)>) -> LoadHandle {
+        leftovers::start_recovery(request, emit)
+    }
+
+    fn sweep_probes(&self, folder: &Location, names: &[OsString]) {
+        leftovers::start_sweep(folder, names);
     }
 
     fn compress(&self, request: CompressRequest, emit: Rc<dyn Fn(OperationEvent)>) -> LoadHandle {

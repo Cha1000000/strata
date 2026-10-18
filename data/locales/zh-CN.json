@@ -956,6 +956,7 @@
   "The device is not available": "设备不可用",
   "The device may still be writing. Wait for the transfer to finish or fail before starting another file operation. Do not unplug until you can safely eject it.": "设备可能仍在写入数据。请等待传输完成或失败后，再开始其他文件操作。在可以安全弹出之前，请勿拔出设备。",
   "The device started, but no mountable volume appeared.": "设备已启动，但没有出现可挂载的卷。",
+  "The drive is read-only. It may need to be checked for errors after it was unplugged without being ejected.": "驱动器为只读。如果未弹出就拔出，可能需要检查磁盘错误。",
   "The disk quota has been exceeded": "已超出磁盘配额",
   "The download stopped unexpectedly. Try again.": "下载意外停止。请重试。",
   "The file does not match the selected filter": "文件与所选文件类型不匹配",
