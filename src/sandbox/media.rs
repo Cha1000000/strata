@@ -139,7 +139,7 @@ fn spawn_helper(
     operation: ParseOperation,
     start_tick: Option<u32>,
     cancellation: &Cancellation,
-) -> Result<(Child, PrivateOutput, Hold), String> {
+) -> Result<(Renderer, PrivateOutput, Hold), String> {
     let input = source
         .path
         .canonicalize()
@@ -209,15 +209,14 @@ fn render(
 }
 
 fn consume(
-    child: &mut Child,
+    child: &mut Renderer,
     source: &SandboxedMedia,
     start_tick: u32,
     cancellation: &Cancellation,
     sender: &mpsc::SyncSender<Event>,
 ) -> io::Result<()> {
     let stdout = child
-        .stdout
-        .take()
+        .stdout()
         .ok_or_else(|| io::Error::other("Missing decoded-media pipe"))?;
     let mut reader = TimedReader {
         fd: &stdout,
@@ -335,13 +334,12 @@ fn render_peaks(
 }
 
 fn consume_peaks(
-    child: &mut Child,
+    child: &mut Renderer,
     cancellation: &Cancellation,
     sender: &mpsc::SyncSender<PeaksEvent>,
 ) -> io::Result<()> {
     let stdout = child
-        .stdout
-        .take()
+        .stdout()
         .ok_or_else(|| io::Error::other("Missing waveform pipe"))?;
     let deadline = Instant::now() + PEAKS_TIMEOUT;
     let mut reader = TimedReader {
@@ -447,15 +445,14 @@ fn render_storyboard(
 }
 
 fn consume_storyboard(
-    child: &mut Child,
+    child: &mut Renderer,
     cancellation: &Cancellation,
     sender: &mpsc::SyncSender<StoryboardEvent>,
 ) -> io::Result<()> {
     use crate::media::storyboard::{CellReader, Sheet};
 
     let stdout = child
-        .stdout
-        .take()
+        .stdout()
         .ok_or_else(|| io::Error::other("Missing storyboard pipe"))?;
     let deadline = Instant::now() + PEAKS_TIMEOUT;
     let mut reader = TimedReader {

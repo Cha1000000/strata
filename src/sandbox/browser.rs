@@ -8,7 +8,7 @@ use std::{
     io,
     os::unix::{fs::MetadataExt, net::UnixStream},
     path::{Path, PathBuf},
-    process::{Child, Stdio},
+    process::Stdio,
     sync::{
         Arc, Condvar, Mutex, OnceLock,
         atomic::{AtomicUsize, Ordering},
@@ -734,7 +734,7 @@ impl Worker {
 }
 
 struct ProcessWorker {
-    child: Child,
+    child: super::Renderer,
     socket: UnixStream,
     _snapshot: super::PrivateOutput,
 }

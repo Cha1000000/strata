@@ -166,6 +166,7 @@ fn sandbox_command_starts_absolute_bubblewrap() {
         .join(" ");
     assert!(joined.contains("--unshare-all"));
     assert!(joined.contains("--clearenv"));
+    assert!(joined.starts_with("--info-fd 2 "), "{joined}");
     let arguments: Vec<_> = command.get_args().collect();
     let path = option_env!("STRATA_SANDBOX_PATH").unwrap_or("/usr/bin");
     let root = option_env!("STRATA_SANDBOX_ROOT").unwrap_or("/usr");
@@ -1120,4 +1121,44 @@ fn archive_operation_debug_redacts_the_password() {
         rendered.contains("password: None"),
         "an absent password must stay distinguishable, got {rendered:?}"
     );
+}
+
+fn sandbox_whose_init_outlives_it(ends: &str) -> Command {
+    let script = format!(
+        r#"setsid sleep 0.4 </dev/null >/dev/null 2>&1 &
+init=$!
+until [ "$(cut -d' ' -f6 /proc/$init/stat 2>/dev/null)" = "$init" ]; do :; done
+printf '{{\n    "child-pid": %s,\n    "net-namespace": 1\n}}\n' "$init" >&2
+{ends}"#
+    );
+    let mut command = Command::new("sh");
+    command.args(["-c", &script]);
+    command
+}
+
+#[test]
+fn a_sandbox_is_waited_for_until_the_init_of_its_namespace_has_exited() {
+    use rustix::event::{PollFd, PollFlags, Timespec, poll};
+    for (row, ends, cancelled) in [
+        ("an exit of its own", "exec 2>&-; exit 0", false),
+        ("a kill", "exec 2>&-; wait", true),
+    ] {
+        let mut renderer =
+            spawn_renderer(&mut sandbox_whose_init_outlives_it(ends)).expect("start the sandbox");
+        let init = renderer.init.take().expect("the reported namespace init");
+        let watched = rustix::io::dup(&init).expect("watch the namespace init");
+        renderer.init = Some(init);
+        let cancellation = Cancellation::default();
+        if cancelled {
+            cancellation.cancel();
+        }
+        let started = Instant::now();
+
+        let _ = wait_for_renderer(&mut renderer, &cancellation, Duration::from_secs(5));
+
+        let mut fds = [PollFd::new(&watched, PollFlags::IN)];
+        let gone = poll(&mut fds, Some(&Timespec::default())).expect("poll the namespace init");
+        assert_eq!(gone, 1, "{row}: the namespace init still runs");
+        assert!(started.elapsed() < Duration::from_secs(2), "{row}");
+    }
 }
