@@ -4,6 +4,7 @@ use super::*;
 
 mod acceptance;
 mod column_widths;
+mod confined;
 mod filtered_preview;
 mod image_conversion;
 mod keyboard;

@@ -148,7 +148,7 @@ The browser and open/save chooser use the same collection behavior, not a univer
 | Owner | Responsibility and intentional differences |
 | --- | --- |
 | `ui/collection_interaction.rs` | Display-position pointer transitions (Ctrl toggle, Shift range, plain selection/drag-group preservation) and press/release/cancel ownership. Modified sequences are claimed only on release so marquee can participate. |
-| `ui/search_session.rs` | Root, hidden-file and recursive-scope inputs; worker/receiver, query intent, generation, bounded event draining, cancellation and status/coverage delivery. It knows neither widgets nor acceptance/navigation policy. |
+| `ui/search_session.rs` | Root, hidden-file and recursive-scope inputs; worker/receiver, query intent, generation, bounded event draining, cancellation, status/coverage delivery, pruning the hits a worker proves gone, and starting a confined source's search only once a worker places its root inside the boundary. It knows neither widgets nor acceptance/navigation policy. |
 | `ui/inline_search.rs` | Single-pane search composition and transactional consumer selection publication. `inline_search/collection.rs` owns stable result objects and displayed-order lookup; `presentation.rs` builds and binds typed row/card parts. |
 | `ui/browser/columns/search.rs` | Native Columns result reconciliation. Its result vector is authoritative; the string model is only a label projection, updated in lockstep under selection suppression. Columns keeps its multi-depth navigation and native collection. |
 | `ui/collection_edit.rs` | A rename lease on an entry identity and typed editor/display handles: validation, submission signals, cancellation, focus, reveal tick and cleanup. It has no `ViewState` or `browser_modes` dependency. |
@@ -167,6 +167,9 @@ selection slot; Columns intentionally leaves the selection empty when its select
 vanishes. Columns uses per-column hidden-file preferences and does not display a separate
 coverage/status row; single-pane search uses browser preferences and shows partial coverage or
 empty/indexing status. Nonlocal locations keep their native, nonrecursive filter fallback.
+The search worker drops hits whose files are proven gone before it publishes them, and pruning
+after a file operation asks the probe module, so neither surface checks a hit on the interface
+thread; any answer but a proven absence keeps the hit.
 The shared session preserves these adapter policies rather than normalizing them.
 
 During single-pane reconciliation, consumer selection callbacks are suppressed until model,

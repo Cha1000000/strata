@@ -248,37 +248,52 @@ async fn remote_presence(location: &Location, cancellable: &gio::Cancellable) ->
     }
 }
 
+fn listable(folder: &Path, progress: &Progress) -> Result<(), LocationValidationError> {
+    let invalid = |error: Errno| LocationValidationError::from(io::Error::from(error));
+    let stamp = folder_stamp(folder, false);
+    progress.answered(&stamp);
+    let stamp = stamp.map_err(invalid)?;
+    if let Some(id) = stamp.mount_id {
+        progress.learn(id);
+    }
+    if stamp.kind != FileType::Directory {
+        return Err(LocationValidationError::NotDirectory);
+    }
+    let opened = fs().open_path(
+        folder.as_os_str(),
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+        Mode::empty(),
+    );
+    progress.answered(&opened);
+    opened.map(drop).map_err(invalid)
+}
+
+fn unavailable(refused: Unanswered) -> LocationValidationError {
+    LocationValidationError::Unavailable(io_error_detail(&unanswered(refused)))
+}
+
 pub(crate) async fn folder(path: &Path) -> Result<(), LocationValidationError> {
     let folder = path.to_owned();
     mount_lanes::run_joined(path, "folder check".to_owned(), move |progress, _| {
         progress.begin_reading();
-        let invalid = |error: Errno| LocationValidationError::from(io::Error::from(error));
-        let stamp = folder_stamp(&folder, false);
-        progress.answered(&stamp);
-        let stamp = stamp.map_err(invalid)?;
-        if let Some(id) = stamp.mount_id {
-            progress.learn(id);
-        }
-        if stamp.kind != FileType::Directory {
-            return Err(LocationValidationError::NotDirectory);
-        }
-        let opened = fs().open_path(
-            folder.as_os_str(),
-            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
-            Mode::empty(),
-        );
-        progress.answered(&opened);
-        opened.map(drop).map_err(invalid)
+        listable(&folder, progress)
     })
     .await
-    .map_or_else(
-        |refused| {
-            Err(LocationValidationError::Unavailable(io_error_detail(
-                &unanswered(refused),
-            )))
-        },
-        Arc::unwrap_or_clone,
-    )
+    .map_or_else(|refused| Err(unavailable(refused)), Arc::unwrap_or_clone)
+}
+
+pub(crate) async fn real_folder(path: &Path) -> Result<PathBuf, LocationValidationError> {
+    let folder = path.to_owned();
+    mount_lanes::run_joined(path, "real folder check".to_owned(), move |progress, _| {
+        progress.begin_reading();
+        let real = folder.canonicalize();
+        progress.answered(&real);
+        let real = real?;
+        listable(&real, progress)?;
+        Ok(real)
+    })
+    .await
+    .map_or_else(|refused| Err(unavailable(refused)), Arc::unwrap_or_clone)
 }
 
 pub(crate) async fn writable_folder(path: &Path) -> Result<Option<PathBuf>, Unanswered> {

@@ -592,7 +592,7 @@ fn choose_folder_rejects_invalid_destinations_and_copies_into_a_confined_directo
             let outside = fixture.path().join("outside");
             std::fs::create_dir_all(&source_dir).expect("source directory");
             std::fs::create_dir_all(device.join("subdir")).expect("device subdirectory");
-            std::fs::create_dir_all(&outside).expect("outside directory");
+            std::fs::create_dir_all(outside.join("outside-folder")).expect("outside directory");
             let first = source_dir.join("first.txt");
             let second = source_dir.join("second.txt");
             for path in [&first, &second] {
@@ -649,37 +649,52 @@ fn choose_folder_rejects_invalid_destinations_and_copies_into_a_confined_directo
                 },
                 "confined directory listing",
             );
-            let mut position = 0;
-            while let Some(entry) = chooser.browser().entry_at(0, position) {
-                assert!(entry.is_directory());
-                assert!(
-                    entry
-                        .location
-                        .native_path()
-                        .expect("local folder")
-                        .canonicalize()
-                        .expect("existing folder")
-                        .starts_with(&device),
-                    "escaping symlinks are not offered"
-                );
-                position += 1;
-            }
-            let mut invalid = vec![
-                device.join("missing"),
-                device.join("regular-file.txt"),
-                outside.clone(),
-                device.join("../outside"),
-            ];
-            #[cfg(unix)]
-            invalid.push(device.join("external-link"));
-            for path in invalid {
+            let listed_inside_device = || {
+                let mut position = 0;
+                while let Some(entry) = chooser.browser().entry_at(0, position) {
+                    assert!(entry.is_directory());
+                    assert!(
+                        entry
+                            .location
+                            .native_path()
+                            .is_some_and(|path| path.starts_with(&device))
+                    );
+                    assert_ne!(
+                        entry.display_name, "outside-folder",
+                        "nothing outside the device is listed"
+                    );
+                    position += 1;
+                }
+            };
+            listed_inside_device();
+            for path in [outside.clone(), device.join("../outside")] {
                 chooser.navigate_location(Location::local(&path));
                 drain_context();
                 assert_eq!(
                     chooser.browser().active_location(),
                     Some(Location::local(&device)),
-                    "invalid navigation stays confined"
+                    "a path outside the device stays confined"
                 );
+            }
+            let mut invalid = vec![device.join("missing"), device.join("regular-file.txt")];
+            #[cfg(unix)]
+            invalid.push(device.join("external-link"));
+            for path in invalid {
+                chooser.navigate_location(Location::local(&path));
+                wait_until(
+                    || {
+                        chooser
+                            .browser()
+                            .column_snapshot(0)
+                            .is_some_and(|snapshot| {
+                                snapshot.location == Location::local(&path)
+                                    && !snapshot.loading
+                                    && snapshot.error.is_some()
+                            })
+                    },
+                    "an invalid folder fails to load",
+                );
+                listed_inside_device();
                 assert!(events.borrow().iter().all(|event| !matches!(
                     event,
                     crate::app::BrowserEvent::TransferStarted { .. }
@@ -688,6 +703,55 @@ fn choose_folder_rejects_invalid_destinations_and_copies_into_a_confined_directo
                     preferences.send_to_recent_destinations(device_id),
                     original_recents
                 );
+            }
+            #[cfg(unix)]
+            {
+                std::fs::create_dir(outside.join("arrived-outside")).expect("folder outside");
+                let settle = |duration| {
+                    let deadline = std::time::Instant::now() + duration;
+                    while std::time::Instant::now() < deadline {
+                        glib::MainContext::default().iteration(false);
+                        std::thread::sleep(std::time::Duration::from_millis(2));
+                    }
+                };
+                settle(std::time::Duration::from_secs(1));
+                assert!(
+                    chooser.browser().entry_at(0, 0).is_none(),
+                    "a folder leading off the device lists nothing created outside"
+                );
+                assert!(
+                    chooser
+                        .browser()
+                        .column_snapshot(0)
+                        .is_some_and(|snapshot| snapshot.error.is_some()),
+                    "its error stays"
+                );
+                use crate::ui::browser_modes::BrowserMode;
+                let original = chooser.view_mode();
+                assert!(chooser.show_filter_with_query("outside"));
+                for mode in [BrowserMode::Columns, BrowserMode::List] {
+                    chooser.set_view_mode(mode);
+                    wait_until(
+                        || {
+                            chooser
+                                .filter_status()
+                                .flatten()
+                                .is_some_and(|status| status.displayed)
+                        },
+                        "the search there settles",
+                    );
+                    settle(std::time::Duration::from_millis(500));
+                    assert_eq!(
+                        chooser
+                            .filter_status()
+                            .flatten()
+                            .map(|status| status.files + status.folders),
+                        Some(0),
+                        "{mode:?}: a search there finds nothing outside the device"
+                    );
+                }
+                chooser.dismiss_focused_filter();
+                chooser.set_view_mode(original);
             }
             chooser.create_new_folder();
             assert!(

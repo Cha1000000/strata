@@ -266,6 +266,7 @@ pub enum SearchEvent {
         indexing: bool,
         coverage: SearchCoverage,
         has_more: bool,
+        candidates: usize,
     },
 }
 
@@ -1740,14 +1741,25 @@ fn publish(
         items: progress
             .matches
             .iter()
-            .map(|(_, item)| item.clone())
+            .map(|(_, item)| item)
+            .filter(|item| search_path_present(&item.path))
+            .cloned()
             .collect(),
         indexing,
         coverage,
         has_more: progress.limit > 0
             && progress.matches.len() == progress.limit
             && progress.limit < MAX_INDEX_ENTRIES,
+        candidates: progress.matches.len(),
     });
+}
+
+fn search_path_present(path: &Path) -> bool {
+    // Preserve dangling symlinks and uncertain paths; only confirmed absence removes a hit.
+    path.symlink_metadata().map_or_else(
+        |error| error.kind() != std::io::ErrorKind::NotFound,
+        |_| true,
+    )
 }
 
 fn filter_score_normalized(item: &SearchItem, query: &str) -> Option<i64> {

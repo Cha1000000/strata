@@ -633,27 +633,37 @@ pub(super) fn refresh_source_filter(column: &ColumnView, browser: &crate::app::B
     changed
 }
 
-pub(super) fn prune_missing_search_results(column: &ColumnView) -> bool {
+pub(super) fn prune_missing_search_results(
+    column: &ColumnView,
+    selection_changed: impl Fn() + 'static,
+) {
     if !column.search_session.is_active() {
-        return false;
+        return;
     }
-    let items: Vec<_> = column
+    let paths = column
         .search_results
         .borrow()
         .iter()
-        .filter(|item| crate::ui::inline_search::search_path_present(&item.path))
-        .cloned()
+        .map(|item| item.path.clone())
         .collect();
-    if items.len() == column.search_results.borrow().len() {
-        return false;
-    }
-    search::update_results(
-        &column.search_model,
-        &column.search_results,
-        &column.selection,
-        &column.syncing_selection,
-        items,
-    )
+    let model = column.search_model.clone();
+    let results = column.search_results.clone();
+    let selection = column.selection.clone();
+    let syncing = column.syncing_selection.clone();
+    column.search_session.prune_missing(paths, move |gone| {
+        let items: Vec<_> = results
+            .borrow()
+            .iter()
+            .filter(|item| !gone.contains(&item.path))
+            .cloned()
+            .collect();
+        if items.len() == results.borrow().len() {
+            return;
+        }
+        if search::update_results(&model, &results, &selection, &syncing, items) {
+            selection_changed();
+        }
+    });
 }
 
 pub(super) fn set_filter_placeholder(column: &ColumnView, count: usize) {
@@ -1599,6 +1609,7 @@ impl ViewState {
                         show_hidden,
                         scope,
                         refused: Default::default(),
+                        within: state.browser.confined_to(),
                     },
                     &query,
                     restart,
@@ -1622,6 +1633,7 @@ impl ViewState {
                             &batch.query,
                             batch.items,
                             batch.has_more,
+                            batch.candidates,
                         );
                         hits.replace(ColumnHits {
                             ranges: if scope.fuzzy() {

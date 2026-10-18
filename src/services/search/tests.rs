@@ -361,6 +361,56 @@ fn index_reports_completion_before_a_query_is_entered() {
 }
 
 #[test]
+fn only_hits_proven_gone_are_dropped_before_they_reach_the_interface() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fixture = tempfile::tempdir().expect("search fixture");
+    let root = fixture.path();
+    fs::create_dir(root.join("locked")).expect("locked folder");
+    for name in [
+        "needle-kept.txt",
+        "needle-gone.txt",
+        "locked/needle-locked.txt",
+    ] {
+        fs::write(root.join(name), b"content").expect("search fixture file");
+    }
+    std::os::unix::fs::symlink(root.join("nowhere"), root.join("needle-dangling"))
+        .expect("dangling link");
+    let (search, events) = index_tree(root.to_path_buf(), false);
+    let published = |search: &super::SearchHandle, asked: &str| {
+        search.query(asked);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            assert!(std::time::Instant::now() < deadline, "no completed results");
+            if let Ok(SearchEvent::Results {
+                query,
+                items,
+                indexing: false,
+                ..
+            }) = events.recv_timeout(Duration::from_millis(100))
+                && query == asked
+            {
+                let mut names: Vec<String> = items.into_iter().map(|item| item.name).collect();
+                names.sort();
+                return names;
+            }
+        }
+    };
+    assert_eq!(published(&search, "needle").len(), 4);
+
+    fs::remove_file(root.join("needle-gone.txt")).expect("remove a hit");
+    fs::set_permissions(root.join("locked"), fs::Permissions::from_mode(0o000))
+        .expect("lock the folder");
+    let names = published(&search, "needl");
+    let _ = fs::set_permissions(root.join("locked"), fs::Permissions::from_mode(0o755));
+
+    assert_eq!(
+        names,
+        ["needle-dangling", "needle-kept.txt", "needle-locked.txt"]
+    );
+}
+
+#[test]
 fn repeated_walker_paths_are_published_once_without_blocking_later_progress() {
     let repeated = PathBuf::from("/fixture/repeated.txt");
     let later = PathBuf::from("/fixture/later.txt");

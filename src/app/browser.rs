@@ -1432,6 +1432,10 @@ impl Browser {
         self.source.allows_entry(entry)
     }
 
+    pub(crate) fn confined_to(&self) -> Option<PathBuf> {
+        self.source.confined_to().map(Path::to_path_buf)
+    }
+
     /// Synchronizes widget focus without changing selection or reopening a directory.
     pub fn set_active_column(&self, depth: usize) {
         self.state.borrow_mut().focus_column(depth);

@@ -1489,14 +1489,15 @@ impl ViewState {
         self.mode_views.borrow().show_empty_if_empty(depth);
     }
 
-    pub(super) fn prune_stale_search_results(&self) {
+    pub(super) fn prune_stale_search_results(self: &Rc<Self>) {
         let columns = self.columns.borrow().clone();
-        let mut changed = false;
         for column in &columns {
-            changed |= prune_missing_search_results(column);
-        }
-        if changed {
-            self.notify_search_selection_changed();
+            let weak = Rc::downgrade(self);
+            prune_missing_search_results(column, move || {
+                if let Some(state) = weak.upgrade() {
+                    state.notify_search_selection_changed();
+                }
+            });
         }
         self.mode_views.borrow().prune_stale_search_results();
     }

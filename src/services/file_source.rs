@@ -5,6 +5,7 @@ mod tests;
 
 use std::{
     fmt,
+    path::Path,
     rc::Rc,
     time::{Duration, SystemTime},
 };
@@ -524,6 +525,10 @@ pub trait FileSource {
     /// This runs on the caller's thread, including for indexed search results.
     fn allows_entry(&self, _entry: &FileEntry) -> bool {
         true
+    }
+
+    fn confined_to(&self) -> Option<&Path> {
+        None
     }
 
     fn validate_location(&self, location: &Location) -> Result<(), LocationValidationError>;

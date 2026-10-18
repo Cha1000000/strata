@@ -10,7 +10,7 @@ use std::{
     cell::{Cell, RefCell},
     collections::HashMap,
     ffi::{OsStr, OsString},
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     rc::Rc,
     sync::{
         Arc,
@@ -27,7 +27,7 @@ use ashpd::{
 use gtk::{gdk::ModifierType, gio, glib, prelude::*};
 
 use crate::{
-    adapters::{LocalFileSource, LocalOperationProvider, LocalPreviewProvider},
+    adapters::{LocalFileSource, LocalOperationProvider, LocalPreviewProvider, probes},
     app::BrowserEvent,
     model::{EntryKind, FileEntry, Location, MetadataValue},
     portal::{
@@ -133,14 +133,17 @@ impl FileSource for ChooserFileSource {
 
     fn validate_location(&self, location: &Location) -> Result<(), LocationValidationError> {
         if !self.allows_navigation(location) {
-            return Err(LocationValidationError::Refused(
-                "Choose an existing folder inside this removable device.",
-            ));
+            return Err(LocationValidationError::Refused(OUTSIDE_ROOT));
         }
         if location.native_path().is_none() && !location.is_recent_root() {
             return Err(LocationValidationError::Refused(
                 "The system file chooser supports local files and folders only.",
             ));
+        }
+        if let (Some(root), Some(path)) = (&self.root_limit, location.native_path())
+            && !path.canonicalize().is_ok_and(|real| real.starts_with(root))
+        {
+            return Err(LocationValidationError::Refused(OUTSIDE_ROOT));
         }
         self.source.validate_location(location)
     }
@@ -150,6 +153,14 @@ impl FileSource for ChooserFileSource {
         location: Location,
         emit: Rc<dyn Fn(Result<(), LocationValidationError>)>,
     ) -> LoadHandle {
+        if let (Some(root), Some(path)) = (self.root_limit.clone(), location.native_path())
+            && self.allows_navigation(&location)
+        {
+            return after_containment(root, path.to_owned(), move |answer| {
+                emit(answer);
+                None
+            });
+        }
         if self.root_limit.is_some()
             || (location.native_path().is_none() && !location.is_recent_root())
         {
@@ -176,32 +187,45 @@ impl FileSource for ChooserFileSource {
         let filter = self.filter.clone();
         let directory_only = self.directory_only.clone();
         let root_limit = self.root_limit.clone();
-        self.source.enumerate(
-            request,
-            Rc::new(move |event| {
-                let event = match event {
+        let emit: Rc<dyn Fn(DirectoryEvent)> = Rc::new(move |event| {
+            let event = match event {
+                DirectoryEvent::Batch {
+                    request_id,
+                    mut entries,
+                } => {
+                    entries.retain(|entry| {
+                        chooser_entry_allowed(
+                            filter.borrow().as_ref(),
+                            directory_only.get(),
+                            root_limit.as_deref(),
+                            entry,
+                        )
+                    });
                     DirectoryEvent::Batch {
                         request_id,
-                        mut entries,
-                    } => {
-                        entries.retain(|entry| {
-                            chooser_entry_allowed(
-                                filter.borrow().as_ref(),
-                                directory_only.get(),
-                                root_limit.as_deref(),
-                                entry,
-                            )
-                        });
-                        DirectoryEvent::Batch {
-                            request_id,
-                            entries,
-                        }
+                        entries,
                     }
-                    event => event,
-                };
-                emit(event);
-            }),
-        )
+                }
+                event => event,
+            };
+            emit(event);
+        });
+        let (Some(root), Some(path)) = (self.root_limit.clone(), request.location.native_path())
+        else {
+            return self.source.enumerate(request, emit);
+        };
+        let path = path.to_owned();
+        let source = self.source.clone();
+        after_containment(root, path, move |answer| match answer {
+            Ok(()) => Some(source.enumerate(request, emit)),
+            Err(error) => {
+                emit(DirectoryEvent::Failed {
+                    request_id: request.id,
+                    message: error.message(),
+                });
+                None
+            }
+        })
     }
 
     fn watch(
@@ -213,18 +237,28 @@ impl FileSource for ChooserFileSource {
         let filter = self.filter.clone();
         let directory_only = self.directory_only.clone();
         let root_limit = self.root_limit.clone();
-        self.source.watch(
-            location,
-            include_hidden,
-            Rc::new(move |change| {
-                notify(filter_directory_change(
-                    filter.borrow().as_ref(),
-                    directory_only.get(),
-                    root_limit.as_deref(),
-                    change,
-                ));
-            }),
-        )
+        let notify: Rc<dyn Fn(DirectoryChange)> = Rc::new(move |change| {
+            notify(filter_directory_change(
+                filter.borrow().as_ref(),
+                directory_only.get(),
+                root_limit.as_deref(),
+                change,
+            ));
+        });
+        let (Some(root), Some(path)) = (self.root_limit.clone(), location.native_path()) else {
+            return self.source.watch(location, include_hidden, notify);
+        };
+        let path = path.to_owned();
+        let source = self.source.clone();
+        Some(after_containment(root, path, move |answer| {
+            answer
+                .ok()
+                .and_then(|()| source.watch(location, include_hidden, notify))
+        }))
+    }
+
+    fn confined_to(&self) -> Option<&Path> {
+        self.root_limit.as_deref()
     }
 
     fn query_location_identity(
@@ -258,11 +292,34 @@ fn file_filter_matches(filter: &gtk::FileFilter, entry: &FileEntry) -> bool {
     filter.match_(&info)
 }
 
+const OUTSIDE_ROOT: &str = "Choose an existing folder inside this removable device.";
+
+fn after_containment(
+    root: PathBuf,
+    path: PathBuf,
+    proven: impl FnOnce(Result<(), LocationValidationError>) -> Option<LoadHandle> + 'static,
+) -> LoadHandle {
+    let started: Rc<RefCell<Option<LoadHandle>>> = Rc::default();
+    let slot = started.clone();
+    let task = glib::MainContext::default().spawn_local(async move {
+        let answer = match probes::real_folder(&path).await {
+            Ok(real) if real.starts_with(&root) => Ok(()),
+            Ok(_) => Err(LocationValidationError::Refused(OUTSIDE_ROOT)),
+            Err(error) => Err(error),
+        };
+        let handle = proven(answer);
+        slot.replace(handle);
+    });
+    LoadHandle::new(move || {
+        task.abort();
+        started.take();
+    })
+}
+
 fn chooser_location_allowed(root: Option<&Path>, location: &Location) -> bool {
     root.is_none_or(|root| {
         location.native_path().is_some_and(|path| {
-            path.canonicalize()
-                .is_ok_and(|path| path.is_dir() && path.starts_with(root))
+            path.starts_with(root) && !path.components().any(|part| part == Component::ParentDir)
         })
     })
 }
