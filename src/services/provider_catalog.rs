@@ -441,7 +441,8 @@ pub(crate) fn status(entry: &Entry, root: &Path) -> Status {
 pub(crate) struct Installation {
     pub id: String,
     pub name: String,
-    pub path: PathBuf,
+    /// The declared icon, when the registration loads as a trusted provider.
+    pub icon: Option<Vec<u8>>,
 }
 
 /// Provider directories that no catalog entry owns.
@@ -467,7 +468,11 @@ pub(crate) fn manual_installations(root: &Path, catalog: &[Entry]) -> Vec<Instal
                 .and_then(|manifest| manifest.name)
                 .filter(|name| plain_text(name, 64))
                 .unwrap_or_else(|| id.clone());
-            Some(Installation { id, name, path })
+            let icon = file_providers::load(&path).and_then(|registration| {
+                let icon = registration.manifest.icon.as_ref()?;
+                registration.icons.get(icon).cloned()
+            });
+            Some(Installation { id, name, icon })
         })
         .collect();
     installations.sort_by(|a, b| a.id.cmp(&b.id));

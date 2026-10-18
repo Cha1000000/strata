@@ -68,10 +68,17 @@ pub(super) fn integrations_page_with(source: Source) -> gtk::Widget {
     description.add_css_class("settings-option-description");
     copy.append(&title);
     copy.append(&description);
+    if let Some(root) = &source.root {
+        let location = note(&rust_i18n::t!(
+            "Installed integrations are stored in %{path}.",
+            path = root.display()
+        ));
+        copy.append(&location);
+    }
     row.append(&copy);
     settings_group(&content, "").append(&row);
 
-    // Search shows or hides this body with the page title; the restart notice
+    // Search shows or hides this box with the page title; the restart notice
     // inside it keeps its own visibility.
     let body = gtk::Box::new(gtk::Orientation::Vertical, 0);
     search::tag(&body, TITLE);
@@ -95,8 +102,10 @@ pub(super) fn integrations_page_with(source: Source) -> gtk::Widget {
     notice.append(&notice_text);
     notice.append(&restart);
     body.append(&notice);
+    // A direct child of the page so its group headings get the page spacing.
     let list = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    body.append(&list);
+    search::tag(&list, TITLE);
+    content.append(&list);
 
     let page = Rc::new(Page {
         source,
@@ -243,7 +252,7 @@ impl Page {
         let copy = gtk::Box::new(gtk::Orientation::Vertical, 3);
         copy.set_hexpand(true);
         let heading = gtk::Box::new(gtk::Orientation::Horizontal, 10);
-        heading.append(&logo(entry));
+        heading.append(&logo(entry.icon_bytes(), entry.category));
         let name = crate::i18n::tr(&entry.name);
         let title = gtk::Label::new(Some(&name));
         title.set_xalign(0.0);
@@ -376,21 +385,22 @@ impl Page {
     }
 
     fn manual_row(self: &Rc<Self>, installation: Installation) -> gtk::Box {
-        let widget = gtk::Box::new(gtk::Orientation::Vertical, 3);
+        let widget = gtk::Box::new(gtk::Orientation::Horizontal, 12);
         widget.add_css_class("settings-option");
         widget.add_css_class("integration-row");
         widget.set_widget_name(&format!("integration-{}", installation.id));
         let copy = gtk::Box::new(gtk::Orientation::Vertical, 3);
         copy.set_hexpand(true);
+        copy.set_valign(gtk::Align::Center);
+        let heading = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+        heading.append(&logo(installation.icon.as_deref(), Category::Other));
         let title = gtk::Label::new(Some(&installation.name));
         title.set_xalign(0.0);
         title.set_wrap(true);
+        title.set_hexpand(true);
         title.add_css_class("settings-option-title");
-        copy.append(&title);
-        let path = note(&installation.path.display().to_string());
-        path.set_selectable(true);
-        path.add_css_class("integration-path");
-        copy.append(&path);
+        heading.append(&title);
+        copy.append(&heading);
         let message = note("");
         message.add_css_class("integration-message");
         message.set_visible(false);
@@ -402,7 +412,9 @@ impl Page {
         let actions = gtk::Box::new(gtk::Orientation::Horizontal, 8);
         actions.add_css_class("settings-integration-actions");
         actions.set_halign(gtk::Align::End);
-        copy.append(&actions);
+        actions.set_valign(gtk::Align::Center);
+        widget.append(&copy);
+        widget.append(&actions);
         let context = Rc::new(RowContext {
             page: Rc::downgrade(self),
             id: installation.id.clone(),
@@ -430,7 +442,6 @@ impl Page {
                 }),
             );
         });
-        widget.append(&copy);
         widget
     }
 
@@ -625,13 +636,11 @@ fn named_button(label: &str, accessible: &str) -> gtk::Button {
     button
 }
 
-fn logo(entry: &Entry) -> gtk::Widget {
-    let texture = entry
-        .icon_bytes()
-        .and_then(|bytes| gdk::Texture::from_bytes(&glib::Bytes::from(bytes)).ok());
+fn logo(icon: Option<&[u8]>, category: Category) -> gtk::Widget {
+    let texture = icon.and_then(|bytes| gdk::Texture::from_bytes(&glib::Bytes::from(bytes)).ok());
     let image = match texture {
         Some(texture) => gtk::Image::from_paintable(Some(&texture)),
-        None => assets::primary_icon(category_icon(entry.category), 24),
+        None => assets::primary_icon(category_icon(category), 24),
     };
     image.set_pixel_size(20);
     image.set_valign(gtk::Align::Center);

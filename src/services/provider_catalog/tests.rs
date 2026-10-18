@@ -241,7 +241,7 @@ fn install_registers_a_resolved_command_and_tracks_updates_and_edits() {
         vec![Installation {
             id: "example".into(),
             name: "Example Cloud".into(),
-            path: directory.clone(),
+            icon: next.icon_bytes().map(<[u8]>::to_vec),
         }]
     );
 

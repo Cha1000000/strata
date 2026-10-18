@@ -48,7 +48,7 @@ fn trusted(path: &Path, directory: bool) -> bool {
 pub(crate) fn slug(s: &str) -> bool {
     !s.is_empty() && s.len() <= 64 && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
 }
-fn load(dir: &Path) -> Option<Registration> {
+pub(crate) fn load(dir: &Path) -> Option<Registration> {
     if !trusted(dir, true) || !trusted(&dir.join("provider.json"), false) {
         return None;
     }

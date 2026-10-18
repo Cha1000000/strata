@@ -984,5 +984,6 @@
   "“%{new_name}” could not be renamed back to “%{name}”: %{error}": "“%{new_name}”의 이름을 “%{name}”(으)로 되돌릴 수 없습니다: %{error}",
   "“%{path}” does not contain an action.toml file": "“%{path}”에 action.toml 파일이 없습니다",
   "“%{path}” is not an absolute path, so it cannot be passed to an action": "“%{path}”은(는) 절대 경로가 아니므로 작업에 전달할 수 없습니다",
-  "“%{program}” was not found on your PATH": "PATH에서 “%{program}”을(를) 찾을 수 없습니다"
+  "“%{program}” was not found on your PATH": "PATH에서 “%{program}”을(를) 찾을 수 없습니다",
+  "Installed integrations are stored in %{path}.": "설치된 통합은 %{path}에 저장됩니다."
 }

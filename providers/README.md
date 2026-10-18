@@ -54,7 +54,7 @@ packages = { pacman = "python-gobject", apt = "python3-gi", dnf = "python3-gobje
 ```
 
 `name` and `description` are Strata interface text: add them to every catalog
-under `data/locales/` in all eleven languages (see
+under `data/locales/` in all twelve languages (see
 [Internationalization](../docs/internationalization.md)). Messages the provider
 itself returns stay with the provider; follow the system locale as the protocol
 documentation describes.

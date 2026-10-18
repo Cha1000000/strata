@@ -6234,12 +6234,6 @@ two-column presentation. */
   margin-top: 4px;
 }
 
-.integration-path {
-  color: @strata_dim_text;
-  font-family: monospace;
-  font-size: 0.85em;
-}
-
 .integration-restart {
   margin-top: 12px;
 }

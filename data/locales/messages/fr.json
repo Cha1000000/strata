@@ -984,5 +984,6 @@
   "“%{new_name}” could not be renamed back to “%{name}”: %{error}": "« %{new_name} » n’a pas pu reprendre le nom « %{name} » : %{error}",
   "“%{path}” does not contain an action.toml file": "« %{path} » ne contient pas de fichier action.toml",
   "“%{path}” is not an absolute path, so it cannot be passed to an action": "« %{path} » n’est pas un chemin absolu et ne peut donc pas être transmis à une action",
-  "“%{program}” was not found on your PATH": "« %{program} » est introuvable dans votre PATH"
+  "“%{program}” was not found on your PATH": "« %{program} » est introuvable dans votre PATH",
+  "Installed integrations are stored in %{path}.": "Les intégrations installées sont stockées dans %{path}."
 }

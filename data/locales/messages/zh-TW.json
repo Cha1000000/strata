@@ -977,5 +977,13 @@
   "“%{name}” was replaced, but its original could not be removed from “%{kept}”: %{error}": "“%{name}” 已取代，但無法從 “%{kept}” 移除其原始項目：%{error}",
   "“%{name}” was saved as “%{new_name}”": "“%{name}” 已儲存為 “%{new_name}”",
   "“%{name}” will be saved as “%{new_name}” in this location.": "“%{name}” 將在此位置儲存為 “%{new_name}”。",
-  "“%{new_name}” could not be renamed back to “%{name}”: %{error}": "無法將 “%{new_name}” 重新命名回 “%{name}”：%{error}"
+  "“%{new_name}” could not be renamed back to “%{name}”: %{error}": "無法將 “%{new_name}” 重新命名回 “%{name}”：%{error}",
+  "Confirm removing %{name}": "確認移除 %{name}",
+  "Confirm replacing %{name}": "確認取代 %{name}",
+  "Install %{name}": "安裝 %{name}",
+  "Maintained by %{maintainer}": "由 %{maintainer} 維護",
+  "Remove %{name}": "移除 %{name}",
+  "The change failed: %{error}": "變更失敗：%{error}",
+  "Update %{name}": "更新 %{name}",
+  "Installed integrations are stored in %{path}.": "已安裝的整合儲存在 %{path}。"
 }
