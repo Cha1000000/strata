@@ -904,7 +904,7 @@ pub(super) async fn replace_owing(
         progress.report(report);
     }
     if let Some(original) = replaced.displaced {
-        owed.owe(Deletion::Displaced(original, plan.target_display()));
+        owed.owe(Deletion::Displaced(original, target_path));
     }
     if let Some(sources) = sources {
         owed.owe(Deletion::Sources(source, sources));

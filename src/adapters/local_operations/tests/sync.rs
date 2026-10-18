@@ -1685,7 +1685,8 @@ fn a_failed_barrier_stops_a_bulk_move() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn an_original_that_cannot_be_deleted_fails_its_replacing_move() -> Result<(), Box<dyn Error>> {
+fn an_original_that_cannot_be_deleted_stays_aside_and_its_replacing_move_completes()
+-> Result<(), Box<dyn Error>> {
     let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let sources = root.path().join("sources");
@@ -1732,15 +1733,38 @@ fn an_original_that_cannot_be_deleted_fails_its_replacing_move() -> Result<(), B
     );
     pump_until_transfer(&events);
 
+    let events = events.take();
     assert!(
         matches!(
-            terminal_transfer(&events.borrow()),
-            Some(OperationEvent::TransferFailed { message, .. }) if message.contains(".strata-")
+            terminal_transfer(&events),
+            Some(OperationEvent::Pasted { .. })
         ),
-        "{:?}",
-        events.borrow()
+        "{events:?}"
     );
     assert_eq!(fs::read(destination.join("notes.txt"))?, b"incoming");
-    assert_eq!(fs::read(&source)?, b"incoming");
+    assert!(!source.exists());
+    let [originals, _] = names(&destination)?
+        .try_into()
+        .map_err(|_| "the originals folder and the replacement")?;
+    let kept = destination.join(originals).join("notes.txt");
+    assert_eq!(fs::read(&kept)?, b"foreign");
+    let reported: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            OperationEvent::ItemsReported { report, .. } => Some(report.kept.clone()),
+            _ => None,
+        })
+        .flatten()
+        .collect();
+    assert!(
+        matches!(
+            reported.as_slice(),
+            [crate::services::KeptItem {
+                location,
+                cause: crate::services::KeptCause::OriginalNotRemoved(_),
+            }] if location == &Location::local(&kept)
+        ),
+        "{reported:?}"
+    );
     Ok(())
 }

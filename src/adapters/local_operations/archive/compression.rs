@@ -100,7 +100,7 @@ where
         Displaced::Aside(aside) => {
             let mut owed = Owed::default();
             owed.barrier = barrier;
-            owed.owe(Deletion::Displaced(aside, name));
+            owed.owe(Deletion::Displaced(aside, destination.join(&name)));
             owed.settle(None, &gio::Cancellable::new())
                 .await
                 .map_err(|error| archive_failed(error.message()))?;

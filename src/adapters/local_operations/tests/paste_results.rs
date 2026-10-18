@@ -235,15 +235,48 @@ fn a_move_that_cannot_remove_the_original_it_replaced_keeps_it_and_its_undo()
         ClosesDuringTheWait,
         OpenInAProgram,
     }
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum Transfer {
+        MoveWithinTheMount,
+        MoveFromAnotherMount,
+        Copy,
+    }
     let _serial = serial()?;
-    let rows: [(Original, Preset); 4] = [
-        (Original::Undeletable, Quirks::ext4),
-        (Original::StaysOpen, Quirks::nfs3),
-        (Original::ClosesDuringTheWait, Quirks::nfs3),
-        (Original::OpenInAProgram, Quirks::cifs_posix),
+    let rows: [(Original, Preset, Transfer); 7] = [
+        (
+            Original::Undeletable,
+            Quirks::ext4,
+            Transfer::MoveWithinTheMount,
+        ),
+        (
+            Original::StaysOpen,
+            Quirks::nfs3,
+            Transfer::MoveWithinTheMount,
+        ),
+        (
+            Original::ClosesDuringTheWait,
+            Quirks::nfs3,
+            Transfer::MoveWithinTheMount,
+        ),
+        (
+            Original::OpenInAProgram,
+            Quirks::cifs_posix,
+            Transfer::MoveWithinTheMount,
+        ),
+        (
+            Original::Undeletable,
+            Quirks::ext4,
+            Transfer::MoveFromAnotherMount,
+        ),
+        (
+            Original::StaysOpen,
+            Quirks::nfs3,
+            Transfer::MoveFromAnotherMount,
+        ),
+        (Original::Undeletable, Quirks::ext4, Transfer::Copy),
     ];
-    for (original, preset) in rows {
-        let row = format!("{original:?}");
+    for (original, preset, transfer) in rows {
+        let row = format!("{original:?}, {transfer:?}");
         let _clock = ClockGuard::set(SystemTime::now());
         let root = tempfile::tempdir()?;
         let sources = root.path().join("sources");
@@ -278,6 +311,8 @@ fn a_move_that_cannot_remove_the_original_it_replaced_keeps_it_and_its_undo()
                 ..preset()
             },
         );
+        let _sources = (transfer == Transfer::MoveFromAnotherMount)
+            .then(|| FsQuirks::install(&sources, Quirks::default()));
         if original != Original::Undeletable {
             let held = hold(&destination.join("replace.txt"));
             holds.lock().map_err(|_| "the holds")?.push(held);
@@ -291,7 +326,7 @@ fn a_move_that_cannot_remove_the_original_it_replaced_keeps_it_and_its_undo()
                 conflict: TransferConflict::ReplaceExisting,
                 target_name: None,
             }],
-            move_sources: true,
+            move_sources: transfer != Transfer::Copy,
         });
 
         let left = names(&destination)?;
@@ -305,13 +340,20 @@ fn a_move_that_cannot_remove_the_original_it_replaced_keeps_it_and_its_undo()
             b"incoming",
             "{row}"
         );
-        assert_eq!(
-            item_moves(&events),
-            [(
-                Location::local(sources.join("replace.txt")),
-                Location::local(destination.join("replace.txt"))
-            )],
-            "{row}"
+        let moved = (
+            Location::local(sources.join("replace.txt")),
+            Location::local(destination.join("replace.txt")),
+        );
+        if transfer == Transfer::Copy {
+            assert_eq!(item_moves(&events), [], "{row}");
+            assert_eq!(fs::read(sources.join("replace.txt"))?, b"incoming", "{row}");
+        } else {
+            assert_eq!(item_moves(&events), [moved], "{row}");
+            assert!(!sources.join("replace.txt").exists(), "{row}");
+        }
+        assert!(
+            matches!(events.last(), Some(OperationEvent::Pasted { .. })),
+            "{row}: {events:?}"
         );
         let kept: Vec<_> = events
             .iter()
