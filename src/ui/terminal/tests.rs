@@ -54,3 +54,28 @@ fn omarchy_presentation_command_runs_the_launcher_only_when_installed() {
         [OsStr::new("omarchy-update")]
     );
 }
+
+#[test]
+fn ghostty_opens_directories_and_commands_through_new_window() {
+    let directory = tempfile::tempdir().expect("PATH fixture");
+    let program = directory.path().join("ghostty");
+    fs::write(&program, "#!/bin/sh\n").expect("terminal");
+    fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).expect("executable");
+
+    let terminal = Terminal::resolve_with(
+        Some(directory.path().as_os_str()),
+        Some(OsStr::new("ghostty")),
+    )
+    .expect("ghostty");
+
+    let open = terminal.directory_command(Path::new("/tmp/work"));
+    assert_eq!(
+        open.get_args().collect::<Vec<_>>(),
+        ["+new-window", "--working-directory=/tmp/work"].map(OsStr::new)
+    );
+    let run = terminal.exec_command(&["htop"]);
+    assert_eq!(
+        run.get_args().collect::<Vec<_>>(),
+        ["+new-window", "-e", "htop"].map(OsStr::new)
+    );
+}

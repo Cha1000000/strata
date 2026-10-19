@@ -67,7 +67,7 @@ const KNOWN_TERMINALS: &[KnownTerminal] = &[
     },
     KnownTerminal {
         program: "ghostty",
-        leading: &[],
+        leading: &["+new-window"],
         directory: DirectoryStyle::Joined("--working-directory="),
         exec: ExecStyle::Flag("-e"),
     },
