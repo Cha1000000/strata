@@ -56,26 +56,55 @@ fn omarchy_presentation_command_runs_the_launcher_only_when_installed() {
 }
 
 #[test]
-fn ghostty_opens_directories_and_commands_through_new_window() {
-    let directory = tempfile::tempdir().expect("PATH fixture");
-    let program = directory.path().join("ghostty");
-    fs::write(&program, "#!/bin/sh\n").expect("terminal");
-    fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).expect("executable");
+fn ghostty_opens_directories_through_new_window_only_from_1_3() {
+    const DIRECTORY: &str = "--working-directory=/tmp/work";
+    const CLASS: &str = "--class=com.example.strata";
+    let cases: [(&str, &str, &[&str], &[&str]); 6] = [
+        (
+            "Ghostty 1.3.1",
+            "ghostty",
+            &["+new-window", DIRECTORY],
+            &["-e", "htop"],
+        ),
+        (
+            "Ghostty 1.4.0-main+5c3c7a2",
+            "ghostty",
+            &["+new-window", DIRECTORY],
+            &["-e", "htop"],
+        ),
+        (
+            "Ghostty 1.3.1",
+            "ghostty --class=com.example.strata",
+            &["+new-window", CLASS, DIRECTORY],
+            &[CLASS, "-e", "htop"],
+        ),
+        ("Ghostty 1.2.3", "ghostty", &[DIRECTORY], &["-e", "htop"]),
+        ("Ghostty 1.1.3", "ghostty", &[DIRECTORY], &["-e", "htop"]),
+        ("", "ghostty", &[DIRECTORY], &["-e", "htop"]),
+    ];
+    for (version_output, terminal_var, directory_args, exec_args) in cases {
+        let directory = tempfile::tempdir().expect("PATH fixture");
+        let program = directory.path().join("ghostty");
+        fs::write(&program, format!("#!/bin/sh\necho '{version_output}'\n")).expect("terminal");
+        fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).expect("executable");
 
-    let terminal = Terminal::resolve_with(
-        Some(directory.path().as_os_str()),
-        Some(OsStr::new("ghostty")),
-    )
-    .expect("ghostty");
+        let terminal = Terminal::resolve_with(
+            Some(directory.path().as_os_str()),
+            Some(OsStr::new(terminal_var)),
+        )
+        .expect("ghostty");
 
-    let open = terminal.directory_command(Path::new("/tmp/work"));
-    assert_eq!(
-        open.get_args().collect::<Vec<_>>(),
-        ["+new-window", "--working-directory=/tmp/work"].map(OsStr::new)
-    );
-    let run = terminal.exec_command(&["htop"]);
-    assert_eq!(
-        run.get_args().collect::<Vec<_>>(),
-        ["+new-window", "-e", "htop"].map(OsStr::new)
-    );
+        let open = terminal.directory_command(Path::new("/tmp/work"));
+        assert_eq!(
+            open.get_args().collect::<Vec<_>>(),
+            directory_args.iter().map(OsStr::new).collect::<Vec<_>>(),
+            "{version_output:?} via {terminal_var:?}"
+        );
+        let run = terminal.exec_command(&["htop"]);
+        assert_eq!(
+            run.get_args().collect::<Vec<_>>(),
+            exec_args.iter().map(OsStr::new).collect::<Vec<_>>(),
+            "{version_output:?} via {terminal_var:?}"
+        );
+    }
 }

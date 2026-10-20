@@ -4,11 +4,14 @@ use std::ffi::{OsStr, OsString};
 use std::io::ErrorKind;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
+use std::sync::{Mutex, PoisonError};
 
 #[cfg(test)]
 mod tests;
 
 pub(super) const PREFERRED_LAUNCHER: &str = "xdg-terminal-exec";
+
+const GHOSTTY: &str = "ghostty";
 
 const OMARCHY_PRESENTATION_LAUNCHER: &str = "omarchy-launch-floating-terminal-with-presentation";
 
@@ -66,8 +69,8 @@ const KNOWN_TERMINALS: &[KnownTerminal] = &[
         exec: ExecStyle::Separator,
     },
     KnownTerminal {
-        program: "ghostty",
-        leading: &["+new-window"],
+        program: GHOSTTY,
+        leading: &[],
         directory: DirectoryStyle::Joined("--working-directory="),
         exec: ExecStyle::Flag("-e"),
     },
@@ -150,8 +153,9 @@ impl Terminal {
         &self.program
     }
 
-    fn base(&self) -> Command {
+    fn base(&self, action: Option<&str>) -> Command {
         let mut command = Command::new(&self.program);
+        command.args(action);
         command.args(&self.leading);
         command
             .stdin(Stdio::null())
@@ -161,7 +165,11 @@ impl Terminal {
     }
 
     pub(super) fn directory_command(&self, path: &Path) -> Command {
-        let mut command = self.base();
+        // A single-instance Ghostty hands a plain launch to the running instance,
+        // which ignores the directory; `+new-window` forwards it from 1.3 onward.
+        let action =
+            (self.is_ghostty() && ghostty_has_new_window(&self.program)).then_some("+new-window");
+        let mut command = self.base(action);
         command.current_dir(path);
         match self.directory {
             DirectoryStyle::Joined(prefix) => {
@@ -178,7 +186,7 @@ impl Terminal {
     }
 
     pub(super) fn exec_command<S: AsRef<OsStr>>(&self, argv: &[S]) -> Command {
-        let mut command = self.base();
+        let mut command = self.base(None);
         match self.exec {
             ExecStyle::Separator => {
                 command.arg("--");
@@ -190,6 +198,10 @@ impl Terminal {
         }
         command.args(argv);
         command
+    }
+
+    fn is_ghostty(&self) -> bool {
+        Path::new(&self.program).file_name() == Some(OsStr::new(GHOSTTY))
     }
 
     pub(super) fn launch_failure(&self, error: &std::io::Error) -> String {
@@ -288,6 +300,41 @@ fn explicit_terminal(path_var: Option<&OsStr>, terminal_var: Option<&OsStr>) -> 
             .map(|known| known.exec)
             .unwrap_or(ExecStyle::Flag("-e")),
     })
+}
+
+fn ghostty_has_new_window(program: &OsStr) -> bool {
+    static PROBED: Mutex<Vec<(OsString, bool)>> = Mutex::new(Vec::new());
+    let mut probed = PROBED.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some((_, supported)) = probed.iter().find(|(probed, _)| probed == program) {
+        return *supported;
+    }
+    let supported = Command::new(program)
+        .arg("--version")
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .is_ok_and(|output| {
+            ghostty_version_has_new_window(&String::from_utf8_lossy(&output.stdout))
+        });
+    probed.push((program.to_owned(), supported));
+    supported
+}
+
+fn ghostty_version_has_new_window(version_output: &str) -> bool {
+    let Some(version) = version_output
+        .lines()
+        .next()
+        .and_then(|line| line.strip_prefix("Ghostty "))
+    else {
+        return false;
+    };
+    let mut numbers = version
+        .split(['.', '-', '+'])
+        .map(|part| part.parse::<u32>().ok());
+    match (numbers.next().flatten(), numbers.next().flatten()) {
+        (Some(major), Some(minor)) => (major, minor) >= (1, 3),
+        _ => false,
+    }
 }
 
 fn find_on_path(path_var: Option<&OsStr>, program: &str) -> Option<OsString> {
