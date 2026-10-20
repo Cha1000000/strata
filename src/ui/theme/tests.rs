@@ -8,10 +8,11 @@ use std::{cell::Cell, collections::HashSet, rc::Rc};
 use crate::ui::preferences::{CornerRoundness, PreferenceManager};
 
 use super::{
-    Theme, ThemeManager, ThemeTokens, azure_tokens, blend, builtins, canonical_color, color_to_hex,
-    custom_theme_id, is_omarchy_theme_event, merge_builtin_and_custom_themes, omarchy::contrast,
-    slugify, source_palette_from_quattro, source_style_scheme_xml, themes_directory,
-    title_case_slug, tokens_from_quattro, validate_tokens,
+    PINNED_GTK_THEME, Theme, ThemeManager, ThemeTokens, azure_tokens, blend, builtins,
+    canonical_color, color_to_hex, custom_theme_id, is_omarchy_theme_event,
+    merge_builtin_and_custom_themes, omarchy::contrast, slugify, source_palette_from_quattro,
+    source_style_scheme_xml, themes_directory, title_case_slug, tokens_from_quattro,
+    validate_tokens,
 };
 use crate::test_support::{gtk_test, gtk_test_with_env, texture_has_visible_pixels};
 use gtk::prelude::*;
@@ -798,7 +799,15 @@ fn desktop_gtk_theme_and_gtk_css_do_not_restyle_widgets() {
                 gtk::glib::MainContext::default().iteration(false);
             }
 
-            assert_eq!(settings.gtk_theme_name().as_deref(), Some("Default"));
+            assert_eq!(settings.gtk_theme_name().as_deref(), Some(PINNED_GTK_THEME));
+            for variant in ["gtk.css", "gtk-dark.css"] {
+                let path = format!("/org/gtk/libgtk/theme/{PINNED_GTK_THEME}/{variant}");
+                if let Err(error) =
+                    gtk::gio::resources_get_info(&path, gtk::gio::ResourceLookupFlags::NONE)
+                {
+                    panic!("{path} should be bundled: {error}");
+                }
+            }
             let expected =
                 gtk::gdk::RGBA::parse(&manager.starter_tokens().text).expect("text color");
             let actual = label.color();

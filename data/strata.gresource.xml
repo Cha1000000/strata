@@ -463,4 +463,8 @@
     <file>icons/catppuccin/strata-ctp-zap.svg</file>
     <file>icons/catppuccin/strata-ctp-zig.svg</file>
   </gresource>
+  <gresource prefix="/org/gtk/libgtk/theme/StrataEmpty">
+    <file alias="gtk.css">theme-empty.css</file>
+    <file alias="gtk-dark.css">theme-empty.css</file>
+  </gresource>
 </gresources>
