@@ -720,15 +720,18 @@ fn a_case_only_rename_and_its_undo_keep_the_item_or_say_where_it_was_left()
     let message = failure(&rename(&source, "Report.txt"));
 
     let left = names(root.path())?;
-    let [temporary] = left.as_slice() else {
+    let [originals] = left.as_slice() else {
         panic!("expected one entry, got {left:?}");
     };
-    assert!(temporary.starts_with(".strata-rename-"), "{temporary}");
-    assert_eq!(inode(&root.path().join(temporary)), original);
+    assert!(originals.starts_with(".strata-originals-"), "{originals}");
+    assert_eq!(
+        inode(&root.path().join(originals).join("report.txt")),
+        original
+    );
     assert_eq!(
         message,
         format!(
-            "Could not rename \u{201c}report.txt\u{201d}; it was left as \u{201c}{temporary}\u{201d}: A device input/output error occurred"
+            "Could not rename \u{201c}report.txt\u{201d}; it was left as \u{201c}{originals}/report.txt\u{201d}: A device input/output error occurred"
         )
     );
     Ok(())
@@ -1094,7 +1097,7 @@ fn undoing_a_grouping_reports_the_trashed_group_folder() {
             let group = root.path().join("group");
             fs::create_dir(&group).expect("group folder");
             fs::write(group.join("report.txt"), b"contents").expect("grouped item");
-            let identity = TrashedOriginal::at_path(&group).expect("identity");
+            let identity = numbers_at(&group);
             let events = Rc::new(RefCell::new(Vec::new()));
             let emitted = events.clone();
             let _operation = LocalOperationProvider.undo_move(

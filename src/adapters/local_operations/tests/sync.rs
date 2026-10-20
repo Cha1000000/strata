@@ -497,7 +497,8 @@ fn the_barrier_before_deleting_a_moved_source_follows_the_destination_family()
     const FAILS: Device = Some(Err(Errno::ACCESS));
     const FS: &[Op] = &[Op::SyncFs];
     const DIR: &[Op] = &[Op::SyncDir];
-    const BOTH: &[Op] = &[Op::SyncFs, Op::SyncDir];
+    const BOTH: &[Op] = &[Op::SyncDir, Op::SyncFs, Op::SyncDir];
+    const FS_THEN_DIR: &[Op] = &[Op::SyncFs, Op::SyncDir];
     type Row = (
         &'static str,
         Device,
@@ -507,9 +508,10 @@ fn the_barrier_before_deleting_a_moved_source_follows_the_destination_family()
         bool,
         &'static [Op],
     );
-    let rows: [Row; 12] = [
+    let rows: [Row; 13] = [
         ("ext4", None, None, false, true, false, FS),
         ("vfat", None, None, false, true, false, BOTH),
+        ("ntfs3", None, None, false, true, false, BOTH),
         ("fuseblk", None, None, false, true, true, DIR),
         ("fuseblk", NTFS, None, false, true, false, BOTH),
         ("fuseblk", EXFAT, None, false, true, false, BOTH),
@@ -517,7 +519,7 @@ fn the_barrier_before_deleting_a_moved_source_follows_the_destination_family()
         ("fuseblk", FAILS, None, false, true, true, DIR),
         ("cifs", None, None, false, true, true, &[]),
         ("9p", None, None, false, true, true, FS),
-        ("ext4", None, None, true, true, false, BOTH),
+        ("ext4", None, None, true, true, false, FS_THEN_DIR),
         ("cifs", None, None, false, false, false, &[]),
         ("ext4", None, Some((5, 4, 0)), false, true, true, FS),
     ];
@@ -874,7 +876,8 @@ fn cancelling_a_move_closes_its_pending_batch() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn many_moved_files_are_copied_in_parallel_and_share_a_barrier() -> Result<(), Box<dyn Error>> {
+fn many_moved_files_share_a_barrier_and_are_copied_in_parallel_unless_a_disk_spins()
+-> Result<(), Box<dyn Error>> {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     let _serial = serial()?;
     // The last item makes the batch due, which still closes as the device
@@ -883,134 +886,158 @@ fn many_moved_files_are_copied_in_parallel_and_share_a_barrier() -> Result<(), B
         items: 12,
         ..NO_LIMITS
     });
-    let root = tempfile::tempdir()?;
-    let sources = root.path().join("sources");
-    let destination = root.path().join("destination");
-    fs::create_dir(&sources)?;
-    fs::create_dir(&destination)?;
-    let names: Vec<String> = (0..12).map(|index| format!("f{index:02}.txt")).collect();
-    let names: Vec<&str> = names.iter().map(String::as_str).collect();
-    let mut paths = Vec::new();
-    for name in &names {
-        fs::write(sources.join(name), name)?;
-        paths.push(sources.join(name));
-    }
-    // The first copy waits for a second to start, as only parallel copies can.
-    let (started, parallel) = (
-        Arc::new(AtomicUsize::new(0)),
-        Arc::new(AtomicBool::new(false)),
-    );
-    let mut opened: Vec<(Op, &'static str, usize, super::fs_quirks::Racer)> = Vec::new();
-    let (count, seen_parallel) = (started.clone(), parallel.clone());
-    opened.push((
-        Op::OpenSource,
-        "*",
-        0,
-        Box::new(move || {
-            count.fetch_add(1, Ordering::SeqCst);
-            let start = Instant::now();
-            while count.load(Ordering::SeqCst) < 2 && start.elapsed() < Duration::from_secs(3) {
-                thread::sleep(Duration::from_millis(5));
-            }
-            seen_parallel.store(count.load(Ordering::SeqCst) >= 2, Ordering::SeqCst);
-        }),
-    ));
-    for _ in 1..names.len() {
-        let count = started.clone();
+    for (case, source_spins, destination_spins) in [
+        ("no disk spins", false, false),
+        ("the destination spins", false, true),
+        ("a source spins", true, false),
+    ] {
+        let one_at_a_time = source_spins || destination_spins;
+        let root = tempfile::tempdir()?;
+        let sources = root.path().join("sources");
+        let destination = root.path().join("destination");
+        fs::create_dir(&sources)?;
+        fs::create_dir(&destination)?;
+        let names: Vec<String> = (0..12).map(|index| format!("f{index:02}.txt")).collect();
+        let names: Vec<&str> = names.iter().map(String::as_str).collect();
+        let mut paths = Vec::new();
+        for name in &names {
+            fs::write(sources.join(name), name)?;
+            paths.push(sources.join(name));
+        }
+        // The first copy waits for a second to start, as only parallel copies can.
+        let (started, parallel) = (
+            Arc::new(AtomicUsize::new(0)),
+            Arc::new(AtomicBool::new(false)),
+        );
+        let wait = if one_at_a_time {
+            Duration::from_millis(300)
+        } else {
+            Duration::from_secs(3)
+        };
+        let mut opened: Vec<(Op, &'static str, usize, super::fs_quirks::Racer)> = Vec::new();
+        let (count, seen_parallel) = (started.clone(), parallel.clone());
         opened.push((
             Op::OpenSource,
             "*",
             0,
             Box::new(move || {
                 count.fetch_add(1, Ordering::SeqCst);
+                let start = Instant::now();
+                while count.load(Ordering::SeqCst) < 2 && start.elapsed() < wait {
+                    thread::sleep(Duration::from_millis(5));
+                }
+                seen_parallel.store(count.load(Ordering::SeqCst) >= 2, Ordering::SeqCst);
             }),
         ));
-    }
-    let barriers = Barriers::new();
-    let changed = sources.join("f03.txt");
-    let rewrite: Box<dyn FnMut() + Send> =
-        Box::new(move || fs::write(&changed, b"rewritten after its copy").expect("rewrite"));
-    let _sources = FsQuirks::install(
-        &sources,
-        Quirks {
-            before: opened,
-            ..Quirks::default()
-        },
-    );
-    let _destination = FsQuirks::install(
-        &destination,
-        Quirks {
-            before: barriers.racers(&sources, &names, &destination, Some(rewrite)),
-            ..Quirks::ext4()
-        },
-    );
+        for _ in 1..names.len() {
+            let count = started.clone();
+            opened.push((
+                Op::OpenSource,
+                "*",
+                0,
+                Box::new(move || {
+                    count.fetch_add(1, Ordering::SeqCst);
+                }),
+            ));
+        }
+        let barriers = Barriers::new();
+        let changed = sources.join("f03.txt");
+        let rewrite: Box<dyn FnMut() + Send> =
+            Box::new(move || fs::write(&changed, b"rewritten after its copy").expect("rewrite"));
+        let _sources = FsQuirks::install(
+            &sources,
+            Quirks {
+                before: opened,
+                rotational: Some(source_spins),
+                ..Quirks::default()
+            },
+        );
+        let _destination = FsQuirks::install(
+            &destination,
+            Quirks {
+                before: barriers.racers(&sources, &names, &destination, Some(rewrite)),
+                rotational: Some(destination_spins),
+                ..Quirks::ext4()
+            },
+        );
 
-    let (_operation, events, early) = paste_moves(340, &destination, &paths, &barriers, None);
-    pump_until_transfer(&events);
+        let (_operation, events, early) = paste_moves(340, &destination, &paths, &barriers, None);
+        pump_until_transfer(&events);
 
-    assert!(
-        matches!(
-            terminal_transfer(&events.borrow()),
-            Some(OperationEvent::Pasted { .. })
-        ),
-        "{:?}",
-        events.borrow()
-    );
-    if thread::available_parallelism().map_or(1, usize::from) > 1 {
-        assert!(parallel.load(Ordering::SeqCst), "the copies overlap");
-    }
-    assert_eq!(
-        barriers.seen(),
-        [Seen {
-            deleted: Vec::new(),
-            copied: strings(&names),
-            flushing: true,
-            counted: 12,
-        }]
-    );
-    for (name, path) in names.iter().zip(&paths) {
-        assert_eq!(path.exists(), *name == "f03.txt", "{name}");
-        assert_eq!(fs::read(destination.join(name))?, name.as_bytes(), "{name}");
-    }
-    let kept: Vec<_> = events
-        .borrow()
-        .iter()
-        .filter_map(|event| match event {
-            OperationEvent::ItemsReported { report, .. } => Some(report.kept.clone()),
-            _ => None,
-        })
-        .flatten()
-        .collect();
-    assert_eq!(
-        kept,
-        [crate::services::KeptItem {
-            location: Location::local(sources.join("f03.txt")),
-            cause: crate::services::KeptCause::Changed,
-        }]
-    );
-    assert!(
-        early
+        assert!(
+            matches!(
+                terminal_transfer(&events.borrow()),
+                Some(OperationEvent::Pasted { .. })
+            ),
+            "{case}: {:?}",
+            events.borrow()
+        );
+        let cores = thread::available_parallelism().map_or(1, usize::from);
+        assert_eq!(
+            parallel.load(Ordering::SeqCst),
+            !one_at_a_time && cores > 1,
+            "{case}: whether the copies overlap"
+        );
+        assert_eq!(
+            barriers.seen(),
+            [Seen {
+                deleted: Vec::new(),
+                copied: strings(&names),
+                flushing: true,
+                counted: 12,
+            }],
+            "{case}"
+        );
+        for (name, path) in names.iter().zip(&paths) {
+            assert_eq!(path.exists(), *name == "f03.txt", "{case}: {name}");
+            assert_eq!(
+                fs::read(destination.join(name))?,
+                name.as_bytes(),
+                "{case}: {name}"
+            );
+        }
+        let kept: Vec<_> = events
             .borrow()
             .iter()
-            .all(|from| from == &Location::local(sources.join("f03.txt")))
-    );
-    let last = events.borrow().iter().rev().find_map(|event| match event {
-        OperationEvent::TransferProgress {
-            completed_files,
-            total_files,
-            transferred_bytes,
-            total_bytes,
-            ..
-        } => Some((
-            *completed_files,
-            *total_files,
-            *transferred_bytes,
-            *total_bytes,
-        )),
-        _ => None,
-    });
-    let bytes: u64 = names.iter().map(|name| name.len() as u64).sum();
-    assert_eq!(last, Some((12, Some(12), bytes, Some(bytes))));
+            .filter_map(|event| match event {
+                OperationEvent::ItemsReported { report, .. } => Some(report.kept.clone()),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        assert_eq!(
+            kept,
+            [crate::services::KeptItem {
+                location: Location::local(sources.join("f03.txt")),
+                cause: crate::services::KeptCause::Changed,
+            }],
+            "{case}"
+        );
+        assert!(
+            early
+                .borrow()
+                .iter()
+                .all(|from| from == &Location::local(sources.join("f03.txt"))),
+            "{case}"
+        );
+        let last = events.borrow().iter().rev().find_map(|event| match event {
+            OperationEvent::TransferProgress {
+                completed_files,
+                total_files,
+                transferred_bytes,
+                total_bytes,
+                ..
+            } => Some((
+                *completed_files,
+                *total_files,
+                *transferred_bytes,
+                *total_bytes,
+            )),
+            _ => None,
+        });
+        let bytes: u64 = names.iter().map(|name| name.len() as u64).sum();
+        assert_eq!(last, Some((12, Some(12), bytes, Some(bytes))), "{case}");
+    }
     Ok(())
 }
 
@@ -1658,7 +1685,8 @@ fn a_failed_barrier_stops_a_bulk_move() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn an_original_that_cannot_be_deleted_fails_its_replacing_move() -> Result<(), Box<dyn Error>> {
+fn an_original_that_cannot_be_deleted_stays_aside_and_its_replacing_move_completes()
+-> Result<(), Box<dyn Error>> {
     let _serial = serial()?;
     let root = tempfile::tempdir()?;
     let sources = root.path().join("sources");
@@ -1670,13 +1698,14 @@ fn an_original_that_cannot_be_deleted_fails_its_replacing_move() -> Result<(), B
     fs::write(destination.join("notes.txt"), b"old")?;
     let (watched, foreign) = (destination.clone(), root.path().join("foreign"));
     let racer: super::fs_quirks::Racer = Box::new(move || {
-        let aside = fs::read_dir(&watched)
+        let originals = fs::read_dir(&watched)
             .expect("list the destination")
             .filter_map(Result::ok)
             .find(|entry| entry.file_name().to_string_lossy().starts_with(".strata-"))
             .expect("the original is aside");
         fs::write(&foreign, b"foreign").expect("write the foreign file");
-        fs::rename(&foreign, aside.path()).expect("put it at the original's name");
+        fs::rename(&foreign, originals.path().join("notes.txt"))
+            .expect("put it at the original's name");
     });
     let _sources = FsQuirks::install(&sources, Quirks::default());
     let _destination = FsQuirks::install(
@@ -1704,15 +1733,38 @@ fn an_original_that_cannot_be_deleted_fails_its_replacing_move() -> Result<(), B
     );
     pump_until_transfer(&events);
 
+    let events = events.take();
     assert!(
         matches!(
-            terminal_transfer(&events.borrow()),
-            Some(OperationEvent::TransferFailed { message, .. }) if message.contains(".strata-")
+            terminal_transfer(&events),
+            Some(OperationEvent::Pasted { .. })
         ),
-        "{:?}",
-        events.borrow()
+        "{events:?}"
     );
     assert_eq!(fs::read(destination.join("notes.txt"))?, b"incoming");
-    assert_eq!(fs::read(&source)?, b"incoming");
+    assert!(!source.exists());
+    let [originals, _] = names(&destination)?
+        .try_into()
+        .map_err(|_| "the originals folder and the replacement")?;
+    let kept = destination.join(originals).join("notes.txt");
+    assert_eq!(fs::read(&kept)?, b"foreign");
+    let reported: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            OperationEvent::ItemsReported { report, .. } => Some(report.kept.clone()),
+            _ => None,
+        })
+        .flatten()
+        .collect();
+    assert!(
+        matches!(
+            reported.as_slice(),
+            [crate::services::KeptItem {
+                location,
+                cause: crate::services::KeptCause::OriginalNotRemoved(_),
+            }] if location == &Location::local(&kept)
+        ),
+        "{reported:?}"
+    );
     Ok(())
 }

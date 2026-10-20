@@ -11,9 +11,11 @@ use std::{
     time::Duration,
 };
 
-use gtk::gio;
-
 use super::names::{NameEncoding, NameProfile, NameRules, PrivateUse, Reserved, Strip, byte_limit};
+use crate::{
+    model::hidden_names::ForeignLeftover,
+    services::{IdentityTraits, InodeNumbers},
+};
 
 /// Parsed without touching mounted filesystems, including unresponsive mounts.
 #[derive(Clone)]
@@ -26,6 +28,7 @@ struct MountEntry {
     device: (u32, u32),
     site: MountSite,
     mount_type: MountType,
+    source: Option<PathBuf>,
 }
 
 impl MountEntry {
@@ -47,28 +50,41 @@ pub(crate) struct MountType {
 }
 
 impl MountType {
-    /// Whether an entry keeps its inode number: FAT and exFAT, libfuse
-    /// without `use_ino` and cifs without server inode numbers number an
-    /// entry afresh once the kernel has evicted it, and vboxsf keeps a name's
-    /// number for whatever a rename puts there.
-    pub(crate) fn stable_inodes(&self) -> bool {
-        if self.fs_type == "vboxsf" {
-            return false;
-        }
-        match family(&self.fs_type) {
-            Family::Fat | Family::Fuse => false,
-            Family::Smb => !self
-                .super_options
-                .split(',')
-                .any(|option| option == "noserverino"),
-            _ => true,
+    /// FAT and exFAT, libfuse without `use_ino` and cifs without server inode numbers number an
+    /// entry afresh once the kernel has evicted it, and vboxsf keeps a name's number for whatever
+    /// a rename puts there. The kernel's exFAT driver stamps a folder's birth time at each rename
+    /// into or within it.
+    pub(crate) fn identity(&self) -> IdentityTraits {
+        let smb = family(&self.fs_type) == Family::Smb;
+        let numbers = match (family(&self.fs_type), self.fs_type.as_str()) {
+            (Family::Fat | Family::Fuse | Family::Smb, _) | (_, "vboxsf") => InodeNumbers::Renewed,
+            (
+                Family::Other,
+                "9p" | "virtiofs" | "ecryptfs" | "ceph" | "hfs" | "hfsplus" | "ntfs" | "ramfs",
+            ) => InodeNumbers::Kept,
+            (Family::Other, _) => InodeNumbers::Unknown,
+            _ => InodeNumbers::Kept,
+        };
+        IdentityTraits {
+            numbers,
+            folder_births: self.fs_type != "exfat",
+            made_up_births: smb,
         }
     }
 
-    /// The kernel's exFAT driver stamps a folder's birth time at each rename
-    /// into or within it.
-    pub(crate) fn renames_reset_folder_births(&self) -> bool {
-        self.fs_type == "exfat"
+    pub(crate) fn wants_file_handle(&self, birth: Option<(i64, u32)>) -> bool {
+        matches!(
+            family(&self.fs_type),
+            Family::Ext | Family::Nfs | Family::Nfs4
+        ) && birth.is_none_or(|birth| birth == (0, 0))
+    }
+
+    pub(crate) fn server_numbers(&self) -> bool {
+        family(&self.fs_type) == Family::Smb
+            && self
+                .super_options
+                .split(',')
+                .any(|option| option == "serverino")
     }
 
     /// How long the SMB client keeps a closed file's handle open
@@ -84,6 +100,21 @@ impl MountType {
             .and_then(|seconds| seconds.parse().ok())
             .unwrap_or(1);
         Some(Duration::from_secs(seconds))
+    }
+
+    pub(crate) fn silly_names(&self) -> Option<SillyNames> {
+        match family(&self.fs_type) {
+            Family::Nfs | Family::Nfs4 => Some(SillyNames::Renamed(ForeignLeftover::Nfs)),
+            Family::Fuse => Some(SillyNames::Renamed(ForeignLeftover::Fuse)),
+            Family::Smb if self.smb_posix() => Some(SillyNames::Unlisted),
+            Family::Smb => Some(SillyNames::Renamed(ForeignLeftover::Smb)),
+            _ => None,
+        }
+    }
+
+    fn smb_posix(&self) -> bool {
+        let has = |name| self.super_options.split(',').any(|option| option == name);
+        has("posix") || has("unix") && has("posixpaths")
     }
 
     /// How long the SMB client answers stats from the attributes it cached
@@ -152,9 +183,7 @@ impl MountType {
             // udisks mounts ntfs-3g with `windows_names`, which mountinfo hides.
             ("fuseblk", Some("ntfs")) => NameProfile::windows(Reserved::Full, NameEncoding::Utf8),
             ("fuseblk", _) => NameProfile::windows(Reserved::Bare, NameEncoding::Utf8).learning(),
-            ("cifs" | "smb3", _) if has("posix") || has("unix") && has("posixpaths") => {
-                NameProfile::smb_posix(bytes)
-            }
+            ("cifs" | "smb3", _) if self.smb_posix() => NameProfile::smb_posix(bytes),
             ("cifs" | "smb3", _) => NameProfile {
                 encoding: if has("nocase") {
                     NameEncoding::Utf8Bmp
@@ -211,7 +240,17 @@ impl MountType {
     pub(crate) fn is_gvfs_bridge(&self) -> bool {
         self.fs_type == "fuse.gvfsd-fuse"
     }
+
+    pub(crate) fn outside_writers(&self) -> bool {
+        self.fs_type != "fuseblk" && is_remote_fs_type(&self.fs_type)
+    }
+
+    pub(crate) fn daemon_cache(&self) -> Option<Duration> {
+        (self.fs_type == "fuse.sshfs").then_some(SSHFS_DAEMON_CACHE)
+    }
 }
+
+pub(crate) const SSHFS_DAEMON_CACHE: Duration = Duration::from_secs(21);
 
 pub(crate) const FAT32_MAX_FILE_SIZE: u64 = u32::MAX as u64;
 
@@ -244,11 +283,28 @@ pub(crate) fn max_file_size(fs_type: &str, device_format: Option<&str>) -> Optio
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SillyNames {
+    Renamed(ForeignLeftover),
+    Unlisted,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct CoarseTimes {
     pub window: Duration,
     /// Whether this machine's clock stamps them, as on a local disk,
     /// rather than a server's.
     pub stamped_here: bool,
+}
+
+impl CoarseTimes {
+    /// A time with no fraction of a second may come from a filesystem as coarse as FAT's that the
+    /// mount does not show, such as one a server shares.
+    pub(crate) fn whole_second(nanoseconds: u32) -> Option<Self> {
+        (nanoseconds == 0).then_some(Self {
+            window: Duration::from_secs(2),
+            stamped_here: false,
+        })
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -356,24 +412,23 @@ pub(crate) fn set_mountinfo_for_isolated_test(mountinfo: Option<String>) {
         .unwrap_or_else(std::sync::PoisonError::into_inner) = mountinfo;
 }
 
+#[cfg(test)]
+pub(super) fn mountinfo_for_test() -> Option<String> {
+    MOUNTINFO_FOR_TEST
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+}
+
 impl MountTable {
     pub(crate) fn current() -> Self {
+        crate::util::ui_thread::assert_off();
         #[cfg(test)]
-        if let Some(mountinfo) = MOUNTINFO_FOR_TEST
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
-        {
+        if let Some(mountinfo) = mountinfo_for_test() {
             return Self::parse(mountinfo);
         }
         std::fs::read("/proc/self/mountinfo")
             .map(Self::parse)
-            .unwrap_or_else(|_| Self::parse(b""))
-    }
-
-    pub(crate) async fn load() -> Self {
-        gio::spawn_blocking(Self::current)
-            .await
             .unwrap_or_else(|_| Self::parse(b""))
     }
 
@@ -392,8 +447,9 @@ impl MountTable {
                 let mount_point = fields.next()?;
                 let mut back = back.split(|byte| *byte == b' ');
                 let fs_type = std::str::from_utf8(back.next()?).ok()?;
+                let source = back.next().map(|source| PathBuf::from(unescape(source)));
                 let super_options = back
-                    .nth(1)
+                    .next()
                     .and_then(|options| std::str::from_utf8(options).ok())
                     .unwrap_or_default();
                 Some(MountEntry {
@@ -407,6 +463,7 @@ impl MountTable {
                         fs_type: fs_type.to_owned(),
                         super_options: super_options.to_owned(),
                     },
+                    source,
                 })
             })
             .collect::<Vec<_>>();
@@ -427,6 +484,17 @@ impl MountTable {
             .map(MountEntry::parts)
     }
 
+    pub(crate) fn wants_file_handle(&self, id: Option<u64>, birth: Option<(i64, u32)>) -> bool {
+        id.and_then(|id| self.mount_of(id))
+            .is_some_and(|(mount, _)| mount.wants_file_handle(birth))
+    }
+
+    pub(crate) fn points(&self) -> impl Iterator<Item = (u64, &Path)> {
+        self.entries
+            .iter()
+            .map(|entry| (entry.id, entry.site.point.as_path()))
+    }
+
     pub(crate) fn mount_at(&self, path: &Path) -> Option<(&MountType, &MountSite)> {
         self.innermost(path).map(MountEntry::parts)
     }
@@ -440,15 +508,11 @@ impl MountTable {
         })
     }
 
-    pub(super) fn is_remote_path(&self, path: &Path) -> bool {
-        self.fs_type_for(path).is_some_and(is_remote_fs_type)
-    }
-
     /// Remote filesystems other than FUSE drivers for local block devices,
     /// such as ntfs-3g and exfat-fuse on a USB drive.
     pub(crate) fn is_network_path(&self, path: &Path) -> bool {
-        self.fs_type_for(path)
-            .is_some_and(|fs_type| fs_type != "fuseblk" && is_remote_fs_type(fs_type))
+        self.innermost(path)
+            .is_some_and(|entry| entry.mount_type.outside_writers())
     }
 
     pub(crate) fn has_mount_inside(&self, directory: &Path) -> bool {
@@ -457,16 +521,18 @@ impl MountTable {
             .any(|entry| entry.site.point.parent() == Some(directory))
     }
 
-    pub(super) fn query_may_block(&self, path: &Path) -> bool {
-        // Prefix probes can trigger autofs even when a nested mount is local.
-        self.is_remote_path(path)
-            || self.entries.iter().any(|entry| {
-                entry.mount_type.fs_type == "autofs" && path.starts_with(&entry.site.point)
-            })
-    }
-
     pub(crate) fn is_mount_point(&self, path: &Path) -> bool {
         self.entries.iter().any(|entry| entry.site.point == path)
+    }
+
+    pub(crate) fn sources(&self) -> impl Iterator<Item = (&Path, &Path)> {
+        self.entries
+            .iter()
+            .filter_map(|entry| Some((entry.site.point.as_path(), entry.source.as_deref()?)))
+    }
+
+    pub(crate) fn source_for(&self, path: &Path) -> Option<&Path> {
+        self.innermost(path)?.source.as_deref()
     }
 
     pub(crate) fn mount_point_for(&self, path: &Path) -> Option<&Path> {
@@ -477,6 +543,12 @@ impl MountTable {
     pub(crate) fn trash_scan_mounts(&self) -> impl Iterator<Item = &Path> {
         self.entries.iter().filter_map(|entry| {
             is_trash_scan_fs_type(&entry.mount_type.fs_type).then_some(entry.site.point.as_path())
+        })
+    }
+
+    pub(crate) fn non_virtual_mounts(&self) -> impl Iterator<Item = &Path> {
+        self.entries.iter().filter_map(|entry| {
+            (!is_virtual_fs_type(&entry.mount_type.fs_type)).then_some(entry.site.point.as_path())
         })
     }
 

@@ -592,7 +592,7 @@ fn choose_folder_rejects_invalid_destinations_and_copies_into_a_confined_directo
             let outside = fixture.path().join("outside");
             std::fs::create_dir_all(&source_dir).expect("source directory");
             std::fs::create_dir_all(device.join("subdir")).expect("device subdirectory");
-            std::fs::create_dir_all(&outside).expect("outside directory");
+            std::fs::create_dir_all(outside.join("outside-folder")).expect("outside directory");
             let first = source_dir.join("first.txt");
             let second = source_dir.join("second.txt");
             for path in [&first, &second] {
@@ -649,37 +649,52 @@ fn choose_folder_rejects_invalid_destinations_and_copies_into_a_confined_directo
                 },
                 "confined directory listing",
             );
-            let mut position = 0;
-            while let Some(entry) = chooser.browser().entry_at(0, position) {
-                assert!(entry.is_directory());
-                assert!(
-                    entry
-                        .location
-                        .native_path()
-                        .expect("local folder")
-                        .canonicalize()
-                        .expect("existing folder")
-                        .starts_with(&device),
-                    "escaping symlinks are not offered"
-                );
-                position += 1;
-            }
-            let mut invalid = vec![
-                device.join("missing"),
-                device.join("regular-file.txt"),
-                outside.clone(),
-                device.join("../outside"),
-            ];
-            #[cfg(unix)]
-            invalid.push(device.join("external-link"));
-            for path in invalid {
+            let listed_inside_device = || {
+                let mut position = 0;
+                while let Some(entry) = chooser.browser().entry_at(0, position) {
+                    assert!(entry.is_directory());
+                    assert!(
+                        entry
+                            .location
+                            .native_path()
+                            .is_some_and(|path| path.starts_with(&device))
+                    );
+                    assert_ne!(
+                        entry.display_name, "outside-folder",
+                        "nothing outside the device is listed"
+                    );
+                    position += 1;
+                }
+            };
+            listed_inside_device();
+            for path in [outside.clone(), device.join("../outside")] {
                 chooser.navigate_location(Location::local(&path));
                 drain_context();
                 assert_eq!(
                     chooser.browser().active_location(),
                     Some(Location::local(&device)),
-                    "invalid navigation stays confined"
+                    "a path outside the device stays confined"
                 );
+            }
+            let mut invalid = vec![device.join("missing"), device.join("regular-file.txt")];
+            #[cfg(unix)]
+            invalid.push(device.join("external-link"));
+            for path in invalid {
+                chooser.navigate_location(Location::local(&path));
+                wait_until(
+                    || {
+                        chooser
+                            .browser()
+                            .column_snapshot(0)
+                            .is_some_and(|snapshot| {
+                                snapshot.location == Location::local(&path)
+                                    && !snapshot.loading
+                                    && snapshot.error.is_some()
+                            })
+                    },
+                    "an invalid folder fails to load",
+                );
+                listed_inside_device();
                 assert!(events.borrow().iter().all(|event| !matches!(
                     event,
                     crate::app::BrowserEvent::TransferStarted { .. }
@@ -688,6 +703,42 @@ fn choose_folder_rejects_invalid_destinations_and_copies_into_a_confined_directo
                     preferences.send_to_recent_destinations(device_id),
                     original_recents
                 );
+            }
+            #[cfg(unix)]
+            {
+                let settle = |duration| {
+                    let deadline = std::time::Instant::now() + duration;
+                    while std::time::Instant::now() < deadline {
+                        glib::MainContext::default().iteration(false);
+                        std::thread::sleep(std::time::Duration::from_millis(2));
+                    }
+                };
+                use crate::ui::browser_modes::BrowserMode;
+                let original = chooser.view_mode();
+                assert!(chooser.show_filter_with_query("outside"));
+                for mode in [BrowserMode::Columns, BrowserMode::List] {
+                    chooser.set_view_mode(mode);
+                    wait_until(
+                        || {
+                            chooser
+                                .filter_status()
+                                .flatten()
+                                .is_some_and(|status| status.displayed)
+                        },
+                        "the search there settles",
+                    );
+                    settle(std::time::Duration::from_millis(500));
+                    assert_eq!(
+                        chooser
+                            .filter_status()
+                            .flatten()
+                            .map(|status| status.files + status.folders),
+                        Some(0),
+                        "{mode:?}: a search there finds nothing outside the device"
+                    );
+                }
+                chooser.dismiss_focused_filter();
+                chooser.set_view_mode(original);
             }
             chooser.create_new_folder();
             assert!(
@@ -851,7 +902,11 @@ fn choose_folder_uses_the_current_root_after_a_remount() {
             std::fs::remove_dir_all(&opened_root).expect("old mount removed");
             confirm_destination(&chooser_window);
             wait_until(
-                || visible_error_message(&chooser_overlay).is_some(),
+                || {
+                    visible_texts(&chooser_overlay).iter().any(|text| {
+                        text == "Choose an existing folder inside this removable device."
+                    }) && destination_accept(&chooser_window).is_sensitive()
+                },
                 "the missing corresponding folder error",
             );
             assert!(!current_root.join("nested").exists());
@@ -1217,6 +1272,236 @@ fn extract_to_focused_enter_extracts_destination() {
     );
 }
 
+#[derive(Clone, Copy)]
+enum ChosenFor {
+    Copy,
+    Move,
+    Extract,
+    SendTo,
+}
+
+#[derive(Clone, Copy)]
+enum ChosenFolder {
+    SlowToAnswer,
+    Failing(rustix::io::Errno, &'static str),
+    WriteOnly,
+}
+
+#[test]
+fn a_chosen_folder_is_checked_off_the_ui_thread_while_the_chooser_stays_open() {
+    crate::test_support::gtk_test(
+        "ui::browser::transfer::tests::a_chosen_folder_is_checked_off_the_ui_thread_while_the_chooser_stays_open",
+        || {
+            use std::os::unix::fs::PermissionsExt;
+
+            for (case, chosen_for, chosen) in [
+                (
+                    "copy to a folder slow to answer",
+                    ChosenFor::Copy,
+                    ChosenFolder::SlowToAnswer,
+                ),
+                (
+                    "extract to a folder slow to answer",
+                    ChosenFor::Extract,
+                    ChosenFolder::SlowToAnswer,
+                ),
+                (
+                    "send to a device slow to answer",
+                    ChosenFor::SendTo,
+                    ChosenFolder::SlowToAnswer,
+                ),
+                (
+                    "copy to a folder that is gone",
+                    ChosenFor::Copy,
+                    ChosenFolder::Failing(rustix::io::Errno::NOENT, "Choose an existing folder."),
+                ),
+                (
+                    "extract to a folder that fails",
+                    ChosenFor::Extract,
+                    ChosenFolder::Failing(rustix::io::Errno::IO, "Unable to open that location: "),
+                ),
+                (
+                    "move to a write-only folder",
+                    ChosenFor::Move,
+                    ChosenFolder::WriteOnly,
+                ),
+                (
+                    "extract to a write-only folder",
+                    ChosenFor::Extract,
+                    ChosenFolder::WriteOnly,
+                ),
+            ] {
+                let (_fixture, work, destination) =
+                    focused_enter_destination_fixture("chosen folder fixture");
+                let archive = work.join("bundle.tar");
+                crate::adapters::write_compression_fixture(
+                    &archive,
+                    &[work.join("photo.txt")],
+                    crate::services::ArchiveFormat::Tar,
+                    None,
+                )
+                .expect("fixture archive");
+                let (view, _overlay, window, events) = open_transfer_browser(&work);
+                let source = work.join("photo.txt");
+                match chosen_for {
+                    ChosenFor::Copy | ChosenFor::Move => view.state.show_transfer_dialog(
+                        vec![transfer_entry(&source)],
+                        matches!(chosen_for, ChosenFor::Move),
+                    ),
+                    ChosenFor::Extract => {
+                        view.state.show_extract_to_dialog(transfer_entry(&archive))
+                    }
+                    ChosenFor::SendTo => {
+                        let root = destination.clone();
+                        view.state.show_send_to_folder_dialog_with_resolver(
+                            "volume:chosen-device".to_owned(),
+                            vec![Location::local(&source)],
+                            Rc::new(move |_| Some(root.clone())),
+                        );
+                    }
+                }
+                let (chooser_window, chooser) = destination_chooser(&window);
+                navigate_destination(&chooser, &destination);
+                wait_until(
+                    || {
+                        chooser
+                            .browser()
+                            .column_snapshot(0)
+                            .is_some_and(|snapshot| !snapshot.loading)
+                            && chooser.browser().column_has_monitor(0)
+                    },
+                    &format!("{case}: the chosen folder's listing and monitor"),
+                );
+                let write_only = matches!(chosen, ChosenFolder::WriteOnly);
+                if write_only {
+                    std::fs::set_permissions(&destination, std::fs::Permissions::from_mode(0o300))
+                        .expect("write-only destination");
+                }
+                let chooser_overlay = chooser_window
+                    .child()
+                    .expect("chooser content")
+                    .downcast::<gtk::Overlay>()
+                    .expect("chooser overlay");
+                let (release, held) = std::sync::mpsc::channel::<()>();
+                let checked = std::sync::Arc::new(std::sync::Mutex::new(None));
+                let seen = checked.clone();
+                let slow = matches!(chosen, ChosenFolder::SlowToAnswer);
+                let _scope = crate::adapters::FsQuirks::install(
+                    destination.parent().expect("fixture root"),
+                    crate::adapters::Quirks {
+                        before: vec![(
+                            crate::adapters::FsOp::FolderStamp,
+                            "destination",
+                            0,
+                            Box::new(move || {
+                                *seen.lock().expect("check thread") =
+                                    Some(crate::util::ui_thread::is_current());
+                                if slow {
+                                    let _released = held.recv();
+                                }
+                            }),
+                        )],
+                        fail: match chosen {
+                            ChosenFolder::Failing(error, _) => {
+                                vec![(crate::adapters::FsOp::FolderStamp, "destination", 0, error)]
+                            }
+                            ChosenFolder::SlowToAnswer | ChosenFolder::WriteOnly => Vec::new(),
+                        },
+                        ..crate::adapters::Quirks::ext4()
+                    },
+                );
+                let started = view.browser().last_started_operation();
+
+                confirm_destination(&chooser_window);
+
+                wait_until(
+                    || checked.lock().expect("check thread").is_some(),
+                    &format!("{case}: the chosen folder to be checked"),
+                );
+                assert_eq!(
+                    *checked.lock().expect("check thread"),
+                    Some(false),
+                    "{case}: the folder is checked off the UI thread"
+                );
+                match chosen {
+                    ChosenFolder::SlowToAnswer => {
+                        for _ in 0..20 {
+                            glib::MainContext::default().iteration(false);
+                        }
+                        assert!(
+                            chooser_window.is_visible()
+                                && !destination_accept(&chooser_window).is_sensitive(),
+                            "{case}: the chooser waits for the folder, open and without a second accept"
+                        );
+                        assert_eq!(
+                            view.browser().last_started_operation(),
+                            started,
+                            "{case}: nothing starts before the folder answers"
+                        );
+                        release.send(()).expect("held check");
+                        wait_until(
+                            || destination.join("photo.txt").exists(),
+                            &format!("{case}: the item to land in the chosen folder"),
+                        );
+                    }
+                    ChosenFolder::Failing(_, message) => {
+                        wait_until(
+                            || {
+                                visible_error_message(&chooser_overlay)
+                                    .is_some_and(|shown| shown.starts_with(message))
+                            },
+                            &format!("{case}: the chooser to say what is wrong"),
+                        );
+                        assert!(
+                            chooser_window.is_visible()
+                                && destination_accept(&chooser_window).is_sensitive(),
+                            "{case}: the chooser stays open for another folder"
+                        );
+                        assert_eq!(view.browser().last_started_operation(), started);
+                        assert!(!destination.join("photo.txt").exists());
+                    }
+                    ChosenFolder::WriteOnly => {
+                        wait_until(
+                            || {
+                                !chooser_window.is_visible()
+                                    && view.browser().last_started_operation() != started
+                            },
+                            &format!("{case}: the chooser to accept the write-only folder"),
+                        );
+                        if matches!(chosen_for, ChosenFor::Extract) {
+                            wait_until(
+                                || {
+                                    events.borrow().iter().any(|event| {
+                                        matches!(
+                                            event,
+                                            crate::app::BrowserEvent::OperationFailed { message, .. }
+                                                if message.starts_with("Could not open extraction destination")
+                                        )
+                                    })
+                                },
+                                &format!(
+                                    "{case}: extraction, which lists its destination, to say so"
+                                ),
+                            );
+                        } else {
+                            wait_until(
+                                || destination.join("photo.txt").exists(),
+                                &format!("{case}: the item to land in the write-only folder"),
+                            );
+                        }
+                    }
+                }
+                if write_only {
+                    std::fs::set_permissions(&destination, std::fs::Permissions::from_mode(0o700))
+                        .expect("readable destination");
+                }
+                view.browser().clear_observer();
+                window.destroy();
+            }
+        },
+    );
+}
+
 #[test]
 fn an_extraction_reloads_its_folder_only_without_a_monitor() {
     use crate::services::{DirectoryChange, OperationEvent};
@@ -1262,6 +1547,10 @@ fn an_extraction_reloads_its_folder_only_without_a_monitor() {
                 wait_until(|| listed(0).len() == 2, "the archive's folder");
                 if active_elsewhere {
                     view.browser().descend(0, Location::local(&other));
+                    wait_until(
+                        || view.browser().location_at(1) == Some(Location::local(&other)),
+                        "the other folder",
+                    );
                     view.browser().set_active_column(1);
                 }
                 let loads = (
@@ -1448,6 +1737,82 @@ fn send_to_fast_copy_shows_transient_success() {
 }
 
 #[test]
+fn send_to_checks_the_device_root_off_the_ui_thread_before_copying() {
+    crate::test_support::gtk_test(
+        "ui::browser::transfer::tests::send_to_checks_the_device_root_off_the_ui_thread_before_copying",
+        || {
+            let SendToToastFixture {
+                _tempdir,
+                view,
+                window,
+                events,
+                source_dir,
+                device,
+                ..
+            } = open_send_to_toast_browser("send-to check fixture", &["a.txt"]);
+            std::fs::create_dir(device.join("Photos")).expect("recent folder");
+            let device_id = "volume:toast-device";
+            for (recent, copied) in [
+                (None, device.join("a.txt")),
+                (Some("Photos"), device.join("Photos/a.txt")),
+            ] {
+                let parked = crate::test_support::parked::Parked::default();
+                let _device = crate::adapters::FsQuirks::install(
+                    &device,
+                    crate::adapters::Quirks {
+                        before: vec![(crate::adapters::FsOp::Access, "*", 0, parked.racer())],
+                        ..crate::adapters::Quirks::default()
+                    },
+                );
+                let device_root = device.clone();
+                let resolve = move |id: &str| (id == device_id).then(|| device_root.clone());
+                let sources = vec![Location::local(source_dir.join("a.txt"))];
+                match recent {
+                    None => view
+                        .state
+                        .send_to_removable_device_with_resolver(device_id, sources, resolve),
+                    Some(recent) => view.state.send_to_recent_destination_with_resolver(
+                        device_id,
+                        Path::new(recent),
+                        sources,
+                        resolve,
+                    ),
+                }
+                wait_until(|| parked.reached(), "the device check");
+                assert_eq!(parked.reached_on_ui_thread(), Some(false), "{recent:?}");
+                assert!(
+                    events.borrow().iter().all(|event| !matches!(
+                        event,
+                        crate::app::BrowserEvent::TransferStarted { .. }
+                    )),
+                    "nothing is copied before the device answers: {recent:?}"
+                );
+                parked.release();
+                wait_until(
+                    || {
+                        copied.exists()
+                            && events.borrow().iter().any(|event| {
+                                matches!(event, crate::app::BrowserEvent::TransferFinished { .. })
+                            })
+                    },
+                    "the copy once the device answered",
+                );
+                events.borrow_mut().clear();
+            }
+            assert_eq!(
+                crate::ui::preferences::PreferenceManager::shared()
+                    .send_to_recent_destinations(device_id)
+                    .first()
+                    .map(PathBuf::as_path),
+                Some(Path::new("Photos"))
+            );
+            view.browser().clear_observer();
+            window.destroy();
+        },
+    );
+}
+
+#[test]
 fn send_to_plural_copy_shows_item_count() {
     crate::test_support::gtk_test(
         "ui::browser::transfer::tests::send_to_plural_copy_shows_item_count",
@@ -1621,8 +1986,11 @@ fn send_to_failure_shows_no_toast() {
                 device,
             } = open_send_to_toast_browser("send-to failure fixture", &["a.txt"]);
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&device, std::fs::Permissions::from_mode(0o555))
-                .expect("read-only device");
+            std::fs::set_permissions(
+                source_dir.join("a.txt"),
+                std::fs::Permissions::from_mode(0o000),
+            )
+            .expect("unreadable source");
             let device_root = device.clone();
             view.state.send_to_removable_device_with_resolver(
                 "volume:toast-device",
@@ -1651,8 +2019,6 @@ fn send_to_failure_shows_no_toast() {
                     .all(|event| !matches!(event, crate::app::BrowserEvent::TransferCompleted)),
                 "no successful completion was reported"
             );
-            std::fs::set_permissions(&device, std::fs::Permissions::from_mode(0o755))
-                .expect("writable device for cleanup");
             view.browser().clear_observer();
             window.destroy();
         },
@@ -1857,6 +2223,7 @@ fn cancelling_an_operation_keeps_the_live_local_listing_visible() {
                     view.browser()
                         .column_snapshot(0)
                         .is_some_and(|snapshot| !snapshot.loading && snapshot.count == 1)
+                        && view.browser().column_has_monitor(0)
                 },
                 "the local listing",
             );
@@ -2186,6 +2553,7 @@ fn transfer_reveal_waits_for_the_live_monitor_instead_of_reloading() {
                     view.browser()
                         .column_snapshot(0)
                         .is_some_and(|snapshot| !snapshot.loading && snapshot.count == 0)
+                        && view.browser().column_has_monitor(0)
                 },
                 "the empty local destination",
             );
@@ -2241,6 +2609,7 @@ fn revealing_an_already_open_local_destination_keeps_its_live_listing() {
                     view.browser()
                         .column_snapshot(0)
                         .is_some_and(|snapshot| !snapshot.loading && snapshot.count == 1)
+                        && view.browser().column_has_monitor(0)
                 },
                 "the local destination listing",
             );
@@ -2927,6 +3296,233 @@ fn redo_move_replays_the_undone_transfer() {
     );
 }
 
+fn moved_for_undo(
+    view: &crate::ui::browser::BrowserView,
+    root: &Path,
+    name: &str,
+    make: impl FnOnce(&Path),
+) -> (std::path::PathBuf, std::path::PathBuf) {
+    let (original, current) = (root.join("original"), root.join("current"));
+    std::fs::create_dir_all(&original).expect("original dir");
+    std::fs::create_dir_all(&current).expect("current dir");
+    let (original, current) = (original.join(name), current.join(name));
+    make(&original);
+    view.state.start_transfer(
+        Location::local(current.parent().expect("current dir")),
+        vec![Location::local(&original)],
+        true,
+    );
+    wait_until(
+        || current.symlink_metadata().is_ok() && original.symlink_metadata().is_err(),
+        "the move to complete",
+    );
+    wait_until(
+        || view.browser().pending_undo_move().is_some(),
+        "the move undo to become pending",
+    );
+    (original, current)
+}
+
+#[test]
+fn an_undo_checks_its_items_off_the_ui_thread_and_a_cancelled_check_keeps_it() {
+    crate::test_support::gtk_test(
+        "ui::browser::transfer::tests::an_undo_checks_its_items_off_the_ui_thread_and_a_cancelled_check_keeps_it",
+        || {
+            for cancelled in [false, true] {
+                let row = format!("cancelled {cancelled}");
+                let fixture = tempfile::tempdir().expect("undo fixture");
+                let (view, overlay, window) = conflict_view();
+                let (original, current) =
+                    moved_for_undo(&view, fixture.path(), "notes.txt", |path| {
+                        std::fs::write(path, b"notes").expect("moved file");
+                    });
+                let browser = view.browser();
+                let (release, held) = std::sync::mpsc::channel::<()>();
+                let checked = std::sync::Arc::new(std::sync::Mutex::new(None));
+                let seen = checked.clone();
+                let _scope = crate::adapters::FsQuirks::install(
+                    fixture.path(),
+                    crate::adapters::Quirks {
+                        before: vec![(
+                            crate::adapters::FsOp::Stat,
+                            "notes.txt",
+                            0,
+                            Box::new(move || {
+                                *seen.lock().expect("check thread") =
+                                    Some(crate::util::ui_thread::is_current());
+                                let _released = held.recv();
+                            }),
+                        )],
+                        ..crate::adapters::Quirks::ext4()
+                    },
+                );
+                let started = browser.last_started_operation();
+                let (generation, records) = browser.pending_undo_move().expect("pending undo");
+
+                assert!(view.state.undo_move(generation, records.clone()));
+                wait_until(
+                    || checked.lock().expect("check thread").is_some(),
+                    &format!("{row}: the undo to check its items"),
+                );
+                assert_eq!(
+                    *checked.lock().expect("check thread"),
+                    Some(false),
+                    "{row}: the items are checked off the UI thread"
+                );
+                assert!(
+                    view.state.undo_move(generation, records),
+                    "{row}: a repeated undo is taken while the first one checks"
+                );
+                wait_until(
+                    || {
+                        transfer_row_shown(&overlay, true)
+                            && visible_texts(&overlay)
+                                .iter()
+                                .any(|text| text == "Preparing items…")
+                    },
+                    &format!("{row}: the undo to show it prepares its items"),
+                );
+                assert_eq!(
+                    browser.last_started_operation(),
+                    started,
+                    "{row}: nothing moves while the items are checked"
+                );
+                if cancelled {
+                    click_button(&overlay, "Cancel");
+                    wait_until(
+                        || !transfer_row_shown(&overlay, true),
+                        &format!("{row}: the preparing undo to go away"),
+                    );
+                    release.send(()).expect("held check");
+                    for _ in 0..20 {
+                        glib::MainContext::default().iteration(false);
+                    }
+                    assert!(
+                        current.exists() && !original.exists(),
+                        "{row}: a cancelled undo moves nothing"
+                    );
+                    let (generation, records) = browser
+                        .pending_undo_move()
+                        .expect("a cancelled undo stays in the history");
+                    assert!(view.state.undo_move(generation, records));
+                } else {
+                    release.send(()).expect("held check");
+                }
+                wait_until(
+                    || original.exists() && !current.exists(),
+                    &format!("{row}: the undo to move the item back"),
+                );
+                window.destroy();
+            }
+        },
+    );
+}
+
+#[test]
+fn an_undo_tries_items_it_cannot_rule_out_and_drops_only_items_proven_gone() {
+    crate::test_support::gtk_test(
+        "ui::browser::transfer::tests::an_undo_tries_items_it_cannot_rule_out_and_drops_only_items_proven_gone",
+        || {
+            for (case, make, failed_check, undone) in [
+                (
+                    "a dangling link",
+                    (|path: &Path| {
+                        std::os::unix::fs::symlink("nowhere", path).expect("dangling link")
+                    }) as fn(&Path),
+                    None,
+                    true,
+                ),
+                (
+                    "a check of the item that fails",
+                    |path: &Path| std::fs::write(path, b"notes").expect("moved file"),
+                    Some(0),
+                    true,
+                ),
+                (
+                    "a check of its destination that fails",
+                    |path: &Path| std::fs::write(path, b"notes").expect("moved file"),
+                    Some(1),
+                    true,
+                ),
+                (
+                    "an item deleted since",
+                    |path: &Path| std::fs::write(path, b"notes").expect("moved file"),
+                    None,
+                    false,
+                ),
+            ] {
+                let fixture = tempfile::tempdir().expect("undo fixture");
+                let (view, overlay, window) = conflict_view();
+                let (original, current) = moved_for_undo(&view, fixture.path(), "notes.txt", make);
+                if !undone {
+                    std::fs::remove_file(&current).expect("item deleted since the move");
+                }
+                let checked = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let seen = checked.clone();
+                let _scope = crate::adapters::FsQuirks::install(
+                    fixture.path(),
+                    crate::adapters::Quirks {
+                        before: vec![(
+                            crate::adapters::FsOp::Stat,
+                            "notes.txt",
+                            0,
+                            Box::new(move || seen.store(true, std::sync::atomic::Ordering::SeqCst)),
+                        )],
+                        fail: failed_check
+                            .map(|skipped| {
+                                (
+                                    crate::adapters::FsOp::Stat,
+                                    "notes.txt",
+                                    skipped,
+                                    rustix::io::Errno::IO,
+                                )
+                            })
+                            .into_iter()
+                            .collect(),
+                        ..crate::adapters::Quirks::ext4()
+                    },
+                );
+                let browser = view.browser();
+                let started = browser.last_started_operation();
+                let (generation, records) = browser.pending_undo_move().expect("pending undo");
+
+                assert!(view.state.undo_move(generation, records));
+
+                wait_until(
+                    || checked.load(std::sync::atomic::Ordering::SeqCst),
+                    &format!("{case}: the undo to check the item"),
+                );
+                if undone {
+                    wait_until(
+                        || {
+                            original.symlink_metadata().is_ok()
+                                && current.symlink_metadata().is_err()
+                        },
+                        &format!("{case}: the undo to move the item back"),
+                    );
+                    assert!(
+                        !visible_texts(&overlay)
+                            .iter()
+                            .any(|text| text == "File already exists"),
+                        "{case}: a destination that cannot be ruled out is not replaced"
+                    );
+                } else {
+                    wait_until(
+                        || browser.pending_undo_move().is_none(),
+                        &format!("{case}: the undo to be dropped"),
+                    );
+                    assert_eq!(
+                        browser.last_started_operation(),
+                        started,
+                        "{case}: nothing to move back"
+                    );
+                }
+                window.destroy();
+            }
+        },
+    );
+}
+
 #[test]
 fn drop_open_preference_applies_before_settings_and_live_across_views() {
     crate::test_support::gtk_test(
@@ -3000,7 +3596,10 @@ fn drop_open_preference_applies_before_settings_and_live_across_views() {
                         } else {
                             Location::local(fixture.path())
                         };
-                        assert_eq!(view.browser().active_location(), Some(expected));
+                        wait_until(
+                            || view.browser().active_location() == Some(expected.clone()),
+                            "the revealed folder",
+                        );
                         if enabled && mode == BrowserMode::Columns {
                             assert_eq!(
                                 view.browser().location_at(0),

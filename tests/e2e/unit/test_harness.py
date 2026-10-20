@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: MIT
 
+import json
 import os
 import signal
 import sys
 from pathlib import Path
-from unittest.mock import Mock, call
+from unittest.mock import MagicMock, Mock, call
 
 import pytest
 from PIL import Image
@@ -14,6 +15,7 @@ from harness.application import Application, binary_path
 from harness.browser import Strata
 from harness.environment import process_environment
 from harness.fixtures import FixtureTree
+from harness.portal import open_file_request
 from harness.process import ManagedProcess, terminate
 from harness.tree import Bounds, Node
 from tests.e2e.scenarios.test_marquee_scrolling import (
@@ -406,6 +408,69 @@ def test_application_start_failure_stops_process(monkeypatch, tmp_path):
         application.start()
     stop.assert_called_once_with(process.popen)
     assert application.process is None
+
+
+def _start_and_stop_application(monkeypatch, tmp_path, fixture):
+    monkeypatch.setattr("harness.application.binary_path", lambda: Path("/test/strata"))
+    monkeypatch.setattr("harness.application.terminate", Mock())
+    monkeypatch.setattr(Application, "_await_window", Mock())
+    application = Application(
+        display=Mock(environment={}),
+        environment=Mock(root=tmp_path, variables=lambda: {}),
+        location=fixture,
+    )
+    application.start()
+    application.stop()
+    return [str(fixture)]
+
+
+def _answer_portal_request(monkeypatch, tmp_path, fixture):
+    monkeypatch.setattr("harness.portal.Gio", MagicMock())
+    monkeypatch.setattr("harness.portal.terminate", Mock())
+    monkeypatch.setattr(tree, "wait_until", Mock())
+    with open_file_request(
+        Path("/test/strata"),
+        Mock(environment={"DBUS_SESSION_BUS_ADDRESS": "unix:path=/bus"}),
+        Mock(root=tmp_path, variables=lambda: {}),
+        Mock(root=fixture),
+        title="Open",
+        options={},
+        browser_mode="list",
+    ):
+        pass
+    return ["--portal"]
+
+
+@pytest.mark.parametrize(
+    "launch_strata", [_start_and_stop_application, _answer_portal_request], ids=["application", "portal"]
+)
+def test_the_audit_traces_each_strata_launch_and_keeps_its_launch_record(monkeypatch, tmp_path, launch_strata):
+    spawn = Mock(return_value=Mock(log_path=tmp_path / "strata.log"))
+    (tmp_path / "strata.log").write_text("UI thread stalled 300 ms in statx()\n")
+    monkeypatch.setattr(ManagedProcess, "spawn", spawn)
+    monkeypatch.setenv("PYTEST_CURRENT_TEST", "tests/e2e/scenarios/test_x.py::test_y (setup)")
+    monkeypatch.setenv("STRATA_UI_STALL_MS", "250")
+    monkeypatch.delenv("STRATA_E2E_MAIN_IO", raising=False)
+    fixture = tmp_path / "fixture"
+
+    arguments = launch_strata(monkeypatch, tmp_path, fixture)
+    assert spawn.call_args.args[1] == ["/test/strata", *arguments]
+    assert spawn.call_args.kwargs["env"]["STRATA_UI_STALL_MS"] == "250"
+
+    run = tmp_path / "run"
+    monkeypatch.setenv("STRATA_E2E_MAIN_IO", str(run))
+    launch_strata(monkeypatch, tmp_path, fixture)
+    launch = run / "tests-e2e-scenarios-test_x.py--test_y" / "launch-1"
+    command = spawn.call_args.args[1]
+    assert Path(command[0]).name == "strace"
+    assert command[1:3] == ["-o", str(launch / "trace")]
+    assert command[-1 - len(arguments):] == ["/test/strata", *arguments]
+    meta = json.loads((launch / "meta.json").read_text())
+    assert (meta["scenario"], meta["fixture"], meta["binary"]) == (
+        "tests/e2e/scenarios/test_x.py::test_y", str(fixture), "/test/strata"
+    )
+    assert meta["ready"] >= meta["started"]
+    assert (launch / "strata.log").read_text() == "UI thread stalled 300 ms in statx()\n"
 
 
 def test_terminate_signals_group_after_leader_exits(monkeypatch):

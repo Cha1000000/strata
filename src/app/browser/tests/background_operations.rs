@@ -263,6 +263,17 @@ fn parked_delete_finishes_without_cancelling_foreground_and_respects_permanent_u
         let events = Rc::new(RefCell::new(Vec::new()));
         let observed = events.clone();
         browser.observe(move |event| observed.borrow_mut().push(event.clone()));
+        let trashed = (!permanent).then(|| folder_identity(7, 1));
+        if let Some(identity) = trashed {
+            operations.emit(
+                id,
+                OperationEvent::ItemTrashed {
+                    request_id: id,
+                    location: deleted.clone(),
+                    identity,
+                },
+            );
+        }
         operations.emit(
             id,
             OperationEvent::DeleteProgress {
@@ -281,14 +292,19 @@ fn parked_delete_finishes_without_cancelling_foreground_and_respects_permanent_u
         );
         assert!(browser.is_current_operation(foreground));
         assert!(!operations.cancelled(foreground));
-        assert_eq!(location_changes(&events.borrow()), [removed(&deleted)]);
+        assert_eq!(
+            location_changes(&events.borrow()),
+            [LocationChange::Removed {
+                location: deleted.clone(),
+                trash_identity: trashed,
+            }]
+        );
         assert_eq!(
             pending_undo_entry(),
-            if permanent {
-                None
-            } else {
-                Some(UndoEntry::Trash(vec![deleted]))
-            }
+            trashed.map(|identity| UndoEntry::Trash {
+                locations: vec![deleted.clone()],
+                originals: HashMap::from([(deleted, identity)]),
+            })
         );
     }
 }
@@ -537,8 +553,17 @@ fn a_background_merge_records_what_it_placed_for_undo() {
         (created.clone(), PlacedSnapshot::new(())),
         (overwritten.clone(), PlacedSnapshot::new(())),
     ]);
+    let original = folder_identity(7, 1);
     assert!(browser.background_file_operation(id));
 
+    operations.emit(
+        id,
+        OperationEvent::ItemTrashed {
+            request_id: id,
+            location: overwritten.clone(),
+            identity: original,
+        },
+    );
     for (created, overwritten, placed) in [
         (
             vec![created.clone()],
@@ -570,8 +595,8 @@ fn a_background_merge_records_what_it_placed_for_undo() {
         pending_undo_entry(),
         Some(UndoEntry::Merge {
             created: vec![created],
-            overwritten: vec![overwritten],
-            originals: HashMap::new(),
+            overwritten: vec![overwritten.clone()],
+            originals: HashMap::from([(overwritten, original)]),
             placed,
         })
     );

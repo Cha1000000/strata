@@ -5,10 +5,12 @@ mod tests;
 
 use std::{
     fmt,
+    path::Path,
     rc::Rc,
     time::{Duration, SystemTime},
 };
 
+use super::{ItemIdentity, Proof};
 use crate::model::{
     FileEntry, GIO_URI_BUILD_FLAGS, GIO_URI_PARSE_FLAGS, Location, MetadataValue,
     uri_contains_credentials,
@@ -32,6 +34,7 @@ pub struct DirectoryRequest {
     /// Complete camera Photos scans use `Duration::MAX` to disable the deadline;
     /// their `max_entries` is `usize::MAX`. Bounded peeks retain finite limits.
     pub time_budget: Duration,
+    pub background: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -53,6 +56,17 @@ pub enum LocationValidationError {
     EmbeddedCredential,
     /// Already localized by [`backend_unavailable_message`].
     BackendUnavailable(String),
+}
+
+impl From<std::io::Error> for LocationValidationError {
+    fn from(error: std::io::Error) -> Self {
+        match error.kind() {
+            std::io::ErrorKind::NotFound => Self::Missing,
+            std::io::ErrorKind::PermissionDenied => Self::Inaccessible,
+            std::io::ErrorKind::NotADirectory => Self::NotDirectory,
+            _ => Self::Unavailable(io_error_detail(&error)),
+        }
+    }
 }
 
 impl fmt::Display for LocationValidationError {
@@ -139,7 +153,7 @@ pub(crate) fn io_error_message(error: &std::io::Error) -> String {
     }
 }
 
-const UNEXPECTED_SYSTEM_ERROR: &str = "An unexpected system error occurred";
+pub(crate) const UNEXPECTED_SYSTEM_ERROR: &str = "An unexpected system error occurred";
 
 pub(crate) const INVALID_NAME_REASON: &str = "The name isn\u{2019}t valid at this location";
 
@@ -379,11 +393,106 @@ pub enum DirectoryChange {
     Rescan,
 }
 
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub enum MountToken {
+    Native(u64),
+    Remote(String),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct DirectoryStamp {
+    pub modified: (i64, u32),
+    pub changed: Option<(i64, u32)>,
+    pub identity: Option<ItemIdentity>,
+    pub mount: Option<MountToken>,
+    pub outside_writers: bool,
+    pub coarse_window: Option<Duration>,
+    pub daemon_cache: Option<Duration>,
+    pub read_at: SystemTime,
+}
+
+impl DirectoryStamp {
+    pub fn moved_since(&self, baseline: &Self) -> bool {
+        self.modified != baseline.modified
+            || self.changed != baseline.changed
+            || self.replaced(baseline)
+    }
+
+    pub fn replaced(&self, baseline: &Self) -> bool {
+        match (&self.identity, &baseline.identity) {
+            (Some(identity), Some(baseline)) => identity.proof(baseline) == Proof::Different,
+            (None, None) => false,
+            _ => true,
+        }
+    }
+
+    fn settles_at(&self, window: Duration) -> Option<SystemTime> {
+        let latest = self
+            .changed
+            .map_or(self.modified, |changed| changed.max(self.modified));
+        u64::try_from(latest.0).ok().and_then(|seconds| {
+            (SystemTime::UNIX_EPOCH + Duration::new(seconds, latest.1)).checked_add(window)
+        })
+    }
+
+    pub fn may_hide_changes(&self) -> bool {
+        let Some(window) = self.coarse_window else {
+            return false;
+        };
+        self.settles_at(window)
+            .is_none_or(|settled| self.read_at < settled)
+    }
+
+    pub fn confirm_after(&self) -> Option<Duration> {
+        let whole_seconds =
+            self.modified.1 == 0 && self.changed.is_none_or(|changed| changed.1 == 0);
+        let window = self
+            .coarse_window
+            .filter(|_| whole_seconds && self.may_hide_changes())?;
+        let settles = self.settles_at(window).map_or(window, |settled| {
+            settled.duration_since(self.read_at).unwrap_or_default()
+        });
+        Some(settles.max(self.daemon_cache.unwrap_or_default()))
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum Responsiveness {
+    #[default]
+    Answering,
+    Stalled,
+    NotResponding,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Watching {
+    Live,
+    Unavailable,
+}
+
+#[derive(Clone, Debug)]
+pub enum StampAnswer {
+    Stamp(Box<DirectoryStamp>),
+    Missing,
+    Inaccessible,
+    Unreachable,
+    Unresponsive,
+    Unsupported,
+}
+
 #[derive(Clone, Debug)]
 pub enum DirectoryEvent {
+    Stamp {
+        request_id: RequestId,
+        stamp: Box<DirectoryStamp>,
+    },
     Batch {
         request_id: RequestId,
         entries: Vec<FileEntry>,
+    },
+    ListingDigest {
+        request_id: RequestId,
+        names_digest: u64,
     },
     Finished {
         request_id: RequestId,
@@ -404,6 +513,7 @@ pub enum DirectoryEvent {
     Failed {
         request_id: RequestId,
         message: String,
+        refused: bool,
     },
     /// Size/mtime arrivals for already-listed entries, positioned by the receiver
     /// against stable locations. Zero or more chunks, then exactly one `MetadataFinished`
@@ -461,26 +571,6 @@ pub struct MetadataRequest {
     pub time_budget: Duration,
 }
 
-/// What a folder is on its filesystem, which a rename does not change.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct LocationIdentity {
-    pub device: u64,
-    pub inode: u64,
-    pub created: Option<SystemTime>,
-}
-
-impl LocationIdentity {
-    /// Filesystems reuse a deleted folder's inode, so a known birth time must agree too.
-    pub fn matches(&self, other: &Self) -> bool {
-        self.device == other.device
-            && self.inode == other.inode
-            && match (self.created, other.created) {
-                (Some(created), Some(other)) => created == other,
-                _ => true,
-            }
-    }
-}
-
 /// A cancellable directory load. Dropping it cancels any unfinished provider work.
 pub struct LoadHandle {
     cancel: Option<Box<dyn FnOnce()>>,
@@ -513,6 +603,10 @@ pub trait FileSource {
     /// This runs on the caller's thread, including for indexed search results.
     fn allows_entry(&self, _entry: &FileEntry) -> bool {
         true
+    }
+
+    fn confined_to(&self) -> Option<&Path> {
+        None
     }
 
     fn validate_location(&self, location: &Location) -> Result<(), LocationValidationError>;
@@ -557,14 +651,47 @@ pub trait FileSource {
         None
     }
 
-    /// Identifies the folder at `location` across renames. Emits `None` when the provider
-    /// cannot, or nothing is there.
-    fn query_location_identity(
+    fn start_watch(
         &self,
-        _location: Location,
-        emit: Rc<dyn Fn(Option<LocationIdentity>)>,
+        location: Location,
+        include_hidden: bool,
+        notify: Rc<dyn Fn(DirectoryChange)>,
+        report: Rc<dyn Fn(Watching)>,
     ) -> LoadHandle {
-        emit(None);
+        match self.watch(location, include_hidden, notify) {
+            Some(watch) => {
+                report(Watching::Live);
+                watch
+            }
+            None => {
+                report(Watching::Unavailable);
+                LoadHandle::new(|| {})
+            }
+        }
+    }
+
+    fn probe_stamp(&self, _location: Location, emit: Rc<dyn Fn(StampAnswer)>) -> LoadHandle {
+        emit(StampAnswer::Unsupported);
+        LoadHandle::new(|| {})
+    }
+
+    fn responsiveness(&self, _location: &Location) -> Responsiveness {
+        Responsiveness::Answering
+    }
+
+    fn follow_responsiveness(&self, _notify: Rc<dyn Fn()>) -> LoadHandle {
+        LoadHandle::new(|| {})
+    }
+
+    /// `locations` must share one mount: the check runs on the first one's lane.
+    fn check_stamps(
+        &self,
+        locations: Vec<Location>,
+        emit: Rc<dyn Fn(Location, StampAnswer)>,
+    ) -> LoadHandle {
+        for location in locations {
+            emit(location, StampAnswer::Unsupported);
+        }
         LoadHandle::new(|| {})
     }
 
@@ -573,7 +700,7 @@ pub trait FileSource {
     fn find_by_identity(
         &self,
         _parent: Location,
-        _identity: LocationIdentity,
+        _identity: ItemIdentity,
         emit: Rc<dyn Fn(Option<Location>)>,
     ) -> LoadHandle {
         emit(None);

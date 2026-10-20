@@ -141,7 +141,8 @@ the invoking user. Minimal generated passwd/group files provide the invoking
 UID/GID to D-Bus, so one published environment works across local user IDs without
 rebuilding it or mounting the host's account database.
 The image includes bubblewrap for sandboxed thumbnail decoding, FFmpeg/ffprobe,
-and GTK's GStreamer media backend with the base/good/libav plugins. Rust media
+GTK's GStreamer media backend with the base/good/libav plugins, and strace for
+the opt-in [main-thread I/O audit](#main-thread-io-audit). Rust media
 regressions exercise actual normalization, playback, and long-source duration
 limits rather than skipping when optional host tools are missing. These packages
 come from the dated Arch snapshot. The accessibility patch is test-only and does
@@ -563,6 +564,82 @@ startup/collection error or killed process. Logs and JUnit reports are
 saved in `target/e2e-mutations`. The script restores source changes
 afterwards. Run it after changing the harness, and when adding a scenario
 for a workflow that does not have a mutation yet.
+
+## Main-thread I/O audit
+
+Strata must not touch the disk on the GTK main thread (see
+[`docs/architecture.md`](architecture.md)). Runtime asserts catch calls that go
+through Strata's own seams; two opt-in tools catch the rest, including GLib and
+GTK internals and closes triggered by drops. Neither is a CI job: run them before
+pushing a change that moves work on or off the UI thread.
+
+`scripts/trace-main-io.py` runs an E2E selection (every scenario by default)
+through the canonical runner with each Strata launch wrapped in `strace`: the
+application, the portal backend and the second instances some scenarios start.
+Harness code that starts Strata goes through `harness.main_io.launch`. Only the
+initial thread, which runs GTK's main loop, is traced, so workers keep their
+normal timing:
+
+```bash
+./scripts/trace-main-io.py                                  # every scenario
+./scripts/trace-main-io.py tests/e2e/scenarios/test_trash.py
+./scripts/trace-main-io.py --stacks -k 'rename and not visual'
+./scripts/trace-main-io.py --analyze target/main-io/<run>   # classify again
+```
+
+Traces, each launch's log and the report go to `target/main-io/<run>/`. Each file
+call is classified by its path, after resolving descriptors and `*at` folders:
+
+- **user**: the scenario's fixture tree, `HOME`, the Trash, the user's
+  `gtksourceview-5` and `gstreamer-1.0` folders, `/tmp`, `/run/media`, `/media`,
+  `/mnt` and GVfs mounts. Always a violation.
+- **settings**: Strata's own settings, state, caches and runtime files (`strata`
+  under the XDG folders, the shared thumbnail cache, GTK bookmarks, portal files,
+  Omarchy's theme state and Strata's install folder). A violation unless a
+  documented exception below covers it.
+- **toolkit**: system paths and the toolkit's own files (fonts, icons, Mesa,
+  audio configuration, GTK settings, MIME associations, recently
+  used files, the rest of `XDG_RUNTIME_DIR`, the launch's `XDG_DATA_DIRS`, pipes,
+  sockets and event descriptors). Ignored.
+- **unclassified**: anything else, reported so new paths get a deliberate
+  category.
+
+A metadata call (`stat`, `access`, `readlink`) on a folder above a settings or
+toolkit place takes that place's category, because path walks and `mkdir -p`
+stat every ancestor; the XDG folders themselves belong to the toolkit. Each call
+is a read, a write or, for `inotify_add_watch`, a watch, so no read exception
+covers a file monitor. The phase is startup until the harness sees the first
+window (the chooser for the portal backend), then running. The script exits
+non-zero when it finds a violation. `tests/e2e/main-io-allowlist.toml` holds
+only documented exceptions, each with its reason; the script refuses entries for
+user paths. The documented exceptions are:
+
+- Strata's reads of its settings and state at startup, which stay synchronous.
+- The bundled font, which Strata writes at startup and fontconfig reads whenever
+  it lays out text.
+- GIO's checks of an application's program while it lists or launches
+  applications (`GDesktopAppInfo`), a toolkit exception.
+
+`--stacks` adds the Strata frames of every reported call, named from the binary's
+symbol table; it leaves plain `read` and `write` untraced and is slow, so use it
+on a selection.
+
+Limits: page faults on mapped files and waits on another thread, such as a
+synchronous D-Bus call or a mutex held by a worker, make no traced call. The stall
+watchdog covers those. Set `STRATA_UI_STALL_MS` (for example `250`) to start a
+thread that posts to the main context every 100 ms; when the main loop has not run
+it within the limit, Strata logs the call the UI thread is blocked in, read from
+`/proc`:
+
+```text
+UI thread stalled 250 ms in openat("/mnt/nas/folder") wchan=…
+UI thread ran again after 2400 ms
+```
+
+The watchdog is off unless the variable is set. The E2E runner forwards it to
+every Strata launch, and `--stall-ms` passes it to an audit run, whose report
+lists the logged stalls per scenario. Debug builds stall at start-up while the
+first window is built, and more so under `strace`.
 
 ## In CI
 

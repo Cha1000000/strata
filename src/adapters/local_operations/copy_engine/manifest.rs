@@ -26,21 +26,22 @@ use rustix::{
     io::Errno,
 };
 
-use super::{Failure, Identifies, Mount, lock};
+use super::{Failure, Mount, lock, restrictive};
 use crate::{
     adapters::{
         local_operations::{
             cancelled_local_operation,
-            deletion::{bounded_local_worker_count, local_device_is_rotational},
+            deletion::bounded_local_worker_count,
             fs_ops::{Entry, EntryStat, FsOps, OffMain},
             io_error,
-            native_fs::LocalFileIdentity,
+            leftovers::{self, Deadline, Refused},
+            native_fs::{self, LocalFileIdentity},
             translated_io_error,
             work_queue::{self, Group, Job, WorkQueue},
         },
-        volume::CoarseTimes,
+        volume::{CoarseTimes, Family},
     },
-    services::KeptCause,
+    services::{Attributes, IdentityTraits, InodeNumbers, KeptCause, Proof},
 };
 
 /// The link count each name deletions removed of a file with several names
@@ -48,7 +49,30 @@ use crate::{
 /// as its items may hold names of one file. Those counts tell which
 /// removals followed a snapshot: the ones at or below its count.
 #[derive(Default)]
-pub(in crate::adapters::local_operations) struct Unlinks(Mutex<HashMap<(u64, u64), Vec<u64>>>);
+pub(in crate::adapters::local_operations) struct Unlinks {
+    unlinked: Mutex<HashMap<(u64, u64), Unlinked>>,
+    leftovers: Deadline,
+}
+
+impl Unlinks {
+    pub(in crate::adapters::local_operations) fn leftovers(&self) -> &Deadline {
+        &self.leftovers
+    }
+}
+
+#[derive(Default)]
+struct Unlinked {
+    counts: Vec<u64>,
+    left: Option<(i64, u32)>,
+}
+
+impl Unlinked {
+    fn since(&self, nlink: u64) -> (u64, Option<(i64, u32)>) {
+        let since = self.counts.iter().filter(|&&count| count <= nlink).count() as u64;
+        let latest_followed = self.counts.last().is_some_and(|&count| count <= nlink);
+        (since, self.left.filter(|_| latest_followed))
+    }
+}
 
 /// The time tests pretend it is, which waits move on instead of sleeping.
 #[cfg(test)]
@@ -67,7 +91,7 @@ pub(in crate::adapters::local_operations) fn now() -> SystemTime {
     SystemTime::now()
 }
 
-pub(super) fn sleep(duration: Duration) {
+pub(in crate::adapters::local_operations) fn sleep(duration: Duration) {
     #[cfg(test)]
     if let Some(pretended) = lock(&TEST_NOW).as_mut() {
         *pretended += duration;
@@ -122,17 +146,9 @@ pub(super) struct Unsettled {
 
 pub(super) fn unsettled(stat: &EntryStat, mount: &Mount, started: SystemTime) -> Option<Unsettled> {
     let (seconds, nanoseconds) = stat.mtime;
-    // A time with no fraction of a second may come from a filesystem as
-    // coarse as FAT's that the mount does not show, such as one a server
-    // shares.
     let coarse = mount
         .coarse_times
-        .or_else(|| {
-            (nanoseconds == 0).then_some(CoarseTimes {
-                window: Duration::from_secs(2),
-                stamped_here: false,
-            })
-        })
+        .or_else(|| CoarseTimes::whole_second(nanoseconds))
         .or_else(|| mount.family.coarse_clock(super::data::kernel()))?;
     let modified =
         UNIX_EPOCH.checked_add(Duration::new(u64::try_from(seconds).ok()?, nanoseconds))?;
@@ -202,11 +218,21 @@ impl SourceSnapshot {
     }
 
     /// Removing a name changes the ctime and link count of the others.
-    fn holds(&self, current: &EntryStat, stable_inodes: bool, unlinked: u64) -> bool {
-        let same = current.identity.may_be(&self.identity)
-            && current.size == self.size
-            && current.mtime == self.mtime;
-        if !stable_inodes {
+    fn holds(
+        &self,
+        current: &EntryStat,
+        traits: IdentityTraits,
+        (unlinked, left): (u64, Option<(i64, u32)>),
+    ) -> bool {
+        let recorded = Attributes {
+            size: self.size,
+            mtime: self.mtime,
+            ctime: None,
+        };
+        let same = native_fs::compare(traits, self.identity, Some(recorded), current)
+            == Proof::Same
+            && (current.size, current.mtime) == (self.size, self.mtime);
+        if !counts_links(traits) {
             // Nothing tells which names of a file this deletion removed. Where
             // times are as coarse as FAT's, only a birth time tells a file put
             // in its place apart.
@@ -214,10 +240,17 @@ impl SourceSnapshot {
         }
         // Every change to an entry moves its change time; the identity and
         // link count are defence in depth.
-        same && current.identity == self.identity
-            && current.nlink + unlinked == self.nlink
-            && (current.ctime == self.ctime || unlinked > 0)
+        same && current.nlink + unlinked == self.nlink
+            && match unlinked {
+                0 => current.ctime == self.ctime,
+                _ if traits.numbers == InodeNumbers::Renewed => left == Some(current.ctime),
+                _ => left.is_none_or(|left| current.ctime == left),
+            }
     }
+}
+
+fn counts_links(traits: IdentityTraits) -> bool {
+    traits.numbers != InodeNumbers::Renewed || traits.made_up_births
 }
 
 pub(super) fn changed(before: &EntryStat, after: &EntryStat) -> bool {
@@ -402,6 +435,14 @@ impl State {
         self.size == stat.size && self.mtime == stat.mtime
     }
 
+    pub(super) fn attributes(&self) -> Attributes {
+        Attributes {
+            size: self.size,
+            mtime: self.mtime,
+            ctime: None,
+        }
+    }
+
     /// Where only the type tells the copy, a file of another size put in its
     /// place keeps the state the copy was written with.
     pub(super) fn settle(&mut self, stat: &EntryStat) {
@@ -452,6 +493,10 @@ impl Ownership {
     ) -> Self {
         self.states.extend(states);
         self
+    }
+
+    pub(in crate::adapters::local_operations) fn attributes(&self) -> Option<Attributes> {
+        self.states.get(Path::new("")).map(State::attributes)
     }
 
     pub(super) fn of(stat: &EntryStat) -> Self {
@@ -541,28 +586,28 @@ impl Ownership {
 
     /// A file rewritten in place, or another one given its inode number and
     /// birth time, shows only in its size or modification time, and within
-    /// one tick of a coarse clock only in its contents. Where the mount
-    /// numbers an evicted entry afresh, the type and birth time stand in for
-    /// the inode number, for a file or link only beside its recorded size and
-    /// time, and where renames reset a folder's birth time, a folder's type
-    /// alone.
+    /// one tick of a coarse clock only in its contents.
     fn holds(
         &self,
         fs: &dyn FsOps,
         (at, path): (Entry<'_>, &Path),
         stat: &EntryStat,
-        identifies: Identifies,
+        traits: IdentityTraits,
     ) -> bool {
         let Some(identity) = self.identity_at(path) else {
             return false;
         };
         let state = self.states.get(path);
-        let same = if identifies.inodes || (has_state(identity.kind) && state.is_none()) {
-            stat.identity == identity
-        } else if identity.kind == FileType::Directory && !identifies.folder_births {
-            stat.kind == identity.kind
+        let exact = stat.identity == identity;
+        let same = if has_state(identity.kind) && state.is_none() {
+            exact
         } else {
-            stat.identity.may_be(&identity)
+            let attributes = native_fs::beside_birth(identity, state.map(State::attributes));
+            match native_fs::compare(traits, identity, attributes, stat) {
+                Proof::Same => true,
+                Proof::Different => false,
+                Proof::Unproven => exact || native_fs::birth_reset_folder(traits, identity, stat),
+            }
         };
         same && state.is_none_or(|state| {
             state.holds(stat)
@@ -572,12 +617,23 @@ impl Ownership {
         })
     }
 
+    pub(in crate::adapters::local_operations) fn discard(
+        &self,
+        fs: &dyn FsOps,
+        at: Entry<'_>,
+    ) -> bool {
+        self.identity
+            .is_some_and(|identity| identity.kind != FileType::Directory)
+            && self.stays(fs, at)
+            && matches!(fs.unlink(at, AtFlags::empty()), Ok(()) | Err(Errno::NOENT))
+    }
+
     pub(super) fn stays(&self, fs: &dyn FsOps, at: Entry<'_>) -> bool {
         let Ok(stat) = fs.stat(at, true) else {
             return false;
         };
-        let identifies = Mount::identifies(fs, at.dir);
-        if !self.holds(fs, (at, Path::new("")), &stat, identifies) {
+        let traits = Mount::new(fs, at.dir).identity_now(fs, at.dir);
+        if !self.holds(fs, (at, Path::new("")), &stat, traits) {
             return false;
         }
         if self.descendants.is_empty() {
@@ -602,7 +658,7 @@ impl Ownership {
             };
             let at = Entry::new(&dir, name);
             fs.stat(at, true)
-                .is_ok_and(|stat| self.holds(fs, (at, path), &stat, identifies))
+                .is_ok_and(|stat| self.holds(fs, (at, path), &stat, traits))
         })
     }
 }
@@ -955,7 +1011,17 @@ pub(super) fn remove(
     unlinks: Arc<Unlinks>,
     cancelled: Arc<AtomicBool>,
 ) -> Removed {
-    walk(fs, parent, root, unlinks, cancelled, false)
+    walk(fs, parent, root, unlinks, cancelled, false, false)
+}
+
+pub(super) fn remove_placed(
+    fs: &'static dyn FsOps,
+    parent: Arc<OwnedFd>,
+    root: &Folder,
+    unlinks: Arc<Unlinks>,
+    cancelled: Arc<AtomicBool>,
+) -> Removed {
+    walk(fs, parent, root, unlinks, cancelled, false, true)
 }
 
 /// Keeps what [`remove`] would keep, and folders holding entries added
@@ -967,7 +1033,7 @@ pub(super) fn compare(
     unlinks: Arc<Unlinks>,
     cancelled: Arc<AtomicBool>,
 ) -> Removed {
-    walk(fs, parent, root, unlinks, cancelled, true)
+    walk(fs, parent, root, unlinks, cancelled, true, false)
 }
 
 fn walk(
@@ -977,14 +1043,24 @@ fn walk(
     unlinks: Arc<Unlinks>,
     cancelled: Arc<AtomicBool>,
     compare_only: bool,
+    own_folders: bool,
 ) -> Removed {
+    let mount = Mount::new(fs, parent.as_fd());
+    let identity = mount.identity_now(fs, parent.as_fd());
+    let mut linked = HashMap::new();
+    if counts_links(identity) && !compare_only {
+        linked_names(root, Path::new(""), &mut linked);
+    }
     let deletion = Arc::new(Deletion {
         fs,
-        stable_inodes: Mount::identifies(fs, parent.as_fd()).inodes,
+        identity,
+        root: parent.clone(),
+        linked: Mutex::new(linked),
         unlinks,
         kept: Mutex::default(),
         removed: AtomicBool::new(false),
         compare_only,
+        own_folders: own_folders.then_some(mount.family),
     });
     let steps = deletion.steps(root, Path::new(""));
     let workers = match steps.as_slice() {
@@ -994,7 +1070,7 @@ fn walk(
             let available = thread::available_parallelism()
                 .map(usize::from)
                 .unwrap_or(1);
-            let rotational = local_device_is_rotational(parent.as_fd()) == Some(true);
+            let rotational = fs.rotational(parent.as_fd()) == Some(true);
             bounded_local_worker_count(available, rotational)
         }
     };
@@ -1022,15 +1098,29 @@ fn walk(
     }
 }
 
+fn linked_names(folder: &Folder, path: &Path, names: &mut HashMap<(u64, u64), Vec<PathBuf>>) {
+    for (name, node) in lock(&folder.children).iter() {
+        match node {
+            Node::Entry(snapshot) if snapshot.nlink > 1 => names
+                .entry((snapshot.identity.device, snapshot.identity.inode))
+                .or_default()
+                .push(path.join(name)),
+            Node::Folder(folder) => linked_names(folder, &path.join(name), names),
+            Node::Entry(_) | Node::Kept(_) => {}
+        }
+    }
+}
+
 struct Deletion {
     fs: &'static dyn FsOps,
-    /// FUSE daemons without `use_ino` and cifs without server inode
-    /// numbers number an entry afresh once the kernel evicts it.
-    stable_inodes: bool,
+    identity: IdentityTraits,
+    root: Arc<OwnedFd>,
+    linked: Mutex<HashMap<(u64, u64), Vec<PathBuf>>>,
     unlinks: Arc<Unlinks>,
     kept: Mutex<Vec<(PathBuf, KeptCause)>>,
     removed: AtomicBool,
     compare_only: bool,
+    own_folders: Option<Family>,
 }
 
 impl Deletion {
@@ -1093,12 +1183,56 @@ impl Deletion {
 
     fn same(&self, current: &EntryStat, identity: Option<LocalFileIdentity>) -> bool {
         identity.is_some_and(|identity| {
-            if self.stable_inodes {
-                current.identity == identity
-            } else {
-                current.identity.may_be(&identity)
-            }
+            native_fs::compare(self.identity, identity, None, current) != Proof::Different
         })
+    }
+
+    fn left_after_removing(
+        &self,
+        (key, path): ((u64, u64), &Path),
+        identity: LocalFileIdentity,
+    ) -> Option<(i64, u32)> {
+        let mut linked = lock(&self.linked);
+        let names = linked.get_mut(&key)?;
+        names.retain(|name| name != path);
+        names.iter().find_map(|name| {
+            let other = Entry {
+                dir: self.root.as_fd(),
+                name: name.as_os_str(),
+            };
+            let stat = self.fs.stat(other, true).ok()?;
+            self.same(&stat, Some(identity)).then_some(stat.ctime)
+        })
+    }
+
+    fn loosen(&self, at: Entry<'_>, fd: &Arc<OwnedFd>, mode: u32) -> Option<Loosened> {
+        let family = self.own_folders.filter(|_| !self.compare_only)?;
+        (mode & 0o700 != 0o700 && restrictive::open_to_owner(self.fs, at, fd.as_fd(), mode, family))
+            .then(|| Loosened {
+                fs: self.fs,
+                fd: fd.clone(),
+                mode: Some(mode),
+            })
+    }
+}
+
+struct Loosened {
+    fs: &'static dyn FsOps,
+    fd: Arc<OwnedFd>,
+    mode: Option<u32>,
+}
+
+impl Loosened {
+    fn into_mode(mut self) -> Option<u32> {
+        self.mode.take()
+    }
+}
+
+impl Drop for Loosened {
+    fn drop(&mut self) {
+        if let Some(mode) = self.mode {
+            let _ = self.fs.chmod_fd(self.fd.as_fd(), mode);
+        }
     }
 }
 
@@ -1118,7 +1252,7 @@ struct Removal {
 enum Step {
     Folder(Arc<Folder>),
     Entry(SourceSnapshot),
-    Rmdir(Arc<OwnedFd>),
+    Rmdir(Arc<OwnedFd>, Option<Loosened>),
 }
 
 impl Job for Removal {
@@ -1139,8 +1273,8 @@ impl Job for Removal {
                 at.entry(&snapshot, &|| queue.is_stopped());
                 queue.complete(completion);
             }
-            Step::Rmdir(opened) => {
-                at.rmdir(opened);
+            Step::Rmdir(opened, loosened) => {
+                at.rmdir(opened, loosened, &|| queue.is_stopped());
                 queue.complete(completion);
             }
         }
@@ -1182,8 +1316,10 @@ impl At {
                 let added = deletion.compare_only && deletion.added_to(fd.as_fd(), folder)?;
                 Ok((fd, stat, added))
             });
-        let fd = match opened {
-            Ok((fd, current, false)) if deletion.same(&current, folder.identity) => Arc::new(fd),
+        let (fd, mode) = match opened {
+            Ok((fd, current, false)) if deletion.same(&current, folder.identity) => {
+                (Arc::new(fd), current.mode)
+            }
             Ok(_) | Err(Errno::NOTDIR | Errno::LOOP) => {
                 deletion.keep(self.path, KeptCause::Changed);
                 queue.complete(completion);
@@ -1195,10 +1331,11 @@ impl At {
                 return;
             }
         };
+        let loosened = deletion.loosen(self.entry_at(), &fd, mode);
         let steps = deletion.steps(folder, &self.path);
         let rmdir = Removal {
             at: self,
-            step: Step::Rmdir(fd.clone()),
+            step: Step::Rmdir(fd.clone(), loosened),
             completion,
         };
         if steps.is_empty() {
@@ -1244,16 +1381,11 @@ impl At {
         let key = (snapshot.identity.device, snapshot.identity.inode);
         // Checking, removing and counting a name of a file with several
         // names must not interleave with another name's check.
-        let mut unlinks = (snapshot.nlink > 1).then(|| lock(&deletion.unlinks.0));
+        let mut unlinks = (snapshot.nlink > 1).then(|| lock(&deletion.unlinks.unlinked));
         let since = unlinks
             .as_ref()
             .and_then(|unlinks| unlinks.get(&key))
-            .map_or(0, |counts| {
-                counts
-                    .iter()
-                    .filter(|&&count| count <= snapshot.nlink)
-                    .count() as u64
-            });
+            .map_or((0, None), |unlinked| unlinked.since(snapshot.nlink));
         let current = fs.stat(self.entry_at(), true);
         // Only the file compared may go, not one renamed over its name since;
         // its open descriptor keeps its inode number. Closed before the
@@ -1268,14 +1400,18 @@ impl At {
             && still_ahead
             && current
                 .as_ref()
-                .is_ok_and(|current| snapshot.holds(current, deletion.stable_inodes, since));
+                .is_ok_and(|current| snapshot.holds(current, deletion.identity, since));
         match current {
             Ok(_) if unchanged && deletion.compare_only => {}
             Ok(current) if unchanged => match fs.unlink(self.entry_at(), AtFlags::empty()) {
                 Ok(()) => {
                     deletion.removed.store(true, Ordering::Release);
                     if let Some(unlinks) = &mut unlinks {
-                        unlinks.entry(key).or_default().push(current.nlink);
+                        let left =
+                            deletion.left_after_removing((key, &self.path), snapshot.identity);
+                        let unlinked = unlinks.entry(key).or_default();
+                        unlinked.counts.push(current.nlink);
+                        unlinked.left = left;
                     }
                 }
                 Err(error) => deletion.failed(self.path.clone(), error),
@@ -1315,7 +1451,7 @@ impl At {
         }
     }
 
-    fn rmdir(&self, opened: Arc<OwnedFd>) {
+    fn rmdir(&self, opened: Arc<OwnedFd>, loosened: Option<Loosened>, stopped: &dyn Fn() -> bool) {
         let deletion = &self.deletion;
         if deletion.compare_only {
             return;
@@ -1326,22 +1462,44 @@ impl At {
         let named = fs
             .stat(self.entry_at(), false)
             .and_then(|named| Ok((named, fs.stat_fd(opened.as_fd())?)));
-        drop(opened);
-        match named {
-            Ok((named, opened)) if named.identity == opened.identity => {}
+        let identity = match named {
+            Ok((named, opened)) if named.identity == opened.identity => opened.identity,
             Ok(_) => return deletion.keep(self.path.clone(), KeptCause::Changed),
             Err(error) => return deletion.failed(self.path.clone(), error),
-        }
-        match fs.unlink(self.entry_at(), AtFlags::REMOVEDIR) {
-            Ok(()) => deletion.removed.store(true, Ordering::Release),
-            Err(Errno::NOENT) => {}
+        };
+        let mode = loosened.and_then(Loosened::into_mode);
+        drop(opened);
+        let leftovers = &deletion.unlinks.leftovers;
+        let unchanged = || {
+            fs.stat(self.entry_at(), false)
+                .is_ok_and(|current| deletion.same(&current, Some(identity)))
+        };
+        match leftovers::remove_folder(fs, self.entry_at(), leftovers, stopped, &unchanged) {
+            Ok(()) => return deletion.removed.store(true, Ordering::Release),
+            Err(Refused::Os(Errno::NOENT)) => return,
+            Err(Refused::Changed(_)) => {
+                return deletion.keep(self.path.clone(), KeptCause::Changed);
+            }
+            Err(Refused::Stopped(_)) => {}
+            Err(Refused::StillOpen(errno)) => match leftovers::holder(fs, self.entry_at()) {
+                None if errno == Errno::ACCESS => deletion.failed(self.path.clone(), errno),
+                holder => deletion.keep(self.path.clone(), KeptCause::StillOpen(holder)),
+            },
             // Entries added meanwhile stay, and so does their folder.
-            Err(Errno::NOTEMPTY | Errno::EXIST) => {
+            Err(Refused::Os(Errno::NOTEMPTY | Errno::EXIST)) => {
                 if deletion.holds_others(self.entry_at(), &self.path) {
                     deletion.keep(self.path.clone(), KeptCause::Changed);
                 }
             }
-            Err(error) => deletion.failed(self.path.clone(), error),
+            Err(refused) => deletion.failed(self.path.clone(), refused.errno()),
+        }
+        if let Some(mode) = mode
+            && let Ok(folder) = fs.open_dir(self.entry_at())
+            && fs
+                .stat_fd(folder.as_fd())
+                .is_ok_and(|current| deletion.same(&current, Some(identity)))
+        {
+            let _ = fs.chmod_fd(folder.as_fd(), mode);
         }
     }
 }

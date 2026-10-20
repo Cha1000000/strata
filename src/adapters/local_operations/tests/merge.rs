@@ -4,7 +4,8 @@ use std::{os::unix::fs::MetadataExt, sync::atomic::Ordering};
 
 use rustix::io::Errno;
 
-use super::fs_quirks::{Op, Racer, Support, Trash};
+use super::super::{fs_ops::System, placement::probe};
+use super::fs_quirks::{Op, OverEmptyDirectory, Racer, Support, Trash, hold};
 use super::*;
 use crate::{
     adapters::volume::learn_mount_capability,
@@ -56,7 +57,7 @@ fn rename_stage(staging: PathBuf) -> (StageOverwrite, Rc<RefCell<Vec<Location>>>
             })?;
             std::fs::rename(path, staging.join(format!("staged-{index}")))
                 .map_err(|error| glib::Error::new(gio::IOErrorEnum::Failed, &error.to_string()))?;
-            Ok(())
+            Ok(None)
         })
     });
     (stage, calls)
@@ -93,6 +94,7 @@ fn a_merge_replaces_nothing_with_a_link_the_destination_cannot_hold() -> Result<
                 copy_into_target: super::super::merge_copy(None, fixing()),
                 stage_overwrite: stage,
                 on_merged: &on_merged,
+                progress: None,
             },
         ))?;
 
@@ -155,6 +157,7 @@ fn fat_merge_overwrites_the_names_it_plans_and_keeps_the_names_that_need_no_fix(
                 copy_into_target: copy,
                 stage_overwrite: stage,
                 on_merged: &on_merged,
+                progress: None,
             },
         ))?;
         let nested = target.join("nested_");
@@ -241,6 +244,7 @@ fn a_merge_off_fat_keeps_the_names_fat_would_fix() -> Result<(), Box<dyn Error>>
                 copy_into_target: copy,
                 stage_overwrite: stage,
                 on_merged: &on_merged,
+                progress: None,
             },
         ))?;
 
@@ -318,6 +322,7 @@ fn a_merge_onto_fat_takes_the_rules_of_a_folder_inside_it_only_from_another_devi
                     copy_into_target: copy(),
                     stage_overwrite: stage,
                     on_merged: &on_merged,
+                    progress: None,
                 },
             ))?;
 
@@ -396,6 +401,7 @@ fn a_merge_within_one_disk_fixes_the_names_another_filesystem_mounted_in_its_sou
                     copy_into_target: copy(),
                     stage_overwrite: stage,
                     on_merged: &on_merged,
+                    progress: None,
                 },
             ))?;
 
@@ -446,6 +452,7 @@ fn a_merge_records_the_names_its_copy_gives_a_cut_name() -> Result<(), Box<dyn E
                 copy_into_target: copy,
                 stage_overwrite: stage,
                 on_merged: &on_merged,
+                progress: None,
             },
         ))?;
 
@@ -500,6 +507,7 @@ fn merging_folders_unites_contents_and_overwrites_shared_names() -> Result<(), B
             copy_into_target: real_copy(),
             stage_overwrite: stage,
             on_merged: &on_merged,
+            progress: None,
         },
     ));
 
@@ -554,6 +562,24 @@ fn merging_recurses_into_subdirectories_shared_by_both_sides() -> Result<(), Box
     fs::write(target.join("nested/shared.txt"), b"old")?;
     let (stage, _) = rename_stage(root.path().join("staging"));
     let (plans, on_merged) = recorded_plans();
+    let listed_on = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let listing = |folder: &'static str| -> (Op, &'static str, usize, Racer) {
+        let listed_on = listed_on.clone();
+        let racer: Racer = Box::new(move || {
+            listed_on
+                .lock()
+                .expect("listings")
+                .push((folder, thread::current().id()));
+        });
+        (Op::ListChunks, folder, 0, racer)
+    };
+    let _scope = FsQuirks::install(
+        root.path(),
+        Quirks {
+            before: vec![listing("source"), listing("nested")],
+            ..Quirks::default()
+        },
+    );
 
     let result = glib::MainContext::default().block_on(merge_local_with(
         gio::File::for_path(&source),
@@ -566,6 +592,7 @@ fn merging_recurses_into_subdirectories_shared_by_both_sides() -> Result<(), Box
             copy_into_target: real_copy(),
             stage_overwrite: stage,
             on_merged: &on_merged,
+            progress: None,
         },
     ));
 
@@ -576,6 +603,20 @@ fn merging_recurses_into_subdirectories_shared_by_both_sides() -> Result<(), Box
         b"incoming wins"
     );
     assert_eq!(fs::read(target.join("nested/stays.txt"))?, b"keep me");
+    let ui = thread::current().id();
+    let listed_on = listed_on.lock().expect("listings");
+    assert_eq!(
+        listed_on
+            .iter()
+            .map(|(folder, _)| *folder)
+            .collect::<Vec<_>>(),
+        ["source", "nested"],
+        "each local source folder is listed through the filesystem seam"
+    );
+    assert!(
+        listed_on.iter().all(|(_, thread)| *thread != ui),
+        "and never on the UI thread"
+    );
     let plans = plans.borrow();
     assert_eq!(plans.len(), 2);
     assert_eq!(
@@ -622,6 +663,7 @@ fn a_merge_from_a_location_without_paths_does_not_claim_provenance_for_undo()
             copy_into_target: real_copy(),
             stage_overwrite: stage,
             on_merged: &on_merged,
+            progress: None,
         },
     ));
 
@@ -710,6 +752,57 @@ fn a_new_subdirectory_is_reported_as_a_single_created_entry() -> Result<(), Box<
 }
 
 #[test]
+fn a_merge_stage_goes_once_another_program_closes_a_file_it_kept_there()
+-> Result<(), Box<dyn Error>> {
+    let _serial = serial()?;
+    let root = tempfile::tempdir()?;
+    let source = root.path().join("source");
+    let target = root.path().join("target");
+    fs::create_dir_all(&source)?;
+    fs::create_dir_all(&target)?;
+    fs::write(source.join("new.txt"), b"new")?;
+    let holds = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (held, live) = (holds.clone(), target.clone());
+    let hold_staged: Racer = Box::new(move || {
+        for stage in fs::read_dir(&live).expect("list the target").flatten() {
+            if stage
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".strata-copy-")
+            {
+                let staged = hold(&stage.path().join("new.txt"));
+                held.lock().expect("the holds").push(staged);
+            }
+        }
+    });
+    let release: Racer = Box::new(move || holds.lock().expect("the holds").clear());
+    let _scope = FsQuirks::install(
+        root.path(),
+        without_trash(Quirks {
+            before: vec![(Op::Unlink, "new.txt", 0, hold_staged)],
+            after: vec![(Op::Names, ".strata-copy-*", 0, release)],
+            links: Support::Rejected(Errno::MLINK),
+            rename_over_empty_dir: OverEmptyDirectory::NotEmpty,
+            ..Quirks::nfs3()
+        }),
+    );
+    let (_plans, on_merged) = recorded_plans();
+
+    let result = glib::MainContext::default().block_on(merge_local(
+        gio::File::for_path(&source),
+        gio::File::for_path(&target),
+        false,
+        gio::Cancellable::new(),
+        &on_merged,
+    ));
+
+    assert!(result.is_ok(), "{result:?}");
+    assert_eq!(names(&target)?, ["new.txt"]);
+    assert_eq!(fs::read(target.join("new.txt"))?, b"new");
+    Ok(())
+}
+
+#[test]
 fn a_staging_failure_aborts_the_merge_and_reports_only_what_was_staged()
 -> Result<(), Box<dyn Error>> {
     let _serial = serial()?;
@@ -748,7 +841,7 @@ fn a_staging_failure_aborts_the_merge_and_reports_only_what_was_staged()
                 std::fs::rename(path, staging.join("staged")).map_err(|error| {
                     glib::Error::new(gio::IOErrorEnum::Failed, &error.to_string())
                 })?;
-                Ok(())
+                Ok(None)
             })
         });
 
@@ -763,6 +856,7 @@ fn a_staging_failure_aborts_the_merge_and_reports_only_what_was_staged()
                 copy_into_target: real_copy(),
                 stage_overwrite: stage,
                 on_merged: &on_merged,
+                progress: None,
             },
         ));
 
@@ -824,6 +918,111 @@ fn merge_places_a_read_only_incoming_folder() -> Result<(), Box<dyn Error>> {
     assert_eq!(placed?, 0o555);
     assert_eq!(fs::read(target.join("incoming/file.txt"))?, b"new");
     assert_eq!(fs::read(target.join("stays.txt"))?, b"keep me");
+    Ok(())
+}
+
+#[test]
+fn undoing_a_merge_without_trash_opens_only_its_own_read_only_folders_to_remove_them()
+-> Result<(), Box<dyn Error>> {
+    use std::os::unix::fs::PermissionsExt;
+    #[derive(Clone, Copy, Debug)]
+    enum Undo {
+        Whole,
+        Refilled,
+        Cancelled,
+        IntoLockedTarget,
+    }
+    let _serial = serial()?;
+    let mode = |path: &Path| {
+        fs::metadata(path)
+            .ok()
+            .map(|metadata| metadata.mode() & 0o7777)
+    };
+    let set_mode = |path: &Path, mode| fs::set_permissions(path, fs::Permissions::from_mode(mode));
+    for undo in [
+        Undo::Whole,
+        Undo::Refilled,
+        Undo::Cancelled,
+        Undo::IntoLockedTarget,
+    ] {
+        let root = tempfile::tempdir()?;
+        let source = root.path().join("source");
+        let target = root.path().join("target");
+        fs::create_dir_all(source.join("incoming/inner"))?;
+        fs::create_dir_all(&target)?;
+        fs::write(source.join("incoming/inner/file.txt"), b"new")?;
+        fs::write(target.join("stays.txt"), b"keep me")?;
+        for folder in ["incoming/inner", "incoming"] {
+            set_mode(&source.join(folder), 0o555)?;
+        }
+        let merging = FsQuirks::install(root.path(), without_trash(Quirks::default()));
+        let (plans, on_merged) = recorded_plans();
+        let merged = glib::MainContext::default().block_on(merge_local(
+            gio::File::for_path(&source),
+            gio::File::for_path(&target),
+            false,
+            gio::Cancellable::new(),
+            &on_merged,
+        ));
+        drop(merging);
+        let (incoming, inner) = (target.join("incoming"), target.join("incoming/inner"));
+        let cancellable = gio::Cancellable::new();
+        let (refill, cancel) = (inner.join("theirs.txt"), cancellable.clone());
+        let racer: Racer = Box::new(move || match undo {
+            Undo::Refilled => drop(fs::write(&refill, b"theirs")),
+            _ => cancel.cancel(),
+        });
+        let mut quirks = without_trash(Quirks::default());
+        if let Undo::Refilled | Undo::Cancelled = undo {
+            quirks.before = vec![(Op::Unlink, "file.txt", 0, racer)];
+        }
+        let _undoing = FsQuirks::install(root.path(), quirks);
+        if let Undo::IntoLockedTarget = undo {
+            set_mode(&target, 0o555)?;
+        }
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let emitted = events.clone();
+
+        glib::MainContext::default().block_on(run_merge_undo(
+            OperationRequestId(93),
+            undo_parts(plans.take()),
+            Rc::new(move |event| emitted.borrow_mut().push(event)),
+            cancellable,
+            staged_lookup(HashMap::new()),
+        ));
+
+        let modes = [&target, &incoming, &inner].map(|folder| mode(folder));
+        let left = [&incoming, &inner].map(|folder| names(folder).ok());
+        for folder in [&source.join("incoming"), &source.join("incoming/inner")] {
+            set_mode(folder, 0o755)?;
+        }
+        for folder in [&target, &incoming, &inner] {
+            if folder.is_dir() {
+                set_mode(folder, 0o755)?;
+            }
+        }
+        let row = format!("{undo:?}: {:?}", events.borrow());
+        assert!(merged.is_ok(), "{row}: {merged:?}");
+        let theirs = || Some(vec!["theirs.txt".to_owned()]);
+        let (expected_modes, expected_left) = match undo {
+            Undo::Whole => ([Some(0o755), None, None], [None, None]),
+            Undo::Refilled => (
+                [Some(0o755), Some(0o555), Some(0o555)],
+                [Some(vec!["inner".to_owned()]), theirs()],
+            ),
+            Undo::Cancelled => (
+                [Some(0o755), Some(0o555), Some(0o555)],
+                [Some(vec!["inner".to_owned()]), Some(Vec::new())],
+            ),
+            Undo::IntoLockedTarget => ([Some(0o555), Some(0o555), None], [Some(Vec::new()), None]),
+        };
+        assert_eq!(modes, expected_modes, "{row}");
+        assert_eq!(left, expected_left, "{row}");
+        if let Undo::Whole = undo {
+            assert!(restored(&events.borrow()).is_some(), "{row}");
+        }
+        assert!(names(&target)?.contains(&"stays.txt".to_owned()), "{row}");
+    }
     Ok(())
 }
 
@@ -1492,6 +1691,7 @@ fn a_failed_merge_preserves_the_destinations_existing_contents() -> Result<(), B
             }),
             stage_overwrite: Rc::new(trash_stage_overwrite),
             on_merged: &no_plan,
+            progress: None,
         },
     ));
 
@@ -1581,20 +1781,20 @@ fn staged_lookup(entries: HashMap<PathBuf, RestoreEntry>) -> StagedOriginalLooku
 #[test]
 fn merge_undo_uses_recorded_identity_when_trash_dates_collide() -> Result<(), Box<dyn Error>> {
     let _serial = serial()?;
-    for chosen in ["older.zip", "current.zip", "removed.zip"] {
+    for chosen in ["older.zip", "current.zip", "purged.zip"] {
         let root = tempfile::tempdir()?;
         let target = root.path().join("archive.zip");
         fs::write(&target, b"incoming archive")?;
         let mut staged = HashMap::new();
-        for name in ["older.zip", "current.zip", "removed.zip"] {
+        for name in ["older.zip", "current.zip", "purged.zip"] {
             let entry = staged_trash_fixture(root.path(), name, &target, name.as_bytes())?;
             staged.insert(
                 name,
                 entry.source.native_path().expect("staged path").to_owned(),
             );
         }
-        let original = TrashedOriginal::from_metadata(&fs::symlink_metadata(&staged[chosen])?);
-        if chosen == "removed.zip" {
+        let original = identity_off_main(&staged[chosen]).ok_or("identity")?;
+        if chosen == "purged.zip" {
             fs::remove_file(&staged[chosen])?;
         }
         let trash_root = staged[chosen]
@@ -1607,14 +1807,22 @@ fn merge_undo_uses_recorded_identity_when_trash_dates_collide() -> Result<(), Bo
         let originals = HashMap::from([(location.clone(), original)]);
         let lookup: StagedOriginalLookup = Rc::new(move |location, cancellable| {
             let path = location.native_path().expect("local original").to_owned();
-            let entry = home_trash_entries_at(
-                &trash_root,
-                &HashSet::from([path.clone()]),
-                &cancellable,
-                &originals,
-            )
-            .remove(&path);
-            Box::pin(async move { entry.ok_or_else(|| io_error("Recorded original is missing")) })
+            let (trash_root, originals) = (trash_root.clone(), originals.clone());
+            Box::pin(async move {
+                gio::spawn_blocking(move || {
+                    trash_entries_at(
+                        std::slice::from_ref(&trash_root),
+                        &HashSet::from([path.clone()]),
+                        &cancellable,
+                        &originals,
+                    )
+                    .remove(&path)
+                })
+                .await
+                .ok()
+                .flatten()
+                .unwrap_or_else(|| Err(io_error("Recorded original is missing")))
+            })
         });
         let events = Rc::new(RefCell::new(Vec::new()));
         let emitted = events.clone();
@@ -1627,7 +1835,7 @@ fn merge_undo_uses_recorded_identity_when_trash_dates_collide() -> Result<(), Bo
             lookup,
         ));
 
-        if chosen == "removed.zip" {
+        if chosen == "purged.zip" {
             assert_eq!(fs::read(&target)?, b"incoming archive");
             assert!(matches!(
                 events.borrow().last(),
@@ -1647,6 +1855,425 @@ fn merge_undo_uses_recorded_identity_when_trash_dates_collide() -> Result<(), Bo
         }
     }
     Ok(())
+}
+
+#[derive(Clone, Copy, Debug)]
+enum InTrash {
+    Renumbered,
+    NumberReused,
+    TrashedAfter,
+    TrashedInTheSameTick(&'static [u8]),
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Chosen {
+    Item(&'static str),
+    Nothing,
+    Refused,
+}
+
+#[test]
+fn a_trashed_original_is_passed_over_only_where_its_mount_proves_another()
+-> Result<(), Box<dyn Error>> {
+    use Chosen::{Item, Nothing, Refused};
+    let _serial = serial()?;
+    let reusing_ext4: Preset = || Quirks {
+        reused_inodes: Some("report*"),
+        ..Quirks::ext4()
+    };
+    let reusing_nfs3: Preset = || Quirks {
+        reused_inodes: Some("report*"),
+        ..Quirks::nfs3()
+    };
+    let exfat_in_one_tick: Preset = || Quirks {
+        coarse_clock: Some(SystemTime::now() - Duration::from_secs(1)),
+        ..Quirks::exfat()
+    };
+    let rows: [(Preset, bool, InTrash, Chosen); 8] = [
+        (Quirks::vfat, false, InTrash::Renumbered, Item("report")),
+        (Quirks::sshfs, false, InTrash::Renumbered, Item("report")),
+        (Quirks::sshfs, true, InTrash::Renumbered, Item("report")),
+        (Quirks::sshfs, true, InTrash::TrashedAfter, Item("report")),
+        (reusing_ext4, false, InTrash::NumberReused, Nothing),
+        (reusing_nfs3, false, InTrash::NumberReused, Nothing),
+        (
+            exfat_in_one_tick,
+            false,
+            InTrash::TrashedInTheSameTick(b"other"),
+            Item("report"),
+        ),
+        (
+            exfat_in_one_tick,
+            false,
+            InTrash::TrashedInTheSameTick(b"original"),
+            Refused,
+        ),
+    ];
+    for (preset, folder, change, chosen) in rows {
+        let root = tempfile::tempdir()?;
+        let _quirks = FsQuirks::install(root.path(), preset());
+        let original = root.path().join("report");
+        let make = |path: &Path, contents: &[u8]| {
+            if folder {
+                fs::create_dir(path)
+            } else {
+                fs::write(path, contents)
+            }
+        };
+        make(&original, b"original")?;
+        let recorded =
+            super::super::native_fs::identity_at_path(&original).ok_or("recorded identity")?;
+        let trash_root = root
+            .path()
+            .join(format!(".Trash-{}", rustix::process::getuid().as_raw()));
+        fs::create_dir_all(trash_root.join("files"))?;
+        fs::create_dir_all(trash_root.join("info"))?;
+        let put_in_trash = |name: &str, contents: &[u8], date: &str| -> io::Result<()> {
+            make(&trash_root.join("files").join(name), contents)?;
+            fs::write(
+                trash_root.join("info").join(format!("{name}.trashinfo")),
+                format!(
+                    "[Trash Info]\nPath={}\nDeletionDate={date}T00:00:00\n",
+                    original.display()
+                ),
+            )
+        };
+        if let InTrash::TrashedInTheSameTick(contents) = change {
+            put_in_trash("report.1", contents, "2026-01-01")?;
+        }
+        fs::write(
+            trash_root.join("info/report.trashinfo"),
+            format!(
+                "[Trash Info]\nPath={}\nDeletionDate=2026-01-01T00:00:00\n",
+                original.display()
+            ),
+        )?;
+        let trashed = trash_root.join("files/report");
+        let modified = fs::symlink_metadata(&original)?.modified()?;
+        fs::rename(&original, &trashed)?;
+        super::super::native_fs::identity_at_path(&trashed).ok_or("seen in Trash")?;
+        match change {
+            InTrash::Renumbered => assert!(super::fs_quirks::evict(&trashed)),
+            InTrash::NumberReused => {
+                fs::remove_file(&trashed)?;
+                make(&trashed, b"original")?;
+                fs::File::options()
+                    .write(true)
+                    .open(&trashed)?
+                    .set_modified(modified)?;
+                super::fs_quirks::recreated(&trashed);
+            }
+            InTrash::TrashedAfter => put_in_trash("report.2", b"later", "2026-01-02")?,
+            InTrash::TrashedInTheSameTick(contents) => {
+                put_in_trash("report.2", contents, "2026-01-01")?;
+            }
+        }
+        let entries = trash_entries_at(
+            std::slice::from_ref(&trash_root),
+            &HashSet::from([original.clone()]),
+            &gio::Cancellable::new(),
+            &HashMap::from([(Location::local(&original), recorded)]),
+        );
+        let expected = match chosen {
+            Item(name) => Some(Ok(Location::local(trash_root.join("files").join(name)))),
+            Nothing => None,
+            Refused => Some(Err(
+                "More than one item in Trash could be “report”, so they were left there",
+            )),
+        };
+        assert_eq!(
+            entries.get(&original).map(|found| found
+                .as_ref()
+                .map(|entry| entry.source.clone())
+                .map_err(glib::Error::message)),
+            expected,
+            "{:?}, folder {folder}, {change:?}",
+            preset().mount_type
+        );
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug)]
+enum VolumeTrash {
+    PerUser,
+    Shared,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Undone {
+    Replace,
+    Delete,
+    Merge,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Trashed {
+    Original,
+    Nothing,
+    OriginalBesideANewerOneBehindALink,
+    OnlyAnotherFromTheSamePath,
+    TwoAlikeBeforeAnother,
+}
+
+#[test]
+fn undo_finds_an_original_in_the_trash_of_its_own_mount() {
+    crate::test_support::gtk_test(
+        "adapters::local_operations::tests::merge::undo_finds_an_original_in_the_trash_of_its_own_mount",
+        || {
+            let _serial = serial().expect("serial");
+            let uid = rustix::process::getuid().as_raw();
+            for (layout, undone, trashed) in [
+                (VolumeTrash::PerUser, Undone::Replace, Trashed::Original),
+                (VolumeTrash::Shared, Undone::Replace, Trashed::Original),
+                (VolumeTrash::PerUser, Undone::Delete, Trashed::Original),
+                (VolumeTrash::PerUser, Undone::Delete, Trashed::Nothing),
+                (
+                    VolumeTrash::PerUser,
+                    Undone::Delete,
+                    Trashed::OriginalBesideANewerOneBehindALink,
+                ),
+                (
+                    VolumeTrash::PerUser,
+                    Undone::Delete,
+                    Trashed::OnlyAnotherFromTheSamePath,
+                ),
+                (
+                    VolumeTrash::PerUser,
+                    Undone::Delete,
+                    Trashed::TwoAlikeBeforeAnother,
+                ),
+            ] {
+                let row = format!("{layout:?} Trash, undo of a {undone:?}, {trashed:?}");
+                let volume = tempfile::tempdir().expect("volume");
+                let _quirks = matches!(trashed, Trashed::TwoAlikeBeforeAnother).then(|| {
+                    FsQuirks::install(
+                        volume.path(),
+                        Quirks {
+                            coarse_clock: Some(SystemTime::now() - Duration::from_secs(1)),
+                            ..Quirks::exfat()
+                        },
+                    )
+                });
+                crate::adapters::mount_watch::publish_for_isolated_test(Some(
+                    crate::adapters::MountTable::parse(format!(
+                        "1 0 8:1 / / rw - ext4 /dev/root rw\n\
+                         4242 1 8:2 / {} rw - ext4 /dev/sdb1 rw\n",
+                        volume.path().display()
+                    )),
+                ));
+                let trash = match layout {
+                    VolumeTrash::PerUser => volume.path().join(format!(".Trash-{uid}")),
+                    VolumeTrash::Shared => {
+                        let shared = volume.path().join(".Trash");
+                        fs::create_dir(&shared).expect("shared Trash");
+                        fs::set_permissions(
+                            &shared,
+                            std::os::unix::fs::PermissionsExt::from_mode(0o1777),
+                        )
+                        .expect("sticky shared Trash");
+                        shared.join(uid.to_string())
+                    }
+                };
+                for folder in [
+                    trash.join("files"),
+                    trash.join("info"),
+                    volume.path().join("folder"),
+                ] {
+                    fs::create_dir_all(folder).expect("fixture folder");
+                }
+                let original = volume.path().join("folder/report.txt");
+                let other = volume.path().join("folder/other.txt");
+                let info = trash.join("info/report.txt.trashinfo");
+                let trash_as =
+                    |trash: &Path, name: &str, from: &str, contents: &str, date: &str| {
+                        fs::write(trash.join("files").join(name), contents).expect("trashed item");
+                        fs::write(
+                            trash.join("info").join(format!("{name}.trashinfo")),
+                            format!(
+                                "[Trash Info]\nPath=folder/{from}\nDeletionDate={date}T00:00:00\n"
+                            ),
+                        )
+                        .expect("trash info");
+                    };
+                let put_in_trash = |trash: &Path, contents: &str, date: &str| {
+                    trash_as(trash, "report.txt", "report.txt", contents, date);
+                };
+                let planted = volume.path().join("planted");
+                let mut originals = HashMap::new();
+                match trashed {
+                    Trashed::Original => put_in_trash(&trash, "original", "2026-01-01"),
+                    Trashed::Nothing => {}
+                    Trashed::OriginalBesideANewerOneBehindALink => {
+                        put_in_trash(&trash, "original", "2026-01-01");
+                        fs::create_dir_all(planted.join("files")).expect("planted files");
+                        fs::create_dir_all(planted.join("info")).expect("planted info");
+                        put_in_trash(&planted, "planted", "2099-01-01");
+                        let shared = volume.path().join(".Trash");
+                        fs::create_dir(&shared).expect("shared Trash");
+                        fs::set_permissions(
+                            &shared,
+                            std::os::unix::fs::PermissionsExt::from_mode(0o1777),
+                        )
+                        .expect("sticky shared Trash");
+                        std::os::unix::fs::symlink(&planted, shared.join(uid.to_string()))
+                            .expect("linked user Trash");
+                    }
+                    Trashed::OnlyAnotherFromTheSamePath => {
+                        fs::write(&original, b"original").expect("original");
+                        let recorded = identity_off_main(&original).expect("recorded identity");
+                        put_in_trash(&trash, "another", "2099-01-01");
+                        fs::remove_file(&original).expect("original purged");
+                        originals.insert(Location::local(&original), recorded);
+                    }
+                    Trashed::TwoAlikeBeforeAnother => {
+                        for (path, contents) in [(&original, "original"), (&other, "other")] {
+                            fs::write(path, contents).expect("trashed original");
+                            let recorded = identity_off_main(path).expect("recorded identity");
+                            originals.insert(Location::local(path), recorded);
+                            fs::remove_file(path).expect("original trashed");
+                        }
+                        put_in_trash(&trash, "original", "2026-01-01");
+                        trash_as(
+                            &trash,
+                            "report.2.txt",
+                            "report.txt",
+                            "original",
+                            "2026-01-01",
+                        );
+                        trash_as(&trash, "other.txt", "other.txt", "other", "2026-01-01");
+                    }
+                }
+                let location = Location::local(&original);
+                let locations = match trashed {
+                    Trashed::TwoAlikeBeforeAnother => {
+                        vec![location.clone(), Location::local(&other)]
+                    }
+                    _ => vec![location.clone()],
+                };
+                let events = Rc::new(RefCell::new(Vec::new()));
+                let emitted = events.clone();
+                let emit: Rc<dyn Fn(OperationEvent)> =
+                    Rc::new(move |event| emitted.borrow_mut().push(event));
+                let id = OperationRequestId(1729);
+                let _operation = match undone {
+                    Undone::Replace => {
+                        fs::write(&original, b"incoming copy").expect("incoming copy");
+                        LocalOperationProvider.undo_merge(
+                            crate::services::UndoMergeRequest {
+                                id,
+                                created: Vec::new(),
+                                overwritten: vec![location.clone()],
+                                originals,
+                                placed: placed_now(&[&original]),
+                            },
+                            emit,
+                        )
+                    }
+                    Undone::Delete | Undone::Merge => LocalOperationProvider.restore(
+                        RestoreRequest {
+                            id,
+                            source: RestoreSource::OriginalLocations {
+                                locations,
+                                originals,
+                            },
+                        },
+                        emit,
+                    ),
+                };
+                wait_for_operation(&events, |event| {
+                    matches!(
+                        event,
+                        OperationEvent::Restored { .. }
+                            | OperationEvent::RestoreCompletedWithErrors { .. }
+                            | OperationEvent::CompletedWithErrors { .. }
+                            | OperationEvent::Failed { .. }
+                            | OperationEvent::Cancelled { .. }
+                    )
+                });
+
+                if let Trashed::Nothing | Trashed::OnlyAnotherFromTheSamePath = trashed {
+                    assert!(
+                        matches!(
+                            events.borrow().last(),
+                            Some(OperationEvent::Failed { message, .. })
+                                if message == "Unable to find items in Trash: \
+                                    One or more recently trashed items are no longer available"
+                        ),
+                        "{row}: {:?}",
+                        events.borrow().last()
+                    );
+                    if let Trashed::OnlyAnotherFromTheSamePath = trashed {
+                        assert_eq!(
+                            fs::read(trash.join("files/report.txt")).expect("left in Trash"),
+                            b"another",
+                            "{row}"
+                        );
+                    }
+                    continue;
+                }
+                if let Trashed::TwoAlikeBeforeAnother = trashed {
+                    assert!(
+                        matches!(
+                            events.borrow().last(),
+                            Some(OperationEvent::RestoreCompletedWithErrors { restored, message, .. })
+                                if restored == &[Location::local(&other)]
+                                    && message.ends_with(
+                                        "• report.txt: More than one item in Trash could be \
+                                            “report.txt”, so they were left there"
+                                    )
+                        ),
+                        "{row}: {:?}",
+                        events.borrow().last()
+                    );
+                    let progress = events
+                        .borrow()
+                        .iter()
+                        .filter_map(|event| match event {
+                            OperationEvent::RestoreProgress {
+                                completed,
+                                restored_location,
+                                ..
+                            } => Some((*completed, restored_location.clone())),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>();
+                    assert_eq!(
+                        progress,
+                        [(1, None), (2, Some(Location::local(&other)))],
+                        "{row}"
+                    );
+                    assert_eq!(fs::read(&other).expect("restored"), b"other", "{row}");
+                    assert!(fs::symlink_metadata(&original).is_err(), "{row}");
+                    for name in ["report.txt", "report.2.txt"] {
+                        assert_eq!(
+                            fs::read(trash.join("files").join(name)).expect("left in Trash"),
+                            b"original",
+                            "{row}"
+                        );
+                    }
+                    continue;
+                }
+                assert!(
+                    matches!(
+                        events.borrow().last(),
+                        Some(OperationEvent::Restored { .. })
+                    ),
+                    "{row}: {:?}",
+                    events.borrow().last()
+                );
+                assert_eq!(fs::read(&original).expect("restored"), b"original", "{row}");
+                assert!(!info.exists(), "{row}: the Trash entry is gone");
+                if let Trashed::OriginalBesideANewerOneBehindALink = trashed {
+                    assert_eq!(
+                        fs::read(planted.join("files/report.txt")).expect("planted"),
+                        b"planted",
+                        "{row}"
+                    );
+                }
+            }
+        },
+    );
 }
 
 #[test]
@@ -1675,7 +2302,7 @@ fn check_merge_undo_restores_staged_originals_and_removes_created() -> Result<()
         &bookmarks,
         format!("{}{}{}", pin(&shared), pin(&incoming), pin(&stays)),
     )?;
-    let incoming_identity = TrashedOriginal::at_path(&incoming).ok_or("identity")?;
+    let incoming_identity = numbers_at(&incoming);
     let staged = staged_trash_fixture(root.path(), "shared.txt", &shared, b"old")?;
     let staged_path = staged
         .source
@@ -1720,6 +2347,7 @@ fn check_merge_undo_restores_staged_originals_and_removes_created() -> Result<()
     assert!(!staged_path.exists(), "the staged copy left the fake trash");
     assert_eq!(fs::read(&stays)?, b"keep me");
     assert!(target.exists(), "the destination folder itself survives");
+    crate::storage::writer::settle();
     assert_eq!(
         fs::read_to_string(bookmarks)?,
         format!("{}{}", pin(&shared), pin(&stays))
@@ -1992,6 +2620,146 @@ fn a_merge_a_cancel_cuts_off_counts_as_failed_as_it_keeps_what_it_placed()
     assert_eq!(result.failed, [Location::local(sources.join("run"))]);
     assert!(result.not_attempted.is_empty());
     assert_eq!(fs::read(destination.join("run/old.txt"))?, b"old");
+    Ok(())
+}
+
+#[test]
+fn a_merge_without_trash_cancelled_after_it_placed_a_copy_puts_the_original_back()
+-> Result<(), Box<dyn Error>> {
+    #[derive(Clone, Copy, Debug)]
+    enum Copied {
+        AsPlaced,
+        Rewritten,
+        RenamedOver,
+    }
+    let _serial = serial()?;
+    let mut rows = [false, true]
+        .into_iter()
+        .flat_map(|moving| {
+            [Copied::AsPlaced, Copied::Rewritten, Copied::RenamedOver]
+                .map(|copy| (moving, copy, Quirks::default as Preset))
+        })
+        .collect::<Vec<_>>();
+    rows.push((false, Copied::AsPlaced, Quirks::exfat));
+    for (move_sources, copy, preset) in rows {
+        let root = tempfile::tempdir()?;
+        let sources = root.path().join("sources");
+        let destination = root.path().join("destination");
+        write_files(
+            &sources.join("run"),
+            &[("a.txt", "new a"), ("b.txt", "new b"), ("c.txt", "new c")],
+        )?;
+        write_files(
+            &destination.join("run"),
+            &[("a.txt", "old a"), ("b.txt", "old b")],
+        )?;
+        let cancel = CancelFromMain::default();
+        let mut cancels = cancel.racer();
+        let (placed, theirs) = (destination.join("run/a.txt"), root.path().join("theirs"));
+        let racer: Racer = Box::new(move || {
+            match copy {
+                Copied::AsPlaced => {}
+                Copied::Rewritten => fs::write(&placed, b"theirs, longer").expect("rewrite"),
+                Copied::RenamedOver => {
+                    fs::write(&theirs, b"theirs, longer").expect("write theirs");
+                    fs::rename(&theirs, &placed).expect("rename theirs over the copy");
+                }
+            }
+            cancels();
+        });
+        let _sources = FsQuirks::install(&sources, Quirks::default());
+        let _destination = FsQuirks::install(
+            &destination,
+            without_trash(Quirks {
+                after: vec![(Op::Rename, "a.txt", 1, racer)],
+                ..preset()
+            }),
+        );
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let emitted = events.clone();
+        let mut operation = Some(LocalOperationProvider.paste(
+            PasteRequest {
+                id: OperationRequestId(1729),
+                destination: Location::local(&destination),
+                items: vec![PasteItem {
+                    source: Location::local(sources.join("run")),
+                    conflict: TransferConflict::Merge,
+                    target_name: None,
+                }],
+                move_sources,
+            },
+            Rc::new(move |event| emitted.borrow_mut().push(event)),
+        ));
+
+        let context = glib::MainContext::default();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !events.borrow().iter().any(|event| {
+            matches!(
+                event,
+                OperationEvent::Cancelled { .. }
+                    | OperationEvent::Pasted { .. }
+                    | OperationEvent::TransferFailed { .. }
+            )
+        }) {
+            assert!(Instant::now() < deadline, "the merge never ended");
+            cancel.serve(|| drop(operation.take()));
+            context.iteration(false);
+            thread::sleep(Duration::from_millis(1));
+        }
+
+        let row = format!(
+            "moving: {move_sources}, {copy:?}, {:?}",
+            preset().mount_type
+        );
+        let events = events.borrow();
+        assert!(cancel.served(), "{row}");
+        assert_eq!(fs::read(destination.join("run/b.txt"))?, b"old b", "{row}");
+        if let Copied::AsPlaced = copy {
+            let Some(OperationEvent::Cancelled { result, .. }) = events.last() else {
+                panic!("{row}: expected a cancel, got {events:?}");
+            };
+            assert!(result.completed.is_empty(), "{row}");
+            assert_eq!(
+                result.failed,
+                [Location::local(sources.join("run"))],
+                "{row}"
+            );
+            assert_eq!(fs::read(destination.join("run/a.txt"))?, b"old a", "{row}");
+            assert_eq!(
+                names(&destination.join("run"))?,
+                ["a.txt", "b.txt"],
+                "{row}"
+            );
+        } else {
+            let Some(OperationEvent::TransferFailed { message, .. }) = events.last() else {
+                panic!("{row}: expected the merge to stop, got {events:?}");
+            };
+            let left = names(&destination.join("run"))?;
+            let [folder, a, b] = &left[..] else {
+                panic!("{row}: expected the merge folder beside a.txt and b.txt, found {left:?}");
+            };
+            assert!(folder.starts_with(".strata-merge-"), "{row}: {left:?}");
+            assert_eq!([a.as_str(), b.as_str()], ["a.txt", "b.txt"], "{row}");
+            assert!(message.contains(folder.as_str()), "{row}: {message}");
+            assert_eq!(
+                fs::read(destination.join("run/a.txt"))?,
+                b"theirs, longer",
+                "{row}"
+            );
+            assert_eq!(
+                fs::read(destination.join("run").join(folder).join("a.txt"))?,
+                b"old a",
+                "{row}"
+            );
+        }
+        for (name, contents) in [("a.txt", "new a"), ("b.txt", "new b"), ("c.txt", "new c")] {
+            assert_eq!(
+                fs::read(sources.join("run").join(name))?,
+                contents.as_bytes(),
+                "{row}"
+            );
+        }
+    }
     Ok(())
 }
 
@@ -2480,6 +3248,7 @@ fn a_merge_undo_deletes_only_what_the_merge_left_unchanged() -> Result<(), Box<d
                 copy_into_target: real_copy(),
                 stage_overwrite: stage,
                 on_merged: &on_merged,
+                progress: None,
             },
         ))?;
         let [a, b] = ["docs/a.txt", "docs/b.txt"].map(|path| target.join(path));
@@ -2559,6 +3328,7 @@ fn undoing_a_replace_deletes_what_it_placed_only_if_all_of_it_is_unchanged()
         (true, "added to"),
         (true, "edited during the undo"),
         (true, "undeletable"),
+        (true, "still open in another program"),
     ];
     for (directory, change) in rows {
         let row = format!("{change} {}", if directory { "folder" } else { "file" });
@@ -2615,6 +3385,12 @@ fn undoing_a_replace_deletes_what_it_placed_only_if_all_of_it_is_unchanged()
                 fail: vec![(Op::Unlink, "a.txt", 0, Errno::ACCESS)],
                 ..Quirks::default()
             }),
+            "still open in another program" => Some(Quirks {
+                mount_type: Some(("nfs4", "rw,vers=4.2")),
+                silly_rename: Some(super::fs_quirks::Silly::nfs()),
+                holder: Some(crate::services::Holder::Program("Text Editor".to_owned())),
+                ..Quirks::default()
+            }),
             // Once the comparison found it unchanged, before its deletion.
             "edited during the undo" => Some(Quirks {
                 before: vec![(
@@ -2628,6 +3404,10 @@ fn undoing_a_replace_deletes_what_it_placed_only_if_all_of_it_is_unchanged()
             _ => None,
         }
         .map(|quirks| FsQuirks::install(root.path(), quirks));
+        let _clock = (change == "still open in another program")
+            .then(|| ClockGuard::set(std::time::SystemTime::now()));
+        let _held =
+            (change == "still open in another program").then(|| hold(&target.join("sub/b.txt")));
 
         let undo = || {
             run_undo(
@@ -2642,6 +3422,23 @@ fn undoing_a_replace_deletes_what_it_placed_only_if_all_of_it_is_unchanged()
 
         let events = undo();
 
+        if change == "still open in another program" {
+            let Some(OperationEvent::CompletedWithErrors { message, .. }) = events.last() else {
+                panic!("{row}: {events:?}");
+            };
+            let error = rust_i18n::t!(
+                "Could not delete “%{name}”: %{error}",
+                name = "sub",
+                error = rust_i18n::t!(
+                    "A file in it is still open in %{program}. Close it there and try again.",
+                    program = "Text Editor"
+                )
+            );
+            assert!(message.contains(&*error), "{message}");
+            assert!(kept_in_trash(&events).is_empty());
+            assert!(trash.join("info/target.trashinfo").exists());
+            continue;
+        }
         if change == "undeletable" {
             let Some(OperationEvent::CompletedWithErrors { message, .. }) = events.last() else {
                 panic!("{row}: {events:?}");
@@ -2650,7 +3447,7 @@ fn undoing_a_replace_deletes_what_it_placed_only_if_all_of_it_is_unchanged()
                 Errno::ACCESS.raw_os_error(),
             ));
             let error = rust_i18n::t!(
-                "Could not delete %{name}: %{error}",
+                "Could not delete “%{name}”: %{error}",
                 name = "a.txt",
                 error = denied
             );
@@ -2729,11 +3526,16 @@ fn a_merge_undo_compares_what_it_placed_as_a_move_compares_its_sources()
     let rows: [(&str, MakeQuirks, &str, bool); 6] = [
         (
             "cifs noserverino",
-            Box::new(cifs("rw,noserverino")),
+            Box::new(cifs("rw,vers=3.1.1")),
             "evicted",
             true,
         ),
-        ("cifs", Box::new(cifs("rw,serverino")), "evicted", false),
+        (
+            "cifs",
+            Box::new(cifs("rw,vers=3.1.1,serverino")),
+            "evicted",
+            false,
+        ),
         ("vfat", Box::new(coarse), "untouched", true),
         ("vfat", Box::new(coarse), "rewritten", false),
         ("vfat", Box::new(coarse), "rewritten in a folder", false),
@@ -3038,6 +3840,7 @@ fn an_undo_keeps_what_was_too_big_to_record() -> Result<(), Box<dyn Error>> {
                 copy_into_target: real_copy(),
                 stage_overwrite: stage,
                 on_merged: &on_merged,
+                progress: None,
             },
         ))?;
         let [a, b] = ["a.txt", "b.txt"].map(|name| target.join(name));
@@ -3181,6 +3984,7 @@ fn a_merge_records_what_it_creates_only_where_undo_cannot_trash_it() -> Result<(
                 copy_into_target: real_copy(),
                 stage_overwrite: stage,
                 on_merged: &on_merged,
+                progress: None,
             },
         ))?;
 
@@ -3562,6 +4366,7 @@ fn merge_through_trash(
             copy_into_target,
             stage_overwrite: Rc::new(trash_stage_overwrite),
             on_merged: &on_merged,
+            progress: None,
         },
     ));
     (result, plans.take())
@@ -3577,6 +4382,8 @@ fn merge_without_trash_sets_originals_aside_and_removes_them_after_success()
         (Trash::FalseWithoutError, Quirks::default(), false),
         (Trash::Unsupported, Quirks::sshfs(), false),
         (Trash::Unsupported, Quirks::vboxsf(), true),
+        (Trash::Unsupported, Quirks::exfat(), false),
+        (Trash::Unsupported, Quirks::exfat(), true),
     ] {
         let root = tempfile::tempdir()?;
         let source = root.path().join("source");
@@ -3701,6 +4508,185 @@ fn without_trash_an_original_the_merge_left_nothing_in_place_of_stays() -> Resul
 }
 
 #[test]
+fn a_merge_without_trash_reports_its_folder_kept_by_an_original_still_open()
+-> Result<(), Box<dyn Error>> {
+    let _serial = serial()?;
+    let editor = Some("Text Editor");
+    let without_links = || Quirks {
+        links: Support::Rejected(Errno::PERM),
+        ..Quirks::nfs3()
+    };
+    let renumbered_links = || Quirks {
+        link_inodes: true,
+        ..Quirks::nfs3()
+    };
+    for (row, move_sources, original, preset, holder) in [
+        ("copy fails", false, "x", Quirks::nfs3 as Preset, editor),
+        ("copy fails", false, "sub/x", Quirks::nfs3, editor),
+        ("copy fails, no links", false, "x", without_links, editor),
+        (
+            "copy fails, links numbered apart",
+            false,
+            "x",
+            renumbered_links,
+            editor,
+        ),
+        ("left out", false, "x", Quirks::nfs3, editor),
+        ("left out", true, "sub/x", Quirks::nfs3, editor),
+        ("replaced", true, "x", Quirks::nfs3, editor),
+        ("replaced", true, "x", Quirks::cifs_posix, editor),
+        ("replaced", true, "x", Quirks::cifs_posix, None),
+        ("replaced", true, "sub/x", Quirks::nfs3, None),
+        ("replaced", true, "sub/x", Quirks::cifs_posix, None),
+    ] {
+        let holder = holder.map(|program| crate::services::Holder::Program(program.to_owned()));
+        let root = tempfile::tempdir()?;
+        let linked_back = matches!(preset().links, Support::Supported)
+            && !preset().link_inodes
+            && base_links_keep_their_number(root.path())?;
+        let put_back_by_rename = !row.starts_with("replaced") && !linked_back;
+        let sources = root.path().join("sources");
+        let destination = root.path().join("destination");
+        let (source, target) = (sources.join("run"), destination.join("run"));
+        write_files(&source, &[("y.txt", "new y")])?;
+        write_files(&target, &[(original, "original")])?;
+        if row == "replaced" {
+            write_files(&source, &[("also/z", "incoming")])?;
+            write_files(&target, &[("also/z", "original")])?;
+        }
+        fs::create_dir_all(source.join(original).parent().ok_or("no parent")?)?;
+        let mut source_quirks = Quirks::default();
+        let _socket = if row == "left out" {
+            match std::os::unix::net::UnixListener::bind(source.join(original)) {
+                Ok(socket) => Some(socket),
+                Err(error)
+                    if matches!(Errno::from_io_error(&error), Some(Errno::PERM | Errno::IO)) =>
+                {
+                    eprintln!(
+                        "skipped on a base that refuses Unix sockets: {row} {original}, moving: {move_sources}"
+                    );
+                    continue;
+                }
+                Err(error) => return Err(error.into()),
+            }
+        } else {
+            fs::write(source.join(original), b"incoming")?;
+            None
+        };
+        if row.starts_with("copy fails") {
+            source_quirks.fail = vec![(Op::OpenSource, "x", 0, Errno::IO)];
+        }
+        let _sources = FsQuirks::install(&sources, source_quirks);
+        let _destination = FsQuirks::install(
+            &destination,
+            without_trash(Quirks {
+                holder: holder.clone(),
+                ..preset()
+            }),
+        );
+        let _clock = ClockGuard::set(std::time::SystemTime::now());
+        let _held = hold(&target.join(original));
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let emitted = events.clone();
+        let _operation = LocalOperationProvider.paste(
+            PasteRequest {
+                id: OperationRequestId(1729),
+                destination: Location::local(&destination),
+                items: vec![PasteItem {
+                    source: Location::local(&source),
+                    conflict: TransferConflict::Merge,
+                    target_name: None,
+                }],
+                move_sources,
+            },
+            Rc::new(move |event| emitted.borrow_mut().push(event)),
+        );
+
+        drive_until_transfer_settles(&events);
+
+        let listed = !matches!(
+            preset().silly_rename,
+            Some(super::fs_quirks::Silly {
+                aside: super::fs_quirks::Aside::Unlisted(_),
+                ..
+            })
+        );
+        let row = format!(
+            "{row} {original}, moving: {move_sources}, {:?}",
+            preset().mount_type
+        );
+        let events = events.take();
+        let folder = aside_folder(&target)?;
+        assert_eq!(folder.is_none(), put_back_by_rename, "{row}: {events:?}");
+        let kept = events
+            .iter()
+            .filter_map(|event| match event {
+                OperationEvent::ItemsReported { report, .. } => Some(report.kept.clone()),
+                _ => None,
+            })
+            .flatten()
+            .collect::<Vec<_>>();
+        let cause = match holder {
+            None if !listed => KeptCause::Undeletable(Errno::ACCESS.raw_os_error()),
+            holder => KeptCause::StillOpen(holder),
+        };
+        let mut expected: Vec<_> = folder
+            .as_ref()
+            .map(|folder| KeptItem {
+                location: Location::local(target.join(folder)),
+                cause,
+            })
+            .into_iter()
+            .collect();
+        if row.starts_with("left out") && move_sources {
+            expected.push(KeptItem {
+                location: Location::local(source.join(original)),
+                cause: KeptCause::Skipped(crate::services::SpecialKind::Socket),
+            });
+        }
+        assert_eq!(kept, expected, "{row}: {events:?}");
+        let now_there: &[u8] = if row.starts_with("replaced") {
+            b"incoming"
+        } else {
+            b"original"
+        };
+        assert_eq!(fs::read(target.join(original))?, now_there, "{row}");
+        if let Some(folder) = &folder {
+            let aside = target.join(folder).join(original);
+            let leftovers = names(aside.parent().ok_or("no parent")?)?;
+            assert!(
+                leftovers.len() == usize::from(listed)
+                    && leftovers.iter().all(|name| name.starts_with(".nfs")),
+                "{row}: {leftovers:?}"
+            );
+        }
+        match terminal_transfer(&events) {
+            Some(OperationEvent::TransferFailed { message, .. }) if row.starts_with("copy") => {
+                assert!(
+                    folder.iter().all(|folder| !message.contains(folder)),
+                    "{row}: {message}"
+                );
+                assert_eq!(fs::read(source.join(original))?, b"incoming", "{row}");
+            }
+            Some(OperationEvent::Pasted { .. }) if !row.starts_with("copy") => {
+                assert_eq!(fs::read(target.join("y.txt"))?, b"new y", "{row}");
+                for name in ["y.txt", original] {
+                    let gone = move_sources && (name == "y.txt" || row.starts_with("replaced"));
+                    assert_eq!(source.join(name).exists(), !gone, "{row}: {name}");
+                }
+                assert_eq!(
+                    item_moves(&events).len(),
+                    usize::from(move_sources),
+                    "{row}"
+                );
+            }
+            other => panic!("{row}: {other:?}"),
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn a_failed_merge_without_trash_puts_back_what_it_can_and_names_the_rest()
 -> Result<(), Box<dyn Error>> {
     let _serial = serial()?;
@@ -3787,8 +4773,10 @@ fn a_failed_aside_puts_every_original_back_before_merging() -> Result<(), Box<dy
         };
         let quirks = FsQuirks::install(root.path(), without_trash(quirks));
         if case == "second aside fails" {
+            let folder = fs::File::open(root.path())?;
+            let no_replace = probe(&System, folder.as_fd(), true, false, false)?.no_replace;
             learn_mount_capability(quirks.key(), |capabilities| {
-                capabilities.no_replace = Some(true);
+                capabilities.no_replace = no_replace;
             });
         }
         let _nested = (case == "nested mount")
@@ -3997,15 +4985,19 @@ impl crate::services::FileSource for Listing {
         crate::adapters::LocalFileSource.enumerate(request, emit)
     }
 
-    fn watch(
+    fn start_watch(
         &self,
         location: Location,
         include_hidden: bool,
         notify: Rc<dyn Fn(crate::services::DirectoryChange)>,
-    ) -> Option<crate::services::LoadHandle> {
-        self.watched
-            .then(|| crate::adapters::LocalFileSource.watch(location, include_hidden, notify))
-            .flatten()
+        report: Rc<dyn Fn(crate::services::Watching)>,
+    ) -> crate::services::LoadHandle {
+        if self.watched {
+            crate::adapters::LocalFileSource.start_watch(location, include_hidden, notify, report)
+        } else {
+            report(crate::services::Watching::Unavailable);
+            crate::services::LoadHandle::new(|| {})
+        }
     }
 }
 
@@ -4185,5 +5177,144 @@ fn check_a_merge_undo_drops_from_view_only_what_it_removed() -> Result<(), Box<d
         );
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+    Ok(())
+}
+
+#[test]
+fn an_undo_never_brings_back_another_item_trashed_later_from_the_same_path() {
+    crate::test_support::gtk_test(
+        "adapters::local_operations::tests::merge::an_undo_never_brings_back_another_item_trashed_later_from_the_same_path",
+        || {
+            for undone in [Undone::Delete, Undone::Replace, Undone::Merge] {
+                check_an_undo_never_brings_back_another_item_trashed_later(undone)
+                    .unwrap_or_else(|error| panic!("{undone:?}: {error}"));
+            }
+        },
+    );
+}
+
+fn check_an_undo_never_brings_back_another_item_trashed_later(
+    undone: Undone,
+) -> Result<(), Box<dyn Error>> {
+    use crate::app::{Browser, BrowserEvent};
+    let _serial = serial()?;
+    let context = glib::MainContext::default();
+    let root = tempfile::tempdir_in(glib::home_dir())?;
+    let target = root.path().join("folder/report.txt");
+    write_files(root.path(), &[("folder/report.txt", "original")])?;
+    let browser = Browser::new(Rc::new(Listing { watched: false }));
+    browser.set_operation_provider(Rc::new(LocalOperationProvider));
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let observed = events.clone();
+    browser.observe(move |event| {
+        observed
+            .borrow_mut()
+            .push(crate::test_support::operations::operation_event(event).clone());
+    });
+    let pump_until = |what: &str, done: &dyn Fn(&BrowserEvent) -> bool| {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !events.borrow().iter().any(done) {
+            if Instant::now() > deadline {
+                return Err(format!("timed out waiting until {what}"));
+            }
+            context.iteration(false);
+            thread::sleep(Duration::from_millis(1));
+        }
+        Ok(())
+    };
+    let incoming = |conflict| -> Result<(), Box<dyn Error>> {
+        write_files(
+            &root.path().join("incoming"),
+            &[("folder/report.txt", "incoming")],
+        )?;
+        let (source, destination) = match conflict {
+            TransferConflict::Merge => {
+                (root.path().join("incoming/folder"), root.path().to_owned())
+            }
+            _ => (
+                root.path().join("incoming/folder/report.txt"),
+                root.path().join("folder"),
+            ),
+        };
+        browser.transfer(
+            Location::local(destination),
+            vec![PasteItem {
+                source: Location::local(source),
+                conflict,
+                target_name: None,
+            }],
+            false,
+            false,
+        );
+        pump_until("the paste ends", &|event| {
+            matches!(event, BrowserEvent::TransferCompleted)
+        })?;
+        Ok(())
+    };
+    match undone {
+        Undone::Delete => {
+            browser.delete(vec![file_entry(&target)], false);
+            pump_until("the delete ends", &|event| {
+                matches!(event, BrowserEvent::DeletionFinished { .. })
+            })?;
+        }
+        Undone::Replace => incoming(TransferConflict::ReplaceExisting)?,
+        Undone::Merge => incoming(TransferConflict::Merge)?,
+    }
+    let trash = glib::user_data_dir().join("Trash");
+    let recorded = |info: &Path| {
+        fs::read_to_string(info).ok().and_then(|contents| {
+            contents
+                .lines()
+                .find_map(|line| line.strip_prefix("Path="))
+                .and_then(crate::adapters::trash_restore::decode_trashinfo_path)
+        })
+    };
+    let ours = fs::read_dir(trash.join("info"))?
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .find(|info| recorded(info).as_deref() == Some(target.as_path()))
+        .ok_or("the original's Trash entry")?;
+    let contents = fs::read_to_string(&ours)?;
+    fs::write(
+        &ours,
+        contents
+            .lines()
+            .map(|line| match line.strip_prefix("DeletionDate=") {
+                Some(_) => "DeletionDate=2000-01-01T00:00:00",
+                None => line,
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )?;
+    let later = trash.join("files/report.later.txt");
+    fs::write(&later, "trashed later")?;
+    fs::write(
+        trash.join("info/report.later.txt.trashinfo"),
+        format!(
+            "[Trash Info]\nPath={}\nDeletionDate=2099-01-01T00:00:00\n",
+            target.display()
+        ),
+    )?;
+    events.borrow_mut().clear();
+
+    let started = match undone {
+        Undone::Delete => browser.undo_last_trash(),
+        Undone::Replace | Undone::Merge => {
+            let (generation, created, overwritten) =
+                browser.pending_undo_merge().ok_or("the paste's undo")?;
+            browser.undo_merge(generation, created, overwritten)
+        }
+    };
+    assert!(started, "the undo starts");
+    pump_until("the undo ends", &|event| {
+        matches!(event, BrowserEvent::RestorationFinished { .. })
+    })?;
+
+    assert_eq!(fs::read_to_string(&target)?, "original");
+    assert_eq!(fs::read_to_string(&later)?, "trashed later");
+    fs::remove_file(later)?;
+    fs::remove_file(trash.join("info/report.later.txt.trashinfo"))?;
     Ok(())
 }

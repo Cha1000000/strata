@@ -2,6 +2,7 @@
 
 use std::{
     cell::{Cell, RefCell},
+    path::{Path, PathBuf},
     process::Command,
     rc::{Rc, Weak},
     sync::{OnceLock, mpsc::TryRecvError},
@@ -93,30 +94,48 @@ const RESTART_GRACE_SECONDS: u64 = 20;
 const ROLLBACK_RETENTION: Duration = Duration::from_secs(60);
 
 pub(crate) fn schedule_rollback_cleanup() {
-    let Ok(current_exe) = services::installed_executable() else {
-        return;
-    };
-    let Some(rollback) = current_exe.parent().map(services::rollback_path) else {
-        return;
-    };
+    schedule_rollback_cleanup_with(
+        || {
+            let current_exe = services::installed_executable().ok()?;
+            Some(services::rollback_path(current_exe.parent()?))
+        },
+        ROLLBACK_RETENTION,
+        remove_unless_replaced,
+    );
+}
+
+fn schedule_rollback_cleanup_with(
+    locate: impl FnOnce() -> Option<PathBuf> + Send + 'static,
+    retention: Duration,
+    remove: impl FnOnce(&Path, &std::fs::Metadata) + Send + 'static,
+) {
+    glib::MainContext::default().spawn_local(async move {
+        let preserved = gio::spawn_blocking(move || {
+            crate::util::ui_thread::assert_off();
+            let rollback = locate()?;
+            let preserved = std::fs::symlink_metadata(&rollback).ok()?;
+            preserved.is_file().then_some((rollback, preserved))
+        });
+        let Ok(Some((rollback, preserved))) = preserved.await else {
+            return;
+        };
+        glib::timeout_future(retention).await;
+        let _removed = gio::spawn_blocking(move || remove(&rollback, &preserved)).await;
+    });
+}
+
+fn remove_unless_replaced(rollback: &Path, preserved: &std::fs::Metadata) {
     use std::os::unix::fs::MetadataExt;
-    let Ok(preserved) = std::fs::symlink_metadata(&rollback) else {
-        return;
-    };
-    if !preserved.is_file() {
+    crate::util::ui_thread::assert_off();
+    // A later install owns its own rollback copy, even in this process.
+    if !std::fs::symlink_metadata(rollback)
+        .is_ok_and(|current| current.dev() == preserved.dev() && current.ino() == preserved.ino())
+    {
         return;
     }
-    glib::timeout_add_local_once(ROLLBACK_RETENTION, move || {
-        // A later install owns its own rollback copy, even in this process.
-        if !std::fs::symlink_metadata(&rollback).is_ok_and(|current| {
-            current.dev() == preserved.dev() && current.ino() == preserved.ino()
-        }) {
-            return;
-        }
-        if let Err(error) = std::fs::remove_file(&rollback) {
-            tracing::warn!(%error, "could not remove the preserved previous version");
-        }
-    });
+    if let Err(error) = std::fs::remove_file(rollback) {
+        tracing::warn!(%error, "could not remove the preserved previous version");
+    }
 }
 
 thread_local! {
@@ -178,7 +197,7 @@ pub(super) fn resolve_update_method_async(callback: impl FnOnce(UpdateMethod) + 
     let spawned = std::thread::Builder::new()
         .name("strata-update-method".into())
         .spawn(move || {
-            let method = *UPDATE_METHOD_CACHE.get_or_init(services::update_method);
+            let method = *UPDATE_METHOD_CACHE.get_or_init(detect_update_method);
             let _sent = sender.send(method);
         });
     if spawned.is_err() {
@@ -206,6 +225,14 @@ pub(super) fn resolve_update_method_async(callback: impl FnOnce(UpdateMethod) + 
         }
     });
 }
+
+fn detect_update_method() -> UpdateMethod {
+    if let Some(managed) = InstallSource::detect().managed() {
+        managed.find_installed_aur_helper();
+    }
+    services::update_method()
+}
+
 const UPDATE_DUE_INTERVAL: Duration = Duration::from_secs(24 * 3600);
 
 fn update_check_due(last: Option<Instant>, now: Instant) -> bool {
@@ -1995,26 +2022,17 @@ fn update_check_row_with(
     let row_status = status.clone();
     let row_pending_download = pending_download.clone();
     button.connect_clicked(move |button| {
-        if update_method == UpdateMethod::Aur && managed_update_available.get() {
-            match launch_aur_update() {
-                Ok(message) => status.set_text(&message),
-                Err(error) => status.set_text(&rust_i18n::t!(
-                    "Couldn’t open AUR update: %{error}",
-                    error = error
-                )),
-            }
-            return;
-        }
-        if update_method == UpdateMethod::Omarchy && managed_update_available.get() {
-            match launch_omarchy_update() {
-                Ok(()) => {
-                    status.set_text(&crate::i18n::tr("Omarchy Update opened in your terminal."))
-                }
-                Err(error) => status.set_text(&rust_i18n::t!(
-                    "Couldn’t open Omarchy Update: %{error}",
-                    error = error
-                )),
-            }
+        if matches!(update_method, UpdateMethod::Aur | UpdateMethod::Omarchy)
+            && managed_update_available.get()
+        {
+            let status = status.clone();
+            glib::MainContext::default().spawn_local(async move {
+                status.set_text(
+                    &launch_managed_update(update_method)
+                        .await
+                        .unwrap_or_else(|error| error),
+                );
+            });
             return;
         }
         if installed.get() {
@@ -2336,6 +2354,7 @@ fn process_start_time(pid: u32) -> Option<String> {
 fn restart_waiter(current_exe: &std::path::Path, parent_pid: u32) -> Option<Command> {
     use std::{os::unix::process::CommandExt, process::Stdio};
 
+    crate::util::ui_thread::assert_off();
     let mut command = crate::trusted_command::command("sh").ok()?;
     let sleep = crate::trusted_command::resolve("sleep").ok()?;
     let start_time = process_start_time(parent_pid).unwrap_or_default();
@@ -2371,14 +2390,12 @@ fn restart_waiter(current_exe: &std::path::Path, parent_pid: u32) -> Option<Comm
     Some(command)
 }
 
-/// A closed window may no longer have an application; never exit the process in that case.
 fn restart(application: Option<&gtk::Application>) {
-    let Some(application) = application else {
-        return;
-    };
-    let Ok(current_exe) = crate::services::installed_executable() else {
-        return;
-    };
+    restart_with(application, start_restart_waiter);
+}
+
+fn start_restart_waiter() -> Option<std::process::Child> {
+    let current_exe = crate::services::installed_executable().ok()?;
     // Wait for this process to exit completely before relaunching. A fixed
     // delay could overlap the old and new GTK/Wayland clients and rapidly hand
     // keyboard focus through an underlying terminal. Besides re-activating the
@@ -2386,22 +2403,43 @@ fn restart(application: Option<&gtk::Application>) {
     // affected systems. Detach the waiter from inherited terminal streams and
     // put it in its own process group so applying an update cannot disturb the
     // terminal that launched Strata.
-    let Some(mut waiter) = restart_waiter(&current_exe, std::process::id()) else {
+    restart_waiter(&current_exe, std::process::id())?
+        .spawn()
+        .ok()
+}
+
+thread_local! {
+    static RESTART_IN_FLIGHT: Cell<bool> = const { Cell::new(false) };
+}
+
+/// A closed window may no longer have an application; never exit the process in that case.
+fn restart_with(
+    application: Option<&gtk::Application>,
+    start: impl FnOnce() -> Option<std::process::Child> + Send + 'static,
+) {
+    let Some(application) = application.cloned() else {
         return;
     };
-    if restart_blocker_shown(application) {
+    if RESTART_IN_FLIGHT.get() || restart_blocker_shown(&application) {
         return;
     }
-    let Ok(mut waiter) = waiter.spawn() else {
-        return;
-    };
-    // Do not leave a waiter behind when an unregistered close handler refuses.
-    if !close_windows_for_restart(application) {
-        let _ = waiter.kill();
-        let _ = waiter.wait();
-        return;
-    }
-    application.quit();
+    RESTART_IN_FLIGHT.set(true);
+    glib::spawn_future_local(async move {
+        let started = gio::spawn_blocking(start).await;
+        RESTART_IN_FLIGHT.set(false);
+        let Ok(Some(mut waiter)) = started else {
+            return;
+        };
+        // Do not leave a waiter behind when an unregistered close handler refuses.
+        if !close_windows_for_restart(&application) {
+            gio::spawn_blocking(move || {
+                let _ = waiter.kill();
+                let _ = waiter.wait();
+            });
+            return;
+        }
+        application.quit();
+    });
 }
 
 /// Checks every window before closing any, so a refusal cannot leave some closed.
@@ -2672,35 +2710,28 @@ fn build_update_dialog(
     let application = parent.application();
     let dialog_status = status.clone();
     action.connect_clicked(move |button| {
-        if update_method == UpdateMethod::Aur {
-            if aur_action == "Close" {
-                dismiss_modal_layer(&action_layer, &action_overlay, action_root.as_ref());
-                button.set_sensitive(false);
-                return;
-            }
-            match launch_aur_update() {
-                Ok(_) => {
-                    dismiss_modal_layer(&action_layer, &action_overlay, action_root.as_ref());
-                    button.set_sensitive(false);
-                }
-                Err(error) => status.set_text(&rust_i18n::t!(
-                    "Couldn’t open AUR update: %{error}",
-                    error = error
-                )),
-            }
+        if update_method == UpdateMethod::Aur && aur_action == "Close" {
+            dismiss_modal_layer(&action_layer, &action_overlay, action_root.as_ref());
+            button.set_sensitive(false);
             return;
         }
-        if update_method == UpdateMethod::Omarchy {
-            match launch_omarchy_update() {
-                Ok(()) => {
-                    dismiss_modal_layer(&action_layer, &action_overlay, action_root.as_ref());
-                    button.set_sensitive(false);
+        if matches!(update_method, UpdateMethod::Aur | UpdateMethod::Omarchy) {
+            button.set_sensitive(false);
+            let (layer, overlay, root) = (
+                action_layer.clone(),
+                action_overlay.clone(),
+                action_root.clone(),
+            );
+            let (status, button) = (status.clone(), button.clone());
+            glib::MainContext::default().spawn_local(async move {
+                match launch_managed_update(update_method).await {
+                    Ok(_) => dismiss_modal_layer(&layer, &overlay, root.as_ref()),
+                    Err(error) => {
+                        status.set_text(&error);
+                        button.set_sensitive(true);
+                    }
                 }
-                Err(error) => status.set_text(&rust_i18n::t!(
-                    "Couldn’t open Omarchy Update: %{error}",
-                    error = error
-                )),
-            }
+            });
             return;
         }
         if update_method == UpdateMethod::Pacman {
@@ -2873,17 +2904,34 @@ fn aur_update_command(terminal: &terminal::Terminal, helper: &str, package: &str
     terminal.exec_command(&[helper, "-Syu", package])
 }
 
-fn launch_aur_update() -> Result<String, String> {
+async fn launch_managed_update(method: UpdateMethod) -> Result<String, String> {
+    if method == UpdateMethod::Aur {
+        return launch_aur_update().await.map_err(|error| {
+            rust_i18n::t!("Couldn’t open AUR update: %{error}", error = error).into_owned()
+        });
+    }
+    launch_omarchy_update()
+        .await
+        .map(|()| crate::i18n::tr("Omarchy Update opened in your terminal."))
+        .map_err(|error| {
+            rust_i18n::t!("Couldn’t open Omarchy Update: %{error}", error = error).into_owned()
+        })
+}
+
+async fn launch_aur_update() -> Result<String, String> {
     let managed = InstallSource::detect()
         .managed()
         .ok_or_else(|| crate::i18n::tr("missing package metadata"))?;
     if let Some((helper, package)) = managed.aur_update_target() {
-        let Some(terminal) = terminal::Terminal::resolve() else {
-            return Err(terminal::no_terminal_message());
-        };
-        return terminal::spawn_reaped(aur_update_command(&terminal, helper, package))
-            .map(|()| crate::i18n::tr("AUR update opened in your terminal."))
-            .map_err(|error| terminal.launch_failure(&error));
+        return terminal::spawn_reaped(move || {
+            let terminal =
+                terminal::Terminal::resolve().ok_or_else(terminal::no_terminal_message)?;
+            aur_update_command(&terminal, helper, package)
+                .spawn()
+                .map_err(|error| terminal.launch_failure(&error))
+        })
+        .await
+        .map(|()| crate::i18n::tr("AUR update opened in your terminal."));
     }
     let package = managed
         .package()
@@ -2898,24 +2946,26 @@ fn omarchy_update_command(terminal: &terminal::Terminal) -> Command {
     terminal.exec_command(&["omarchy", "update"])
 }
 
-fn launch_omarchy_update() -> Result<(), String> {
-    if let Some(command) = terminal::omarchy_presentation_command(
-        std::env::var_os("PATH").as_deref(),
-        "omarchy-update",
-    ) {
-        match terminal::spawn_reaped(command) {
-            Ok(()) => return Ok(()),
-            Err(error) => tracing::warn!(
-                %error,
-                "Omarchy presentation launcher failed to start; falling back to a plain terminal"
-            ),
+async fn launch_omarchy_update() -> Result<(), String> {
+    terminal::spawn_reaped(|| {
+        if let Some(mut command) = terminal::omarchy_presentation_command(
+            std::env::var_os("PATH").as_deref(),
+            "omarchy-update",
+        ) {
+            match command.spawn() {
+                Ok(child) => return Ok(child),
+                Err(error) => tracing::warn!(
+                    %error,
+                    "Omarchy presentation launcher failed to start; falling back to a plain terminal"
+                ),
+            }
         }
-    }
-    let Some(terminal) = terminal::Terminal::resolve() else {
-        return Err(terminal::no_terminal_message());
-    };
-    terminal::spawn_reaped(omarchy_update_command(&terminal))
-        .map_err(|error| terminal.launch_failure(&error))
+        let terminal = terminal::Terminal::resolve().ok_or_else(terminal::no_terminal_message)?;
+        omarchy_update_command(&terminal)
+            .spawn()
+            .map_err(|error| terminal.launch_failure(&error))
+    })
+    .await
 }
 
 fn or_unknown(value: Option<String>) -> String {

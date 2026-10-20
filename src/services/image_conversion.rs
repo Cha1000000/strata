@@ -69,6 +69,7 @@ impl ImageKind {
 
 // Only a bounded signature read happens outside the decoder sandbox.
 pub(crate) fn detect(path: &Path) -> Option<ImageKind> {
+    crate::util::ui_thread::assert_off();
     let mut header = [0; 32];
     let count = fs::File::open(path).ok()?.read(&mut header).ok()?;
     let header = &header[..count];

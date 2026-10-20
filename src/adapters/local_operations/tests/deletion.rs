@@ -1,11 +1,16 @@
-use super::fs_quirks::{Op, Trash};
+use super::fs_quirks::{Births, HoldGuard, Op, Racer, Trash, hold};
 use super::*;
 use crate::adapters::local_operations::{
     LocalDeleteJob, LocalDeleteQueue, PinnedEntry, parallel_delete_local_blocking_with_workers,
     parallel_delete_local_with, process_local_delete_job, retry_local_open,
     run_local_delete_workers,
 };
-use std::sync::{Barrier, atomic::Ordering, mpsc};
+use crate::{
+    adapters::trash_support::SystemTrash,
+    model::hidden_names::foreign_leftover,
+    services::{Holder, file_activity},
+};
+use std::sync::{Barrier, Mutex, atomic::Ordering, mpsc};
 
 #[test]
 fn permanent_deletion_reports_injected_unlink_failures_without_removing_the_item()
@@ -56,6 +61,7 @@ fn enqueue_root(queue: &Arc<LocalDeleteQueue>, root: PinnedEntry) {
         expected: root.identity,
         guard: None,
         completion: None,
+        deadline: Default::default(),
     });
 }
 
@@ -207,6 +213,7 @@ fn parallel_workers_finish_nested_trees_without_following_symlinks() -> Result<(
             vec![delete_root(&target)?],
             Arc::new(AtomicBool::new(false)),
             workers,
+            &Default::default(),
         )?;
         assert!(!target.exists());
         assert_eq!(fs::read(sentinel)?, b"keep");
@@ -470,6 +477,7 @@ fn provider_cleans_only_confirmed_pins_on_failure_and_cancellation() {
                 }) {
                     context.iteration(true);
                 }
+                crate::storage::writer::settle();
                 assert_eq!(
                     fs::read_to_string(&bookmarks).expect("remaining pins"),
                     pin(&second)
@@ -654,17 +662,11 @@ fn deleting_browser_can_drop_after_a_confirmed_deletion_without_losing_pin_clean
             let weak = Rc::downgrade(&browser);
             let owner = Rc::new(RefCell::new(Some(browser.clone())));
             let release = owner.clone();
-            let expected = pin(&second);
-            let saved = bookmarks.clone();
             browser.observe(move |event| {
                 if matches!(
                     event,
                     crate::app::BrowserEvent::DeletionProgress { completed: 1, .. }
                 ) {
-                    assert_eq!(
-                        fs::read_to_string(&saved).expect("pins before callback"),
-                        expected
-                    );
                     release
                         .borrow_mut()
                         .take()
@@ -689,6 +691,7 @@ fn deleting_browser_can_drop_after_a_confirmed_deletion_without_losing_pin_clean
             }
             assert!(!first.exists());
             assert!(second.exists());
+            crate::storage::writer::settle();
             assert_eq!(
                 fs::read_to_string(bookmarks).expect("saved pins"),
                 pin(&second)
@@ -730,6 +733,7 @@ fn bookmark_cleanup_failure_preserves_the_successful_deletion_outcome() {
             {
                 glib::MainContext::default().iteration(true);
             }
+            crate::storage::writer::settle();
             assert!(!gone.exists());
             assert_eq!(*failures.borrow(), [true]);
             assert!(
@@ -949,6 +953,99 @@ fn permanent_delete_revalidates_identity_after_a_parent_alias_changes() -> Resul
 }
 
 #[test]
+fn a_removal_by_a_recorded_identity_follows_the_mounts_rule() -> Result<(), Box<dyn Error>> {
+    #[derive(Clone, Copy, Debug)]
+    enum Since {
+        Evicted,
+        Replaced,
+        ReplacedAlike,
+        ReplacedOnceNumbersWent,
+    }
+    let _serial = serial()?;
+    let samba = || Quirks {
+        births: Births::MadeUp,
+        ..Quirks::cifs()
+    };
+    let rows: [(Preset, Since, bool); 5] = [
+        (Quirks::vfat, Since::Evicted, true),
+        (Quirks::vfat, Since::Replaced, false),
+        (Quirks::ext4, Since::Evicted, false),
+        (samba, Since::ReplacedAlike, false),
+        (samba, Since::ReplacedOnceNumbersWent, false),
+    ];
+    for (preset, since, removed) in rows {
+        for permanently in [true, false] {
+            let row = format!("{:?}, {since:?}, {permanently}", preset().mount_type);
+            let root = tempfile::tempdir()?;
+            let path = root.path().join("item");
+            let theirs = root.path().join("theirs");
+            fs::write(&path, b"recorded")?;
+            fs::write(&theirs, b"theirs")?;
+            let hour_before = std::time::SystemTime::now()
+                .duration_since(std::time::SystemTime::UNIX_EPOCH)?
+                .as_secs()
+                - 3600;
+            for file in [&path, &theirs] {
+                set_times(file, hour_before, 0)?;
+            }
+            let _scope = FsQuirks::install(root.path(), preset());
+            let context = glib::MainContext::default();
+            let expected = context
+                .block_on(super::local_file_identity(&gio::File::for_path(&path)))?
+                .ok_or("a local item")?;
+            match since {
+                Since::Evicted => assert!(super::fs_quirks::evict(&path), "{row}"),
+                Since::Replaced => {
+                    let probe = root.path().join("probe");
+                    wait_for_a_later_birth_time(&probe, &fs::metadata(&path)?);
+                    fs::remove_file(&path)?;
+                    fs::write(&path, b"theirs")?;
+                    super::fs_quirks::recreated(&path);
+                }
+                Since::ReplacedAlike => fs::rename(&theirs, &path)?,
+                Since::ReplacedOnceNumbersWent => {
+                    assert!(super::fs_quirks::autodisable_serverino(&path), "{row}");
+                    fs::rename(&theirs, &path)?;
+                }
+            }
+
+            let gone = if permanently {
+                let result = context.block_on(super::permanently_delete_local_path_if_unchanged(
+                    path.clone(),
+                    Some(expected),
+                    gio::Cancellable::new(),
+                ));
+                if let Err(error) = &result {
+                    assert!(error.to_string().contains("changed"), "{row}: {error}");
+                }
+                result.is_ok()
+            } else {
+                let parent = super::open_local_parent_directory(root.path())?;
+                let item = std::ffi::OsStr::new("item");
+                std::thread::scope(|scope| {
+                    scope
+                        .spawn(|| {
+                            super::super::placement::remove_if_unchanged(
+                                super::super::fs_ops::fs(),
+                                super::super::fs_ops::Entry::new(&parent, item),
+                                expected.identity,
+                                expected.attributes,
+                                rustix::fs::AtFlags::empty(),
+                            )
+                        })
+                        .join()
+                })
+                .map_err(|_| "the removal panicked")?
+            };
+
+            assert_eq!(gone, removed, "{row}");
+            assert_eq!(path.exists(), !removed, "{row}");
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn permanent_delete_of_a_symlink_through_an_alias_keeps_its_referent() -> Result<(), Box<dyn Error>>
 {
     let _serial = serial()?;
@@ -1005,15 +1102,15 @@ fn an_already_cancelled_recursive_delete_preserves_the_root() -> Result<(), Box<
 }
 
 #[test]
-fn trashing_reports_each_items_identity_and_a_permanent_delete_reports_none() {
+fn trashing_and_restoring_report_each_items_identity_and_a_permanent_delete_reports_none() {
     crate::test_support::gtk_test(
-        "adapters::local_operations::tests::deletion::trashing_reports_each_items_identity_and_a_permanent_delete_reports_none",
+        "adapters::local_operations::tests::deletion::trashing_and_restoring_report_each_items_identity_and_a_permanent_delete_reports_none",
         || {
             for permanent in [false, true] {
                 let root = tempfile::tempdir().expect("root");
                 let folder = root.path().join("folder");
                 fs::create_dir(&folder).expect("folder");
-                let identity = TrashedOriginal::at_path(&folder).expect("identity");
+                let identity = numbers_at(&folder);
                 let events = Rc::new(RefCell::new(Vec::new()));
                 let emitted = events.clone();
                 let _operation = LocalOperationProvider.delete(
@@ -1031,18 +1128,146 @@ fn trashing_reports_each_items_identity_and_a_permanent_delete_reports_none() {
                     )
                 });
 
+                let trashed = {
+                    let events = events.borrow();
+                    assert!(matches!(
+                        events.last(),
+                        Some(OperationEvent::Deleted { .. })
+                    ));
+                    assert_eq!(
+                        trashed_items(&events),
+                        if permanent {
+                            Vec::new()
+                        } else {
+                            vec![(Location::local(&folder), identity)]
+                        }
+                    );
+                    events.iter().find_map(|event| match event {
+                        OperationEvent::ItemTrashed { identity, .. } => Some(*identity),
+                        _ => None,
+                    })
+                };
+                let Some(trashed) = trashed else {
+                    continue;
+                };
+                let restoring = Rc::new(RefCell::new(Vec::new()));
+                let emitted = restoring.clone();
+                let _operation = LocalOperationProvider.restore(
+                    RestoreRequest {
+                        id: OperationRequestId(96),
+                        source: RestoreSource::OriginalLocations {
+                            locations: vec![Location::local(&folder)],
+                            originals: HashMap::new(),
+                        },
+                    },
+                    Rc::new(move |event| emitted.borrow_mut().push(event)),
+                );
+                wait_for_operation(&restoring, |event| {
+                    matches!(
+                        event,
+                        OperationEvent::Restored { .. }
+                            | OperationEvent::RestoreCompletedWithErrors { .. }
+                            | OperationEvent::Failed { .. }
+                    )
+                });
+                let restoring = restoring.borrow();
+                let restored = restoring
+                    .iter()
+                    .filter_map(|event| match event {
+                        OperationEvent::ItemRestored {
+                            location, identity, ..
+                        } => Some((location.clone(), *identity)),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                assert!(
+                    matches!(&restored[..], [(location, restored)]
+                        if *location == Location::local(&folder) && restored.unchanged(&trashed)),
+                    "{restored:?} after {:?}",
+                    restoring.last()
+                );
+            }
+        },
+    );
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Swap {
+    Untouched,
+    RenamedOver,
+    MovedAside,
+}
+
+#[test]
+fn trash_reports_the_item_it_moved_when_another_took_the_name_first() {
+    crate::test_support::gtk_test(
+        "adapters::local_operations::tests::deletion::trash_reports_the_item_it_moved_when_another_took_the_name_first",
+        || {
+            let rows: [(Preset, Op, Swap, bool); 5] = [
+                (Quirks::ext4, Op::Trash, Swap::Untouched, false),
+                (Quirks::ext4, Op::Trash, Swap::RenamedOver, true),
+                (Quirks::ext4, Op::OpenAt, Swap::RenamedOver, true),
+                (Quirks::sshfs, Op::Trash, Swap::MovedAside, true),
+                (Quirks::nfs3, Op::Trash, Swap::RenamedOver, false),
+            ];
+            for (preset, op, swap, reports_arrival) in rows {
+                let root = tempfile::tempdir().expect("root");
+                let item = root.path().join("report.txt");
+                let arrival = root.path().join("arrival.txt");
+                fs::write(&item, b"checked").expect("item");
+                fs::write(&arrival, b"arrived later").expect("arrival");
+                let (checked, arrived) = (numbers_at(&item), numbers_at(&arrival));
+                let (from, to, aside) = (
+                    arrival.clone(),
+                    item.clone(),
+                    root.path().join("report.txt~"),
+                );
+                let racer: Racer = Box::new(move || match swap {
+                    Swap::Untouched => {}
+                    Swap::RenamedOver => fs::rename(&from, &to).expect("renamed over"),
+                    Swap::MovedAside => {
+                        fs::rename(&to, &aside).expect("moved aside");
+                        fs::rename(&from, &to).expect("renamed in");
+                    }
+                });
+                let _quirks = FsQuirks::install(
+                    root.path(),
+                    Quirks {
+                        before: vec![(op, "report.txt", 0, racer)],
+                        ..preset()
+                    },
+                );
+                let events = Rc::new(RefCell::new(Vec::new()));
+                let emitted = events.clone();
+                let _operation = LocalOperationProvider.delete(
+                    DeleteRequest {
+                        id: OperationRequestId(13),
+                        entries: vec![file_entry(&item)],
+                        permanent: false,
+                    },
+                    Rc::new(move |event| emitted.borrow_mut().push(event)),
+                );
+                wait_for_operation(&events, |event| {
+                    matches!(
+                        event,
+                        OperationEvent::Deleted { .. } | OperationEvent::CompletedWithErrors { .. }
+                    )
+                });
+
                 let events = events.borrow();
-                assert!(matches!(
-                    events.last(),
-                    Some(OperationEvent::Deleted { .. })
-                ));
+                assert!(
+                    matches!(events.last(), Some(OperationEvent::Deleted { .. })),
+                    "{op:?}, {swap:?}: {:?}",
+                    events.last()
+                );
                 assert_eq!(
                     trashed_items(&events),
-                    if permanent {
-                        Vec::new()
-                    } else {
-                        vec![(Location::local(&folder), identity)]
-                    }
+                    [(
+                        Location::local(&item),
+                        if reports_arrival { arrived } else { checked }
+                    )],
+                    "{:?}, {op:?}, {swap:?}",
+                    preset().mount_type
                 );
             }
         },
@@ -1099,14 +1324,14 @@ fn verified_trash_learns_fuse_refusals_and_cleans_leftovers_on_both_worker_route
                                     .expect("open");
                             let at =
                                 super::super::Entry::new(&parent, path.file_name().expect("name"));
-                            let identity =
-                                super::super::fs().stat(at, false).expect("stat").identity;
+                            let stat = super::super::fs().stat(at, false).expect("stat");
                             Ok(super::super::trash::trash_verified(
                                 at,
                                 &path,
-                                identity,
+                                &stat,
                                 &gio::Cancellable::new(),
-                            ))
+                            )
+                            .map(drop))
                         }))
                         .expect("worker")
                 } else {
@@ -1144,15 +1369,32 @@ fn a_trash_that_moves_nothing_is_retryable_and_records_no_undo() {
     crate::test_support::gtk_test(
         "adapters::local_operations::tests::deletion::a_trash_that_moves_nothing_is_retryable_and_records_no_undo",
         || {
-            for trash in [Trash::FalseWithoutError, Trash::SucceedsWithoutMoving] {
+            let rows: [(Trash, Preset, Option<bool>); 5] = [
+                (Trash::FalseWithoutError, Quirks::default, None),
+                (Trash::SucceedsWithoutMoving, Quirks::default, None),
+                (Trash::SucceedsWithoutMoving, Quirks::vfat, Some(false)),
+                (Trash::SucceedsWithoutMoving, Quirks::sshfs, Some(false)),
+                (Trash::SucceedsWithoutMoving, Quirks::exfat, Some(false)),
+            ];
+            for (trash, preset, evicted) in rows {
                 let root = tempfile::tempdir().expect("root");
                 let folder = root.path().join("folder");
                 fs::create_dir(&folder).expect("folder");
+                let evicting = Arc::new(Mutex::new(None));
+                let (path, outcome) = (folder.clone(), evicting.clone());
+                let racer: super::fs_quirks::Racer = Box::new(move || {
+                    *outcome.lock().expect("outcome") = Some(super::fs_quirks::evict(&path));
+                });
                 let _quirks = FsQuirks::install(
                     root.path(),
                     Quirks {
                         trash,
-                        ..Quirks::default()
+                        after: if evicted.is_some() {
+                            vec![(Op::Trash, "folder", 0, racer)]
+                        } else {
+                            Vec::new()
+                        },
+                        ..preset()
                     },
                 );
                 let events = Rc::new(RefCell::new(Vec::new()));
@@ -1185,7 +1427,427 @@ fn a_trash_that_moves_nothing_is_retryable_and_records_no_undo() {
                 );
                 assert!(trashed_items(&events).is_empty());
                 assert!(folder.is_dir());
+                assert_eq!(
+                    *evicting.lock().expect("outcome"),
+                    evicted,
+                    "{:?}",
+                    preset().mount_type
+                );
             }
         },
     );
+}
+
+const CLOCK_START: Duration = Duration::from_secs(1_800_000_000);
+
+type Holds = Arc<std::sync::Mutex<Vec<HoldGuard>>>;
+
+fn releasing(holds: &Holds) -> Racer {
+    let holds = holds.clone();
+    Box::new(move || holds.lock().expect("the holds").clear())
+}
+
+fn folder_with_an_open_file(path: &Path, holds: &Holds) -> io::Result<()> {
+    fs::create_dir(path)?;
+    fs::write(path.join("open.txt"), b"open elsewhere")?;
+    let held = hold(&path.join("open.txt"));
+    holds
+        .lock()
+        .map_err(|_| io::Error::other("the holds"))?
+        .push(held);
+    Ok(())
+}
+
+fn delete_permanently(folders: &[PathBuf]) -> Vec<OperationEvent> {
+    delete(folders, true)
+}
+
+fn delete(folders: &[PathBuf], permanent: bool) -> Vec<OperationEvent> {
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let emitted = events.clone();
+    glib::MainContext::default().block_on(run_deletion_in(
+        Rc::new(SystemTrash),
+        OperationRequestId(1590),
+        folders
+            .iter()
+            .map(|folder| DeletionTarget::from_entry(&directory_entry(folder)))
+            .collect(),
+        permanent,
+        Rc::new(move |event| emitted.borrow_mut().push(event)),
+        gio::Cancellable::new(),
+    ));
+    events.take()
+}
+
+fn waited_since(start: SystemTime) -> Result<Duration, Box<dyn Error>> {
+    Ok(super::super::copy_engine::clock_for_test().duration_since(start)?)
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Holding {
+    Unnamed,
+    Program,
+    StrataRead,
+    StrataOperation,
+    TheDeleteItself,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Meanwhile {
+    StaysOpen(Holding),
+    Closes,
+    ClosesAsTheWaitEnds,
+    IsSwappedForAnEmptyFolder,
+}
+
+const GONE_AFTER_THE_CLOSE: Duration = Duration::from_millis(100);
+
+fn meanwhile_racer(
+    meanwhile: Meanwhile,
+    folder: &Path,
+    holds: &Holds,
+    wait_ends: SystemTime,
+) -> Option<(Op, &'static str, usize, Racer)> {
+    let (holds, folder) = (holds.clone(), folder.to_path_buf());
+    match meanwhile {
+        Meanwhile::StaysOpen(_) => None,
+        Meanwhile::Closes => Some((Op::Unlink, "folder", 0, releasing(&holds))),
+        Meanwhile::ClosesAsTheWaitEnds => Some((
+            Op::Unlink,
+            "folder",
+            1,
+            Box::new(move || {
+                super::super::copy_engine::set_clock_for_test(Some(wait_ends));
+                holds.lock().expect("the holds").clear();
+                let gone = wait_ends + GONE_AFTER_THE_CLOSE;
+                super::super::copy_engine::set_clock_for_test(Some(gone));
+            }),
+        )),
+        Meanwhile::IsSwappedForAnEmptyFolder => Some((
+            Op::Unlink,
+            "folder",
+            0,
+            Box::new(move || {
+                fs::rename(&folder, folder.with_extension("moved")).expect("move the folder");
+                fs::create_dir(&folder).expect("make another folder");
+            }),
+        )),
+    }
+}
+
+#[test]
+fn a_folder_only_leftovers_keep_goes_once_they_do_within_the_mount_s_wait()
+-> Result<(), Box<dyn Error>> {
+    use Holding::*;
+    use Meanwhile::*;
+    let _serial = serial()?;
+    let smb = Duration::from_millis(1500);
+    let fuse_and_nfs = Duration::from_secs(2);
+    let renamed = |holding| {
+        [
+            StaysOpen(Unnamed),
+            StaysOpen(holding),
+            Closes,
+            ClosesAsTheWaitEnds,
+            IsSwappedForAnEmptyFolder,
+        ]
+    };
+    let rows: [(&str, Preset, Duration, &[Meanwhile]); 6] = [
+        ("nfs3", Quirks::nfs3, fuse_and_nfs, &renamed(StrataRead)),
+        ("nfs42", Quirks::nfs42, fuse_and_nfs, &renamed(Program)),
+        ("cifs", Quirks::cifs, smb, &renamed(StrataOperation)),
+        (
+            "cifs-posix",
+            Quirks::cifs_posix,
+            smb,
+            &[
+                StaysOpen(Unnamed),
+                StaysOpen(Program),
+                Closes,
+                IsSwappedForAnEmptyFolder,
+            ],
+        ),
+        (
+            "sshfs",
+            Quirks::sshfs,
+            fuse_and_nfs,
+            &renamed(TheDeleteItself),
+        ),
+        (
+            "exfat-fuse",
+            Quirks::exfat_fuse,
+            fuse_and_nfs,
+            &renamed(Unnamed),
+        ),
+    ];
+    for (mount, preset, budget, cases) in rows {
+        for &meanwhile in cases {
+            let row = format!("{mount}, {meanwhile:?}");
+            let start = SystemTime::UNIX_EPOCH + CLOCK_START;
+            let _clock = ClockGuard::set(start);
+            let root = tempfile::tempdir()?;
+            let folder = root.path().join("folder");
+            let holds = Holds::default();
+            let holding = match meanwhile {
+                StaysOpen(holding) => holding,
+                _ => Unnamed,
+            };
+            let scope = FsQuirks::install(
+                root.path(),
+                Quirks {
+                    after: meanwhile_racer(meanwhile, &folder, &holds, start + budget)
+                        .into_iter()
+                        .collect(),
+                    holder: matches!(holding, Program)
+                        .then(|| Holder::Program("Text Editor".to_owned())),
+                    ..preset()
+                },
+            );
+            folder_with_an_open_file(&folder, &holds)?;
+            let real_folder = folder.canonicalize()?;
+            let read_by_strata = real_folder.join("open.txt");
+            let _read = matches!(holding, StrataRead)
+                .then(|| file_activity::hold([&read_by_strata], || {}))
+                .transpose()?;
+            let _other_operation = matches!(holding, StrataOperation).then(|| {
+                file_activity::begin(file_activity::OperationScope {
+                    roots: vec![read_by_strata.clone()],
+                    folders: Vec::new(),
+                })
+            });
+            let _this_delete = matches!(holding, TheDeleteItself).then(|| {
+                file_activity::begin(file_activity::OperationScope {
+                    roots: vec![real_folder.clone(), read_by_strata.clone()],
+                    folders: Vec::new(),
+                })
+            });
+
+            let events = delete_permanently(std::slice::from_ref(&folder));
+
+            let waited = waited_since(start)?;
+            let deleted = matches!(events.last(), Some(OperationEvent::Deleted { .. }));
+            let leftovers_only = |folder: &Path| -> Result<bool, Box<dyn Error>> {
+                let left = names(folder)?;
+                Ok(left.len() <= 1
+                    && left
+                        .iter()
+                        .all(|name| foreign_leftover(OsStr::new(name)).is_some()))
+            };
+            match meanwhile {
+                Closes | ClosesAsTheWaitEnds => {
+                    assert!(deleted, "{row}: {events:?}");
+                    assert!(!folder.exists(), "{row}");
+                    if let Closes = meanwhile {
+                        assert!(waited < budget, "{row}: {waited:?}");
+                    }
+                }
+                StaysOpen(holding) => {
+                    assert!(!deleted, "{row}: {events:?}");
+                    assert_eq!(waited, budget, "{row}");
+                    assert!(leftovers_only(&folder)?, "{row}");
+                    let reason = match (holding, mount) {
+                        (Program, _) => rust_i18n::t!(
+                            "A file in it is still open in %{program}. Close it there and try again.",
+                            program = "Text Editor"
+                        )
+                        .into_owned(),
+                        (StrataRead | StrataOperation, _) => crate::i18n::tr(
+                            "A file in it is still in use by Strata. Try again when its other operation or search ends.",
+                        ),
+                        (Unnamed | TheDeleteItself, "cifs") => crate::i18n::tr(
+                            "A file in it is still open in a program on this or another computer.",
+                        ),
+                        (Unnamed | TheDeleteItself, "cifs-posix") => crate::services::io_error_detail(
+                            &io::Error::from_raw_os_error(rustix::io::Errno::ACCESS.raw_os_error()),
+                        ),
+                        (Unnamed | TheDeleteItself, _) => crate::i18n::tr(
+                            "A file in it is still open in another program. Close it and try again.",
+                        ),
+                    };
+                    let line = rust_i18n::t!(
+                        "Could not delete “%{name}”: %{error}",
+                        name = "folder",
+                        error = reason
+                    );
+                    assert!(
+                        matches!(
+                            events.last(),
+                            Some(OperationEvent::CompletedWithErrors { message, .. })
+                                if message.contains(&*line)
+                        ),
+                        "{row}: {events:?}"
+                    );
+                    let scanned = scope.count(Op::Holders);
+                    match holding {
+                        StrataRead | StrataOperation => assert_eq!(scanned, 0, "{row}"),
+                        Unnamed | Program | TheDeleteItself => assert_eq!(scanned, 1, "{row}"),
+                    }
+                }
+                IsSwappedForAnEmptyFolder => {
+                    assert!(!deleted, "{row}: {events:?}");
+                    assert!(names(&folder)?.is_empty(), "{row}");
+                    assert!(leftovers_only(&folder.with_extension("moved"))?, "{row}");
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn one_wait_for_open_files_covers_every_folder_of_a_delete_or_trash() -> Result<(), Box<dyn Error>>
+{
+    let _serial = serial()?;
+    let smb_folders_refused = || Quirks {
+        folder_renames_refused_below: Some(Duration::from_secs(1)),
+        ..Quirks::cifs()
+    };
+    let rows: [(&str, Preset, bool, Duration); 2] = [
+        ("nfs3, Delete", Quirks::nfs3, true, Duration::from_secs(2)),
+        (
+            "cifs, Trash",
+            smb_folders_refused,
+            false,
+            Duration::from_millis(1500),
+        ),
+    ];
+    for (row, preset, permanent, budget) in rows {
+        let start = SystemTime::UNIX_EPOCH + CLOCK_START;
+        let _clock = ClockGuard::set(start);
+        let root = tempfile::tempdir()?;
+        let _scope = FsQuirks::install(root.path(), preset());
+        let holds = Holds::default();
+        let folders = [root.path().join("first"), root.path().join("second")];
+        for folder in &folders {
+            folder_with_an_open_file(folder, &holds)?;
+        }
+
+        let events = delete(&folders, permanent);
+
+        assert!(
+            matches!(
+                events.last(),
+                Some(OperationEvent::CompletedWithErrors { deleted_locations, .. })
+                    if deleted_locations.is_empty()
+            ),
+            "{row}: {events:?}"
+        );
+        assert!(folders.iter().all(|folder| folder.is_dir()), "{row}");
+        assert_eq!(waited_since(start)?, budget, "{row}");
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Hidden {
+    Leftover { closed_after: Option<Op> },
+    LeftoverBesideAnEarlierOne,
+    NamedLikeOne,
+}
+
+#[test]
+fn a_recursive_delete_never_unlinks_another_program_s_leftover() -> Result<(), Box<dyn Error>> {
+    let _serial = serial()?;
+    let leftover = |closed_after| Hidden::Leftover { closed_after };
+    let earlier = ".__smbfile_silly1";
+    let rows: [(&str, Preset, Hidden); 10] = [
+        ("nfs3", Quirks::nfs3, leftover(None)),
+        ("nfs3", Quirks::nfs3, leftover(Some(Op::Unlink))),
+        ("nfs3", Quirks::nfs3, leftover(Some(Op::List))),
+        ("cifs", Quirks::cifs, leftover(None)),
+        ("cifs", Quirks::cifs, leftover(Some(Op::Unlink))),
+        ("cifs", Quirks::cifs, Hidden::LeftoverBesideAnEarlierOne),
+        ("sshfs", Quirks::sshfs, leftover(None)),
+        ("sshfs", Quirks::sshfs, leftover(Some(Op::Unlink))),
+        ("ext4", Quirks::ext4, Hidden::NamedLikeOne),
+        ("exfat-fuse", Quirks::exfat_fuse, Hidden::NamedLikeOne),
+    ];
+    for (mount, preset, hidden) in rows {
+        let row = format!("{mount}, {hidden:?}");
+        let start = SystemTime::UNIX_EPOCH + CLOCK_START;
+        let _clock = ClockGuard::set(start);
+        let root = tempfile::tempdir()?;
+        let folder = root.path().join("folder");
+        let holds = Holds::default();
+        let closed_after = match hidden {
+            Hidden::Leftover { closed_after } => closed_after,
+            Hidden::LeftoverBesideAnEarlierOne | Hidden::NamedLikeOne => None,
+        };
+        let scope = FsQuirks::install(
+            root.path(),
+            Quirks {
+                after: closed_after
+                    .map(|op| (op, "folder", 0, releasing(&holds)))
+                    .into_iter()
+                    .collect(),
+                ..preset()
+            },
+        );
+        match hidden {
+            Hidden::Leftover { .. } | Hidden::LeftoverBesideAnEarlierOne => {
+                folder_with_an_open_file(&folder, &holds)?;
+                if let Hidden::LeftoverBesideAnEarlierOne = hidden {
+                    fs::write(folder.join(earlier), b"earlier")?;
+                }
+                let dir = open_local_parent_directory(&folder)?;
+                super::super::fs_ops::fs().unlink(
+                    super::super::fs_ops::Entry::new(&dir, OsStr::new("open.txt")),
+                    rustix::fs::AtFlags::empty(),
+                )?;
+            }
+            Hidden::NamedLikeOne => {
+                fs::create_dir(&folder)?;
+                fs::write(folder.join(".nfs000000000000005e000000de"), b"ordinary")?;
+            }
+        }
+        let hidden_names = names(&folder)?;
+        if let Hidden::LeftoverBesideAnEarlierOne = hidden {
+            assert_eq!(hidden_names.len(), 2, "{row}: {hidden_names:?}");
+            assert_eq!(fs::read(folder.join(earlier))?, b"earlier", "{row}");
+        } else {
+            assert_eq!(hidden_names.len(), 1, "{row}: {hidden_names:?}");
+        }
+        fs::write(folder.join("ordinary.txt"), b"ordinary")?;
+        scope.clear_calls();
+
+        let events = delete_permanently(std::slice::from_ref(&folder));
+
+        let unlinked = scope
+            .calls()
+            .into_iter()
+            .filter(|call| call.op == Op::Unlink)
+            .flat_map(|call| call.names)
+            .collect::<Vec<_>>();
+        assert!(
+            unlinked.contains(&"ordinary.txt".into()),
+            "{row}: {unlinked:?}"
+        );
+        if let Hidden::NamedLikeOne = hidden {
+            assert!(!folder.exists(), "{row}: {events:?}");
+            continue;
+        }
+        assert!(
+            hidden_names
+                .iter()
+                .all(|name| !unlinked.contains(&name.into())),
+            "{row}: {unlinked:?}"
+        );
+        if closed_after.is_some() {
+            assert!(
+                matches!(events.last(), Some(OperationEvent::Deleted { .. })),
+                "{row}: {events:?}"
+            );
+            assert!(!folder.exists(), "{row}");
+        } else {
+            assert!(
+                matches!(
+                    events.last(),
+                    Some(OperationEvent::CompletedWithErrors { .. })
+                ),
+                "{row}: {events:?}"
+            );
+            assert_eq!(names(&folder)?, hidden_names, "{row}");
+        }
+    }
+    Ok(())
 }

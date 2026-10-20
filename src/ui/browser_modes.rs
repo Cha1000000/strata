@@ -394,11 +394,13 @@ struct Pane {
     status: gtk::Label,
     spinner: gtk::Spinner,
     truncated_hint: gtk::Image,
+    not_responding: gtk::Box,
     marquee: super::marquee::Marquee,
     search: super::inline_search::InlineSearch,
     filter_entry: Option<gtk::Entry>,
     filter_button: Option<gtk::ToggleButton>,
     empty_trash_button: Option<gtk::Button>,
+    leftovers_button: gtk::Button,
     show_hidden: Rc<Cell<bool>>,
     filter: gtk::CustomFilter,
     filter_query: Rc<RefCell<String>>,
@@ -1783,6 +1785,12 @@ impl ModeViews {
             .collect()
     }
 
+    pub(crate) fn show_leftovers(&self, depth: usize, shown: bool) {
+        for pane in self.panes_at(depth) {
+            pane.leftovers_button.set_visible(shown);
+        }
+    }
+
     /// The Icons or List pane showing `depth`.
     fn mode_pane(&self, depth: usize) -> Option<&Pane> {
         self.panes_at(depth).into_iter().next()
@@ -2198,6 +2206,7 @@ struct IconsControls {
     thumbnail_value: gtk::Label,
     thumbnail_popover: gtk::Popover,
     empty_trash_button: Option<gtk::Button>,
+    leftovers_button: gtk::Button,
 }
 
 /// `tooltip` names the filter shortcut with `%{keys}`.
@@ -2302,6 +2311,8 @@ fn icons_controls(browser: &Rc<Browser>, depth: usize, thumbnail_size: i32) -> I
     thumbnail_menu.set_child(Some(&crate::assets::chrome_icon(
         crate::assets::icons::PICTURES,
     )));
+    let leftovers = super::browser::leftovers_button(browser, depth);
+    actions.append(&leftovers);
     let empty_trash = super::browser::empty_trash_button(browser);
     let is_trash = browser
         .location_at(depth)
@@ -2328,6 +2339,7 @@ fn icons_controls(browser: &Rc<Browser>, depth: usize, thumbnail_size: i32) -> I
         thumbnail_value,
         thumbnail_popover,
         empty_trash_button: is_trash.then_some(empty_trash),
+        leftovers_button: leftovers,
     }
 }
 
@@ -2447,14 +2459,15 @@ fn build_icons_pane(
             .actions
             .prepend(&super::browser::pane_new_folder_button(state, depth));
     }
-    let (shell, header, content, model, stack, status, spinner, truncated_hint) = pane_base(
-        title,
-        BrowserMode::Icons,
-        "icons-pane",
-        &icons_loading_skeleton(options.thumbnail_size.get(), options.density),
-        Some(controls.leading.clone().upcast()),
-        Some(controls.actions.clone().upcast()),
-    );
+    let (shell, header, content, model, stack, status, spinner, truncated_hint, not_responding) =
+        pane_base(
+            title,
+            BrowserMode::Icons,
+            "icons-pane",
+            &icons_loading_skeleton(options.thumbnail_size.get(), options.density),
+            Some(controls.leading.clone().upcast()),
+            Some(controls.actions.clone().upcast()),
+        );
     let source_index = SourceIndexMap::watch(&model);
     if let Some(destination) = browser.location_at(depth) {
         install_mode_directory_drop_target(&stack, destination, transfer_handler.clone());
@@ -2675,11 +2688,13 @@ fn build_icons_pane(
         status,
         spinner,
         truncated_hint,
+        not_responding,
         marquee,
         search,
         filter_entry: Some(controls.filter_entry),
         filter_button: Some(controls.filter_button),
         empty_trash_button: controls.empty_trash_button,
+        leftovers_button: controls.leftovers_button,
         sort_direction_button: Some(controls.sort_direction_button),
         show_hidden,
         filter: filter_for_pane,
@@ -3654,6 +3669,8 @@ fn build_list_pane(
 
     let actions = gtk::Box::new(gtk::Orientation::Horizontal, 0);
     actions.add_css_class("icons-header-actions");
+    let leftovers = super::browser::leftovers_button(&browser, depth);
+    actions.append(&leftovers);
     let empty_trash = super::browser::empty_trash_button(&browser);
     let is_trash = browser
         .location_at(depth)
@@ -3698,14 +3715,15 @@ fn build_list_pane(
 
     let (filter_entry, filter_revealer, filter_button) = filter_controls("Filter list (%{keys})");
     actions.append(&filter_button);
-    let (shell, header, content, model, stack, status, spinner, truncated_hint) = pane_base(
-        title,
-        BrowserMode::List,
-        "list-pane",
-        &list_loading_skeleton(&columns),
-        Some(navigation.upcast()),
-        Some(actions.upcast()),
-    );
+    let (shell, header, content, model, stack, status, spinner, truncated_hint, not_responding) =
+        pane_base(
+            title,
+            BrowserMode::List,
+            "list-pane",
+            &list_loading_skeleton(&columns),
+            Some(navigation.upcast()),
+            Some(actions.upcast()),
+        );
     let source_index = SourceIndexMap::watch(&model);
     if let Some(destination) = browser.location_at(depth) {
         install_mode_directory_drop_target(&stack, destination, transfer_handler.clone());
@@ -3953,11 +3971,13 @@ fn build_list_pane(
         status,
         spinner,
         truncated_hint,
+        not_responding,
         marquee,
         search,
         filter_entry: Some(filter_entry),
         filter_button: Some(filter_button),
         empty_trash_button: is_trash.then_some(empty_trash),
+        leftovers_button: leftovers,
         sort_direction_button: None,
         show_hidden,
         filter: filter_for_pane,
@@ -4103,6 +4123,7 @@ fn pane_base(
     gtk::Label,
     gtk::Spinner,
     gtk::Image,
+    gtk::Box,
 ) {
     let shell = super::accessibility::pane_box();
     shell.add_css_class(class);
@@ -4145,6 +4166,8 @@ fn pane_base(
         header.append(&actions);
     }
     shell.append(&header);
+    let not_responding = super::browser::not_responding_notice();
+    shell.append(&not_responding);
 
     let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
     content.set_hexpand(true);
@@ -4173,6 +4196,7 @@ fn pane_base(
         status,
         spinner,
         truncated_hint,
+        not_responding,
     )
 }
 
@@ -4370,8 +4394,13 @@ fn install_mode_directory_drop_target(
         let Some(handler) = transfer_handler.borrow().clone() else {
             return false;
         };
-        let commit = super::browser::file_drop_commit(target, &destination, &sources, &drop_state);
-        handler(destination.clone(), sources, commit);
+        super::browser::file_drop_commit(
+            target,
+            destination.clone(),
+            sources,
+            &drop_state,
+            move |destination, sources, commit| handler(destination, sources, commit),
+        );
         true
     });
     widget.add_controller(drop);
@@ -4598,8 +4627,13 @@ fn install_list_drag_drop(
         let Some(handler) = transfer_handler.borrow().clone() else {
             return false;
         };
-        let commit = super::browser::file_drop_commit(target, &destination, &sources, &drop_state);
-        handler(destination, sources, commit);
+        super::browser::file_drop_commit(
+            target,
+            destination,
+            sources,
+            &drop_state,
+            move |destination, sources, commit| handler(destination, sources, commit),
+        );
         true
     });
     row.add_controller(drop);
@@ -5317,6 +5351,9 @@ fn apply_snapshot(pane: &Pane, snapshot: &BrowserColumnSnapshot, browser: &Brows
         scroll_pane_to_source(pane, focused);
     }
     pane.truncated_hint.set_visible(snapshot.truncated);
+    pane.leftovers_button
+        .set_visible(!browser.column_leftovers(pane.depth).is_empty());
+    pane.not_responding.set_visible(snapshot.not_responding);
     if snapshot.loading {
         pane.spinner.start();
         if restarts_loading {

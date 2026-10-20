@@ -1105,3 +1105,66 @@ fn wait_until(condition: impl Fn() -> bool, message: &str) {
         std::thread::sleep(Duration::from_millis(2));
     }
 }
+
+/// A new tab's first load now answers after Ctrl+L can open the entry; the
+/// arriving column must not close the entry or replace what was typed.
+#[test]
+fn a_folder_arriving_while_a_location_is_typed_keeps_the_entry_open() {
+    crate::test_support::gtk_test(
+        "ui::browser::location::tests::a_folder_arriving_while_a_location_is_typed_keeps_the_entry_open",
+        || {
+            let root = tempfile::tempdir().expect("fixture");
+            let later = root.path().join("later");
+            std::fs::create_dir(&later).expect("folder");
+            let view = BrowserView::new(
+                Rc::new(crate::adapters::LocalFileSource),
+                crate::ui::browser::PeekBehavior::default(),
+            );
+            let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
+            content.append(&view.location_widget());
+            content.append(&view.widget());
+            let window = gtk::Window::builder()
+                .child(&content)
+                .default_width(900)
+                .default_height(600)
+                .build();
+            window.present();
+            let loaded = |depth: usize| {
+                view.browser()
+                    .column_snapshot(depth)
+                    .is_some_and(|snapshot| !snapshot.loading)
+            };
+            view.browser().navigate(Location::local(root.path()));
+            wait_until(|| loaded(0), "the first folder loads");
+            view.browser().focus_active();
+            wait_until(|| view.item_view_has_focus(), "the rows take focus");
+
+            view.browser()
+                .navigate_input_located(&later.to_string_lossy(), None)
+                .expect("a typed folder");
+            view.begin_location_edit();
+            assert!(
+                view.location_has_focus(),
+                "the entry opens before the folder answers"
+            );
+            view.state.location_entry.set_text("/typed/so/far");
+            wait_until(
+                || view.browser().active_location() == Some(Location::local(&later)),
+                "the later folder arrives",
+            );
+            wait_until(|| loaded(0), "the later folder loads");
+
+            assert!(view.location_edit_is_active(), "the entry stays open");
+            assert_eq!(view.state.location_entry.text(), "/typed/so/far");
+
+            view.state.cancel_location_edit();
+            assert!(!view.location_edit_is_active());
+            assert_eq!(
+                view.state.location_entry.text(),
+                Location::local(&later).display_path(),
+                "closing the entry shows the folder that arrived"
+            );
+            window.destroy();
+        },
+    );
+}

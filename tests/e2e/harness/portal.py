@@ -11,7 +11,7 @@ import uuid
 
 from gi.repository import Gio, GLib
 
-from . import tree
+from . import main_io, tree
 from .display import HeadlessDisplay
 from .environment import TestEnvironment, process_environment
 from .fixtures import FixtureTree
@@ -41,7 +41,8 @@ def open_file_request(
 
     test_environment.write_preferences({"browser_mode": browser_mode})
     environment = {**process_environment(), **test_environment.variables(), **headless_display.environment}
-    backend = ManagedProcess.spawn("portal", [str(strata_binary), "--portal"], log_dir=test_environment.root, env=environment, cwd=fixture_tree.root)
+    command, capture = main_io.launch(test_environment, fixture_tree.root, [str(strata_binary), "--portal"], environment)
+    backend = ManagedProcess.spawn("portal", command, log_dir=test_environment.root, env=environment, cwd=fixture_tree.root)
     connection = Gio.DBusConnection.new_for_address_sync(
         environment["DBUS_SESSION_BUS_ADDRESS"],
         Gio.DBusConnectionFlags.AUTHENTICATION_CLIENT | Gio.DBusConnectionFlags.MESSAGE_BUS_CONNECTION,
@@ -63,6 +64,8 @@ def open_file_request(
             return application.find(name=title) if application else None
 
         chooser = tree.wait_until(window, message=f"{title} chooser", timeout=20)
+        if capture is not None:
+            capture.ready()
         yield chooser, future
     finally:
         if future is not None and not future.done():
@@ -71,5 +74,7 @@ def open_file_request(
             except GLib.Error:
                 pass
         terminate(backend.popen)
+        if capture is not None:
+            capture.keep_log(backend.log_path)
         pool.shutdown(wait=True, cancel_futures=True)
         connection.close_sync(None)

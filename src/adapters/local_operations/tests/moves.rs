@@ -7,9 +7,10 @@ use std::{
 
 use rustix::io::Errno;
 
-use super::fs_quirks::{NameOpens, Op, Support};
+use super::fs_quirks::{NameOpens, Op, Support, hold};
 use super::*;
-use crate::services::{KeptCause, KeptItem, SpecialKind, TransferReport};
+use crate::adapters::volume::{Family, mount_capabilities};
+use crate::services::{Holder, KeptCause, KeptItem, SpecialKind, TransferReport};
 
 #[test]
 fn moving_a_directory_falls_back_to_a_safe_copy_when_the_move_needs_one()
@@ -453,17 +454,29 @@ fn paste_move(
     source: &Path,
     conflict: TransferConflict,
 ) -> (LoadHandle, Rc<RefCell<Vec<OperationEvent>>>) {
+    paste_moves(id, destination, &[source], conflict)
+}
+
+fn paste_moves(
+    id: u64,
+    destination: &Path,
+    sources: &[&Path],
+    conflict: TransferConflict,
+) -> (LoadHandle, Rc<RefCell<Vec<OperationEvent>>>) {
     let events = Rc::new(RefCell::new(Vec::new()));
     let emitted = events.clone();
     let operation = LocalOperationProvider.paste(
         PasteRequest {
             id: OperationRequestId(id),
             destination: Location::local(destination),
-            items: vec![PasteItem {
-                source: Location::local(source),
-                conflict,
-                target_name: None,
-            }],
+            items: sources
+                .iter()
+                .map(|source| PasteItem {
+                    source: Location::local(source),
+                    conflict,
+                    target_name: None,
+                })
+                .collect(),
             move_sources: true,
         },
         Rc::new(move |event| emitted.borrow_mut().push(event)),
@@ -1206,6 +1219,119 @@ fn moving_across_volumes_deletes_every_entry_it_copied() -> Result<(), Box<dyn E
     Ok(())
 }
 
+#[test]
+fn a_name_of_a_linked_file_changed_after_its_other_name_went_stays() -> Result<(), Box<dyn Error>> {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    let _serial = serial()?;
+    let cifs = || Quirks {
+        mount_type: Quirks::cifs().mount_type,
+        ..Quirks::default()
+    };
+    for (row, source, numbers_go, evicted) in [
+        ("ext4", Quirks::ext4 as Preset, false, false),
+        ("cifs, server inode numbers turned off", cifs, true, false),
+        (
+            "cifs, server inode numbers turned off, names numbered afresh after the copy",
+            cifs,
+            true,
+            true,
+        ),
+    ] {
+        let root = tempfile::tempdir()?;
+        let source_dir = root.path().join("source");
+        let folder = source_dir.join("folder");
+        fs::create_dir_all(&folder)?;
+        fs::write(folder.join("a"), b"linked")?;
+        if !hard_linked(&folder.join("a"), &folder.join("b"))? {
+            eprintln!("skipped on a base without hard links: {row}");
+            continue;
+        }
+        if !numbers_go && super::fs_quirks::smb_base(fs::File::open(&folder)?.as_fd()) {
+            eprintln!(
+                "skipped on an SMB base, which refuses to open a link's second name while the first is open: {row}"
+            );
+            continue;
+        }
+        let hour_before = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)?
+            .as_secs()
+            - 3600;
+        set_times(&folder.join("a"), hour_before, 0)?;
+        if numbers_go && !a_later_change_time(&folder.join("b"), &folder.join("a"), hour_before)? {
+            eprintln!(
+                "skipped on a base that reports the modification time as the change time: {row}"
+            );
+            continue;
+        }
+        let (deleting, checked) = (
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicUsize::new(0)),
+        );
+        let rewrite_second = |name: &'static str| -> super::fs_quirks::Racer {
+            let (deleting, checked, path, probe) = (
+                deleting.clone(),
+                checked.clone(),
+                folder.join(name),
+                root.path().join("probe"),
+            );
+            Box::new(move || {
+                if deleting.load(Ordering::Acquire) && checked.fetch_add(1, Ordering::SeqCst) == 1 {
+                    let before = fs::metadata(&path).expect("stat the file");
+                    wait_for_a_later_change_time(&probe, &before);
+                    fs::write(&path, b"LINKED").expect("rewrite the file");
+                    set_times(&path, hour_before, 0).expect("put the times back");
+                }
+            })
+        };
+        let went = Arc::new(AtomicBool::new(!numbers_go));
+        let (opening, renumbering, linked) = (
+            deleting.clone(),
+            went.clone(),
+            [folder.join("a"), folder.join("b")],
+        );
+        let deletion_opens: super::fs_quirks::Racer = Box::new(move || {
+            if evicted {
+                renumbering.fetch_and(
+                    linked.iter().all(|path| super::fs_quirks::evict(path)),
+                    Ordering::AcqRel,
+                );
+            }
+            opening.store(true, Ordering::Release);
+        });
+        let mut before = vec![(Op::OpenDir, "folder", 1, deletion_opens)];
+        if numbers_go {
+            let (at, going) = (source_dir.clone(), went.clone());
+            let numbers_went: super::fs_quirks::Racer = Box::new(move || {
+                going.store(
+                    super::fs_quirks::autodisable_serverino(&at),
+                    Ordering::Release,
+                );
+            });
+            before.push((Op::Stat, "folder", 0, numbers_went));
+        }
+        for name in ["a", "b", "a", "b"] {
+            before.push((Op::Stat, name, 0, rewrite_second(name)));
+        }
+        let quirks = Quirks { before, ..source() };
+
+        let (moved, report, _) = move_across_volumes(&folder, quirks)?;
+
+        assert!(went.load(Ordering::Acquire), "{row}");
+        assert_eq!(fs::read(moved.join("a"))?, b"linked", "{row}");
+        assert_eq!(fs::read(moved.join("b"))?, b"linked", "{row}");
+        assert!(folder.exists(), "{row}");
+        let left = names(&folder)?;
+        assert_eq!(left.len(), 1, "{row}: {left:?}");
+        let second = folder.join(&left[0]);
+        assert_eq!(fs::read(&second)?, b"LINKED", "{row}");
+        assert_eq!(report.kept, [kept(second, KeptCause::Changed)], "{row}");
+    }
+    Ok(())
+}
+
 fn make_fifo(path: &Path) -> io::Result<()> {
     rustix::fs::mknodat(
         rustix::fs::CWD,
@@ -1269,7 +1395,7 @@ fn rewrite(path: &Path, contents: &'static [u8]) -> super::fs_quirks::Racer {
 fn a_rewrite_that_keeps_the_size_and_times_is_kept_at_the_source() -> Result<(), Box<dyn Error>> {
     let _serial = serial()?;
     let unstable = || Quirks {
-        mount_type: Some(("cifs", "rw,noserverino")),
+        mount_type: Some(("cifs", "rw,vers=3.1.1")),
         ..Quirks::default()
     };
     for (row, quirks) in [
@@ -1329,22 +1455,6 @@ fn wait_for_a_later_change_time(probe: &Path, than: &fs::Metadata) {
         }
     }
     fs::remove_file(probe).expect("remove the probe");
-}
-
-/// Where inode numbers are not trusted, a file born within one birth-time tick
-/// of `than` passes for it.
-fn wait_for_a_later_birth_time(probe: &Path, than: &fs::Metadata) {
-    let Ok(born) = than.created() else {
-        return;
-    };
-    loop {
-        fs::write(probe, b"probe").expect("write the probe");
-        let stamped = fs::metadata(probe).expect("stat the probe");
-        fs::remove_file(probe).expect("remove the probe");
-        if stamped.created().is_ok_and(|later| later > born) {
-            break;
-        }
-    }
 }
 
 #[test]
@@ -1516,7 +1626,7 @@ fn moves_off_mounts_without_stable_inodes_keep_only_what_changed() -> Result<(),
         }
     });
     let quirks = Quirks {
-        mount_type: Some(("cifs", "rw,noserverino")),
+        mount_type: Some(("cifs", "rw,vers=3.1.1")),
         before: vec![(Op::OpenDir, "folder", 1, racer)],
         ..Quirks::default()
     };
@@ -1606,6 +1716,17 @@ fn entries_swapped_or_removed_after_their_copy_are_never_deleted() -> Result<(),
 
 #[test]
 fn moves_compare_inode_numbers_only_where_the_source_keeps_them() -> Result<(), Box<dyn Error>> {
+    #[derive(Clone, Copy, PartialEq)]
+    enum Linked {
+        No,
+        Outside,
+        SelectedFirst,
+    }
+    #[derive(Clone, Copy)]
+    enum Meanwhile {
+        Renumbered,
+        ReplacedAlike { linked: Linked },
+    }
     let _serial = serial()?;
     let mounted = |fs_type, options| {
         move || Quirks {
@@ -1613,48 +1734,224 @@ fn moves_compare_inode_numbers_only_where_the_source_keeps_them() -> Result<(), 
             ..Quirks::default()
         }
     };
+    let share = |preset: Preset, no_birth_time| {
+        move || Quirks {
+            mount_type: preset().mount_type,
+            no_birth_time,
+            ..Quirks::default()
+        }
+    };
     type MakeQuirks = Box<dyn Fn() -> Quirks>;
-    let cases: [(&str, MakeQuirks, bool); 4] = [
-        ("sshfs", Box::new(Quirks::sshfs), false),
+    let cases: [(&str, MakeQuirks, bool, Meanwhile, Option<&str>); 12] = [
+        (
+            "sshfs",
+            Box::new(Quirks::sshfs),
+            false,
+            Meanwhile::Renumbered,
+            None,
+        ),
         (
             "cifs noserverino",
-            Box::new(mounted("cifs", "rw,noserverino")),
+            Box::new(share(Quirks::cifs_noserverino, false)),
             false,
+            Meanwhile::Renumbered,
+            None,
         ),
-        ("cifs", Box::new(mounted("cifs", "rw,serverino")), true),
-        ("vfat", Box::new(mounted("vfat", "rw,flush")), false),
+        (
+            "cifs",
+            Box::new(share(Quirks::cifs, false)),
+            false,
+            Meanwhile::Renumbered,
+            Some("folder"),
+        ),
+        (
+            "cifs without creation times",
+            Box::new(share(Quirks::cifs, true)),
+            false,
+            Meanwhile::Renumbered,
+            Some("folder"),
+        ),
+        (
+            "cifs, server inode numbers turned off",
+            Box::new(share(Quirks::cifs, false)),
+            true,
+            Meanwhile::Renumbered,
+            None,
+        ),
+        (
+            "cifs without creation times, server inode numbers turned off",
+            Box::new(share(Quirks::cifs, true)),
+            true,
+            Meanwhile::Renumbered,
+            None,
+        ),
+        (
+            "vfat",
+            Box::new(mounted("vfat", "rw,flush")),
+            false,
+            Meanwhile::Renumbered,
+            None,
+        ),
+        (
+            "cifs, a linked file replaced",
+            Box::new(share(Quirks::cifs, false)),
+            false,
+            Meanwhile::ReplacedAlike {
+                linked: Linked::Outside,
+            },
+            Some("folder/a.txt"),
+        ),
+        (
+            "cifs, a file replaced once server inode numbers went",
+            Box::new(share(Quirks::cifs, false)),
+            true,
+            Meanwhile::ReplacedAlike { linked: Linked::No },
+            Some("folder/a.txt"),
+        ),
+        (
+            "cifs, a linked file replaced once server inode numbers went",
+            Box::new(share(Quirks::cifs, false)),
+            true,
+            Meanwhile::ReplacedAlike {
+                linked: Linked::Outside,
+            },
+            Some("folder/a.txt"),
+        ),
+        (
+            "cifs, a file linked to an item moved first replaced",
+            Box::new(share(Quirks::cifs, false)),
+            false,
+            Meanwhile::ReplacedAlike {
+                linked: Linked::SelectedFirst,
+            },
+            Some("folder/a.txt"),
+        ),
+        (
+            "cifs, a file linked to an item moved first replaced once server inode numbers went",
+            Box::new(share(Quirks::cifs, false)),
+            true,
+            Meanwhile::ReplacedAlike {
+                linked: Linked::SelectedFirst,
+            },
+            Some("folder/a.txt"),
+        ),
     ];
-    for (case, quirks, kept_at_source) in cases {
+    for (case, quirks, turned_off, meanwhile, kept_at_source) in cases {
         let root = tempfile::tempdir()?;
         let source_dir = root.path().join("source");
         let folder = source_dir.join("folder");
         fs::create_dir_all(folder.join("sub"))?;
         fs::write(folder.join("a.txt"), b"a")?;
         fs::write(folder.join("sub/b.txt"), b"b")?;
+        let (arrival, backup) = (root.path().join("arrival"), source_dir.join("backup.txt"));
+        if let Meanwhile::ReplacedAlike { linked } = meanwhile {
+            if linked != Linked::No && !hard_linked(&folder.join("a.txt"), &backup)? {
+                eprintln!("skipped on a base without hard links: {case}");
+                continue;
+            }
+            fs::write(&arrival, b"z")?;
+            let hour_before = SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)?
+                .as_secs()
+                - 3600;
+            set_times(&folder.join("a.txt"), hour_before, 123_456_789)?;
+            if turned_off && !a_later_change_time(&arrival, &folder.join("a.txt"), hour_before)? {
+                eprintln!(
+                    "skipped on a base that reports the modification time as the change time: {case}"
+                );
+                continue;
+            }
+            set_times(&arrival, hour_before, 123_456_789)?;
+        }
         let evicted = [
             folder.clone(),
             folder.join("a.txt"),
             folder.join("sub"),
             folder.join("sub/b.txt"),
         ];
-        let racer: super::fs_quirks::Racer = Box::new(move || {
-            for path in &evicted {
-                super::fs_quirks::renumbered(path);
-            }
-        });
+        let switched = Arc::new(AtomicBool::new(false));
+        let (renumbering, meanwhile_at_source, meanwhile_at_destination) =
+            match (meanwhile, turned_off) {
+                (Meanwhile::Renumbered, false) => {
+                    let switching = switched.clone();
+                    let racer: super::fs_quirks::Racer = Box::new(move || {
+                        for path in &evicted {
+                            super::fs_quirks::renumbered(path);
+                        }
+                        switching.store(true, Ordering::Release);
+                    });
+                    (
+                        vec![(Op::OpenDir, "folder", 1, racer)],
+                        Vec::new(),
+                        Vec::new(),
+                    )
+                }
+                _ => {
+                    let (at, switching) = (source_dir.clone(), switched.clone());
+                    let (probe, file) = (root.path().join("probe"), folder.join("a.txt"));
+                    let racer: super::fs_quirks::Racer = Box::new(move || {
+                        let numbers_went =
+                            !turned_off || super::fs_quirks::autodisable_serverino(&at);
+                        let happened = numbers_went
+                            && match meanwhile {
+                                Meanwhile::Renumbered => {
+                                    evicted.iter().all(|path| super::fs_quirks::evict(path))
+                                }
+                                Meanwhile::ReplacedAlike { .. } => {
+                                    let before = fs::metadata(&file).expect("stat the file");
+                                    wait_for_a_later_change_time(&probe, &before);
+                                    fs::rename(&arrival, &file).is_ok()
+                                }
+                            };
+                        switching.store(happened, Ordering::Release);
+                    });
+                    match meanwhile {
+                        Meanwhile::ReplacedAlike {
+                            linked: Linked::SelectedFirst,
+                        } => (
+                            Vec::new(),
+                            vec![(Op::Unlink, "backup.txt", 0, racer)],
+                            Vec::new(),
+                        ),
+                        _ => (
+                            Vec::new(),
+                            Vec::new(),
+                            vec![(Op::Rename, "folder", 0, racer)],
+                        ),
+                    }
+                }
+            };
         let _source = FsQuirks::install(
             &source_dir,
             Quirks {
-                before: vec![(Op::OpenDir, "folder", 1, racer)],
+                before: renumbering,
+                after: meanwhile_at_source,
                 ..quirks()
             },
         );
         let destination = root.path().join("destination");
         fs::create_dir_all(&destination)?;
-        let _destination = FsQuirks::install(&destination, Quirks::default());
+        let _destination = FsQuirks::install(
+            &destination,
+            Quirks {
+                after: meanwhile_at_destination,
+                ..Quirks::default()
+            },
+        );
 
+        let selected_first = matches!(
+            meanwhile,
+            Meanwhile::ReplacedAlike {
+                linked: Linked::SelectedFirst
+            }
+        );
+        let sources = if selected_first {
+            vec![backup.as_path(), &folder]
+        } else {
+            vec![folder.as_path()]
+        };
         let (_operation, events) =
-            paste_move(95, &destination, &folder, TransferConflict::FailIfExists);
+            paste_moves(95, &destination, &sources, TransferConflict::FailIfExists);
         pump_until_transfer(&events);
 
         assert!(
@@ -1665,17 +1962,29 @@ fn moves_compare_inode_numbers_only_where_the_source_keeps_them() -> Result<(), 
             "{case}: {:?}",
             events.borrow()
         );
+        assert!(switched.load(Ordering::Acquire), "{case}");
+        if selected_first {
+            assert_eq!(fs::read(destination.join("backup.txt"))?, b"a", "{case}");
+            assert!(!backup.exists(), "{case}");
+        }
+        assert_eq!(fs::read(destination.join("folder/a.txt"))?, b"a", "{case}");
         assert_eq!(
             fs::read(destination.join("folder/sub/b.txt"))?,
             b"b",
             "{case}"
         );
-        assert_eq!(folder.exists(), kept_at_source, "{case}");
-        let expected = if kept_at_source {
-            vec![kept(folder.clone(), KeptCause::Changed)]
-        } else {
-            Vec::new()
-        };
+        if let Meanwhile::ReplacedAlike { .. } = meanwhile {
+            assert_eq!(
+                fs::read(folder.join("a.txt")).ok(),
+                Some(b"z".to_vec()),
+                "{case}"
+            );
+        }
+        assert_eq!(folder.exists(), kept_at_source.is_some(), "{case}");
+        let expected: Vec<_> = kept_at_source
+            .map(|path| kept(source_dir.join(path), KeptCause::Changed))
+            .into_iter()
+            .collect();
         assert_eq!(reported(&events).kept, expected, "{case}");
     }
     Ok(())
@@ -1712,6 +2021,12 @@ fn a_move_across_volumes_reads_the_source_mount_once() -> Result<(), Box<dyn Err
     assert_eq!(super::names(&destination)?, names);
     assert!(super::names(&sources)?.is_empty());
     assert_eq!(source_scope.count(Op::MountType), 1);
+    let smb = mount_capabilities(source_scope.key()).family == Some(Family::Smb);
+    let reads_again = source_scope.count(Op::CurrentMountType);
+    assert!(
+        reads_again <= usize::from(smb) * names.len(),
+        "{reads_again} reads of the current mount type, SMB: {smb}"
+    );
     Ok(())
 }
 
@@ -1756,6 +2071,146 @@ fn a_source_entry_that_cannot_be_deleted_is_kept_with_the_reason() -> Result<(),
         reported(&events).kept,
         [kept(child, KeptCause::Undeletable(reason))]
     );
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug)]
+enum SourceMeanwhile {
+    Closes,
+    IsSwapped,
+    StaysOpen(Option<&'static str>),
+    DeletedBefore { closes: bool },
+}
+
+#[test]
+fn a_moved_folder_goes_once_another_program_closes_its_file_within_the_mount_s_wait()
+-> Result<(), Box<dyn Error>> {
+    use SourceMeanwhile::*;
+    let _serial = serial()?;
+    let rows: [(&str, super::fs_quirks::Preset, SourceMeanwhile); 9] = [
+        ("nfs42", Quirks::nfs42, Closes),
+        ("nfs42", Quirks::nfs42, IsSwapped),
+        ("nfs42", Quirks::nfs42, StaysOpen(None)),
+        ("nfs42", Quirks::nfs42, StaysOpen(Some("Text Editor"))),
+        ("cifs-posix", Quirks::cifs_posix, StaysOpen(None)),
+        (
+            "cifs-posix",
+            Quirks::cifs_posix,
+            StaysOpen(Some("Text Editor")),
+        ),
+        ("nfs42", Quirks::nfs42, DeletedBefore { closes: false }),
+        ("nfs42", Quirks::nfs42, DeletedBefore { closes: true }),
+        ("sshfs", Quirks::sshfs, DeletedBefore { closes: false }),
+    ];
+    for (mount, preset, meanwhile) in rows {
+        let row = format!("{mount}, {meanwhile:?}");
+        let _clock = ClockGuard::set(SystemTime::now());
+        let root = tempfile::tempdir()?;
+        let source_dir = root.path().join("source");
+        let folder = source_dir.join("folder");
+        let moved = source_dir.join("folder.moved");
+        fs::create_dir_all(&folder)?;
+        fs::write(folder.join("open.txt"), b"open elsewhere")?;
+        fs::write(folder.join("other.txt"), b"other")?;
+        let held = Arc::new(std::sync::Mutex::new(None));
+        let release = held.clone();
+        let (live, aside) = (folder.clone(), moved.clone());
+        let racer: Option<super::fs_quirks::Racer> = match meanwhile {
+            IsSwapped => Some(Box::new(move || {
+                fs::rename(&live, &aside).expect("move the folder");
+                fs::create_dir(&live).expect("make another folder");
+            })),
+            Closes | DeletedBefore { closes: true } => Some(Box::new(move || {
+                drop(release.lock().expect("the hold").take());
+            })),
+            StaysOpen(_) | DeletedBefore { closes: false } => None,
+        };
+        let holder = match meanwhile {
+            StaysOpen(Some(program)) => Some(Holder::Program(program.to_owned())),
+            _ => None,
+        };
+        let _source = FsQuirks::install(
+            &source_dir,
+            Quirks {
+                after: racer
+                    .map(|racer| (Op::Unlink, "folder", 0, racer))
+                    .into_iter()
+                    .collect(),
+                holder: holder.clone(),
+                ..preset()
+            },
+        );
+        *held.lock().map_err(|_| "the hold")? = Some(hold(&folder.join("open.txt")));
+        if let DeletedBefore { .. } = meanwhile {
+            let dir = open_local_parent_directory(&folder)?;
+            super::super::fs_ops::fs().unlink(
+                super::super::fs_ops::Entry::new(&dir, OsStr::new("open.txt")),
+                rustix::fs::AtFlags::empty(),
+            )?;
+        }
+        let destination = root.path().join("destination");
+        fs::create_dir_all(&destination)?;
+        let _destination = FsQuirks::install(&destination, Quirks::default());
+
+        let (_operation, events) =
+            paste_move(1590, &destination, &folder, TransferConflict::FailIfExists);
+        pump_until_transfer(&events);
+
+        assert!(
+            matches!(
+                terminal_transfer(&events.borrow()),
+                Some(OperationEvent::Pasted { .. })
+            ),
+            "{row}"
+        );
+        let copied = destination.join("folder");
+        if let DeletedBefore { .. } = meanwhile {
+            assert_eq!(names(&copied)?, ["other.txt"], "{row}");
+        } else {
+            assert_eq!(
+                fs::read(copied.join("open.txt"))?,
+                b"open elsewhere",
+                "{row}"
+            );
+        }
+        let report = reported(&events);
+        match meanwhile {
+            Closes | DeletedBefore { closes: true } => {
+                assert!(!folder.exists(), "{row}");
+                assert!(report.kept.is_empty(), "{row}: {:?}", report.kept);
+            }
+            IsSwapped => {
+                assert_eq!(
+                    report.kept,
+                    [kept(folder.clone(), KeptCause::Changed)],
+                    "{row}"
+                );
+                assert!(names(&folder)?.is_empty(), "{row}");
+                assert!(moved.is_dir(), "{row}");
+            }
+            DeletedBefore { closes: false } => {
+                assert_eq!(
+                    report.kept,
+                    [kept(folder.clone(), KeptCause::StillOpen(None))],
+                    "{row}"
+                );
+                let [leftover] = names(&folder)?.try_into().map_err(|_| "one leftover")?;
+                assert!(
+                    crate::model::hidden_names::foreign_leftover(OsStr::new(&leftover)).is_some(),
+                    "{row}: {leftover}"
+                );
+            }
+            StaysOpen(_) => {
+                let cause = match (mount, holder) {
+                    ("cifs-posix", None) => KeptCause::Undeletable(Errno::ACCESS.raw_os_error()),
+                    (_, holder) => KeptCause::StillOpen(holder),
+                };
+                assert_eq!(report.kept, [kept(folder.clone(), cause)], "{row}");
+                assert!(folder.is_dir(), "{row}");
+            }
+        }
+        drop(held.lock().map_err(|_| "the hold")?.take());
+    }
     Ok(())
 }
 
@@ -2123,9 +2578,6 @@ fn a_copy_replaced_before_its_times_are_settled_keeps_its_source() -> Result<(),
         mount_type: Some(("fuse.rclone", "rw,user_id=1000,group_id=1000")),
         ..Quirks::sshfs()
     };
-    // On FUSE the settled copy is known by type alone: an old source's times
-    // are set again (by name where its owner may neither read nor write it),
-    // a recent one's left as they are.
     let rows: [(&str, Preset, u64, u32); 3] = [
         ("times set again", Quirks::sshfs, 3600, 0o644),
         ("times set again by name", Quirks::sshfs, 3600, 0o044),
@@ -2142,9 +2594,6 @@ fn a_copy_replaced_before_its_times_are_settled_keeps_its_source() -> Result<(),
         fs::write(&notes, b"notes")?;
         let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?;
         set_times(&notes, now.as_secs() - age, 500_000_000)?;
-        let arrival = root.path().join("arrival");
-        fs::write(&arrival, b"another program's file")?;
-        fs::set_permissions(&arrival, fs::Permissions::from_mode(mode))?;
         let replaced = Arc::new(AtomicBool::new(false));
         let replacing = replaced.clone();
         let staged = destination.clone();
@@ -2152,7 +2601,9 @@ fn a_copy_replaced_before_its_times_are_settled_keeps_its_source() -> Result<(),
             for entry in fs::read_dir(&staged).expect("list the destination") {
                 let copy = entry.expect("an entry").path().join("notes.txt");
                 if copy.exists() {
-                    fs::rename(&arrival, &copy).expect("replace the copy");
+                    fs::write(&copy, b"another program's file").expect("replace the copy");
+                    fs::set_permissions(&copy, fs::Permissions::from_mode(mode))
+                        .expect("set the replacement's mode");
                     replacing.store(true, Ordering::Release);
                     return;
                 }
@@ -2297,7 +2748,7 @@ fn a_special_file_move_keeps_its_source_without_proven_published_ownership()
 }
 
 #[test]
-fn copies_a_mount_numbers_afresh_are_known_by_type_birth_time_size_and_time()
+fn copies_a_mount_numbers_afresh_are_known_by_birth_time_or_else_by_inode_number()
 -> Result<(), Box<dyn Error>> {
     let _serial = serial()?;
     #[derive(Clone, Copy, Debug, PartialEq)]
@@ -2313,6 +2764,7 @@ fn copies_a_mount_numbers_afresh_are_known_by_type_birth_time_size_and_time()
         /// Renamed away, with what the merge placed in it, and another folder
         /// made at its name.
         FolderReplaced,
+        FolderEvicted,
     }
     // exFAT and FUSE daemons without `use_ino` number an entry afresh once
     // the kernel evicts it, here right after the copy is published; on ext4,
@@ -2320,8 +2772,17 @@ fn copies_a_mount_numbers_afresh_are_known_by_type_birth_time_size_and_time()
     // a folder on exFAT sets its birth time again. Whether the move deletes
     // its source.
     let (fail, merge) = (TransferConflict::FailIfExists, TransferConflict::Merge);
-    let rows: [(Preset, &str, TransferConflict, Change, bool); 8] = [
-        (Quirks::sshfs, "notes.txt", fail, Change::None, true),
+    let rows: [(Preset, &str, TransferConflict, Change, bool); 11] = [
+        (Quirks::sshfs, "notes.txt", fail, Change::None, false),
+        (Quirks::sshfs, "folder", fail, Change::FolderEvicted, false),
+        (
+            Quirks::exfat_fuse,
+            "folder",
+            fail,
+            Change::FolderEvicted,
+            false,
+        ),
+        (Quirks::vfat, "folder", fail, Change::None, true),
         (Quirks::exfat, "folder", fail, Change::None, true),
         (Quirks::exfat, "folder", fail, Change::Rewritten, false),
         (
@@ -2392,11 +2853,14 @@ fn copies_a_mount_numbers_afresh_are_known_by_type_birth_time_size_and_time()
         };
         let replaced = copied_notes.clone();
         let merged = copy.clone();
+        if change == Change::FolderEvicted {
+            copied.truncate(1);
+        }
         let evicted = Arc::new(AtomicBool::new(false));
         let evicting = evicted.clone();
         let racer: super::fs_quirks::Racer = Box::new(move || {
             match change {
-                Change::None => {}
+                Change::None | Change::FolderEvicted => {}
                 Change::Rewritten => fs::write(&replaced, b"NOTES").expect("rewrite the copy"),
                 Change::ReplacedWithinTheTick | Change::ReplacedAlike => {
                     fs::rename(&arrival, &replaced).expect("replace the copy");
@@ -2462,7 +2926,7 @@ fn copied_links_a_mount_numbers_afresh_are_known_by_their_size_and_time()
 -> Result<(), Box<dyn Error>> {
     let _serial = serial()?;
     let noserverino = || Quirks {
-        mount_type: Some(("cifs", "rw,noserverino")),
+        mount_type: Some(("cifs", "rw,vers=3.1.1")),
         ..Quirks::default()
     };
     let sshfs_renaming = || Quirks {
@@ -2523,7 +2987,6 @@ fn copied_links_a_mount_numbers_afresh_are_known_by_their_size_and_time()
             if replaced {
                 fs::rename(&arrival, &replacing).expect("replace the link");
             }
-            super::fs_quirks::renumbered(&copy);
             super::fs_quirks::renumbered(&replacing);
             evicting.store(true, Ordering::Release);
         });
@@ -2614,10 +3077,11 @@ fn later_names_rewritten_within_the_tick_are_kept() -> Result<(), Box<dyn Error>
     let _serial = serial()?;
     let _kernel = KernelGuard::set(Some((6, 12, 0)));
     // Within one coarse tick only a digest tells a same-size rewrite. SMB
-    // refuses to open a later name, so none of them can be compared there.
-    for (row, quirks, kept_names) in [
-        ("ext4", Quirks::ext4 as fn() -> Quirks, &["m", "sub/n"][..]),
-        ("smb", smb_with_one_name_open, &["m", "sub/n", "sub/y"][..]),
+    // refuses to open a later name, so none of them can be compared there;
+    // which of the unchanged pair is later depends on the listing order.
+    for (row, quirks, later_kept) in [
+        ("ext4", Quirks::ext4 as fn() -> Quirks, false),
+        ("smb", smb_with_one_name_open, true),
     ] {
         let tick = SystemTime::now() - Duration::from_secs(1);
         let _clock = ClockGuard::set(tick);
@@ -2642,12 +3106,29 @@ fn later_names_rewritten_within_the_tick_are_kept() -> Result<(), Box<dyn Error>
         assert_eq!(fs::read(moved.join("sub/n"))?, b"m", "{row}");
         let mut left = report.kept;
         left.sort_by_key(|item| item.location.native_path().map(Path::to_path_buf));
-        let expected = kept_names
+        let unchanged_pair = [folder.join("x"), folder.join("sub/y")];
+        let later = unchanged_pair
             .iter()
-            .map(|path| kept(folder.join(path), KeptCause::Changed))
+            .filter(|name| {
+                left.iter()
+                    .any(|item| item.location == Location::local(name))
+            })
             .collect::<Vec<_>>();
+        assert_eq!(later.len(), usize::from(later_kept), "{row}: {left:?}");
+        let mut expected = vec![
+            kept(folder.join("m"), KeptCause::Changed),
+            kept(folder.join("sub/n"), KeptCause::Changed),
+        ];
+        expected.extend(
+            later
+                .iter()
+                .map(|name| kept((*name).clone(), KeptCause::Changed)),
+        );
+        expected.sort_by_key(|item| item.location.native_path().map(Path::to_path_buf));
         assert_eq!(left, expected, "{row}");
-        assert!(!folder.join("x").exists(), "{row}");
+        for name in &unchanged_pair {
+            assert_eq!(name.exists(), later.contains(&name), "{row}: {name:?}");
+        }
     }
     Ok(())
 }

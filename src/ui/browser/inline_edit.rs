@@ -1016,6 +1016,19 @@ impl ViewState {
         }
     }
 
+    pub(super) fn expect_new_entry(&self, depth: usize, parent: Location) {
+        self.cancel_new_entry();
+        self.cancel_rename();
+        self.pending_new_entry
+            .replace(Some(Rc::new(PendingEntryRename {
+                depth,
+                parent,
+                reveal_generation: self.rename_reveal_generation.get(),
+                move_sources: std::cell::RefCell::new(Vec::new()),
+                created: std::cell::RefCell::new(None),
+            })));
+    }
+
     pub(super) fn cancel_new_entry(&self) -> bool {
         let pending = self.pending_new_entry.take();
         if let Some(pending) = &pending

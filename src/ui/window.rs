@@ -19,11 +19,11 @@ use gtk::{
 use crate::{
     adapters::{
         LocalFileSource, LocalOperationProvider, RevealRequest, location_for_file,
-        mount_can_unplug, volume_can_unplug,
+        mount_can_unplug, mount_lanes, probes, volume_can_unplug,
     },
     app::{Browser, BrowserEvent},
     model::Location,
-    services::sanitize_uri_credentials,
+    services::LocationValidationError,
 };
 
 use super::{
@@ -63,8 +63,11 @@ mod sidebar_drop_feedback;
 mod unlock_argument;
 mod volume_password;
 
+#[cfg(test)]
+pub(super) use devices::offer_removable_destinations_for_test;
 pub(super) use devices::{
-    RemovableDestination, removable_destinations, resolve_removable_destination,
+    RemovableDestination, RemovableWatch, removable_destination_root, removable_destinations,
+    send_to_recent_folders, watch_removable_destinations,
 };
 pub(in crate::ui) use keyboard::{ChooserKeys, ChooserPolicy, edit_focused_text};
 
@@ -303,6 +306,7 @@ pub(super) fn present_target(
     crate::assets::register_icon_theme();
     let _theme_manager = super::theme::ThemeManager::shared();
     let preference_manager = super::preferences::PreferenceManager::shared();
+    super::actions::shared();
     tracing::debug!(
         elapsed_ms = present_started.elapsed().as_millis() as u64,
         "present theme and styles ready"
@@ -321,7 +325,6 @@ pub(super) fn present_target(
     crate::metrics::mark_window_presented();
     if auto_navigate {
         let restore = restore_tabs && location.is_none();
-        let pending_location = location.unwrap_or_else(|| startup_location(&preference_manager));
         let idle_browser = browser.clone();
         glib::idle_add_local_once(move || {
             let started = std::time::Instant::now();
@@ -330,10 +333,14 @@ pub(super) fn present_target(
                     elapsed_ms = started.elapsed().as_millis() as u64,
                     "present tab session restored"
                 );
-            } else if selection.is_empty() {
-                idle_browser.navigate_location(pending_location);
             } else {
-                idle_browser.reveal_locations(pending_location, selection, properties);
+                match location {
+                    Some(location) if !selection.is_empty() => {
+                        idle_browser.reveal_locations(location, selection, properties);
+                    }
+                    Some(location) => idle_browser.navigate_location(location),
+                    None => open_default_folder(&idle_browser.browser(), &preference_manager),
+                }
             }
             tracing::debug!(
                 elapsed_ms = started.elapsed().as_millis() as u64,
@@ -1137,7 +1144,7 @@ pub(super) struct SidebarState {
     place_rows: RefCell<Vec<(Location, gtk::Button)>>,
     trash_contents: Cell<TrashContents>,
     trash_menu_rows: RefCell<Option<TrashMenuRows>>,
-    trash_monitor: RefCell<Option<gio::FileMonitor>>,
+    trash_monitor: RefCell<Option<crate::services::LoadHandle>>,
     trash_probe_running: Cell<bool>,
     trash_probe_pending: Cell<bool>,
     local_only: bool,
@@ -1283,9 +1290,7 @@ impl SidebarView {
 
     pub(super) fn disconnect(&self) {
         unparent_sidebar_popovers(self.state.widget.upcast_ref());
-        if let Some(monitor) = self.state.trash_monitor.take() {
-            monitor.cancel();
-        }
+        self.state.trash_monitor.take();
         self.bookmark_watch.take();
         for handler in self.handlers.take() {
             self.state.volume_monitor.disconnect(handler);
@@ -1841,62 +1846,88 @@ impl SidebarState {
     }
 
     fn pin_location(self: &Rc<Self>, location: Location, name: String) {
-        self.update_pinned_places(|places| {
-            if pin_status(places, &location) != PinStatus::Available {
-                return false;
-            }
-            places.push((location, name));
-            true
-        });
+        self.update_pinned_places(
+            move |places| {
+                if pin_status(places, &location) != PinStatus::Available {
+                    return false;
+                }
+                places.push((location.clone(), name.clone()));
+                true
+            },
+            |_| {},
+        );
     }
 
     fn unpin_location(self: &Rc<Self>, location: &Location) {
-        self.update_pinned_places(|places| remove_pinned_place(places, location));
+        let location = location.clone();
+        self.update_pinned_places(move |places| remove_pinned_place(places, &location), |_| {});
     }
 
-    fn pin_folders_into(self: &Rc<Self>, folders: &[(Location, String)], gap: PinGap<'_>) -> bool {
-        self.update_pinned_places(|places| {
-            pin_gap_index(places, gap).is_some_and(|index| pin_locations_at(places, folders, index))
-        })
+    fn pin_folders_into(
+        self: &Rc<Self>,
+        folders: &[(Location, String)],
+        (after, before): PinGap<'_>,
+        done: impl FnOnce(bool) + 'static,
+    ) {
+        let folders = folders.to_vec();
+        let (after, before) = (after.cloned(), before.cloned());
+        self.update_pinned_places(
+            move |places| {
+                pin_gap_index(places, (after.as_ref(), before.as_ref()))
+                    .is_some_and(|index| pin_locations_at(places, &folders, index))
+            },
+            done,
+        );
     }
 
-    fn reorder_pinned_into(self: &Rc<Self>, source: &Location, gap: PinGap<'_>) -> bool {
-        self.update_pinned_places(|places| {
-            let Some(source) = places.iter().position(|(location, _)| location == source) else {
-                return false;
-            };
-            pin_gap_index(places, gap).is_some_and(|index| move_pinned_place(places, source, index))
-        })
+    fn reorder_pinned_into(
+        self: &Rc<Self>,
+        source: &Location,
+        (after, before): PinGap<'_>,
+        done: impl FnOnce(bool) + 'static,
+    ) {
+        let source = source.clone();
+        let (after, before) = (after.cloned(), before.cloned());
+        self.update_pinned_places(
+            move |places| {
+                let Some(source) = places.iter().position(|(location, _)| *location == source)
+                else {
+                    return false;
+                };
+                pin_gap_index(places, (after.as_ref(), before.as_ref()))
+                    .is_some_and(|index| move_pinned_place(places, source, index))
+            },
+            done,
+        );
     }
 
     fn update_pinned_places(
         self: &Rc<Self>,
-        change: impl FnOnce(&mut Vec<(Location, String)>) -> bool,
-    ) -> bool {
+        change: impl Fn(&mut Vec<(Location, String)>) -> bool + Send + 'static,
+        done: impl FnOnce(bool) + 'static,
+    ) {
         // Merge into the shared file, never this window's stale snapshot.
-        let mut changed = false;
-        let result = load_pinned_places().and_then(|mut places| {
-            changed = change(&mut places);
-            if changed {
-                save_pinned_places(&places)?;
+        let edit = move |contents: &[u8]| {
+            let mut places = crate::adapters::bookmarks::parse_pinned_places(contents);
+            change(&mut places)
+                .then(|| crate::adapters::bookmarks::serialize_pinned_places(&places).into_bytes())
+        };
+        let weak = Rc::downgrade(self);
+        glib::MainContext::default().spawn_local(async move {
+            match crate::adapters::bookmarks::update(edit).await {
+                Ok(changed) => done(changed),
+                Err(error) => {
+                    if let Some(state) = weak.upgrade() {
+                        show_error_dialog(
+                            &state.view.widget(),
+                            &crate::i18n::tr("Unable to update pinned folders"),
+                            &crate::services::io_error_message(&error),
+                        );
+                    }
+                    done(false);
+                }
             }
-            Ok(places)
         });
-        match result {
-            Ok(places) => {
-                self.pinned_places.replace(places);
-                self.rebuild();
-                changed
-            }
-            Err(error) => {
-                show_error_dialog(
-                    &self.view.widget(),
-                    &crate::i18n::tr("Unable to update pinned folders"),
-                    &crate::services::io_error_message(&error),
-                );
-                false
-            }
-        }
     }
     fn event_changes_active_place(event: &BrowserEvent) -> bool {
         matches!(
@@ -1992,18 +2023,21 @@ impl SidebarState {
         if self.trash_monitor.borrow().is_some() {
             return;
         }
-        let trash = gio::File::for_uri("trash:///");
-        let Ok(monitor) =
-            trash.monitor_directory(gio::FileMonitorFlags::NONE, gio::Cancellable::NONE)
-        else {
-            return;
-        };
-        let weak = Rc::downgrade(self);
-        monitor.connect_changed(move |_, _, _, _| {
-            if let Some(state) = weak.upgrade() {
-                state.refresh_trash_contents();
-            }
-        });
+        let (changed, live) = (Rc::downgrade(self), Rc::downgrade(self));
+        let monitor = crate::adapters::watch(
+            &Location::uri("trash:///"),
+            crate::adapters::Watched::Folder,
+            move |_, _| {
+                if let Some(state) = changed.upgrade() {
+                    state.refresh_trash_contents();
+                }
+            },
+            move || {
+                if let Some(state) = live.upgrade() {
+                    state.refresh_trash_contents();
+                }
+            },
+        );
         *self.trash_monitor.borrow_mut() = Some(monitor);
     }
 
@@ -2327,16 +2361,19 @@ impl SidebarState {
                 _ => return,
             }
         };
-        self.update_pinned_places(|places| {
-            let position =
-                |location: &Location| places.iter().position(|(pinned, _)| pinned == location);
-            match (position(&source), position(&target)) {
-                (Some(source), Some(target)) => {
-                    reorder_pinned_places(places, source, target, after)
+        self.update_pinned_places(
+            move |places| {
+                let position =
+                    |location: &Location| places.iter().position(|(pinned, _)| pinned == location);
+                match (position(&source), position(&target)) {
+                    (Some(source), Some(target)) => {
+                        reorder_pinned_places(places, source, target, after)
+                    }
+                    _ => false,
                 }
-                _ => false,
-            }
-        });
+            },
+            |_| {},
+        );
     }
 
     fn append_separator(&self) {
@@ -2986,8 +3023,15 @@ fn install_sidebar_file_drop(
         if sources.is_empty() {
             return false;
         }
-        let commit = file_drop_commit(target, &destination, &sources, &drop_state);
-        view.commit_file_drop(destination.clone(), sources, commit);
+        file_drop_commit(
+            target,
+            destination.clone(),
+            sources,
+            &drop_state,
+            move |destination, sources, commit| {
+                view.commit_file_drop(destination, sources, commit);
+            },
+        );
         true
     });
     row.add_controller(drop);
@@ -3517,7 +3561,7 @@ pub(crate) fn crypto_password_uuid_for_volume(volume: &gio::Volume) -> Option<St
     let unix = gio_volume_unix_device(volume);
     let hint = unix
         .as_deref()
-        .map(devices::probe_block_crypto)
+        .map(devices::block_crypto_hint)
         .unwrap_or_default();
     devices::crypto_password_uuid(
         volume.uuid().as_deref(),
@@ -3536,7 +3580,7 @@ fn crypto_password_uuid_for_mount(mount: &gio::Mount) -> Option<String> {
         .and_then(|drive| drive.identifier(gio::VOLUME_IDENTIFIER_KIND_UNIX_DEVICE.as_str()));
     let hint = unix
         .as_deref()
-        .map(devices::probe_block_crypto)
+        .map(devices::block_crypto_hint)
         .unwrap_or_default();
     devices::crypto_password_uuid(None, unix.as_deref(), hint.as_ref(), false)
 }
@@ -3883,7 +3927,7 @@ fn gio_icons_are_encrypted(
     names.extend(gio_icon_names(icon));
     let names: Vec<&str> = names.iter().map(String::as_str).collect();
     let hint = unix_device
-        .map(devices::probe_block_crypto)
+        .map(devices::block_crypto_hint)
         .unwrap_or_default();
     devices::is_encrypted_device(&names, start_stop, hint.as_ref())
 }
@@ -4401,79 +4445,6 @@ fn navigate_to_gio_file(browser: &Rc<Browser>, file: &gio::File) {
     }
 }
 
-fn pinned_places_path() -> PathBuf {
-    crate::adapters::bookmarks::pinned_places_path()
-}
-
-fn load_pinned_places() -> std::io::Result<Vec<(Location, String)>> {
-    match std::fs::read(pinned_places_path()) {
-        Ok(contents) => Ok(parse_pinned_places(&contents)),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
-        Err(error) => Err(error),
-    }
-}
-
-/// GTK bookmarks may contain non-UTF-8 labels.
-fn parse_pinned_places(contents: &[u8]) -> Vec<(Location, String)> {
-    let mut places = Vec::new();
-    for line in contents.split(|byte| *byte == b'\n') {
-        let line = line.strip_suffix(b"\r").unwrap_or(line);
-        let (uri, label) = match line.iter().position(|byte| *byte == b' ') {
-            Some(space) => (&line[..space], Some(&line[space + 1..])),
-            None => (line, None),
-        };
-        if uri.is_empty() {
-            continue;
-        }
-        let Ok(uri) = std::str::from_utf8(uri) else {
-            continue;
-        };
-        let file = gio::File::for_uri(uri);
-        let Some(location) = location_for_file(&file) else {
-            continue;
-        };
-        if places
-            .iter()
-            .any(|(existing, _): &(Location, String)| existing == &location)
-        {
-            continue;
-        }
-        let name = label
-            .filter(|label| !label.is_empty())
-            .map(|label| String::from_utf8_lossy(label).into_owned())
-            .unwrap_or_else(|| location.display_name());
-        places.push((location, name));
-    }
-    places
-}
-
-fn save_pinned_places(places: &[(Location, String)]) -> std::io::Result<()> {
-    let path = pinned_places_path();
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let contents = serialize_pinned_places(places);
-    crate::storage::atomic_write_config(&path, contents.as_bytes())
-}
-
-fn serialize_pinned_places(places: &[(Location, String)]) -> String {
-    let mut contents = String::new();
-    for (location, name) in places {
-        let uri = location
-            .native_path()
-            .map(gio::File::for_path)
-            .map(|file| file.uri().to_string())
-            .or_else(|| location.uri_value().map(str::to_owned));
-        let Some(uri) = uri.and_then(|uri| sanitize_uri_credentials(&uri).ok().map(|(uri, _)| uri))
-        else {
-            continue;
-        };
-        let label = name.replace(['\n', '\r'], " ");
-        contents.push_str(&format!("{uri} {label}\n"));
-    }
-    contents
-}
-
 pub(crate) fn home_directory() -> PathBuf {
     env::var_os("HOME")
         .map(PathBuf::from)
@@ -4484,17 +4455,53 @@ pub(crate) fn default_save_folder() -> PathBuf {
     glib::user_special_dir(glib::UserDirectory::Downloads).unwrap_or_else(home_directory)
 }
 
-fn startup_location(manager: &PreferenceManager) -> Location {
-    let saved = manager.default_directory();
-    if let Some(path) = &saved
-        && path.is_dir()
-    {
-        return Location::local(path);
-    }
-    if saved.is_some() {
-        manager.set_default_directory(None);
-    }
-    Location::local(home_directory())
+fn open_checked(browser: &Rc<Browser>, location: Location, absent: impl FnOnce() + 'static) {
+    let Some(path) = location.native_path().map(PathBuf::from) else {
+        browser.navigate_location(location, true);
+        return;
+    };
+    let generation = browser.bump_navigation_generation();
+    let weak = Rc::downgrade(browser);
+    glib::MainContext::default().spawn_local(async move {
+        let gone = glib::future_with_timeout(mount_lanes::STALLED_AFTER, async {
+            match probes::folder(&path).await {
+                Err(LocationValidationError::NotDirectory) => true,
+                Err(LocationValidationError::Missing) => probes::folder_was_deleted(&path).await,
+                _ => false,
+            }
+        })
+        .await
+        .unwrap_or(false);
+        let Some(browser) = weak.upgrade() else {
+            return;
+        };
+        if browser.navigation_generation() != generation {
+            return;
+        }
+        if gone {
+            absent();
+        } else {
+            browser.navigate_location(location, true);
+        }
+    });
+}
+
+fn open_default_folder(browser: &Rc<Browser>, manager: &Rc<PreferenceManager>) {
+    let home = Location::local(home_directory());
+    let Some(saved) = manager.default_directory() else {
+        browser.navigate_location(home, true);
+        return;
+    };
+    let weak = Rc::downgrade(browser);
+    let manager = manager.clone();
+    open_checked(browser, Location::local(&saved), move || {
+        if manager.default_directory().as_ref() == Some(&saved) {
+            manager.set_default_directory(None);
+        }
+        if let Some(browser) = weak.upgrade() {
+            browser.navigate_location(home, true);
+        }
+    });
 }
 
 #[cfg(test)]

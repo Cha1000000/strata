@@ -403,10 +403,11 @@ open-path marker. The current name is filled in with a file's stem (or a
 folder's whole name) selected, as inline rename selects it. The item is fixed
 when the prompt opens; **Up** / **Down** do not move the cursor while it is open.
 **Enter** renames the item to exactly the typed name and keeps its contents; an
-unchanged name does nothing. An invalid name, one already taken, or one the
-location would store as another keeps the prompt open with the reason, and
-nothing is replaced. Permission errors leave the original name and show the
-usual rename error.
+unchanged name does nothing. An invalid name, one already taken (including by
+another hard link to the same file; see
+[Rename](filesystem-compatibility.md#rename)), or one the location would store
+as another keeps the prompt open with the reason, and nothing is replaced.
+Permission errors leave the original name and show the usual rename error.
 **Esc**, focus leaving the prompt, a clicked row (which keeps its selection),
 another prompt, leaving the mode, or closing the window discard the typed name.
 Trash items flash `Can’t rename items here`. The context menu's **Rename** and a

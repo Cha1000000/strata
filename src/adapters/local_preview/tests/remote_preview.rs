@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::{
+    adapters::gio_close::tests::closed_on_the_ui_thread_once_answered_and_let_go,
     model::{EntryKind, FileEntry, Location, MetadataValue},
     services::PreviewRequestId,
 };
@@ -340,4 +341,13 @@ fn unsupported_and_oversized_remote_inputs_fail_before_transfer_or_render() {
             }
         },
     );
+}
+
+#[test]
+fn a_remote_text_stream_answered_as_the_preview_lets_go_closes_on_a_worker() {
+    let closed_on_the_ui_thread =
+        closed_on_the_ui_thread_once_answered_and_let_go(|file| async move {
+            let _ = read_text(&file, None, 64).await;
+        });
+    assert!(!closed_on_the_ui_thread);
 }

@@ -41,6 +41,12 @@ pub(super) enum DepartureEvidence {
     FailedLoad,
 }
 
+pub(super) struct DepartureProbe {
+    generation: u64,
+    answered: Rc<Cell<bool>>,
+    _probe: LoadHandle,
+}
+
 /// A chooser refuses folders outside its boundary, which includes missing ones.
 fn departure_confirmed(error: &LocationValidationError) -> bool {
     matches!(
@@ -195,6 +201,12 @@ impl Browser {
         self.keep_departure_probe(generation, &answered, probe);
     }
 
+    pub(super) fn departure_check_pending(&self) -> bool {
+        self.departure_probe.borrow().as_ref().is_some_and(|probe| {
+            !probe.answered.get() && probe.generation == self.navigation_generation()
+        })
+    }
+
     fn departure_check_is_current(
         &self,
         generation: u64,
@@ -206,9 +218,13 @@ impl Browser {
     }
 
     /// A step that already answered may have started the next one, which must stay.
-    fn keep_departure_probe(&self, generation: u64, answered: &Cell<bool>, probe: LoadHandle) {
+    fn keep_departure_probe(&self, generation: u64, answered: &Rc<Cell<bool>>, probe: LoadHandle) {
         if !answered.get() && self.navigation_generation() == generation {
-            self.departure_probe.replace(Some(probe));
+            self.departure_probe.replace(Some(DepartureProbe {
+                generation,
+                answered: answered.clone(),
+                _probe: probe,
+            }));
         }
     }
 

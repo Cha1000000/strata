@@ -24,6 +24,23 @@ fn wait_until(condition: impl Fn() -> bool, waiting_for: &str) {
     }
 }
 
+fn saved_pins() -> Vec<(Location, String)> {
+    crate::storage::writer::settle();
+    let contents =
+        std::fs::read(crate::adapters::bookmarks::pinned_places_path()).unwrap_or_default();
+    crate::adapters::bookmarks::parse_pinned_places(&contents)
+}
+
+fn save_pins(places: &[(Location, String)]) {
+    let path = crate::adapters::bookmarks::pinned_places_path();
+    std::fs::create_dir_all(path.parent().expect("config folder")).expect("config folder");
+    std::fs::write(
+        &path,
+        crate::adapters::bookmarks::serialize_pinned_places(places),
+    )
+    .expect("saved pins");
+}
+
 fn shows_label(widget: &gtk::Widget, text: &str) -> bool {
     if !widget.is_visible() {
         return false;
@@ -149,7 +166,6 @@ fn connect_to_server_stays_open_until_connecting_ends_and_pins_only_on_success()
         "ui::window::tests::sidebar::connect_to_server_stays_open_until_connecting_ends_and_pins_only_on_success",
         [("GIO_USE_VFS", "local")],
         || {
-            use super::super::load_pinned_places;
             PreferenceManager::seed_saved_preferences_for_test();
             let preferences = PreferenceManager::shared();
             preferences.set_sidebar_show_network(true);
@@ -175,7 +191,7 @@ fn connect_to_server_stays_open_until_connecting_ends_and_pins_only_on_success()
                 .find(|(candidate, _)| *candidate == network)
                 .map(|(_, row)| row.clone())
                 .expect("Network row");
-            let pins_before = load_pinned_places().expect("bookmarks");
+            let pins_before = saved_pins();
 
             find::<gtk::Button>(&network_row, |button| {
                 button
@@ -223,7 +239,7 @@ fn connect_to_server_stays_open_until_connecting_ends_and_pins_only_on_success()
             let error =
                 find::<gtk::Label>(&overlay, |label| label.has_css_class("form-field-error"));
             assert!(error.is_visible() && !error.text().is_empty());
-            assert_eq!(load_pinned_places().expect("bookmarks"), pins_before);
+            assert_eq!(saved_pins(), pins_before);
             assert_ne!(
                 view.browser().active_location(),
                 Some(Location::uri("smb://unreachable.invalid/share"))
@@ -233,17 +249,13 @@ fn connect_to_server_stays_open_until_connecting_ends_and_pins_only_on_success()
             let opened = Location::local(folder.path());
             address.set_text(&folder.path().to_string_lossy());
             connect.emit_clicked();
-            assert_eq!(
-                modal_layers(&overlay),
-                0,
-                "the dialog closes once the location opens"
+            wait_until(
+                || modal_layers(&overlay) == 0,
+                "the dialog to close once the location opens",
             );
             assert_eq!(view.browser().active_location(), Some(opened.clone()));
             assert!(
-                load_pinned_places()
-                    .expect("bookmarks")
-                    .iter()
-                    .any(|(location, _)| *location == opened),
+                saved_pins().iter().any(|(location, _)| *location == opened),
                 "the retried location is pinned"
             );
             view.browser().clear_observer();
@@ -258,9 +270,8 @@ fn an_empty_pinned_section_shows_only_while_files_are_dragged_over_the_sidebar()
     crate::test_support::gtk_test(
         "ui::window::tests::sidebar::an_empty_pinned_section_shows_only_while_files_are_dragged_over_the_sidebar",
         || {
-            use super::super::save_pinned_places;
             PreferenceManager::seed_saved_preferences_for_test();
-            save_pinned_places(&[]).expect("no pins");
+            save_pins(&[]);
             let view = browser_for_window();
             let sidebar = build_sidebar(view.clone(), PreferenceManager::shared(), false);
             let window = gtk::Window::builder().child(&sidebar.widget).build();
@@ -430,18 +441,28 @@ fn pinning_merges_latest_bookmarks_and_persists_aliases_in_selection_order() {
     crate::test_support::gtk_test(
         "ui::window::tests::sidebar::pinning_merges_latest_bookmarks_and_persists_aliases_in_selection_order",
         || {
-            use super::super::{load_pinned_places, save_pinned_places};
+            use crate::{
+                storage::writer,
+                test_support::{save_pins, saved_pins},
+            };
+            use std::{cell::Cell, rc::Rc};
+            fn finished(start: impl FnOnce(Rc<Cell<Option<bool>>>)) -> bool {
+                let outcome = Rc::new(Cell::new(None));
+                start(outcome.clone());
+                writer::settle();
+                outcome.get().expect("pin edit finished")
+            }
             PreferenceManager::seed_saved_preferences_for_test();
             let initial = vec![
                 (Location::uri("sftp://host/anchor"), "Anchor".to_owned()),
                 (Location::local("/pinned/last"), "Last".to_owned()),
             ];
-            save_pinned_places(&initial).expect("seed bookmarks");
+            save_pins(&initial);
             let view = browser_for_window();
             let sidebar = build_sidebar(view.clone(), PreferenceManager::shared(), false);
             let mut external = initial.clone();
             external.insert(0, (Location::local("/external/pin"), "External".to_owned()));
-            save_pinned_places(&external).expect("external edit");
+            save_pins(&external);
             let folders = [
                 (Location::local("/mount/folder"), "Mounted".to_owned()),
                 (Location::local("/aliases/folder"), "Alias".to_owned()),
@@ -449,39 +470,57 @@ fn pinning_merges_latest_bookmarks_and_persists_aliases_in_selection_order() {
                 (Location::local("/mount/folder"), "Mounted".to_owned()),
             ];
             let locations = folders.clone().map(|(location, _)| location);
-            assert!(
-                sidebar
-                    .state
-                    .pin_folders_into(&folders, (None, Some(&initial[0].0)))
-            );
+            let held = writer::hold();
+            let outcome = Rc::new(Cell::new(None));
+            let reported = outcome.clone();
+            sidebar
+                .state
+                .pin_folders_into(&folders, (None, Some(&initial[0].0)), move |changed| {
+                    reported.set(Some(changed));
+                });
+            for _ in 0..20 {
+                gtk::glib::MainContext::default().iteration(false);
+            }
+            assert_eq!(outcome.get(), None);
+            assert_eq!(saved_pins(), external);
+            assert_eq!(*sidebar.state.pinned_places.borrow(), initial);
+            drop(held);
+            writer::settle();
+            assert_eq!(outcome.get(), Some(true));
             external.splice(1..1, folders[..2].iter().cloned());
-            assert_eq!(load_pinned_places().expect("saved pins"), external);
+            assert_eq!(saved_pins(), external);
             assert_eq!(*sidebar.state.pinned_places.borrow(), external);
-            assert!(
-                !sidebar
-                    .state
-                    .pin_folders_into(&folders, (Some(&initial[1].0), None))
-            );
-            assert_eq!(load_pinned_places().expect("unchanged pins"), external);
+            assert!(!finished(|outcome| {
+                sidebar.state.pin_folders_into(
+                    &folders,
+                    (Some(&initial[1].0), None),
+                    move |changed| outcome.set(Some(changed)),
+                );
+            }));
+            assert_eq!(saved_pins(), external);
             let later = (Location::local("/external/later"), "Later".to_owned());
             external.insert(0, later);
-            save_pinned_places(&external).expect("another external edit");
-            assert!(
-                sidebar
-                    .state
-                    .reorder_pinned_into(&locations[0], (Some(&initial[0].0), Some(&initial[1].0)))
-            );
+            save_pins(&external);
+            assert!(finished(|outcome| {
+                sidebar.state.reorder_pinned_into(
+                    &locations[0],
+                    (Some(&initial[0].0), Some(&initial[1].0)),
+                    move |changed| outcome.set(Some(changed)),
+                );
+            }));
             let moved = external.remove(2);
             external.insert(4, moved);
-            assert_eq!(load_pinned_places().expect("reordered pins"), external);
+            assert_eq!(saved_pins(), external);
             external.retain(|(location, _)| location != &locations[0]);
-            save_pinned_places(&external).expect("external unpin");
-            assert!(
-                !sidebar
-                    .state
-                    .reorder_pinned_into(&locations[0], (Some(&initial[1].0), None))
-            );
-            assert_eq!(load_pinned_places().expect("no resurrected pin"), external);
+            save_pins(&external);
+            assert!(!finished(|outcome| {
+                sidebar.state.reorder_pinned_into(
+                    &locations[0],
+                    (Some(&initial[1].0), None),
+                    move |changed| outcome.set(Some(changed)),
+                );
+            }));
+            assert_eq!(saved_pins(), external);
             view.browser().clear_observer();
             sidebar.disconnect();
         },

@@ -3,7 +3,7 @@
 //! Browser composition and public commands. Feature modules share this view's state and the
 //! application controller; they must not create independent navigation or operation state.
 
-use crate::app::Browser;
+use crate::app::{Browser, FreshnessInput, Presence, VisibleDepths};
 use crate::model::{FileEntry, Location};
 use crate::services::{FileSource, LoadHandle, LocationValidationError, OperationProvider};
 use crate::ui::browser::clipboard::{copy_locations, register_cut_view};
@@ -53,6 +53,7 @@ mod file_commands;
 pub(in crate::ui) mod find;
 pub(super) mod fly_to_trash;
 mod inline_edit;
+mod leftovers;
 mod listing_filter;
 mod listing_search;
 mod location;
@@ -101,7 +102,7 @@ pub(super) use crate::ui::browser::entry::{
     format_file_size, icon_for_name, metadata_needs_fill, model_type_group,
 };
 pub(crate) use crate::ui::browser::file_commands::{
-    ConflictFocus, CreateRefusal, PinChange, TargetCommand, Yank, can_rename, typed_rename_is_taken,
+    ConflictFocus, CreateRefusal, PinChange, TargetCommand, Yank, can_rename,
 };
 pub(super) use crate::ui::browser::inline_edit::{queue_rename, reveal_rename_row};
 pub(in crate::ui) use crate::ui::browser::listing_filter::{
@@ -109,11 +110,12 @@ pub(in crate::ui) use crate::ui::browser::listing_filter::{
 };
 pub(in crate::ui) use crate::ui::browser::location::ConnectOutcome;
 pub(super) use crate::ui::browser::pane_header::{
-    column_sort_direction_toggle, column_sort_menu, empty_trash_button, pane_new_folder_button,
-    pane_refresh_button, sync_column_sort_direction,
+    column_sort_direction_toggle, column_sort_menu, empty_trash_button, leftovers_button,
+    pane_new_folder_button, pane_refresh_button, sync_column_sort_direction,
 };
 pub(super) use crate::ui::browser::paths::is_trash_root;
 pub use crate::ui::browser::peek::PeekBehavior;
+pub(super) use crate::ui::browser::presentation::not_responding_notice;
 pub use crate::ui::browser::properties::format_permissions;
 pub(super) use crate::ui::modal::{
     animate_in, animate_out, dismiss_modal_layer, modal_layer, show_error_dialog, slide_out,
@@ -124,7 +126,7 @@ type UnpinHandler = Rc<dyn Fn(&Location)>;
 type PinStatusHandler = Rc<dyn Fn(&Location) -> PinStatus>;
 type PrintHandler = Rc<dyn Fn(FileEntry)>;
 type PreparingTransfer = (
-    (Location, Vec<Location>, bool),
+    transfer::Preparing,
     gio::Cancellable,
     Weak<FileProgressState>,
 );
@@ -280,10 +282,10 @@ pub(super) struct ViewState {
     pending_location_credentials: RefCell<Option<MountCredentials>>,
     pending_connect: RefCell<Option<Rc<PendingConnect>>>,
     pending_trash_lookup: RefCell<Option<LoadHandle>>,
+    leftovers: leftovers::LeftoverState,
     pending_empty_trash: RefCell<Option<LoadHandle>>,
     trash_loading: RefCell<Option<TrashLoadingView>>,
     unlock_slots: RefCell<Vec<UnlockProgressSlot>>,
-    auto_refresh: RefCell<Option<glib::SourceId>>,
     trash_button: glib::WeakRef<gtk::Button>,
     recent_removal: crate::adapters::RecentRemovalState,
     drag_autoscroll: RefCell<Option<Rc<columns::drag_scroll::DragAutoscroll>>>,
@@ -667,10 +669,10 @@ impl BrowserView {
             pending_location_credentials: RefCell::new(None),
             pending_connect: RefCell::new(None),
             pending_trash_lookup: RefCell::new(None),
+            leftovers: leftovers::LeftoverState::default(),
             pending_empty_trash: RefCell::new(None),
             trash_loading: RefCell::new(None),
             unlock_slots: RefCell::new(Vec::new()),
-            auto_refresh: RefCell::new(None),
             trash_button: glib::WeakRef::new(),
             recent_removal: crate::adapters::RecentRemovalState::new(),
             drag_autoscroll: RefCell::new(None),
@@ -689,6 +691,13 @@ impl BrowserView {
             browser,
         });
         find::register_highlight_view(&state);
+        let weak_state = Rc::downgrade(&state);
+        state.browser.set_freshness_hold(move || {
+            weak_state.upgrade().is_some_and(|state| {
+                state.inline_edit_is_open() || state.rename_operation_pending()
+            })
+        });
+        state.enter_mode(state.mode.get());
 
         let weak_state = Rc::downgrade(&state);
         *pending_submit.borrow_mut() = Some(Rc::new(move || {
@@ -1077,7 +1086,7 @@ impl BrowserView {
                     _ => BrowserMode::Columns,
                 };
                 if let Some(state) = state.upgrade() {
-                    state.mode.set(mode);
+                    state.enter_mode(mode);
                 }
                 handler(mode);
             });
@@ -1097,7 +1106,7 @@ impl BrowserView {
         let searching = self.state.listing_search_showing();
         // Read before the rebuild tears down the focused field or results.
         let filter_focus = self.state.filter_focus();
-        self.state.mode.set(mode);
+        self.state.enter_mode(mode);
         let filter = match previous {
             BrowserMode::Columns => self.state.capture_active_column_filter(),
             BrowserMode::Icons | BrowserMode::List => {
@@ -1474,15 +1483,7 @@ impl BrowserView {
     }
 
     pub fn location_has_focus(&self) -> bool {
-        let entry = self.state.location_entry.upcast_ref::<gtk::Widget>();
-        self.state.location_entry.has_focus()
-            || self
-                .state
-                .overlay
-                .root()
-                .and_then(|root| root.focus())
-                .as_ref()
-                .is_some_and(|focused| focused == entry || focused.is_ancestor(entry))
+        self.state.location_entry_has_focus()
     }
 
     pub(super) fn location_edit_is_active(&self) -> bool {
@@ -2016,8 +2017,21 @@ impl BrowserView {
         self.state.refresh_browser();
     }
 
-    pub fn set_auto_refresh_interval(&self, secs: u32) {
-        self.state.set_auto_refresh_interval(secs);
+    pub fn set_watch_network_folders(&self, enabled: bool) {
+        let browser = &self.state.browser;
+        browser.set_freshness(FreshnessInput {
+            watch_network_folders: enabled,
+            ..browser.freshness_input()
+        });
+    }
+
+    pub fn set_presence(&self, presence: Presence, power_saver: bool) {
+        let browser = &self.state.browser;
+        browser.set_freshness(FreshnessInput {
+            presence,
+            power_saver,
+            ..browser.freshness_input()
+        });
     }
 
     pub fn show_location_properties(&self, location: &Location) {
@@ -2667,30 +2681,20 @@ impl ViewState {
         }
     }
 
-    pub(super) fn set_auto_refresh_interval(self: &Rc<Self>, secs: u32) {
-        if let Some(source) = self.auto_refresh.take() {
-            source.remove();
-        }
-        if secs == 0 {
-            return;
-        }
-        let weak_state = Rc::downgrade(self);
-        let source = glib::timeout_add_local(Duration::from_secs(u64::from(secs)), move || {
-            let Some(state) = weak_state.upgrade() else {
-                return glib::ControlFlow::Break;
-            };
-            // A submitted rename also waits for the listing to show its result.
-            if state.inline_edit_is_open() || state.rename_operation_pending() {
-                return glib::ControlFlow::Continue;
-            }
-            state.refresh_browser();
-            glib::ControlFlow::Continue
+    fn enter_mode(self: &Rc<Self>, mode: BrowserMode) {
+        self.mode.set(mode);
+        let scope = match mode {
+            BrowserMode::Columns => VisibleDepths::All,
+            BrowserMode::Icons | BrowserMode::List => VisibleDepths::Active,
+        };
+        self.browser.set_freshness(FreshnessInput {
+            scope,
+            ..self.browser.freshness_input()
         });
-        self.auto_refresh.replace(Some(source));
     }
 
     /// A reload rebinds the rows an inline edit leases, which would discard the typed
-    /// name, so window commands and auto-refresh wait while this holds.
+    /// name, so window commands and background re-lists wait while this holds.
     pub(super) fn inline_edit_is_open(&self) -> bool {
         self.pending_new_entry.borrow().is_some()
             || self.active_rename.borrow().is_some()

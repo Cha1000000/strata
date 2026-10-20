@@ -19,8 +19,11 @@ use std::{
 
 use gtk::{gio, glib, prelude::*};
 
-use super::volume::{MountTable, TrashMountKey as MountKey, is_fuse_fs_type};
-use crate::services::TrashedOriginal;
+use super::{
+    local_operations::Deadline,
+    volume::{MountTable, TrashMountKey as MountKey, is_fuse_fs_type},
+};
+use crate::services::ItemIdentity;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum TrashFailure {
@@ -81,14 +84,15 @@ pub(crate) trait TrashEnvironment {
         &self,
         file: &gio::File,
         cancellable: &gio::Cancellable,
-    ) -> Pin<Box<dyn Future<Output = Result<Option<TrashedOriginal>, glib::Error>>>>;
+        deadline: &Deadline,
+    ) -> Pin<Box<dyn Future<Output = Result<Option<ItemIdentity>, glib::Error>>>>;
 }
 
 pub(crate) struct SystemTrash;
 
 impl TrashEnvironment for SystemTrash {
     fn mounts(&self) -> MountTable {
-        MountTable::current()
+        super::volume::mount_watch::latest()
     }
 
     fn home(&self) -> PathBuf {
@@ -99,12 +103,12 @@ impl TrashEnvironment for SystemTrash {
         &self,
         file: &gio::File,
         cancellable: &gio::Cancellable,
-    ) -> Pin<Box<dyn Future<Output = Result<Option<TrashedOriginal>, glib::Error>>>> {
-        let file = file.clone();
-        let cancellable = cancellable.clone();
-        Box::pin(
-            async move { super::local_operations::trash::trash_entry(&file, &cancellable).await },
-        )
+        deadline: &Deadline,
+    ) -> Pin<Box<dyn Future<Output = Result<Option<ItemIdentity>, glib::Error>>>> {
+        let (file, cancellable, deadline) = (file.clone(), cancellable.clone(), deadline.clone());
+        Box::pin(async move {
+            super::local_operations::trash::trash_entry(&file, &cancellable, &deadline).await
+        })
     }
 }
 
@@ -113,7 +117,7 @@ impl TrashEnvironment for SystemTrash {
 pub(crate) async fn trash_with_cleanup(
     file: &gio::File,
     cancellable: &gio::Cancellable,
-) -> Result<Option<TrashedOriginal>, TrashError> {
+) -> Result<Option<ItemIdentity>, TrashError> {
     trash_with_cleanup_in(&SystemTrash, file, cancellable).await
 }
 
@@ -121,9 +125,9 @@ pub(crate) async fn trash_with_cleanup_in(
     environment: &dyn TrashEnvironment,
     file: &gio::File,
     cancellable: &gio::Cancellable,
-) -> Result<Option<TrashedOriginal>, TrashError> {
+) -> Result<Option<ItemIdentity>, TrashError> {
     let mut leftovers = LeftoverWatch::observe(environment, native_path(file)).await;
-    let result = attempt(environment, file, cancellable).await;
+    let result = attempt(environment, file, cancellable, &Deadline::default()).await;
     if let Some(path) = native_path(file) {
         leftovers.note(&path, result.as_ref().err().map(|error| error.failure));
     }
@@ -136,8 +140,9 @@ pub(crate) async fn attempt(
     environment: &dyn TrashEnvironment,
     file: &gio::File,
     cancellable: &gio::Cancellable,
-) -> Result<Option<TrashedOriginal>, TrashError> {
-    let error = match environment.trash(file, cancellable).await {
+    deadline: &Deadline,
+) -> Result<Option<ItemIdentity>, TrashError> {
+    let error = match environment.trash(file, cancellable, deadline).await {
         Ok(identity) => return Ok(identity),
         Err(error) => error,
     };
@@ -153,7 +158,7 @@ pub(crate) fn verified_with_cleanup(
     path: &Path,
     attempt: impl FnOnce() -> Result<(), glib::Error>,
 ) -> Result<(), TrashError> {
-    let mounts = MountTable::current();
+    let mounts = super::volume::mount_watch::latest();
     let home = glib::home_dir();
     let mount = path
         .parent()
@@ -370,7 +375,7 @@ pub(crate) fn unsupported_reason_for(path: &Path) -> Option<(MountKey, Unsupport
     if unsupported_mounts().is_empty() {
         return None;
     }
-    unsupported_reason_in(&MountTable::current(), path)
+    unsupported_reason_in(&super::volume::mount_watch::latest(), path)
 }
 
 /// Blocking: resolves symlinks first, for worker threads already reading `directory`.
@@ -379,7 +384,8 @@ pub(crate) fn unsupported_reason_for_directory(directory: &Path) -> Option<Unsup
         return None;
     }
     let directory = std::fs::canonicalize(directory).ok()?;
-    unsupported_reason_in(&MountTable::current(), &directory).map(|(_, reason)| reason)
+    unsupported_reason_in(&super::volume::mount_watch::latest(), &directory)
+        .map(|(_, reason)| reason)
 }
 
 pub(super) fn unsupported_reason_in(

@@ -302,7 +302,7 @@ fn aborted_folder_clicks_release_the_title_hold() {
                     "unmap" => tabs.select(1),
                     _ => unreachable!(),
                 }
-                assert_eq!(title.text(), "parent", "{outcome}: resolved click");
+                wait_until(|| title.text() == "parent");
                 assert_eq!(
                     view.browser().active_location(),
                     Some(Location::local(root.path().join("parent"))),
@@ -645,6 +645,70 @@ fn hidden_tabs_and_new_tabs_apply_live_browsing_preferences() {
     );
 }
 
+fn freshness(view: &BrowserView) -> (Presence, bool) {
+    let input = view.browser().freshness_input();
+    (input.presence, input.power_saver)
+}
+
+#[test]
+fn only_the_active_tab_checks() {
+    gtk_test(
+        "ui::window::composition::tabs::tests::only_the_active_tab_checks",
+        || {
+            let (window, tabs) = open();
+            let first_id = tabs.active.get();
+            let first = tabs.active_browser();
+            tabs.new_tab();
+            let second = tabs.active_browser();
+            tabs.set_presence(Presence::Focused, false);
+            let with_the_second_active = (freshness(&first).0, freshness(&second).0);
+            tabs.select(first_id);
+            let with_the_first_active = (freshness(&first).0, freshness(&second).0);
+            tabs.new_tab();
+            let third = tabs.active_browser();
+
+            assert_eq!(
+                with_the_second_active,
+                (Presence::Hidden, Presence::Focused)
+            );
+            assert_eq!(with_the_first_active, (Presence::Focused, Presence::Hidden));
+            assert_eq!(
+                [&first, &second, &third].map(|view| freshness(view).0),
+                [Presence::Hidden, Presence::Hidden, Presence::Focused]
+            );
+            window.destroy();
+        },
+    );
+}
+
+#[test]
+fn presence_reaches_the_browser_of_the_active_tab() {
+    gtk_test(
+        "ui::window::composition::tabs::tests::presence_reaches_the_browser_of_the_active_tab",
+        || {
+            let (window, tabs) = open();
+            let first = tabs.active_browser();
+            tabs.new_tab();
+            let second = tabs.active_browser();
+            let shown = freshness(&second).0;
+            window.set_visible(false);
+            let hidden = (freshness(&first).0, freshness(&second).0);
+            window.present();
+            let shown_again = freshness(&second).0;
+            tabs.set_presence(Presence::Visible, true);
+
+            assert_ne!(shown, Presence::Hidden);
+            assert_eq!(hidden, (Presence::Hidden, Presence::Hidden));
+            assert_ne!(shown_again, Presence::Hidden);
+            assert_eq!(
+                (freshness(&first), freshness(&second)),
+                ((Presence::Hidden, true), (Presence::Visible, true))
+            );
+            window.destroy();
+        },
+    );
+}
+
 #[test]
 fn operations_in_inactive_tabs_prevent_tab_and_window_closure() {
     gtk_test(
@@ -766,6 +830,7 @@ fn saved_session_restores_tabs_in_order_with_active_tab() {
                 ],
                 3,
             );
+            crate::storage::writer::settle();
             let (window, tabs) = open();
             assert!(tabs.try_restore());
             let expected = vec![
@@ -777,6 +842,186 @@ fn saved_session_restores_tabs_in_order_with_active_tab() {
             assert_eq!(tabs.tabs.borrow().len(), 3);
             assert_eq!(tabs.active.get(), tabs.tabs.borrow()[2].id);
             window.destroy();
+        },
+    );
+}
+
+#[test]
+fn restored_tabs_open_once_a_worker_checks_their_folders() {
+    gtk_test(
+        "ui::window::composition::tabs::tests::restored_tabs_open_once_a_worker_checks_their_folders",
+        || {
+            use crate::adapters::{FsOp, FsQuirks, Quirks};
+
+            let root = tempfile::tempdir().expect("tab fixture");
+            let parked = root.path().join("parked");
+            let kept = root.path().join("kept");
+            let unmounted = root.path().join("nas");
+            for directory in [&parked, &kept, &unmounted] {
+                std::fs::create_dir_all(directory).expect("session directory");
+            }
+            let offline = unmounted.join("Documents");
+            std::fs::write(root.path().join("file"), b"content").expect("session file");
+            let gate = crate::test_support::Gate::default();
+            let _scope = FsQuirks::install(
+                root.path(),
+                Quirks {
+                    before: vec![(FsOp::FolderStamp, "parked", 0, gate.racer())],
+                    ..Quirks::default()
+                },
+            );
+            crate::ui::tabs_session::save(
+                &[
+                    Location::local(&parked),
+                    Location::local(root.path().join("gone")),
+                    Location::local(&kept),
+                    Location::local(root.path().join("file")),
+                    Location::local(&offline),
+                ],
+                2,
+            );
+            crate::storage::writer::settle();
+            let (window, tabs) = open();
+
+            assert!(tabs.try_restore());
+            assert_eq!(
+                tabs.tabs.borrow().len(),
+                5,
+                "every saved tab exists at once"
+            );
+            wait_until(|| gate.reached());
+            wait_until(|| {
+                tab_locations(&tabs)
+                    == vec![
+                        None,
+                        Some(Location::local(&kept)),
+                        Some(Location::local(&offline)),
+                    ]
+            });
+            assert_eq!(tabs.active.get(), tabs.tabs.borrow()[1].id);
+            crate::storage::writer::settle();
+            assert_eq!(
+                saved_session().map(|session| session.tabs),
+                Some(vec![
+                    Location::local(&parked),
+                    Location::local(&kept),
+                    Location::local(&offline)
+                ]),
+                "a tab still being checked, or missing from an empty mount point, stays"
+            );
+
+            gate.release();
+            wait_until(|| {
+                tab_locations(&tabs)
+                    == vec![
+                        Some(Location::local(&parked)),
+                        Some(Location::local(&kept)),
+                        Some(Location::local(&offline)),
+                    ]
+            });
+            window.destroy();
+        },
+    );
+}
+
+#[test]
+fn a_new_tab_forgets_its_default_folder_only_once_it_is_proven_gone() {
+    gtk_test(
+        "ui::window::composition::tabs::tests::a_new_tab_forgets_its_default_folder_only_once_it_is_proven_gone",
+        || {
+            use crate::adapters::{FsOp, FsQuirks, Quirks};
+            use rustix::io::Errno;
+
+            let root = tempfile::tempdir().expect("tab fixture");
+            let parked = root.path().join("parked");
+            let stalled = root.path().join("stalled");
+            let flaky = root.path().join("flaky");
+            let unmounted = root.path().join("nas");
+            for directory in [&parked, &stalled, &flaky, &unmounted] {
+                std::fs::create_dir_all(directory).expect("default folder");
+            }
+            let (gate, stall) = (
+                crate::test_support::Gate::default(),
+                crate::test_support::Gate::default(),
+            );
+            let _scope = FsQuirks::install(
+                root.path(),
+                Quirks {
+                    before: vec![
+                        (FsOp::FolderStamp, "parked", 0, gate.racer()),
+                        (FsOp::FolderStamp, "stalled", 0, stall.racer()),
+                    ],
+                    fail: vec![(FsOp::FolderStamp, "flaky", 0, Errno::IO)],
+                    ..Quirks::default()
+                },
+            );
+            let home = crate::ui::window::home_directory();
+            let app = application();
+            let new_tab = |default: &std::path::Path| {
+                let (window, tabs) = open_in(&app);
+                tabs.preferences
+                    .set_default_directory(Some(default.to_path_buf()));
+                tabs.new_tab();
+                (window, tabs.active_browser().browser())
+            };
+
+            let (parked_window, browser) = new_tab(&parked);
+            wait_until(|| gate.reached());
+            assert_eq!(browser.active_location(), None, "opens once checked");
+            gate.release();
+            wait_until(|| browser.active_location() == Some(Location::local(&parked)));
+            assert_eq!(
+                PreferenceManager::shared().default_directory(),
+                Some(parked.clone())
+            );
+
+            let (stalled_window, browser) = new_tab(&stalled);
+            wait_until(|| stall.reached());
+            wait_until(|| {
+                browser
+                    .column_snapshot(0)
+                    .is_some_and(|column| column.error.is_some())
+            });
+            assert_eq!(browser.active_location(), Some(Location::local(&stalled)));
+            assert_eq!(
+                PreferenceManager::shared().default_directory(),
+                Some(stalled.clone()),
+                "a check that does not answer opens the folder to show why"
+            );
+            stall.release();
+
+            let mut windows = vec![parked_window, stalled_window];
+            for (default, why) in [
+                (
+                    flaky.clone(),
+                    "an I/O error is not proof that the folder is gone",
+                ),
+                (
+                    unmounted.join("Documents"),
+                    "a folder missing from an empty mount point is kept",
+                ),
+                (
+                    root.path().join("drive/Photos"),
+                    "a folder missing with its drive is kept",
+                ),
+            ] {
+                let (window, browser) = new_tab(&default);
+                wait_until(|| browser.active_location() == Some(Location::local(&default)));
+                assert_eq!(
+                    PreferenceManager::shared().default_directory(),
+                    Some(default.clone()),
+                    "{why}"
+                );
+                windows.push(window);
+            }
+
+            let (gone_window, browser) = new_tab(&root.path().join("gone"));
+            wait_until(|| browser.active_location() == Some(Location::local(&home)));
+            assert_eq!(PreferenceManager::shared().default_directory(), None);
+            windows.push(gone_window);
+            for window in windows {
+                window.destroy();
+            }
         },
     );
 }
@@ -824,6 +1069,7 @@ fn disabled_restore_ignores_the_saved_session() {
             let (window, tabs) = open();
             tabs.preferences.set_restore_tabs(false);
             crate::ui::tabs_session::save(&[Location::local(root.path().join("kept"))], 0);
+            crate::storage::writer::settle();
             assert!(!tabs.try_restore());
             assert_eq!(tabs.tabs.borrow().len(), 1);
             assert_eq!(tab_locations(&tabs), vec![None]);
@@ -844,8 +1090,10 @@ fn explicit_target_windows_do_not_clobber_the_saved_session() {
                 std::fs::create_dir_all(directory).expect("session directory");
             }
             crate::ui::tabs_session::save(&[Location::local(&kept)], 0);
+            crate::storage::writer::settle();
             let (window, tabs) = open_persisting(&application(), false);
             load(&tabs.active_browser(), Location::local(&other));
+            crate::storage::writer::settle();
             assert_eq!(
                 saved_session().map(|session| session.tabs),
                 Some(vec![Location::local(&kept)])

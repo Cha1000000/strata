@@ -5,26 +5,51 @@
 
 use std::{
     ffi::{OsStr, OsString},
+    mem::MaybeUninit,
+    ops::ControlFlow,
     os::{
         fd::{AsFd, AsRawFd, BorrowedFd, IntoRawFd, OwnedFd},
         unix::ffi::OsStringExt,
     },
+    path::Path,
+    time::Duration,
 };
 
-use gtk::{gio, glib};
+use gtk::gio;
 
 use rustix::{
     fs::{
-        AtFlags, FileType, FsWord, Mode, OFlags, RenameFlags, ResolveFlags, SeekFrom, StatxFlags,
+        Access, AtFlags, FileType, FsWord, Mode, OFlags, RenameFlags, ResolveFlags, SeekFrom,
+        StatxFlags,
     },
     io::Errno,
 };
 
 use super::native_fs::{LocalFileIdentity, retry_local_open};
-use crate::adapters::volume::MountKey;
+use crate::{
+    adapters::volume::MountKey,
+    services::{Attributes, IdentityTraits},
+};
 
 /// `STATX_MNT_ID_UNIQUE` (Linux 6.8), which rustix does not name yet.
 const STATX_MNT_ID_UNIQUE: u32 = 0x4000;
+
+const LISTING_CHUNK_BYTES: usize = 32 * 1024;
+
+pub(in crate::adapters) type Listed = Vec<(OsString, FileType)>;
+
+#[derive(Clone, Copy, Debug)]
+pub(in crate::adapters) struct FolderStamp {
+    pub kind: FileType,
+    pub mode: u32,
+    pub size: u64,
+    pub modified: (i64, u32),
+    pub changed: (i64, u32),
+    pub device: u64,
+    pub inode: u64,
+    pub birth: Option<(i64, u32)>,
+    pub mount_id: Option<u64>,
+}
 
 #[derive(Clone, Copy, Debug)]
 pub(super) struct FsStat {
@@ -68,6 +93,25 @@ pub(super) struct EntryStat {
 impl EntryStat {
     pub(super) fn is_directory(&self) -> bool {
         self.kind == FileType::Directory
+    }
+
+    pub(super) fn attributes(&self) -> Attributes {
+        Attributes {
+            size: self.size,
+            mtime: self.mtime,
+            ctime: Some(self.ctime),
+        }
+    }
+
+    pub(super) fn file_attributes(&self) -> Option<Attributes> {
+        matches!(self.kind, FileType::RegularFile | FileType::Symlink).then(|| self.attributes())
+    }
+
+    pub(super) fn kept_attributes(&self) -> Option<Attributes> {
+        self.file_attributes().map(|attributes| Attributes {
+            ctime: None,
+            ..attributes
+        })
     }
 }
 
@@ -148,6 +192,13 @@ pub(super) trait FsOps: super::environment::FsEnvironment {
     /// without following a symlink anywhere on the way.
     fn open_dir(&self, at: Entry<'_>) -> Result<OwnedFd, Errno>;
     fn list(&self, dir: BorrowedFd<'_>) -> Result<Vec<(OsString, FileType)>, Errno>;
+    fn list_chunks(
+        &self,
+        dir: BorrowedFd<'_>,
+        each: &mut dyn FnMut(Listed) -> ControlFlow<()>,
+    ) -> Result<(), Errno>;
+    fn folder_stamp(&self, path: &Path, force_sync: bool) -> Result<FolderStamp, Errno>;
+    fn access(&self, path: &Path, access: Access) -> Result<(), Errno>;
     fn create_node(&self, at: Entry<'_>, kind: FileType, mode: Mode) -> Result<(), Errno>;
     /// Opens the named pipe at `at` for its metadata, which never waits for
     /// a writer.
@@ -178,15 +229,68 @@ pub(super) fn fs() -> &'static dyn FsOps {
     }
 }
 
+pub(in crate::adapters) fn folder_stamp(
+    path: &Path,
+    force_sync: bool,
+) -> Result<FolderStamp, Errno> {
+    fs().folder_stamp(path, force_sync)
+}
+
+pub(in crate::adapters) struct StampMount {
+    pub id: u64,
+    pub identity: IdentityTraits,
+    pub outside_writers: bool,
+    pub coarse_window: Option<Duration>,
+    pub daemon_cache: Option<Duration>,
+}
+
+pub(in crate::adapters) fn stamp_mount(path: &Path, stamp: &FolderStamp) -> Option<StampMount> {
+    let (id, mount_type) = fs().folder_mount(path, stamp.mount_id)?;
+    Some(StampMount {
+        id,
+        identity: mount_type.identity(),
+        outside_writers: mount_type.outside_writers(),
+        coarse_window: mount_type.coarse_times(None).map(|coarse| coarse.window),
+        daemon_cache: mount_type.daemon_cache(),
+    })
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Watched {
+    Folder,
+    File,
+}
+
+pub(in crate::adapters) fn watch(
+    file: &gio::File,
+    watched: Watched,
+    flags: gio::FileMonitorFlags,
+) -> Result<gio::FileMonitor, gtk::glib::Error> {
+    fs().watch(file, watched, flags)
+}
+
+pub(in crate::adapters) fn unwatch(file: &gio::File, monitor: gio::FileMonitor) {
+    fs().unwatch(file, monitor);
+}
+
+pub(in crate::adapters) fn list_folder(
+    path: &Path,
+    each: &mut dyn FnMut(Listed) -> ControlFlow<()>,
+) -> Result<(), Errno> {
+    let folder = fs().open_path(
+        path.as_os_str(),
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+        Mode::empty(),
+    )?;
+    fs().list_chunks(folder.as_fd(), each)
+}
+
 pub(super) fn assert_off_main_thread() {
-    debug_assert!(
-        !glib::MainContext::default().is_owner(),
-        "filesystem calls must not run on the main thread"
-    );
+    crate::util::ui_thread::assert_off();
 }
 
 pub(super) fn drop_off_main_thread<T: Send + 'static>(held: T) {
-    if glib::MainContext::default().is_owner() {
+    if crate::util::ui_thread::is_current() {
         drop(gio::spawn_blocking(move || drop(held)));
     }
 }
@@ -230,6 +334,7 @@ fn entry_stat(stat: &rustix::fs::Statx) -> EntryStat {
             inode: stat.stx_ino,
             kind,
             birth,
+            handle: None,
         },
         kind,
         mode: u32::from(stat.stx_mode) & 0o7777,
@@ -287,9 +392,20 @@ fn statx_at(dir: BorrowedFd<'_>, name: &OsStr, flags: AtFlags) -> Result<EntrySt
         | StatxFlags::CTIME
         | StatxFlags::BTIME
         | StatxFlags::UID
-        | StatxFlags::GID;
+        | StatxFlags::GID
+        | StatxFlags::MNT_ID;
     match rustix::fs::statx(dir, name, flags | AtFlags::SYMLINK_NOFOLLOW, mask) {
-        Ok(stat) => Ok(entry_stat(&stat)),
+        Ok(stat) => {
+            let mut entry = entry_stat(&stat);
+            let mount_id = StatxFlags::from_bits_retain(stat.stx_mask)
+                .contains(StatxFlags::MNT_ID)
+                .then_some(stat.stx_mnt_id);
+            let (mounts, birth) = fs().file_handle_inputs(Entry { dir, name }, &entry);
+            if mounts.wants_file_handle(mount_id, birth) {
+                entry.identity.handle = fs().file_handle(Entry { dir, name }).ok();
+            }
+            Ok(entry)
+        }
         Err(Errno::NOSYS) => {
             let at_flags = (flags & AtFlags::EMPTY_PATH) | AtFlags::SYMLINK_NOFOLLOW;
             rustix::fs::statat(dir, name, at_flags).map(|stat| legacy_stat(&stat))
@@ -332,6 +448,7 @@ impl FsOps for System {
         mode: Mode,
         resolve: Option<ResolveFlags>,
     ) -> Result<OwnedFd, Errno> {
+        assert_off_main_thread();
         match resolve {
             Some(resolve) => rustix::fs::openat2(at.dir, at.name, flags, mode, resolve),
             None => rustix::fs::openat(at.dir, at.name, flags, mode),
@@ -339,6 +456,7 @@ impl FsOps for System {
     }
 
     fn open_path(&self, path: &OsStr, flags: OFlags, mode: Mode) -> Result<OwnedFd, Errno> {
+        assert_off_main_thread();
         rustix::fs::open(path, flags, mode)
     }
 
@@ -347,6 +465,7 @@ impl FsOps for System {
     }
 
     fn stat_vfs(&self, fd: BorrowedFd<'_>) -> Result<rustix::fs::StatVfs, Errno> {
+        assert_off_main_thread();
         rustix::fs::fstatvfs(fd)
     }
     fn rename(&self, from: Entry<'_>, to: Entry<'_>, flags: RenameFlags) -> Result<(), Errno> {
@@ -695,6 +814,82 @@ impl FsOps for System {
         Ok(entries)
     }
 
+    fn list_chunks(
+        &self,
+        dir: BorrowedFd<'_>,
+        each: &mut dyn FnMut(Listed) -> ControlFlow<()>,
+    ) -> Result<(), Errno> {
+        assert_off_main_thread();
+        let mut buffer = vec![MaybeUninit::uninit(); LISTING_CHUNK_BYTES];
+        let mut entries = rustix::fs::RawDir::new(dir, &mut buffer);
+        let mut chunk = Vec::new();
+        while let Some(entry) = entries.next() {
+            let entry = entry?;
+            let name = entry.file_name();
+            if name != c"." && name != c".." {
+                let kind = match entry.file_type() {
+                    FileType::Unknown => {
+                        match rustix::fs::statat(dir, name, AtFlags::SYMLINK_NOFOLLOW) {
+                            Ok(stat) => Some(FileType::from_raw_mode(stat.st_mode)),
+                            Err(Errno::NOENT) => None,
+                            Err(error) => return Err(error),
+                        }
+                    }
+                    kind => Some(kind),
+                };
+                if let Some(kind) = kind {
+                    chunk.push((OsString::from_vec(name.to_bytes().to_vec()), kind));
+                }
+            }
+            if entries.is_buffer_empty()
+                && !chunk.is_empty()
+                && each(std::mem::take(&mut chunk)).is_break()
+            {
+                return Ok(());
+            }
+        }
+        Ok(())
+    }
+
+    fn folder_stamp(&self, path: &Path, force_sync: bool) -> Result<FolderStamp, Errno> {
+        assert_off_main_thread();
+        let sync = if force_sync {
+            AtFlags::STATX_FORCE_SYNC
+        } else {
+            AtFlags::empty()
+        };
+        let mask = StatxFlags::TYPE
+            | StatxFlags::MODE
+            | StatxFlags::SIZE
+            | StatxFlags::INO
+            | StatxFlags::MTIME
+            | StatxFlags::CTIME
+            | StatxFlags::BTIME
+            | StatxFlags::MNT_ID;
+        let stat = rustix::fs::statx(rustix::fs::CWD, path, sync, mask)?;
+        let reported = StatxFlags::from_bits_retain(stat.stx_mask);
+        Ok(FolderStamp {
+            kind: FileType::from_raw_mode(u32::from(stat.stx_mode)),
+            mode: u32::from(stat.stx_mode),
+            size: stat.stx_size,
+            modified: (stat.stx_mtime.tv_sec, stat.stx_mtime.tv_nsec),
+            changed: (stat.stx_ctime.tv_sec, stat.stx_ctime.tv_nsec),
+            device: rustix::fs::makedev(stat.stx_dev_major, stat.stx_dev_minor),
+            inode: stat.stx_ino,
+            birth: reported
+                .contains(StatxFlags::BTIME)
+                .then_some((stat.stx_btime.tv_sec, stat.stx_btime.tv_nsec)),
+            mount_id: reported
+                .contains(StatxFlags::MNT_ID)
+                .then_some(stat.stx_mnt_id),
+        })
+    }
+
+    fn access(&self, path: &Path, access: Access) -> Result<(), Errno> {
+        assert_off_main_thread();
+        rustix::fs::access(path, access)
+    }
+
     fn create_node(&self, at: Entry<'_>, kind: FileType, mode: Mode) -> Result<(), Errno> {
         assert_off_main_thread();
         rustix::fs::mknodat(at.dir, at.name, kind, mode, 0)
@@ -757,3 +952,6 @@ impl FsOps for System {
         )
     }
 }
+
+#[cfg(test)]
+mod tests;

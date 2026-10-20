@@ -2,8 +2,8 @@
 
 use std::{
     cell::{Cell, RefCell},
-    collections::{HashMap, HashSet},
-    path::{Path, PathBuf},
+    collections::HashMap,
+    path::PathBuf,
     rc::{Rc, Weak},
 };
 
@@ -42,8 +42,7 @@ pub(super) struct ActionMenuSection {
     dispatch: super::commands::MenuDispatch,
     _commands: super::commands::CommandMenus,
     navigation: Rc<super::keyboard::NativeMenuNavigation>,
-    monitor: gio::VolumeMonitor,
-    monitor_handlers: RefCell<Vec<gtk::glib::SignalHandlerId>>,
+    removable_watch: RefCell<Option<crate::ui::RemovableWatch>>,
     refresh_pending: Cell<bool>,
     selection: RefCell<Option<SelectionMenuContext>>,
     pressed_inside: Rc<Cell<bool>>,
@@ -56,22 +55,8 @@ struct SelectionMenuContext {
     parent: Option<PathBuf>,
 }
 
-fn refresh_on_change<T>(
-    menu: &Rc<ActionMenuSection>,
-) -> impl Fn(&gio::VolumeMonitor, &T) + 'static {
-    let menu = Rc::downgrade(menu);
-    move |_, _| {
-        if let Some(menu) = menu.upgrade() {
-            menu.schedule_removable_refresh();
-        }
-    }
-}
-
 impl Drop for ActionMenuSection {
     fn drop(&mut self) {
-        for handler in self.monitor_handlers.get_mut().drain(..) {
-            self.monitor.disconnect(handler);
-        }
         release_popover(&self.popover);
     }
 }
@@ -263,8 +248,7 @@ impl ActionMenuSection {
             dispatch,
             _commands: commands,
             navigation,
-            monitor: gio::VolumeMonitor::get(),
-            monitor_handlers: RefCell::new(Vec::new()),
+            removable_watch: RefCell::new(None),
             refresh_pending: Cell::new(false),
             selection: RefCell::new(None),
             pressed_inside,
@@ -275,19 +259,14 @@ impl ActionMenuSection {
                 menu.sync_send_to_row();
             }
         });
-        let monitor = &menu.monitor;
         if menu.transfer_sections.is_some() {
-            menu.monitor_handlers.replace(vec![
-                monitor.connect_mount_added(refresh_on_change(&menu)),
-                monitor.connect_mount_removed(refresh_on_change(&menu)),
-                monitor.connect_mount_changed(refresh_on_change(&menu)),
-                monitor.connect_volume_added(refresh_on_change(&menu)),
-                monitor.connect_volume_removed(refresh_on_change(&menu)),
-                monitor.connect_volume_changed(refresh_on_change(&menu)),
-                monitor.connect_drive_connected(refresh_on_change(&menu)),
-                monitor.connect_drive_disconnected(refresh_on_change(&menu)),
-                monitor.connect_drive_changed(refresh_on_change(&menu)),
-            ]);
+            let weak = Rc::downgrade(&menu);
+            menu.removable_watch
+                .replace(Some(crate::ui::watch_removable_destinations(move || {
+                    if let Some(menu) = weak.upgrade() {
+                        menu.schedule_removable_refresh();
+                    }
+                })));
         }
         menu
     }
@@ -398,13 +377,12 @@ impl ActionMenuSection {
             choose_folder,
         };
         let destinations = crate::ui::removable_destinations();
-        let preferences = crate::ui::preferences::PreferenceManager::shared();
         let recent_destinations = destinations
             .iter()
             .map(|destination| {
                 (
                     destination.id.clone(),
-                    preferences.send_to_recent_destinations(&destination.id),
+                    crate::ui::send_to_recent_folders(destination),
                 )
             })
             .collect();
@@ -658,9 +636,9 @@ fn append_send_to_devices(
         root.append(Some("Drive root"), Some(&format!("custom.{name}")));
         let recent_paths = recent_destinations
             .get(&destination.id)
-            .map(|paths| valid_recent_destinations(&destination.root, paths))
-            .unwrap_or_default();
-        for (recent_index, relative) in recent_paths.into_iter().enumerate() {
+            .into_iter()
+            .flatten();
+        for (recent_index, relative) in recent_paths.enumerate() {
             let recent_name = format!("send-to-recent-{index}-{recent_index}");
             let id = destination.id.clone();
             let selected = sources.to_vec();
@@ -711,37 +689,6 @@ fn append_send_to_devices(
         item.set_attribute_value("x-strata-description", Some(&destination.name.to_variant()));
         devices.append_item(&item);
     }
-}
-
-fn valid_recent_destinations(root: &Path, persisted: &[PathBuf]) -> Vec<PathBuf> {
-    let Some(canonical_root) = crate::ui::browser::destination::canonical_existing_directory(root)
-    else {
-        return Vec::new();
-    };
-    let mut seen_relative = HashSet::new();
-    let mut seen_destinations = HashSet::new();
-    let mut valid = Vec::new();
-    for relative in persisted {
-        if !crate::ui::preferences::is_valid_send_to_relative_path(relative)
-            || !seen_relative.insert(relative)
-        {
-            continue;
-        }
-        let Some(destination) = crate::ui::browser::destination::canonical_directory_within(
-            &canonical_root,
-            &canonical_root.join(relative),
-        ) else {
-            continue;
-        };
-        if destination == canonical_root || !seen_destinations.insert(destination) {
-            continue;
-        }
-        valid.push(relative.clone());
-        if valid.len() == crate::ui::preferences::SEND_TO_RECENT_DESTINATIONS_LIMIT {
-            break;
-        }
-    }
-    valid
 }
 
 pub(super) fn refresh_presentation(

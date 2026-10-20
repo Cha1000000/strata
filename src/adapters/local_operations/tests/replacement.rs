@@ -1,13 +1,16 @@
 // SPDX-License-Identifier: MIT
 
-use std::os::unix::fs::MetadataExt;
+use std::{os::unix::fs::MetadataExt, sync::atomic::Ordering};
 
 use rustix::{fs::FsWord, io::Errno};
 
 use super::super::{Copying, StageContent, publish_staged_replacement};
-use super::fs_quirks::{Exchange, Op, Racer, Support, Trash};
+use super::fs_quirks::{Births, Exchange, Op, Racer, Support, Trash};
 use super::*;
-use crate::{adapters::volume::mount_capabilities, services::ReplacedOriginal};
+use crate::{
+    adapters::volume::{Family, mount_capabilities},
+    services::ReplacedOriginal,
+};
 
 const NFS_SUPER_MAGIC: FsWord = 0x6969;
 const FUSE_SUPER_MAGIC: FsWord = 0x6573_5546;
@@ -41,6 +44,12 @@ fn replace_reporting(
         &|original, _| replaced.borrow_mut().push(original),
     ));
     (result, replaced.into_inner())
+}
+
+fn originals_folder(folder: &Path) -> Result<Option<String>, io::Error> {
+    Ok(names(folder)?
+        .into_iter()
+        .find(|name| name.starts_with(".strata-originals-")))
 }
 
 fn write_item(path: &Path, directory: bool, contents: &[u8]) -> Result<(), io::Error> {
@@ -116,7 +125,7 @@ fn a_replacement_reports_what_it_left_out_only_once_it_is_published() -> Result<
         let fail = if published {
             Vec::new()
         } else {
-            vec![(Op::Rename, ".strata-replacement-*", 0, Errno::IO)]
+            vec![(Op::Rename, ".strata-copy-*", 0, Errno::IO)]
         };
         let _scope = FsQuirks::install(
             root.path(),
@@ -175,7 +184,7 @@ fn replacement_publication_reports_a_stage_it_cannot_remove() -> Result<(), Box<
     let _quirks = FsQuirks::install(
         root.path(),
         Quirks {
-            reused_inodes: Some(".strata-replacement-*"),
+            reused_inodes: Some(".strata-copy-*"),
             no_birth_time: true,
             ..Quirks::default()
         },
@@ -303,12 +312,7 @@ fn cancelling_as_the_replacement_is_staged_keeps_the_destination() -> Result<(),
             Quirks {
                 before: vec![
                     (Op::Close, "#*", 0, cancel(cancellable.clone())),
-                    (
-                        Op::Close,
-                        ".strata-replacement-*",
-                        0,
-                        cancel(cancellable.clone()),
-                    ),
+                    (Op::Close, ".strata-copy-*", 0, cancel(cancellable.clone())),
                 ],
                 ..Quirks::default()
             },
@@ -486,36 +490,191 @@ fn replace_accepts_a_symlink_in_the_sources_parent_path() -> Result<(), Box<dyn 
 #[test]
 fn replacement_stops_before_exchanging_a_substituted_target() -> Result<(), Box<dyn Error>> {
     let _serial = serial()?;
-    let root = tempfile::tempdir()?;
-    let source = root.path().join("source.txt");
-    let target = root.path().join("target.txt");
-    let original_target = root.path().join("original-target.txt");
-    fs::write(&source, b"replacement")?;
-    fs::write(&target, b"original target")?;
-    let _scope = FsQuirks::install(
-        root.path(),
-        Quirks {
-            before: vec![(Op::Clone, "*", 0, substitute(&target, &original_target))],
-            ..Quirks::default()
-        },
-    );
+    for (op, name) in [(Op::Clone, "*"), (Op::OpenAt, "target.txt")] {
+        let root = tempfile::tempdir()?;
+        let source = root.path().join("source.txt");
+        let target = root.path().join("target.txt");
+        let original_target = root.path().join("original-target.txt");
+        fs::write(&source, b"replacement")?;
+        fs::write(&target, b"original target")?;
+        let scope = FsQuirks::install(
+            root.path(),
+            Quirks {
+                before: vec![(op, name, 0, substitute(&target, &original_target))],
+                ..Quirks::default()
+            },
+        );
 
-    let result = glib::MainContext::default().block_on(replace_local(
-        gio::File::for_path(&source),
-        gio::File::for_path(&target),
-        false,
-        gio::Cancellable::new(),
-        None,
-    ));
+        let result = glib::MainContext::default().block_on(replace_local(
+            gio::File::for_path(&source),
+            gio::File::for_path(&target),
+            false,
+            gio::Cancellable::new(),
+            None,
+        ));
 
-    let error = result.expect_err("a substituted target must fail identity validation");
-    assert!(error.to_string().contains("changed"), "{error}");
-    assert_eq!(fs::read(target)?, b"new arrival");
-    assert_eq!(fs::read(original_target)?, b"original target");
-    assert_eq!(
-        names(root.path())?,
-        ["original-target.txt", "source.txt", "target.txt"]
-    );
+        let family = mount_capabilities(scope.key()).family;
+        if op == Op::OpenAt && matches!(family, Some(Family::Nfs | Family::Nfs4)) {
+            eprintln!("skipped on an NFS base, where Strata holds no item it trashes: {op:?}");
+            continue;
+        }
+        let error = result.expect_err("a substituted target must fail identity validation");
+        assert!(error.to_string().contains("changed"), "{op:?}: {error}");
+        assert_eq!(fs::read(target)?, b"new arrival", "{op:?}");
+        assert_eq!(fs::read(original_target)?, b"original target", "{op:?}");
+        assert_eq!(
+            names(root.path())?,
+            ["original-target.txt", "source.txt", "target.txt"],
+            "{op:?}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn a_target_is_replaced_only_while_its_mount_still_knows_it() -> Result<(), Box<dyn Error>> {
+    #[derive(Clone, Copy, Debug)]
+    enum Meanwhile {
+        Evicted,
+        StageEvicted,
+        ReplacedAlike,
+        ReplacedLonger,
+        EvictedOnceNumbersWent,
+        ReplacedAlikeOnceNumbersWent,
+        ReplacedAlikeAndEvictedOnceNumbersWent,
+    }
+    let _serial = serial()?;
+    let samba = || Quirks {
+        births: Births::MadeUp,
+        ..Quirks::cifs()
+    };
+    let path_keyed = || Quirks {
+        reused_inodes: Some("target"),
+        ..Quirks::sshfs()
+    };
+    let reusing_nfs3 = || Quirks {
+        reused_inodes: Some("target"),
+        ..Quirks::nfs3()
+    };
+    let rows: [(Preset, Meanwhile, bool, bool); 9] = [
+        (Quirks::vfat, Meanwhile::Evicted, true, true),
+        (Quirks::vfat, Meanwhile::StageEvicted, true, true),
+        (Quirks::sshfs, Meanwhile::Evicted, true, false),
+        (Quirks::sshfs, Meanwhile::ReplacedAlike, false, true),
+        (path_keyed, Meanwhile::ReplacedLonger, false, true),
+        (reusing_nfs3, Meanwhile::ReplacedAlike, false, true),
+        (samba, Meanwhile::EvictedOnceNumbersWent, true, true),
+        (samba, Meanwhile::ReplacedAlikeOnceNumbersWent, false, true),
+        (
+            samba,
+            Meanwhile::ReplacedAlikeAndEvictedOnceNumbersWent,
+            false,
+            true,
+        ),
+    ];
+    for (preset, meanwhile, replaced, possible) in rows {
+        let row = format!("{:?}, {meanwhile:?}", preset().mount_type);
+        let root = tempfile::tempdir()?;
+        let share = root.path().join("share");
+        fs::create_dir(&share)?;
+        let (source, target) = (share.join("source"), share.join("target"));
+        let arrival = root.path().join("arrival");
+        let theirs: &[u8] = match meanwhile {
+            Meanwhile::ReplacedLonger => b"OLD, longer",
+            _ => b"OLD",
+        };
+        fs::write(&source, b"new")?;
+        fs::write(&target, b"old")?;
+        fs::write(&arrival, theirs)?;
+        let hour_before = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)?
+            .as_secs()
+            - 3600;
+        for file in [&target, &arrival] {
+            set_times(file, hour_before, 0)?;
+        }
+        let told_by_change_time = matches!(
+            meanwhile,
+            Meanwhile::ReplacedAlikeOnceNumbersWent
+                | Meanwhile::ReplacedAlikeAndEvictedOnceNumbersWent
+        );
+        if told_by_change_time && !a_later_change_time(&arrival, &target, hour_before)? {
+            eprintln!(
+                "skipped on a base that reports the modification time as the change time: {row}"
+            );
+            continue;
+        }
+        let stage_evicted = matches!(meanwhile, Meanwhile::StageEvicted);
+        if stage_evicted && !base_takes_rename_flags(root.path())? {
+            eprintln!("skipped on a base that refuses or fakes rename flags: {row}");
+            continue;
+        }
+        let happened = Arc::new(AtomicBool::new(!possible));
+        let stage_closes: Vec<(Op, &str, usize, Racer)> = (0..4)
+            .map(|skip| {
+                let (at, done) = (share.clone(), happened.clone());
+                let racer: Racer = Box::new(move || {
+                    let stages = names(&at).expect("list the share");
+                    let evicted = stages
+                        .iter()
+                        .filter(|name| name.starts_with(".strata-copy-"))
+                        .any(|stage| super::fs_quirks::evict(&at.join(stage)));
+                    done.fetch_or(evicted, Ordering::AcqRel);
+                });
+                (Op::Close, ".strata-copy-*", skip, racer)
+            })
+            .collect();
+        let (at, done) = (share.clone(), happened.clone());
+        let racer: Racer = Box::new(move || {
+            let target = at.join("target");
+            let numbers_went = || super::fs_quirks::autodisable_serverino(&at);
+            let renamed_over = || fs::rename(&arrival, &target).is_ok();
+            let evicted = || super::fs_quirks::evict(&target);
+            let happened = match meanwhile {
+                Meanwhile::Evicted => evicted(),
+                Meanwhile::StageEvicted => return,
+                Meanwhile::ReplacedAlike | Meanwhile::ReplacedLonger => renamed_over(),
+                Meanwhile::EvictedOnceNumbersWent => numbers_went() && evicted(),
+                Meanwhile::ReplacedAlikeOnceNumbersWent => numbers_went() && renamed_over(),
+                Meanwhile::ReplacedAlikeAndEvictedOnceNumbersWent => {
+                    numbers_went() && renamed_over() && evicted()
+                }
+            };
+            done.store(happened, Ordering::Release);
+        });
+        let scope = FsQuirks::install(
+            &share,
+            Quirks {
+                trash: Trash::Unsupported,
+                before: vec![(Op::OpenSource, "source", 0, racer)],
+                after: if stage_evicted {
+                    stage_closes
+                } else {
+                    Vec::new()
+                },
+                ..preset()
+            },
+        );
+
+        let (result, _) = replace_reporting(&source, &target, false);
+
+        assert_eq!(happened.load(Ordering::Acquire), possible, "{row}");
+        if stage_evicted {
+            assert_eq!(scope.count(Op::Exchange), 1, "{row}");
+        }
+        if replaced {
+            assert!(result.is_ok(), "{row}: {result:?}");
+            assert_eq!(fs::read(&target)?, b"new", "{row}");
+            assert_eq!(names(&share)?, ["source", "target"], "{row}");
+        } else {
+            let Err(error) = result else {
+                panic!("{row}: replaced instead of refusing")
+            };
+            assert!(error.to_string().contains("changed"), "{row}: {error}");
+            assert_eq!(fs::read(&target)?, theirs, "{row}");
+            assert_eq!(names(&share)?, ["source", "target"], "{row}");
+        }
+    }
     Ok(())
 }
 
@@ -648,28 +807,45 @@ fn replacing_a_directory_cleans_up_a_symlink_in_the_old_contents_without_followi
 #[test]
 fn replace_without_trash_or_exchange_sets_the_original_aside() -> Result<(), Box<dyn Error>> {
     let _serial = serial()?;
-    let mounts: [(FsWord, Preset); 3] = [
-        (NFS_SUPER_MAGIC, Quirks::without_rename_flags),
-        (FUSE_SUPER_MAGIC, Quirks::sshfs),
-        (FUSE_SUPER_MAGIC, Quirks::vboxsf),
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum Item {
+        File,
+        Folder,
+        EmptyReadOnlyFolder,
+    }
+    let plain: &[Item] = &[Item::File, Item::Folder];
+    let mounts: [(FsWord, Preset, &[Item]); 3] = [
+        (
+            NFS_SUPER_MAGIC,
+            Quirks::without_rename_flags,
+            &[Item::File, Item::Folder, Item::EmptyReadOnlyFolder],
+        ),
+        (FUSE_SUPER_MAGIC, Quirks::sshfs, plain),
+        (FUSE_SUPER_MAGIC, Quirks::vboxsf, plain),
     ];
-    for (fs_type, quirks) in mounts {
-        for directory in [false, true] {
+    for (fs_type, quirks, items) in mounts {
+        for &item in items {
+            let directory = item != Item::File;
             let root = tempfile::tempdir()?;
             let source = root.path().join("source");
             let target = root.path().join("target");
             write_item(&source, directory, b"new")?;
-            write_item(&target, directory, b"old")?;
+            if let Item::EmptyReadOnlyFolder = item {
+                fs::create_dir(&target)?;
+                fs::set_permissions(&target, fs::Permissions::from_mode(0o555))?;
+            } else {
+                write_item(&target, directory, b"old")?;
+            }
             let quirks = FsQuirks::install(root.path(), without_trash(fs_type, quirks()));
 
             let (result, replaced) = replace_reporting(&source, &target, false);
 
-            assert!(result.is_ok(), "{result:?}");
+            assert!(result.is_ok(), "{item:?}: {result:?}");
             assert_eq!(replaced, [ReplacedOriginal::Deleted]);
             assert_eq!(read_item(&target, directory)?, b"new");
             assert_eq!(read_item(&source, directory)?, b"new");
             assert_eq!(names(root.path())?, ["source", "target"]);
-            assert!(quirks.used_name(".strata-replaced-*"));
+            assert!(quirks.used_name(".strata-originals-*"));
             assert_eq!(quirks.count(Op::Exchange), 0);
         }
     }
@@ -703,7 +879,7 @@ fn replace_falls_back_to_aside_when_trash_lies() -> Result<(), Box<dyn Error>> {
         assert_eq!(quirks.count(Op::Trash), 1);
         assert_eq!(replaced, [ReplacedOriginal::Deleted]);
         assert_eq!(fs::read(&target)?, b"new");
-        assert!(quirks.used_name(".strata-replaced-*"));
+        assert!(quirks.used_name(".strata-originals-*"));
         assert_eq!(
             names(root.path())?,
             if move_source {
@@ -746,7 +922,51 @@ fn replace_never_uses_exchange_on_fuse() -> Result<(), Box<dyn Error>> {
 
 #[test]
 fn rejected_exchange_falls_back_to_aside_and_is_remembered() -> Result<(), Box<dyn Error>> {
+    #[derive(Clone, Copy, Debug)]
+    enum Locked {
+        Copy,
+        EmptyOriginal,
+    }
     let _serial = serial()?;
+    let mode = |path: &Path| fs::metadata(path).map(|metadata| metadata.mode() & 0o7777);
+    let set_mode = |path: &Path, mode| fs::set_permissions(path, fs::Permissions::from_mode(mode));
+    for (locked, exchanges) in [(Locked::Copy, 0), (Locked::EmptyOriginal, 1)] {
+        let root = tempfile::tempdir()?;
+        let source = root.path().join("source");
+        let target = root.path().join("target");
+        write_item(&source, true, b"new")?;
+        match locked {
+            Locked::Copy => {
+                write_item(&target, true, b"old")?;
+                set_mode(&source, 0o555)?;
+            }
+            Locked::EmptyOriginal => {
+                fs::create_dir(&target)?;
+                set_mode(&target, 0o555)?;
+            }
+        }
+        let incoming = mode(&source)?;
+        let quirks = FsQuirks::install(root.path(), without_trash(TMPFS_MAGIC, Quirks::default()));
+
+        let (result, replaced) = replace_reporting(&source, &target, false);
+
+        let replaced_mode = mode(&target);
+        for path in [&source, &target] {
+            set_mode(path, 0o755)?;
+        }
+        assert!(result.is_ok(), "{locked:?}: {result:?}");
+        assert_eq!(replaced, [ReplacedOriginal::Deleted], "{locked:?}");
+        assert_eq!(quirks.count(Op::Exchange), exchanges, "{locked:?}");
+        assert_eq!(read_item(&target, true)?, b"new", "{locked:?}");
+        assert_eq!(replaced_mode?, incoming, "{locked:?}");
+        assert_eq!(names(root.path())?, ["source", "target"], "{locked:?}");
+        assert_ne!(
+            mount_capabilities(quirks.key()).exchange,
+            Some(false),
+            "{locked:?}"
+        );
+    }
+
     let root = tempfile::tempdir()?;
     let source = root.path().join("source");
     let target = root.path().join("target");
@@ -781,24 +1001,69 @@ fn rejected_exchange_falls_back_to_aside_and_is_remembered() -> Result<(), Box<d
 #[test]
 fn a_failed_publication_puts_the_original_back() -> Result<(), Box<dyn Error>> {
     let _serial = serial()?;
-    for (directory, quirks, op) in [
-        (false, Quirks::default(), Op::Rename),
-        (true, Quirks::default(), Op::Rename),
-        (false, Quirks::without_rename_flags(), Op::Link),
+    let vfat = Quirks {
+        exchange: Exchange::Rejected,
+        ..Quirks::vfat()
+    };
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum Item {
+        File,
+        Folder,
+        ReadOnlyFolder,
+        Symlink,
+    }
+    for (item, quirks, (op, skip), evicted) in [
+        (Item::File, Quirks::default(), (Op::Rename, 1), false),
+        (Item::Folder, Quirks::default(), (Op::Rename, 1), false),
+        (
+            Item::ReadOnlyFolder,
+            Quirks::default(),
+            (Op::Rename, 2),
+            false,
+        ),
+        (
+            Item::File,
+            Quirks::without_rename_flags(),
+            (Op::Link, 0),
+            false,
+        ),
+        (Item::File, vfat, (Op::Rename, 3), true),
+        (Item::Symlink, Quirks::sshfs(), (Op::Rename, 1), false),
     ] {
+        let directory = matches!(item, Item::Folder | Item::ReadOnlyFolder);
         let root = tempfile::tempdir()?;
         let source = root.path().join("source");
         let target = root.path().join("target");
         write_item(&source, directory, b"new")?;
-        write_item(&target, directory, b"old")?;
-        let original = inode(&target)?;
-        // The first match sets the original aside; the second publishes.
+        match item {
+            Item::Symlink => std::os::unix::fs::symlink("old", &target)?,
+            _ => write_item(&target, directory, b"old")?,
+        }
+        let mode = |mode| fs::Permissions::from_mode(mode);
+        if let Item::ReadOnlyFolder = item {
+            fs::set_permissions(&target, mode(0o555))?;
+        }
+        let original = (inode(&target)?, forced_mode(&target)?);
+        let folder = root.path().to_path_buf();
+        let evicting: Racer = Box::new(move || {
+            let originals = originals_folder(&folder)
+                .expect("list the folder")
+                .expect("the original is aside");
+            assert!(super::fs_quirks::evict(
+                &folder.join(originals).join("target")
+            ));
+        });
         let quirks = FsQuirks::install(
             root.path(),
             without_trash(
-                NFS_SUPER_MAGIC,
+                quirks.fs_type.unwrap_or(NFS_SUPER_MAGIC),
                 Quirks {
-                    fail: vec![(op, "target", 1, Errno::IO)],
+                    fail: vec![(op, "target", skip, Errno::IO)],
+                    before: if evicted {
+                        vec![(op, "target", skip, evicting)]
+                    } else {
+                        Vec::new()
+                    },
                     ..quirks
                 },
             ),
@@ -806,12 +1071,22 @@ fn a_failed_publication_puts_the_original_back() -> Result<(), Box<dyn Error>> {
 
         let (result, replaced) = replace_reporting(&source, &target, false);
 
-        assert!(result.is_err(), "{directory} {op:?}");
+        let left = (inode(&target)?, fs::symlink_metadata(&target)?.mode());
+        if let Item::ReadOnlyFolder = item {
+            fs::set_permissions(&target, mode(0o755))?;
+        }
+        let error = result.expect_err("the publication fails");
+        let injected = super::super::native_fs::os_error_detail(Errno::IO);
+        assert!(error.message().contains(&injected), "{item:?}: {error}");
         assert!(replaced.is_empty());
-        assert!(quirks.used_name(".strata-replaced-*"));
-        assert_eq!(inode(&target)?, original);
-        assert_eq!(read_item(&target, directory)?, b"old");
-        assert_eq!(names(root.path())?, ["source", "target"]);
+        assert!(quirks.used_name(".strata-originals-*"));
+        assert_eq!(names(root.path())?, ["source", "target"], "{item:?} {op:?}");
+        if item == Item::Symlink {
+            assert_eq!(fs::read_link(&target)?, Path::new("old"));
+        } else {
+            assert_eq!(left, original, "{item:?}");
+            assert_eq!(read_item(&target, directory)?, b"old");
+        }
     }
     Ok(())
 }
@@ -819,20 +1094,26 @@ fn a_failed_publication_puts_the_original_back() -> Result<(), Box<dyn Error>> {
 #[test]
 fn a_taken_name_keeps_the_original_aside_and_names_it() -> Result<(), Box<dyn Error>> {
     let _serial = serial()?;
-    // The racer writes just before the new item is published at `target`.
-    let cases: [(Preset, Op, usize); 2] = [
-        (Quirks::default, Op::Rename, 1),
-        (Quirks::vboxsf, Op::Create, 0),
+    let cases: [(Preset, Op, usize, bool, bool); 4] = [
+        (Quirks::default, Op::Rename, 1, false, false),
+        (Quirks::vboxsf, Op::Create, 0, false, false),
+        (Quirks::default, Op::Rename, 0, true, false),
+        (Quirks::default, Op::Rename, 0, true, true),
     ];
-    for (quirks, op, skip) in cases {
+    for (quirks, op, skip, saves_over, move_source) in cases {
         let root = tempfile::tempdir()?;
         let source = root.path().join("source");
         let target = root.path().join("target");
         fs::write(&source, b"new")?;
         fs::write(&target, b"old")?;
-        let racer_target = target.clone();
+        let (racer_target, saved) = (target.clone(), root.path().join("saved"));
         let racer: Box<dyn FnMut() + Send> = Box::new(move || {
-            let _ = fs::write(&racer_target, b"racer");
+            if saves_over {
+                let _ = fs::write(&saved, b"racer");
+                let _ = fs::rename(&saved, &racer_target);
+            } else {
+                let _ = fs::write(&racer_target, b"racer");
+            }
         });
         let _quirks = FsQuirks::install(
             root.path(),
@@ -845,21 +1126,29 @@ fn a_taken_name_keeps_the_original_aside_and_names_it() -> Result<(), Box<dyn Er
             ),
         );
 
-        let (result, _) = replace_reporting(&source, &target, false);
+        let (result, _) = replace_reporting(&source, &target, move_source);
 
-        let error = result.expect_err("the racer keeps the name");
-        let kept = names(root.path())?
-            .into_iter()
-            .find(|name| name.starts_with(".strata-replaced-"))
-            .ok_or("the original was not kept")?;
-        assert!(error.message().contains(&kept), "{op:?}: {error}");
-        assert_eq!(fs::read(root.path().join(&kept))?, b"old", "{op:?}");
-        assert_eq!(fs::read(&target)?, b"racer", "{op:?}");
-        assert_eq!(
-            names(root.path())?,
-            [kept.as_str(), "source", "target"],
-            "{op:?}"
+        let row = format!("{op:?}, saves over: {saves_over}, moving: {move_source}");
+        let error = result.expect_err("the racer keeps its item");
+        let kept = originals_folder(root.path())?.ok_or("the original was not kept")?;
+        assert!(
+            error.message().contains(&format!("{kept}/target")),
+            "{row}: {error}"
         );
+        let original = root.path().join(&kept).join("target");
+        if saves_over {
+            assert_eq!(fs::read(original)?, b"racer", "{row}");
+            assert_eq!(names(root.path())?, [kept.as_str(), "source"], "{row}");
+        } else {
+            assert_eq!(fs::read(original)?, b"old", "{row}");
+            assert_eq!(fs::read(&target)?, b"racer", "{row}");
+            assert_eq!(
+                names(root.path())?,
+                [kept.as_str(), "source", "target"],
+                "{row}"
+            );
+        }
+        assert_eq!(fs::read(&source)?, b"new", "{row}");
     }
     Ok(())
 }
@@ -905,11 +1194,7 @@ fn the_original_is_deleted_only_once_its_replacement_is_flushed() -> Result<(), 
         let aside_during_flush = Arc::new(std::sync::Mutex::new(Vec::new()));
         let (record, watched) = (aside_during_flush.clone(), root.path().to_path_buf());
         let racer: super::fs_quirks::Racer = Box::new(move || {
-            let kept = names(&watched).is_ok_and(|names| {
-                names
-                    .iter()
-                    .any(|name| name.starts_with(".strata-replaced-"))
-            });
+            let kept = originals_folder(&watched).is_ok_and(|folder| folder.is_some());
             record
                 .lock()
                 .unwrap_or_else(|error| error.into_inner())
@@ -946,11 +1231,8 @@ fn the_original_is_deleted_only_once_its_replacement_is_flushed() -> Result<(), 
             assert_eq!(names(root.path())?, ["source", "target"]);
             continue;
         }
-        let aside = names(root.path())?
-            .into_iter()
-            .find(|name| name.starts_with(".strata-replaced-"))
-            .ok_or("the original stays aside")?;
-        assert_eq!(fs::read(root.path().join(&aside))?, b"old");
+        let aside = originals_folder(root.path())?.ok_or("the original stays aside")?;
+        assert_eq!(fs::read(root.path().join(&aside).join("target"))?, b"old");
         let error = result.expect_err("the original is kept");
         assert!(
             error.message().contains(&aside)
@@ -992,7 +1274,7 @@ fn same_filesystem_replacing_move_places_the_source_without_a_stage() -> Result<
             assert_eq!(read_item(&target, directory)?, b"new");
             assert!(!source.exists());
             assert_eq!(names(&destination)?, ["item"]);
-            assert!(!quirks.used_name(".strata-replacement-*"));
+            assert!(!quirks.used_name(".strata-copy-*"));
         }
     }
     Ok(())
@@ -1019,7 +1301,7 @@ fn same_filesystem_replacing_move_refuses_a_substituted_source() -> Result<(), B
             without_trash(
                 NFS_SUPER_MAGIC,
                 Quirks {
-                    before: vec![(Op::Rename, "source", 0, racer)],
+                    before: vec![(Op::Rename, "target", 0, racer)],
                     ..quirks()
                 },
             ),
@@ -1064,7 +1346,7 @@ fn same_filesystem_replacing_move_restores_the_original_when_placement_fails()
 
     assert!(result.is_err());
     assert!(replaced.is_empty());
-    assert!(quirks.used_name(".strata-replaced-*"));
+    assert!(quirks.used_name(".strata-originals-*"));
     assert_eq!(inode(&target)?, original);
     assert_eq!(fs::read(&target)?, b"old");
     assert_eq!(fs::read(&source)?, b"incoming");
@@ -1120,7 +1402,7 @@ fn a_replacing_move_on_ntfs_3g_renames_names_it_would_cut_or_puts_the_original_b
         assert_eq!(read_item(&target, directory)?, contents, "{case}");
         assert_eq!(source.exists(), placing_fails, "{case}");
         assert_eq!(names(&destination)?, [name.as_str()], "{case}");
-        assert!(!quirks.used_name(".strata-replacement-*"), "{case}");
+        assert!(!quirks.used_name(".strata-copy-*"), "{case}");
     }
     Ok(())
 }

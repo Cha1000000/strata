@@ -8,19 +8,20 @@ mod tests;
 use super::super::{
     copy_engine,
     fs_ops::{Entry, EntryStat, OffMain, fs},
-    mount_profile::{name_limit, name_rules},
+    mount_profile::{self, known_mount, name_limit, name_rules},
     names::{fix::split_extension, numbered_name},
     native_fs::{
-        LocalFileIdentity, local_directory_children, open_local_child_directory,
+        LocalFileIdentity, Pinned, Recorded, local_directory_children, open_local_child_directory,
         open_local_parent_directory,
     },
     owed::{Deletion, Owed},
     placement::{
-        COMPRESSION_STAGE_PREFIX, Displacement, NUMBERED_NAME_ATTEMPTS, PlaceError,
-        REPLACED_PREFIX, displacement_without_trash, exchange, file_creation_error, place_staged,
-        put_back, remove_if_unchanged, reserve_hidden_name, set_aside, set_aside_if_safe,
+        Displacement, Exchanged, NUMBERED_NAME_ATTEMPTS, PlaceError, RenameFailure,
+        displacement_without_trash, exchange_through, file_creation_error, place_staged, put_back,
+        remove_if_unchanged, reserve_hidden_name, set_aside, set_aside_if_safe,
     },
     placement_reason,
+    progress::TransferProgressTracker,
     replacement::{DisplacedOriginal, cannot_replace_safely, original_kept_aside},
     trash::trash_verified,
     typed_names,
@@ -29,8 +30,10 @@ use super::{
     ArchiveError, COPY_BUF, archive_failed, check_archive_cancelled, copy_with_big_buf,
     decoders::FILE_ATTRIBUTE_UNIX_EXTENSION, destination::process_umask,
 };
-use crate::services::{
-    PlacedSnapshot, ReplacedOriginal, TransferConflict, TrashedOriginal, error_detail,
+use crate::{
+    adapters::volume::Family,
+    model::hidden_names::HiddenName,
+    services::{ItemIdentity, PlacedSnapshot, ReplacedOriginal, TransferConflict, error_detail},
 };
 use gtk::{gio, glib};
 use rustix::fs::AtFlags;
@@ -65,6 +68,7 @@ pub(super) async fn write_staged_archive<F>(
     archive_path: &Path,
     conflict: TransferConflict,
     cancelled: Arc<AtomicBool>,
+    progress: Option<&TransferProgressTracker>,
     write_archive: F,
 ) -> Result<(String, Option<ReplacedOriginal>, Option<PlacedSnapshot>), ArchiveError>
 where
@@ -99,8 +103,8 @@ where
         Displaced::Aside(aside) => {
             let mut owed = Owed::default();
             owed.barrier = barrier;
-            owed.owe(Deletion::Displaced(aside, name));
-            owed.settle(None, &gio::Cancellable::new())
+            owed.owe(Deletion::Displaced(aside, destination.join(&name)));
+            owed.settle(progress, &gio::Cancellable::new())
                 .await
                 .map_err(|error| archive_failed(error.message()))?;
             (Some(ReplacedOriginal::Deleted), None)
@@ -113,7 +117,12 @@ enum Strategy {
     New,
     Numbered,
     /// Replaces only the item seen before encoding.
-    Replace(Replacement, LocalFileIdentity),
+    Replace(Replacement, Target),
+}
+
+struct Target {
+    recorded: EntryStat,
+    pin: Pinned,
 }
 
 #[derive(Clone, Copy)]
@@ -125,7 +134,7 @@ enum Replacement {
 
 enum Displaced {
     None,
-    Trashed(TrashedOriginal, Option<PlacedSnapshot>),
+    Trashed(Option<ItemIdentity>, Option<PlacedSnapshot>),
     Aside(DisplacedOriginal),
 }
 
@@ -136,6 +145,7 @@ struct Published {
 
 struct Stage {
     ownership: OnceLock<copy_engine::Ownership>,
+    stale_written_times: bool,
     parent: Arc<OwnedFd>,
     name: OsString,
     identity: LocalFileIdentity,
@@ -200,12 +210,22 @@ impl Publication {
                     } else {
                         self.without_trash(&parent)?
                     };
-                    (mode, Strategy::Replace(replacement, stat.identity))
+                    let pin = Pinned::at(
+                        fs(),
+                        Entry::new(&*parent, OsStr::new(&self.name)),
+                        &stat,
+                        known_mount(fs(), parent.as_fd()).1.identity,
+                    );
+                    let target = Target {
+                        recorded: stat,
+                        pin,
+                    };
+                    (mode, Strategy::Replace(replacement, target))
                 }
             },
         };
 
-        let (name, file) = reserve_hidden_name(COMPRESSION_STAGE_PREFIX, |name| {
+        let (name, file) = reserve_hidden_name(HiddenName::Copy, |name| {
             fs().create_exclusive(
                 Entry::new(&*parent, name),
                 rustix::fs::Mode::from_raw_mode(0o600),
@@ -213,19 +233,40 @@ impl Publication {
             .map_err(file_creation_error)
         })
         .map_err(|error| self.creation_failed(placement_reason(error)))?;
-        let stage = match fs().stat_fd(file.as_fd()).map(|stat| stat.identity) {
-            Ok(identity) => Stage {
-                ownership: OnceLock::new(),
-                parent,
-                name,
-                identity,
-            },
+        let (stage, _pinned) = match fs().stat_fd(file.as_fd()) {
+            Ok(stat) => {
+                let capabilities = known_mount(fs(), parent.as_fd()).1;
+                let pinned = Pinned::at(
+                    fs(),
+                    Entry::new(&*parent, &name),
+                    &stat,
+                    capabilities.identity,
+                );
+                let stage = Stage {
+                    ownership: OnceLock::new(),
+                    stale_written_times: capabilities.family == Some(Family::Smb),
+                    parent,
+                    name,
+                    identity: stat.identity,
+                };
+                (stage, pinned)
+            }
             Err(error) => return Err(self.creation_failed(errno_text(error))),
         };
         let result =
             self.encode_and_publish(&stage, file, mode, cancelled, strategy, write_archive);
         if result.is_err() {
-            remove_if_unchanged(fs(), stage.entry(), stage.identity, AtFlags::empty());
+            let attributes = stage
+                .ownership
+                .get()
+                .and_then(copy_engine::Ownership::attributes);
+            remove_if_unchanged(
+                fs(),
+                stage.entry(),
+                stage.identity,
+                attributes,
+                AtFlags::empty(),
+            );
         }
         result
     }
@@ -256,6 +297,13 @@ impl Publication {
         let stat = fs()
             .stat_fd(handle.as_fd())
             .map_err(|error| self.creation_failed(errno_text(error)))?;
+        // While it holds a lease, the SMB client shows the server's time only to a forced stat.
+        let stat = stage
+            .stale_written_times
+            .then(|| fs().stat(stage.entry(), true))
+            .and_then(Result::ok)
+            .filter(|named| named.identity == stat.identity)
+            .unwrap_or(stat);
         let _ = stage.ownership.set(copy_engine::file_ownership(&stat));
         // Close before publication so NFS cannot silly-rename a failed stage.
         fs().close(handle)
@@ -290,7 +338,7 @@ impl Publication {
         strategy: Strategy,
         cancelled: &AtomicBool,
     ) -> Result<Published, ArchiveError> {
-        let (replacement, identity) = match strategy {
+        let (replacement, target) = match strategy {
             Strategy::New => {
                 return stage
                     .place(OsStr::new(&self.name))
@@ -298,37 +346,49 @@ impl Publication {
                     .map_err(|error| self.creation_failed(placement_reason(error)));
             }
             Strategy::Numbered => return self.publish_numbered(stage),
-            Strategy::Replace(replacement, identity) => (replacement, identity),
+            Strategy::Replace(replacement, target) => (replacement, target),
         };
         let Some(stat) = self.existing(&stage.parent)? else {
             return self.publish(stage, Strategy::New, cancelled);
         };
-        if stat.identity != identity {
+        if !target.pin.unchanged(
+            fs(),
+            mount_profile::identity_at(fs(), stage.parent.as_fd()),
+            &target.recorded,
+            &stat,
+        ) {
             return Err(archive_failed(crate::i18n::tr(
                 "The target changed while the operation was in progress",
             )));
         }
         match replacement {
-            Replacement::Trash => self.publish_after_trash(stage, identity, cancelled),
-            Replacement::Exchange => self.publish_by_exchange(stage, identity),
-            Replacement::Aside => self.publish_after_set_aside(stage, identity),
+            Replacement::Trash => self.publish_after_trash(stage, target, &stat, cancelled),
+            Replacement::Exchange => self.publish_by_exchange(stage, &stat),
+            Replacement::Aside => self.publish_after_set_aside(stage, &stat),
         }
     }
 
     fn publish_by_exchange(
         &self,
         stage: &Stage,
-        identity: LocalFileIdentity,
+        current: &EntryStat,
     ) -> Result<Published, ArchiveError> {
         let target = Entry::new(&*stage.parent, OsStr::new(&self.name));
-        match exchange(fs(), stage.entry(), target) {
-            Ok(true) => Ok(self.published(Displaced::Aside(DisplacedOriginal {
-                parent: OffMain::new(stage.parent.clone()),
-                name: stage.name.clone(),
-                identity,
-            }))),
-            Ok(false) => match set_aside_if_safe(fs(), stage.parent.as_fd(), false) {
-                Ok(Some(_)) => self.publish_after_set_aside(stage, identity),
+        let attributes = stage
+            .ownership
+            .get()
+            .and_then(copy_engine::Ownership::attributes);
+        match exchange_through(fs(), stage.entry(), target, stage.identity, attributes) {
+            Ok(Exchanged::Swapped(originals)) => {
+                Ok(self.published(Displaced::Aside(DisplacedOriginal {
+                    parent: OffMain::new(stage.parent.clone()),
+                    originals,
+                    name: OsString::from(&self.name),
+                    identity: Recorded::of(current),
+                })))
+            }
+            Ok(Exchanged::Refused) => match set_aside_if_safe(fs(), stage.parent.as_fd(), false) {
+                Ok(Some(_)) => self.publish_after_set_aside(stage, current),
                 Ok(None) => Err(self.cannot_replace_safely()),
                 Err(error) => Err(self.creation_failed(placement_reason(error))),
             },
@@ -339,19 +399,20 @@ impl Publication {
     fn publish_after_trash(
         &self,
         stage: &Stage,
-        identity: LocalFileIdentity,
+        target: Target,
+        current: &EntryStat,
         cancelled: &AtomicBool,
     ) -> Result<Published, ArchiveError> {
-        match trash_verified(
+        let trashed = match trash_verified(
             Entry::new(&*stage.parent, OsStr::new(&self.name)),
             &self.destination.join(&self.name),
-            identity,
+            current,
             &gio::Cancellable::new(),
         ) {
-            Ok(()) => {}
+            Ok(trashed) => trashed,
             Err(error) if error.is_unsupported() => {
                 let replacement = self.without_trash(&stage.parent)?;
-                return self.publish(stage, Strategy::Replace(replacement, identity), cancelled);
+                return self.publish(stage, Strategy::Replace(replacement, target), cancelled);
             }
             Err(error) => {
                 return Err(archive_failed(rust_i18n::t!(
@@ -360,7 +421,7 @@ impl Publication {
                     error = crate::services::gio_error_detail(&error.error)
                 )));
             }
-        }
+        };
         stage
             .place(OsStr::new(&self.name))
             .map(|()| {
@@ -373,7 +434,7 @@ impl Publication {
                         cancelled,
                     )
                 });
-                self.published(Displaced::Trashed(identity.into(), placed))
+                self.published(Displaced::Trashed(trashed, placed))
             })
             .map_err(|error| {
                 archive_failed(rust_i18n::t!(
@@ -386,30 +447,40 @@ impl Publication {
     fn publish_after_set_aside(
         &self,
         stage: &Stage,
-        identity: LocalFileIdentity,
+        current: &EntryStat,
     ) -> Result<Published, ArchiveError> {
         let target = OsStr::new(&self.name);
         let aside = match set_aside(
             fs(),
             Entry::new(&*stage.parent, target),
-            REPLACED_PREFIX,
-            identity,
+            current.identity,
+            current.kept_attributes(),
         ) {
             Ok(aside) => aside,
-            Err(PlaceError::Unsupported) => return Err(self.cannot_replace_safely()),
-            Err(error) => return Err(self.creation_failed(placement_reason(error))),
+            Err(RenameFailure::Place(PlaceError::Unsupported)) => {
+                return Err(self.cannot_replace_safely());
+            }
+            Err(RenameFailure::Place(error)) => {
+                return Err(self.creation_failed(placement_reason(error)));
+            }
+            Err(RenameFailure::Stranded { temporary, error }) => {
+                return Err(archive_failed(original_kept_aside(
+                    &self.name,
+                    &temporary,
+                    &error_detail(placement_reason(error)),
+                )));
+            }
         };
         match stage.place(target) {
-            Ok(()) => Ok(self.published(Displaced::Aside(DisplacedOriginal {
-                parent: OffMain::new(stage.parent.clone()),
-                name: aside.name,
-                identity: aside.identity,
-            }))),
+            Ok(()) => Ok(self.published(Displaced::Aside(DisplacedOriginal::aside(
+                stage.parent.clone(),
+                aside,
+            )))),
             Err(error) => match put_back(fs(), stage.parent.as_fd(), &aside, target) {
                 Ok(()) => Err(self.creation_failed(placement_reason(error))),
                 Err(_) => Err(archive_failed(original_kept_aside(
                     &self.name,
-                    &aside.name,
+                    &aside.kept(),
                     &error_detail(placement_reason(error)),
                 ))),
             },
@@ -417,9 +488,21 @@ impl Publication {
     }
 
     fn publish_numbered(&self, stage: &Stage) -> Result<Published, ArchiveError> {
-        let mut candidate = self.name.clone();
+        let (stem, extension) = split_extension(OsStr::new(&self.name), false);
         let mut limit = None;
-        for suffix in 1..NUMBERED_NAME_ATTEMPTS {
+        for suffix in 0..NUMBERED_NAME_ATTEMPTS {
+            let candidate = if suffix == 0 {
+                self.name.clone()
+            } else if extension.is_empty() {
+                return Err(
+                    crate::i18n::tr("Archive filename must have a format extension").into(),
+                );
+            } else {
+                let limit = *limit.get_or_insert_with(|| name_limit(fs(), stage.parent.as_fd()));
+                numbered_name(stem, suffix, extension, limit, false)
+                    .to_string_lossy()
+                    .into_owned()
+            };
             match stage.place(OsStr::new(&candidate)) {
                 Ok(()) => {
                     return Ok(Published {
@@ -427,20 +510,7 @@ impl Publication {
                         displaced: Displaced::None,
                     });
                 }
-                Err(PlaceError::Exists) => {
-                    let (stem, extension) = split_extension(OsStr::new(&self.name), false);
-                    if extension.is_empty() {
-                        return Err(crate::i18n::tr(
-                            "Archive filename must have a format extension",
-                        )
-                        .into());
-                    }
-                    let limit =
-                        *limit.get_or_insert_with(|| name_limit(fs(), stage.parent.as_fd()));
-                    candidate = numbered_name(stem, suffix, extension, limit, false)
-                        .to_string_lossy()
-                        .into_owned();
-                }
+                Err(PlaceError::Exists) => {}
                 Err(error) => return Err(self.creation_failed(placement_reason(error))),
             }
         }

@@ -9,7 +9,9 @@ mod names;
 mod native_fs;
 use case_variants::CaseVariants;
 use names::{Key, PlanEntry, Planned, Taken, fix::fix_name, numbered_names, plan_names};
+#[cfg(test)]
 use native_fs::LocalFileIdentity;
+use native_fs::Recorded;
 pub(super) use native_fs::open_local_child_directory;
 #[cfg(test)]
 use native_fs::retry_local_open;
@@ -81,7 +83,6 @@ use deletion::bounded_local_worker_count;
 use deletion::ensure_local_delete_target_unchanged;
 #[cfg(test)]
 use deletion::local_delete_worker_count;
-use deletion::local_device_is_rotational;
 use deletion::local_file_identity;
 #[cfg(test)]
 use deletion::open_local_delete_target;
@@ -111,14 +112,14 @@ use restore::RestoreEntry;
 #[cfg(test)]
 use restore::StagedOriginalLookup;
 #[cfg(test)]
-use restore::home_trash_entries_at;
-#[cfg(test)]
 use restore::move_restore_path;
 use restore::restore_renamed;
 use restore::restore_trash_entry;
 use restore::restore_worker_count;
 use restore::restored_destination;
 use restore::run_merge_undo;
+#[cfg(test)]
+use restore::trash_entries_at;
 use restore::trashed_entries_for_originals;
 use restore::trashed_merge_original;
 #[cfg(test)]
@@ -126,12 +127,20 @@ use restore::{NameKept, restore_name};
 
 mod copy_engine;
 mod create_entry;
+mod deferred_close;
+use deferred_close::WaitCancelled;
 mod environment;
 mod fs_ops;
+mod holders;
+mod leftovers;
+pub(super) use leftovers::Deadline;
 mod merge_aside;
 mod mount_profile;
 mod owed;
 mod placement;
+pub(crate) mod probes;
+mod release;
+pub(crate) use release::ActiveOperation;
 mod transfer_targets;
 pub(super) mod trash;
 mod typed_names;
@@ -148,10 +157,16 @@ pub(crate) use archive::{
 
 #[cfg(test)]
 pub(crate) use archive::write_compression_fixture;
+pub(crate) use fs_ops::Watched;
+pub(in crate::adapters) use fs_ops::{
+    FolderStamp, folder_stamp, list_folder, stamp_mount, unwatch, watch,
+};
 #[cfg(test)]
-pub(crate) use tests::fs_quirks::{FsQuirks, Op as FsOp, Quirks};
+pub(crate) use tests::fs_quirks::{Births, FsQuirks, Op as FsOp, Quirks, evict};
 pub(crate) use transfer_targets::transfer_targets;
-pub(crate) use typed_names::refused_in as typed_name_refusal;
+pub(crate) use typed_names::{
+    refused_in as typed_name_refusal, rename_taken as typed_rename_is_taken,
+};
 
 use std::{
     cell::{Cell, RefCell},
@@ -175,23 +190,23 @@ use gtk::{gio, glib, prelude::*};
 use fs_ops::{Entry, fs};
 use mount_profile::{FolderNames, NamePolicy};
 use owed::{Deletion, Done, Owed, Settling};
-use placement::{COPY_PREFIX, PlaceError, RenameFailure};
+use placement::{PlaceError, RenameFailure};
 
 use crate::{
     adapters::{
-        gio_file_for_location, location_for_file,
+        gio_close, gio_file_for_location, location_for_file,
         trash_restore::RestoreContext,
         trash_support::{TrashError, TrashFailure, trash_with_cleanup},
-        volume::{MountTable, NameProfile},
+        volume::{NameProfile, mount_watch},
     },
-    model::Location,
+    model::{Location, hidden_names::HiddenName},
     services::{
         CancelledOperation, CompressRequest, CreateDirectoryRequest, CreateFileRequest,
         DeleteRequest, ExtractRequest, KeptCause, KeptItem, LoadHandle, NameMode, OperationEvent,
-        OperationProvider, OperationRequestId, PasteItem, PasteRequest, RenameCause, RenameRequest,
-        RenamedItem, ReplacedOriginal, RestoreRequest, RestoreSource, SkippedItem, SpecialKind,
-        TransferConflict, TransferReport, UndoCopyRequest, UndoMergeRequest, UndoMoveRequest,
-        UndoRenameRequest, validate_basename,
+        OperationProvider, OperationRequestId, PasteItem, PasteRequest, RecoverRequest,
+        RenameCause, RenameRequest, RenamedItem, ReplacedOriginal, RestoreRequest, RestoreSource,
+        SkippedItem, SpecialKind, TransferConflict, TransferReport, UndoCopyRequest,
+        UndoMergeRequest, UndoMoveRequest, UndoRenameRequest, validate_basename,
     },
 };
 
@@ -501,7 +516,7 @@ async fn removable_roots_for_paths(paths: &[PathBuf]) -> Vec<PathBuf> {
     if let Some(hints) = removable_hints_for_test() {
         return removable_sync_roots(&destinations, &hints);
     }
-    let table = MountTable::load().await;
+    let table = mount_watch::fresh().await;
     let mounts = gio::VolumeMonitor::get().mounts();
     let mut hints = Vec::new();
     for path in paths {
@@ -806,21 +821,18 @@ fn transfer_size(
             });
         }
 
-        let enumerator = await_cancellable(&file, &cancellable, |file, cancellable, result| {
-            file.enumerate_children_async(
-                "standard::name",
-                gio::FileQueryInfoFlags::NOFOLLOW_SYMLINKS,
-                glib::Priority::DEFAULT,
-                Some(cancellable),
-                move |output| result.resolve(output),
-            );
-        })
+        let enumerator = gio_close::enumerate_children(
+            &file,
+            "standard::name",
+            gio::FileQueryInfoFlags::NOFOLLOW_SYMLINKS,
+            Some(&cancellable),
+        )
         .await?;
         let mut total = Some(0_u64);
         let mut files = 0_usize;
         loop {
             let children = await_cancellable(
-                &enumerator,
+                &*enumerator,
                 &cancellable,
                 |enumerator, cancellable, result| {
                     enumerator.next_files_async(
@@ -1170,12 +1182,12 @@ async fn parallel_copy_plans(
         let rotational = destination
             .path()
             .and_then(|path| std::fs::File::open(path).ok())
-            .and_then(|directory| local_device_is_rotational(&directory))
+            .and_then(|directory| fs().rotational(directory.as_fd()))
             .unwrap_or(windows_disk)
             || source_folders.into_iter().any(|folder| {
                 open_local_parent_directory(folder)
                     .ok()
-                    .and_then(local_device_is_rotational)
+                    .and_then(|folder| fs().rotational(folder.as_fd()))
                     == Some(true)
             });
         Some((plans, bounded_local_worker_count(available, rotational)))
@@ -1232,7 +1244,7 @@ async fn execute_parallel_copy_plans(
                 );
                 context.spawn_local(async move {
                     let target = gio::File::for_path(&plan.written_path);
-                    let taken = if case_variants::taken_by(&target, &earlier).await {
+                    let taken = if case_variants::taken_by(&target, earlier).await {
                         Taken::Number
                     } else {
                         Taken::Fail
@@ -1589,21 +1601,48 @@ fn renamed_item(
 /// Children whose names are fixed come once the folder is listed, numbered past every sibling.
 /// Where the mount takes two names for one, the whole folder is listed first.
 struct NamedChildren<'a> {
-    enumerator: &'a gio::FileEnumerator,
+    children: Children<'a>,
     names: FolderNames,
     kept: Vec<OsString>,
     held: Vec<(OsString, gio::FileType)>,
     listed: bool,
 }
 
+enum Children<'a> {
+    Enumerated(&'a gio::FileEnumerator),
+    Listed(Vec<(OsString, gio::FileType)>),
+}
+
 impl<'a> NamedChildren<'a> {
     fn new(enumerator: &'a gio::FileEnumerator, names: FolderNames) -> Self {
+        Self::of(Children::Enumerated(enumerator), names)
+    }
+
+    fn listed(children: Vec<(OsString, gio::FileType)>, names: FolderNames) -> Self {
+        Self::of(Children::Listed(children), names)
+    }
+
+    fn of(children: Children<'a>, names: FolderNames) -> Self {
         Self {
-            enumerator,
+            children,
             names,
             kept: Vec::new(),
             held: Vec::new(),
             listed: false,
+        }
+    }
+
+    async fn batch(
+        &mut self,
+        cancellable: &gio::Cancellable,
+    ) -> Result<Vec<(OsString, gio::FileType)>, glib::Error> {
+        match &mut self.children {
+            Children::Enumerated(enumerator) => Ok(next_children(enumerator, cancellable)
+                .await?
+                .iter()
+                .map(|child| (child.name().into_os_string(), child.file_type()))
+                .collect()),
+            Children::Listed(children) => Ok(std::mem::take(children)),
         }
     }
 
@@ -1616,11 +1655,9 @@ impl<'a> NamedChildren<'a> {
             cause: None,
         };
         while !self.listed {
-            let batch = next_children(self.enumerator, cancellable).await?;
+            let batch = self.batch(cancellable).await?;
             self.listed = batch.is_empty();
-            let children = batch
-                .iter()
-                .map(|child| (child.name().into_os_string(), child.file_type()));
+            let children = batch.into_iter();
             if !self.names.fixing {
                 return Ok(children
                     .map(|(name, kind)| (name.clone(), kind, kept(name)))
@@ -1724,7 +1761,7 @@ async fn run_local_fs_step<T: Send + 'static>(
 
 struct CreatedCopyRoot {
     was_created: Cell<bool>,
-    identity: Cell<Option<LocalFileIdentity>>,
+    identity: Cell<Option<Recorded>>,
 }
 
 impl CreatedCopyRoot {
@@ -1794,7 +1831,7 @@ async fn create_remote_file_stage(
     let parent = target
         .parent()
         .ok_or_else(|| translated_io_error("The destination has no parent directory"))?;
-    let stage = parent.child(format!("{COPY_PREFIX}{}", glib::uuid_string_random()));
+    let stage = parent.child(HiddenName::Copy.fresh());
     let stream = match await_cancellable(&stage, cancellable, |stage, cancellable, result| {
         stage.create_async(
             gio::FileCreateFlags::PRIVATE,
@@ -1912,17 +1949,13 @@ fn copy_recursively_with_progress(
                 CopyRecord::Root(_) => CopyRecord::Nothing,
                 record => record,
             };
-            let enumerator =
-                await_cancellable(&source, &cancellable, |source, cancellable, result| {
-                    source.enumerate_children_async(
-                        "standard::name,standard::type",
-                        gio::FileQueryInfoFlags::NOFOLLOW_SYMLINKS,
-                        glib::Priority::DEFAULT,
-                        Some(cancellable),
-                        move |output| result.resolve(output),
-                    );
-                })
-                .await?;
+            let enumerator = gio_close::enumerate_children(
+                &source,
+                "standard::name,standard::type",
+                gio::FileQueryInfoFlags::NOFOLLOW_SYMLINKS,
+                Some(&cancellable),
+            )
+            .await?;
             let names = names.within(folder);
             let mut renamed = Vec::new();
             let mut listed = NamedChildren::new(&enumerator, folder.names);
@@ -2471,16 +2504,11 @@ fn could_not_move(name: &str, error: &str) -> String {
     .into_owned()
 }
 
-async fn rename_native(source: PathBuf, target: PathBuf) -> Result<(), glib::Error> {
-    renamed_native(source.clone(), target.clone())
-        .await?
-        .map_err(|failure| rename_failure_error(failure, &source, &target))
-}
-
-async fn renamed_native(
+async fn rename_native(
     source: PathBuf,
     target: PathBuf,
-) -> Result<Result<(), RenameFailure>, glib::Error> {
+    cancellable: &gio::Cancellable,
+) -> Result<(), glib::Error> {
     let (Some(source_parent), Some(source_name), Some(target_parent), Some(target_name)) = (
         source.parent().map(Path::to_path_buf),
         source.file_name().map(OsStr::to_os_string),
@@ -2489,21 +2517,38 @@ async fn renamed_native(
     ) else {
         return Err(translated_io_error("Invalid move destination"));
     };
-    let outcome = run_local_fs_step(move || {
+    let stopped = cancellable.clone();
+    run_local_fs_step(move || {
         let source_dir = open_local_parent_directory(&source_parent)?;
         let target_dir = if target_parent == source_parent {
             None
         } else {
             Some(open_local_parent_directory(&target_parent)?)
         };
-        Ok(placement::rename_in_place(
+        let from = Entry::new(&source_dir, &source_name);
+        let to = Entry::new(target_dir.as_ref().unwrap_or(&source_dir), &target_name);
+        let Ok(renamed) = deferred_close::retry_folder_rename(
             fs(),
-            Entry::new(&source_dir, &source_name),
-            Entry::new(target_dir.as_ref().unwrap_or(&source_dir), &target_name),
-        ))
+            from,
+            &Deadline::default(),
+            &|| stopped.is_cancelled(),
+            |failure| {
+                matches!(
+                    failure,
+                    RenameFailure::Place(PlaceError::Io(rustix::io::Errno::ACCESS))
+                )
+            },
+            || placement::rename_in_place(fs(), from, to),
+        ) else {
+            return Ok(Err(cancelled_local_operation()));
+        };
+        Ok(renamed.map(drop).map_err(|failure| match failure {
+            RenameFailure::Place(error) => still_open_rename(from, error)
+                .map_or_else(|| rename_failure_error(failure, &source, &target), io_error),
+            failure => rename_failure_error(failure, &source, &target),
+        }))
     })
-    .await?;
-    Ok(outcome.map(drop))
+    .await?
 }
 
 fn rename_failure_error(failure: RenameFailure, source: &Path, target: &Path) -> glib::Error {
@@ -2554,49 +2599,76 @@ fn move_local_path(
         };
 
         let display_name = source_name.to_string_lossy().into_owned();
-        let outcome = run_local_fs_step(move || {
+        let stopped = cancellable.clone();
+        run_local_fs_step(move || {
             let source_parent = open_local_parent_directory(&source_parent_path)?;
             let target_parent = open_local_parent_directory(&target_parent_path)?;
             let from = Entry::new(&source_parent, &source_name);
-            let is_directory = match taken {
-                Taken::Fail => false,
-                Taken::Number => match fs().stat(from, false) {
-                    Ok(stat) => stat.is_directory(),
-                    Err(error) => return Ok(Err(PlaceError::Io(error))),
-                },
-            };
-            let limit = || mount_profile::name_limit(fs(), target_parent.as_fd());
-            for name in taken.names(&target_name, is_directory, limit) {
-                let to = Entry::new(&target_parent, &name);
-                let placed = placement::place(fs(), from, to, None);
-                if taken == Taken::Number && matches!(placed, Err(PlaceError::Exists)) {
-                    continue;
-                }
-                return Ok(match placed {
-                    Ok(_) => Ok(Moved::Done(gio::File::for_path(
-                        target_parent_path.join(&name),
-                    ))),
-                    Err(PlaceError::CrossDevice | PlaceError::Unsupported) => {
-                        match fs().stat(from, false) {
-                            Ok(stat)
-                                if stat.is_directory()
-                                    && placement::contains(fs(), stat.identity, to.dir)
-                                        != Some(false) =>
-                            {
-                                Err(PlaceError::IntoItself)
-                            }
-                            Ok(_) => Ok(Moved::Copy),
-                            Err(error) => Err(PlaceError::Io(error)),
-                        }
+            let moved = || {
+                let is_directory = match taken {
+                    Taken::Fail => false,
+                    Taken::Number => match fs().stat(from, false) {
+                        Ok(stat) => stat.is_directory(),
+                        Err(error) => return Ok(Err(PlaceError::Io(error))),
+                    },
+                };
+                let limit = || mount_profile::name_limit(fs(), target_parent.as_fd());
+                let deadline = Deadline::default();
+                for name in taken.names(&target_name, is_directory, limit) {
+                    let to = Entry::new(&target_parent, &name);
+                    let placed = deferred_close::retry_folder_rename(
+                        fs(),
+                        from,
+                        &deadline,
+                        &|| stopped.is_cancelled(),
+                        |error| matches!(error, PlaceError::Io(rustix::io::Errno::ACCESS)),
+                        || placement::place(fs(), from, to, None),
+                    )?;
+                    if taken == Taken::Number && matches!(placed, Err(PlaceError::Exists)) {
+                        continue;
                     }
-                    Err(error) => Err(error),
-                });
-            }
-            Ok(Err(PlaceError::Exists))
+                    return Ok(match placed {
+                        Ok(_) => Ok(Moved::Done(gio::File::for_path(
+                            target_parent_path.join(&name),
+                        ))),
+                        Err(PlaceError::CrossDevice | PlaceError::Unsupported) => {
+                            match fs().stat(from, false) {
+                                Ok(stat)
+                                    if stat.is_directory()
+                                        && placement::contains(fs(), stat.identity, to.dir)
+                                            != Some(false) =>
+                                {
+                                    Err(PlaceError::IntoItself)
+                                }
+                                Ok(_) => Ok(Moved::Copy),
+                                Err(error) => Err(PlaceError::Io(error)),
+                            }
+                        }
+                        Err(error) => Err(error),
+                    });
+                }
+                Ok(Err(PlaceError::Exists))
+            };
+            Ok(match moved() {
+                Ok(moved) => moved.map_err(|error| match still_open_rename(from, error) {
+                    Some(reason) => io_error(could_not_move(
+                        &display_name,
+                        &crate::services::error_detail(reason),
+                    )),
+                    None => placement_failure(error, &display_name, could_not_move),
+                }),
+                Err(WaitCancelled) => Err(cancelled_local_operation()),
+            })
         })
-        .await?;
-        outcome.map_err(|error| placement_failure(error, &display_name, could_not_move))
+        .await?
     })
+}
+
+fn still_open_rename(from: Entry<'_>, error: PlaceError) -> Option<String> {
+    match error {
+        PlaceError::Io(errno) => holders::refused_rename(fs(), from, errno),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -2819,8 +2891,6 @@ fn item_error(name: &str, error: impl std::fmt::Display) -> String {
 }
 
 fn operation_handle(cancellable: gio::Cancellable) -> LoadHandle {
-    // Install invalidation before the queued operation can learn mount capabilities.
-    super::volume::watch_operation_mounts();
     LoadHandle::new(move || cancellable.cancel())
 }
 
@@ -2880,6 +2950,9 @@ impl OperationProvider for LocalOperationProvider {
             let item = request.entry.location.clone();
             let new_name = request.new_name.clone();
             let affected_locations = item.parent().into_iter().collect();
+            let roots = release::natives([&item]);
+            let operation = ActiveOperation::begin(release::parents(&roots));
+            operation.release(roots, &operation_cancellable).await;
             if operation_cancellable.is_cancelled() {
                 emit(cancelled_event(
                     request.id,
@@ -2893,7 +2966,12 @@ impl OperationProvider for LocalOperationProvider {
             let result = match request.entry.location.native_path() {
                 Some(path) => match glib::filename_from_utf8(&request.new_name) {
                     Ok((name, _)) => {
-                        rename_native(path.to_path_buf(), path.with_file_name(name)).await
+                        rename_native(
+                            path.to_path_buf(),
+                            path.with_file_name(name),
+                            &operation_cancellable,
+                        )
+                        .await
                     }
                     Err(error) => Err(glib::Error::new(
                         gio::IOErrorEnum::InvalidFilename,
@@ -2971,6 +3049,13 @@ impl OperationProvider for LocalOperationProvider {
             for parent in request.items.iter().filter_map(|item| item.source.parent()) {
                 affected_locations.insert(parent);
             }
+            let moved = if request.move_sources {
+                release::natives(request.items.iter().map(|item| &item.source))
+            } else {
+                Vec::new()
+            };
+            let operation = Rc::new(ActiveOperation::begin(release::parents(&moved)));
+            operation.include_folder(&request.destination);
             let sources = request
                 .items
                 .iter()
@@ -3042,6 +3127,25 @@ impl OperationProvider for LocalOperationProvider {
                         .map(|planned| destination.child(&planned.target))
                 })
                 .collect::<Vec<_>>();
+            let targets_of = |conflict: TransferConflict| {
+                request
+                    .items
+                    .iter()
+                    .zip(&targets)
+                    .zip(&duplicate)
+                    .filter(move |((item, _), duplicate)| item.conflict == conflict && !**duplicate)
+                    .filter_map(|((_, target), _)| target.as_ref())
+            };
+            operation
+                .include_trees(targets_of(TransferConflict::Merge).filter_map(location_for_file));
+            let replaced =
+                targets_of(TransferConflict::ReplaceExisting).filter_map(gio::File::path);
+            operation
+                .release(
+                    moved.into_iter().chain(replaced).collect(),
+                    &operation_cancellable,
+                )
+                .await;
             let mut variants =
                 CaseVariants::new(planned.iter().enumerate().filter_map(|(index, planned)| {
                     Some((index, planned.as_ref()?.target.clone()))
@@ -3266,15 +3370,27 @@ impl OperationProvider for LocalOperationProvider {
                         &operation_cancellable,
                         Some(&mut affected_locations),
                         &copying.placed_entries,
-                        progress_merge_hooks(Some(progress.clone()), names.clone(), &|plan| {
-                            emit(OperationEvent::Merged {
-                                request_id: request.id,
-                                source: item.source.clone(),
-                                created: plan.created,
-                                overwritten: plan.overwritten,
-                                placed: plan.placed,
-                            });
-                        }),
+                        progress_merge_hooks(
+                            Some(progress.clone()),
+                            names.clone(),
+                            Some(operation.clone()),
+                            &|plan| {
+                                for (location, identity) in plan.originals {
+                                    emit(OperationEvent::ItemTrashed {
+                                        request_id: request.id,
+                                        location,
+                                        identity,
+                                    });
+                                }
+                                emit(OperationEvent::Merged {
+                                    request_id: request.id,
+                                    source: item.source.clone(),
+                                    created: plan.created,
+                                    overwritten: plan.overwritten,
+                                    placed: plan.placed,
+                                });
+                            },
+                        ),
                     )
                     .await
                     .map(|owed| (target, owed))
@@ -3297,7 +3413,7 @@ impl OperationProvider for LocalOperationProvider {
                                     return;
                                 }
                             };
-                            if let Some(target) = &replaced_target {
+                            if let (Some(target), Some(identity)) = (&replaced_target, identity) {
                                 emit(OperationEvent::ItemTrashed {
                                     request_id: request.id,
                                     location: target.clone(),
@@ -3327,7 +3443,7 @@ impl OperationProvider for LocalOperationProvider {
                     .map(|owed| (target, owed))
                 } else {
                     if taken == Taken::Fail
-                        && case_variants::taken_by(&target, &variants.earlier(index)).await
+                        && case_variants::taken_by(&target, variants.earlier(index)).await
                     {
                         taken = Taken::Number;
                         aliased = true;
@@ -3532,6 +3648,12 @@ impl OperationProvider for LocalOperationProvider {
                     affected_locations.insert(parent);
                 }
             }
+            let moved = release::natives(request.items.iter().map(|item| &item.record.current));
+            let operation = ActiveOperation::begin(release::parents(&moved).into_iter().chain(
+                release::parents(&release::natives(
+                    request.items.iter().map(|item| &item.record.original),
+                )),
+            ));
             let sources = request
                 .items
                 .iter()
@@ -3568,6 +3690,20 @@ impl OperationProvider for LocalOperationProvider {
                     return;
                 }
             };
+            let replaced = release::natives(
+                request
+                    .items
+                    .iter()
+                    .filter(|item| item.conflict == TransferConflict::ReplaceExisting)
+                    .map(|item| &item.record.original),
+            );
+            let cleaned = release::natives(&request.cleanup_locations);
+            operation
+                .release(
+                    moved.into_iter().chain(replaced).chain(cleaned).collect(),
+                    &operation_cancellable,
+                )
+                .await;
             let names = NamePolicy::new(request.names);
             let progress =
                 TransferProgressTracker::new(request.id, total_bytes, total_files, emit.clone());
@@ -3630,7 +3766,7 @@ impl OperationProvider for LocalOperationProvider {
                         Some(&mut affected_locations),
                         copying,
                         &|original, _| {
-                            if let ReplacedOriginal::Trashed(identity) = original {
+                            if let ReplacedOriginal::Trashed(Some(identity)) = original {
                                 emit(OperationEvent::ItemTrashed {
                                     request_id: request.id,
                                     location: item.record.original.clone(),
@@ -3794,12 +3930,21 @@ impl OperationProvider for LocalOperationProvider {
                     affected_locations.insert(parent);
                 }
             }
+            let roots = release::natives([&current]);
+            let operation =
+                ActiveOperation::begin(release::parents(&release::natives([&current, &original])));
+            operation.release(roots, &operation_cancellable).await;
             let result = if operation_cancellable.is_cancelled() {
                 Err(cancelled_local_operation())
             } else if let (Some(source), Some(target)) =
                 (current.native_path(), original.native_path())
             {
-                rename_native(source.to_path_buf(), target.to_path_buf()).await
+                rename_native(
+                    source.to_path_buf(),
+                    target.to_path_buf(),
+                    &operation_cancellable,
+                )
+                .await
             } else {
                 move_file_with_progress(
                     gio_file_for_location(&current),
@@ -3837,6 +3982,13 @@ impl OperationProvider for LocalOperationProvider {
         let cancellable = gio::Cancellable::new();
         let operation_cancellable = cancellable.clone();
         let _task = glib::MainContext::default().spawn_local(async move {
+            let roots: Vec<PathBuf> = request
+                .entries
+                .iter()
+                .filter_map(|entry| entry.local_thumbnail_path().map(Path::to_path_buf))
+                .collect();
+            let operation = ActiveOperation::begin(release::parents(&roots));
+            operation.release(roots, &operation_cancellable).await;
             let targets = request
                 .entries
                 .iter()
@@ -3858,6 +4010,9 @@ impl OperationProvider for LocalOperationProvider {
         let cancellable = gio::Cancellable::new();
         let operation_cancellable = cancellable.clone();
         let _task = glib::MainContext::default().spawn_local(async move {
+            let roots = release::natives(&request.locations);
+            let operation = ActiveOperation::begin(release::parents(&roots));
+            operation.release(roots, &operation_cancellable).await;
             let mut targets = Vec::with_capacity(request.locations.len());
             for location in &request.locations {
                 targets.push(DeletionTarget::probed(location, &operation_cancellable).await);
@@ -3875,6 +4030,9 @@ impl OperationProvider for LocalOperationProvider {
         let cancellable = gio::Cancellable::new();
         let operation_cancellable = cancellable.clone();
         let _task = glib::MainContext::default().spawn_local(async move {
+            let roots = release::natives(request.created.iter().chain(&request.overwritten));
+            let operation = ActiveOperation::begin(release::parents(&roots));
+            operation.release(roots, &operation_cancellable).await;
             run_merge_undo(
                 request.id,
                 (request.created, request.overwritten, request.placed),
@@ -3896,19 +4054,24 @@ impl OperationProvider for LocalOperationProvider {
             let entries = match request.source {
                 RestoreSource::TrashEntries(items) => items
                     .into_iter()
-                    .map(|item| RestoreEntry {
-                        source: item.entry.location,
-                        display_name: item.entry.display_name,
-                        original_target: None,
-                        trash_info: None,
-                        confirmed_destination: Some(item.destination),
-                        physical_path: item.entry.thumbnail_path,
+                    .map(|item| {
+                        Ok(RestoreEntry {
+                            source: item.entry.location,
+                            display_name: item.entry.display_name,
+                            original_target: None,
+                            trash_info: None,
+                            confirmed_destination: Some(item.destination),
+                            physical_path: item.entry.thumbnail_path,
+                        })
                     })
                     .collect(),
-                RestoreSource::OriginalLocations(locations) => match trashed_entries_for_originals(
+                RestoreSource::OriginalLocations {
+                    locations,
+                    originals,
+                } => match trashed_entries_for_originals(
                     &locations,
                     &operation_cancellable,
-                    &HashMap::new(),
+                    &originals,
                 )
                 .await
                 {
@@ -3937,6 +4100,8 @@ impl OperationProvider for LocalOperationProvider {
                     }
                 },
             };
+            let found = entries.iter().flatten().cloned().collect::<Vec<_>>();
+            let _operation = restore::release_trashed(&found, &operation_cancellable).await;
             let total = entries.len();
             let mut errors = Vec::new();
             let mut restored_locations = Vec::new();
@@ -3945,19 +4110,20 @@ impl OperationProvider for LocalOperationProvider {
             let mut affected_locations = HashSet::from([Location::uri("trash:///")]);
             let context = RestoreContext::current().await;
             let unlinks = Arc::new(copy_engine::Unlinks::default());
-            let worker_count = restore_worker_count(&entries).await;
+            let worker_count = restore_worker_count(&found).await;
             let mut completed = 0;
             let mut cut_off = Vec::new();
+            let source = |entry: &Result<RestoreEntry, (Location, glib::Error)>| match entry {
+                Ok(entry) => entry.source.clone(),
+                Err((original, _)) => original.clone(),
+            };
             for chunk in entries.chunks(worker_count) {
                 if operation_cancellable.is_cancelled() {
                     emit(cancelled_event(
                         request.id,
                         restored,
                         failed_locations,
-                        entries[completed..]
-                            .iter()
-                            .map(|entry| entry.source.clone())
-                            .collect(),
+                        entries[completed..].iter().map(source).collect(),
                         affected_locations,
                     ));
                     return;
@@ -3971,14 +4137,20 @@ impl OperationProvider for LocalOperationProvider {
                         let cancellable = operation_cancellable.clone();
                         main_context.spawn_local(async move {
                             let mut affected = HashSet::new();
-                            let result = restore_trash_entry(
-                                &entry,
-                                &context,
-                                &mut affected,
-                                &unlinks,
-                                &cancellable,
-                            )
-                            .await;
+                            let result = match &entry {
+                                Ok(entry) => restore_trash_entry(
+                                    entry,
+                                    &context,
+                                    &mut affected,
+                                    &unlinks,
+                                    &cancellable,
+                                )
+                                .await
+                                .map(|(report, identity)| {
+                                    (report, identity, restored_destination(entry))
+                                }),
+                                Err((_, refused)) => Err(refused.clone()),
+                            };
                             (entry, result, affected)
                         })
                     })
@@ -3986,39 +4158,44 @@ impl OperationProvider for LocalOperationProvider {
                 for task in tasks {
                     let (entry, result, affected) = match task.await {
                         Ok(outcome) => outcome,
-                        Err(_) => {
-                            let entry = entries[completed].clone();
-                            (
-                                entry,
-                                Err(io_error("Restore worker failed")),
-                                HashSet::new(),
-                            )
-                        }
+                        Err(_) => (
+                            entries[completed].clone(),
+                            Err(io_error("Restore worker failed")),
+                            HashSet::new(),
+                        ),
+                    };
+                    let display_name = match &entry {
+                        Ok(entry) => entry.display_name.clone(),
+                        Err((original, _)) => original.display_name(),
                     };
                     affected_locations.extend(affected);
                     completed += 1;
                     let restored_location = match result {
                         Err(error) if was_cancelled(&error) => {
-                            cut_off.push(entry.source.clone());
+                            cut_off.push(source(&entry));
                             None
                         }
                         Err(error) => {
                             errors.push(item_error(
-                                &entry.display_name,
+                                &display_name,
                                 crate::services::gio_error_detail(&error),
                             ));
-                            failed_locations.push(entry.source.clone());
+                            failed_locations.push(source(&entry));
                             None
                         }
-                        Ok(report) => {
+                        Ok((report, identity, destination)) => {
                             if !report.is_empty() {
                                 emit(OperationEvent::ItemsReported {
                                     request_id: request.id,
                                     report,
                                 });
                             }
-                            restored_locations.push(entry.source.clone());
-                            let destination = restored_destination(&entry);
+                            restored_locations.push(source(&entry));
+                            emit(OperationEvent::ItemRestored {
+                                request_id: request.id,
+                                location: destination.clone(),
+                                identity,
+                            });
                             restored.push(destination.clone());
                             Some(destination)
                         }
@@ -4031,11 +4208,7 @@ impl OperationProvider for LocalOperationProvider {
                     });
                 }
                 if !cut_off.is_empty() || operation_cancellable.is_cancelled() {
-                    cut_off.extend(
-                        entries[completed..]
-                            .iter()
-                            .map(|entry| entry.source.clone()),
-                    );
+                    cut_off.extend(entries[completed..].iter().map(source));
                     emit(cancelled_event(
                         request.id,
                         restored,
@@ -4064,13 +4237,28 @@ impl OperationProvider for LocalOperationProvider {
         operation_handle(cancellable)
     }
 
+    fn recover(&self, request: RecoverRequest, emit: Rc<dyn Fn(OperationEvent)>) -> LoadHandle {
+        leftovers::start_recovery(request, emit)
+    }
+
+    fn sweep_probes(&self, folder: &Location, names: &[OsString]) {
+        leftovers::start_sweep(folder, names);
+    }
+
+    fn review_leftovers(
+        &self,
+        folder: &Location,
+        names: Vec<OsString>,
+        done: Box<dyn FnOnce(Vec<crate::services::ReviewedLeftover>)>,
+    ) -> LoadHandle {
+        leftovers::start_review(folder, names, done)
+    }
+
     fn compress(&self, request: CompressRequest, emit: Rc<dyn Fn(OperationEvent)>) -> LoadHandle {
-        super::volume::watch_operation_mounts();
         archive::compress(request, emit)
     }
 
     fn extract(&self, request: ExtractRequest, emit: Rc<dyn Fn(OperationEvent)>) -> LoadHandle {
-        super::volume::watch_operation_mounts();
         archive::extract(request, emit)
     }
 }

@@ -188,10 +188,10 @@ const TARGETS: &[Target] = &[
         aliases: "file transfers drag drop destination navigate reveal copy move",
     },
     Target {
-        id: "refresh",
+        id: "watch-network-folders",
         page: "general",
-        title: "Auto-refresh folder",
-        aliases: "performance timer reload network share monitors",
+        title: "Watch network folders",
+        aliases: "performance network share nfs smb sftp remote changes check refresh reload monitor",
     },
     Target {
         id: "video",

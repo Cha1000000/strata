@@ -338,6 +338,11 @@ fn top_level_items_a_destination_takes_for_an_earlier_one_are_numbered_and_repor
         case_insensitive: true,
         ..Quirks::ext4()
     };
+    let case_insensitive_sftp_server = || Quirks {
+        case_insensitive: true,
+        alias_inodes: true,
+        ..Quirks::sshfs()
+    };
     // Past eight files a paste copies several at once.
     let padding = (0..8)
         .map(|index| format!("pad {index}"))
@@ -345,6 +350,10 @@ fn top_level_items_a_destination_takes_for_an_earlier_one_are_numbered_and_repor
     for (mount, preset) in [
         ("casefolded ext4", casefolded as Preset),
         ("cifs", Quirks::cifs),
+        (
+            "sshfs to a case-insensitive server",
+            case_insensitive_sftp_server,
+        ),
     ] {
         for moving in [false, true] {
             for parallel in [false, true] {
@@ -368,7 +377,7 @@ fn top_level_items_a_destination_takes_for_an_earlier_one_are_numbered_and_repor
                         fs::write(source.join(name), name)?;
                     }
                 }
-                let sources = FsQuirks::install(&source, Quirks::default());
+                let sources = FsQuirks::install(&source, Quirks::ext4());
                 let _destination = FsQuirks::install(&destination, preset());
 
                 let events = run_paste(PasteRequest {

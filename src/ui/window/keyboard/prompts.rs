@@ -20,7 +20,7 @@ use crate::{
     model::{FileEntry, Location},
     services::NavigationHistory,
     ui::{
-        browser::{BrowserView, CreateRefusal, typed_rename_is_taken},
+        browser::{BrowserView, CreateRefusal},
         folder_picker::{self, FolderPicker, Refused, Request},
         keys::{KeyPress, bindings::*},
         shortcut_footer::{CandidateKeys, ShortcutFooter},
@@ -311,9 +311,11 @@ impl Dispatcher {
             };
             let taken = match paths {
                 Some((current, wanted)) if unstorable.is_none() => {
-                    gtk::gio::spawn_blocking(move || typed_rename_is_taken(&current, &wanted))
-                        .await
-                        .unwrap_or(false)
+                    gtk::gio::spawn_blocking(move || {
+                        crate::adapters::typed_rename_is_taken(&current, &wanted)
+                    })
+                    .await
+                    .unwrap_or(false)
                 }
                 _ => false,
             };

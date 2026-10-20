@@ -37,10 +37,13 @@ Each tab retains its location, selection, navigation history, preview and search
 state. Tab locations persist across restarts: a plain launch (no folder
 argument, reveal request, or unlock target) reopens the previous tabs in order
 with the previously active tab selected, when **Settings → General → Startup →
-Restore open tabs** is on (the default). Missing directories, credential-bearing
-URIs, and transient locations such as trashed-item children, non-root Recent
-entries, and camera roots are skipped; with nothing restorable the window opens
-at the default directory as before. Windows opened for an explicit folder,
+Restore open tabs** is on (the default). Credential-bearing URIs and transient
+locations such as trashed-item children, non-root Recent entries, and camera
+roots are skipped; with nothing restorable the window opens at the default
+directory as before. Every saved folder gets its tab at once and is checked off
+the interface thread: a folder proven missing or not a folder closes its tab,
+and one that cannot be checked, such as on a server that does not answer, keeps
+its tab and shows its error. Windows opened for an explicit folder,
 reveal request, or unlock target never overwrite the saved session; with
 several plain-launch windows open the most recently changed one wins. Selection, history, and preview state stay
 in-memory. Appearance preferences and the clipboard remain
@@ -111,11 +114,15 @@ request — selects that target instead of restoring the remembered position.
 
 ## Refreshing a directory
 
-F5, the pane's Refresh button, Auto-refresh, and the rescan after a burst of
-external changes keep the selection, the keyboard cursor and the keyboard focus in
+F5, the pane's Refresh button, the rescan after a burst of external changes, and
+the re-read that a check of a network folder starts when it finds a change keep
+the selection, the keyboard cursor and the keyboard focus in
 every view: a focused row stays focused, and a focused Ctrl+F field keeps focus and
 its text. Icons and List also keep the scroll position. When the item under the
 cursor is gone, the cursor moves to the item now in its place without selecting it.
+On a mount that stopped answering, F5 and Refresh keep the rows as they are
+instead of clearing them; see
+[Unresponsive mounts](filesystem-compatibility.md#unresponsive-mounts).
 
 ## Creating files and folders
 
@@ -178,10 +185,13 @@ unchanged.
 
 Results follow the watched folders live: the open folder, and in Columns every open
 column. A matching file that another program creates or renames there appears within
-about a second, and a deleted one leaves the results as soon as the listing drops it.
+about a second, and one that another computer adds to a network folder at its next
+check, at first every 3 s in a focused window and less often otherwise
+([Cadence](filesystem-compatibility.md#cadence) says when checks slow down or stop).
+A deleted one leaves the results as soon as the listing drops it.
 With [Include subfolders](preferences.md#filter-scope) on, changes in folders below
-those reach the results on **F5**, Auto-refresh, the rescan after a burst of external
-changes, or when the filter is cleared and opened again.
+those reach the results on **F5**, the rescan after a burst of external changes, or
+when the filter is cleared and opened again.
 When another program renames the open folder itself, the view follows it and a filter
 typed in that folder ends, while filters and **Ctrl+K** searches rooted above it follow
 the rename. When the open folder is deleted or moved into another folder, the view

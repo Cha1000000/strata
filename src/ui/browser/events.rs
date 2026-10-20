@@ -350,6 +350,14 @@ impl ViewState {
                     set_column_busy(column, true);
                 }
             }
+            BrowserEvent::ColumnNotResponding {
+                depth,
+                not_responding,
+            } => {
+                if let Some(column) = self.columns.borrow().get(*depth) {
+                    column.not_responding.set_visible(*not_responding);
+                }
+            }
             BrowserEvent::ColumnReloaded { depth } => {
                 if let Some(column) = self.columns.borrow().get(*depth) {
                     super::pane_header::sync_column_sort_direction(
@@ -685,6 +693,9 @@ impl ViewState {
             }
             BrowserEvent::RenameCompleted { request_id } => {
                 self.complete_pending_rename(*request_id);
+                if let Some(recovered) = self.take_recovered_item() {
+                    self.rename_created_entry(&recovered);
+                }
                 self.prune_stale_search_results();
                 self.finish_keyboard_refocus(
                     super::file_commands::KeyboardRefocus::Rename(*request_id),
@@ -693,12 +704,18 @@ impl ViewState {
             }
             BrowserEvent::RenameAbandoned { request_id } => {
                 self.abandon_pending_rename(*request_id);
+                if self.take_recovered_item().is_some() {
+                    self.cancel_new_entry();
+                }
             }
             BrowserEvent::RenameFailed {
                 request_id,
                 message,
             } => {
                 self.fail_pending_rename_from_browser(*request_id);
+                if self.take_recovered_item().is_some() {
+                    self.cancel_new_entry();
+                }
                 if let Some(request_id) = request_id {
                     self.finish_keyboard_refocus(
                         super::file_commands::KeyboardRefocus::Rename(*request_id),
@@ -799,9 +816,10 @@ impl ViewState {
                 crate::ui::preferences::PreferenceManager::shared()
                     .forget_folder_views_within(location, *trash_identity);
             }
-            BrowserEvent::ItemRestored { location } => {
-                customization::restore_item_customizations(location);
-                crate::ui::preferences::PreferenceManager::shared().restore_folder_views(location);
+            BrowserEvent::ItemRestored { location, identity } => {
+                customization::restore_item_customizations(location, *identity);
+                crate::ui::preferences::PreferenceManager::shared()
+                    .restore_folder_views(location, *identity);
             }
             BrowserEvent::DeletionStarted { total } => {
                 let browser = self.browser.clone();
@@ -1019,6 +1037,12 @@ impl ViewState {
             }
             BrowserEvent::EmptyTrashRequested => {
                 self.load_trash_summary();
+            }
+            BrowserEvent::LeftoverReviewRequested { depth } => {
+                self.show_leftover_review(*depth);
+            }
+            BrowserEvent::LeftoversChanged { depth, announce } => {
+                self.follow_leftovers(*depth, *announce);
             }
             BrowserEvent::LocationNavigationRejected { error } => {
                 let credentials = self.pending_location_credentials.take();
@@ -1492,14 +1516,15 @@ impl ViewState {
         self.mode_views.borrow().show_empty_if_empty(depth);
     }
 
-    pub(super) fn prune_stale_search_results(&self) {
+    pub(super) fn prune_stale_search_results(self: &Rc<Self>) {
         let columns = self.columns.borrow().clone();
-        let mut changed = false;
         for column in &columns {
-            changed |= prune_missing_search_results(column);
-        }
-        if changed {
-            self.notify_search_selection_changed();
+            let weak = Rc::downgrade(self);
+            prune_missing_search_results(column, move || {
+                if let Some(state) = weak.upgrade() {
+                    state.notify_search_selection_changed();
+                }
+            });
         }
         self.mode_views.borrow().prune_stale_search_results();
     }

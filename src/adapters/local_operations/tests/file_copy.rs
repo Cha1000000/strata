@@ -8,9 +8,8 @@ use std::{
 
 use rustix::io::Errno;
 
-use super::fs_quirks::{Call, NameOpens, Op, Racer, Support, TmpfileLink};
+use super::fs_quirks::{Call, NameOpens, Op, Racer, Support, TmpfileLink, evict};
 use super::*;
-use crate::adapters::local_operations::{bounded_local_worker_count, local_device_is_rotational};
 use crate::adapters::volume::{XattrNamespace, mount_capabilities};
 
 struct Mounts {
@@ -85,49 +84,25 @@ fn xattrs_set(calls: &[Call]) -> Vec<OsString> {
 #[test]
 fn a_file_being_copied_is_invisible_until_complete() -> Result<(), Box<dyn Error>> {
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock()?;
-    let seen = Arc::new(Mutex::new(None));
-    let mounts = mounts(Quirks::default(), |destination| Quirks {
-        before: vec![(Op::Write, "*", 0, list_into(destination, &seen))],
-        ..Quirks::default()
-    })?;
-    let contents = patterned(2 * 1024 * 1024);
-    let source = mounts.source(&contents)?;
-
-    copy(&source, &mounts.target())?;
-
-    let seen = seen
-        .lock()
-        .map_err(|error| error.to_string())?
-        .take()
-        .ok_or("the copy wrote nothing")?;
-    assert!(seen.iter().all(|name| name.starts_with('.')), "{seen:?}");
-    if mount_capabilities(mounts.destination_scope.key()).tmpfile == Some(true) {
-        assert!(seen.is_empty(), "{seen:?}");
-    }
-    assert_eq!(fs::read(mounts.target())?, contents);
-    Ok(())
-}
-
-#[test]
-fn files_use_a_hidden_stage_where_tmpfiles_are_unavailable() -> Result<(), Box<dyn Error>> {
-    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock()?;
-    for (case, preset, probed) in [
+    for (case, preset, emulated) in [
+        ("tmpfiles", Quirks::default as Preset, None),
         (
             "tmpfiles refused",
-            (|| Quirks {
+            || Quirks {
                 tmpfile: Support::Rejected(Errno::OPNOTSUPP),
                 ..Quirks::ext4()
-            }) as Preset,
-            true,
+            },
+            Some((1, Some(false))),
         ),
-        ("NFS", Quirks::nfs42, false),
+        ("NFS", Quirks::nfs42, Some((0, None))),
     ] {
         let seen = Arc::new(Mutex::new(None));
         let mounts = mounts(Quirks::default(), |destination| Quirks {
             before: vec![(Op::Write, "*", 0, list_into(destination, &seen))],
             ..preset()
         })?;
-        let source = mounts.source(b"contents")?;
+        let contents = patterned(2 * 1024 * 1024);
+        let source = mounts.source(&contents)?;
 
         copy(&source, &mounts.target())?;
 
@@ -136,18 +111,61 @@ fn files_use_a_hidden_stage_where_tmpfiles_are_unavailable() -> Result<(), Box<d
             .map_err(|error| error.to_string())?
             .take()
             .ok_or("the copy wrote nothing")?;
-        assert!(
-            matches!(seen.as_slice(), [stage] if stage.starts_with(".strata-copy-")),
-            "{case}: {seen:?}"
-        );
         let scope = &mounts.destination_scope;
-        assert_eq!(scope.count(Op::OpenTmpfile), usize::from(probed), "{case}");
-        if probed {
-            assert_eq!(mount_capabilities(scope.key()).tmpfile, Some(false));
+        let learned = mount_capabilities(scope.key()).tmpfile;
+        let opened = scope.count(Op::OpenTmpfile);
+        match emulated {
+            Some(expected) => assert_eq!((opened, learned), expected, "{case}"),
+            None if learned == Some(true) => assert_eq!(opened, 1, "{case}"),
+            None => {}
+        }
+        if learned == Some(true) {
+            assert!(seen.is_empty(), "{case}: {seen:?}");
+        } else {
+            assert!(
+                matches!(seen.as_slice(), [stage] if stage.starts_with(".strata-copy-")),
+                "{case}: {seen:?}"
+            );
         }
         assert_eq!(names(&mounts.destination)?, ["target.bin"], "{case}");
-        assert_eq!(fs::read(mounts.target())?, b"contents");
+        assert_eq!(fs::read(mounts.target())?, contents, "{case}");
     }
+    Ok(())
+}
+
+#[test]
+fn a_stage_only_a_held_descriptor_tells_apart_is_held_until_it_is_published()
+-> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock()?;
+    let evicted = Arc::new(Mutex::new(None));
+    let outcome = evicted.clone();
+    let mounts = mounts(Quirks::default(), move |destination| {
+        let folder = destination.to_path_buf();
+        let evicting: Racer = Box::new(move || {
+            let stage = names(&folder)
+                .expect("list the destination")
+                .into_iter()
+                .find(|name| name.starts_with(".strata-copy-"))
+                .expect("a stage");
+            *outcome.lock().expect("outcome") = Some(evict(&folder.join(stage)));
+        });
+        Quirks {
+            tmpfile: Support::Rejected(Errno::OPNOTSUPP),
+            before: vec![(Op::Rename, ".strata-copy-*", 0, evicting)],
+            ..Quirks::sshfs()
+        }
+    })?;
+    let contents = patterned(64 * 1024);
+    let source = mounts.source(&contents)?;
+
+    copy(&source, &mounts.target())?;
+
+    assert_eq!(
+        *evicted.lock().map_err(|error| error.to_string())?,
+        Some(false)
+    );
+    assert_eq!(names(&mounts.destination)?, ["target.bin"]);
+    assert_eq!(fs::read(mounts.target())?, contents);
     Ok(())
 }
 
@@ -300,6 +318,117 @@ fn a_folder_removed_before_the_link_leaves_tmpfiles_in_use() -> Result<(), Box<d
     assert_eq!(scope.count(Op::OpenTmpfile), 1, "{:?}", scope.calls());
     assert!(!scope.used_name(".strata-copy-*"));
     assert_eq!(fs::read(root.path().join("target.txt"))?, b"contents");
+    Ok(())
+}
+
+#[test]
+fn what_a_mount_learns_of_its_copy_support_stays_with_that_mount() -> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock()?;
+    for (case, learner, learned) in [
+        (
+            "AT_EMPTY_PATH refused",
+            (|| Quirks {
+                tmpfile_link: TmpfileLink::ProcOnly,
+                ..Quirks::default()
+            }) as Preset,
+            [(Op::OpenTmpfile, 1), (Op::LinkFd, 1)],
+        ),
+        (
+            "no form of link",
+            || Quirks {
+                tmpfile_link: TmpfileLink::Unavailable,
+                ..Quirks::default()
+            },
+            [(Op::OpenTmpfile, 0), (Op::LinkFd, 0)],
+        ),
+        (
+            "copy_file_range missing",
+            || Quirks {
+                fail: vec![(Op::CopyRange, "*", 0, Errno::NOSYS)],
+                ..Quirks::default()
+            },
+            [(Op::CopyRange, 0), (Op::LinkFd, 1)],
+        ),
+    ] {
+        let without_clones = |quirks: Quirks| Quirks {
+            reflink: Support::Rejected(Errno::OPNOTSUPP),
+            ..quirks
+        };
+        let (learning, bystanding) = (tempfile::tempdir()?, tempfile::tempdir()?);
+        let learner_scope = FsQuirks::install(learning.path(), without_clones(learner()));
+        let bystander_scope =
+            FsQuirks::install(bystanding.path(), without_clones(Quirks::default()));
+        for folder in [learning.path(), bystanding.path()] {
+            fs::write(folder.join("source.bin"), b"contents")?;
+        }
+        copy(
+            &learning.path().join("source.bin"),
+            &learning.path().join("first.bin"),
+        )?;
+        copy(
+            &bystanding.path().join("source.bin"),
+            &bystanding.path().join("target.bin"),
+        )?;
+        learner_scope.clear_calls();
+        drop(FsQuirks::install(
+            tempfile::tempdir()?.path(),
+            Quirks::default(),
+        ));
+        copy(
+            &learning.path().join("source.bin"),
+            &learning.path().join("second.bin"),
+        )?;
+
+        for (op, count) in learned {
+            assert_eq!(learner_scope.count(op), count, "{case}: {op:?}");
+        }
+        assert_eq!(bystander_scope.count(Op::OpenTmpfile), 1, "{case}");
+        assert_eq!(bystander_scope.count(Op::LinkFd), 1, "{case}");
+        assert!(bystander_scope.count(Op::CopyRange) > 0, "{case}");
+        assert!(!bystander_scope.used_name(".strata-copy-*"), "{case}");
+        assert_eq!(fs::read(learning.path().join("second.bin"))?, b"contents");
+        assert_eq!(fs::read(bystanding.path().join("target.bin"))?, b"contents");
+    }
+    Ok(())
+}
+
+#[test]
+fn a_mount_found_unable_to_link_tmpfiles_stays_so_while_another_copy_opens_one()
+-> Result<(), Box<dyn Error>> {
+    let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock()?;
+    let folder = tempfile::tempdir()?;
+    let source = folder.path().join("source.bin");
+    fs::write(&source, b"contents")?;
+    let alongside = |name: &str| -> Racer {
+        let (source, target) = (source.clone(), folder.path().join(name));
+        Box::new(move || {
+            glib::MainContext::new()
+                .block_on(copy_new_recursively(
+                    gio::File::for_path(&source),
+                    gio::File::for_path(&target),
+                    gio::Cancellable::new(),
+                ))
+                .expect("the copy alongside");
+        })
+    };
+    let scope = FsQuirks::install(
+        folder.path(),
+        Quirks {
+            tmpfile_link: TmpfileLink::Unavailable,
+            before: vec![
+                (Op::OpenTmpfile, "*", 0, alongside("first.bin")),
+                (Op::LinkFd, "second.bin", 0, alongside("third.bin")),
+            ],
+            ..Quirks::default()
+        },
+    );
+
+    copy(&source, &folder.path().join("second.bin"))?;
+
+    assert_eq!(scope.count(Op::OpenTmpfile), 2);
+    for name in ["first.bin", "second.bin", "third.bin"] {
+        assert_eq!(fs::read(folder.path().join(name))?, b"contents", "{name}");
+    }
     Ok(())
 }
 
@@ -996,13 +1125,11 @@ fn selected_names_of_a_linked_file_on_an_smb_share_are_opened_one_at_a_time()
             after: vec![(Op::OpenSource, "linked-*", 0, hold)],
             ..Quirks::default()
         };
-        let mounts = mounts(smb, |_| Quirks::default())?;
-        let folder = fs::File::open(&mounts.sources)?;
-        let rotational = thread::spawn(move || local_device_is_rotational(&folder))
-            .join()
-            .map_err(|_| "reading whether the disk is rotational")?;
-        let available = thread::available_parallelism().map_or(1, usize::from);
-        if bounded_local_worker_count(available, rotational == Some(true)) < 2 {
+        let mounts = mounts(smb, |_| Quirks {
+            rotational: Some(false),
+            ..Quirks::default()
+        })?;
+        if thread::available_parallelism().map_or(1, usize::from) < 2 {
             eprintln!("skipped: the bulk path copies one file at a time on this machine");
             return Ok(());
         }

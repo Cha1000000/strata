@@ -542,9 +542,16 @@ fn install_file_drop(state: &Rc<TabWindow>, id: u64, widget: &gtk::Box, browser:
         if file_drop_action(target, &drop_state).is_empty() {
             return false;
         }
-        let commit = file_drop_commit(target, &destination, &sources, &drop_state);
         state.select(id);
-        browser.commit_file_drop(destination, sources, commit);
+        file_drop_commit(
+            target,
+            destination,
+            sources,
+            &drop_state,
+            move |destination, sources, commit| {
+                browser.commit_file_drop(destination, sources, commit);
+            },
+        );
         true
     });
     widget.add_controller(target);

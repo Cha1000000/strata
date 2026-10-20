@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 
-use gtk::prelude::*;
+use gtk::{glib, prelude::*};
 
 use crate::{
     assets::{self, icons},
@@ -21,9 +21,6 @@ pub(super) fn install_command(command: &str, finished: &str) -> gtk::Box {
     let field = copyable_command(command);
     field.add_css_class("install-command");
     container.append(&field);
-    let Some(terminal) = Terminal::resolve() else {
-        return container;
-    };
     let label = crate::i18n::tr("Run in terminal");
     let run = gtk::Button::builder()
         .tooltip_text(&label)
@@ -48,17 +45,29 @@ pub(super) fn install_command(command: &str, finished: &str) -> gtk::Box {
     let arguments = terminal_install_arguments(command);
     let finished = finished.to_owned();
     run.connect_clicked(move |_| {
-        match terminal::spawn_reaped(terminal.exec_command(&arguments)) {
-            Ok(()) => {
-                status.remove_css_class("error");
-                status.set_text(&finished);
+        let arguments = arguments.clone();
+        let (status, finished) = (status.clone(), finished.clone());
+        glib::MainContext::default().spawn_local(async move {
+            let launched = terminal::spawn_reaped(move || {
+                let terminal = Terminal::resolve().ok_or_else(terminal::no_terminal_message)?;
+                terminal
+                    .exec_command(&arguments)
+                    .spawn()
+                    .map_err(|error| terminal.launch_failure(&error))
+            })
+            .await;
+            match launched {
+                Ok(()) => {
+                    status.remove_css_class("error");
+                    status.set_text(&finished);
+                }
+                Err(message) => {
+                    status.add_css_class("error");
+                    status.set_text(&message);
+                }
             }
-            Err(error) => {
-                status.add_css_class("error");
-                status.set_text(&terminal.launch_failure(&error));
-            }
-        }
-        status.set_visible(true);
+            status.set_visible(true);
+        });
     });
     container
 }

@@ -185,13 +185,7 @@ impl PageState {
         let action_id = action.id().to_owned();
         let anchor = row.clone();
         toggle.connect_state_set(move |_, enabled| {
-            if let Err(message) = state.set_enabled(&action_id, enabled) {
-                show_error_dialog(
-                    &anchor,
-                    &crate::i18n::tr("Unable to save the action"),
-                    &message,
-                );
-            }
+            state.set_enabled(&action_id, enabled, &anchor);
             glib::Propagation::Proceed
         });
         heading.append(&toggle);
@@ -238,43 +232,86 @@ impl PageState {
         row
     }
 
-    fn set_enabled(self: &Rc<Self>, id: &str, enabled: bool) -> Result<(), String> {
-        let Some(action) = self.registry.catalog().get(id).cloned() else {
-            return Err(rust_i18n::t!("The action “%{id}” no longer exists", id = id).into_owned());
+    fn set_enabled(self: &Rc<Self>, id: &str, enabled: bool, anchor: &gtk::Box) {
+        let failed = {
+            let anchor = anchor.clone();
+            move |message: &str| {
+                show_error_dialog(
+                    &anchor,
+                    &crate::i18n::tr("Unable to save the action"),
+                    message,
+                );
+            }
         };
-        let mut definition = action.definition.clone();
-        definition.enabled = enabled;
-        Self::save(self, &definition, None)
+        let saved = self.registry.set_enabled(id.to_owned(), enabled);
+        let state = self.clone();
+        glib::MainContext::default().spawn_local(async move {
+            match saved.await {
+                Ok(()) => PageState::render(&state),
+                Err(error) => failed(&error.user_message()),
+            }
+        });
     }
 
     fn save(
         self: &Rc<Self>,
-        definition: &ActionDefinition,
+        definition: ActionDefinition,
         script: Option<ActionScript>,
-    ) -> Result<(), String> {
-        self.registry
-            .write(&ActionWriteRequest {
-                definition: definition.clone(),
-                script,
-            })
-            .map_err(|error| error.user_message())?;
-        PageState::render(self);
-        Ok(())
+        done: impl FnOnce(Result<(), String>) + 'static,
+    ) {
+        let saved = self
+            .registry
+            .write(ActionWriteRequest { definition, script });
+        let state = self.clone();
+        glib::MainContext::default().spawn_local(async move {
+            let saved = saved.await.map_err(|error| error.user_message());
+            if saved.is_ok() {
+                PageState::render(&state);
+            }
+            done(saved);
+        });
+    }
+
+    fn confirm_editor(
+        self: &Rc<Self>,
+        mode: EditorMode,
+        definition: ActionDefinition,
+        script: Option<ActionScript>,
+        done: impl FnOnce(Result<(), String>) + 'static,
+    ) {
+        match mode {
+            EditorMode::Create => {
+                let created = self
+                    .registry
+                    .create(ActionWriteRequest { definition, script });
+                glib::MainContext::default().spawn_local(async move {
+                    done(created.await.map_err(|error| error.user_message()));
+                });
+            }
+            EditorMode::Edit => self.save(definition, script, done),
+        }
     }
 
     fn edit(self: &Rc<Self>, button: &gtk::Button, action: Rc<ActionHandle>) {
-        let script = match self.registry.read_script(action.id()) {
-            Ok(script) => script,
-            Err(error) => {
-                show_error_dialog(
-                    button,
+        let read = self.registry.read(action.id().to_owned());
+        let state = self.clone();
+        let button = button.clone();
+        glib::MainContext::default().spawn_local(async move {
+            match read.await {
+                Ok(stored) => {
+                    let action = Rc::new(ActionHandle {
+                        definition: stored.definition,
+                        ..(*action).clone()
+                    });
+                    state.open_editor(&button, EditorMode::Edit, action, stored.script);
+                }
+                Err(error) => show_error_dialog(
+                    &button,
                     &crate::i18n::tr("Unable to read the action"),
                     &error.user_message(),
-                );
-                return;
+                ),
             }
-        };
-        self.open_editor(button, EditorMode::Edit, action, script);
+        });
     }
 
     fn start_new(self: &Rc<Self>, button: &gtk::Button) {
@@ -355,7 +392,7 @@ impl PageState {
         let weak_layer = layer.downgrade();
         let overlay_for_save = overlay.clone();
         let root_for_save = blurred_root.clone();
-        layout.confirm.connect_clicked(move |_| {
+        layout.confirm.connect_clicked(move |confirm| {
             let (definition, script) = match form_for_save.read() {
                 Ok(parsed) => parsed,
                 Err(message) => {
@@ -363,61 +400,42 @@ impl PageState {
                     return;
                 }
             };
-            let result = match mode {
-                EditorMode::Create => state
-                    .registry
-                    .create(&ActionWriteRequest { definition, script })
-                    .map_err(|error| error.user_message()),
-                EditorMode::Edit => state.save(&definition, script),
-            };
-            match result {
-                Ok(()) => {
-                    if let Some(layer) = weak_layer.upgrade() {
-                        dismiss_modal_layer(&layer, &overlay_for_save, root_for_save.as_ref());
+            confirm.set_sensitive(false);
+            let confirm = confirm.clone();
+            let form = form_for_save.clone();
+            let weak_layer = weak_layer.clone();
+            let overlay = overlay_for_save.clone();
+            let root = root_for_save.clone();
+            state.confirm_editor(mode, definition, script, move |saved| {
+                confirm.set_sensitive(true);
+                match saved {
+                    Ok(()) => {
+                        if let Some(layer) = weak_layer.upgrade() {
+                            dismiss_modal_layer(&layer, &overlay, root.as_ref());
+                        }
                     }
+                    Err(message) => form.show_error(&message),
                 }
-                Err(message) => form_for_save.show_error(&message),
-            }
+            });
         });
         overlay.add_overlay(&layer);
         form.focus_first();
     }
 
     fn duplicate(self: &Rc<Self>, button: &gtk::Button, action: &Rc<ActionHandle>) {
-        let script = match self.registry.read_script(action.id()) {
-            Ok(script) => script,
-            Err(error) => {
+        let duplicated = self
+            .registry
+            .duplicate(action.id().to_owned(), copy_name(action.name()));
+        let button = button.clone();
+        glib::MainContext::default().spawn_local(async move {
+            if let Err(error) = duplicated.await {
                 show_error_dialog(
-                    button,
+                    &button,
                     &crate::i18n::tr("Unable to duplicate the action"),
                     &error.user_message(),
                 );
-                return;
             }
-        };
-        let mut definition = action.definition.clone();
-        definition.id = match unique_copy_id(&self.registry, &definition.id) {
-            Ok(id) => id,
-            Err(message) => {
-                show_error_dialog(
-                    button,
-                    &crate::i18n::tr("Unable to duplicate the action"),
-                    &message,
-                );
-                return;
-            }
-        };
-        definition.name = copy_name(&definition.name);
-        if let Err(error) = self
-            .registry
-            .create(&ActionWriteRequest { definition, script })
-        {
-            show_error_dialog(
-                button,
-                &crate::i18n::tr("Unable to duplicate the action"),
-                &error.user_message(),
-            );
-        }
+        });
     }
 
     fn import(self: &Rc<Self>, button: &gtk::Button) {
@@ -437,27 +455,32 @@ impl PageState {
             let Some(path) = folder.path() else {
                 return;
             };
-            match state.registry.import(&path) {
-                Ok(id) => {
-                    PageState::render(&state);
-                    tracing::info!(action = %id, "imported a custom action");
-                    show_notice(
-                        &anchor,
-                        &crate::i18n::tr("Action imported"),
-                        &rust_i18n::t!(
-                            "“%{id}” was imported disabled. Review its script, then enable it.",
-                            id = id
-                        ),
-                    );
+            let imported = state.registry.import(path);
+            let state = state.clone();
+            let anchor = anchor.clone();
+            glib::MainContext::default().spawn_local(async move {
+                match imported.await {
+                    Ok(id) => {
+                        PageState::render(&state);
+                        tracing::info!(action = %id, "imported a custom action");
+                        show_notice(
+                            &anchor,
+                            &crate::i18n::tr("Action imported"),
+                            &rust_i18n::t!(
+                                "“%{id}” was imported disabled. Review its script, then enable it.",
+                                id = id
+                            ),
+                        );
+                    }
+                    Err(error) => {
+                        show_error_dialog(
+                            &anchor,
+                            &crate::i18n::tr("Unable to import the action"),
+                            &error.user_message(),
+                        );
+                    }
                 }
-                Err(error) => {
-                    show_error_dialog(
-                        &anchor,
-                        &crate::i18n::tr("Unable to import the action"),
-                        &error.user_message(),
-                    );
-                }
-            }
+            });
         });
     }
 
@@ -469,7 +492,7 @@ impl PageState {
             .title(crate::i18n::tr("Export this action to a folder"))
             .modal(true)
             .build();
-        let registry = self.registry.clone();
+        let state = self.clone();
         let anchor = button.clone();
         let id = action.id().to_owned();
         dialog.select_folder(Some(&window), gio::Cancellable::NONE, move |result| {
@@ -479,7 +502,15 @@ impl PageState {
             let Some(path) = folder.path() else {
                 return;
             };
-            match registry.export(&id, &path) {
+            state.export_to(&anchor, &id, &path);
+        });
+    }
+
+    fn export_to(&self, anchor: &gtk::Button, id: &str, folder: &std::path::Path) {
+        let exported = self.registry.export(id.to_owned(), folder.to_path_buf());
+        let anchor = anchor.clone();
+        glib::MainContext::default().spawn_local(async move {
+            match exported.await {
                 Ok(target) => show_notice(
                     &anchor,
                     &crate::i18n::tr("Action exported"),
@@ -529,18 +560,22 @@ impl PageState {
         let id = action.id().to_owned();
         let failure_anchor = button.clone();
         layout.confirm.connect_clicked(move |_| {
-            let result = state.registry.delete(&id);
+            let deleted = state.registry.delete(id.clone());
             if let Some(layer) = weak_layer.upgrade() {
                 dismiss_modal_layer(&layer, &overlay, root.as_ref());
             }
-            match result {
-                Ok(()) => PageState::render(&state),
-                Err(error) => show_error_dialog(
-                    &failure_anchor,
-                    &crate::i18n::tr("Unable to delete the action"),
-                    &error.user_message(),
-                ),
-            }
+            let state = state.clone();
+            let failure_anchor = failure_anchor.clone();
+            glib::MainContext::default().spawn_local(async move {
+                match deleted.await {
+                    Ok(()) => PageState::render(&state),
+                    Err(error) => show_error_dialog(
+                        &failure_anchor,
+                        &crate::i18n::tr("Unable to delete the action"),
+                        &error.user_message(),
+                    ),
+                }
+            });
         });
         host.overlay.add_overlay(&layer);
         layout.confirm.grab_focus();
@@ -1470,10 +1505,9 @@ fn picker_icon(name: &str) -> gtk::Image {
 }
 
 fn script_buffer(language: &str, contents: &str) -> sourceview5::Buffer {
-    let buffer = sourceview5::Buffer::new(None);
-    crate::ui::theme::register_source_buffer(&buffer);
+    let buffer = crate::ui::theme::new_source_buffer();
     buffer.set_language(
-        sourceview5::LanguageManager::default()
+        crate::ui::theme::source_languages()
             .language(language)
             .as_ref(),
     );
@@ -1577,30 +1611,4 @@ fn action_icon_name(slug: &str) -> String {
     let key = format!("action_icon.{slug}");
     let name = crate::i18n::tr(&key);
     if name == key { slug.to_owned() } else { name }
-}
-
-fn unique_copy_id(registry: &ActionRegistry, id: &str) -> Result<String, String> {
-    let catalog = registry.reload();
-    for suffix in 0..1000 {
-        let suffix = if suffix == 0 {
-            "-copy".to_owned()
-        } else {
-            format!("-copy-{suffix}")
-        };
-        let stem: String = id
-            .chars()
-            .take(crate::model::MAX_ACTION_ID_CHARS - suffix.len())
-            .collect();
-        let candidate = format!("{stem}{suffix}");
-        if candidate != id
-            && catalog.get(&candidate).is_none()
-            && !catalog
-                .failures()
-                .iter()
-                .any(|failure| failure.directory == candidate)
-        {
-            return Ok(candidate);
-        }
-    }
-    Err(rust_i18n::t!("No free action name is available for “%{id}”", id = id).into_owned())
 }

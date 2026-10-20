@@ -142,7 +142,7 @@ pub(super) fn integrations_page_with(source: Source) -> gtk::Widget {
         filter,
         expanded: RefCell::default(),
         requirements: RefCell::default(),
-        manager: PackageManager::detect(),
+        manager: Cell::new(None),
         generation: Cell::new(0),
     });
     let refresh = icon_label_button(icons::REFRESH, "Refresh");
@@ -196,7 +196,7 @@ struct Page {
     expanded: RefCell<HashSet<String>>,
     /// Requirement results by entry id, filled by a worker after the first build.
     requirements: RefCell<HashMap<String, Vec<RequirementResult>>>,
-    manager: Option<PackageManager>,
+    manager: Cell<Option<PackageManager>>,
     generation: Cell<u64>,
 }
 
@@ -231,7 +231,7 @@ impl Page {
                     let catalog: Vec<Entry> = rows.iter().map(|row| row.entry.clone()).collect();
                     integration_catalog::manual_installations(root, &catalog)
                 });
-                (rows, manual)
+                (rows, manual, PackageManager::detect())
             })
             .await;
             let Some(page) = page.upgrade() else {
@@ -240,7 +240,8 @@ impl Page {
             if page.generation.get() != generation {
                 return;
             }
-            if let Ok((rows, manual)) = scanned {
+            if let Ok((rows, manual, manager)) = scanned {
+                page.manager.set(manager);
                 page.show(rows, manual);
             }
         });
@@ -612,7 +613,7 @@ impl Page {
             );
             chips.append(&chip);
             if !result.satisfied
-                && let Some(command) = result.requirement.install_command(self.manager)
+                && let Some(command) = result.requirement.install_command(self.manager.get())
                 && !hints.contains(&command)
             {
                 hints.push(command);

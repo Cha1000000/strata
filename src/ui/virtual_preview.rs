@@ -686,7 +686,7 @@ fn reusable_document_view(
 
 fn document_uses_source_buffer(unit: &DocumentUnit) -> bool {
     highlighted_code_language(unit).is_some_and(|language| {
-        sourceview5::LanguageManager::default()
+        super::theme::source_languages()
             .language(language)
             .is_some()
     })
@@ -869,8 +869,7 @@ fn document_text_view(
     wrapped: bool,
 ) -> super::document_view::DocumentTextView {
     let buffer = if document_uses_source_buffer(unit) {
-        let buffer = sourceview5::Buffer::new(None);
-        super::theme::register_source_buffer(&buffer);
+        let buffer = super::theme::new_source_buffer();
         buffer.upcast::<gtk::TextBuffer>()
     } else {
         gtk::TextBuffer::new(Some(document_tags))
@@ -901,7 +900,7 @@ fn bind_document_text_view(
     let text = normalize_preview_text(&unit.text);
     if let Ok(source_buffer) = buffer.clone().downcast::<sourceview5::Buffer>() {
         let language = highlighted_code_language(unit)
-            .and_then(|language| sourceview5::LanguageManager::default().language(language));
+            .and_then(|language| super::theme::source_languages().language(language));
         source_buffer.set_highlight_syntax(language.is_some());
         source_buffer.set_language(language.as_ref());
         source_buffer.set_text(&text);

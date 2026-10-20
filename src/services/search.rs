@@ -16,7 +16,7 @@ use crate::model::{EntryKind, MetadataValue};
 use unicode_normalization::UnicodeNormalization;
 
 use super::{
-    is_hidden_name, native_hidden_names, native_kind,
+    file_activity, is_hidden_name, native_hidden_names, native_kind,
     path_match::{self, Frecency, PathMatcher, PathQuery, TextScore},
 };
 
@@ -266,6 +266,7 @@ pub enum SearchEvent {
         indexing: bool,
         coverage: SearchCoverage,
         has_more: bool,
+        candidates: usize,
     },
 }
 
@@ -1366,6 +1367,7 @@ fn build_index(
         .iter()
         .map(|root| (root.clone(), build_root_overrides(root)))
         .collect();
+    let mut real_roots: HashMap<PathBuf, PathBuf> = HashMap::new();
     let initial_directory_batch = initial_directory_batch.max(1);
     let max_pending_directories = max_pending_directories.max(1);
     let directory_batch_limit = (max_entries / 100).clamp(1, 64);
@@ -1409,6 +1411,25 @@ fn build_index(
         if index.indexing_cancelled() {
             return;
         }
+        if !real_roots.contains_key(&directory.root) {
+            let real = directory
+                .root
+                .canonicalize()
+                .unwrap_or_else(|_| directory.root.clone());
+            real_roots.insert(directory.root.clone(), real);
+        }
+        let real_root = &real_roots[&directory.root];
+        let real = match directory.path.strip_prefix(&directory.root) {
+            Ok(relative) if !relative.as_os_str().is_empty() => real_root.join(relative),
+            _ => real_root.clone(),
+        };
+        let Ok(hold) = file_activity::hold([&directory.path, &real], || {}) else {
+            coverage.unreadable = true;
+            if !branch.is_empty() {
+                pending_branches.push_back(branch);
+            }
+            continue;
+        };
         let overrides = root_overrides.get(&directory.root).expect("root overrides");
         let mut walker =
             directory_walker(&directory, overrides, boundaries.clone(), show_hidden).peekable();
@@ -1420,6 +1441,10 @@ fn build_index(
         let exhausted = loop {
             if index.indexing_cancelled() {
                 return;
+            }
+            if hold.stopped() {
+                coverage.unreadable = true;
+                break true;
             }
             if walk_start.elapsed() >= time_budget {
                 coverage.time_limit = true;
@@ -1519,6 +1544,7 @@ fn build_index(
             }
         };
         drop(walker);
+        drop(hold);
         // Within a branch, depth puts the continuation ahead of this slice's
         // children, but earlier slices' children retain their lower work keys.
         let resume_work = directory.virtual_work.saturating_add(slice_work);
@@ -1715,14 +1741,25 @@ fn publish(
         items: progress
             .matches
             .iter()
-            .map(|(_, item)| item.clone())
+            .map(|(_, item)| item)
+            .filter(|item| search_path_present(&item.path))
+            .cloned()
             .collect(),
         indexing,
         coverage,
         has_more: progress.limit > 0
             && progress.matches.len() == progress.limit
             && progress.limit < MAX_INDEX_ENTRIES,
+        candidates: progress.matches.len(),
     });
+}
+
+fn search_path_present(path: &Path) -> bool {
+    // Preserve dangling symlinks and uncertain paths; only confirmed absence removes a hit.
+    path.symlink_metadata().map_or_else(
+        |error| error.kind() != std::io::ErrorKind::NotFound,
+        |_| true,
+    )
 }
 
 fn filter_score_normalized(item: &SearchItem, query: &str) -> Option<i64> {

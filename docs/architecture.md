@@ -148,7 +148,7 @@ The browser and open/save chooser use the same collection behavior, not a univer
 | Owner | Responsibility and intentional differences |
 | --- | --- |
 | `ui/collection_interaction.rs` | Display-position pointer transitions (Ctrl toggle, Shift range, plain selection/drag-group preservation) and press/release/cancel ownership. Modified sequences are claimed only on release so marquee can participate. |
-| `ui/search_session.rs` | Root, hidden-file and recursive-scope inputs; worker/receiver, query intent, generation, bounded event draining, cancellation and status/coverage delivery. It knows neither widgets nor acceptance/navigation policy. |
+| `ui/search_session.rs` | Root, hidden-file and recursive-scope inputs; worker/receiver, query intent, generation, bounded event draining, cancellation, status/coverage delivery, pruning the hits a worker proves gone, and starting a confined source's search only once a worker places its root inside the boundary. It knows neither widgets nor acceptance/navigation policy. |
 | `ui/inline_search.rs` | Single-pane search composition and transactional consumer selection publication. `inline_search/collection.rs` owns stable result objects and displayed-order lookup; `presentation.rs` builds and binds typed row/card parts. |
 | `ui/browser/columns/search.rs` | Native Columns result reconciliation. Its result vector is authoritative; the string model is only a label projection, updated in lockstep under selection suppression. Columns keeps its multi-depth navigation and native collection. |
 | `ui/collection_edit.rs` | A rename lease on an entry identity and typed editor/display handles: validation, submission signals, cancellation, focus, reveal tick and cleanup. It has no `ViewState` or `browser_modes` dependency. |
@@ -167,6 +167,9 @@ selection slot; Columns intentionally leaves the selection empty when its select
 vanishes. Columns uses per-column hidden-file preferences and does not display a separate
 coverage/status row; single-pane search uses browser preferences and shows partial coverage or
 empty/indexing status. Nonlocal locations keep their native, nonrecursive filter fallback.
+The search worker drops hits whose files are proven gone before it publishes them, and pruning
+after a file operation asks the probe module, so neither surface checks a hit on the interface
+thread; any answer but a proven absence keeps the hit.
 The shared session preserves these adapter policies rather than normalizing them.
 
 During single-pane reconciliation, consumer selection callbacks are suppressed until model,
@@ -263,8 +266,33 @@ what a move read so that only unchanged sources are deleted. `owed.rs` batches t
 paste owes behind one durability barrier per destination filesystem, and the completion report
 reaches the UI as `OperationEvent::ItemsReported`. Replacement/merge, deletion, restore/undo and
 progress orchestration live in their adjacent `replacement`, `deletion`, `restore` and `progress`
-modules. `native_fs` owns shared descriptor and identity primitives; the syscall seam composes
-`FsEnvironment` for Trash, mount-table and udev queries without a second injection registry.
+modules. `native_fs` owns shared descriptor primitives, the per-mount identity rule (`compare`)
+and `Pinned`, the `O_PATH` hold for items nothing else proves; the syscall seam composes
+`FsEnvironment` for Trash, mount-table, udev and `/proc` holder queries without a second injection
+registry. Identities that outlive an operation (Trash items, saved views of trashed items, a
+folder's load stamp) are `services/item_identity.rs`'s `ItemIdentity`, which carries its mount's
+traits and compares without I/O.
+
+Every mutating `OperationProvider` entry, Empty Trash and a drive's unmount hold an
+`ActiveOperation` (`adapters/local_operations/release.rs`) until their final event. It registers
+the operation in `services/file_activity.rs`, the in-memory registry of Strata's own reads and
+running operations, and releases what the operation changes: it fences those paths against new
+reads, stops the registered reads under them (previews, thumbnails, sandboxes, metadata probes and
+background listings) and waits for them within a budget. Readers register at the funnels they
+already share, and preview drawers and thumbnails follow the registry's notices on the main thread.
+`leftovers.rs` removes folders that hold only other programs' silly-rename leftovers, and
+`holders.rs` names the program that still has a file open; see
+[Files that are still open](filesystem-compatibility.md#files-that-are-still-open).
+
+Every hidden name Strata creates in a user's folder, and every one earlier builds created, is in
+the pure table `model/hidden_names.rs`, which adapters take their names from and which classifies a
+listed name by its whole form. `app/browser/leftovers.rs` classifies a settled column's names in
+memory, hides them while `file_activity` shows an operation in that folder, and emits
+`LeftoversChanged` for the pane button and the once-per-session dock card. The review dialog
+(`ui/browser/leftovers.rs`) reads the items through `OperationProvider::review_leftovers`, and
+`adapters/local_operations/leftovers.rs` restores originals (`recover`, behind the same
+`ActiveOperation` as every operation) and sweeps stale probes; see
+[Leftovers after a crash or unplug](filesystem-compatibility.md#leftovers-after-a-crash-or-unplug).
 
 Filesystem work for Trash lives in `adapters/trash.rs`. Measurement shares one entry/time budget
 across root and descendant batches; depth truncation and unreadable descendants remain branch-local.
@@ -338,9 +366,22 @@ Feature unit tests sit beside their implementations. Cross-feature browser tests
 `STRATA_REQUIRE_GTK_TESTS=1` when exercising those tests on a display to make unavailable GTK a
 failure rather than a skip.
 
-This separation is not a redesign of operation policy or a claim that all UI filesystem calls have
-been eliminated. Collision probes for typed names, destination creation and permission editing still
-deserve application/adapter boundaries in focused follow-ups. Likewise, alternate renderers, staged
+Code on the GTK main thread makes no file call, except those listed under [Off the interface
+thread](filesystem-compatibility.md#off-the-interface-thread). `util/ui_thread.rs` marks that
+thread, and the syscall seam, `FsEnvironment`, the probes, `MountTable::current()` and the settings
+writer's file calls assert that they run elsewhere; only named, scoped exceptions (the reads that
+build the first window, the exit flush) let them through. The interface asks instead:
+`adapters/local_operations/probes.rs` for presence, folder checks, writable destinations and
+typed-path listings; `adapters/volume/mount_watch.rs`, a thread that keeps the mount table published
+for readers that do no I/O; `adapters/volume/mount_lanes.rs`, which bounds the folder loads, probes,
+monitors and other requests it admits to a mount that stops answering;
+`adapters/local_files/monitors.rs`, the one worker that creates and cancels file monitors;
+`adapters/gio_close.rs`, which closes the enumerators and streams the interface lets go of in the
+background (GLib still closes a GVfs stream whose open succeeded just as it was cancelled); and `storage/writer.rs`, the background writer for Strata's own settings and state. See
+[Unresponsive mounts](filesystem-compatibility.md#unresponsive-mounts) and the [main-thread I/O
+audit](e2e-testing.md#main-thread-io-audit).
+
+This separation is not a redesign of operation policy. Alternate renderers, staged
 publication/metadata orchestration, native transfer security and the settings workspace should be
 refactored independently of browser composition. Investigation and scope decisions are recorded in
 [issue #397](https://github.com/lgse/strata/issues/397).
@@ -352,6 +393,18 @@ native batches stage for sorting/publication, while remote batches keep the firs
 and coalesced-tail paths. Completion carries truncation and both filesystem capabilities
 together. Requests outside the open-load gate retain their existing peek/failure handling;
 stale work is still checked against the owning directory or peek request.
+
+A load's `DirectoryEvent::Stamp` arrives before its first batch: it requests the column's change
+monitor, which `directory_changes.rs` checks once it is live, and becomes the column's baseline for
+`app/browser/freshness.rs` when the listing is shown. That scheduler checks the visible folders that
+other writers can change, or that have no live monitor, through `FileSource::check_stamps`, one
+background job per mount, and re-lists a moved one through a background request that keeps the
+listing if it fails or falls short. A check that finds the folder gone or replaced feeds the same
+departure check as a monitor's removal report. Its inputs come from the interface: focus,
+visibility and power saver from `ui/presence.rs`, which follows each window, and the "Watch network
+folders" preference. It also follows each column's mount and emits `ColumnNotResponding` for the
+notice. See
+[Changes made elsewhere](filesystem-compatibility.md#changes-made-elsewhere).
 
 `loading/metadata.rs` separates full-sort fills, applied by location, from viewport fills,
 validated against directory identity and row-position/location tokens. Metadata chunks
@@ -366,9 +419,11 @@ that report to the parent column's monitor, which sees the departure as a change
 its entries; any other column, including the depth-0 folder, is checked in
 `directory_changes.rs`. A folder that validates again (deleted and recreated) reloads in
 place, which renews its monitor. A missing depth-0 folder is looked up in its parent by
-the identity it had when it loaded: device, inode and, where the filesystem records it,
-birth time, queried off the main thread (`FileSource::query_location_identity`). The birth
-time keeps a new folder that reuses the inode from passing for a rename. Found there
+the identity its load's change stamp recorded off the main thread (an `ItemIdentity`),
+compared by the mount's [identity rule](filesystem-compatibility.md#identity): a birth time
+keeps a new folder that reuses the inode from passing for a rename, and on mounts that
+renumber folders without reporting their birth times (sshfs, exFAT) nothing proves a
+folder, so it counts as departed. Found there
 (`find_by_identity`), the folder was renamed in place: the search indexes are rebased and
 the open columns relocate (`ColumnsRelocated`), as for an in-app rename. Not found, with a
 parent that cannot be listed, or before its identity is known, it departed: the nearest
@@ -422,11 +477,17 @@ versus validated navigation; file drops still exclude virtual locations. Typed d
 signals share a weak rebuild callback and retain their disconnect handles. Standard,
 pinned, and device rows are separate rendering stages, with the chooser's local-only
 filter preserved. Initial construction builds static places; device rows retain their
-existing deferred rebuild timing. Bookmark storage, Trash, and media-release policies
-remain in `window.rs` rather than changing alongside assembly. Bookmark mutations
-read the shared GTK file before applying changes and adopt them only after a
-successful save. This preserves sequential external edits, not simultaneous writes;
-other windows are refreshed on their next bookmark action, not by a live monitor.
+existing deferred rebuild timing. Trash and media-release policies remain in
+`window.rs` rather than changing alongside assembly. Bookmark storage lives in
+`adapters/bookmarks.rs`: every pin, unpin, reorder and deletion cleanup is one job on
+the background settings writer (`storage::writer`) that reads the shared GTK file,
+applies the change and saves it, checking just before its rename that no other program
+changed the file since the read and starting over, at most twice, if one did. Every
+open sidebar then adopts the pins the file holds. A symlinked bookmarks file is written
+through to its target under the same ownership rules as `settings.toml`. Only the first
+sidebar reads the file before the first window shows; later windows start from the
+last adopted pins and re-read the file in the background. Outside edits are picked up
+by the next update or new window, not by a live monitor.
 
 `ui/window/pinned_drop.rs` owns folder pinning through dedicated gaps between pinned
 rows, including an empty section. Existing pins reorder through the same gaps and
@@ -515,7 +576,7 @@ shared Settings/F1 presentation; default F1 navigation remains view-specific.
 
 ### File source
 
-Enumerates locations, retrieves metadata, watches changes, identifies folders across renames, and reports supported actions. Begin with local files. Avoid designing a universal remote filesystem API before a second backend exists.
+Enumerates locations, retrieves metadata, watches changes, identifies folders across renames, and reports supported actions. Every load reports the folder's change stamp (`DirectoryEvent::Stamp`) before its first batch and a digest of the listed names before it finishes; `probe_stamp` and `check_stamps` read a stamp again on request, `check_stamps` as background work grouped per mount, and `responsiveness` says, without I/O, whether a location's mount still answers. Begin with local files. Avoid designing a universal remote filesystem API before a second backend exists.
 
 ### Operation service
 

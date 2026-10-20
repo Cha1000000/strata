@@ -7,6 +7,7 @@ mod audio;
 mod find;
 mod media_controls;
 mod model;
+mod operations;
 mod pdf;
 mod video;
 

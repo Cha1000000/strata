@@ -15,7 +15,7 @@ use std::{
 
 use crate::model::{FileEntry, Location};
 
-use super::LoadHandle;
+use super::{ItemIdentity, LoadHandle};
 
 pub fn validate_basename(name: &str) -> Result<(), &'static str> {
     if name.trim().is_empty() {
@@ -128,28 +128,9 @@ pub struct UndoCopyRequest {
     pub locations: Vec<Location>,
 }
 
-/// Identity preserved by a local move to Trash, independent of deletion timestamps.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct TrashedOriginal {
-    pub device: u64,
-    pub inode: u64,
-}
-
-impl TrashedOriginal {
-    /// The identity of whatever is at `path` now, without following a final symlink.
-    pub fn at_path(path: &std::path::Path) -> Option<Self> {
-        use std::os::unix::fs::MetadataExt;
-        let metadata = std::fs::symlink_metadata(path).ok()?;
-        Some(Self {
-            device: metadata.dev(),
-            inode: metadata.ino(),
-        })
-    }
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ReplacedOriginal {
-    Trashed(TrashedOriginal),
+    Trashed(Option<ItemIdentity>),
     /// Removed without Trash, so undo must not offer to delete the only copy.
     Deleted,
 }
@@ -192,7 +173,7 @@ pub struct UndoMergeRequest {
     /// unavailable, before being overwritten; undo deletes the incoming copy
     /// and restores an original from Trash.
     pub overwritten: Vec<Location>,
-    pub originals: HashMap<Location, TrashedOriginal>,
+    pub originals: HashMap<Location, ItemIdentity>,
     /// What the operation put at created and overwritten paths; an item
     /// without one, or changed since, stays, and so does its original in
     /// Trash.
@@ -231,13 +212,38 @@ pub struct RestoreTrashItem {
 #[derive(Clone, Debug)]
 pub enum RestoreSource {
     TrashEntries(Vec<RestoreTrashItem>),
-    OriginalLocations(Vec<Location>),
+    OriginalLocations {
+        locations: Vec<Location>,
+        originals: HashMap<Location, ItemIdentity>,
+    },
 }
 
 #[derive(Clone, Debug)]
 pub struct RestoreRequest {
     pub id: OperationRequestId,
     pub source: RestoreSource,
+}
+
+#[derive(Clone, Debug)]
+pub struct RecoverRequest {
+    pub id: OperationRequestId,
+    pub container: Location,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReviewedLeftover {
+    pub name: OsString,
+    pub modified: Option<i64>,
+    pub inside: LeftoverInside,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum LeftoverInside {
+    Item,
+    Items { names: Vec<PathBuf>, more: usize },
+    StillOpen(String),
+    Gone,
+    Unreadable(String),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -352,6 +358,12 @@ pub struct SkippedItem {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Holder {
+    Strata,
+    Program(String),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum KeptCause {
     Changed,
     /// What replaced it may have changed afterwards, so undo kept that instead.
@@ -361,10 +373,12 @@ pub enum KeptCause {
     Skipped(SpecialKind),
     /// Its copy was no longer where the move put it.
     CopyGone,
+    StillOpen(Option<Holder>),
     NameNotRestored {
         saved_as: Location,
         error: String,
     },
+    OriginalNotRemoved(String),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -489,7 +503,12 @@ pub enum OperationEvent {
     ItemTrashed {
         request_id: OperationRequestId,
         location: Location,
-        identity: TrashedOriginal,
+        identity: ItemIdentity,
+    },
+    ItemRestored {
+        request_id: OperationRequestId,
+        location: Location,
+        identity: ItemIdentity,
     },
     /// A merge undo left the item at `location`, as it may have changed
     /// since, so nothing of it is left to undo. A created item so kept still
@@ -634,6 +653,17 @@ pub trait OperationProvider {
     -> LoadHandle;
     fn delete(&self, request: DeleteRequest, emit: Rc<dyn Fn(OperationEvent)>) -> LoadHandle;
     fn restore(&self, request: RestoreRequest, emit: Rc<dyn Fn(OperationEvent)>) -> LoadHandle;
+    fn recover(&self, request: RecoverRequest, emit: Rc<dyn Fn(OperationEvent)>) -> LoadHandle;
+    fn sweep_probes(&self, _folder: &Location, _names: &[OsString]) {}
+    fn review_leftovers(
+        &self,
+        _folder: &Location,
+        _names: Vec<OsString>,
+        done: Box<dyn FnOnce(Vec<ReviewedLeftover>)>,
+    ) -> LoadHandle {
+        done(Vec::new());
+        LoadHandle::new(|| {})
+    }
     fn compress(&self, request: CompressRequest, emit: Rc<dyn Fn(OperationEvent)>) -> LoadHandle;
     fn extract(&self, request: ExtractRequest, emit: Rc<dyn Fn(OperationEvent)>) -> LoadHandle;
 }

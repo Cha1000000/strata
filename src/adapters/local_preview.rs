@@ -14,6 +14,7 @@ use gtk::{gio, glib, prelude::*};
 
 use crate::{
     adapters::{
+        gio_close::Closing,
         gio_file_for_location,
         local_operations::{ArchiveListingStatus, decode_archive_listing},
     },
@@ -258,10 +259,19 @@ impl LocalPreviewProvider {
             let sample = match entry.location.native_path() {
                 Some(path) => {
                     let path = path.to_path_buf();
-                    gio::spawn_blocking(move || read_head_sample(&path))
-                        .await
-                        .ok()
-                        .flatten()
+                    match gio::spawn_blocking(move || read_head_sample(&path)).await {
+                        Ok(Ok(sample)) => Some(sample),
+                        Ok(Err(error)) if crate::services::file_activity::is_refusal(&error) => {
+                            emit(PreviewEvent::Failed {
+                                request_id,
+                                entry,
+                                message: crate::services::file_activity::HELD_FOR_OPERATION
+                                    .to_owned(),
+                            });
+                            return;
+                        }
+                        _ => None,
+                    }
                 }
                 None => None,
             };
@@ -866,7 +876,7 @@ async fn read_text(
                     &crate::services::io_error_message(&error),
                 )
             };
-            let file = std::fs::File::open(&path).map_err(io_failure)?;
+            let file = crate::services::file_activity::open(&path).map_err(io_failure)?;
             let mut bytes = Vec::new();
             file.take(byte_limit as u64 + 1)
                 .read_to_end(&mut bytes)
@@ -886,7 +896,12 @@ async fn read_text(
             }
         }
     }
-    let stream = file.read_future(glib::Priority::DEFAULT).await?;
+    let stream = gio::GioFuture::new(file, |file, cancellable, result| {
+        file.read_async(glib::Priority::DEFAULT, Some(cancellable), move |output| {
+            result.resolve(output.map(|stream| Closing::new(stream.upcast::<gio::InputStream>())));
+        });
+    })
+    .await?;
     let bytes = stream
         .read_bytes_future(byte_limit.saturating_add(1), glib::Priority::DEFAULT)
         .await?;

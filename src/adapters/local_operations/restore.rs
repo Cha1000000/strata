@@ -1,19 +1,26 @@
 // SPDX-License-Identifier: MIT
 
 use super::{
-    fs_ops::{Entry, fs},
+    fs_ops::{Entry, OffMain, fs},
+    holders,
     placement::{PlaceError, RenameFailure},
+    release::{self, ActiveOperation},
 };
 use crate::{
     adapters::{
-        gio_file_for_location, location_for_file,
-        trash_restore::{RestoreContext, plan_restore_for_location},
+        gio_file_for_location,
+        local_files::trash_thumbnail_path,
+        location_for_file,
+        trash_restore::{
+            RestoreContext, absolute_original, candidate_trash_roots, decode_trashinfo_path,
+            plan_restore_for_location,
+        },
         trash_support::trash_with_cleanup,
     },
     model::Location,
     services::{
-        KeptCause, KeptItem, MoveRecord, OperationEvent, OperationRequestId, PlacedSnapshot,
-        RenameCause, RenamedItem, TransferReport, TrashedOriginal,
+        ItemIdentity, KeptCause, KeptItem, MoveRecord, OperationEvent, OperationRequestId,
+        PlacedSnapshot, Proof, RenameCause, RenamedItem, TransferReport,
     },
 };
 use gtk::{gio, glib, prelude::*};
@@ -23,7 +30,7 @@ use std::{
     future::Future,
     io,
     os::{
-        fd::OwnedFd,
+        fd::{AsFd, OwnedFd},
         unix::ffi::{OsStrExt, OsStringExt},
     },
     path::{Path, PathBuf},
@@ -36,7 +43,11 @@ use super::{
     await_cancellable, cancelled_event, cancelled_local_operation, copy_engine,
     deletion::local_parent_worker_count,
     deletion_error_summary, deletion_undone_when_cancelled, io_error, item_error, kept_items,
-    native_fs::{open_local_parent_beneath, open_local_parent_directory, os_error_detail},
+    mount_profile::identity_at,
+    native_fs::{
+        identity_at_path, open_local_parent_beneath, open_local_parent_directory, os_error_detail,
+        trashed_identity,
+    },
 };
 
 use super::{
@@ -235,7 +246,7 @@ pub(super) async fn move_restore_path(
     allowed_root: PathBuf,
     unlinks: Arc<copy_engine::Unlinks>,
     cancellable: gio::Cancellable,
-) -> Result<TransferReport, glib::Error> {
+) -> Result<(TransferReport, ItemIdentity), glib::Error> {
     if cancellable.is_cancelled() {
         return Err(cancelled_local_operation());
     }
@@ -267,22 +278,28 @@ pub(super) async fn move_restore_path(
         )?);
         let from = Entry::new(&*source_parent, &step_source_name);
         let to = Entry::new(&*target_parent, &target_name);
-        let identity = fs()
+        let stat = fs()
             .stat(from, false)
-            .map_err(|error| could_not_restore(&step_display_name, &os_error_detail(error)))?
-            .identity;
+            .map_err(|error| could_not_restore(&step_display_name, &os_error_detail(error)))?;
+        let trashed = trashed_identity(&stat, identity_at(fs(), source_parent.as_fd()));
         if step_cancellable.is_cancelled() {
             return Ok(None);
         }
-        let placed = placement::place(fs(), from, to, Some(identity));
-        Ok(Some((source_parent, target_parent, identity, placed)))
+        let placed = placement::place(fs(), from, to, Some(stat.identity));
+        Ok(Some((
+            OffMain::new(source_parent),
+            OffMain::new(target_parent),
+            stat.identity,
+            trashed,
+            placed,
+        )))
     })
     .await?;
-    let Some((source_parent, target_parent, source_identity, placed)) = placed else {
+    let Some((source_parent, target_parent, source_identity, trashed, placed)) = placed else {
         return Err(cancelled_local_operation());
     };
     match placed {
-        Ok(_) => return Ok(TransferReport::default()),
+        Ok(_) => return Ok((TransferReport::default(), trashed)),
         Err(PlaceError::Unsupported) => {}
         Err(PlaceError::CrossDevice) => {
             return Err(io_error(rust_i18n::t!(
@@ -300,8 +317,8 @@ pub(super) async fn move_restore_path(
         ..copy_engine::Options::default()
     };
     let (sources, mut report) = copy_engine::copy_in_place(
-        (source_parent, source_name, source_identity),
-        (target_parent, target_path),
+        (source_parent.into_inner(), source_name, source_identity),
+        (target_parent.into_inner(), target_path),
         options,
         &cancellable,
     )
@@ -329,7 +346,7 @@ pub(super) async fn move_restore_path(
         ))
     })?;
     report.kept_in_trash = kept_items(&trash_path, kept);
-    Ok(report)
+    Ok((report, trashed))
 }
 
 pub(super) fn restore_destination_exists(display_name: &str) -> glib::Error {
@@ -345,7 +362,7 @@ pub(super) async fn move_restore(
     allowed_root: PathBuf,
     unlinks: Arc<copy_engine::Unlinks>,
     cancellable: gio::Cancellable,
-) -> Result<TransferReport, glib::Error> {
+) -> Result<(TransferReport, ItemIdentity), glib::Error> {
     if cancellable.is_cancelled() {
         return Err(cancelled_local_operation());
     }
@@ -361,23 +378,16 @@ pub(super) async fn move_restore(
     )))
 }
 
-impl TrashedOriginal {
-    pub(super) fn from_metadata(metadata: &std::fs::Metadata) -> Self {
-        use std::os::unix::fs::MetadataExt;
-        Self {
-            device: metadata.dev(),
-            inode: metadata.ino(),
-        }
-    }
+fn vouched(expected: &ItemIdentity, path: &Path) -> Option<bool> {
+    let current = identity_at_path(path)?;
+    (expected.proof(&current) != Proof::Different).then(|| expected.unchanged(&current))
+}
 
-    pub(super) async fn matches_path(self, path: PathBuf) -> bool {
-        gio::spawn_blocking(move || {
-            std::fs::symlink_metadata(path)
-                .is_ok_and(|metadata| self == Self::from_metadata(&metadata))
-        })
+async fn trashed_as(expected: ItemIdentity, path: PathBuf) -> Option<bool> {
+    gio::spawn_blocking(move || vouched(&expected, &path))
         .await
-        .unwrap_or(false)
-    }
+        .ok()
+        .flatten()
 }
 
 #[derive(Clone)]
@@ -393,8 +403,8 @@ pub(super) struct RestoreEntry {
 pub(super) async fn trashed_entries_for_originals(
     original_locations: &[Location],
     cancellable: &gio::Cancellable,
-    originals: &HashMap<Location, TrashedOriginal>,
-) -> Result<Vec<RestoreEntry>, glib::Error> {
+    originals: &HashMap<Location, ItemIdentity>,
+) -> Result<Vec<Result<RestoreEntry, (Location, glib::Error)>>, glib::Error> {
     if cancellable.is_cancelled() {
         return Err(cancelled_local_operation());
     }
@@ -403,12 +413,15 @@ pub(super) async fn trashed_entries_for_originals(
         .filter_map(|location| location.native_path().map(Path::to_path_buf))
         .collect::<HashSet<_>>();
     // GVfs can miss an item re-trashed under the same basename after a restore, so prefer the
-    // authoritative freedesktop.org metadata for the home trash before consulting trash:///.
+    // authoritative freedesktop.org metadata before consulting trash:///.
+    let context = RestoreContext::current().await;
+    let fallback_context = context.clone();
     let fallback_requested = requested.clone();
     let fallback_cancellable = cancellable.clone();
     let fallback_originals = originals.clone();
     let mut fallback = gio::spawn_blocking(move || {
-        home_trash_entries(
+        trash_entries(
+            &fallback_context,
             &fallback_requested,
             &fallback_cancellable,
             &fallback_originals,
@@ -422,24 +435,31 @@ pub(super) async fn trashed_entries_for_originals(
     if fallback.len() == requested.len() && requested.len() == original_locations.len() {
         return Ok(original_locations
             .iter()
-            .filter_map(|location| location.native_path())
-            .filter_map(|path| fallback.remove(path))
+            .filter_map(|location| {
+                let found = fallback.remove(location.native_path()?)?;
+                Some(found.map_err(|error| (location.clone(), error)))
+            })
             .collect());
     }
 
-    let context = RestoreContext::current().await;
     let trash = gio::File::for_uri("trash:///");
-    let enumerator = await_cancellable(&trash, cancellable, |trash, cancellable, result| {
+    let enumerated = await_cancellable(&trash, cancellable, |trash, cancellable, result| {
         trash.enumerate_children_async(
-            "standard::name,standard::display-name,trash::orig-path,trash::deletion-date",
+            "standard::name,standard::display-name,standard::target-uri,trash::orig-path,trash::deletion-date",
             gio::FileQueryInfoFlags::NOFOLLOW_SYMLINKS,
             glib::Priority::DEFAULT,
             Some(cancellable),
             move |value| result.resolve(value),
         );
     })
-    .await?;
-    let mut newest = HashMap::<PathBuf, (String, Location, String)>::new();
+    .await;
+    let enumerator = match enumerated {
+        Err(error) if error.matches(gio::IOErrorEnum::NotSupported) => {
+            return Err(trashed_items_unavailable());
+        }
+        enumerator => enumerator?,
+    };
+    let mut newest = HashMap::new();
     loop {
         if cancellable.is_cancelled() {
             return Err(cancelled_local_operation());
@@ -465,7 +485,7 @@ pub(super) async fn trashed_entries_for_originals(
                 continue;
             };
             let original_path = PathBuf::from(original_path.as_str());
-            if !requested.contains(&original_path) {
+            if !requested.contains(&original_path) || fallback.contains_key(&original_path) {
                 continue;
             }
             let deletion_date = info
@@ -476,8 +496,9 @@ pub(super) async fn trashed_entries_for_originals(
                 continue;
             };
             let original = Location::local(&original_path);
-            if let Some(&expected) = originals.get(&original) {
-                let matches = match plan_restore_for_location(
+            let recorded = originals.get(&original);
+            let vouched = match recorded {
+                Some(&expected) => match plan_restore_for_location(
                     &location,
                     Some(&original),
                     None,
@@ -486,20 +507,22 @@ pub(super) async fn trashed_entries_for_originals(
                 )
                 .await
                 {
-                    Ok(plan) => expected.matches_path(plan.source_path).await,
-                    Err(_) => false,
-                };
-                if !matches {
-                    continue;
-                }
-            }
-            let candidate = (deletion_date, location, info.display_name().to_string());
-            match newest.get(&original_path) {
-                Some(current) if current.0 >= candidate.0 => {}
-                _ => {
-                    newest.insert(original_path, candidate);
-                }
-            }
+                    Ok(plan) => trashed_as(expected, plan.source_path).await,
+                    Err(_) => None,
+                },
+                None => Some(true),
+            };
+            let Some(vouched) = vouched else {
+                continue;
+            };
+            let entry = gvfs_trash_entry(location, &info, &original_path);
+            keep_newest(
+                &mut newest,
+                original_path,
+                (vouched, deletion_date),
+                recorded.is_some(),
+                entry,
+            );
         }
     }
 
@@ -508,29 +531,109 @@ pub(super) async fn trashed_entries_for_originals(
         .any(|path| !fallback.contains_key(path) && !newest.contains_key(path))
         || requested.len() != original_locations.len()
     {
-        return Err(glib::Error::new(
-            gio::IOErrorEnum::NotFound,
-            &crate::i18n::tr("One or more recently trashed items are no longer available"),
-        ));
+        return Err(trashed_items_unavailable());
     }
     Ok(original_locations
         .iter()
-        .filter_map(|location| location.native_path())
-        .filter_map(|path| {
-            fallback.remove(path).or_else(|| {
-                newest
-                    .remove(path)
-                    .map(|(_, source, display_name)| RestoreEntry {
-                        source,
-                        display_name,
-                        original_target: None,
-                        trash_info: None,
-                        confirmed_destination: None,
-                        physical_path: None,
-                    })
-            })
+        .filter_map(|location| {
+            let path = location.native_path()?;
+            let found = fallback
+                .remove(path)
+                .or_else(|| newest.remove(path).map(|newest| chosen(path, newest)))?;
+            Some(found.map_err(|error| (location.clone(), error)))
         })
         .collect())
+}
+
+struct Newest {
+    rank: (bool, String),
+    entry: RestoreEntry,
+    tied: bool,
+}
+
+fn keep_newest(
+    newest: &mut HashMap<PathBuf, Newest>,
+    original: PathBuf,
+    rank: (bool, String),
+    recorded: bool,
+    entry: RestoreEntry,
+) {
+    if let Some(kept) = newest.get_mut(&original)
+        && kept.rank >= rank
+    {
+        kept.tied |= recorded && rank.0 && kept.rank == rank;
+        return;
+    }
+    newest.insert(
+        original,
+        Newest {
+            rank,
+            entry,
+            tied: false,
+        },
+    );
+}
+
+fn chosen(original: &Path, newest: Newest) -> Result<RestoreEntry, glib::Error> {
+    if !newest.tied {
+        return Ok(newest.entry);
+    }
+    let name = Location::local(original).display_name();
+    Err(glib::Error::new(
+        gio::IOErrorEnum::Failed,
+        &rust_i18n::t!(
+            "More than one item in Trash could be “%{name}”, so they were left there",
+            name = name
+        ),
+    ))
+}
+
+fn trashed_items_unavailable() -> glib::Error {
+    glib::Error::new(
+        gio::IOErrorEnum::NotFound,
+        &crate::i18n::tr("One or more recently trashed items are no longer available"),
+    )
+}
+
+pub(super) fn gvfs_trash_entry(
+    source: Location,
+    info: &gio::FileInfo,
+    original_path: &Path,
+) -> RestoreEntry {
+    RestoreEntry {
+        physical_path: trash_thumbnail_path(&source, info),
+        source,
+        display_name: info.display_name().to_string(),
+        original_target: Some(Location::local(original_path)),
+        trash_info: None,
+        confirmed_destination: None,
+    }
+}
+
+pub(super) async fn release_trashed(
+    entries: &[RestoreEntry],
+    cancellable: &gio::Cancellable,
+) -> ActiveOperation {
+    let roots: Vec<PathBuf> = entries
+        .iter()
+        .filter_map(|entry| {
+            entry
+                .physical_path
+                .clone()
+                .or_else(|| entry.source.native_path().map(Path::to_path_buf))
+        })
+        .collect();
+    let destinations: Vec<PathBuf> = entries
+        .iter()
+        .filter_map(|entry| {
+            restored_destination(entry)
+                .native_path()
+                .map(Path::to_path_buf)
+        })
+        .collect();
+    let operation = ActiveOperation::begin(release::parents(&destinations));
+    operation.release(roots, cancellable).await;
+    operation
 }
 
 pub(super) fn restored_destination(entry: &RestoreEntry) -> Location {
@@ -559,7 +662,7 @@ pub(super) async fn restore_trash_entry(
     affected_locations: &mut HashSet<Location>,
     unlinks: &Arc<copy_engine::Unlinks>,
     cancellable: &gio::Cancellable,
-) -> Result<TransferReport, glib::Error> {
+) -> Result<(TransferReport, ItemIdentity), glib::Error> {
     let plan = match plan_restore_for_location(
         &entry.source,
         entry.original_target.as_ref(),
@@ -595,7 +698,7 @@ pub(super) async fn restore_trash_entry(
     }
     let source = gio::File::for_path(&plan.source_path);
     let target = gio::File::for_path(&plan.destination);
-    let report = move_restore(
+    let (report, trashed) = move_restore(
         source,
         target,
         plan.allowed_root,
@@ -620,13 +723,13 @@ pub(super) async fn restore_trash_entry(
             tracing::warn!(%error, "unable to remove restored trash metadata");
         }
     }
-    Ok(report)
+    Ok((report, trashed))
 }
 
 pub(super) fn trashed_merge_original(
     location: Location,
     cancellable: gio::Cancellable,
-    originals: HashMap<Location, TrashedOriginal>,
+    originals: HashMap<Location, ItemIdentity>,
 ) -> Pin<Box<dyn Future<Output = Result<RestoreEntry, glib::Error>>>> {
     Box::pin(async move {
         let entries = trashed_entries_for_originals(
@@ -635,17 +738,18 @@ pub(super) fn trashed_merge_original(
             &originals,
         )
         .await?;
-        entries.into_iter().next().ok_or_else(|| {
-            glib::Error::new(
+        match entries.into_iter().next() {
+            Some(found) => found.map_err(|(_, error)| error),
+            None => Err(glib::Error::new(
                 gio::IOErrorEnum::NotFound,
                 &crate::i18n::tr("The original is no longer in Trash"),
-            )
-        })
+            )),
+        }
     })
 }
 
 pub(super) enum Reverted {
-    Restored(TransferReport),
+    Restored(TransferReport, Box<ItemIdentity>),
     Kept,
 }
 
@@ -666,13 +770,20 @@ pub(super) async fn remove_unchanged(
     *deleting = removed.removed;
     removed.result?;
     if let Some((path, error)) = removed.kept.iter().find_map(|(path, cause)| match cause {
-        KeptCause::Undeletable(error) => Some((path, *error)),
+        KeptCause::Undeletable(error) => Some((
+            path,
+            crate::services::io_error_detail(&io::Error::from_raw_os_error(*error)),
+        )),
+        KeptCause::StillOpen(holder) => Some((
+            path,
+            crate::services::error_detail(holders::held(holder.as_ref())),
+        )),
         _ => None,
     }) {
         return Err(io_error(rust_i18n::t!(
-            "Could not delete %{name}: %{error}",
+            "Could not delete “%{name}”: %{error}",
             name = path.file_name().unwrap_or_default().to_string_lossy(),
-            error = crate::services::io_error_detail(&io::Error::from_raw_os_error(error))
+            error = error
         )));
     }
     Ok(removed.kept.is_empty())
@@ -717,7 +828,7 @@ pub(super) async fn undo_merged_overwrite(
     }
     restore_trash_entry(staged, context, affected_locations, unlinks, cancellable)
         .await
-        .map(Reverted::Restored)
+        .map(|(report, trashed)| Reverted::Restored(report, Box::new(trashed)))
 }
 
 pub(super) type StagedOriginalLookup = Rc<
@@ -746,6 +857,7 @@ pub(super) async fn run_merge_undo(
             affected_locations.insert(parent);
         }
     }
+    let mut deleted_pins = crate::adapters::bookmarks::DeletedPins::default();
     let context = RestoreContext::current().await;
     let unlinks = Arc::default();
     let mut completed_locations = Vec::new();
@@ -785,10 +897,15 @@ pub(super) async fn run_merge_undo(
             Err(error) => Err(error),
         };
         let restored_location = match result {
-            Ok(Reverted::Restored(report)) => {
+            Ok(Reverted::Restored(report, identity)) => {
                 if !report.is_empty() {
                     emit(OperationEvent::ItemsReported { request_id, report });
                 }
+                emit(OperationEvent::ItemRestored {
+                    request_id,
+                    location: location.clone(),
+                    identity: *identity,
+                });
                 completed_locations.push(location.clone());
                 restored.push(location.clone());
                 Some(location.clone())
@@ -912,7 +1029,7 @@ pub(super) async fn run_merge_undo(
             }
             Ok(()) => {
                 if found {
-                    crate::adapters::bookmarks::deletion_completed(std::slice::from_ref(location));
+                    deleted_pins.push(location.clone());
                 }
                 if let Some(identity) = trashed_identity {
                     emit(OperationEvent::ItemTrashed {
@@ -982,30 +1099,51 @@ pub(super) async fn run_merge_undo(
     }
 }
 
-pub(super) fn home_trash_entries(
+fn trash_entries(
+    context: &RestoreContext,
     requested: &HashSet<PathBuf>,
     cancellable: &gio::Cancellable,
-    originals: &HashMap<Location, TrashedOriginal>,
-) -> HashMap<PathBuf, RestoreEntry> {
-    home_trash_entries_at(
-        &glib::user_data_dir().join("Trash"),
-        requested,
-        cancellable,
-        originals,
-    )
+    originals: &HashMap<Location, ItemIdentity>,
+) -> HashMap<PathBuf, Result<RestoreEntry, glib::Error>> {
+    let mut roots = requested
+        .iter()
+        .flat_map(|path| candidate_trash_roots(context, Some(path)))
+        .collect::<Vec<_>>();
+    roots.sort();
+    roots.dedup();
+    trash_entries_at(&roots, requested, cancellable, originals)
 }
 
-pub(super) fn home_trash_entries_at(
+pub(super) fn trash_entries_at(
+    roots: &[PathBuf],
+    requested: &HashSet<PathBuf>,
+    cancellable: &gio::Cancellable,
+    originals: &HashMap<Location, ItemIdentity>,
+) -> HashMap<PathBuf, Result<RestoreEntry, glib::Error>> {
+    let mut newest = HashMap::new();
+    for trash_root in roots {
+        newest_in_trash(trash_root, requested, cancellable, originals, &mut newest);
+    }
+    newest
+        .into_iter()
+        .map(|(path, newest)| {
+            let entry = chosen(&path, newest);
+            (path, entry)
+        })
+        .collect()
+}
+
+fn newest_in_trash(
     trash_root: &Path,
     requested: &HashSet<PathBuf>,
     cancellable: &gio::Cancellable,
-    originals: &HashMap<Location, TrashedOriginal>,
-) -> HashMap<PathBuf, RestoreEntry> {
+    originals: &HashMap<Location, ItemIdentity>,
+    newest: &mut HashMap<PathBuf, Newest>,
+) {
     let info_root = trash_root.join("info");
     let files_root = trash_root.join("files");
-    let mut newest = HashMap::<PathBuf, (String, RestoreEntry)>::new();
     let Ok(infos) = std::fs::read_dir(info_root) else {
-        return HashMap::new();
+        return;
     };
     for info in infos.flatten() {
         if cancellable.is_cancelled() {
@@ -1027,8 +1165,9 @@ pub(super) fn home_trash_entries_at(
             .lines()
             .find_map(|line| line.strip_prefix("DeletionDate="))
             .unwrap_or_default();
-        let Some(original_path) =
-            encoded_path.and_then(|path| gio::File::for_uri(&format!("file://{path}")).path())
+        let Some(original_path) = encoded_path
+            .and_then(decode_trashinfo_path)
+            .and_then(|path| absolute_original(trash_root, path))
         else {
             continue;
         };
@@ -1036,15 +1175,16 @@ pub(super) fn home_trash_entries_at(
             continue;
         }
         let source_path = files_root.join(OsString::from_vec(file_name.to_vec()));
-        let Ok(metadata) = std::fs::symlink_metadata(&source_path) else {
+        let recorded = originals.get(&Location::local(&original_path));
+        let vouched = match recorded {
+            Some(expected) => vouched(expected, &source_path),
+            None => std::fs::symlink_metadata(&source_path)
+                .is_ok()
+                .then_some(true),
+        };
+        let Some(vouched) = vouched else {
             continue;
         };
-        if originals
-            .get(&Location::local(&original_path))
-            .is_some_and(|expected| *expected != TrashedOriginal::from_metadata(&metadata))
-        {
-            continue;
-        }
         let entry = RestoreEntry {
             source: Location::local(&source_path),
             display_name: source_path
@@ -1056,15 +1196,12 @@ pub(super) fn home_trash_entries_at(
             confirmed_destination: None,
             physical_path: Some(source_path.clone()),
         };
-        match newest.get(&original_path) {
-            Some((current_date, _)) if current_date.as_str() >= deletion_date => {}
-            _ => {
-                newest.insert(original_path, (deletion_date.to_owned(), entry));
-            }
-        }
+        keep_newest(
+            newest,
+            original_path,
+            (vouched, deletion_date.to_owned()),
+            recorded.is_some(),
+            entry,
+        );
     }
-    newest
-        .into_iter()
-        .map(|(path, (_, entry))| (path, entry))
-        .collect()
 }

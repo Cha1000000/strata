@@ -188,6 +188,7 @@ impl From<glib::Error> for DriveOpError {
 
 /// Locate an executable through `PATH` plus the usual sbin directories.
 fn tool_path(cmd: &str) -> Option<PathBuf> {
+    crate::util::ui_thread::assert_off();
     if cmd.contains('/') {
         let path = PathBuf::from(cmd);
         return is_executable(&path).then_some(path);
@@ -244,13 +245,11 @@ pub(super) fn usage_for_path(path: &Path) -> Option<(u64, u64)> {
 }
 
 pub(super) fn block_device_for_path(path: &Path) -> Option<PathBuf> {
-    let table = std::fs::read("/proc/self/mountinfo").ok()?;
-    super::devices::block_device_from_mount_table(&table, path)
+    super::devices::block_device_from_mount_table(&crate::adapters::mount_watch::latest(), path)
 }
 
 pub(super) fn mounted_path_for_device(device: &Path) -> Option<PathBuf> {
-    let table = std::fs::read("/proc/self/mountinfo").ok()?;
-    super::devices::mounted_path_from_table(&table, device)
+    super::devices::mounted_path_from_table(&crate::adapters::mount_watch::latest(), device)
 }
 
 /// Human-readable filesystem name for a block device.

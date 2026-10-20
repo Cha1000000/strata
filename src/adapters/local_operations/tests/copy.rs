@@ -2492,11 +2492,33 @@ fn a_bulk_copy_records_for_undo_where_a_refused_name_was_saved() -> Result<(), B
 }
 
 #[test]
-fn a_name_refused_as_missing_neither_turns_unnamed_files_off_nor_writes_twice()
+fn a_refused_name_keeps_unnamed_files_on_and_writes_twice_only_after_enoent()
 -> Result<(), Box<dyn Error>> {
     let _serial = serial()?;
     // Names given back are refused as they are.
-    for (names, saved) in [(fixing(), Some("a_b")), (NamePolicy::default(), None)] {
+    for (case, policy, refused, outcome, staged) in [
+        (
+            "fixed after ENOENT",
+            fixing(),
+            refuses_colons_as_missing as fn(&OsStr) -> Option<Errno>,
+            Ok("a_b"),
+            false,
+        ),
+        (
+            "given back after ENOENT",
+            NamePolicy::default(),
+            refuses_colons_as_missing,
+            Err(None),
+            true,
+        ),
+        (
+            "given back after EINVAL",
+            NamePolicy::default(),
+            has_colon,
+            Err(Some(crate::services::INVALID_NAME_REASON)),
+            false,
+        ),
+    ] {
         let root = tempfile::tempdir()?;
         let source = root.path().join("source");
         let disk = root.path().join("disk");
@@ -2507,7 +2529,7 @@ fn a_name_refused_as_missing_neither_turns_unnamed_files_off_nor_writes_twice()
         let scope = FsQuirks::install(
             &disk,
             Quirks {
-                invalid_name: Some(refuses_colons_as_missing),
+                invalid_name: Some(refused),
                 ..Quirks::ext4()
             },
         );
@@ -2518,74 +2540,53 @@ fn a_name_refused_as_missing_neither_turns_unnamed_files_off_nor_writes_twice()
                 Taken::Fail,
                 gio::Cancellable::new(),
                 None,
-                names.clone(),
+                policy.clone(),
                 None,
             ))
         };
 
         let copied = copy("a:b");
 
-        match saved {
-            Some(saved) => {
-                assert_eq!(copied?.path(), Some(disk.join(saved)));
-                assert_eq!(fs::read(disk.join(saved))?, b"colon");
-                assert!(!scope.used_name(".strata-copy-*"), "{:?}", scope.calls());
+        match outcome {
+            Ok(saved) => {
+                assert_eq!(copied?.path(), Some(disk.join(saved)), "{case}");
+                assert_eq!(fs::read(disk.join(saved))?, b"colon", "{case}");
             }
-            None => assert!(copied.is_err()),
+            Err(reason) => {
+                let error = copied.err().ok_or("a refused name was copied")?;
+                if let Some(reason) = reason {
+                    assert!(
+                        error.message().contains(&crate::i18n::tr(reason)),
+                        "{case}: {error}"
+                    );
+                }
+                assert!(names(&disk)?.is_empty(), "{case}");
+            }
         }
+        assert_eq!(
+            scope.count(Op::OpenTmpfile),
+            1,
+            "{case}: {:?}",
+            scope.calls()
+        );
+        assert_eq!(
+            scope.used_name(".strata-copy-*"),
+            staged,
+            "{case}: {:?}",
+            scope.calls()
+        );
         scope.clear_calls();
 
         copy("plain")?;
 
-        assert_eq!(fs::read(disk.join("plain"))?, b"plain");
+        assert_eq!(fs::read(disk.join("plain"))?, b"plain", "{case}");
         assert_eq!(
             scope.count(Op::OpenTmpfile),
             1,
-            "{saved:?}: {:?}",
+            "{case}: {:?}",
             scope.calls()
         );
     }
-    Ok(())
-}
-
-#[test]
-fn a_name_given_back_that_the_mount_refuses_outright_fails_without_a_second_write()
--> Result<(), Box<dyn Error>> {
-    let _serial = serial()?;
-    let root = tempfile::tempdir()?;
-    let source = root.path().join("source");
-    let disk = root.path().join("disk");
-    fs::create_dir_all(&source)?;
-    fs::create_dir(&disk)?;
-    fs::write(source.join("a:b"), b"colon")?;
-    let scope = FsQuirks::install(
-        &disk,
-        Quirks {
-            invalid_name: Some(has_colon),
-            ..Quirks::ext4()
-        },
-    );
-
-    let copied = glib::MainContext::default().block_on(copy_new_recursively_on_filesystem(
-        gio::File::for_path(source.join("a:b")),
-        gio::File::for_path(disk.join("a:b")),
-        Taken::Fail,
-        gio::Cancellable::new(),
-        None,
-        NamePolicy::default(),
-        None,
-    ));
-
-    let error = copied.err().ok_or("a refused name was copied")?;
-    assert!(
-        error
-            .message()
-            .contains(&crate::i18n::tr(crate::services::INVALID_NAME_REASON)),
-        "{error}"
-    );
-    assert_eq!(scope.count(Op::OpenTmpfile), 1, "{:?}", scope.calls());
-    assert!(!scope.used_name(".strata-copy-*"), "{:?}", scope.calls());
-    assert!(names(&disk)?.is_empty());
     Ok(())
 }
 
@@ -2871,13 +2872,13 @@ fn only_entry(folder: &Path, prefix: &str) -> PathBuf {
 }
 
 fn only_stage(root: &Path) -> PathBuf {
-    only_entry(root, ".strata-replacement-")
+    only_entry(root, ".strata-copy-")
 }
 
 /// A folder put at a file stage's name gets the stage's inode number back.
 fn reusing_stage_inodes(before: (Op, &'static str, usize, Racer)) -> Quirks {
     Quirks {
-        reused_inodes: Some(".strata-replacement-*"),
+        reused_inodes: Some(".strata-copy-*"),
         no_birth_time: true,
         before: vec![before],
         ..Quirks::without_placement()
@@ -2897,7 +2898,7 @@ fn a_stage_left_after_the_exclusive_copy_is_reported() -> Result<(), Box<dyn Err
     // Two stats decide publication; the third is the discard.
     let _scope = FsQuirks::install(
         root.path(),
-        reusing_stage_inodes((Op::Stat, ".strata-replacement-*", 2, racer)),
+        reusing_stage_inodes((Op::Stat, ".strata-copy-*", 2, racer)),
     );
     let staged = stage(root.path(), false)?;
     let staged_path = root.path().join(&staged.name);
@@ -2931,7 +2932,7 @@ fn a_stage_swapped_before_publication_is_neither_published_nor_deleted()
     });
     let _scope = FsQuirks::install(
         root.path(),
-        reusing_stage_inodes((Op::Rename, ".strata-replacement-*", 0, racer)),
+        reusing_stage_inodes((Op::Rename, ".strata-copy-*", 0, racer)),
     );
     let staged = stage(root.path(), false)?;
     let staged_path = root.path().join(&staged.name);

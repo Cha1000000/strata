@@ -28,8 +28,7 @@ fn prepared_selection_rejects_changed_targets() {
         locations: vec![location.clone()],
         files: vec![gio_file_for_location(&location)],
         content_types: vec!["text/plain".to_string()],
-        recommended_apps: vec![],
-        other_apps: vec![],
+        choices: Default::default(),
         default: None,
     };
     assert!(selection.entries_match_target(&[entry(location)]));

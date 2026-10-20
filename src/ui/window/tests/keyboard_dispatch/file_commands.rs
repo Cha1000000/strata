@@ -1352,13 +1352,14 @@ impl crate::services::FileSource for TrashlessLocal {
         crate::adapters::LocalFileSource.fill_metadata(request, emit)
     }
 
-    fn watch(
+    fn start_watch(
         &self,
         location: Location,
         include_hidden: bool,
         notify: Rc<dyn Fn(crate::services::DirectoryChange)>,
-    ) -> Option<crate::services::LoadHandle> {
-        crate::adapters::LocalFileSource.watch(location, include_hidden, notify)
+        report: Rc<dyn Fn(crate::services::Watching)>,
+    ) -> crate::services::LoadHandle {
+        crate::adapters::LocalFileSource.start_watch(location, include_hidden, notify, report)
     }
 }
 
@@ -1547,7 +1548,7 @@ fn a_mount_that_refused_trash_confirms_up_front_until_reload() {
             assert!(!permanent, "the first Delete tries Trash");
             // The adapter records the refusal before it reports the failure.
             crate::adapters::trash_support::record_unsupported(
-                crate::adapters::MountTable::current()
+                crate::adapters::mount_watch::latest()
                     .mount_for(&directory)
                     .expect("fixture mount"),
                 crate::adapters::trash_support::UnsupportedReason::FuseRefused,

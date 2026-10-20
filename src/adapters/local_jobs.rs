@@ -90,29 +90,34 @@ impl ActionRunner for LocalActionRunner {
                 .to_owned();
             return failed_immediately(sink, reason);
         };
-        let run_directory = match create_run_directory(&self.runtime_root) {
-            Ok(directory) => directory,
-            Err(error) => {
-                return failed_immediately(
-                    sink,
-                    format!("Unable to prepare a private working directory: {error}"),
-                );
-            }
-        };
-
         let cancellation = Arc::new(Cancellation::default());
         let worker_cancel = cancellation.clone();
         let worker_sink = sink.clone();
-        let context = RunContext {
-            inputs: request.inputs.clone(),
-            parent: request.parent.clone(),
-            source: request.source,
-            position: request.position,
-            run_directory: run_directory.clone(),
-        };
+        let runtime_root = self.runtime_root.clone();
+        let (inputs, parent, source, position) = (
+            request.inputs.clone(),
+            request.parent.clone(),
+            request.source,
+            request.position,
+        );
         let spawned = thread::Builder::new()
             .name("strata-action".to_owned())
             .spawn(move || {
+                let run_directory = match create_run_directory(&runtime_root) {
+                    Ok(directory) => directory,
+                    Err(error) => {
+                        return worker_sink(ActionRunEvent::Failed(format!(
+                            "Unable to prepare a private working directory: {error}"
+                        )));
+                    }
+                };
+                let context = RunContext {
+                    inputs,
+                    parent,
+                    source,
+                    position,
+                    run_directory,
+                };
                 let result =
                     spawn_and_watch(&action, &program, &context, &worker_sink, &worker_cancel);
                 let _ignored = fs::remove_dir_all(&context.run_directory);
@@ -122,7 +127,6 @@ impl ActionRunner for LocalActionRunner {
                 });
             });
         if let Err(error) = spawned {
-            let _ignored = fs::remove_dir_all(&run_directory);
             return failed_immediately(sink, format!("Unable to start the action worker: {error}"));
         }
 
@@ -505,6 +509,7 @@ fn json_string(value: &str) -> String {
 
 // The temporary-directory fallback may be shared with other users.
 fn create_run_directory(runtime_root: &Path) -> io::Result<PathBuf> {
+    crate::util::ui_thread::assert_off();
     let base = runtime_root.join("actions");
     match fs::symlink_metadata(&base) {
         Ok(metadata) => {

@@ -107,46 +107,51 @@ fn trashed_entry(root: &Path, name: &str, original: &Path) -> (FileEntry, PathBu
 
 #[test]
 fn deletion_reach_keeps_the_local_warning_unless_every_item_is_remote() {
-    use DeletionReach::{Local, Remote};
-    let mounts = || {
-        crate::adapters::MountTable::parse(
-            "1 0 8:1 / / rw - ext4 /dev/root rw\n\
-             2 1 0:2 / /mnt/cloud rw - fuse.rclone drive: rw\n\
-             3 1 8:33 / /media/usb rw - fuseblk /dev/sdc1 rw\n\
-             4 1 0:4 / /mnt/nas rw - nfs4 nas:/export rw\n\
-             5 1 0:5 / /mnt/pool rw - fuse.mergerfs disks rw\n",
-        )
-    };
-    let entries = |locations: &[&str]| -> Vec<FileEntry> {
-        locations
-            .iter()
-            .map(|location| {
-                crate::test_support::operations::entry(if location.starts_with('/') {
-                    Location::local(location)
-                } else {
-                    Location::uri(*location)
-                })
-            })
-            .collect()
-    };
-    for (locations, expected) in [
-        (&["/mnt/cloud/a"][..], Remote),
-        (&["/mnt/nas/a", "/mnt/cloud/b"], Remote),
-        (&["sftp://host/a"], Remote),
-        (&["/home/user/a"], Local),
-        (&["/media/usb/a"], Local),
-        (&["/mnt/pool/a"], Local),
-        (&["TRASH:///a"], Local),
-        (&["trash:///a"], Local),
-        (&["/mnt/cloud/a", "/home/user/b"], Local),
-        (&[], Local),
-    ] {
-        assert_eq!(
-            deletion_reach_with(&entries(locations), mounts),
-            expected,
-            "{locations:?}"
-        );
-    }
+    crate::test_support::gtk_test(
+        "ui::browser::trash::tests::deletion_reach_keeps_the_local_warning_unless_every_item_is_remote",
+        || {
+            use DeletionReach::{Local, Remote};
+            crate::adapters::mount_watch::publish_for_isolated_test(Some(
+                crate::adapters::MountTable::parse(
+                    "1 0 8:1 / / rw - ext4 /dev/root rw\n\
+                     2 1 0:2 / /mnt/cloud rw - fuse.rclone drive: rw\n\
+                     3 1 8:33 / /media/usb rw - fuseblk /dev/sdc1 rw\n\
+                     4 1 0:4 / /mnt/nas rw - nfs4 nas:/export rw\n\
+                     5 1 0:5 / /mnt/pool rw - fuse.mergerfs disks rw\n",
+                ),
+            ));
+            let entries = |locations: &[&str]| -> Vec<FileEntry> {
+                locations
+                    .iter()
+                    .map(|location| {
+                        crate::test_support::operations::entry(if location.starts_with('/') {
+                            Location::local(location)
+                        } else {
+                            Location::uri(*location)
+                        })
+                    })
+                    .collect()
+            };
+            for (locations, expected) in [
+                (&["/mnt/cloud/a"][..], Remote),
+                (&["/mnt/nas/a", "/mnt/cloud/b"], Remote),
+                (&["sftp://host/a"], Remote),
+                (&["/home/user/a"], Local),
+                (&["/media/usb/a"], Local),
+                (&["/mnt/pool/a"], Local),
+                (&["TRASH:///a"], Local),
+                (&["trash:///a"], Local),
+                (&["/mnt/cloud/a", "/home/user/b"], Local),
+                (&[], Local),
+            ] {
+                assert_eq!(
+                    deletion_reach(&entries(locations)),
+                    expected,
+                    "{locations:?}"
+                );
+            }
+        },
+    );
 }
 
 #[test]

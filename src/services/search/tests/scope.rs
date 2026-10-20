@@ -170,9 +170,13 @@ fn wildcard_scoring_is_session_local_and_applies_to_new_index_batches() {
     filter.query("*.MOV");
     let SearchEvent::Results { items, .. } = wait_for_results(&events).expect("empty index");
     assert!(items.is_empty());
+    let fixture = tempfile::tempdir().expect("fixture");
     let mut batch: Vec<_> = ["clip.MOV", "clip.MOV.bak", "*.MOV", "IMG_001.jpg"]
         .into_iter()
-        .map(|name| SearchItem::for_test(PathBuf::from("/fixture").join(name), false))
+        .map(|name| {
+            fs::write(fixture.path().join(name), b"").expect("fixture file");
+            SearchItem::for_test(fixture.path().join(name), false)
+        })
         .collect();
     append_index_items(&index, &mut batch, false, SearchCoverage::default());
     index.broadcast_change();

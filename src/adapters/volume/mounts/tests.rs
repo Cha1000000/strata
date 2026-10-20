@@ -3,12 +3,17 @@
 use std::{path::Path, time::Duration};
 
 use super::{
-    FAT32_MAX_FILE_SIZE, MountKey, MountTable, holds_symlinks, is_remote_fs_type, max_file_size,
-    unescape,
+    FAT32_MAX_FILE_SIZE, MountKey, MountTable, MountType, holds_symlinks, is_remote_fs_type,
+    max_file_size, unescape,
 };
 use crate::adapters::volume::names::{
     NameEncoding, NameLimit, NameProfile, NameRules, PrivateUse, Reserved, Strip,
 };
+use crate::services::{IdentityTraits, InodeNumbers};
+
+fn remote(table: &MountTable, path: &Path) -> bool {
+    table.fs_type_for(path).is_some_and(is_remote_fs_type)
+}
 
 mod byte_paths;
 
@@ -42,27 +47,92 @@ fn parses_mount_points_and_filesystem_types() {
 }
 
 #[test]
-fn inode_numbers_are_unstable_on_fat_fuse_vboxsf_and_cifs_without_server_inodes() {
+fn only_mount_types_known_to_keep_inode_numbers_are_trusted_to() {
     let table = MountTable::parse(
         "\
-70 22 0:60 / /mnt/a rw - cifs //server/a rw,vers=3.1.1,serverino,cache=strict
-71 22 0:61 / /mnt/b rw - cifs //server/b rw,vers=3.1.1,noserverino,cache=strict
+70 22 0:60 / /mnt/a rw - cifs //server/a rw,vers=3.1.1,cache=strict,serverino,mapposix
+71 22 0:61 / /mnt/b rw - cifs //server/b rw,vers=3.1.1,cache=strict,mapposix
 72 22 0:62 / /mnt/c rw - fuse.sshfs host:/ rw,user_id=1000
 73 22 0:63 / /mnt/d rw - ext4 /dev/sdc1 rw,relatime
-74 22 0:64 / /mnt/e rw - smb3 //server/e rw,vers=3.1.1,noserverino
+74 22 0:64 / /mnt/e rw - smb3 //server/e rw,vers=3.1.1,posix,serverino
 75 22 8:33 / /mnt/f rw - vfat /dev/sdc2 rw,flush
 76 22 8:34 / /mnt/g rw - exfat /dev/sdc3 rw
 77 22 8:35 / /mnt/h rw - msdos /dev/sdc4 rw
 78 22 0:65 / /mnt/i rw - vboxsf share rw,nodev,relatime,iocharset=utf8
+79 22 0:66 / /mnt/j rw - 9p share rw,trans=virtio
+80 22 8:36 / /mnt/k rw - jfs /dev/sdc5 rw
+81 22 0:67 / /mnt/l rw - nfs server:/l rw,vers=3,serverino
 ",
     );
-    let stable = |id| table.mount_of(id).map(|(mount, _)| mount.stable_inodes());
-    assert_eq!(stable(70), Some(true));
-    assert_eq!(stable(71), Some(false));
-    assert_eq!(stable(72), Some(false));
-    assert_eq!(stable(73), Some(true));
-    for id in 74..=78 {
-        assert_eq!(stable(id), Some(false), "mount {id}");
+    let rows = [
+        (70, InodeNumbers::Renewed, true, true),
+        (71, InodeNumbers::Renewed, true, false),
+        (72, InodeNumbers::Renewed, true, false),
+        (73, InodeNumbers::Kept, true, false),
+        (74, InodeNumbers::Renewed, true, true),
+        (75, InodeNumbers::Renewed, true, false),
+        (76, InodeNumbers::Renewed, false, false),
+        (77, InodeNumbers::Renewed, true, false),
+        (78, InodeNumbers::Renewed, true, false),
+        (79, InodeNumbers::Kept, true, false),
+        (80, InodeNumbers::Unknown, true, false),
+        (81, InodeNumbers::Kept, true, false),
+    ];
+    for (id, numbers, folder_births, server_numbers) in rows {
+        let mount = table.mount_of(id).map(|(mount, _)| mount);
+        let smb = matches!(id, 70 | 71 | 74);
+        assert_eq!(
+            mount.map(MountType::identity),
+            Some(IdentityTraits {
+                numbers,
+                folder_births,
+                made_up_births: smb,
+            }),
+            "mount {id}"
+        );
+        assert_eq!(
+            mount.map(MountType::server_numbers),
+            Some(server_numbers),
+            "mount {id}"
+        );
+    }
+}
+
+#[test]
+fn file_handles_are_read_only_where_they_tell_a_reused_number_apart() {
+    let table = MountTable::parse(
+        "\
+90 22 0:70 / /mnt/a rw - nfs server:/a rw,vers=3
+91 22 0:71 / /mnt/b rw - nfs4 server:/b rw,vers=4.2
+92 22 8:40 / /mnt/c rw - ext4 /dev/sdd1 rw
+93 22 8:41 / /mnt/d rw - ext3 /dev/sdd2 rw
+94 22 0:72 / /mnt/e rw - fuse.sshfs host:/ rw,user_id=1000
+95 22 8:42 / /mnt/f rw - fuseblk /dev/sdd3 rw,user_id=0
+96 22 0:73 / /mnt/g rw - cifs //server/g rw,vers=3.1.1,serverino
+97 22 8:43 / /mnt/h rw - exfat /dev/sdd4 rw
+",
+    );
+    let born = Some((1_700_000_000, 5));
+    let rows = [
+        (Some(90), None, true),
+        (Some(91), Some((0, 0)), true),
+        (Some(91), born, false),
+        (Some(92), None, true),
+        (Some(93), None, true),
+        (Some(92), born, false),
+        (Some(94), None, false),
+        (Some(95), None, false),
+        (Some(96), None, false),
+        (Some(97), None, false),
+        (Some(99), None, false),
+        (None, None, false),
+    ];
+    for (id, birth, wanted) in rows {
+        assert_eq!(
+            table.wants_file_handle(id, birth),
+            wanted,
+            "mount {id:?}, birth {birth:?}"
+        );
     }
 }
 
@@ -146,8 +216,8 @@ fn innermost_mount_wins() {
         table.mount_point_for(nested),
         Some(Path::new("/mnt/nfs/local"))
     );
-    assert!(!table.is_remote_path(nested));
-    assert!(table.is_remote_path(Path::new("/mnt/nfs/file")));
+    assert!(!remote(&table, nested));
+    assert!(remote(&table, Path::new("/mnt/nfs/file")));
     assert_eq!(
         table.mount_point_for(Path::new("/mnt/nfs/docs")),
         Some(Path::new("/mnt/nfs"))
@@ -210,7 +280,7 @@ fn fuse_drivers_for_local_drives_are_not_network_shares() {
         "{SAMPLE}70 22 8:33 / /run/media/user/USB rw,relatime shared:40 - fuseblk /dev/sdc1 rw\n"
     ));
     let usb = Path::new("/run/media/user/USB/photos");
-    assert!(table.is_remote_path(usb), "a FUSE daemon can still block");
+    assert!(remote(&table, usb), "a FUSE daemon can still block");
     assert!(!table.is_network_path(usb));
     for share in [
         "/mnt/nfs/docs",
@@ -223,21 +293,40 @@ fn fuse_drivers_for_local_drives_are_not_network_shares() {
 }
 
 #[test]
-fn network_and_fuse_filesystems_are_remote() {
-    for fs_type in [
-        "nfs",
-        "nfs4",
-        "cifs",
-        "smb3",
-        "fuse.sshfs",
-        "fuse.gvfsd-fuse",
-        "fuse",
-        "9p",
+fn network_and_fuse_filesystems_are_remote_and_written_from_elsewhere() {
+    for (fs_type, remote, outside_writers) in [
+        ("nfs", true, true),
+        ("nfs4", true, true),
+        ("cifs", true, true),
+        ("smb3", true, true),
+        ("fuse.sshfs", true, true),
+        ("fuse.gvfsd-fuse", true, true),
+        ("fuse", true, true),
+        ("9p", true, true),
+        ("virtiofs", true, true),
+        ("vboxsf", true, true),
+        ("ceph", true, true),
+        ("gfs2", true, true),
+        ("fuse.mergerfs", true, true),
+        ("fuse.gocryptfs", true, true),
+        ("fuseblk", true, false),
+        ("ext4", false, false),
+        ("btrfs", false, false),
+        ("xfs", false, false),
+        ("tmpfs", false, false),
+        ("vfat", false, false),
+        ("exfat", false, false),
+        ("overlay", false, false),
     ] {
-        assert!(is_remote_fs_type(fs_type), "{fs_type} should be remote");
-    }
-    for fs_type in ["ext4", "btrfs", "xfs", "tmpfs", "vfat", "exfat", "overlay"] {
-        assert!(!is_remote_fs_type(fs_type), "{fs_type} should be local");
+        let mount = MountType {
+            fs_type: fs_type.to_owned(),
+            super_options: String::new(),
+        };
+        assert_eq!(
+            (is_remote_fs_type(fs_type), mount.outside_writers()),
+            (remote, outside_writers),
+            "{fs_type}"
+        );
     }
 }
 

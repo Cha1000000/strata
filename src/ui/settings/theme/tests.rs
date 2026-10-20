@@ -15,6 +15,7 @@ fn variant_choices_sync_across_windows_without_initialization_writes() {
             let preferences = PreferenceManager::shared();
             let themes = ThemeManager::shared();
             preferences.set_omarchy_variant(OmarchyVariant::Darker);
+            crate::storage::writer::settle();
             let settings = crate::ui::preferences::config_directory().join("settings.toml");
             let before = std::fs::read(&settings).expect("saved settings");
             let windows = [gtk::Window::new(), gtk::Window::new()];
@@ -83,6 +84,7 @@ fn corner_roundness_controls_follow_the_preference_across_windows() {
         || {
             let preferences = PreferenceManager::shared();
             preferences.set_corner_roundness(CornerRoundness::new(40));
+            crate::storage::writer::settle();
             let settings = crate::ui::preferences::config_directory().join("settings.toml");
             let before = std::fs::read(&settings).expect("saved settings");
             let windows = [gtk::Window::new(), gtk::Window::new()];
@@ -149,6 +151,7 @@ fn interface_font_choices_follow_the_preference_across_windows() {
         || {
             let preferences = PreferenceManager::shared();
             preferences.set_interface_font(Some("Fixture Sans".into()));
+            crate::storage::writer::settle();
             let settings = crate::ui::preferences::config_directory().join("settings.toml");
             let before = std::fs::read(&settings).expect("saved settings");
             let windows = [gtk::Window::new(), gtk::Window::new()];

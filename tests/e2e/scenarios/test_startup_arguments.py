@@ -6,7 +6,7 @@ import subprocess
 
 import pytest
 
-from harness import tree
+from harness import main_io, tree
 from harness.process import terminate
 from harness.application import binary_path
 from harness.environment import process_environment
@@ -16,8 +16,11 @@ def launch_argument(strata, argument):
     variables = process_environment()
     variables.update(strata.environment.variables())
     variables.update(strata.display.environment)
+    command, _ = main_io.launch(
+        strata.environment, strata.fixture.root, [binary_path(), argument], variables
+    )
     subprocess.run(
-        [binary_path(), argument],
+        command,
         env=variables,
         cwd=strata.fixture.root,
         check=True,
@@ -65,9 +68,10 @@ def test_missing_directory_can_be_restored_and_retried(strata):
 
 def test_multiple_arguments_include_non_utf8_directory_and_file(strata):
     root = os.fsencode(strata.fixture.root)
-    directories = [root + b"/startup-first", root + b"/startup-\xff"]
+    directories = [b"startup-first", root + b"/startup-\xff"]
     markers = ["first-argument.txt", "non-utf8-argument.txt"]
     for directory, marker in zip(directories, markers):
+        directory = os.path.join(root, directory)
         os.mkdir(directory)
         with open(directory + b"/" + marker.encode(), "wb") as stream:
             stream.write(b"startup regression\n")
@@ -85,7 +89,9 @@ def test_multiple_arguments_include_non_utf8_directory_and_file(strata):
     variables = process_environment()
     variables.update(strata.environment.variables())
     variables.update(strata.display.environment)
-    subprocess.run(
+    command, _ = main_io.launch(
+        strata.environment,
+        strata.fixture.root,
         [
             os.fsencode(binary_path()),
             *directories,
@@ -93,6 +99,10 @@ def test_multiple_arguments_include_non_utf8_directory_and_file(strata):
             broken_link,
             colliding_argument,
         ],
+        variables,
+    )
+    subprocess.run(
+        command,
         env=variables,
         cwd=strata.fixture.root,
         check=True,
@@ -128,6 +138,7 @@ def test_multiple_arguments_include_non_utf8_directory_and_file(strata):
     )
     windows = strata.application.application_node.find_all(role="frame", name="Strata")
     assert max(colliding_selections(windows)) == 1
+    assert os.readlink(f"/proc/{strata.application.pid}/cwd") == "/"
 
 
 @pytest.mark.parametrize("closed_streams", ["stdout", "stderr", "both"])
@@ -141,9 +152,12 @@ def test_startup_with_closed_pipes(strata, closed_streams):
     variables.update(strata.environment.variables())
     variables.update(strata.display.environment)
     variables["RUST_LOG"] = "trace"
+    command, capture = main_io.launch(
+        strata.environment, strata.fixture.root, [binary_path(), str(target_dir)], variables
+    )
 
     process = subprocess.Popen(
-        [binary_path(), str(target_dir)],
+        command,
         env=variables,
         cwd=strata.fixture.root,
         start_new_session=True,
@@ -164,5 +178,7 @@ def test_startup_with_closed_pipes(strata, closed_streams):
             return any(window.find(name="target.txt") is not None for window in windows)
 
         strata.wait(target_window_exists, "primary startup with closed output pipes")
+        if capture is not None:
+            capture.ready()
     finally:
         terminate(process)

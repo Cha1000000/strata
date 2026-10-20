@@ -885,6 +885,33 @@ headerbar.browser-header menubutton.header-action > button {
   font-size: 0.82em;
 }
 
+.leftover-card {
+  background: mix(@strata_bg, @strata_muted, 0.25);
+  border: 1px solid alpha(@strata_border, 0.55);
+  border-radius: 10px;
+  color: @strata_text;
+  padding: 18px;
+}
+
+.leftover-card-title {
+  font-weight: 600;
+}
+
+.leftover-card-detail,
+.leftover-card-label {
+  color: @strata_dim_text;
+  font-size: 0.82em;
+}
+
+.leftover-card-text {
+  color: @strata_dim_text;
+  font-size: 0.9375em;
+}
+
+.leftover-card-value {
+  font-size: 0.82em;
+}
+
 
 .action-dialog {
   background: @strata_surface;
@@ -3840,6 +3867,14 @@ button.shortcut-footer-button:disabled {
   min-height: 31px;
   /* Balance the three-pixel top indicator against the one-pixel bottom border. */
   padding: 2px 5px 4px 12px;
+}
+
+.listing-notice {
+  background: alpha(@strata_accent, 0.12);
+  border-bottom: 1px solid alpha(@strata_border, 0.5);
+  color: @strata_text;
+  font-size: 0.9em;
+  padding: 6px 12px;
 }
 
 .column-truncated-hint {

@@ -35,12 +35,13 @@ deletions remove pins; failed and unattempted items keep theirs. Unavailable
 drives and network locations stay pinned. Restoring a folder, including Undo,
 does not restore its former pins; pin it again if needed.
 
-Pin cleanup runs in the deletion provider before progress is reported, so it
-does not depend on the originating window staying open. Pins identify paths;
-deleting a symlink does not remove pins to its target. If updating bookmarks
-fails, Strata reports that separately and does not revert a completed deletion.
-Cleanup is not guaranteed if the process exits before the provider confirms
-the deletion.
+Pin cleanup runs in the deletion provider as one bookmarks update when the
+deletion or restore run ends, however it ends, so it does not depend on the
+originating window staying open. Pins identify paths; deleting a symlink does
+not remove pins to its target. If updating bookmarks fails, Strata reports that
+separately and does not revert a completed deletion. Cleanup is not guaranteed
+if the process exits before the provider confirms the deletion, or before the
+settings writer saves it (quitting waits up to 10 seconds for queued saves).
 
 ## Automated regressions
 

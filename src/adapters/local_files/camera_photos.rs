@@ -19,6 +19,7 @@ pub(super) fn enumerate(request: DirectoryRequest, emit: Rc<dyn Fn(DirectoryEven
                 Ok(Err(message)) => emit(DirectoryEvent::Failed {
                     request_id: request.id,
                     message,
+                    refused: false,
                 }),
                 result => emit(DirectoryEvent::Finished {
                     request_id: request.id,

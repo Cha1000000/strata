@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 
+use futures_channel::oneshot;
 use std::ffi::{OsStr, OsString};
 use std::io::ErrorKind;
 use std::path::Path;
@@ -251,29 +252,32 @@ pub(super) fn no_terminal_message() -> String {
     rust_i18n::t!("No terminal emulator was found. Install “%{PREFERRED_LAUNCHER}” with a configured ~/.config/xdg-terminals.list, set $TERMINAL, or install one of: %{fallbacks}", PREFERRED_LAUNCHER = PREFERRED_LAUNCHER, fallbacks = fallbacks).into_owned()
 }
 
-/// Reaps the child off-thread so exited launchers never linger as defunct.
-pub(super) fn spawn_reaped(mut command: Command) -> std::io::Result<()> {
-    let program = command.get_program().to_owned();
-    let child = command.spawn()?;
-    reap_in_background(child, program);
-    Ok(())
-}
-
-fn reap_in_background(mut child: Child, program: OsString) {
-    let label = program.to_string_lossy().into_owned();
-    let spawned = std::thread::Builder::new()
+/// Starts and reaps the child off the UI thread, so a launcher neither blocks
+/// it nor lingers as defunct.
+pub(super) fn spawn_reaped(
+    start: impl FnOnce() -> Result<Child, String> + Send + 'static,
+) -> impl Future<Output = Result<(), String>> + 'static {
+    let (started, answer) = oneshot::channel();
+    let reaper = std::thread::Builder::new()
         .name("process-reaper".into())
-        .spawn(move || {
-            if let Err(error) = child.wait() {
-                tracing::warn!(
-                    %error,
-                    program = %program.to_string_lossy(),
-                    "unable to reap child process"
-                );
+        .spawn(move || match start() {
+            Ok(mut child) => {
+                let _ = started.send(Ok(()));
+                if let Err(error) = child.wait() {
+                    tracing::warn!(%error, pid = child.id(), "unable to reap child process");
+                }
+            }
+            Err(error) => {
+                let _ = started.send(Err(error));
             }
         });
-    if let Err(error) = spawned {
-        tracing::warn!(%error, program = %label, "unable to start reaper thread");
+    if let Err(error) = reaper {
+        tracing::warn!(%error, "unable to start reaper thread");
+    }
+    async move {
+        answer
+            .await
+            .unwrap_or_else(|_| Err(crate::i18n::tr(crate::services::UNEXPECTED_SYSTEM_ERROR)))
     }
 }
 
@@ -359,6 +363,7 @@ fn find_on_path(path_var: Option<&OsStr>, program: &str) -> Option<OsString> {
 }
 
 fn is_executable(path: &Path) -> bool {
+    crate::util::ui_thread::assert_off();
     let Ok(metadata) = std::fs::metadata(path) else {
         return false;
     };

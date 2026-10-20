@@ -19,7 +19,7 @@ use super::{
     Copy, Created, Failure, FileCopy, Mount, is_fatal, lock,
     manifest::{Contents, Pending},
     metadata::Snapshot,
-    restrictive, stable_inodes,
+    restrictive,
     tree::{self, Names},
 };
 use crate::{
@@ -29,7 +29,7 @@ use crate::{
             native_fs::LocalFileIdentity,
             placement::{self, PlaceError},
         },
-        volume::{Family, MountKey},
+        volume::MountKey,
     },
     services::{KeptCause, RenameCause},
 };
@@ -185,7 +185,7 @@ impl Links {
         copy: &Copy,
         root: BorrowedFd<'_>,
         base: &Path,
-        family: Family,
+        mount: &Mount,
         created: Option<&Created>,
     ) -> Result<(), Failure> {
         let (mut later, firsts, retimed) = {
@@ -243,10 +243,11 @@ impl Links {
             }
             copy.add_file(name.size);
         }
-        let stable = stable_inodes(family);
         for folder in retimed {
             let path = beneath(base, &folder.path)?;
-            if let Some(fd) = restrictive::reopen(copy.fs, root, path, folder.identity, stable)? {
+            if let Some(fd) =
+                restrictive::reopen(copy.fs, root, path, folder.identity, mount.identity)?
+            {
                 folder.snapshot.apply_times(copy.fs, fd.as_fd())?;
             }
         }
@@ -279,6 +280,7 @@ fn make(
             fs,
             Entry::new(&dir, file_name),
             claimed,
+            None,
             AtFlags::empty(),
         )
     {
@@ -332,6 +334,7 @@ fn leave(copy: &Copy, (root, base): (BorrowedFd<'_>, &Path), name: &Name) -> Res
         copy.fs,
         Entry::new(&dir, file_name),
         claimed,
+        None,
         AtFlags::empty(),
     ) {
         Ok(())
@@ -365,7 +368,13 @@ fn linked(
         .stat(from, true)
         .is_ok_and(|current| current.identity == made.identity)
     {
-        placement::remove_if_unchanged(fs, to, made.identity, AtFlags::empty());
+        placement::remove_if_unchanged(
+            fs,
+            to,
+            made.identity,
+            made.kept_attributes(),
+            AtFlags::empty(),
+        );
     }
     Err(Failure::Changed)
 }

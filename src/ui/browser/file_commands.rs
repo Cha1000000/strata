@@ -239,19 +239,6 @@ impl TypedRename {
     }
 }
 
-/// Whether another item already has `wanted`. A name that resolves to the
-/// item itself, such as a case-only change on a case-insensitive drive, is
-/// not taken. Blocking.
-pub(crate) fn typed_rename_is_taken(current: &std::path::Path, wanted: &std::path::Path) -> bool {
-    use std::os::unix::fs::MetadataExt;
-    let Ok(occupant) = std::fs::symlink_metadata(wanted) else {
-        return false;
-    };
-    std::fs::symlink_metadata(current).map_or(true, |item| {
-        (item.dev(), item.ino()) != (occupant.dev(), occupant.ino())
-    })
-}
-
 impl BrowserView {
     pub fn prepare_typed_rename(
         &self,
@@ -453,8 +440,7 @@ impl BrowserView {
                 &state.overlay,
                 files,
                 applications.content_types,
-                applications.recommended,
-                applications.other,
+                applications.choices,
                 crate::ui::open_with::OpenWithContext::Explicit,
                 Rc::new(move || {
                     if let Some(browser) = browser.upgrade() {

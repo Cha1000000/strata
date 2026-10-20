@@ -31,7 +31,7 @@ use crate::{
         holds_symlinks, learn_mount_capability, max_file_size, mount_capabilities,
         teach_mount_capability,
     },
-    services::NameMode,
+    services::{IdentityTraits, InodeNumbers, NameMode},
 };
 
 pub(super) fn known_mount(fs: &dyn FsOps, dir: BorrowedFd<'_>) -> (MountKey, MountCapabilities) {
@@ -47,21 +47,67 @@ pub(super) fn known(fs: &dyn FsOps, dir: BorrowedFd<'_>, key: MountKey) -> Mount
     learn_mount_type(fs, dir, key)
 }
 
+pub(super) fn identity_now(
+    fs: &dyn FsOps,
+    dir: BorrowedFd<'_>,
+    family: Family,
+    identity: IdentityTraits,
+) -> IdentityTraits {
+    if family == Family::Smb
+        && fs
+            .current_mount_type(dir)
+            .is_some_and(|mount| mount.server_numbers())
+    {
+        return IdentityTraits {
+            numbers: InodeNumbers::Kept,
+            ..identity
+        };
+    }
+    identity
+}
+
+pub(super) fn identity_at(fs: &dyn FsOps, dir: BorrowedFd<'_>) -> IdentityTraits {
+    let (_, capabilities) = known_mount(fs, dir);
+    let family = capabilities.family.unwrap_or(Family::Other);
+    identity_now(fs, dir, family, capabilities.identity)
+}
+
+pub(super) fn with_links(
+    family: Option<Family>,
+    identity: IdentityTraits,
+    links_keep_numbers: bool,
+) -> IdentityTraits {
+    if links_keep_numbers
+        && family == Some(Family::Fuse)
+        && identity.numbers == InodeNumbers::Renewed
+    {
+        return IdentityTraits {
+            numbers: InodeNumbers::Kept,
+            ..identity
+        };
+    }
+    identity
+}
+
 /// For `fuseblk`, udev's record of the device tells which daemon serves it. What another
 /// thread learned of the mount meanwhile stays.
 fn learn_mount_type(fs: &dyn FsOps, dir: BorrowedFd<'_>, key: MountKey) -> MountCapabilities {
     let mount = fs.mount_type(dir);
     let mount_type = mount.as_ref().map(|(mount_type, _)| mount_type);
     let family = mount_type.map_or(Family::Other, |mount| family(&mount.fs_type));
-    let stable = mount_type.is_none_or(MountType::stable_inodes);
-    let folder_births_reset = mount_type.is_some_and(MountType::renames_reset_folder_births);
+    let identity = mount_type.map_or_else(IdentityTraits::default, MountType::identity);
     let device_format = mount_type
         .filter(|mount| mount.fs_type == "fuseblk")
         .and_then(|_| fs.device_format(dir).ok().flatten());
     let format = device_format.as_deref();
     let fuse_format = format.and_then(FuseFormat::of);
+    let identity = IdentityTraits {
+        folder_births: identity.folder_births && fuse_format != Some(FuseFormat::Exfat),
+        ..identity
+    };
     let coarse_times = mount_type.and_then(|mount| mount.coarse_times(fuse_format));
     let deferred_close = mount_type.and_then(MountType::deferred_close);
+    let silly_names = mount_type.and_then(MountType::silly_names);
     let attribute_cache = mount_type.and_then(MountType::attribute_cache);
     let cuts_long_names_renamed_over =
         mount_type.is_some_and(|mount| mount.cuts_long_names_renamed_over(format));
@@ -88,11 +134,12 @@ fn learn_mount_type(fs: &dyn FsOps, dir: BorrowedFd<'_>, key: MountKey) -> Mount
     learn_mount_capability(key, |capabilities| {
         if capabilities.family.is_none() {
             capabilities.family = Some(family);
-            capabilities.stable_inodes = Some(stable);
-            capabilities.renames_reset_folder_births = folder_births_reset;
+            capabilities.identity =
+                with_links(Some(family), identity, capabilities.links_keep_numbers);
             capabilities.fuse_format = fuse_format;
             capabilities.coarse_times = coarse_times;
             capabilities.deferred_close = deferred_close;
+            capabilities.silly_names = silly_names;
             capabilities.attribute_cache = attribute_cache;
             capabilities.cuts_long_names_renamed_over = cuts_long_names_renamed_over;
             capabilities.names = Some(names);

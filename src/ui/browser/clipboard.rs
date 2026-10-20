@@ -567,8 +567,14 @@ fn transfer_dropped_files(
     if sources.is_empty() {
         return false;
     }
-    let commit = file_drop_commit(target, &destination, &sources, drop_state);
-    state.commit_file_drop(destination, sources, commit);
+    let state = state.clone();
+    file_drop_commit(
+        target,
+        destination,
+        sources,
+        drop_state,
+        move |destination, sources, commit| state.commit_file_drop(destination, sources, commit),
+    );
     true
 }
 
@@ -590,23 +596,38 @@ pub(crate) fn file_drop_action(
 ) -> gtk::gdk::DragAction {
     let destination = state.destination();
     let sources = state.sources(target);
-    drop_commit_action(classify_file_drop(
-        target,
-        state,
-        destination.as_ref(),
-        sources,
-        false,
-    ))
+    drop_commit_action(
+        classify_file_drop(target, state, destination.as_ref(), sources, false)
+            .map_or(DropCommit::Forbidden, |(choice, relation)| {
+                choice.commit(relation)
+            }),
+    )
 }
 
 pub(crate) fn file_drop_commit(
     target: &gtk::DropTarget,
-    destination: &Location,
-    sources: &[Location],
+    destination: Location,
+    sources: Vec<Location>,
     state: &Rc<FileDropState>,
-) -> DropCommit {
-    let sources = state.sources_matching(target, sources);
-    classify_file_drop(target, state, Some(destination), sources, true)
+    then: impl FnOnce(Location, Vec<Location>, DropCommit) + 'static,
+) {
+    let matching = state.sources_matching(target, &sources);
+    let Some((choice, relation)) =
+        classify_file_drop(target, state, Some(&destination), matching, true)
+    else {
+        return then(destination, sources, DropCommit::Forbidden);
+    };
+    if let Some(DropVolumes::Pending(pending)) = state
+        .classification
+        .borrow()
+        .as_ref()
+        .map(|cached| &cached.volumes)
+        && choice.commit(VolumeRelation::Same) != choice.commit(VolumeRelation::Unknown)
+    {
+        pending.wait(move |relation| then(destination, sources, choice.commit(relation)));
+        return;
+    }
+    then(destination, sources, choice.commit(relation));
 }
 
 fn drop_source_locations(target: &gtk::DropTarget) -> Vec<Location> {
@@ -617,27 +638,45 @@ fn drop_source_locations(target: &gtk::DropTarget) -> Vec<Location> {
         .unwrap_or_default()
 }
 
+#[derive(Clone, Copy)]
+struct FileDropChoice {
+    offered: gtk::gdk::DragAction,
+    override_with: DropOverride,
+    is_noop: bool,
+    strategy: CrossVolumeDropStrategy,
+}
+
+impl FileDropChoice {
+    fn commit(self, relation: VolumeRelation) -> DropCommit {
+        preferred_file_drop_commit(
+            self.offered,
+            self.override_with,
+            relation,
+            self.is_noop,
+            self.strategy,
+        )
+    }
+}
+
 fn classify_file_drop(
     target: &gtk::DropTarget,
     state: &Rc<FileDropState>,
     destination: Option<&Location>,
     sources: Rc<[Location]>,
     commit: bool,
-) -> DropCommit {
+) -> Option<(FileDropChoice, VolumeRelation)> {
     let drop = target.current_drop();
     if drop.is_none() && !commit {
-        return DropCommit::Forbidden;
+        return None;
     }
     let override_with = if commit {
         commit_override(target, &state.last_override)
     } else {
         hover_override(target, &state.last_override)
     };
-    let Some(destination) = destination else {
-        return DropCommit::Forbidden;
-    };
+    let destination = destination?;
     if destination.is_recent_location() {
-        return DropCommit::Forbidden;
+        return None;
     }
     let (relation, is_noop) = state.classify(target, destination, sources.clone());
     let source_actions = drop
@@ -661,7 +700,15 @@ fn classify_file_drop(
             "drop action classified"
         );
     }
-    preferred_file_drop_commit(offered, override_with, relation, is_noop, strategy)
+    Some((
+        FileDropChoice {
+            offered,
+            override_with,
+            is_noop,
+            strategy,
+        },
+        relation,
+    ))
 }
 
 fn current_cross_volume_drop_strategy() -> CrossVolumeDropStrategy {

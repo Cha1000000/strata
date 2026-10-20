@@ -39,8 +39,7 @@ pub(super) enum Deletion {
     Sources(gio::File, Manifest),
     /// With the links a GIO copy left out of it, which stay.
     Source(gio::File, Vec<gio::File>),
-    /// With the replaced item's name.
-    Displaced(DisplacedOriginal, String),
+    Displaced(DisplacedOriginal, PathBuf),
     Aside(MergeAside),
 }
 
@@ -76,17 +75,40 @@ impl Deletion {
                 }
                 permanently_delete_keeping(source, Rc::new(kept), cancellable.clone()).await
             }
-            Self::Displaced(original, name) => remove_displaced_original(original, &name).await,
-            Self::Aside(aside) => aside.remove().await,
+            Self::Displaced(original, target) => {
+                let kept_in = original.kept_in().to_os_string();
+                let kept = target.with_file_name(&kept_in).join(&original.name);
+                let Err(error) = remove_displaced_original(original, unlinks.leftovers()).await
+                else {
+                    return Ok(());
+                };
+                let Some(progress) = progress else {
+                    let name = target.file_name().unwrap_or_default().to_string_lossy();
+                    return Err(io_error(original_not_removed(&name, &kept_in, &error)));
+                };
+                progress.report(TransferReport {
+                    kept: vec![KeptItem {
+                        location: Location::local(kept),
+                        cause: KeptCause::OriginalNotRemoved(crate::services::gio_error_detail(
+                            &error,
+                        )),
+                    }],
+                    ..TransferReport::default()
+                });
+                Ok(())
+            }
+            Self::Aside(aside) => aside.remove(progress, unlinks.leftovers()).await,
         }
     }
 
     fn kept(&self, flush: &str) -> String {
         match self {
             Self::Sources(..) | Self::Source(..) => flush.to_owned(),
-            Self::Displaced(original, name) => {
-                original_not_removed(name, &original.name, &io_error(flush))
-            }
+            Self::Displaced(original, target) => original_not_removed(
+                &target.file_name().unwrap_or_default().to_string_lossy(),
+                original.kept_in(),
+                &io_error(flush),
+            ),
             Self::Aside(aside) => aside.not_removed(&io_error(flush)).message().to_owned(),
         }
     }

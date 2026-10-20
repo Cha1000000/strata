@@ -280,6 +280,7 @@ fn capped_drains_defer_failure_until_the_queue_is_empty() {
     browser.handle_directory_event(DirectoryEvent::Failed {
         request_id: request,
         message: "deferred failure".into(),
+        refused: false,
     });
     assert_loading_progress(&browser, &events, 512);
     browser.flush_coalesced_capped(Some(0));

@@ -8,7 +8,7 @@ use std::{
     time::Duration,
 };
 
-use gtk::{glib, prelude::*};
+use gtk::{gio, glib, prelude::*};
 
 use super::{
     install_command::install_command, page_content, scrollable_page, search, settings_group,
@@ -93,11 +93,20 @@ fn diagnostics_page_with(spawn: Spawner) -> gtk::Widget {
         results: Rc::default(),
         environment: Rc::default(),
         running: Cell::new(false),
+        pending_parts: Cell::new(0),
+        manager: Cell::new(None),
         spawn,
     });
-    let (results, environment) = (page.results.clone(), page.environment.clone());
+    let weak = Rc::downgrade(&page);
     copy.connect_clicked(move |button| {
-        copy_report(button, &environment.borrow(), &results.borrow());
+        if let Some(page) = weak.upgrade() {
+            copy_report(
+                button,
+                &page.environment.borrow(),
+                &page.results.borrow(),
+                page.manager.get(),
+            );
+        }
     });
     run.connect_clicked(move |_| page.start());
     scrollable_page(&content, None)
@@ -119,6 +128,8 @@ struct Page {
     results: Rc<RefCell<Vec<Check>>>,
     environment: Rc<RefCell<Vec<(String, String)>>>,
     running: Cell<bool>,
+    pending_parts: Cell<u8>,
+    manager: Cell<Option<PackageManager>>,
     spawn: Spawner,
 }
 
@@ -138,26 +149,44 @@ impl Page {
 
         let (sender, receiver) = mpsc::channel();
         (self.spawn)(sender);
-        let manager = PackageManager::detect();
-        for check in main_thread_checks() {
-            self.apply(check, manager);
-        }
+        self.pending_parts.set(2);
         let page = Rc::downgrade(self);
-        glib::timeout_add_local(Duration::from_millis(50), move || {
+        glib::MainContext::default().spawn_local(async move {
+            let detected = gio::spawn_blocking(PackageManager::detect).await;
             let Some(page) = page.upgrade() else {
-                return glib::ControlFlow::Break;
+                return;
             };
-            loop {
-                match receiver.try_recv() {
-                    Ok(check) => page.apply(check, manager),
-                    Err(TryRecvError::Empty) => return glib::ControlFlow::Continue,
-                    Err(TryRecvError::Disconnected) => {
-                        page.finish(manager);
-                        return glib::ControlFlow::Break;
+            let manager = detected.ok().flatten();
+            page.manager.set(manager);
+            let poll = Rc::downgrade(&page);
+            glib::timeout_add_local(Duration::from_millis(50), move || {
+                let Some(page) = poll.upgrade() else {
+                    return glib::ControlFlow::Break;
+                };
+                loop {
+                    match receiver.try_recv() {
+                        Ok(check) => page.apply(check, manager),
+                        Err(TryRecvError::Empty) => return glib::ControlFlow::Continue,
+                        Err(TryRecvError::Disconnected) => {
+                            page.finish_part(manager);
+                            return glib::ControlFlow::Break;
+                        }
                     }
                 }
+            });
+            for check in main_thread_checks().await {
+                page.apply(check, manager);
             }
+            page.finish_part(manager);
         });
+    }
+
+    fn finish_part(&self, manager: Option<PackageManager>) {
+        let remaining = self.pending_parts.get().saturating_sub(1);
+        self.pending_parts.set(remaining);
+        if remaining == 0 {
+            self.finish(manager);
+        }
     }
 
     fn build_rows(&self) {
@@ -222,8 +251,11 @@ impl Page {
     }
 }
 
-fn main_thread_checks() -> [Check; 4] {
-    let catalog = crate::ui::actions::shared().reload();
+async fn main_thread_checks() -> [Check; 4] {
+    let terminal = gio::spawn_blocking(|| {
+        Terminal::resolve().map(|terminal| terminal.program().to_string_lossy().into_owned())
+    });
+    let catalog = crate::ui::actions::shared().reload().await;
     let unavailable = catalog
         .actions()
         .iter()
@@ -238,9 +270,7 @@ fn main_thread_checks() -> [Check; 4] {
     [
         diagnostics::syntax_highlighting(),
         diagnostics::folder_monitoring(),
-        diagnostics::terminal(
-            Terminal::resolve().map(|terminal| terminal.program().to_string_lossy().into_owned()),
-        ),
+        diagnostics::terminal(terminal.await.unwrap_or_default()),
         diagnostics::custom_actions(catalog.actions().len(), unavailable, failed),
     ]
 }
@@ -526,8 +556,15 @@ fn detail(check: &Check) -> Option<String> {
     }
 }
 
-fn copy_report(button: &gtk::Button, environment: &[(String, String)], results: &[Check]) {
-    button.clipboard().set_text(&report(environment, results));
+fn copy_report(
+    button: &gtk::Button,
+    environment: &[(String, String)],
+    results: &[Check],
+    manager: Option<PackageManager>,
+) {
+    button
+        .clipboard()
+        .set_text(&report(environment, results, manager));
     button.set_label(&crate::i18n::tr("Copied"));
     let button = button.downgrade();
     glib::timeout_add_local_once(COPY_FEEDBACK, move || {
@@ -590,11 +627,14 @@ fn field(label: &str, value: &str) -> String {
     rust_i18n::t!("%{label}: %{value}", label = label, value = value).into_owned()
 }
 
-fn report(environment: &[(String, String)], results: &[Check]) -> String {
+fn report(
+    environment: &[(String, String)],
+    results: &[Check],
+    manager: Option<PackageManager>,
+) -> String {
     let tr = crate::i18n::tr;
     let mut lines = vec![tr("Strata diagnostics")];
     lines.extend(environment.iter().map(|(label, value)| field(label, value)));
-    let manager = PackageManager::detect();
     for (group, ids) in GROUPS {
         lines.push(String::new());
         lines.push(tr(heading(group)));

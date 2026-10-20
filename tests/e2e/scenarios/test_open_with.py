@@ -139,7 +139,7 @@ def test_open_with_launches_without_changing_default(open_with_app, strata, targ
     else:
         expected = strata.fixture.path(target)
         strata.open_context_menu(target)
-        strata.wait(lambda: "sensitive" in strata.menu_item("Open With…").states, "MIME lookup")
+    strata.wait(lambda: "sensitive" in strata.menu_item("Open With…").states, "MIME lookup")
     strata.choose_menu_item("Open With…")
     dialog = strata.wait_for_dialog()
     assert "Review Text Viewer" in dialog.dump()
@@ -172,7 +172,7 @@ def test_open_with_always_use_updates_the_default(chooser_apps, strata, target):
             strata.pointer.click(strata.entry("readme.md"), modifiers=["ctrl"])
             strata.wait_for_selection(sorted(names))
         strata.open_context_menu(names[0])
-        strata.wait(lambda: "sensitive" in strata.menu_item("Open With…").states, "MIME lookup")
+    strata.wait(lambda: "sensitive" in strata.menu_item("Open With…").states, "MIME lookup")
     strata.choose_menu_item("Open With…")
     dialog = strata.wait_for_dialog()
     strata.keyboard.type_text("Alternative")

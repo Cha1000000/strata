@@ -17,8 +17,8 @@ use crate::ui::browser::find::{
     HitRanges, highlight_hit_name, highlight_listing_name, search_hit_ranges,
 };
 use crate::ui::browser::pane_header::{
-    column_sort_direction_toggle, column_sort_menu, empty_trash_button, pane_new_folder_button,
-    pane_refresh_button,
+    column_sort_direction_toggle, column_sort_menu, empty_trash_button, leftovers_button,
+    pane_new_folder_button, pane_refresh_button,
 };
 use crate::ui::browser::paths::is_trash_root;
 use crate::ui::browser::presentation::LoadPresentation;
@@ -462,7 +462,9 @@ pub(super) struct ColumnView {
     pub(super) spinner: gtk::Spinner,
     pub(super) spinner_delay: Rc<RefCell<Option<glib::SourceId>>>,
     pub(super) truncated_hint: gtk::Image,
+    pub(super) not_responding: gtk::Box,
     pub(super) empty_trash_button: Option<gtk::Button>,
+    pub(super) leftovers_button: gtk::Button,
     pub(super) show_hidden: Rc<Cell<bool>>,
     pub(super) filter: gtk::CustomFilter,
     pub(super) search_results: Rc<RefCell<Vec<crate::services::SearchItem>>>,
@@ -633,27 +635,37 @@ pub(super) fn refresh_source_filter(column: &ColumnView, browser: &crate::app::B
     changed
 }
 
-pub(super) fn prune_missing_search_results(column: &ColumnView) -> bool {
+pub(super) fn prune_missing_search_results(
+    column: &ColumnView,
+    selection_changed: impl Fn() + 'static,
+) {
     if !column.search_session.is_active() {
-        return false;
+        return;
     }
-    let items: Vec<_> = column
+    let paths = column
         .search_results
         .borrow()
         .iter()
-        .filter(|item| crate::ui::inline_search::search_path_present(&item.path))
-        .cloned()
+        .map(|item| item.path.clone())
         .collect();
-    if items.len() == column.search_results.borrow().len() {
-        return false;
-    }
-    search::update_results(
-        &column.search_model,
-        &column.search_results,
-        &column.selection,
-        &column.syncing_selection,
-        items,
-    )
+    let model = column.search_model.clone();
+    let results = column.search_results.clone();
+    let selection = column.selection.clone();
+    let syncing = column.syncing_selection.clone();
+    column.search_session.prune_missing(paths, move |gone| {
+        let items: Vec<_> = results
+            .borrow()
+            .iter()
+            .filter(|item| !gone.contains(&item.path))
+            .cloned()
+            .collect();
+        if items.len() == results.borrow().len() {
+            return;
+        }
+        if search::update_results(&model, &results, &selection, &syncing, items) {
+            selection_changed();
+        }
+    });
 }
 
 pub(super) fn set_filter_placeholder(column: &ColumnView, count: usize) {
@@ -1108,6 +1120,7 @@ impl ViewState {
             set_filter_placeholder(column, snapshot.count);
             update_empty_trash_sensitivity(column, snapshot.count);
             column.truncated_hint.set_visible(snapshot.truncated);
+            column.not_responding.set_visible(snapshot.not_responding);
             let positions = snapshot
                 .selected_positions
                 .into_iter()
@@ -1319,6 +1332,8 @@ impl ViewState {
         header.append(&spinner);
         let header_actions = gtk::Box::new(gtk::Orientation::Horizontal, 0);
         header_actions.add_css_class("column-header-actions");
+        let leftovers = leftovers_button(&self.browser, depth);
+        header_actions.append(&leftovers);
         let empty_trash = empty_trash_button(&self.browser);
         let is_trash = is_trash_root(location);
         empty_trash.set_visible(is_trash);
@@ -1376,6 +1391,8 @@ impl ViewState {
         header.append(&header_actions_stack);
         column.append(&header);
         column.append(&filter_revealer);
+        let not_responding = super::not_responding_notice();
+        column.append(&not_responding);
 
         let entry_count = Rc::new(Cell::new(0));
         let browser_for_model = self.browser.clone();
@@ -1599,6 +1616,7 @@ impl ViewState {
                         show_hidden,
                         scope,
                         refused: Default::default(),
+                        within: state.browser.confined_to(),
                     },
                     &query,
                     restart,
@@ -1622,6 +1640,7 @@ impl ViewState {
                             &batch.query,
                             batch.items,
                             batch.has_more,
+                            batch.candidates,
                         );
                         hits.replace(ColumnHits {
                             ranges: if scope.fuzzy() {
@@ -1989,7 +2008,10 @@ impl ViewState {
                         && focused != shell.clone().upcast::<gtk::Widget>()
                         && focused.ancestor(gtk::Popover::static_type()).is_none()
                 });
+                // 10xer hides the filter with its state kept for leaving, so a focus
+                // move while it is hidden must not switch the filter off.
                 if left_column
+                    && !crate::ui::tenxer_mode::chrome_suppressed()
                     && weak_browser
                         .upgrade()
                         .is_some_and(|browser| !browser.is_chooser_mode())
@@ -2139,7 +2161,9 @@ impl ViewState {
             spinner,
             spinner_delay: Rc::new(RefCell::new(None)),
             truncated_hint,
+            not_responding,
             empty_trash_button: is_trash.then_some(empty_trash),
+            leftovers_button: leftovers,
             show_hidden,
             filter: filter_for_column,
             search_results,

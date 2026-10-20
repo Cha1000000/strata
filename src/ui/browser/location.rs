@@ -1544,6 +1544,19 @@ impl ViewState {
         );
     }
 
+    /// The entry's focus sits on its inner text widget, so the root's focus
+    /// widget is checked rather than the entry itself.
+    pub(super) fn location_entry_has_focus(&self) -> bool {
+        let entry = self.location_entry.upcast_ref::<gtk::Widget>();
+        self.location_entry.has_focus()
+            || self
+                .overlay
+                .root()
+                .and_then(|root| root.focus())
+                .as_ref()
+                .is_some_and(|focused| focused == entry || focused.is_ancestor(entry))
+    }
+
     pub(super) fn begin_location_edit(&self) {
         self.location_stack.set_visible_child_name("entry");
         self.location_entry.grab_focus();
@@ -1644,13 +1657,11 @@ impl ViewState {
         self.pending_connect.replace(Some(connect.clone()));
         match self.open_typed_location(input, base) {
             Ok(TypedLocation::Navigating { location }) => {
-                // Native paths navigate synchronously, as does reopening the current folder.
-                let opened = location.native_path().is_some()
-                    || self
-                        .browser
-                        .active_location()
-                        .is_some_and(|active| same_location(&active, &location));
-                if opened {
+                let reopened = self
+                    .browser
+                    .active_location()
+                    .is_some_and(|active| same_location(&active, &location));
+                if reopened {
                     self.settle_connect(&connect, ConnectOutcome::Opened(location));
                 } else {
                     connect.target.replace(Some(location));
@@ -1702,15 +1713,19 @@ impl ViewState {
             .is_some_and(|connect| self.settle_connect(&connect, ConnectOutcome::Failed(message)))
     }
 
-    /// Opens the pending connect once its validated target becomes a column.
+    /// Opens the pending connect once its validated target becomes a column. A
+    /// native target was validated before any of its columns appear, so the
+    /// first ancestor column settles it too (a typed file reveals its folder).
     pub(super) fn settle_connect_column(&self, location: &Location) {
         let connect = self.pending_connect.borrow().clone();
         if let Some(connect) = connect {
-            let reached = connect
-                .target
-                .borrow()
-                .as_ref()
-                .is_some_and(|target| same_location(target, location));
+            let reached = connect.target.borrow().as_ref().is_some_and(|target| {
+                same_location(target, location)
+                    || target
+                        .native_path()
+                        .zip(location.native_path())
+                        .is_some_and(|(target, column)| target.starts_with(column))
+            });
             if reached {
                 self.settle_connect(&connect, ConnectOutcome::Opened(location.clone()));
             }
@@ -2538,17 +2553,29 @@ impl ViewState {
                     if sources.is_empty() {
                         return false;
                     }
-                    let commit =
-                        super::file_drop_commit(target, &destination, &sources, &drop_state);
-                    state.commit_file_drop(destination, sources, commit);
+                    super::file_drop_commit(
+                        target,
+                        destination,
+                        sources,
+                        &drop_state,
+                        move |destination, sources, commit| {
+                            state.commit_file_drop(destination, sources, commit);
+                        },
+                    );
                     true
                 });
                 button.add_controller(drop);
                 self.breadcrumbs.append(&button);
             }
         }
-        self.location_stack.set_visible_child_name("breadcrumbs");
-        self.location_entry.set_text(&location.display_path());
+        // A folder that arrives while the user types a location, such as a new
+        // tab's first load, must not close the entry or replace the typed text.
+        let editing = self.location_stack.visible_child_name().as_deref() == Some("entry")
+            && self.location_entry_has_focus();
+        if !editing {
+            self.location_stack.set_visible_child_name("breadcrumbs");
+            self.location_entry.set_text(&location.display_path());
+        }
         let Some(last) = self.breadcrumbs.last_child() else {
             return;
         };

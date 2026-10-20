@@ -35,6 +35,7 @@ mod open_with;
 mod pointer;
 mod portal_preferences;
 pub(crate) mod preferences;
+mod presence;
 mod preview;
 mod progress_dock;
 mod raw_details;
@@ -62,11 +63,20 @@ mod window;
 pub(crate) use chooser::{cancel_chooser, present_chooser};
 pub(crate) use settings::schedule_rollback_cleanup;
 pub(crate) use window::default_save_folder;
+#[cfg(test)]
+pub(in crate::ui) use window::offer_removable_destinations_for_test;
 pub(in crate::ui) use window::{
-    RemovableDestination, removable_destinations, resolve_removable_destination,
+    RemovableDestination, RemovableWatch, removable_destination_root, removable_destinations,
+    send_to_recent_folders, watch_removable_destinations,
 };
 pub use window::{UnlockTarget, present, present_open, present_reveal, present_unlock};
 
 pub(crate) fn prepare_portal_ui() {
     let _theme = theme::ThemeManager::shared();
+}
+
+pub(crate) fn read_install_facts() {
+    let _startup = crate::util::ui_thread::allow(crate::util::ui_thread::Exception::Startup);
+    crate::services::InstallSource::detect();
+    open_with::uses_portal();
 }

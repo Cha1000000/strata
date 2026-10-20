@@ -227,6 +227,12 @@ impl ModeViews {
             self.update_camera_grouping(self.grouping_for_snapshot(depth, &snapshot));
         }
         match event {
+            BrowserEvent::ColumnNotResponding {
+                depth,
+                not_responding,
+            } => self.update_panes(*depth, |pane| {
+                pane.not_responding.set_visible(*not_responding);
+            }),
             BrowserEvent::SortingStarted { depth } => {
                 self.update_panes(*depth, Pane::start_sorting)
             }

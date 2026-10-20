@@ -20,7 +20,9 @@ one is deleted.
   [The reserved-name step and its risk](#the-reserved-name-step-and-its-risk). Where only the
   client kernel or a FUSE daemon checks for an existing name, other clients are not covered; see
   the residual limits below. Replace only ever removes the item the user confirmed, identified by
-  device, inode, type and, where the filesystem reports it, birth time.
+  the mount's identity rule: device, type and inode where the mount keeps inode numbers, the birth
+  time where it reports one, and a file's size and times where neither tells (see
+  [Identity](#identity)).
 - **Never remove a name on a guess.** A name is unlinked only after Strata has proven which inode
   it holds. When the outcome of a step cannot be proven, both names are kept and the operation
   reports that the result could not be confirmed.
@@ -30,10 +32,24 @@ one is deleted.
   [Moves across filesystems](#moves-across-filesystems).
 - **Show only complete copies.** A copy appears under its final name once it is complete, except
   on mounts where nothing can be placed; see [Publishing a copy](#publishing-a-copy).
-- **Keep transfer work off the interface thread.** Native copying, placement, and paste/restore/delete
-  planning run on workers. Some existing archive-name, undo and redo replay, and bookmark checks
-  remain synchronous; removing those calls is tracked in [#1590](https://github.com/lgse/strata/issues/1590).
-  An unresponsive mount can still block the window through those remaining checks.
+- **Never remove what an interrupted operation may have left of the user's data.** A crash or an
+  unplugged device can leave Strata's hidden names behind, and an original set aside always keeps
+  its own name inside one. Strata shows them where the user looks and offers to restore them; by
+  itself it removes only its own empty probes, and it deletes an incomplete copy only when the user
+  asks. See [Leftovers after a crash or unplug](#leftovers-after-a-crash-or-unplug).
+- **Never stand in an operation's way, and never remove another program's open file.** Before an
+  operation changes an item, Strata stops its own previews, thumbnails and background reads of it
+  and of everything inside it. A file another program still has open, which NFS, SMB and FUSE keep
+  under a hidden leftover name until it is closed, is never deleted, renamed or copied when Strata
+  finds it inside a folder: the folder stays, and the error names the program where it can. See
+  [Files that are still open](#files-that-are-still-open).
+- **Keep file calls off the interface thread.** Apart from the exceptions listed under
+  [Unresponsive mounts](#unresponsive-mounts), code on the GTK main thread makes no filesystem
+  call, synchronous GIO file call, mount-table or udev read, and waits for no process that makes
+  one. It asks a worker and applies the answer only while it is still current. Folder loads,
+  probes and monitors on a mount that stops answering are bounded, so such a mount makes an action
+  slow or fail but does not freeze the window. That section also says what a dead mount still
+  does.
 - **Move metadata, not data.** Renames never copy file contents. Moves within one filesystem
   rename too, including on mounts with neither `RENAME_NOREPLACE` nor usable hard links. Moves
   copy only when the kernel returns `EXDEV` (across devices, bind mounts, btrfs subvolumes or
@@ -83,12 +99,35 @@ Residual limits:
   a destination name just before Strata renames over its placeholder loses its write, and so does
   an item created at the name, even exclusively, after something else removed the placeholder in
   that window; see [The reserved-name step and its risk](#the-reserved-name-step-and-its-risk).
-- ext4, ntfs3, NFS and SMB give a freed inode number straight to the next item created. Where no
-  birth time is reported (NFSv3, ntfs-3g, exfat-fuse), an item deleted and recreated at the same
-  name with the same type passes for the original.
-- Undo and restore find an item Strata moved to Trash (by Delete, Replace or Merge) by original
-  path, device and inode number, without birth time. If another item trashed from the same path got
-  that inode number, they can bring back that item instead; they never overwrite anything.
+- Where the operation knows which item it moves (restore, Replace's source and the original it
+  sets aside, putting an original back, a case-only rename), another item found at the source
+  name is refused before anything moves. Another item found at the destination just after the
+  move is left there and reported as unconfirmed: it may be one another program put there, so it
+  is never moved back. An item swapped in at the source name between that check and the rename
+  is therefore left at the destination too; where that is a hidden name Strata chose (an original
+  set aside, a case-only rename's temporary name), the error names it.
+- ext4, ntfs3, NFS and SMB give a freed inode number straight to the next item created. Birth
+  times tell the new item apart, and where NFS and ext2, ext3 and ext4 report none, the file
+  handle does (see [Identity](#identity)). On ntfs-3g and exfat-fuse, which report neither, an item
+  deleted and recreated at the same name with the same type passes for the original.
+- Undo and restore find an item Strata moved to Trash by its original path and the newest deletion
+  date. Undo reads the Trash folders itself, the home Trash and the `.Trash/$uid` and
+  `.Trash-$uid` folders of the item's mount, so it needs no GVfs. As in GLib, a mount's Trash
+  folder counts only when it is a folder the user owns, not a link. The mount's identity rule is
+  type, the birth time where both report one, the inode number where the mount keeps numbers, and
+  for files size and modification time where it renumbers them. Undo of a Delete, of a paste's
+  Replace or merge and of an archive that replaced its original passes over a Trash item the rule
+  proves to be another, such as one trashed later from the same path, and prefers one that the
+  rule or its exact inode number vouches for. Where it vouches for more than one item with the
+  newest deletion date, Undo leaves those items in the Trash, names the item and restores the
+  others. That happens for files of one size and modification time trashed from one path within
+  one second on a mount that renumbers entries: sshfs, exfat-fuse, vboxsf and msdos, which report
+  no birth time, and vfat and exFAT where the files were also made within one birth-time tick.
+  Nothing proves a folder on a mount that renumbers and reports no birth time to be another, so
+  once its number changed the newest such folder comes back. The saved views and colors of a
+  trashed item need the Trash item to pass the rule. Where the mount keeps inode numbers but
+  reports neither a birth time nor a file handle (ntfs-3g), another item trashed from the same path
+  that got the inode number can be brought back instead; nothing is ever overwritten.
 - On SMB2/3, gvfsd-fuse and FUSE daemons that ignore rename flags, the no-replace check is made
   by the client kernel, so it protects against local processes but not against another client
   creating the same name at the same moment.
@@ -97,14 +136,16 @@ Residual limits:
 - On a case-insensitive SMB share without POSIX extensions, the Linux cifs client turns server
   inode numbers off for the whole mount once a folder is looked up under a second spelling, as the
   check before a case-only folder rename does ("Autodisabling the use of server inode numbers" in
-  the kernel log). Hard links then report different inode numbers, so Strata stops using them
+  the kernel log). On any SMB mount it does the same once another client renames a folder this
+  client has looked up. Hard links then report different inode numbers, so Strata stops using them
   there, as on sshfs; `RENAME_NOREPLACE` still places items there. A paste never looks a name up
   under a second spelling there, as it numbers names that differ only in case before copying.
 - After a lost reply while placing over a placeholder (to the placeholder's `mkdir` or exclusive
   create, or to the rename over it), an empty folder or file Strata created can remain at the
-  destination name. Where inode numbers are stable, a placeholder the rename left in place proves
-  the rename never happened: Strata removes it and reports the error itself. On FUSE the moved
-  item can report the placeholder's number, so nothing is removed there.
+  destination name. Where the mount's type is known to keep inode numbers, a placeholder the rename
+  left in place proves the rename never happened: Strata removes it and reports the error itself.
+  On FUSE and vboxsf the moved item can report the placeholder's number, so nothing is removed
+  there, nor on a mount of another type or one whose type cannot be read.
 
 Renaming a folder in the lower layer of an overlayfs mount without `redirect_dir`, or moving
 across bind mounts or btrfs subvolumes, returns `EXDEV`. Those moves copy, and the copy uses a
@@ -188,12 +229,12 @@ Replace and Merge without Trash, would still be refused on these mounts.
 Strata learns capabilities per mount instead of trusting the filesystem type. The cache lives in
 `src/adapters/volume/mount_capabilities.rs`. It is keyed by the mount id from `statx`:
 `STATX_MNT_ID_UNIQUE`, which is never reused, on Linux 6.8 and later, otherwise `STATX_MNT_ID` with
-the device number. Entries are dropped whenever Strata's mount monitor reports a change.
+the device number. Entries are dropped whenever the mount table changes.
 
 - It records whether `RENAME_NOREPLACE`, `RENAME_EXCHANGE`, hard links, symbolic links and renaming
-  over an empty folder work, and what the mount's type says of the [names](#names) it stores and of
-  file sizes: FAT holds no file of 4 GiB or more, so a paste that selects one fails before copying
-  anything.
+  over an empty folder work, and what the mount's type says of the [names](#names) it stores, of
+  file sizes and of [identity](#identity): FAT holds no file of 4 GiB or more, so a paste that
+  selects one fails before copying anything.
 - A capability is recorded only from a definitive answer (`ENOSYS`, `EOPNOTSUPP`, or a rejected
   exchange), from Strata's own placeholder, or from a probe on Strata's own temporary names
   (`.strata-probe-*`) in the destination. An `EINVAL` or `EPERM` from placing a user's item never
@@ -210,43 +251,224 @@ the device number. Entries are dropped whenever Strata's mount monitor reports a
 - The common case costs nothing extra: step 1 always runs first, and the cache is read only after
   it fails.
 
+## Identity
+
+Strata often has to tell whether an item it read earlier is still the one at a name: before Replace
+removes its target, before a move deletes a source, when it puts an original back, when Undo looks
+for an item in the Trash, and when an open folder was renamed. Mounts disagree about what can prove
+that. vfat, exFAT, FUSE daemons and SMB without server inode numbers give an entry a new inode
+number once the kernel evicts it; ext4, NFS and SMB give a freed number straight to the next item;
+and only some mounts report birth times. So every such decision goes through one rule per mount:
+`compare` in `src/adapters/local_operations/native_fs.rs` during an operation, and `ItemIdentity` in
+`src/services/item_identity.rs` for records kept after it. The mount's traits are learned once, with
+its [capabilities](#what-a-mount-supports), from its type and udev's format.
+
+The rule weighs what both readings carry, in this order:
+
+1. Another device or type, or another file handle where both readings have one, is another item.
+2. A birth time both report, other than zero, must match. A folder's counts only where the mount
+   keeps folder births.
+3. Where the mount keeps inode numbers, the number decides.
+4. Where it renumbers entries, a matching birth time proves a folder. A file must also keep the
+   size and modification time its site recorded, as vfat and exFAT give files made within one
+   10 ms tick one birth time; on SMB, where that time may be made up, its change time too where the
+   site needs it (below).
+5. Without a birth time, a file is proven by its size and modification time.
+6. Where numbers are renewed, a folder no birth time proves, and a file whose site recorded no size
+   and times, are unproven. A site that removes, replaces or puts back an item then needs the exact
+   inode number it read, with any birth time and file handle, so there only an entry that was held
+   (below) or stayed cached passes. What an operation made or set aside is removed, and a moved
+   copy vouches for its source, by size and times only beside a birth time; without one the exact
+   inode is needed there too. A site that writes into a folder the copy made, or checks a folder's
+   entries one by one and then removes it only if it is empty (`rmdir`), accepts an unproven folder
+   unless the rule finds it different. Following a renamed folder needs proof.
+
+| Mount | Inode numbers | Birth times | What proves an item |
+| --- | --- | --- | --- |
+| ext4 with 256-byte inodes, XFS, btrfs, f2fs, tmpfs, bcachefs, ZFS, ntfs3, NFSv4 over a filesystem with births | kept | yes | device, type, inode and birth time |
+| ext2 and ext3, ext4 with 128-byte inodes, NFSv3, NFSv4 entries without a birth | kept, and reused at once | no | device, type and inode, and the file handle, whose generation changes when a number is reused |
+| ntfs-3g, and other FUSE daemons whose probe link keeps the number | renewed until such a probe, then kept | no | device, type and inode; a reused number passes |
+| vfat, exFAT files | renewed | yes, 10 ms | device, type and birth time, and the size and modification time a site recorded |
+| exFAT folders | renewed | reset by every rename into or within the folder | device and type; their entries are checked one by one |
+| SMB | the server's while the mount shows `serverino`, both when the item was read and when Strata decides | the server's creation time, which Samba may make up | birth time, plus the number while `serverino` shows; once it is gone, a file also the size and times its site recorded |
+| sshfs, exfat-fuse, rclone and other FUSE daemons, vboxsf, msdos | renewed | none | files: size and modification time; folders: type only; single items are held (below) |
+| 9p, virtiofs, ceph, eCryptfs, overlayfs, HFS+, and other types | kept | where reported | device, type, inode and any birth time |
+
+- **File handles.** On NFS and on ext2, ext3 and ext4 without birth times (or with a zero one),
+  Strata reads the file handle right after each stat of an item it records, at no extra round
+  trip, and keeps a 64-bit digest of it. The lab saw the handle change in every one of 198 reuses
+  of an NFSv3 fileid, and stay put across renames, moves between folders and eviction. FUSE
+  handles change once an entry is evicted, so they are never read there, and exFAT and SMB refuse
+  them.
+- **Held items.** Where numbers are renewed and no birth time proves an item (sshfs, exfat-fuse,
+  vboxsf, and folders on kernel exFAT), a single item that one worker reads and later decides about
+  is held with an `O_PATH` descriptor from the first stat until the decision: a Replace or
+  archive-Replace target, and a file stage from its last write until it is published or removed. The
+  item under the [Trash check](#trash) is held on every mount except NFS. The kernel cannot evict a
+  held entry, so it keeps its number, and an `O_PATH` descriptor opens nothing on a FUSE daemon or
+  SMB server and leaves no leftover there. A held entry that is unlinked, or that another file is
+  renamed over through the mount, fails its `fstat` with `ESTALE` or `ENOENT`, which counts as
+  another item, never as a reason to stat the name again. NFS keeps inode numbers and is never held:
+  a held file unlinked there would become a `.nfs` leftover. Sites that track many items (a move's
+  sources, a merge's originals, undo records) record what they read instead.
+- **FUSE link probe.** A FUSE daemon whose probe link keeps the file's number and counts two links,
+  as ntfs-3g does, counts from then on as keeping inode numbers. sshfs gives a link a number of its
+  own and one link, so it keeps renewing.
+- **SMB.** The cifs client can turn server inode numbers off at any moment, and then only drops
+  `serverino` from the mount's options, without a mount-table event. It does so after a lookup of a
+  folder under a second spelling on a case-insensitive share, and on any SMB mount once another
+  client renames a folder this client has looked up. So a decision on SMB reads the mount's options
+  again, once per moved item or per Replace, and compares numbers only while `serverino` showed at
+  both readings. The creation time stands in otherwise. Samba makes that time up from a file's
+  times for any file it did not create itself with stored DOS attributes, so a replacement that
+  keeps the modification time repeats it; while `serverino` shows, the number told them apart in
+  all 37 such cases in the lab. Once it is gone, the client keeps the number and birth it cached
+  for an entry across a replacement another client makes, and only the change time and size show
+  it. So from then on a file must also keep the size and modification time its site recorded, and
+  a Replace or archive-Replace target its change time as well; a move's source keeps its own check
+  of the change time. An original put back is matched by size and modification time, as setting it
+  aside changes its change time, and so are Trash items, as moving to Trash changes it. What an
+  operation made or set aside is removed by the birth time with the size and modification time it
+  recorded. While the client holds a lease on a file, it shows the file's modification time from
+  the server only to a forced stat, whatever `actimeo` says, so an archive stage is recorded by a
+  forced stat by name before it is closed.
+  A birth of exactly 0 s 0 ns, as SMB and NFSv4 report for a server without births, counts as none.
+- **Records kept after an operation.** `ItemIdentity` carries the traits of the mount it was read
+  on, and a comparison uses the weaker of two. It identifies Trash items for restore and Undo, the
+  saved views and colors of a trashed item, and an open folder for following a rename. An open
+  folder's identity comes from the change stamp its load starts with, so loading it takes no
+  second stat.
+
+Where each operation uses the rule, and what it does with another item (rule 6 says when an unproven
+one counts as another):
+
+| Site | Another item means |
+| --- | --- |
+| Replace and archive-Replace target, checked before it is removed | "The target changed while the operation was in progress" |
+| an original set aside and put back, or removed once the copy is flushed | kept aside, and the error names it |
+| a move's sources before deletion, and the copy that must still hold them | the source stays, reported as changed or as an item whose copy was moved away |
+| the [Trash check](#trash) after GLib reports success | not trashed |
+| restore and Undo looking an item up in the Trash | another item; see the residual limits under [Placing an item without replacing](#placing-an-item-without-replacing) |
+| case-only renames, the rename prompt's "already exists", and case aliases in a paste | not the same item, so the name counts as taken; see [Rename](#rename) |
+| an open folder that disappears from its parent | not renamed: the view leaves it as departed |
+
+Limits of the rule:
+
+- **Reuse without a birth or handle.** On ntfs-3g, an item deleted and recreated at the same name
+  with the same type can get the freed number and pass for the original, and on exfat-fuse and
+  sshfs one with the same type, size and times does, unless it is held. On sshfs and vboxsf, a
+  folder that the server or another client puts at a held Replace target's name keeps the name's
+  number and passes too.
+- **Births in one tick.** On vfat and exFAT, a file made at a name within the same 10 ms tick as the
+  one it replaced passes the rule only with the size and modification time its site recorded; where
+  the site recorded none, only the exact inode passes. Following a renamed folder on vfat can follow
+  a sibling folder made in the same tick after the open folder was deleted; this only moves the
+  view.
+- **SMB copies after a switch-off.** Once `serverino` is gone, neither the check that a moved copy
+  is still the one Strata made nor the removal of what an operation made or set aside compares the
+  change time: whether a fresh SMB copy's change time stays put was not measured, and setting an
+  original aside changes it. A same-size replacement that keeps the modification time, made by
+  another client in the meantime, passes.
+- **NFS Trash check.** Nothing holds the item across GLib's Trash call on NFS, so an item swapped
+  in at the name during the call is not noticed there.
+- **File handles** were measured on knfsd exports with `no_subtree_check` only. Where an export
+  with `subtree_check`, or another server, changes a file's handle as it moves between folders, a
+  moved item counts as another and is kept, the safe side.
+
 ## Replace and merge
 
 Before copying anything, Replace chooses how to remove the original, in this order:
 
 1. **Trash**, when the location supports it. Undo restores the original.
 2. **Atomic exchange** (`RENAME_EXCHANGE`) on in-kernel local filesystems: ext4, XFS, btrfs, f2fs,
-   tmpfs, bcachefs, OpenZFS 2.2 and later, and vfat on Linux 6.0 and later. It is never used on
-   FUSE, where some daemons ignore the flag and overwrite the target. The filesystem type is read
-   fresh with `fstatfs` for every decision.
-3. **Set aside**: the original is placed at a hidden `.strata-replaced-<id>` name with the routine
-   above, the new item is placed at the original name, and the set-aside original is removed by
-   identity. If placing fails, the original is put back; if its name was taken meanwhile, it is
-   kept and the error names it. The original's name is briefly absent, as it is with Trash. On
-   mounts with neither `RENAME_NOREPLACE` nor usable hard links, these placements use the
-   [reserved-name step](#the-reserved-name-step-and-its-risk) for files, and for folders where
-   renaming over an empty folder is refused.
+   tmpfs, bcachefs, OpenZFS 2.2 and later, and vfat on Linux 6.0 and later. The finished copy is
+   first moved into a new hidden folder, `.strata-originals-<id>/`, beside the original and under
+   the original's name, then exchanged with the original across the two folders, so the original
+   ends in that folder under its own name and the copy at the name. It is never used or probed on
+   FUSE, where some daemons ignore the flag: exfat-fuse overwrote the target and destroyed it in the
+   lab. The filesystem type is read fresh with `fstatfs` for every decision. If the exchange is
+   refused, the copy goes back to its stage name and Replace sets the original aside instead; only
+   an `EINVAL` or "unsupported" is remembered for the mount, not a permission refusal from a
+   read-only copy or folder.
+3. **Set aside**: the original moves into a new `.strata-originals-<id>/` folder beside it, under
+   its own name, the new item is placed at the original name, and the set-aside original is then
+   removed by identity, its folder with it. The move into the folder is a plain rename followed by
+   an identity check, not the routine above: nothing else knows that folder, so the rename cannot
+   replace anything. If placing fails, the original is put back; if its name was taken meanwhile,
+   it stays in its folder and the error names it. The original's name is briefly absent, as it is
+   with Trash. On mounts with neither `RENAME_NOREPLACE` nor usable hard links, placing the new item
+   and putting the original back use the [reserved-name step](#the-reserved-name-step-and-its-risk)
+   for files, and for folders where renaming over an empty folder is refused.
 4. Otherwise Replace fails before any data is copied. This happens only where a probe cannot
    settle what the mount supports, or for a folder on a mount without `RENAME_NOREPLACE` that has
    hard links but cannot rename over an empty folder.
 
-Copies are written into a hidden `.strata-replacement-<id>` stage before they are placed. A file
-stage is created by the copy itself, exclusively, at a fresh name, so nothing is ever copied over
-a stage. Where the original or a moved source will be deleted, the stage is flushed to disk first;
-see [Durability](#durability).
+Right before it removes the original, after the whole copy, Replace checks that the item at its name
+is still the one it read before copying, by the mount's [identity rule](#identity). Where the mount
+keeps inode numbers, that is the device, type, inode and birth time; vfat, exFAT and SMB without
+server inode numbers number an entry afresh once the kernel evicts it, so there the birth time
+stands in for the inode, and a file must also keep the size and modification time Replace read, on
+SMB its change time too. Where a mount neither keeps numbers nor reports birth times, as sshfs,
+exfat-fuse and vboxsf, and for a folder on kernel exFAT, Replace holds the target from when it reads
+it until it is gone, with an `O_PATH` descriptor, which opens nothing on a FUSE daemon or SMB
+server. The kernel cannot evict a held entry, so it keeps its number, and a file another program
+renames over it through the mount is refused. sshfs and vboxsf keep that number for a file put at
+the name on the server or by another client, so a file must still keep its size and modification
+time, as where no descriptor could be opened, and a folder its inode and any birth time. NFS keeps
+inode numbers and is never held this way; a held file unlinked there would leave a `.nfs` leftover.
+An original renumbered while it waits is still replaced; another item is refused as "The target
+changed while the operation was in progress". The original then goes on with the identity it has
+now. An original set aside is put back by the same rule, without the change time, which setting it
+aside changes. It is removed by its device, type, inode and birth time, where the mount numbers
+entries afresh the birth time with the size and modification time Replace read standing in for the
+inode, and without a birth time only its exact inode. Archives replace their target the same way.
+
+A folder moves to another parent only if its `..` entry can be rewritten, so a folder the user
+owns with a mode that denies its owner write (0555) is made owner-writable for the instant of each
+move into or out of an originals folder, through a descriptor checked against its identity, and
+gets its exact mode back. A folder the user can neither write nor change the mode of, such as
+another user's folder on a mount that enforces modes, cannot be set aside: Replace without Trash
+and a case-only rename on a case-insensitive mount fail there with "Permission denied", as `mv`
+into another folder would.
+
+The originals folder costs, per Replace without Trash and next to setting the original aside under a
+flat hidden name as earlier builds did, 2 more requests on NFSv3, none on NFSv4.2 and one fewer on
+sshfs for a file, 1 to 3 more for a folder, and 14 more SMB commands for a file and 17 for a folder.
+On loopback that took under 0.5 ms longer on NFS and about 1 ms longer on SMB. On sshfs, whose
+requests in the lab often waited on 40 ms delayed acknowledgements, a folder took about 20 ms longer
+and a file 20 to 60 ms less. A crash or unplug at any point leaves the original at its name or in its
+folder, never only under a stage; see [Leftovers after a crash or
+unplug](#leftovers-after-a-crash-or-unplug).
+
+Copies are written into a hidden `.strata-copy-<id>` stage before they are placed, so a stage only
+ever holds a copy. A file stage is created by the copy itself, exclusively, at a fresh name, so
+nothing is ever copied over a stage. Where the original or a moved source will be deleted, the stage
+is flushed to disk first; see [Durability](#durability). Where only a descriptor tells a file stage
+apart, as for the target above, it is held from its last write until it is published or removed, so
+it keeps its number once closed; archive stages too.
 
 When Replace is part of a move within one filesystem, the source itself is placed after the
 original is out of the way, so nothing is copied unless no step can place it. Without Trash, a
 replaced original is gone for good: the replacement is not added to Undo, because undoing it could
-only delete the remaining copy. A replacing move keeps its Undo, which moves the item back.
+only delete the remaining copy. A replacing move keeps its Undo, which moves the item back. Where
+the original cannot be removed once the new item is in place and flushed, as when another program
+holds a file in it, a paste, move or compression completes with its Undo, if it has one, and
+reports "“%{name}” was replaced, but its original could not be removed from “%{kept}”: %{error}",
+naming the originals folder that keeps it.
 
-Merge moves the files it overwrites to Trash. Without Trash, it sets them aside, never by
-exchange: the originals go into one hidden `.strata-merge-<id>` folder inside the merge target, are
-put back if the merge fails, and are removed once it succeeds and is flushed to disk. An original
-whose name the merge left free, because the incoming item was a special file the destination
-cannot store or a source that a merging move kept, is put back instead. It refuses to set a file
-aside where Replace would. How the incoming items are placed is described under
-[Merges](#merges).
+Merge moves the files it overwrites to Trash. Without Trash, it sets them aside, never by exchange:
+the originals go into one hidden `.strata-merge-<id>` folder inside the merge target, under their
+own names and the folders they sat in, each by a plain rename and an identity check, are put back if
+the merge fails or is cancelled, and are removed once it succeeds and is flushed to disk. To put an
+original back over a copy the merge already placed at its name, the merge deletes that copy while it
+is still as placed; anything else at the name stays, and the original stays in the folder, which the
+error names. An original whose name the merge left free, because the incoming item was a special
+file the destination cannot store or a source that a merging move kept, is put back instead. Where
+another program has an original open on NFS, SMB or FUSE, deleting it or putting it back can leave
+the mount's [leftover](#files-that-are-still-open) in the folder. The folder then stays and is
+reported as still open ("“%{name}” was left in “%{folder}”, as a file in it is still open in
+%{program}"), which alone never stops the merge. It refuses to set a file aside where Replace would.
+How the incoming items are placed is described under [Merges](#merges).
 
 ## Copying
 
@@ -275,28 +497,30 @@ item moved to one is deleted by Strata, as described under
 - **Elsewhere, and for folders,** the copy is built in a hidden `.strata-copy-*` stage in the
   destination folder and published with the [placement routine](#placing-an-item-without-replacing).
   A file stage is created exclusively, and its identity is read from its own descriptor. Replace
-  builds its copy under `.strata-replacement-*` and places it itself; see
+  builds its copy in such a stage too and places it itself; see
   [Replace and merge](#replace-and-merge).
 - **Where nothing can be placed,** because the mount's learned capabilities rule out every step for
   a folder or publishing a stage returns "unsupported", entries are created exclusively at their
   final names. A copy that fails there removes only the entries it created, each identified by its
-  inode, and the item's folder only once it is empty. A stage built before this was known is copied
-  again from the stage, on the same device.
+  inode, or where the mount numbers entries afresh by its birth time with the size and modification
+  time the copy left a file with, and the item's folder only once it is empty. A stage built before
+  this was known is copied again from the stage, on the same device.
 - **Keep Both and Duplicate** choose their number when the copy is published, so a name taken in
   the meantime moves the copy on to the next number, cut where needed to fit the mount's [length
   limit](#length). Moves within one filesystem try each numbered name with the placement routine.
   GVfs destinations are probed off the main thread, and the copy retries on "exists". After an
   unconfirmed publish, both names are kept and no other number is tried.
 
-A crash or an unplugged device can leave a `.strata-copy-*` stage behind. It holds only a partial
-copy whose source still exists, and is safe to delete; nothing removes it automatically.
+A crash or an unplugged device can leave a `.strata-copy-*` stage behind. It holds only a copy
+whose source still exists, and is safe to delete. Strata never removes it by itself; the folder's
+[leftover review](#leftovers-after-a-crash-or-unplug) offers to delete it.
 
 ### Data
 
 | Step | When | Gives way to the next step |
 | --- | --- | --- |
 | `FICLONE`, one call | the file is not empty and the destination has not refused clones; on SMB only on kernels with the client's December 2023 fixes | on the errnos that mean it did nothing; `EOPNOTSUPP` and `ENOTTY` are remembered for the mount |
-| `copy_file_range`, in chunks | the file reports a size, and both ends are on one device, or in one network family (NFS, SMB or FUSE) on a kernel with that family's fixes: NFS from 5.9, FUSE from 5.8, SMB from 6.7, 6.6.7 or 6.1.73 | on the errnos that mean "unsupported", from the current offset; `ENOSYS` is remembered for the process |
+| `copy_file_range`, in chunks | the file reports a size, and both ends are on one device, or in one network family (NFS, SMB or FUSE) on a kernel with that family's fixes: NFS from 5.9, FUSE from 5.8, SMB from 6.7, 6.6.7 or 6.1.73 | on the errnos that mean "unsupported", from the current offset; `ENOSYS` is remembered for the mount |
 | `pread` and `pwrite` | always | — |
 
 - Chunks start at 1 MiB, double while a call takes under 100 ms, up to 64 MiB, and halve when one
@@ -361,7 +585,7 @@ What the lab's mounts keep, with udisks' default options:
 | ntfs3 | exact | 100 ns | yes |
 | NFSv4.2 | exact | to the nanosecond, set again after close | `user.*` where the server supports them |
 | NFSv3 | exact | to the nanosecond | no |
-| SMB with POSIX extensions | exact | 100 ns | `user.*` |
+| SMB with POSIX extensions | exact, except the sticky bit, which Samba drops; a file just created shows the mount's `file_mode` until a lookup or forced stat returns the server's mode | 100 ns | `user.*` |
 | SMB without them | 0755; a read-only file shows 0555 | 100 ns | `user.*` |
 | ntfs-3g | 0777 | 100 ns | `user.*` |
 | sshfs | exact | whole seconds | no |
@@ -487,7 +711,8 @@ with the placement routine:
 Placed folders then get their exact modes, and the empty stage is removed. Nothing is written into
 a live folder except by an exclusive rename, or an exclusive create where nothing can be placed, so
 a stopped merge leaves no partial file under a real name. Items already placed stay, and only they
-are reported. Undoing a merge removes items under the names they were saved as. Each merged folder
+are reported, except a copy over an original set aside without Trash, which gives way to the
+original. Undoing a merge removes items under the names they were saved as. Each merged folder
 is opened without following symlinks and pinned, so a folder swapped for a link is not followed,
 while mount points inside the target are.
 
@@ -509,7 +734,13 @@ if it is still what the copy read:
   same type, size and modification time and, where inode numbers are stable, the same inode, change
   time and link count. Removing one name of a hard-linked file changes the other names' change time
   and link count, so Strata counts the names it removed itself, across every item of a paste, a
-  restore or an undo, and accepts only those changes.
+  restore or an undo, and accepts only those link counts. Right after removing a name, it reads the
+  file's change time through another name of it in the same item, and the file's later names must
+  show that change time. Before Linux 6.13, a change within the clock tick of that removal shows
+  the same change time. A name in another item (two selected or restored items that share a
+  file) is accepted with any change time once Strata removed one of the file's names, as long as
+  its size and modification time still match, except on cifs without server inode numbers (see
+  **Relaxed identity**).
 - **SMB change times.** The SMB client answers a stat from the attributes it cached for a file
   (`acregmax`, or `actimeo` in the mount's options, one second by default, and longer for a file
   this machine keeps reading), which can hold a change time from before a change reached the
@@ -518,10 +749,21 @@ if it is still what the copy read:
   one more round trip per entry, and moving or undoing after a paste there, or after reading the
   files, does not keep unchanged entries as changed. Elsewhere, and on SMB mounts with `actimeo=0`,
   which cache nothing, the record takes no extra round trip.
-- **Relaxed identity.** FUSE daemons without `use_ino`, vfat and exFAT, and cifs mounted with
-  `noserverino` give an entry a new inode number once the kernel evicts it. There, the type and the
-  birth time, where both stats report one, stand in for the inode, and the change time is compared
-  only for files with one link.
+- **Relaxed identity.** FUSE daemons without `use_ino`, vfat and exFAT, and cifs without server
+  inode numbers give an entry a new inode number once the kernel evicts it. There, the type and the
+  birth time, where both stats report a non-zero one, stand in for the inode, and the change time is
+  compared only for files with one link. On SMB, whose client keeps a replaced name's cached number
+  and creation time, every file keeps the change time and link count check above. A name the copy
+  recorded under another number than the file's other names stays as changed, as the link counts
+  no longer add up. Once Strata removed one name of a file, a later name is deleted only if it
+  shows the change time Strata read through another name in the same item right after that
+  removal, whatever numbers the client reports now, so a name in another item stays as changed.
+  See [Identity](#identity).
+- **SMB.** The check before deleting reads the mount's options again, once per moved item, and
+  compares inode numbers only while `serverino` still shows; a share mounted `noserverino` shows
+  neither it nor `noserverino`. Otherwise the server's creation time stands in for the inode, and a
+  file must also keep its size and modification time and a source its change time and link count,
+  as [Identity](#identity) explains.
 - **Racily clean files.** Where timestamps are coarse, as on every filesystem before Linux 6.13, a
   same-size rewrite can leave a file's times as they were. Such files are compared by content; see
   [Racily clean files](#racily-clean-files).
@@ -538,19 +780,23 @@ if it is still what the copy read:
   that item is deleted. A fallback that copies out of a stage records the newly created copy's
   identities, not the discarded stage's.
 
-Where the destination keeps inode numbers, its entries must keep the exact device, inode, type and
-available birth time. Where it numbers an evicted entry afresh (FUSE daemons without `use_ino`,
-vfat and exFAT, cifs with `noserverino`), the type and the birth time, where both stats report one,
-stand in for the inode as they do for sources, and a file or symbolic link must also keep its
-recorded size and modification time, and a file its contents where those times cannot tell. The
-kernel's exFAT driver sets a folder's birth time again whenever an entry is renamed into or within
-it, as a merge places entries, so there a folder of the copy is known by its type alone and its
-entries are checked one by one. An entry renumbered after a rename or a cache eviction then still
-proves the copy, and the move deletes its sources.
+Each entry of the copy must keep its device and type, a file or symbolic link its recorded size and
+modification time, and a file its contents where those times cannot tell. Where the destination
+keeps inode numbers, an entry must also keep its inode and available birth time. Where it numbers
+an evicted entry afresh (vfat and exFAT, cifs without `serverino`, FUSE daemons without `use_ino`),
+the birth time, where both stats report one, stands in for the inode, so an entry renumbered after
+a rename or a cache eviction still proves the copy, and the move deletes its sources. Without a
+birth time (sshfs, exfat-fuse, vboxsf), the inode must still match, as another file of the copy's
+size and time would pass a check of those alone; a copy the kernel renumbered before the check
+keeps its sources, reported like a copy that was moved away. The kernel's exFAT driver sets a
+folder's birth time again whenever an entry is renamed into or within it, as a merge places
+entries, so there a folder of the copy that reports a birth time is known by its type, and its
+entries are checked one by one.
 
-What stays is reported by cause: changed during the move, could not be deleted (with the error, as
-in a read-only folder), a special file or symbolic link the destination cannot store, or an item
-whose copy was moved away. An entry already gone is not reported, since a move leaves exactly that.
+What stays is reported by cause: changed during the move, a folder holding a file that is
+[still open](#files-that-are-still-open), could not be deleted (with the error, as in a read-only
+folder), a special file or symbolic link the destination cannot store, or an item whose copy was
+moved away. An entry already gone is not reported, since a move leaves exactly that.
 A moved item with anything left behind is left out of Undo, and the report says so, naming up to
 eight such items and counting the rest. Undoing a move gives back names that were numbered as
 aliases, where the original name is free.
@@ -615,9 +861,9 @@ report there.
 
 | Destination | Flush | Why |
 | --- | --- | --- |
-| ext2/3/4, XFS, btrfs, f2fs, tmpfs, bcachefs, ZFS, overlayfs, ntfs3, NFS | `syncfs` | `sync_fs` flushes the device; NFS commits to the server |
-| vfat, msdos, exFAT | `syncfs`, then `fsync` of the folder | `sync_fs` writes back without flushing the device's cache, which `fsync`, of folders too, does |
-| ntfs-3g, exfat-fuse | `syncfs`, then `fsync` of the folder | without `FUSE_SYNCFS`, `syncfs` writes the daemon's device pages back but flushes nothing; both daemons sync and flush their whole device for a folder's `fsync` |
+| ext2/3/4, XFS, btrfs, f2fs, tmpfs, bcachefs, ZFS, overlayfs, NFS | `syncfs` | `sync_fs` flushes the device; NFS commits to the server |
+| vfat, msdos, exFAT, ntfs3 | `fsync` of the folder, `syncfs`, then `fsync` of the folder again | `sync_fs` writes back without flushing the device's cache, which `fsync`, of folders too, does; on ntfs3 `syncfs` returned success for renames an unplugged device never got, which only a folder `fsync` made first reported |
+| ntfs-3g, exfat-fuse | `fsync` of the folder, `syncfs`, then `fsync` of the folder again | without `FUSE_SYNCFS`, `syncfs` writes the daemon's device pages back but flushes nothing; both daemons sync and flush their whole device for a folder's `fsync` |
 | other FUSE daemons, and `fuseblk` mounts udev cannot tell | `fdatasync` of each written file before it is closed, then `fsync` of the folder | a file's `fsync` reaches the daemon; the folder's covers names published after the files were synced |
 | SMB | `fdatasync` of each written file | only a file's `fsync` reaches the server, as an SMB FLUSH |
 | any other | `fdatasync` of each written file, then `syncfs` | |
@@ -626,8 +872,8 @@ report there.
   (`ID_FS_TYPE` in `/run/udev/data/b<major>:<minor>`), read off the main thread and cached with
   the mount's capabilities. The same record gives them, and FAT served by FUSE, their
   [name rules](#the-rules-each-destination-gets).
-- A removable device gets a folder `fsync` besides. Before Linux 5.8, every file is synced too,
-  since `syncfs` reports no writeback errors there.
+- A removable device of another family gets a folder `fsync` after its `syncfs`. Before Linux 5.8,
+  every file is synced too, since `syncfs` reports no writeback errors there.
 - If the flush fails, nothing behind it is deleted, both copies stay, and the error says the device
   could not finish writing.
 
@@ -690,7 +936,9 @@ beside it in the same paste. Where there is no Trash, it deletes them by the sam
 copy merge records what it creates, under the name it was saved as and within the paste's 100,000
 entries, only where an original could not go to the Trash, or where it overwrote nothing and the
 location offers no Trash; a paste with a merge records each item it copies beside it where the
-destination offers no Trash. The undo deletes an item only if all of it is unchanged. An item that
+destination offers no Trash. The undo deletes an item only if all of it is unchanged. A folder of
+the item that the copy left without owner access, such as 0555, gets it while its entries are
+deleted, and its mode back if it stays; the folder the item sits in is never changed. An item that
 changed, or has no record (one on a GVfs location, a GIO copy without native creation provenance,
 an entry whose client-reported identity changed during publication, or one created where the Trash
 worked during the paste), stays whole and fails with "It was kept, as it may have changed since it was copied";
@@ -706,13 +954,16 @@ the second puts the first back by a rename.
 
 ### The completion report
 
-After a transfer or an archive extraction, Strata reports what it could not do as asked:
+After a transfer, or an archive's compression or extraction, Strata reports what it could not do
+as asked:
 
 - names the destination doesn't allow or that are too long for it, names it took for another (case
   aliases), and names taken during a merge, an extraction or an undo, each with the name the item
   was saved as, and an item saved under several names in turn once, from its first name to its
   last;
 - special files and symbolic links left out of a copy, and symbolic links left out of an extraction;
+- originals a Replace could not remove once the new item was in place, with the originals folder
+  that keeps them;
 - source entries a move left behind, entries a restore left in the Trash, originals an undo left
   there because what replaced them may have changed, and names an undo could not give back, with
   the reason.
@@ -731,22 +982,29 @@ reported.
   by content; without that, a same-size rewrite within one tick would pass. On NFS, SMB and FUSE
   mounts other than sshfs, a server or daemon whose clock runs more than 100 ms behind ours can
   still hide a same-size rewrite of a file it stamped within one of its ticks.
-- **exFAT folders.** The kernel's exFAT driver sets a folder's birth time again whenever an entry
-  is renamed into or within it. A move from exFAT keeps a whole source folder another program did
-  that to, instead of only the changed entry. A move onto exFAT knows the folders of its copy by
-  their type alone, so where another program renames a merged folder away and makes another at its
-  name, the move still deletes its sources, whose copies stay in the renamed folder.
+- **exFAT folders.** The kernel's exFAT driver sets a folder's birth time again, on disk, at every
+  rename whose destination is the folder: an entry renamed into or within it or over one of its
+  entries, or a folder moved into it. So there a folder is known by its device and type wherever
+  its entries are checked one by one or only an empty folder, or one at a hidden name of Strata's
+  own, is removed: a move's source folders and the folders of its copy, Strata's merge folder and
+  the folders putting originals back empties. Where another program renames a merged folder away
+  and makes another at its name, a move onto exFAT still deletes its sources, whose copies stay in
+  the renamed folder, and an empty folder another program makes at a moved folder's name once the
+  move emptied it can be removed with it.
 - **Relaxed identity.** Where a source has no stable inode numbers and reports no birth time
   (sshfs, exfat-fuse, ntfs-3g), a different file with the same type, size and times put at a source
   name passes for the original, unless it is racily clean and compared. The same goes for a move's
-  copy on such a destination before its sources are deleted: a different file or link of its type,
-  size and modification time, as another copy of the source would have, passes for it. On kernel
-  exFAT and vfat, whose birth times count in 10 ms ticks, a copy replaced within its birth time's
-  tick by a file of its size and modification time passes as well, and the move deletes its source.
-  A copy recognises its own entries by inode number, and on FUSE its claimed files by type and
-  size. Where the kernel can renumber an evicted entry (FUSE, vfat, exFAT, cifs with
-  `noserverino`), a renumbered entry stops the copy as changed; nothing is deleted, and its hidden
-  stage can be left behind.
+  copy on sshfs, vboxsf and other mounts that keep a name's inode number for whatever the server or
+  another client puts there: a file or link of the copy's type, size and modification time put at
+  its name passes for it. On ntfs-3g, which reports no birth time and can give a freed inode number
+  to a later file, a file of the copy's size and modification time made at its name after the copy
+  was deleted can pass too. On kernel exFAT and vfat, whose birth times count in 10 ms ticks, a
+  copy replaced within its birth time's tick by a file of its size and modification time passes as
+  well, and the move deletes its source.
+  A copy recognises its own entries, and a selected folder it is about to read, by the mount's
+  rule: by inode number where the mount keeps them, by birth time on vfat and exFAT, and by type
+  elsewhere (its claimed files also by being empty), so an entry the kernel renumbered after
+  eviction does not stop the copy. A hidden stage the kernel renumbered can still be left behind.
 - **Modes that cannot be stored.** On vfat, exFAT, exfat-fuse, ntfs-3g and SMB without POSIX
   extensions, the mount options decide modes, and nothing reports what was lost. On SMB with POSIX
   extensions, a file opened right after `chmod 0444` reports 0755, so any copier copies 0755.
@@ -895,9 +1153,11 @@ in bytes is numbered as an alias, among a paste's top-level items too (`Readme.t
 `README.txt`); a share set to compare case still gets those numbers. Elsewhere, a top-level item
 whose name, looked up once before it is copied, leads to an earlier item of the same paste saved
 under another spelling, as in casefolded folders for `makefile` after `Makefile`, is numbered and
-reported as an alias too. Any other item at the name, including one that took the earlier item's
-place since, keeps it taken. In a merge, a planned name equal to an existing item replaces that
-item like any other same-named one. A paste's top-level items from different folders that share a
+reported as an alias too; where the lookup reports a number of its own, as path-keyed FUSE
+daemons do for each spelling, the rule for [case-only renames](#rename) tells the earlier item.
+Any other item at the name, including one that took the earlier item's place since, keeps it
+taken. In a merge, a planned name equal to an existing item replaces that item like any other
+same-named one. A paste's top-level items from different folders that share a
 name are numbered on every destination, the later one in the paste's order, before anything is
 copied, and reported as names already taken: `notes.txt` from two folders becomes `notes.txt` and
 `notes (1).txt`, also in a move within one filesystem. An item copied into its own folder is
@@ -1000,14 +1260,26 @@ chooses itself, such as "new folder", are not checked.
 
 Local renames go through the same routine instead of GIO's check-then-rename.
 
-- **Case-only renames** (`notes.txt` to `Notes.txt`) on case-insensitive folders — vfat, exFAT,
-  SMB shares, casefolded ext4, f2fs and tmpfs folders, ntfs3 with `nocase` — are done in two steps
-  through a hidden `.strata-rename-<id>` name, with rollback. A plain rename is a silent no-op
-  there, and a no-replace rename reports the name as taken. The SMB client caches the lookup of
-  the new spelling for about a second, so it is revalidated before the second step. exfat-fuse
-  gives each spelling its own inode number, so there the new spelling counts as the item itself
+- **Case-only renames** (`notes.txt` to `Notes.txt`) on case-insensitive folders — vfat, exFAT, SMB
+  shares, casefolded ext4, f2fs and tmpfs folders, ntfs3 with `nocase` — are done in two steps
+  through a hidden `.strata-originals-<id>/` folder, with rollback: the item moves into it under its
+  old spelling, then out of it under the new one, and the folder is removed. A plain rename is a
+  silent no-op there, and a no-replace rename reports the name as taken. The SMB client caches the
+  lookup of the new spelling for about a second, so it is revalidated before the second step.
+  exfat-fuse and other path-keyed FUSE daemons give each spelling its own inode number, and so does
+  cifs once it has turned server numbers off, so there the new spelling counts as the item itself
   only when the folder lists no such name, the item's own name is the only one that matches it
   ignoring case, and type, size and modification time agree.
+- **Names that lead to the item itself.** The 10xer rename prompt decides "already exists" by the
+  rename's own rule, so it never refuses a name the rename would accept. A name the folder lists is
+  taken even when it is another hard link to the same file, and so is one that differs from such a
+  link's name only in case: renaming `a.txt` to its link `link.txt`, or to `Link.txt` on a
+  case-insensitive folder, keeps the prompt open with "already exists", and nothing changes.
+  Another spelling of the item's own name passes where the folder lists no such name, as in
+  case-insensitive folders, and so does a case variant that a mount numbers separately when the
+  rule above counts it as the item itself. A name the folder matches to another link by rules
+  beyond case, such as Unicode normalization, passes the prompt; the rename then moves the item
+  aside and back and reports the name as taken.
 - On mounts with neither `RENAME_NOREPLACE` nor usable hard links, renaming a file takes the
   [reserved-name step](#the-reserved-name-step-and-its-risk) like any other placement, and so does
   renaming a folder where renaming over an empty folder is refused.
@@ -1037,22 +1309,648 @@ There, Delete offers permanent deletion and Replace and Merge use the order abov
 
 GLib 2.86.0 to 2.88.4 can report success without trashing anything on FUSE filesystems that do not
 report entry types (GLib issue #4060). Strata therefore checks that a trashed local item is gone
-before reporting success or recording Undo.
+before reporting success or recording Undo: an item still at its name by the mount's identity
+rule, or held across the call where only a descriptor tells it (see
+[Replace and merge](#replace-and-merge)), was not trashed, whatever number the kernel gave it.
+GLib trashes whatever holds the name when it gets there. Strata holds the item at the name across
+the call, except on NFS, where a held file another program removes stays under a `.nfs` name, and
+reports that item only once the kernel shows it inside a Trash. Replace stops as changed when the
+held item is not the target it checked. If another item took the name after the hold, Strata
+reports the newest Trash entry GLib made for that path instead, so Undo and saved views follow what
+actually went to Trash.
+
+## Files that are still open
+
+On NFS, SMB and FUSE mounts, a file unlinked while a program still has it open stays under a
+hidden name until the last close, and its folder cannot be removed meanwhile. On SMB, a folder with
+a file open below it cannot be renamed, moved or trashed either. Local disks drop the name at once.
+Strata makes sure its own reads are never what is in the way, waits briefly for a file that is
+about to close, and otherwise leaves the file where it is and says which program holds it.
+
+### Releasing Strata's own reads
+
+`src/services/file_activity.rs` registers the reads Strata holds and the operations that run. Every
+read of a user's file goes through it, on a worker: previews and thumbnails with their sandboxes,
+media playback, waveform and storyboard decodes, metadata probes, the small in-process reads
+(content sniffing, text, Markdown images), and background listings (item counts, folder art,
+subtitle lookups, typed-path completions, search index walks, background re-lists and the
+Properties folder size). A folder the user opens is not registered, so browsing where an operation
+works is never blocked.
+
+Every operation registers before it changes anything, with the items it changes and the folders it
+writes into: rename, paste (with Replace and Merge), Delete and Move to Trash, restore, every undo
+and redo, compress, extract, new files and folders, restoring what an interrupted operation left,
+Empty Trash, and unmounting a drive. Before it changes an item, it releases it:
+
+1. New reads of the item, or of anything inside it, are refused ("This item is being changed by a
+   file operation."), and running ones are told to stop.
+2. Off the interface thread, the real path of the item's folder is resolved through the mount's
+   [request lane](#request-lanes), so a read opened through a symbolic link is released too. Where
+   the mount does not answer, only the path as given is covered.
+3. The operation waits until the stopped reads have ended, at most 2 s in all, then goes on.
+
+A merge releases each original only as it moves that original out of the way, so previews in the
+rest of the merged folder go on. Empty Trash releases the Trash folders of the home and of every
+mounted volume by their paths. Unmounting releases everything under the mount's root before it
+flushes: an open file makes the unmount fail as busy, and a sandbox that still binds a file lets
+the unmount succeed while the filesystem stays mounted inside the sandbox.
+
+This happens on every mount, local disks included, so music in the preview stops when its folder
+is renamed. A preview cleared this way follows the selection again once the operation ends: after a
+rename or move, the item at its new name. A thumbnail stopped this way is asked for again then and
+is not remembered as failed, and a Properties folder size that an operation interrupts ends as
+incomplete ("Some folders or entries couldn't be read."). When nothing is held under the item, the
+release costs one lookup of the folder's real path per folder and one lock.
+
+A sandboxed renderer has the user's file bound into its namespace. After bubblewrap exits, killed
+or not, Strata waits, at most 1 s, on a descriptor of the namespace's first process, opened when
+the sandbox started, until the kernel has torn the namespace and its bind down. In the lab,
+bubblewrap 0.12.0's namespace was still alive after nearly every exit: an unlink right after left
+a leftover after 372 of 380 kills, and after 4 of 100 normal exits on NFSv4.2. With the wait it
+left none in 380 of each, at a cost of about 2 ms after a kill and 0.1 ms after a normal exit. See
+[Preview sandbox](preview-sandbox.md#releasing-files-for-file-operations).
+
+### What each mount leaves
+
+| Mount | A file unlinked while open | Held by | Goes | Unlinking the leftover |
+| --- | --- | --- | --- | --- |
+| NFS v3 and v4 | renamed by the client to `.nfs` and 24 hex digits | any reference on this client, also an `O_PATH` descriptor or a sandbox's bind | at the last close | refused with `EBUSY` |
+| SMB, Linux 6.17 and later | renamed by the client to `.__smbfile_silly` and hex digits, also while a Linux client elsewhere has it open | open files only | when the server's last handle closes | `ENOENT`, as the delete is pending |
+| SMB with POSIX extensions | the name goes at once; the folder lists empty and refuses `rmdir` with `EACCES` | open files only | at the last close | — |
+| FUSE daemons on libfuse's high-level API (sshfs, ntfs-3g, exfat-fuse) | renamed by the daemon to `.fuse_hidden` and 16 hex digits | open files only | when the daemon gets the release; on sshfs one request later | succeeds, but leaves a fresh leftover |
+| local disks (ext4, XFS, btrfs, tmpfs, vfat, exFAT, ntfs3) | the name goes at once | — | — | — |
+
+In the lab every leftover went within one request of the last close, over loopback, and an SMB
+close the client deferred took up to `closetimeo`. A leftover is recognised by its name only
+on the mount family that makes it, so a file named `.nfs…` on ext4 is an ordinary file. One found
+inside a folder is left alone:
+
+- A recursive delete leaves it in place, and its folder goes through the wait below.
+- A copy or move of the folder leaves it out. A move keeps the source folder while it stays and
+  reports the folder as still open.
+- Only a leftover the user selects by name is deleted like any file, and the mount's refusal is
+  reported.
+
+### Removing a folder that holds only leftovers
+
+Deleting a folder, removing the source folders of a move, cleaning up a failed copy, removing a
+merge's stage and removing a folder of set-aside originals all go through one removal in
+`src/adapters/local_operations/leftovers.rs`. When
+`rmdir` fails with `ENOTEMPTY`, or with `EACCES` and an empty listing on SMB with POSIX extensions,
+it lists the folder. Anything that is not the mount family's leftover ends it with the error as it
+is. Otherwise it tries again, with pauses of 10 ms doubling to 50 ms, listing again after each
+refusal, until a budget runs out: 2 s on NFS and FUSE, and on SMB the client's `closetimeo` (one
+second by default) plus half a second, at most 10 s. It stops at once when something else is
+listed or when the folder at the name is no longer the one it checked. A Delete and a move's source
+deletions also stop when the operation is cancelled. Cleanups are never cut short, as they also run
+after a cancel: a failed copy's, a merge's stage, and a folder of set-aside originals, which is
+removed once its originals have gone back. One budget covers a whole Delete, a paste's deletions
+after its items are placed (its sources and the originals it set aside), or a copy's cleanups, so a
+thousand held folders cost one wait. Each put back of set-aside originals has a budget of its own,
+so cancelling a merge or Replace whose original another program holds open can take that whole
+budget once more. A folder that empties goes at once and costs no wait.
+
+### Naming what holds it
+
+A folder still refused after the wait is reported as still open. Strata then looks for the holder,
+once per folder, on the worker:
+
+1. A read Strata holds, or another of its operations, inside the folder makes the holder Strata,
+   without reading `/proc`. This also covers Strata's sandboxes, whose binds show in no descriptor.
+2. Otherwise it reads the descriptor links of every process it may read (`/proc/<pid>/fd`) and
+   keeps those inside the folder: the `.nfs…` name on NFS, `<original> (deleted)` on SMB and FUSE.
+   Each is confirmed by the mount id and inode in `/proc/<pid>/fdinfo`, which match the leftover
+   (from Linux 5.14; earlier kernels keep the path match). Strata never calls `stat` through
+   another process's descriptors, which could call into a mount that does not answer.
+3. If no descriptor matched, files mapped without one, by device and inode in `/proc/<pid>/maps`.
+
+The first match wins, and the search stops after 200 ms. The program is named by its app where its
+process says which one, through its systemd app unit (as GNOME, KDE and uwsm launch apps) or GIO's
+launch variable and the app's desktop file, and otherwise by its process name. A program started
+from a terminal app is therefore named after the terminal. Strata's own process, a helper it
+started in a process group of its own (previews, custom actions), and another process running
+Strata's executable count as Strata; a terminal or program Strata opens for the user is named like
+any other.
+
+| Holder | Delete, the folder's line | Move report |
+| --- | --- | --- |
+| a program | A file in it is still open in %{program}. Close it there and try again. | “%{name}” was left in “%{folder}”, as a file in it is still open in %{program} |
+| Strata | A file in it is still in use by Strata. Try again when its other operation or search ends. | “%{name}” was left in “%{folder}”, as a file in it is still in use by Strata |
+| none found, NFS or FUSE | A file in it is still open in another program. Close it and try again. | “%{name}” was left in “%{folder}”, as a file in it is still open in another program |
+| none found, SMB | A file in it is still open in a program on this or another computer. | as above |
+| none found, SMB with POSIX extensions | Permission denied | Could not delete “%{name}”: Permission denied |
+
+On SMB with POSIX extensions an open file leaves no name, so an empty folder that refuses `rmdir`
+looks the same as one the user may not remove: Strata waits the SMB budget, then keeps the system's
+error unless it finds a holder on this computer.
+
+### SMB renames
+
+Samba refuses to rename a folder while any file below it is open, from any client, and the cifs
+client reports that as `EACCES`. A rename, a move within the mount, or a Move to Trash of a folder
+refused that way is tried again for the SMB budget above, cancellably; the refused rename changed
+nothing. Linux 7.2 closes this client's deferred handles below a folder before renaming it, so
+there only a handle still open refuses (360 renames, moves and Trash moves right after a close all
+succeeded at once in the lab). The retry is for 6.17 to 7.1, which may not, and was not verified.
+After the budget, the holder below the folder is named as above; with none found, "Permission
+denied" stays. On SMB with POSIX extensions, where a Linux client's open file does not refuse the
+rename, nothing waits and the system's error stays. A file rename, move or Move to Trash refused
+with `EBUSY`, which comes from a program on another computer that holds the file without sharing
+delete access, says "It is still open in a program on this or another computer." A cached
+directory handle from a listing never blocked a rename in the lab.
+
+### Limits of the release
+
+- **Leftovers nobody holds.** A leftover orphaned by a crashed NFS client, or a file with a
+  leftover's name that nothing holds, keeps its folder until someone removes it by hand.
+- **SMB deletes refused elsewhere.** Unlinking a file that a program on another computer holds
+  without sharing delete access fails with `EIO`, which Strata reports as an I/O error, since it
+  cannot be told apart from a real one.
+- **SMB before Linux 6.17** keeps a deleted open file under its own name, pending deletion. Strata
+  does not recognise it as a leftover (unverified), so removing its folder fails with the system's
+  error.
+- **A single file another program has open** is deleted without a report, as on local disks: its
+  name goes, and the space comes back at the last close.
+- **Other FUSE daemons.** rclone, gvfsd-fuse and other daemons not built on libfuse's high-level
+  API name leftovers otherwise or not at all, so removing a folder that holds one fails with the
+  system's error.
+- **GVfs.** Empty Trash and deletions on GVfs locations go through GVfs's own recursive delete,
+  which meets another program's leftover with GVfs's error.
+- **The holder search** sees only processes on this computer that Strata may read, and its 200 ms
+  limit is an estimate.
+
+## Leftovers after a crash or unplug
+
+A crash, a killed process or a device pulled out during an operation can leave Strata's hidden
+names in a folder. Strata recognises them when it lists that folder, offers to restore what may be
+the user's data, and removes nothing by itself except its own empty probes.
+
+### What an interrupted operation leaves
+
+Current builds leave only five kinds of hidden names (see [Hidden names](#hidden-names)), and the
+name alone says what each holds. A stage holds only a copy. An original that Replace, an archive's
+Replace or a case-only rename moves out of the way sits in a `.strata-originals-<id>/` folder under
+its own name, and the originals Merge moves aside sit in its `.strata-merge-<id>/` folder under
+their own names and folders, so Restore needs nothing but the folder. Where a crash can stop each
+step:
+
+- **Setting an original aside.** Right after the folder is made, it is empty, and Restore removes
+  it. Once the original is in it, the original's name is free, and Restore puts it back. Once the
+  new item is published, both exist, and Restore puts the original back as `name (1)`.
+- **Exchange.** Before the exchange, the folder holds the finished copy and the original is at its
+  name; after it, the other way round. Restore keeps both.
+- **Case-only rename.** The item sits in the folder under its old spelling, and Restore gives the
+  state before the rename back.
+- **Deleting a replaced folder.** Part of the original can remain in its folder. Restore returns
+  that part, and cannot tell that it is partial.
+
+In the lab, 932 kills during Replace and Merge on NFSv3, NFSv4.2, SMB and sshfs, and 200 unplugs
+(through a device-mapper error target) during Replace without Trash on vfat, exFAT and ntfs3, lost
+no original: each was intact, or deleted only once its replacement was durable at its name, and
+Restore emptied every folder it met. Earlier builds (released ones and #1615's nightlies) also left
+originals under flat hidden names, and stages that an exchange could turn into the original; Strata
+still recognises those names and classes them as possible originals.
+
+### Recognising them
+
+- **By the whole name.** A known prefix followed by a UUID, or for the two older stage prefixes the
+  6-character suffix older builds used. `.strata-copy-notes` or an unknown `.strata-x-<uuid>` is an
+  ordinary file. The table is `src/model/hidden_names.rs`.
+- **From the listing Strata makes anyway**, in memory, with no extra scan or file call; a folder
+  nobody opens is never looked at.
+- **Where the user looks.** In a browser window, not the portal chooser, in a folder the view shows
+  rather than a peek, on native folders and GVfs locations other than the Trash and Recent, once its
+  listing has settled.
+- **Not while they may be live.** While an operation of this Strata process changes a folder or
+  writes into it, in any window, and anywhere below a merge's targets while it runs, its hidden
+  names are not shown; they appear the moment the operation ends. Another process (another Strata
+  instance or file manager, or another computer on a share) cannot be seen, so the review says
+  another program or computer may still be using them.
+- **Never another program's.** `.nfs…`, `.fuse_hidden…`, `.__smbfile_silly…` and ntfs-3g's cut
+  names are not Strata's and are never listed as leftovers (see
+  [Files that are still open](#files-that-are-still-open)).
+
+### Where they show
+
+- **The pane header button**, icon-only, "Items left by an interrupted operation", in every column
+  in Columns and in the List and Icons pane, while the folder holds such names. It opens the
+  review.
+- **A dock card**, the first time in a session that a folder holding possible originals is shown:
+  "“%{folder}” holds originals that an interrupted operation set aside." with Review. Like other
+  cards it can be pinned and closes on its own after 15 s otherwise. Review opens the review, or,
+  if the folder was closed meanwhile, opens the folder, whose header button then opens it.
+- **The context menu's Restore**, on a single such row, which is visible when hidden files are
+  shown.
+
+### The review
+
+The review lists each item with what it may hold, its date and its hidden name. When it opens, a
+worker reads each item ("Reading what each item holds…") and lists what the originals and merge
+folders hold, up to 1,000 names and "and N more" (for a merge folder, at least that many). A folder
+holding only another program's open files says so, with the still-open wording, and offers no
+Restore; an item that went says "No longer here", and one that cannot be read shows the system's
+error. Its footer says: "Another program or computer may still be using these items. Restore never
+replaces an existing item."
+
+| Name | Shown as | Actions |
+| --- | --- | --- |
+| `.strata-originals-*` | Set-aside originals | Restore, Show |
+| `.strata-merge-*` | Originals set aside by a merge | Restore, Show |
+| older flat names | Set-aside original | Restore, Show |
+| older stage names | Possible original | Restore, Show |
+| `.strata-copy-*`, `.strata-extraction-*`, older copy names | Incomplete copy | Delete…, Show |
+
+- **Restore of a folder of originals** puts each item back in the folder under its own name, or for
+  a merge under its own folders, which are made again where missing, by the identity it reads then.
+  It never replaces: a taken name gets the next Keep Both number and is reported under "These names
+  were already taken", and a name that already holds the item itself, as a hard link an interrupted
+  step left, only loses the hidden folder's name. Other programs' open files inside are left in
+  place, and a folder holding nothing else stays and is reported as still open. The emptied folders
+  and the hidden folder are then removed, deepest first, by the removal that waits for leftovers
+  about to go and never deletes recursively. Restore selects what came back and adds nothing to
+  Undo. It is not offered on GVfs locations.
+- **Restore of an older flat name**, whose own name is unknown, renames it to "Recovered item",
+  numbered if that is taken, and opens the name editor on it, as New Folder does; that rename has
+  the usual Undo.
+- **Show** reveals the item, turning hidden files on.
+- **Delete…** is offered only for incomplete copies, whose source still exists. It is the usual
+  confirmed Delete, to the Trash where the folder has one. The item is read again when the delete
+  runs, not held to what the review read, so a stage folder on exFAT whose birth time a rename into
+  it reset is still deleted.
+- Restore and Delete… refuse while an operation runs in the folder: "Wait for the running operation
+  to finish, then try again." Show never does.
+- An ntfs3 volume unplugged during a write often mounts only read-only until it is checked. Restore
+  then says "The drive is read-only. It may need to be checked for errors after it was unplugged
+  without being ejected."
+
+### Stale probes
+
+A `.strata-probe-*` name in a listed folder is removed in the background, through the mount's
+[request lane](#request-lanes), once per folder and name in a session, when `lstat` shows an empty
+file or a folder (removed with `rmdir`, so only when empty) whose modification time is over an hour
+old. Probes live for milliseconds. Any error, such as a read-only mount or share, a refusal or a
+device that went away, is ignored, never retried and never reported. On an unplugged FAT, exFAT or
+NTFS device an `unlink` can report success against the cache; such a probe is back after the
+device is plugged in again and goes then. vfat stores local times, so on a stick last written by a
+computer in a time zone to the west a fresh probe can look up to 26 hours old; removing such a live
+probe only costs that probe its answer.
+
+### Limits of the review
+
+- A folder is only checked when it is listed, so leftovers in a folder nobody opens stay.
+- Leftovers at visible names carry no marker: the empty placeholder the
+  [reserved-name step](#the-reserved-name-step-and-its-risk) can leave, entries created at their
+  final names where nothing could be placed, a restore copy cut off at its final names, and an
+  extraction's archive-named folder.
+- Another process's live hidden names can be shown as leftovers; Restore never replaces, and
+  Delete… only takes an incomplete copy after confirmation.
 
 ## Hidden names
 
-| Name | Purpose | After a crash |
-| --- | --- | --- |
-| `.strata-replacement-*` | Replace's staging copy; after an exchange, the swapped-out original until it is deleted | **may be the user's original** |
-| `.strata-copy-*` | a copy being built: a new item, or a merge's incoming items inside the merged folder | partial copy; safe to delete |
-| `.strata-compression-*` | archive being written; after an exchange, the replaced archive | **may be the user's original** |
-| `.strata-replaced-*` | original set aside by Replace | **may be the only copy of the user's item** |
-| `.strata-merge-*` | originals set aside by Merge | **may hold the only copies** |
-| `.strata-rename-*` | middle step of a case-only rename | **is the user's item** |
-| `.strata-extraction-*` | archive extraction staging | extracted output; see [Archives](archives.md) |
-| `.strata-probe-*` | capability probe | empty; safe to delete |
+| Name | Made by | Holds | After a crash |
+| --- | --- | --- | --- |
+| `.strata-probe-*` | capability probes in a destination folder | nothing | empty; removed once stale |
+| `.strata-copy-*` | copies and moves across filesystems, Replace and archive stages, a merge's incoming items in each merged folder | a copy being built | an incomplete copy whose source is unchanged; Delete… in the review |
+| `.strata-extraction-*` | archive extraction | members extracted so far | an incomplete copy, as the archive still holds them; see [Archives](archives.md) |
+| `.strata-originals-*` | Replace and archive Replace without Trash, also by exchange, and case-only renames | the original under its own name, or for a moment before an exchange the finished copy | **may hold the only copy of the user's item**; Restore |
+| `.strata-merge-*` | Merge without Trash | the originals under their own names and folders | **may hold the only copies**; Restore |
+| `.strata-replaced-*`, `.strata-rename-*` | earlier builds' Replace and case-only rename | an original under a hidden name | **may be the user's item**; Restore as "Recovered item" |
+| `.strata-replacement-*`, `.strata-compression-*` with a UUID | earlier builds' Replace and archive stages | a copy, or after an exchange the original | **may be the user's original**; Restore as "Recovered item" |
+| `.strata-replacement-*` with 6 characters | released builds' Replace stage | a copy, or after an exchange the original | **may be the user's original**; Restore as "Recovered item" |
+| `.strata-compression-*` with 6 characters, `.strata-symlink-*` | released builds' archive and symbolic link stages | a copy | an incomplete copy |
 
-The prefixes live in `placement.rs`. Names that may hold user data are never deleted or renamed automatically.
+The prefixes live in `src/model/hidden_names.rs`. Strata never deletes or renames by itself a name
+that may hold user data.
+
+## Changes made elsewhere
+
+A folder's change monitor sees only changes made through this computer's kernel. Another computer
+writing to an NFS export or an SMB share, a program on an sshfs server, or a sync client writing
+into the backing folder of a FUSE overlay sends no event: the lab saw none for 300 such changes
+on NFS, SMB and sshfs. So Strata checks the folders it shows on those mounts, in
+`src/app/browser/freshness.rs`.
+
+### Which folders are checked
+
+An open folder is checked when:
+
+- its mount has writers outside this computer: NFS, SMB, 9p, virtiofs, vboxsf, ceph, AFS,
+  GlusterFS, GFS2, OCFS2, Lustre and other network filesystems, every FUSE mount except `fuseblk`
+  (sshfs, rclone, s3fs, gvfsd-fuse, mergerfs, gocryptfs), and every GVfs location except
+  `admin://`, `mtp://` and `gphoto2://`; or
+- it has no live change monitor: a GVfs backend that offers none, or a monitor that could not be
+  created or is still being created.
+
+A folder is classified by the mount that its load's change stamp names, so a folder reached
+through a symbolic link or a bind mount counts as the mount it is really on. Columns checks every
+open column, List and Icons the open folder. **Watch network folders** (on by default; see
+[Saved preferences](preferences.md)) turns off the checks of the first kind; folders without a
+live monitor on other mounts are checked either way. A folder that shows a load error is not
+checked until it loads again.
+
+### How a check works
+
+Every load starts with a forced `statx` (`AT_STATX_FORCE_SYNC`) of the folder, or a GIO query on
+a GVfs location, and keeps its modification time, change time and [identity](#identity) as the
+folder's stamp. A check reads the same stamp again, as background work on the mount's
+[request lane](#request-lanes), and compares:
+
+| The check finds | Strata |
+| --- | --- |
+| the same stamp | nothing to do |
+| a stamp that moved | re-lists the folder in the background |
+| the folder gone, or another item at its path | runs the same departure check as a monitor's report: follows a rename, reloads a folder replaced in place, or leaves for the nearest folder that still exists |
+| another error, such as `EIO`, `EHOSTDOWN` or a lost connection | keeps the listing and checks again in 30 s |
+| a permission refusal | re-lists, so the folder shows the failure |
+
+The change time makes a stamp move even when a tool such as `rsync -a` or `cp -a` puts a folder's
+modification time back, as a change time cannot be set. On NFS a load is fresh by itself, because
+opening a folder revalidates it (close-to-open consistency); the forced stat is the baseline for
+later checks.
+
+- **Re-lists keep the rows.** A background re-list keeps the listing interactive until the
+  complete new one replaces it, with the column's spinner meanwhile. One that fails, is refused
+  by a busy lane, or stops at the load's time budget where the previous listing was complete keeps
+  the previous listing, with no error page. One cut at the entry limit is shown, marked as cut.
+  A re-list waits while an inline rename is open or a rename is being submitted.
+- **Operations come first.** A folder that an operation changes, or writes into, is not checked or
+  re-listed until it ends, so a check never lists a half-done operation and never holds a handle
+  in an SMB folder an operation is renaming.
+- **One background job per mount.** The due folders on one mount are checked in one job, one after
+  another. While the mount's lane is busy or stalled, checks are skipped, never queued, and the
+  re-lists a window owes on one mount run one at a time.
+
+### Cadence
+
+- Every 3 s for the folders a focused window shows, every 15 s in a window that is shown without
+  focus, and never in a hidden or minimized window, on another workspace where the compositor
+  reports the window as suspended, or in a tab that is not selected. No timer runs then, nor while
+  nothing shown is checked. The portal chooser follows its own window the same way.
+- In power-saver mode, focused checks run 4 times less often, and unfocused ones stop.
+- After 20 unchanged checks in a row the interval doubles, and after 40 it is four times as long;
+  a change, regaining focus and navigating reset it.
+- After any listing, the next check waits at least 10 times as long as that listing took, so a
+  folder that takes 3 s to list is re-read at most every 30 s however often it changes.
+- Regaining focus checks those folders at once. After 30 s or more away, counted on a clock that
+  keeps running through suspend, they are re-listed instead, which also updates the sizes and
+  dates of files edited in place elsewhere, as those do not move the folder's stamp.
+
+### Coarse stamps
+
+Where times have whole seconds (sshfs, GVfs SFTP, FAT-backed shares), two changes within one
+second can leave the stamp as a listing between them saw it. A listing whose stamp lies within
+the mount's [coarse window](#racily-clean-files) of when it was read is confirmed once, by a check
+that re-lists after the window has passed, and never twice. On sshfs the confirmation comes no
+earlier than 21 s after the stamp was read: sshfs answers stats and listings, forced ones too,
+from its own cache for its `dcache_timeout` (20 s by default) on a whole-second clock. Its options
+do not show in mountinfo, so a mount with `-o dcache_timeout=N` gets the same 21 s; with `N=1` the
+lab saw changes within about 2 s.
+
+Fine-grained stamps (NFS, SMB, local FUSE overlays) are never confirmed. On Linux 7.2 servers, a
+forced stat marks the folder's times as queried, so the next change gets a distinct time: none of
+4,000 pairs of changes made within one clock tick around a forced stat shared a stamp. Servers
+without multigrain timestamps (before Linux 6.13) were not measured.
+
+### Mounts whose stamp never moves
+
+Some mounts never move a folder's stamp: 9p with `cache=loose`, object stores served by FUSE
+(rclone or s3fs on a bucket), and servers that do not update folder times. When a load finds a
+folder's stamp as the previous load left it, outside its coarse window, but its complete listing
+holds other names, Strata marks that mount for the session. Its checked folders are then
+re-listed instead of checked, at most every 15 s, and less often while nothing changes, under the
+same duty cycle and lane rules. A stamp that moved while the names stayed the same is never taken
+as evidence, and sshfs is never marked. The mark follows the mount's id, so a mount that later gets
+the same id is re-listed too, which costs listings and never data.
+
+### What a check costs
+
+Measured in the lab over loopback:
+
+| Mount | Requests per check | Bytes | Time (p50) |
+| --- | --- | --- | --- |
+| NFSv3 | one `GETATTR` | 212 B | 13 µs |
+| NFSv4.2 | one `GETATTR`, none while the client holds a directory delegation on a folder it listed (1 request in 1,000 checks) | 420 B | 9 µs |
+| SMB | one create, query and close compound for the folder and one for each component of its path whose 1 s attribute cache lapsed: 5 compounds per check at a 3 s cadence for a folder 4 levels below the share | 904 B per compound, 1,032 B with POSIX extensions; 4.5 to 5.1 KB per check | 19 µs per compound, 33 µs with POSIX extensions |
+| sshfs | none while sshfs's cache holds the folder (20 s), otherwise one SFTP request | 108 B | 181 µs |
+| FUSE overlays on local disks | a local stat | — | — |
+
+With four network folders in a focused window that is 1.3 requests a second on NFS, about 0.6 KB
+a second on NFSv4.2 and almost nothing while it holds delegations, and about 6.7 compounds and
+6 KB a second on SMB. A check's cost does not depend on the folder's size. The forced stat that
+starts a load costs one more `GETATTR` per load on NFSv3 and nothing on a delegated NFSv4.2
+folder. A GVfs check is one D-Bus call and one backend request.
+
+### Limits of the checks
+
+- **Samba directory leases.** On a Samba share with directory leases (Samba's default), a change
+  made on the server's own filesystem (an app on the NAS, an NFS export of the same folder, `rsync`
+  over ssh) moves the folder's stamp, but the client keeps listing from its cached directory, and
+  every check and listing renews that cache, so the change does not appear while the folder stays
+  shown. F5 does not help: a listing every second stayed stale for 120 s. The cache lapses 46 to
+  66 s after its last use, and the re-list after time away comes from it too. Changes made through
+  SMB by other clients break the lease and appear at once. Mounting with `nohandlecache` fixes it,
+  unless another mount of the same share on this computer already holds the connection without
+  it.
+- **Files edited in place** keep their old size and date in the listing until it is re-listed:
+  after time away, on F5, or with the next change to the folder. On SMB, plain stats of such files
+  stayed stale in 10 of 36 trials; checks use forced stats only.
+- **sshfs** shows changes made on the server up to 21 s late, or later with a longer
+  `dcache_timeout`.
+- **Clock skew.** On mounts with whole-second stamps, a server clock more than the coarse window
+  behind ours can still hide a change.
+- **Compositors.** A window on another workspace is treated as hidden only where the compositor
+  reports it as suspended (not verified on Hyprland and GNOME); elsewhere it keeps the 15 s
+  interval.
+- **No change notifications.** Strata does not ask SMB servers for change notifications.
+
+## Unresponsive mounts
+
+When an NFS or SMB server stops, an sshfs connection hangs, a FUSE daemon stops or a GVfs backend
+hangs, every call into that mount waits, often until the server comes back. Strata keeps those
+waits off the interface thread and bounds how many workers they can hold.
+
+### Off the interface thread
+
+The GTK main thread is marked at start (`src/util/ui_thread.rs`), and every seam that touches the
+disk asserts that it runs elsewhere, also outside main-loop dispatch: the syscall seam, the probes,
+mount-table reads and the settings writer. What the interface needs from the disk it asks of a
+worker:
+
+- Opening a folder checks it on a worker, and its load, its change monitor, typed-path completions,
+  the check that forgets a deleted folder's settings, restored tabs and the default folder run
+  there too. A restored tab, a new tab's default folder or a go chord's folder is given up only
+  when it is proven missing or not a folder; a timeout or an I/O error opens it with its error and
+  keeps the saved choice.
+- Context menus and the delete dialog read the mount table the watcher published and a cache of
+  removable destinations whose roots and remembered Send To folders were checked off the thread,
+  and Send To checks the chosen device again while the transfer prepares. Drag targets, encryption hints, unmounting, and the
+  drive properties and Format dialogs, which open at once and fill in their facts, read that table
+  or ask a worker.
+- Undo and redo, Compress, and the folder choosers of Copy To, Move To, Extract To and Send To ask
+  the probes in `src/adapters/local_operations/probes.rs`. Only a proven absence counts as missing:
+  an undo whose item cannot be checked is attempted and reports the real error, a moved dangling
+  link is undone, and a destination that cannot be checked is written only by an exclusive create,
+  which never replaces.
+- Search results are checked on the search worker, and only hits proven gone are dropped.
+- A media preview's audio output is built, opened, played, paused and closed on one audio worker,
+  GStreamer's start-up included, since starting GStreamer can scan its plugins and rewrite its
+  registry in the cache folder, building the output loads sound plugins, opening it opens the
+  device and closing it can wait on the sound server.
+- The file chooser reads a downloaded link's image type, checks that an earlier download of the
+  same link is still there and gives it its image extension on a worker; Open waits for that step.
+- Programs and terminals are resolved and started on a worker, since starting a child waits until
+  it has entered its working folder.
+- Once it has resolved its command-line paths, Strata makes `/` its working folder, so libraries
+  that look files up relative to the working folder never wait on the folder Strata was started
+  from. A program that Open With starts without a working folder of its own starts in `/` too.
+- Strata's own settings and state files are saved by one background writer and read again there
+  after another program changes them; see [Saved preferences](preferences.md).
+- An enumerator or stream the interface lets go of is closed in the background
+  (`src/adapters/gio_close.rs`), as GLib would otherwise close it in place. With the server
+  stopped, closing a read-only file blocked on NFSv4.2 and exfat-fuse in the lab, and closing a
+  written one blocked on NFS, SMB and exfat-fuse until the server returned. A written stream is
+  never closed this way, since its close reports lost data. The folder descriptors that a restore
+  from Trash, an Undo of a merge or a Replace paste holds are closed on a worker too.
+
+The exceptions are:
+
+- The reads at start, before the first window shows: Strata's settings and state files, GTK's
+  bookmarks file, the install marker beside Strata's executable and the check for a Flatpak
+  sandbox. The bundled font Strata writes at start is read by fontconfig whenever it lays out
+  text.
+- GLib's volume monitor, which works only on the main thread. Strata takes it once, in the primary
+  instance's start-up, right after checking that GVfs answers and before the first window shows.
+  Strata skips that check while the marker it wrote after the last passing check still matches the
+  running `gvfsd` processes. The marker does not list GVfs's volume monitors
+  (`gvfs-udisks2-volume-monitor` and the like), which this first use asks, so neither a `gvfsd`
+  process that hangs without restarting nor a volume monitor that hangs, restarted or not, is
+  caught there.
+  Under GLib's own unix volume monitor (`GIO_USE_VOLUME_MONITOR=unix`, as without GVfs), that first
+  use checks every removable mount under `/run/media/$USER`; in the lab it hung for more than 10 s
+  while the daemon of such a FUSE mount (ntfs-3g, exfat-fuse) was stopped. Once the monitor exists,
+  later mount changes did not block it.
+- GIO's checks of an application's program while it lists or launches applications
+  (`GDesktopAppInfo`), and the toolkit's own resources (icons, fonts, styles, MIME data) from
+  system paths. Text previews take their languages from GtkSourceView's bundled and system
+  folders and never read the user's own `gtksourceview-5` folder.
+- On a GVfs location, a stream whose open or create succeeds just as it is cancelled (a text
+  preview, a camera thumbnail, New File, a copy's hidden stage). GLib then frees it itself, and its
+  close is one request to the GVfs backend on the interface thread. These opens keep their cancel,
+  so that it still cuts a stuck request short.
+- Quitting, which waits up to 10 s for queued settings saves.
+
+The [main-thread I/O audit](e2e-testing.md#main-thread-io-audit) reports any other file call the
+interface thread makes, and its stall watchdog names the call the interface thread is blocked in.
+
+### Request lanes
+
+These worker requests go through their mount's lane in `src/adapters/volume/mount_lanes.rs`: folder
+loads, probes, monitor creation, the release before an operation, the leftover review and its sweep
+of stale probes, imports, exports and program checks of custom actions, and the checks and
+background re-lists of [changes made elsewhere](#changes-made-elsewhere). A lane is keyed by the
+mount's id once a `statx` answer has named it. Until then a request is keyed by its path and the
+mount the table places it on, so a dead target of a symbolic link trips only that path and what lies
+below it, never the home folder the link sits in. A GVfs location is keyed by its scheme, user,
+server and port. GVfs never times out its own requests, so there the 2 s count from when each
+request, a folder load included, started.
+
+- **Progress.** A request makes progress when it gets an answer: success, "not found", "not a
+  folder", a stale handle or a permission refusal. `EIO`, `ETIMEDOUT`, `EHOSTDOWN`, `ENOTCONN`, a
+  reset connection and a cancel are not answers, and neither is the end of a call by itself. A
+  listing makes progress with each chunk it reads. Progress counts per request, so a cached answer
+  to one request never vouches for another that hangs.
+- **Stalled.** A lane stalls once any request on it has gone 2 s without its own progress. New
+  interactive requests there (folder loads, probes, monitors, releases) then fail at once as timed
+  out, and background requests are skipped, never queued. Once the stuck request has ended without
+  an answer, one request at a time is let in to find out whether the mount answers again. The stall
+  clears when a request there makes progress, or when a mount-table change removes the mount.
+  After 10 s the mount counts as not responding.
+- **Joins.** Folder loads, folder probes and stamp reads run at most one call per path and kind. A
+  repeated request joins the running one until it starts reading, and after that waits for one
+  follow-up call, so F5 never gets a listing that began before it was pressed. A mount-table change
+  that removes the mount answers the requests waiting on its calls as timed out, and the next
+  request starts a call of its own on whatever is mounted there now.
+
+So once a lane has stalled, no new request there takes a worker, except that one request let in
+and one per path reached through a link into a mount whose id is not yet known, however often the
+user clicks, presses F5 or arrows through its folders. Requests that started in the 2 s before the
+stall keep their workers until the server answers, one per path and kind for those that join:
+arrowing through five folders of a dead NFS mount within 2 s parks five workers, and none after
+that. Without the lanes, each such action parked another thread of GLib's worker pool, up to its
+330 threads, after which every asynchronous GIO call in the process waited. Previews and
+thumbnails, the folder size in Properties, search walks and file operations do not go through the
+lanes, so each of those that reaches a dead mount waits there, on its own thread or helper
+process, until the server answers.
+
+Once a lane stalls, F5 and Retry on its folders keep their rows rather than blanking them, on GVfs
+locations too, and checks and background re-lists there are skipped. After 10 s without progress, a
+folder on that mount also shows "Not responding. This list may be out of date." above its listing,
+in Columns, List and Icons, also over a first load stuck there but not over an error page. The
+notice follows the lane, whichever request stalled it (a load, a check, a paste or drag probe, a
+search, a monitor, another window), and clears as soon as a request there answers. A mount that
+ended its stuck request with an error, as SMB does with `EHOSTDOWN` after a few minutes, or a
+failing FUSE daemon does, leaves no request to answer, so the notice stays until F5, Retry or
+navigating sends one. A GVfs request abandoned while it waits never marks its backend.
+
+A folder whose load was turned away or failed while its mount was not answering loads again by
+itself once the mount answers, on GVfs locations too: a default folder or restored tab whose check
+gave up at start-up, a folder opened while another request waited there, or a refresh that waited
+behind a stuck listing of the folder. An F5, Retry or change monitor's rescan that kept a folder's
+rows that way runs again too, still keeping them, once no inline rename is open or being submitted
+and no operation changes or writes into the folder; a background re-list waits for the folder's
+next check. A folder that failed while its mount answered keeps its error until Retry.
+
+### What a dead server does
+
+Measured in the lab over loopback, with the server stopped:
+
+- **No timely error.** Hard NFS returned nothing in 62 s, SMB with its default options first failed
+  with `EHOSTDOWN` after about 207 s, and sshfs and stopped FUSE daemons returned nothing in 31 to
+  40 s. Only NFS mounted `soft` with short timeouts (`timeo=10,retrans=1`) failed within 3 s, with
+  `EIO`. The lanes' 2 s is the only timely signal. A healthy call took at most 121 µs and the gap
+  between listing chunks at most 394 µs; the slowest healthy operation, a cold listing of 3,000
+  entries on sshfs, took 128 ms. A mount slower than 2 s per round trip looks unresponsive until it
+  answers; real network latency was not measured.
+- **Parked calls stay parked.** The close of a written file on NFS and SMB, every sshfs request, a
+  flush on exfat-fuse and SMB requests during a reconnect could not be killed until the server
+  returned, so a worker parked there stays parked until then.
+- **What blocks.** A path lookup blocks once a component of the path needs revalidation: on NFS
+  once its attribute cache expires (`acdirmin`, 30 s by default), on SMB after `actimeo` (1 s), on
+  sshfs once its own cache misses, and on ntfs-3g at once, as it caches nothing. `statx` with
+  `AT_STATX_DONT_SYNC` by path is no exception, as it walks the path and revalidates expired
+  components. Through an `O_PATH` descriptor it answered at once on every dead mount.
+- **Caches are per process.** The NFS client keys its access cache by the calling process, so
+  helpers Strata starts (preview sandboxes, terminals, programs it launches) begin cold and block
+  on a dead server even in a folder Strata just listed.
+- **NFSv4.2 delegations.** A forced stat of a recently used folder can be answered by the client
+  under a directory delegation, also while the server is dead.
+- **The mount table stays live.** Reading `/proc/self/mountinfo` never waited on a server (446 µs
+  at most over 4,974 reads during six outages, an SMB reconnect included), and `poll` on it woke at
+  once on a change. Strata's mount watcher (`src/adapters/volume/mount_watch.rs`) reads it on its
+  own thread, waits 50 ms for a burst of changes to end, and publishes the table to readers that
+  do no I/O: a burst of 3,000 changes cost 3 reads, and sustained churn 0.6 to 0.8 % of one core.
+- **GVfs was not stopped.** The lab stopped no GVfs backend and no `gvfs-udisks2` volume monitor.
+  How GVfs folder monitors and stream closes behave while their backend is stopped, whether a GVfs
+  folder's monitor, made off the interface thread, delivers its events to it, and how long the
+  first use of the volume monitor waits when `gvfs-udisks2` is stopped before Strata starts are
+  unverified.
+
+### Folder monitors
+
+A folder's change monitor is created once the folder's load has answered, never on a stalled lane.
+One serial worker creates and cancels every monitor, through the lanes: those of open folders, the
+Trash, Strata's settings files, custom themes and the Omarchy theme folders. GLib's inotify backend
+creates, cancels and delivers every monitor in a process under one lock, and creating a monitor
+walks its path, which blocks on a dead mount like any lookup. So while a creation is stuck on a
+mount that stopped answering, monitors on every folder deliver nothing, and later creations and
+cancels wait, until that server answers. The window stays usable, and folders that are
+[checked](#changes-made-elsewhere) still are, but other folders stop updating by themselves
+meanwhile.
+
+A column counts as unmonitored until its monitor is live. Once it is, the folder's change stamp is
+read again, and a change since the load re-lists the folder once. Before Linux 6.13, a change in
+the same clock tick as the load's stamp, made after the listing read past it and before the monitor
+went live, stays hidden until the next change or F5.
 
 ## Filesystem notes
 
@@ -1070,8 +1968,8 @@ filesystem stores are under [Names](#names).
 | ntfs3, ntfs (Linux 7.1 and later) | yes | no | yes | case-sensitive unless mounted with `nocase` |
 | ntfs-3g, libfuse2 daemons | rejects flags | rejects flags | ntfs-3g: yes | the kernel refuses rename flags below FUSE protocol 7.23; ntfs-3g never gets a rename over a name of 237 UTF-16 units or more (see [Placing an item without replacing](#placing-an-item-without-replacing)) |
 | exfat-fuse (libfuse3) | enforced by the kernel only | ignored: overwrites | no | built on libfuse2, it rejects flags, and files take the [reserved-name step](#the-reserved-name-step-and-its-risk) |
-| NFS v3 and v4 | rejects flags | rejects flags | yes | unlinking an open file leaves `.nfsXXXX` until it is closed |
-| SMB/CIFS | client-side only | no | server-dependent | usually case-insensitive; open files may block rename and delete |
+| NFS v3 and v4 | rejects flags | rejects flags | yes | a file unlinked while anything on this client references it stays as `.nfs…` until the last close (see [Files that are still open](#files-that-are-still-open)) |
+| SMB/CIFS | client-side only | no | server-dependent | usually case-insensitive; a file unlinked while open stays as `.__smbfile_silly…` until its last handle closes, and a folder with a file open below it cannot be renamed (see [Files that are still open](#files-that-are-still-open)) |
 | sshfs | rejects flags | rejects flags | not used | each link reports its own inode number; reports "exists" as `EPERM`; files take the [reserved-name step](#the-reserved-name-step-and-its-risk); without the server's `posix-rename@openssh.com` extension its rename over the placeholder fails with `EPERM`, so moved, restored and staged files are copied, and file renames, archive publication and setting a file aside fail |
 | 9p (WSL2, QEMU), ceph, eCryptfs | rejects flags | rejects flags | yes | |
 | vboxsf, rclone, s3fs | rejects flags | rejects flags | no | files take the [reserved-name step](#the-reserved-name-step-and-its-risk); vboxsf refuses to rename over an empty folder, so its folders take that step too |
@@ -1079,8 +1977,11 @@ filesystem stores are under [Names](#names).
 | overlayfs | yes | yes | yes | lower-layer folders cannot be renamed without `redirect_dir` |
 
 libfuse high-level daemons without `use_ino`, sshfs among them, give each hard link its own inode
-number, so a link cannot prove that it holds the item. Once a probe on Strata's own names confirms
-this, Strata stops using links on that mount, and files take the
+number, so a link cannot prove that it holds the item. A FUSE daemon whose probe link keeps the
+file's number and counts two links, as ntfs-3g passes the volume's inode numbers on, counts from
+then on as keeping inode numbers, so its entries are compared by number rather than held or known
+by their size and times. Once a probe on Strata's own names confirms that links get numbers of
+their own, Strata stops using links on that mount, and files take the
 [reserved-name step](#the-reserved-name-step-and-its-risk). A link to a user's item made before
 that confirmation is removed by the identity it reported right after linking, if its type,
 permissions, size and modification time match the item's, and the file then takes that step.
@@ -1103,23 +2004,63 @@ let _quirks = FsQuirks::install(root.path(), Quirks::without_rename_flags());
 Quirks emulate rejected rename flags (NFS, ntfs-3g), missing hard links (vfat, vboxsf), sshfs
 collisions reported as `EPERM`, gvfsd-fuse refusing to rename over an empty folder, case-insensitive
 lookups, invalid names, unsupported or lying Trash, reused inode numbers, hard links with their own
-inode numbers, missing birth times, lost replies (on sshfs, a lost rename reply leaves the target
-name reporting its old inode number) and racing processes, before or after a call.
+inode numbers, missing birth times (where the base reports none, the vfat and exFAT presets record
+one per file that renumbering keeps, as FAT does), lost replies (on sshfs, a lost rename reply
+leaves the target name reporting its old inode number) and racing processes, before or after a call.
+On emulated ext and NFS mounts without birth times Strata reads file handles: the seam reports the
+mount type under the kernel's id of the real mount and the missing birth time, and the handle comes
+from the real filesystem. Where that filesystem gives none (exfat, cifs), or gives each name of a
+hard link its own (FUSE, where high-level daemons such as ntfs-3g keep a node per name), the seam
+makes one up from the real inode number and, where the base keeps it, the birth time (files, and
+folders other than exfat's, which renames restamp). With a birth time, a number the base hands to a
+new file gets a new handle. FUSE reports none, so on a FUSE base a number the daemon hands out again
+(ntfs-3g gives freed numbers to later files) keeps its handle.
 
 For copies they also emulate a mount's family and superblock options as mountinfo reports them, the
 device format udev records, refused `O_TMPFILE` and its links, refused clones, a `copy_file_range`
 that ends early, short reads and writes, times reset at close (NFSv4.2 delegations, FUSE writeback
 caches), refused `chown`, foreign groups, extended attributes refused by prefix, injected or listed
-with ACLs first, refused `mknodat` of files and pipes, NFS silly renames, files that report no size,
+with ACLs first, refused `mknodat` of files and pipes, files that report no size,
 reported modes, change times that equal the modification time (FAT), folder birth times that renames
 reset (exFAT), times stamped within one tick of a coarse clock (kernels without multigrain
-timestamps), single link counts (sshfs), entries renumbered after eviction, SMB's refusal to open
-two names of one file at once or, during its deferred close, another name of a file just written,
-its stale read-only folders and change times answered from its attribute cache, and writeback errors
+timestamps), single link counts (sshfs), entries renumbered after eviction (never one a descriptor
+holds), SMB's refusal to open two names of one file at once or, during its deferred close, another
+name of a file just written, its stale read-only folders, change times answered from its attribute
+cache, the time a file opened for writing had then, which its stats show until a forced stat,
+server inode numbers turned off after a collision (entries the client cached keep their
+numbers and creation times, also across a replacement made elsewhere, until evicted; with POSIX
+extensions new lookups keep the server's numbers), creation times Samba makes up for entries it did
+not create, or for all of them, which the client keeps as it first saw them, folder stamps that
+plain stats answer from NFS's and SMB's attribute caches and that sshfs answers from its daemon's
+cache even when forced, folder stamps without a mount id (kernels before 5.8), listings that repeat
+a cached directory (SMB, renewed by each use) or the daemon's cache (sshfs), and writeback errors
 that `syncfs` reports. Tests can also pretend to run on another kernel release, freeze the clock
 that the racily clean check, the wait for SMB's deferred close and the emulated attribute cache
-read, and set a paste's batch limits and clock. The seam also asserts that no call runs on the main
-context's thread.
+read, and set a paste's batch limits and clock.
+
+The seam, the probes, mount-table reads and the settings writer assert that no call runs on the
+interface thread. That thread is marked at start, and GTK tests mark the thread they run on, so a
+call outside main-loop dispatch is caught too; only the named start-up and exit exceptions take a
+scoped `ui_thread::allow`. A test that checks that the window keeps running while a call hangs
+parks the call with a seam racer that waits on `test_support::Gate`, pumps the main loop until the
+call is reached, checks that nothing waited for it, then releases it. Lane tests hand the lanes'
+state the time, past 2 s and 10 s, instead of waiting. The [main-thread I/O audit and the stall
+watchdog](e2e-testing.md#main-thread-io-audit) look for calls the asserts cannot see, inside GLib
+and GTK.
+
+For [files that are still open](#files-that-are-still-open) they emulate each mount family's
+leftovers: the name NFS, SMB or FUSE gives a file unlinked while open, which references count (any
+on NFS, open files only on SMB and FUSE), how long it outlives the last close on the test clock,
+what unlinking a held leftover returns, and SMB with POSIX extensions refusing `rmdir` instead.
+`fs_quirks::hold(path)` stands for another program keeping a file open, a quirk names the program a
+holder search finds (otherwise the search reads only the test process's own `/proc` entries), and
+another refuses SMB folder renames while a file below is held and for a set time after. For
+[leftovers after a crash or unplug](#leftovers-after-a-crash-or-unplug), a quirk unplugs the device
+after a given call: every later call under the scope fails with `EIO`, cleanup included, until
+`FsQuirks::replug()`.
+
+The checks of [changes made elsewhere](#changes-made-elsewhere) are tested on the app layer with a
+fake file source, on the scheduler's own clock: no timer runs under test, and tests call the tick.
 
 For names they emulate the errno each lab mount returned for a name it refuses, names stored or
 listed as others (vfat dropping trailing dots, SMB reading private-use characters back and listing
@@ -1166,20 +2107,54 @@ inherited. Results, logs and leftovers per mount go to `target/fslab/runs/`. The
 mount on which the kernel cifs client turned server inode numbers off during the run, because
 failures after that point can be artefacts of that mount state.
 
+`fslab test` exports no backing folder of its servers, so a change "made elsewhere" is made by hand
+in the container (`docker exec strata-fslab …`) in a server's own folder (`/srv/nfs/v42/tmp`,
+`/srv/nfs/v3/tmp`, `/srv/smb/cifs/tmp`, `/srv/smb/posix/tmp`, `/srv/sshfs/tmp`), then looked for
+through the client mount. Such a change goes to the server's filesystem directly, not through nfsd,
+smbd or sftp-server.
+
+A preset reports the lab mount's mountinfo type unless it names `mount_type`, the mount's
+`statfs` type unless it names `fs_type`, and the mount's udev format only when it names neither a
+mount type nor a device format. `Quirks::default()` names none of them, so Strata applies the lab
+mount's rules there, and a preset that names only a mount type keeps the base's `statfs` type,
+which decides exchanges. On a FUSE base the seam refuses an exchange with `EINVAL`, as a refusing
+mount does, whatever the preset's type: exfat-fuse overwrites the target instead of swapping it.
+The presets of real filesystems, and rows that need one's rules (`on_ext4`), name both. On an SMB
+base the seam refuses `O_TMPFILE` with `EOPNOTSUPP`, as Strata never opens one there: with POSIX
+extensions the client reports the unnamed file with inode number 1<<32, no links and a wrong size
+until it revalidates. On a kernel exFAT base, which stamps a folder's birth time at each rename into
+it, a preset whose rule keeps folder birth times sees the first one the seam read for each folder.
+The Replace row that substitutes the target Strata holds for its Trash check skips on NFS, where
+nothing is held ("skipped on an NFS base").
+
 Unit tests layer quirks on a fully featured filesystem, so on a limited mount some of them fail by
 design: a test expecting a plain rename sees the ladder link instead on NFS, fixtures with
 symlinks, FIFOs or Unix permissions cannot exist on vfat, a racer keyed to a step the mount never
 takes (an `O_TMPFILE` link, a hole, a `syncfs`, an exchange) never runs, and a time with a fraction
 of a second is rounded away on vfat, exfat-fuse and sshfs. Those three report the modification
 time as the change time, so tests that land the SMB client's deferred closes fail there after two
-seconds. A fixture's name can be one the mount refuses (`a:b` on vfat), and a preset can expect a
-name stored that the real mount refuses, folds or lists as another (Samba's 8.3 aliases, long SMB
-folder names). On NFS a file renamed over while open reads as `.nfsXXXX`, and on casefolded
-folders `/proc` shows files the test process created as `name (deleted)`, so quirk patterns by
-name miss them. The container has no udev database, so
-exfat-fuse and ntfs-3g are not recognised there: they keep their per-file syncs, and get the name
-rules of a `fuseblk` device udev cannot tell, which learn from refusals (ntfs-3g refuses device
-names). Read failures against a run of the same filter on `origin/main`.
+seconds, and Replace and move rows whose replacement or rewrite only its change time tells apart
+skip there ("skipped on a base that reports the modification time as the change time"). Move rows
+whose fixture links a file skip where the base refuses hard links, as vfat, exFAT and exfat-fuse
+do ("skipped on a base without hard links"). The merge row that leaves a Unix socket out skips where
+the base refuses the socket, as vfat, exFAT, exfat-fuse and sshfs do ("skipped on a base that
+refuses Unix sockets"). Replace and Compress rows that make unlinking the original fail skip where
+the base refuses `RENAME_NOREPLACE` and keeps one number for a hard link, as NFS and ntfs-3g do:
+placement there links a file to its name and unlinks the other, which takes the injected failure
+first ("skipped on a base that places files by linking them"). A fixture's name can be one the mount
+refuses (`a:b` on vfat), and a preset can expect a name stored that the real mount refuses, folds or
+lists as another (Samba's 8.3 aliases, long SMB folder names). On NFS a file renamed over while open
+reads as `.nfsXXXX`, and on casefolded folders `/proc` shows files the test process created as
+`name (deleted)`, so quirk patterns by name miss them. Tests that emulate NFSv3, or ext without
+birth times, read the base's real file handles, or on exfat, cifs and FUSE bases the seam's, made up
+from the inode number, which sshfs and exfat-fuse renew after an eviction (ntfs-3g keeps it); the
+test of the handle read itself is skipped on exfat and cifs bases, which give none, and says so on
+stderr ("skipped on a base without file handles"). The vfat row that exchanges a renumbered stage
+skips where the base refuses rename flags (NFS, sshfs, ntfs-3g) or overwrites for them
+(exfat-fuse): "skipped on a base that refuses or fakes rename flags". The container has no udev
+database, so exfat-fuse and ntfs-3g are not recognised there: they keep their per-file syncs, and
+get the name rules of a `fuseblk` device udev cannot tell, which learn from refusals (ntfs-3g
+refuses device names). Read failures against a run of the same filter on `origin/main`.
 
 A FUSE daemon gets every name a preset over it passes on, and exfat-fuse stores overlong forms
 and encoded surrogates, writing an overlong `/` into its volume as a real `/`, which `fsck.exfat`

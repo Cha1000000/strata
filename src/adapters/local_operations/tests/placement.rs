@@ -7,14 +7,18 @@ use rustix::io::Errno;
 use super::super::{
     LocalFileIdentity,
     fs_ops::{Entry, fs},
+    mount_profile::known_mount,
     placement::{
-        Feasibility, PlaceError, Placed, Probed, RenameFailure, Renamed, can_set_aside, place,
-        probe, rename_in_place, set_aside,
+        Feasibility, PlaceError, Placed, Probed, RenameFailure, Renamed, can_set_aside, links_hold,
+        place, probe, rename_in_place, set_aside,
     },
 };
-use super::fs_quirks::{Op, OverEmptyDirectory, Racer, Support};
+use super::fs_quirks::{Op, OverEmptyDirectory, Preset, Racer, Support, handleless_base, hold};
 use super::*;
-use crate::adapters::volume::{MountCapabilities, mount_capabilities};
+use crate::{
+    adapters::volume::{MountCapabilities, mount_capabilities},
+    services::{Holder, InodeNumbers},
+};
 
 fn without_flags(error: Errno) -> Quirks {
     Quirks {
@@ -552,24 +556,41 @@ fn a_lost_reply_over_a_placeholder_removes_only_one_proven_untouched() -> Result
     // which libfuse without `use_ino` and vboxsf number as the placeholder it
     // replaced.
     let vboxsf = || Quirks {
-        mount_type: Some((
-            "vboxsf",
-            "rw,nodev,relatime,iocharset=utf8,uid=1000,gid=1000",
-        )),
         lost_renames_keep_inodes: true,
-        no_birth_time: true,
         ..Quirks::vboxsf()
     };
-    let rows = [
-        (Some(Quirks::sshfs as fn() -> Quirks), false),
-        (Some(Quirks::sshfs as fn() -> Quirks), true),
-        (Some(vboxsf as fn() -> Quirks), false),
-        (None, false),
-        (None, true),
+    let links_refused = || links_refused_for_the_item().on_ext4();
+    let folders = || without_flags(Errno::NOSYS).on_ext4();
+    let unknown_type = || Quirks {
+        mount_type: Some(("jfs", "rw")),
+        ..links_refused_for_the_item()
+    };
+    let unread_type = || Quirks {
+        fail: vec![(Op::MountType, "*", 0, Errno::ACCESS)],
+        ..without_flags(Errno::NOSYS)
+    };
+    let share = || Quirks {
+        mount_type: Quirks::cifs().mount_type,
+        ..without_flags(Errno::NOSYS)
+    };
+    let share_without_server_numbers = || Quirks {
+        mount_type: Quirks::cifs_noserverino().mount_type,
+        lost_renames_keep_inodes: true,
+        ..without_flags(Errno::NOSYS)
+    };
+    let rows: [(Preset, bool, InodeNumbers); 9] = [
+        (Quirks::sshfs, false, InodeNumbers::Renewed),
+        (Quirks::sshfs, true, InodeNumbers::Renewed),
+        (vboxsf, false, InodeNumbers::Renewed),
+        (links_refused, false, InodeNumbers::Kept),
+        (folders, true, InodeNumbers::Kept),
+        (unknown_type, false, InodeNumbers::Unknown),
+        (unread_type, true, InodeNumbers::Unknown),
+        (share, true, InodeNumbers::Kept),
+        (share_without_server_numbers, true, InodeNumbers::Renewed),
     ];
-    for (unstable, folder) in rows {
+    for (preset, folder, numbers) in rows {
         for performed in [true, false] {
-            let stable = unstable.is_none();
             let root = tempfile::tempdir()?;
             let source = root.path().join("source");
             if folder {
@@ -579,11 +600,7 @@ fn a_lost_reply_over_a_placeholder_removes_only_one_proven_untouched() -> Result
                 fs::write(&source, b"")?;
             }
             let original = identity(&source);
-            let mut quirks = match (unstable, folder) {
-                (Some(preset), _) => preset(),
-                (None, true) => without_flags(Errno::NOSYS),
-                (None, false) => links_refused_for_the_item(),
-            };
+            let mut quirks = preset();
             if performed {
                 quirks.lost_reply.push((Op::Rename, "target", Errno::IO));
             } else {
@@ -596,14 +613,17 @@ fn a_lost_reply_over_a_placeholder_removes_only_one_proven_untouched() -> Result
             );
             let _scope = FsQuirks::install(root.path(), quirks);
 
-            let expected = match (stable, performed) {
-                (false, _) => Err(PlaceError::Unconfirmed),
-                (true, true) => Ok(if folder {
-                    Placed::ReservedDirectory
-                } else {
-                    Placed::OverReservedFile
-                }),
-                (true, false) => Err(PlaceError::Io(Errno::IO)),
+            let placed = if folder {
+                Placed::ReservedDirectory
+            } else {
+                Placed::OverReservedFile
+            };
+            let expected = match (numbers, performed) {
+                (InodeNumbers::Renewed, _) | (InodeNumbers::Unknown, false) => {
+                    Err(PlaceError::Unconfirmed)
+                }
+                (_, true) => Ok(placed),
+                (InodeNumbers::Kept, false) => Err(PlaceError::Io(Errno::IO)),
             };
             assert_eq!(
                 place_in(root.path(), "source", "target", Some(original)),
@@ -614,7 +634,7 @@ fn a_lost_reply_over_a_placeholder_removes_only_one_proven_untouched() -> Result
                 assert_eq!(names(root.path())?, ["target"], "{case}");
                 assert_eq!(identity(&root.path().join("target")), original, "{case}");
             } else {
-                let left: &[&str] = if stable {
+                let left: &[&str] = if numbers == InodeNumbers::Kept {
                     &["source"]
                 } else {
                     &["source", "target"]
@@ -628,38 +648,60 @@ fn a_lost_reply_over_a_placeholder_removes_only_one_proven_untouched() -> Result
 }
 
 #[test]
-fn a_source_substituted_before_it_moves_is_moved_back() -> Result<(), Box<dyn Error>> {
+fn another_item_at_either_name_is_reported_and_never_moved() -> Result<(), Box<dyn Error>> {
+    #[derive(Clone, Copy, Debug)]
+    enum Swap {
+        SourceBeforePlacing,
+        SourceAsItMoves,
+        TargetOnceMoved,
+    }
     // `skip` passes the renames into `target` that precede the one that moves it.
-    for (quirks, folder, skip) in [
-        (Quirks::default(), false, 0),
-        (without_flags(Errno::NOSYS), true, 1),
-        (Quirks::vboxsf(), false, 1),
-        (Quirks::vboxsf(), true, 2),
-    ] {
-        let root = tempfile::tempdir()?;
-        let source = root.path().join("source");
-        make(&source, folder)?;
-        let original = identity(&source);
-        let (raced, moved) = (source.clone(), root.path().join("moved"));
-        let racer: Racer = Box::new(move || {
-            fs::rename(&raced, &moved).expect("move the original away");
-            make(&raced, folder).expect("substitute");
-        });
-        let _scope = FsQuirks::install(
-            root.path(),
-            Quirks {
-                before: vec![(Op::Rename, "target", skip, racer)],
-                ..quirks
-            },
-        );
+    let presets: [(Preset, bool, usize); 4] = [
+        (Quirks::default, false, 0),
+        (|| without_flags(Errno::NOSYS), true, 1),
+        (Quirks::vboxsf, false, 1),
+        (Quirks::vboxsf, true, 2),
+    ];
+    for (quirks, folder, skip) in presets {
+        for swap in [
+            Swap::SourceBeforePlacing,
+            Swap::SourceAsItMoves,
+            Swap::TargetOnceMoved,
+        ] {
+            let root = tempfile::tempdir()?;
+            let source = root.path().join("source");
+            make(&source, folder)?;
+            let original = identity(&source);
+            let swapped = match swap {
+                Swap::TargetOnceMoved => root.path().join("target"),
+                _ => source.clone(),
+            };
+            let (raced, moved) = (swapped, root.path().join("moved"));
+            let mut racer: Racer = Box::new(move || {
+                fs::rename(&raced, &moved).expect("move the item away");
+                make(&raced, folder).expect("substitute");
+            });
+            let mut quirks = quirks();
+            match swap {
+                Swap::SourceBeforePlacing => racer(),
+                Swap::SourceAsItMoves => quirks.before = vec![(Op::Rename, "target", skip, racer)],
+                Swap::TargetOnceMoved => quirks.after = vec![(Op::Rename, "target", skip, racer)],
+            }
+            let scope = FsQuirks::install(root.path(), quirks);
+            let case = format!("folder: {folder}, {swap:?}");
 
-        assert_eq!(
-            place_in(root.path(), "source", "target", Some(original)),
-            Err(PlaceError::Changed),
-            "folder: {folder}"
-        );
-        assert_eq!(names(root.path())?, ["moved", "source"], "folder: {folder}");
-        assert_eq!(identity(&root.path().join("moved")), original);
+            let result = place_in(root.path(), "source", "target", Some(original));
+
+            assert_eq!(identity(&root.path().join("moved")), original, "{case}");
+            if let Swap::SourceBeforePlacing = swap {
+                assert_eq!(result, Err(PlaceError::Changed), "{case}");
+                assert_eq!(names(root.path())?, ["moved", "source"], "{case}");
+                assert_eq!(scope.count(Op::Rename), 0, "{case}");
+            } else {
+                assert_eq!(result, Err(PlaceError::Unconfirmed), "{case}");
+                assert_eq!(names(root.path())?, ["moved", "target"], "{case}");
+            }
+        }
     }
     Ok(())
 }
@@ -716,53 +758,97 @@ fn cross_device_is_reported_without_copying() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn set_aside_refuses_a_substituted_target() -> Result<(), Box<dyn Error>> {
-    let root = tempfile::tempdir()?;
-    let target = root.path().join("target");
-    fs::write(&target, b"original")?;
-    let expected = identity(&target);
-    let (moved, stranger) = (root.path().join("moved"), target.clone());
-    let racer: Racer = Box::new(move || {
-        fs::rename(&stranger, &moved).expect("move original");
-        fs::write(&stranger, b"stranger").expect("substitute");
-    });
-    let _scope = FsQuirks::install(
-        root.path(),
-        Quirks {
-            before: vec![(Op::Rename, "target", 0, racer)],
-            ..Quirks::default()
-        },
-    );
-    let parent = open_local_parent_directory(root.path())?;
+fn set_aside_refuses_a_substituted_item_or_names_where_it_went() -> Result<(), Box<dyn Error>> {
+    #[derive(Clone, Copy, Debug)]
+    enum Swap {
+        BeforeSettingAside,
+        AsItIsSetAside,
+        AsACaseOnlyRenameParksIt,
+    }
+    for swap in [
+        Swap::BeforeSettingAside,
+        Swap::AsItIsSetAside,
+        Swap::AsACaseOnlyRenameParksIt,
+    ] {
+        let root = tempfile::tempdir()?;
+        let (name, skip, mut quirks) = match swap {
+            Swap::AsACaseOnlyRenameParksIt => ("report", 1, case_insensitive(Quirks::default())),
+            _ => ("target", 0, Quirks::default()),
+        };
+        let item = root.path().join(name);
+        fs::write(&item, b"original")?;
+        let expected = identity(&item);
+        let (moved, stranger) = (root.path().join("moved"), item.clone());
+        let mut racer: Racer = Box::new(move || {
+            fs::rename(&stranger, &moved).expect("move the original away");
+            fs::write(&stranger, b"stranger").expect("substitute");
+        });
+        match swap {
+            Swap::BeforeSettingAside => racer(),
+            _ => quirks.before = vec![(Op::Rename, name, skip, racer)],
+        }
+        let scope = FsQuirks::install(root.path(), quirks);
+        let parent = open_local_parent_directory(root.path())?;
 
-    let result = set_aside(
-        fs(),
-        Entry::new(&parent, OsStr::new("target")),
-        ".strata-replaced-",
-        expected,
-    );
+        let result = match swap {
+            Swap::AsACaseOnlyRenameParksIt => rename_in(root.path(), "report", "Report").map(drop),
+            _ => set_aside(fs(), Entry::new(&parent, OsStr::new(name)), expected, None).map(drop),
+        };
 
-    assert_eq!(result.map(|aside| aside.name), Err(PlaceError::Changed));
-    assert_eq!(fs::read(&target)?, b"stranger");
-    assert_eq!(fs::read(root.path().join("moved"))?, b"original");
-    assert_eq!(names(root.path())?, ["moved", "target"]);
+        assert_eq!(
+            fs::read(root.path().join("moved"))?,
+            b"original",
+            "{swap:?}"
+        );
+        if let Swap::BeforeSettingAside = swap {
+            assert_eq!(result, Err(RenameFailure::Place(PlaceError::Changed)));
+            assert_eq!(scope.count(Op::Rename), 0);
+            assert_eq!(fs::read(&item)?, b"stranger");
+            assert_eq!(names(root.path())?, ["moved", name]);
+            continue;
+        }
+        let left = names(root.path())?;
+        let [hidden, _] = &left[..] else {
+            return Err(format!("{swap:?}: expected two names, found {left:?}").into());
+        };
+        assert!(
+            hidden.starts_with(HiddenName::Originals.prefix()),
+            "{swap:?}: {left:?}"
+        );
+        assert_eq!(names(&root.path().join(hidden))?, [name], "{swap:?}");
+        assert_eq!(
+            result,
+            Err(RenameFailure::Stranded {
+                temporary: Path::new(hidden).join(name).into_os_string(),
+                error: PlaceError::Unconfirmed,
+            }),
+            "{swap:?}"
+        );
+        assert_eq!(
+            fs::read(root.path().join(hidden).join(name))?,
+            b"stranger",
+            "{swap:?}"
+        );
+    }
     Ok(())
 }
 
-type ProbeCase = (Preset, Probed, Feasibility, Feasibility);
+type ProbeCase = (Preset, Probed, Feasibility, Feasibility, InodeNumbers);
 
 #[test]
 fn the_probe_learns_each_quirk_and_leaves_nothing_behind() -> Result<(), Box<dyn Error>> {
-    let cases: [ProbeCase; 10] = [
+    let cases: [ProbeCase; 11] = [
         (
             Quirks::default,
             Probed {
                 no_replace: Some(true),
                 hard_links: Some(true),
                 rename_over_empty_directory: Some(true),
+                links_keep_numbers: true,
             },
             Feasibility::Yes,
             Feasibility::Yes,
+            InodeNumbers::Kept,
         ),
         (
             Quirks::without_rename_flags,
@@ -770,9 +856,11 @@ fn the_probe_learns_each_quirk_and_leaves_nothing_behind() -> Result<(), Box<dyn
                 no_replace: Some(false),
                 hard_links: Some(true),
                 rename_over_empty_directory: Some(true),
+                links_keep_numbers: true,
             },
             Feasibility::Yes,
             Feasibility::Yes,
+            InodeNumbers::Kept,
         ),
         (
             Quirks::vboxsf,
@@ -780,9 +868,11 @@ fn the_probe_learns_each_quirk_and_leaves_nothing_behind() -> Result<(), Box<dyn
                 no_replace: Some(false),
                 hard_links: Some(false),
                 rename_over_empty_directory: Some(false),
+                links_keep_numbers: false,
             },
             Feasibility::Yes,
             Feasibility::Yes,
+            InodeNumbers::Renewed,
         ),
         (
             || Quirks {
@@ -793,9 +883,11 @@ fn the_probe_learns_each_quirk_and_leaves_nothing_behind() -> Result<(), Box<dyn
                 no_replace: Some(false),
                 hard_links: Some(false),
                 rename_over_empty_directory: None,
+                links_keep_numbers: false,
             },
             Feasibility::Yes,
             Feasibility::Yes,
+            InodeNumbers::Renewed,
         ),
         (
             || Quirks {
@@ -806,9 +898,11 @@ fn the_probe_learns_each_quirk_and_leaves_nothing_behind() -> Result<(), Box<dyn
                 no_replace: Some(false),
                 hard_links: Some(false),
                 rename_over_empty_directory: Some(true),
+                links_keep_numbers: false,
             },
             Feasibility::Yes,
             Feasibility::Yes,
+            InodeNumbers::Kept,
         ),
         (
             Quirks::without_folder_placement,
@@ -816,9 +910,11 @@ fn the_probe_learns_each_quirk_and_leaves_nothing_behind() -> Result<(), Box<dyn
                 no_replace: Some(false),
                 hard_links: Some(true),
                 rename_over_empty_directory: Some(false),
+                links_keep_numbers: true,
             },
             Feasibility::Yes,
             Feasibility::No,
+            InodeNumbers::Kept,
         ),
         (
             Quirks::without_placement,
@@ -826,9 +922,11 @@ fn the_probe_learns_each_quirk_and_leaves_nothing_behind() -> Result<(), Box<dyn
                 no_replace: Some(false),
                 hard_links: None,
                 rename_over_empty_directory: Some(false),
+                links_keep_numbers: false,
             },
             Feasibility::No,
             Feasibility::No,
+            InodeNumbers::Kept,
         ),
         (
             // SMB with POSIX extensions: EISDIR from an exclusive file create is
@@ -844,9 +942,11 @@ fn the_probe_learns_each_quirk_and_leaves_nothing_behind() -> Result<(), Box<dyn
                 no_replace: Some(true),
                 hard_links: Some(true),
                 rename_over_empty_directory: None,
+                links_keep_numbers: true,
             },
             Feasibility::Yes,
             Feasibility::Yes,
+            InodeNumbers::Kept,
         ),
         (
             // cifs with server inode numbers turned off.
@@ -858,9 +958,11 @@ fn the_probe_learns_each_quirk_and_leaves_nothing_behind() -> Result<(), Box<dyn
                 no_replace: Some(true),
                 hard_links: Some(false),
                 rename_over_empty_directory: Some(true),
+                links_keep_numbers: false,
             },
             Feasibility::Yes,
             Feasibility::Yes,
+            InodeNumbers::Kept,
         ),
         (
             Quirks::sshfs,
@@ -868,12 +970,34 @@ fn the_probe_learns_each_quirk_and_leaves_nothing_behind() -> Result<(), Box<dyn
                 no_replace: Some(false),
                 hard_links: Some(false),
                 rename_over_empty_directory: Some(true),
+                links_keep_numbers: false,
             },
             Feasibility::Yes,
             Feasibility::Yes,
+            InodeNumbers::Renewed,
+        ),
+        (
+            Quirks::ntfs_3g,
+            Probed {
+                no_replace: Some(true),
+                hard_links: Some(true),
+                rename_over_empty_directory: Some(true),
+                links_keep_numbers: true,
+            },
+            Feasibility::Yes,
+            Feasibility::Yes,
+            InodeNumbers::Kept,
         ),
     ];
-    for (quirks, expected, files, folders) in cases {
+    for ((quirks, expected, files, folders, numbers), learned_first) in cases
+        .into_iter()
+        .flat_map(|case| [false, true].map(|learned_first| (case, learned_first)))
+    {
+        let row = format!("{:?}, learned first: {learned_first}", quirks().mount_type);
+        let quirks = || match quirks() {
+            unnamed if unnamed.mount_type.is_none() => unnamed.on_ext4(),
+            named => named,
+        };
         let root = tempfile::tempdir()?;
         let parent = open_local_parent_directory(root.path())?;
         {
@@ -881,8 +1005,25 @@ fn the_probe_learns_each_quirk_and_leaves_nothing_behind() -> Result<(), Box<dyn
             assert_eq!(probe(fs(), parent.as_fd(), true, true, true), Ok(expected));
         }
         let _scope = FsQuirks::install(root.path(), quirks());
-        assert_eq!(can_set_aside(fs(), parent.as_fd(), false), Ok(files));
-        assert_eq!(can_set_aside(fs(), parent.as_fd(), true), Ok(folders));
+        if learned_first {
+            known_mount(fs(), parent.as_fd());
+        }
+        assert_eq!(
+            can_set_aside(fs(), parent.as_fd(), false),
+            Ok(files),
+            "{row}"
+        );
+        assert_eq!(
+            can_set_aside(fs(), parent.as_fd(), true),
+            Ok(folders),
+            "{row}"
+        );
+        links_hold(fs(), parent.as_fd());
+        assert_eq!(
+            known_mount(fs(), parent.as_fd()).1.identity.numbers,
+            numbers,
+            "{row}"
+        );
         assert!(names(root.path())?.is_empty(), "{:?}", names(root.path())?);
     }
     Ok(())
@@ -954,44 +1095,152 @@ fn a_case_only_rename_goes_through_a_temporary_name() -> Result<(), Box<dyn Erro
         alias_inodes: true,
         ..Quirks::exfat_fuse()
     };
-    let shapes: [Preset; 4] = [Quirks::default, Quirks::vboxsf, smb, exfat_fuse];
-    for quirks in shapes {
-        for folder in [false, true] {
+    #[derive(Clone, Copy, Debug)]
+    enum Item {
+        File,
+        Folder,
+        ReadOnlyFolder,
+    }
+    let plain: &[Item] = &[Item::File, Item::Folder];
+    let shapes: [(Preset, &[Item]); 4] = [
+        (
+            Quirks::default,
+            &[Item::File, Item::Folder, Item::ReadOnlyFolder],
+        ),
+        (Quirks::vboxsf, plain),
+        (smb, plain),
+        (exfat_fuse, plain),
+    ];
+    for (quirks, items) in shapes {
+        for &item in items {
             let root = tempfile::tempdir()?;
             let _scope = FsQuirks::install(root.path(), case_insensitive(quirks()));
             let source = root.path().join("report");
-            make(&source, folder)?;
+            make(&source, !matches!(item, Item::File))?;
+            let mode = |path: &Path| fs::metadata(path).map(|metadata| metadata.mode() & 0o7777);
+            let set_mode =
+                |path: &Path, mode| fs::set_permissions(path, fs::Permissions::from_mode(mode));
+            if let Item::ReadOnlyFolder = item {
+                set_mode(&source, 0o555)?;
+            }
             let original = identity(&source);
+            let original_mode = forced_mode(&source)? & 0o7777;
 
             assert_eq!(
                 rename_in(root.path(), "report", "report"),
                 Ok(Renamed::Unchanged)
             );
-            assert_eq!(
-                rename_in(root.path(), "report", "Report"),
-                Ok(Renamed::CaseOnly)
-            );
+            let renamed = rename_in(root.path(), "report", "Report");
 
-            assert_eq!(names(root.path())?, ["Report"], "folder: {folder}");
+            let left = names(root.path())?;
+            let modes: Vec<_> = left
+                .iter()
+                .map(|name| {
+                    let path = root.path().join(name);
+                    let kept = mode(&path).ok();
+                    set_mode(&path, 0o755).map(|()| kept)
+                })
+                .collect::<Result<_, _>>()?;
+            assert_eq!(renamed, Ok(Renamed::CaseOnly), "{item:?}");
+            assert_eq!(left, ["Report"], "{item:?}");
             assert_eq!(identity(&root.path().join("Report")), original);
+            assert_eq!(modes, [Some(original_mode)], "{item:?}");
         }
     }
     Ok(())
 }
 
 #[test]
-fn a_hard_link_is_never_taken_for_a_case_alias() -> Result<(), Box<dyn Error>> {
-    let root = tempfile::tempdir()?;
-    let _scope = FsQuirks::install(root.path(), case_insensitive(Quirks::default()));
-    fs::write(root.path().join("report"), b"data")?;
-    fs::hard_link(root.path().join("report"), root.path().join("Report"))?;
+fn a_case_only_rename_is_not_refused_as_taken_where_each_spelling_has_its_own_number()
+-> Result<(), Box<dyn Error>> {
+    let exfat_fuse = || Quirks {
+        alias_inodes: true,
+        ..Quirks::exfat_fuse()
+    };
+    let cifs_nocase = || Quirks {
+        alias_inodes: true,
+        ..Quirks::cifs_nocase()
+    };
+    let rows: [(Preset, bool, bool, bool); 6] = [
+        (Quirks::default, false, false, false),
+        (Quirks::default, true, false, true),
+        (exfat_fuse, false, false, false),
+        (exfat_fuse, true, false, true),
+        (cifs_nocase, false, true, false),
+        (cifs_nocase, true, true, true),
+    ];
+    for (quirks, another_item, serverino_off, taken) in rows {
+        for folder in [false, true] {
+            let root = tempfile::tempdir()?;
+            let _scope = FsQuirks::install(root.path(), case_insensitive(quirks()));
+            let (current, wanted) = (root.path().join("report"), root.path().join("Report"));
+            make(&current, folder)?;
+            if another_item {
+                fs::write(&wanted, b"another item")?;
+            }
+            if serverino_off {
+                assert!(super::fs_quirks::autodisable_serverino(root.path()));
+            }
 
+            assert_eq!(
+                super::super::typed_names::rename_taken(&current, &wanted),
+                taken,
+                "{:?}, folder: {folder}, another item: {another_item}",
+                quirks().mount_type
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn a_file_handle_follows_the_item_and_not_its_name() -> Result<(), Box<dyn Error>> {
+    let root = tempfile::tempdir()?;
+    let dir = open_local_parent_directory(root.path())?;
+    let handle = |name: &str| super::super::native_fs::file_handle(dir.as_fd(), OsStr::new(name));
+    if handleless_base(dir.as_fd()).is_some() {
+        eprintln!("skipped on a base without file handles (exfat, cifs)");
+        return Ok(());
+    }
+    fs::write(root.path().join("report"), b"first")?;
+    let first = handle("report")?;
+    fs::rename(root.path().join("report"), root.path().join("renamed"))?;
+    assert_eq!(handle("renamed"), Ok(first));
+    let held = fs::File::open(root.path().join("renamed"))?;
     assert_eq!(
-        rename_in(root.path(), "report", "Report"),
-        Err(RenameFailure::Place(PlaceError::Exists))
+        super::super::native_fs::file_handle(held.as_fd(), OsStr::new("")),
+        Ok(first)
     );
-    assert_eq!(names(root.path())?, ["Report", "report"]);
-    assert_eq!(fs::metadata(root.path().join("report"))?.nlink(), 2);
+    fs::remove_file(root.path().join("renamed"))?;
+    fs::write(root.path().join("renamed"), b"first")?;
+    assert_ne!(handle("renamed"), Ok(first));
+    assert_eq!(handle("missing"), Err(Errno::NOENT));
+    Ok(())
+}
+
+#[test]
+fn a_hard_link_is_never_taken_for_a_case_alias() -> Result<(), Box<dyn Error>> {
+    for (link, wanted) in [("Report", "Report"), ("Notes", "notes")] {
+        let root = tempfile::tempdir()?;
+        let scope = FsQuirks::install(root.path(), case_insensitive(Quirks::default()));
+        fs::write(root.path().join("report"), b"data")?;
+        fs::hard_link(root.path().join("report"), root.path().join(link))?;
+
+        assert!(
+            super::super::typed_names::rename_taken(
+                &root.path().join("report"),
+                &root.path().join(wanted)
+            ),
+            "{wanted}"
+        );
+        assert_eq!(
+            rename_in(root.path(), "report", wanted),
+            Err(RenameFailure::Place(PlaceError::Exists))
+        );
+        assert_eq!(scope.count(Op::Rename), 1, "{wanted}");
+        assert_eq!(names(root.path())?, [link, "report"]);
+        assert_eq!(fs::metadata(root.path().join("report"))?.nlink(), 2);
+    }
     Ok(())
 }
 
@@ -1046,16 +1295,21 @@ fn a_failed_case_only_rename_moves_back_or_names_the_temporary() -> Result<(), B
 
         let left = names(root.path())?;
         assert_eq!(left.len(), 1);
-        assert_eq!(identity(&root.path().join(&left[0])), original);
         if moves_back {
             assert_eq!(result, Err(RenameFailure::Place(PlaceError::Io(Errno::IO))));
             assert_eq!(left, ["report"]);
+            assert_eq!(identity(&source), original);
         } else {
-            assert!(left[0].starts_with(".strata-rename-"), "{left:?}");
+            assert!(left[0].starts_with(".strata-originals-"), "{left:?}");
+            assert_eq!(names(&root.path().join(&left[0]))?, ["report"]);
+            assert_eq!(
+                identity(&root.path().join(&left[0]).join("report")),
+                original
+            );
             assert_eq!(
                 result,
                 Err(RenameFailure::Stranded {
-                    temporary: OsString::from(&left[0]),
+                    temporary: Path::new(&left[0]).join("report").into_os_string(),
                     error: PlaceError::Io(Errno::IO),
                 })
             );
@@ -1454,6 +1708,271 @@ fn names_ntfs_3g_would_cut_are_never_renamed_over() -> Result<(), Box<dyn Error>
         if arrives {
             assert!(names(&root.path().join(name))?.is_empty(), "{context}");
         }
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Renaming {
+    Rename,
+    Move,
+    Trash,
+}
+
+fn rename_move_or_trash(
+    renaming: Renaming,
+    item: &Path,
+    cancellable: &gio::Cancellable,
+) -> Result<(), glib::Error> {
+    let context = glib::MainContext::default();
+    let parent = item.parent().unwrap_or(item);
+    match renaming {
+        Renaming::Rename => context.block_on(super::super::rename_native(
+            item.to_path_buf(),
+            parent.join("renamed"),
+            cancellable,
+        )),
+        Renaming::Move => context
+            .block_on(move_local(
+                gio::File::for_path(item),
+                gio::File::for_path(parent.join("elsewhere").join("moved")),
+                Taken::Fail,
+                cancellable.clone(),
+                None,
+                NamePolicy::default(),
+            ))
+            .map(drop),
+        Renaming::Trash => context
+            .block_on(super::super::trash::trash_entry(
+                &gio::File::for_path(item),
+                cancellable,
+                &super::super::Deadline::default(),
+            ))
+            .map(drop),
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Below {
+    ClosesDuringTheWait,
+    StaysOpen(Option<&'static str>),
+    WaitCancelled,
+    FailsOtherwiseWhileCancelled,
+    OnAPosixShare,
+}
+
+#[test]
+fn an_smb_folder_refused_while_a_file_below_closes_is_renamed_moved_or_trashed_once_it_has()
+-> Result<(), Box<dyn Error>> {
+    use Below::*;
+    use Renaming::*;
+    let _serial = serial()?;
+    let closetimeo = Duration::from_secs(1);
+    let budget = Duration::from_millis(1500);
+    for (renaming, below) in [
+        (Rename, ClosesDuringTheWait),
+        (Move, ClosesDuringTheWait),
+        (Trash, ClosesDuringTheWait),
+        (Rename, StaysOpen(Some("Text Editor"))),
+        (Move, StaysOpen(Some("Text Editor"))),
+        (Trash, StaysOpen(Some("Text Editor"))),
+        (Rename, StaysOpen(None)),
+        (Trash, StaysOpen(None)),
+        (Move, WaitCancelled),
+        (Rename, FailsOtherwiseWhileCancelled),
+        (Move, FailsOtherwiseWhileCancelled),
+        (Trash, FailsOtherwiseWhileCancelled),
+        (Rename, OnAPosixShare),
+        (Move, OnAPosixShare),
+        (Trash, OnAPosixShare),
+    ] {
+        let row = format!("{renaming:?}, {below:?}");
+        let start = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let _clock = ClockGuard::set(start);
+        let root = tempfile::tempdir()?;
+        let folder = root.path().join("folder");
+        fs::create_dir_all(&folder)?;
+        fs::create_dir(root.path().join("elsewhere"))?;
+        fs::write(folder.join("open.txt"), b"open")?;
+        let cancellable = gio::Cancellable::new();
+        let held = Arc::new(std::sync::Mutex::new(None));
+        let racer: Option<Racer> = match below {
+            ClosesDuringTheWait => {
+                let held = held.clone();
+                Some(Box::new(move || {
+                    drop(held.lock().expect("the hold").take())
+                }))
+            }
+            WaitCancelled | FailsOtherwiseWhileCancelled => {
+                let cancellable = cancellable.clone();
+                Some(Box::new(move || cancellable.cancel()))
+            }
+            StaysOpen(_) | OnAPosixShare => None,
+        };
+        let refused_by = match renaming {
+            Rename | Move => Op::Rename,
+            Trash => Op::Trash,
+        };
+        let holder = match below {
+            StaysOpen(program) => program.map(|program| Holder::Program(program.to_owned())),
+            OnAPosixShare => Some(Holder::Program("Text Editor".to_owned())),
+            _ => None,
+        };
+        let (preset, before, after, fail): (Preset, _, _, _) = match below {
+            FailsOtherwiseWhileCancelled => (
+                Quirks::cifs,
+                racer.map(|racer| (refused_by, "folder", 0, racer)),
+                None,
+                vec![(refused_by, "folder", 0, Errno::IO)],
+            ),
+            OnAPosixShare => (Quirks::cifs_posix, None, None, Vec::new()),
+            _ => (
+                Quirks::cifs,
+                None,
+                racer.map(|racer| (refused_by, "folder", 0, racer)),
+                Vec::new(),
+            ),
+        };
+        let _scope = FsQuirks::install(
+            root.path(),
+            Quirks {
+                folder_renames_refused_below: Some(closetimeo),
+                holder,
+                before: before.into_iter().collect(),
+                after: after.into_iter().collect(),
+                fail,
+                ..preset()
+            },
+        );
+        *held.lock().map_err(|_| "the hold")? = Some(hold(&folder.join("open.txt")));
+
+        let result = rename_move_or_trash(renaming, &folder, &cancellable);
+
+        let waited = super::super::copy_engine::clock_for_test().duration_since(start)?;
+        match below {
+            ClosesDuringTheWait => {
+                assert!(result.is_ok(), "{row}: {result:?}");
+                assert!(!folder.exists(), "{row}");
+                assert!(closetimeo <= waited && waited < budget, "{row}: {waited:?}");
+            }
+            StaysOpen(program) => {
+                let error = result.err().ok_or(row.clone())?;
+                assert!(folder.is_dir(), "{row}");
+                assert_eq!(waited, budget, "{row}");
+                let still_open = program.map(|program| {
+                    rust_i18n::t!(
+                        "A file in it is still open in %{program}. Close it there and try again.",
+                        program = program
+                    )
+                    .into_owned()
+                });
+                match (renaming, still_open) {
+                    (Move, Some(reason)) => assert_eq!(
+                        error.message(),
+                        rust_i18n::t!(
+                            "Could not move %{name}: %{error}",
+                            name = "folder",
+                            error = reason
+                        ),
+                        "{row}"
+                    ),
+                    (_, Some(reason)) => assert_eq!(error.message(), reason, "{row}"),
+                    (Rename, None) => assert_eq!(
+                        error.message(),
+                        crate::services::io_error_message(&io::Error::from_raw_os_error(
+                            Errno::ACCESS.raw_os_error()
+                        )),
+                        "{row}"
+                    ),
+                    (_, None) => assert!(
+                        error.matches(gio::IOErrorEnum::PermissionDenied),
+                        "{row}: {error:?}"
+                    ),
+                }
+            }
+            WaitCancelled => {
+                let error = result.err().ok_or(row.clone())?;
+                assert!(
+                    error.matches(gio::IOErrorEnum::Cancelled),
+                    "{row}: {error:?}"
+                );
+                assert!(folder.is_dir(), "{row}");
+                assert!(waited < budget, "{row}: {waited:?}");
+            }
+            FailsOtherwiseWhileCancelled | OnAPosixShare => {
+                let error = result.err().ok_or(row.clone())?;
+                assert!(folder.is_dir(), "{row}");
+                assert_eq!(waited, Duration::ZERO, "{row}");
+                let errno = match below {
+                    OnAPosixShare => Errno::ACCESS,
+                    _ => Errno::IO,
+                };
+                let detail = crate::services::io_error_detail(&io::Error::from_raw_os_error(
+                    errno.raw_os_error(),
+                ));
+                match renaming {
+                    Trash => assert!(
+                        error.matches(gio::io_error_from_errno(errno.raw_os_error())),
+                        "{row}: {error:?}"
+                    ),
+                    Rename | Move => assert!(error.message().contains(&detail), "{row}: {error:?}"),
+                }
+            }
+        }
+        drop(held.lock().map_err(|_| "the hold")?.take());
+    }
+    Ok(())
+}
+
+#[test]
+fn an_smb_item_refused_as_busy_is_reported_as_still_open_elsewhere() -> Result<(), Box<dyn Error>> {
+    use Renaming::*;
+    let _serial = serial()?;
+    let busy: Preset = Quirks::cifs;
+    let local: Preset = Quirks::ext4;
+    for (renaming, preset, smb) in [
+        (Rename, busy, true),
+        (Move, busy, true),
+        (Trash, busy, true),
+        (Rename, local, false),
+    ] {
+        let row = format!("{renaming:?}, SMB: {smb}");
+        let root = tempfile::tempdir()?;
+        let item = root.path().join("notes.txt");
+        fs::write(&item, b"notes")?;
+        fs::create_dir(root.path().join("elsewhere"))?;
+        let refused_by = match renaming {
+            Rename | Move => Op::Rename,
+            Trash => Op::Trash,
+        };
+        let _scope = FsQuirks::install(
+            root.path(),
+            Quirks {
+                fail: vec![(refused_by, "notes.txt", 0, Errno::BUSY)],
+                ..preset()
+            },
+        );
+
+        let error = rename_move_or_trash(renaming, &item, &gio::Cancellable::new())
+            .err()
+            .ok_or(row.clone())?;
+
+        assert_eq!(fs::read(&item)?, b"notes", "{row}");
+        let still_open =
+            crate::i18n::tr("It is still open in a program on this or another computer.");
+        let reason = match (renaming, smb) {
+            (Move, true) => rust_i18n::t!(
+                "Could not move %{name}: %{error}",
+                name = "notes.txt",
+                error = still_open
+            )
+            .into_owned(),
+            (_, true) => still_open,
+            (_, false) => crate::services::io_error_message(&io::Error::from_raw_os_error(
+                Errno::BUSY.raw_os_error(),
+            )),
+        };
+        assert_eq!(error.message(), reason, "{row}");
     }
     Ok(())
 }

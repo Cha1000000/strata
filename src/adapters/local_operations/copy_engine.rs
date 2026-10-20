@@ -22,7 +22,7 @@ use std::{
     rc::Rc,
     sync::{
         Arc, Condvar, Mutex, MutexGuard,
-        atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
     thread,
     time::Duration,
@@ -37,16 +37,21 @@ use rustix::{
 use super::{
     INVALID_NAME_REASON, Unheld, blocking_join_message, cancelled_local_operation,
     copy_failure_after_cleanup,
+    deferred_close::{self, Pause},
     deletion::{
         PinnedEntry, bounded_local_worker_count, local_delete_worker_count,
-        local_device_is_rotational, parallel_delete_local_blocking_with_workers,
+        parallel_delete_local_blocking_with_workers,
     },
-    fs_ops::{Entry, EntryStat, FsOps, fs},
+    fs_ops::{Entry, EntryStat, FsOps, OffMain, fs},
     io_error,
-    mount_profile::{FolderRules, NamePolicy, Site, known_mount},
+    leftovers::{self, Deadline},
+    mount_profile::{self, FolderRules, NamePolicy, Site, known_mount},
     names::{Taken, may_be_refused, numbered_names, stricter_names},
-    native_fs::{LocalFileIdentity, open_local_parent_directory, os_error_detail, os_error_text},
-    placement::{self, COPY_PREFIX, ENOTSUPP, PlaceError, STAGE_PREFIX},
+    native_fs::{
+        LocalFileIdentity, Pinned, compare, open_local_parent_directory, os_error_detail,
+        os_error_text,
+    },
+    placement::{self, ENOTSUPP, PlaceError},
     placement_error_kind, placement_reason,
     progress::{Reported, TransferProgressTracker},
     replacement::{StageContent, StagedSibling, placement_error},
@@ -57,17 +62,17 @@ use crate::{
         CoarseTimes, Family, FuseFormat, MountCapabilities, MountKey, MountNames, NameLimit,
         learn_mount_capability, mount_capabilities,
     },
-    model::Location,
+    model::{Location, hidden_names::HiddenName},
     services::{
-        KeptCause, NameMode, PlacedSnapshot, RenameCause, RenamedItem, SkippedItem, SpecialKind,
-        TransferReport,
+        Attributes, IdentityTraits, KeptCause, NameMode, PlacedSnapshot, Proof, RenameCause,
+        RenamedItem, SkippedItem, SpecialKind, TransferReport,
     },
 };
 pub(super) use barrier::Barrier;
 use data::Data;
 #[cfg(test)]
 pub(super) use data::set_kernel_for_test;
-pub(super) use manifest::{Manifest, Ownership, Published, Unlinks};
+pub(super) use manifest::{Manifest, Ownership, Published, Unlinks, now, sleep};
 use manifest::{Placed, Removed};
 #[cfg(test)]
 pub(super) use manifest::{now as clock_for_test, set_clock_for_test, set_placed_entries_for_test};
@@ -120,7 +125,9 @@ pub(super) struct Placing {
     root: PathBuf,
     wanted: HashSet<PathBuf>,
     unwanted: Option<HashSet<PathBuf>>,
+    aside: HashSet<PathBuf>,
     placed: Mutex<Vec<(PathBuf, Placed)>>,
+    over_aside: Mutex<HashMap<PathBuf, Ownership>>,
     left: Arc<AtomicUsize>,
 }
 
@@ -131,13 +138,16 @@ impl Placing {
         root: PathBuf,
         wanted: HashSet<PathBuf>,
         unwanted: Option<HashSet<PathBuf>>,
+        aside: HashSet<PathBuf>,
         left: Arc<AtomicUsize>,
     ) -> Arc<Self> {
         Arc::new(Self {
             root,
             wanted,
             unwanted,
+            aside,
             placed: Mutex::default(),
+            over_aside: Mutex::default(),
             left,
         })
     }
@@ -155,6 +165,9 @@ impl Placing {
         cancelled: &AtomicBool,
     ) {
         let path = self.root.join(path);
+        if self.aside.contains(&path) {
+            lock(&self.over_aside).insert(path.clone(), ownership.clone());
+        }
         let wanted = match &self.unwanted {
             Some(unwanted) => !unwanted.contains(&path),
             None => self.wants(&path),
@@ -178,6 +191,10 @@ impl Placing {
                 tracing::warn!(?path, error = %failure.into_error(at.1), "could not record a placed item")
             }
         }
+    }
+
+    pub(super) fn over_aside(&self) -> HashMap<PathBuf, Ownership> {
+        std::mem::take(&mut *lock(&self.over_aside))
     }
 
     pub(super) fn take(&self) -> Vec<(PathBuf, PlacedSnapshot)> {
@@ -268,7 +285,7 @@ pub(super) async fn remove_placed(
         if compared.result.is_err() || !compared.kept.is_empty() {
             return compared;
         }
-        manifest::remove(fs(), parent, &placed.root(), unlinks, cancelled)
+        manifest::remove_placed(fs(), parent, &placed.root(), unlinks, cancelled)
     })
     .await;
     removed.unwrap_or_else(|_| failed(translated_io_error("The deletion stopped unexpectedly")))
@@ -398,6 +415,7 @@ pub(super) async fn copy_in_place(
         ..options
     };
     let workers = options.workers;
+    let copied_into = OffMain::new(parent.clone());
     let followed = following(
         Item::Pinned(source, name),
         options,
@@ -413,8 +431,7 @@ pub(super) async fn copy_in_place(
     let mut manifest = followed
         .manifest
         .ok_or_else(|| translated_io_error("The copy stopped unexpectedly"))?;
-    let (parent, _) = split(&target)?;
-    manifest.copied_to(Published::proven(parent, name, ownership));
+    manifest.copied_to(Published::proven(copied_into.into_inner(), name, ownership));
     Ok((manifest, left_report(&target, followed.left)))
 }
 
@@ -653,6 +670,7 @@ async fn following<T: Send + 'static>(
             counters,
             true,
             options,
+            Deadline::default(),
         );
         let value = work(&copy, &source).map_err(|failure| failure.into_error(&source.name));
         let manifest = source.recorded_in.map(|root| {
@@ -699,6 +717,7 @@ pub(super) async fn copy_from_stage(
                 durable,
                 ..Options::default()
             },
+            Deadline::default(),
         );
         let parent = source.parent.clone();
         from_stage(&copy, &source, identity, &parent, &name)
@@ -720,8 +739,8 @@ pub(super) fn unlock_stage(staged: &StagedSibling) {
         .stat_fd(root.as_fd())
         .is_ok_and(|stat| stat.identity == staged.identity)
     {
-        let family = Mount::new(fs, root.as_fd()).family;
-        restrictive::loosen(fs, root.as_fd(), &staged.restrictive, family);
+        let mount = Mount::new(fs, root.as_fd());
+        restrictive::loosen(fs, root.as_fd(), &staged.restrictive, &mount);
     }
 }
 
@@ -831,7 +850,7 @@ fn copy_new(
                     direct_folder(copy, source, stat.identity, parent, name, workers)
                 });
             }
-            let staged = stage_folder(copy, source, stat.identity, parent, COPY_PREFIX, workers)?;
+            let staged = stage_folder(copy, source, stat.identity, parent, workers)?;
             publish_folder(copy, staged, name, taken, workers)
         }
         _ => Err(Failure::NotCopyable),
@@ -865,27 +884,26 @@ fn copy_special(
         None => StageContent::Fifo,
     };
     // These creation syscalls return no descriptor; retain ownership in a private stage.
-    let staged =
-        StagedSibling::create(parent.clone(), COPY_PREFIX, content).map_err(
-            |error| match error {
-                PlaceError::Io(error)
-                    if stat.kind == FileType::Fifo && tree::refuses_node(FileType::Fifo, error) =>
-                {
-                    Failure::NotCopyable
-                }
-                // The stage's name is valid everywhere, unlike the target.
-                PlaceError::Io(error)
-                    if link
-                        && (tree::refuses_node(FileType::Symlink, error)
-                            || matches!(error, Errno::INVAL | Errno::ILSEQ)) =>
-                {
-                    let refused = Failure::LinkRefused(error);
-                    copy.refused_link(&site, &refused);
-                    refused
-                }
-                error => error.into(),
-            },
-        )?;
+    let staged = StagedSibling::create(parent.clone(), content).map_err(|error| {
+        match error {
+            PlaceError::Io(error)
+                if stat.kind == FileType::Fifo && tree::refuses_node(FileType::Fifo, error) =>
+            {
+                Failure::NotCopyable
+            }
+            // The stage's name is valid everywhere, unlike the target.
+            PlaceError::Io(error)
+                if link
+                    && (tree::refuses_node(FileType::Symlink, error)
+                        || matches!(error, Errno::INVAL | Errno::ILSEQ)) =>
+            {
+                let refused = Failure::LinkRefused(error);
+                copy.refused_link(&site, &refused);
+                refused
+            }
+            error => error.into(),
+        }
+    })?;
     let prepared = (|| {
         let at = Entry::new(&**parent, &staged.name);
         if stat.kind == FileType::Fifo {
@@ -1005,19 +1023,18 @@ fn copy_stage(
             if !copy.names.profiles.holds_link_to(&site, &link) {
                 return Err(Failure::LinkRefused(Errno::ILSEQ));
             }
-            let staged =
-                match StagedSibling::create(parent, STAGE_PREFIX, StageContent::Symlink(link)) {
-                    // The stage's name is valid everywhere, unlike the target.
-                    Err(PlaceError::Io(error))
-                        if tree::refuses_node(FileType::Symlink, error)
-                            || matches!(error, Errno::INVAL | Errno::ILSEQ) =>
-                    {
-                        let refused = Failure::LinkRefused(error);
-                        copy.refused_link(&site, &refused);
-                        return Err(refused);
-                    }
-                    staged => staged?,
-                };
+            let staged = match StagedSibling::create(parent, StageContent::Symlink(link)) {
+                // The stage's name is valid everywhere, unlike the target.
+                Err(PlaceError::Io(error))
+                    if tree::refuses_node(FileType::Symlink, error)
+                        || matches!(error, Errno::INVAL | Errno::ILSEQ) =>
+                {
+                    let refused = Failure::LinkRefused(error);
+                    copy.refused_link(&site, &refused);
+                    return Err(refused);
+                }
+                staged => staged?,
+            };
             // sshfs sets a link's times on what it points to.
             if Mount::new(copy.fs, staged.parent.as_fd()).family != Family::Fuse {
                 let link = Entry::new(&*staged.parent, &staged.name);
@@ -1035,7 +1052,7 @@ fn copy_stage(
         }
         FileType::Directory => {
             let workers = workers.unwrap_or_else(|| worker_count(source, &parent));
-            stage_folder(copy, source, stat.identity, &parent, STAGE_PREFIX, workers)
+            stage_folder(copy, source, stat.identity, &parent, workers)
         }
         _ => Err(Failure::NotCopyable),
     }
@@ -1047,7 +1064,7 @@ fn worker_count(source: &Source, target: &OwnedFd) -> usize {
         .unwrap_or(1);
     let rotational = [source.parent.as_fd(), target.as_fd()]
         .into_iter()
-        .any(|fd| local_device_is_rotational(fd) == Some(true));
+        .any(|fd| fs().rotational(fd) == Some(true));
     bounded_local_worker_count(available, rotational)
 }
 
@@ -1056,11 +1073,10 @@ fn stage_folder(
     source: &Source,
     expected: LocalFileIdentity,
     parent: &Arc<OwnedFd>,
-    prefix: &str,
     workers: usize,
 ) -> Result<StagedSibling, Failure> {
     copy.check_cancelled()?;
-    let mut staged = StagedSibling::create(parent.clone(), prefix, StageContent::Directory)?;
+    let mut staged = StagedSibling::create(parent.clone(), StageContent::Directory)?;
     let root = Root {
         parent: parent.clone(),
         name: staged.name.clone(),
@@ -1189,7 +1205,7 @@ fn fill(
         return Ok(restrictive);
     }
     let opened = fs.open_dir(Entry::new(&*root.parent, &root.name))?;
-    if !same_entry(&fs.stat_fd(opened.as_fd())?, root.identity, mount.family) {
+    if !mount.may_be(root.identity, &fs.stat_fd(opened.as_fd())?) {
         return Err(Failure::Place(PlaceError::Changed));
     }
     links.make(
@@ -1197,12 +1213,11 @@ fn fill(
         copy,
         opened.as_fd(),
         Path::new(""),
-        mount.family,
+        &mount,
         created.map(|created| &**created),
     )?;
-    let stable = stable_inodes(mount.family);
-    if let Err(error) = restrictive::tighten(fs, opened.as_fd(), &mut restrictive, stable) {
-        restrictive::loosen(fs, opened.as_fd(), &restrictive, mount.family);
+    if let Err(error) = restrictive::tighten(fs, opened.as_fd(), &mut restrictive, mount.identity) {
+        restrictive::loosen(fs, opened.as_fd(), &restrictive, &mount);
         return Err(error.into());
     }
     Ok(restrictive)
@@ -1216,7 +1231,8 @@ impl Created {
         lock(&self.0).push((path, identity));
     }
 
-    fn remove(&self, fs: &dyn FsOps, root: &Root, family: Family) -> Result<(), glib::Error> {
+    fn remove(&self, copy: &Copy, root: &Root, mount: &Mount) -> Result<(), glib::Error> {
+        let fs = copy.fs;
         let root_entry = Entry::new(&*root.parent, &root.name);
         let dir = match fs.open_dir(root_entry) {
             Ok(dir) => dir,
@@ -1226,7 +1242,7 @@ impl Created {
         let opened = fs
             .stat_fd(dir.as_fd())
             .map_err(|error| io_error(os_error_detail(error)))?;
-        if !same_entry(&opened, root.identity, family) {
+        if !mount.may_be(root.identity, &opened) {
             return Err(placement_error(PlaceError::Changed));
         }
         let mut made = std::mem::take(&mut *lock(&self.0));
@@ -1250,22 +1266,32 @@ impl Created {
                     .ok()
                     .map(|fd| (parent, fd));
             }
-            if let Some((_, fd)) = &folder {
-                let flags = if identity.kind == FileType::Directory {
-                    AtFlags::REMOVEDIR
-                } else {
-                    AtFlags::empty()
-                };
-                placement::remove_if_unchanged(fs, Entry::new(fd, name), *identity, flags);
+            let Some((_, fd)) = &folder else {
+                continue;
+            };
+            let entry = Entry::new(fd, name);
+            if identity.kind != FileType::Directory {
+                let attributes = copy.written_attributes(*identity);
+                placement::remove_if_unchanged(fs, entry, *identity, attributes, AtFlags::empty());
+                continue;
+            }
+            let unchanged = || {
+                fs.stat(entry, true)
+                    .is_ok_and(|current| current.identity == *identity)
+            };
+            if unchanged() {
+                let _ = copy.remove_folder(entry, &unchanged);
             }
         }
         drop((folder, dir));
-        remove_own(
-            fs,
-            root_entry,
-            |current| same_entry(current, root.identity, family),
-            AtFlags::REMOVEDIR,
-        )
+        let made = |current: &EntryStat| mount.may_be(root.identity, current);
+        let unchanged = || {
+            fs.stat(root_entry, true)
+                .is_ok_and(|current| made(&current))
+        };
+        remove_own(fs, root_entry, made, |at| {
+            copy.remove_folder(at, &unchanged)
+        })
     }
 }
 
@@ -1300,8 +1326,8 @@ fn direct_folder(
     fill(copy, source, expected, &root, workers, Some(&created))
         .map(|_| copy.created_ownership(identity, lock(&created.0).clone()))
         .map_err(|failure| {
-            let family = Mount::new(fs, parent.as_fd()).family;
-            let removed = created.remove(fs, &root, family);
+            let mount = Mount::new(fs, parent.as_fd());
+            let removed = created.remove(copy, &root, &mount);
             copy.after_cleanup(failure, removed)
         })
 }
@@ -1537,30 +1563,17 @@ pub(super) fn holds_no_links(error: Errno) -> bool {
     error == Errno::NOSYS || is_unsupported(error)
 }
 
-/// FUSE daemons without `use_ino` number a node afresh once the kernel has
-/// evicted it.
-fn stable_inodes(family: Family) -> bool {
-    family != Family::Fuse
-}
-
-fn same_entry(current: &EntryStat, identity: LocalFileIdentity, family: Family) -> bool {
-    if stable_inodes(family) {
-        current.identity == identity
-    } else {
-        current.kind == identity.kind
-    }
-}
-
-fn remove_own(
+fn remove_own<'a>(
     fs: &dyn FsOps,
-    entry: Entry<'_>,
+    entry: Entry<'a>,
     made: impl FnOnce(&EntryStat) -> bool,
-    flags: AtFlags,
+    remove: impl FnOnce(Entry<'a>) -> Result<(), leftovers::Refused>,
 ) -> Result<(), glib::Error> {
     match fs.stat(entry, true) {
-        Ok(current) if made(&current) => match fs.unlink(entry, flags) {
-            Ok(()) | Err(Errno::NOENT) => Ok(()),
-            Err(error) => Err(io_error(os_error_detail(error))),
+        Ok(current) if made(&current) => match remove(entry) {
+            Ok(()) | Err(leftovers::Refused::Os(Errno::NOENT)) => Ok(()),
+            Err(leftovers::Refused::Changed(_)) => Err(placement_error(PlaceError::Changed)),
+            Err(refused) => Err(io_error(os_error_detail(refused.errno()))),
         },
         Ok(_) => Err(placement_error(PlaceError::Changed)),
         Err(Errno::NOENT) => Ok(()),
@@ -1568,19 +1581,11 @@ fn remove_own(
     }
 }
 
-/// What tells an entry on a mount from another put at its name, besides its type.
-#[derive(Clone, Copy)]
-struct Identifies {
-    /// Whether an entry keeps its inode number once the kernel evicts it.
-    inodes: bool,
-    /// Whether a folder keeps its birth time when an entry is renamed into or within it.
-    folder_births: bool,
-}
-
 #[derive(Clone, Copy)]
 struct Mount {
     key: MountKey,
     family: Family,
+    identity: IdentityTraits,
     fuse_format: Option<FuseFormat>,
     coarse_times: Option<CoarseTimes>,
     deferred_close: Option<Duration>,
@@ -1598,6 +1603,7 @@ impl Mount {
         Self {
             key,
             family: capabilities.family.unwrap_or(Family::Other),
+            identity: capabilities.identity,
             fuse_format: capabilities.fuse_format,
             coarse_times: capabilities.coarse_times,
             deferred_close: capabilities.deferred_close,
@@ -1612,12 +1618,12 @@ impl Mount {
         self.attribute_cache.is_some()
     }
 
-    fn identifies(fs: &dyn FsOps, dir: BorrowedFd<'_>) -> Identifies {
-        let (_, capabilities) = known_mount(fs, dir);
-        Identifies {
-            inodes: capabilities.stable_inodes.unwrap_or(true),
-            folder_births: !capabilities.renames_reset_folder_births,
-        }
+    fn identity_now(&self, fs: &dyn FsOps, dir: BorrowedFd<'_>) -> IdentityTraits {
+        mount_profile::identity_now(fs, dir, self.family, self.identity)
+    }
+
+    fn may_be(&self, recorded: LocalFileIdentity, current: &EntryStat) -> bool {
+        compare(self.identity, recorded, None, current) != Proof::Different
     }
 
     fn capabilities(&self) -> MountCapabilities {
@@ -1629,47 +1635,42 @@ impl Mount {
     }
 }
 
-const TMPFILE_LINK_UNKNOWN: u8 = 0;
-const TMPFILE_LINK_EMPTY_PATH: u8 = 1;
-const TMPFILE_LINK_PROC: u8 = 2;
-const TMPFILE_LINK_UNAVAILABLE: u8 = 3;
-
-/// How this process links unnamed files: `AT_EMPTY_PATH` needs Linux 6.10
-/// unprivileged, and the `/proc` form needs `/proc`.
-static TMPFILE_LINK: AtomicU8 = AtomicU8::new(TMPFILE_LINK_UNKNOWN);
-
-#[cfg(test)]
-pub(super) fn forget_learned_copy_support() {
-    TMPFILE_LINK.store(TMPFILE_LINK_UNKNOWN, Ordering::Relaxed);
-    data::forget_learned();
-}
-
-fn link_tmpfile(fs: &dyn FsOps, fd: BorrowedFd<'_>, to: Entry<'_>) -> Result<(), Errno> {
-    let known = TMPFILE_LINK.load(Ordering::Relaxed);
-    if known != TMPFILE_LINK_PROC {
+fn link_tmpfile(
+    fs: &dyn FsOps,
+    mount: &Mount,
+    fd: BorrowedFd<'_>,
+    to: Entry<'_>,
+) -> Result<(), Errno> {
+    let through_proc = mount.capabilities().tmpfile_link_through_proc;
+    if through_proc != Some(true) {
         match fs.link_fd(fd, to, false) {
             Ok(()) => {
-                TMPFILE_LINK.store(TMPFILE_LINK_EMPTY_PATH, Ordering::Relaxed);
+                if through_proc.is_none() {
+                    mount
+                        .learn(|capabilities| capabilities.tmpfile_link_through_proc = Some(false));
+                }
                 return Ok(());
             }
             // Once the plain form has worked, ENOENT is about the folder.
-            Err(Errno::NOENT) if known == TMPFILE_LINK_UNKNOWN => {}
+            Err(Errno::NOENT) if through_proc.is_none() => {}
             Err(error) => return Err(error),
         }
     }
     match fs.link_fd(fd, to, true) {
         Ok(()) => {
-            TMPFILE_LINK.store(TMPFILE_LINK_PROC, Ordering::Relaxed);
+            if through_proc.is_none() {
+                mount.learn(|capabilities| capabilities.tmpfile_link_through_proc = Some(true));
+            }
             Ok(())
         }
         // Unless the folder itself was removed meanwhile, or the mount may
         // refuse the name, as SMB and exfat-fuse do with `ENOENT`.
         Err(Errno::NOENT)
-            if known == TMPFILE_LINK_UNKNOWN
+            if through_proc.is_none()
                 && !may_be_refused(to.name)
                 && fs.stat_fd(to.dir).is_ok_and(|folder| folder.nlink > 0) =>
         {
-            TMPFILE_LINK.store(TMPFILE_LINK_UNAVAILABLE, Ordering::Relaxed);
+            mount.learn(|capabilities| capabilities.tmpfile = Some(false));
             Err(Errno::NOENT)
         }
         Err(error) => Err(error),
@@ -1693,6 +1694,7 @@ struct Copy {
     left: Mutex<Left>,
     copies: Mutex<Vec<Published>>,
     written: Mutex<HashMap<(u64, u64), (LocalFileIdentity, manifest::State)>>,
+    leftovers: Deadline,
 }
 
 impl Copy {
@@ -1703,6 +1705,7 @@ impl Copy {
         progress: Arc<SharedProgress>,
         counted: bool,
         options: Options,
+        leftovers: Deadline,
     ) -> Arc<Self> {
         Arc::new(Self {
             fs,
@@ -1719,6 +1722,7 @@ impl Copy {
             left: Mutex::default(),
             copies: Mutex::default(),
             written: Mutex::default(),
+            leftovers,
         })
     }
 
@@ -1755,7 +1759,16 @@ impl Copy {
                 durable: self.durable,
                 ..Options::default()
             },
+            self.leftovers.clone(),
         )
+    }
+
+    fn remove_folder(
+        &self,
+        at: Entry<'_>,
+        unchanged: &dyn Fn() -> bool,
+    ) -> Result<(), leftovers::Refused> {
+        leftovers::remove_folder(self.fs, at, &self.leftovers, &|| false, unchanged)
     }
 
     /// Forced where the mount caches attributes: a move records the source from this stat.
@@ -1841,6 +1854,7 @@ impl Copy {
             self.progress.clone(),
             self.counted,
             options,
+            self.leftovers.clone(),
         )
     }
 
@@ -2074,6 +2088,12 @@ impl Copy {
         );
     }
 
+    fn written_attributes(&self, identity: LocalFileIdentity) -> Option<Attributes> {
+        let written = lock(&self.written);
+        let (known, state) = written.get(&(identity.device, identity.inode))?;
+        (*known == identity).then(|| state.attributes())
+    }
+
     fn settle_state(&self, identity: LocalFileIdentity, stat: &EntryStat) {
         if let Some((known, state)) =
             lock(&self.written).get_mut(&(identity.device, identity.inode))
@@ -2105,15 +2125,15 @@ impl Copy {
         entry: Entry<'_>,
         identity: LocalFileIdentity,
         snapshot: &Snapshot,
-        family: Family,
+        mount: &Mount,
     ) -> Result<(), Failure> {
-        let lost = match family {
+        let lost = match mount.family {
             Family::Nfs4 => true,
             Family::Fuse | Family::Smb => match self.fs.stat(entry, true) {
                 Ok(current) if snapshot.times_match(&current) => {
                     // Times moved by less than the check notices stay, so the
                     // copy is known by them from now on.
-                    if same_entry(&current, identity, family) {
+                    if mount.may_be(identity, &current) {
                         self.settle_state(identity, &current);
                     }
                     false
@@ -2138,14 +2158,14 @@ impl Copy {
             opened => opened,
         };
         let reopened = match reopened {
-            Ok(Some((fd, stat))) if same_entry(&stat, identity, family) => fd,
+            Ok(Some((fd, stat))) if mount.may_be(identity, &stat) => fd,
             // Setting times by name needs only ownership.
             Err(Errno::ACCESS) => {
                 return match fs.stat(entry, true) {
-                    Ok(current) if same_entry(&current, identity, family) => {
+                    Ok(current) if mount.may_be(identity, &current) => {
                         snapshot.apply_times_at(fs, entry)?;
                         if let Ok(settled) = fs.stat(entry, true)
-                            && same_entry(&settled, identity, family)
+                            && mount.may_be(identity, &settled)
                         {
                             self.settle_state(identity, &settled);
                         }
@@ -2169,16 +2189,18 @@ impl Copy {
 
     fn discard(&self, staged: StagedSibling) -> Result<(), glib::Error> {
         unlock_stage(&staged);
+        let identity = Some(staged.recorded());
         let roots = vec![PinnedEntry {
             parent: staged.parent,
             name: staged.name,
-            identity: Some(staged.identity),
+            identity,
         }];
         let workers = local_delete_worker_count(&roots);
         parallel_delete_local_blocking_with_workers(
             roots,
             Arc::new(AtomicBool::new(false)),
             workers,
+            &self.leftovers,
         )
         .map_err(io_error)
     }
@@ -2258,13 +2280,6 @@ fn open_file(fs: &dyn FsOps, at: Entry<'_>, cancelled: &AtomicBool) -> Result<Op
     }
 }
 
-/// How long after `closetimeo` the SMB client may take to close the handle.
-const DEFERRED_CLOSE_MARGIN: Duration = Duration::from_millis(500);
-
-/// The longest an open waits for a deferred close, as `closetimeo` may be
-/// set to days.
-const DEFERRED_CLOSE_LIMIT: Duration = Duration::from_secs(10);
-
 /// After this machine writes a file, the SMB client keeps its handle open
 /// for `closetimeo` and refuses an open of another name of the file with
 /// `EINVAL` meanwhile, so the open is tried again until then.
@@ -2276,23 +2291,18 @@ fn open_after_deferred_close(
     let Some(deferred) = Mount::new(fs, at.dir).deferred_close else {
         return Err(open_failure(at.name, Errno::INVAL));
     };
-    let mut left = deferred
-        .saturating_add(DEFERRED_CLOSE_MARGIN)
-        .min(DEFERRED_CLOSE_LIMIT);
-    let mut pause = Duration::from_millis(10);
-    while !left.is_zero() {
-        let waited = pause.min(left);
-        manifest::sleep(waited);
-        left -= waited;
-        if cancelled.load(Ordering::Acquire) {
-            return Err(Failure::Cancelled);
+    let mut wait = deferred_close::Wait::after(deferred);
+    loop {
+        match wait.pause(&|| cancelled.load(Ordering::Acquire)) {
+            Pause::Retry => {}
+            Pause::Spent => return Err(open_failure(at.name, Errno::INVAL)),
+            Pause::Cancelled => return Err(Failure::Cancelled),
         }
         match fs.open_source(at, true) {
-            Err(Errno::INVAL) => pause = (pause * 2).min(Duration::from_millis(50)),
+            Err(Errno::INVAL) => {}
             opened => return opened.map_err(|error| open_failure(at.name, error)),
         }
     }
-    Err(open_failure(at.name, Errno::INVAL))
 }
 
 fn open_one_name(
@@ -2346,15 +2356,6 @@ impl Drop for OneOpen {
 enum FileTarget<'a> {
     Final(&'a OsStr, Taken),
     Hidden,
-}
-
-impl FileTarget<'_> {
-    fn stage_prefix(self) -> &'static str {
-        match self {
-            Self::Final(..) => COPY_PREFIX,
-            Self::Hidden => STAGE_PREFIX,
-        }
-    }
 }
 
 struct Stage {
@@ -2413,12 +2414,12 @@ impl<'a> FileCopy<'a> {
         let mut tmpfile = None;
         if stage::tmpfile_allowed(self.target.family)
             && self.target.capabilities().tmpfile != Some(false)
-            && TMPFILE_LINK.load(Ordering::Relaxed) != TMPFILE_LINK_UNAVAILABLE
         {
             match fs.open_tmpfile(self.dir, Mode::from_raw_mode(0o600)) {
                 Ok(fd) => {
-                    self.target
-                        .learn(|capabilities| capabilities.tmpfile = Some(true));
+                    self.target.learn(|capabilities| {
+                        capabilities.tmpfile.get_or_insert(true);
+                    });
                     tmpfile = Some(fd);
                 }
                 // Before Linux 3.11 the flag reads as O_DIRECTORY.
@@ -2485,7 +2486,7 @@ impl<'a> FileCopy<'a> {
             FileTarget::Final(name, taken) => {
                 first_free(self.copy, self.dir, (name, taken, false), |name| {
                     let to = self.at(name);
-                    link_tmpfile(fs, tmpfile, to).map_err(|error| {
+                    link_tmpfile(fs, &self.target, tmpfile, to).map_err(|error| {
                         match placement::file_creation_error(error) {
                             PlaceError::Exists => Failure::Place(PlaceError::Exists),
                             _ => creation_failure(fs, to, error),
@@ -2498,8 +2499,8 @@ impl<'a> FileCopy<'a> {
                     _ => Errno::EXIST,
                 })
             }
-            FileTarget::Hidden => placement::reserve_hidden_name(STAGE_PREFIX, |name| {
-                link_tmpfile(fs, tmpfile, self.at(name)).map_err(|error| {
+            FileTarget::Hidden => placement::reserve_hidden_name(HiddenName::Copy, |name| {
+                link_tmpfile(fs, &self.target, tmpfile, self.at(name)).map_err(|error| {
                     match placement::file_creation_error(error) {
                         PlaceError::Exists => PlaceError::Exists,
                         _ => PlaceError::Io(error),
@@ -2553,7 +2554,13 @@ impl<'a> FileCopy<'a> {
             }
         };
         if let Err(error) = fs.close(tmpfile) {
-            placement::remove_if_unchanged(fs, self.at(&name), created.identity, AtFlags::empty());
+            placement::remove_if_unchanged(
+                fs,
+                self.at(&name),
+                created.identity,
+                self.copy.written_attributes(created.identity),
+                AtFlags::empty(),
+            );
             return Err(error.into());
         }
         self.copy.add_file(0);
@@ -2568,7 +2575,7 @@ impl<'a> FileCopy<'a> {
         parent: &EntryStat,
         target: FileTarget<'_>,
     ) -> Result<(OsString, LocalFileIdentity), Failure> {
-        let (fd, stage) = self.create_stage(target)?;
+        let (fd, stage) = self.create_stage()?;
         let copied = self
             .copy
             .copy_data(
@@ -2599,7 +2606,7 @@ impl<'a> FileCopy<'a> {
         parent: &EntryStat,
         target: FileTarget<'_>,
     ) -> Result<(OsString, LocalFileIdentity), Failure> {
-        let (fd, stage) = self.create_stage(target)?;
+        let (fd, stage) = self.create_stage()?;
         let copied = self
             .read_into(source, fd.as_fd(), parent)
             .and_then(|snapshot| {
@@ -2621,9 +2628,8 @@ impl<'a> FileCopy<'a> {
         }
     }
 
-    fn create_stage(&self, target: FileTarget<'_>) -> Result<(OwnedFd, Stage), Failure> {
-        let (name, (fd, created)) =
-            stage::create_file(self.copy.fs, self.dir, target.stage_prefix())?;
+    fn create_stage(&self) -> Result<(OwnedFd, Stage), Failure> {
+        let (name, (fd, created)) = stage::create_file(self.copy.fs, self.dir)?;
         Ok((fd, Stage { name, created }))
     }
 
@@ -2636,6 +2642,12 @@ impl<'a> FileCopy<'a> {
         target: FileTarget<'_>,
     ) -> Result<(OsString, LocalFileIdentity), Failure> {
         let fs = self.copy.fs;
+        let _pinned = Pinned::at(
+            fs,
+            self.at(&stage.name),
+            &stage.created,
+            self.target.identity,
+        );
         let settled = self
             .copy
             .sync_written(fd.as_fd(), &self.target)
@@ -2645,7 +2657,7 @@ impl<'a> FileCopy<'a> {
                     self.at(&stage.name),
                     stage.created.identity,
                     snapshot,
-                    self.target.family,
+                    &self.target,
                 )
             })
             .and_then(|()| self.copy.check_cancelled());
@@ -2747,7 +2759,7 @@ impl<'a> FileCopy<'a> {
             self.copy.sync_written(fd.as_fd(), &self.target)?;
             fs.close(fd)?;
             self.copy
-                .settle_times(target, created.identity, snapshot, self.target.family)
+                .settle_times(target, created.identity, snapshot, &self.target)
         })(fd);
         match filled {
             Ok(()) => Ok(created.identity),
@@ -2759,11 +2771,15 @@ impl<'a> FileCopy<'a> {
     }
 
     fn remove_made(&self, name: &OsStr, identity: LocalFileIdentity) -> Result<(), glib::Error> {
+        let fs = self.copy.fs;
         remove_own(
-            self.copy.fs,
+            fs,
             self.at(name),
             |current| current.identity == identity,
-            AtFlags::empty(),
+            |at| {
+                fs.unlink(at, AtFlags::empty())
+                    .map_err(leftovers::Refused::Os)
+            },
         )
     }
 

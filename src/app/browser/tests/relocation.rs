@@ -73,6 +73,9 @@ impl FileSource for TreeSource {
         } else {
             vec![named(&request.location, "nested", true)]
         };
+        if !self.missing.borrow().contains(&request.location) {
+            self.identities.stamp(&request, &emit);
+        }
         emit(DirectoryEvent::Batch {
             request_id: request.id,
             entries,
@@ -94,24 +97,10 @@ impl FileSource for TreeSource {
         }))
     }
 
-    fn query_location_identity(
-        &self,
-        location: Location,
-        emit: Rc<dyn Fn(Option<LocationIdentity>)>,
-    ) -> LoadHandle {
-        let present = !self.missing.borrow().contains(&location);
-        emit(
-            present
-                .then(|| self.identities.identity(&location))
-                .flatten(),
-        );
-        LoadHandle::new(|| {})
-    }
-
     fn find_by_identity(
         &self,
         parent: Location,
-        identity: LocationIdentity,
+        identity: ItemIdentity,
         emit: Rc<dyn Fn(Option<Location>)>,
     ) -> LoadHandle {
         emit(self.identities.find(&parent, identity));

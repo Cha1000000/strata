@@ -1,6 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-use std::{cell::Cell, fs, path::Path, rc::Rc, time::Instant};
+use std::{
+    cell::{Cell, RefCell},
+    fs,
+    path::Path,
+    rc::Rc,
+    time::Instant,
+};
 
 use gtk::{glib, prelude::*};
 use tempfile::tempdir;
@@ -8,9 +14,21 @@ use tempfile::tempdir;
 use crate::{adapters::LocalFileSource, app::Browser, model::Location};
 
 use super::{
-    CompletionCandidate, PathCompletion, format_highlighted_markup, longest_common_prefix,
-    suggest_completions,
+    CompletionCandidate, PathCompletion, Plan, format_highlighted_markup, longest_common_prefix,
+    plan_completions,
 };
+
+fn suggest_completions(
+    input: &str,
+    current_dir: Option<&Path>,
+    home: &Path,
+    show_hidden: bool,
+) -> Vec<CompletionCandidate> {
+    match plan_completions(input, current_dir, home, show_hidden) {
+        Plan::Ready(candidates) => candidates,
+        Plan::List(listing) => glib::MainContext::new().block_on(listing.candidates()),
+    }
+}
 
 #[test]
 fn first_reveal_shows_suggestions_after_switching_from_breadcrumbs() {
@@ -150,10 +168,8 @@ fn down_reopens_suggestions_after_tab_completion() {
                     press(gtk::gdk::Key::Down);
                 }
                 press(gtk::gdk::Key::Tab);
-                assert_eq!(
-                    entry.text().as_str(),
-                    fixture.path().join(completed).to_string_lossy().as_ref()
-                );
+                let completed = fixture.path().join(completed);
+                wait_until(|| entry.text().as_str() == completed.to_string_lossy());
                 wait_until(|| !completion.popover.is_visible());
                 press(gtk::gdk::Key::Down);
                 if let Some(suggestion) = suggestion {
@@ -166,8 +182,197 @@ fn down_reopens_suggestions_after_tab_completion() {
                     press(gtk::gdk::Key::Down);
                     wait_until(|| completion.popover.is_visible());
                 } else {
+                    wait_until(|| completion.request.borrow().is_none());
                     assert!(!completion.popover.is_visible());
                     assert!(completion.candidates.borrow().is_empty());
+                }
+            }
+            window.destroy();
+        },
+    );
+}
+
+#[test]
+fn typed_paths_are_listed_off_the_ui_thread_and_only_the_latest_text_is_shown() {
+    crate::test_support::gtk_test(
+        "ui::browser::location::completion::tests::typed_paths_are_listed_off_the_ui_thread_and_only_the_latest_text_is_shown",
+        || {
+            use crate::{
+                adapters::{FsOp, FsQuirks, Quirks},
+                test_support::Gate,
+            };
+            use gtk::gdk::Key;
+
+            let fixture = tempdir().expect("fixture");
+            for folder in [
+                "slow/Alpha",
+                "slow/Beta",
+                "fast/Gamma",
+                "later/Alpha",
+                "list/Delta",
+                "list/Echo",
+                "submit/Alpha",
+                "twice/Alpha/Inner",
+                "pair/Projects-a",
+                "pair/Projects-b",
+            ] {
+                fs::create_dir_all(fixture.path().join(folder)).expect("fixture folder");
+            }
+            let gates: Vec<_> = ["slow", "later", "list", "submit", "twice", "pair"]
+                .into_iter()
+                .map(|folder| (folder, Gate::default()))
+                .collect();
+            let gate = |folder: &str| {
+                gates
+                    .iter()
+                    .find_map(|(name, gate)| (*name == folder).then_some(gate))
+                    .expect("gated folder")
+            };
+            let (slow, later, list) = (gate("slow"), gate("later"), gate("list"));
+            let _scope = FsQuirks::install(
+                fixture.path(),
+                Quirks {
+                    before: gates
+                        .iter()
+                        .map(|(folder, gate)| (FsOp::ListChunks, *folder, 0, gate.racer()))
+                        .collect(),
+                    ..Quirks::default()
+                },
+            );
+            let browser = Browser::new(Rc::new(LocalFileSource));
+            let entry = gtk::Entry::new();
+            let submitted = Rc::new(RefCell::new(Vec::<String>::new()));
+            let (submit, submitted_text) = (submitted.clone(), entry.clone());
+            let completion = PathCompletion::attach(
+                &entry,
+                browser,
+                || true,
+                move || {
+                    submit.borrow_mut().push(submitted_text.text().into());
+                },
+            );
+            let window = gtk::Window::builder().child(&entry).build();
+            window.present();
+            entry.grab_focus();
+            wait_until(|| entry.is_mapped());
+            let path = |relative: &str| format!("{}/{relative}", fixture.path().display());
+            let shown = || {
+                completion.popover.is_visible().then(|| {
+                    completion
+                        .candidates
+                        .borrow()
+                        .iter()
+                        .map(|candidate| candidate.display_name.clone())
+                        .collect::<Vec<_>>()
+                })
+            };
+
+            entry.set_text(&path("slow/"));
+            wait_until(|| slow.reached());
+            assert_eq!(
+                shown(),
+                None,
+                "nothing is offered while the folder is listed"
+            );
+            entry.set_text(&path("fast/"));
+            wait_until(|| shown().is_some());
+            assert_eq!(shown(), Some(vec!["Gamma/".to_owned()]));
+            slow.release();
+            let settled = Instant::now() + std::time::Duration::from_millis(200);
+            while Instant::now() < settled {
+                glib::MainContext::default().iteration(false);
+            }
+            assert_eq!(
+                shown(),
+                Some(vec!["Gamma/".to_owned()]),
+                "an earlier text's listing is dropped"
+            );
+
+            entry.set_text(&path("later/Al"));
+            wait_until(|| later.reached());
+            let keys = entry
+                .observe_controllers()
+                .iter::<glib::Object>()
+                .filter_map(Result::ok)
+                .find_map(|controller| controller.downcast::<gtk::EventControllerKey>().ok())
+                .expect("completion keyboard controller");
+            let press = |key: gtk::gdk::Key| {
+                keys.emit_by_name::<bool>(
+                    "key-pressed",
+                    &[&key, &0u32, &gtk::gdk::ModifierType::empty()],
+                )
+            };
+            assert!(press(gtk::gdk::Key::Tab));
+            assert_eq!(
+                entry.text().as_str(),
+                path("later/Al"),
+                "Tab waits for the listing"
+            );
+            later.release();
+            wait_until(|| entry.text().as_str() == path("later/Alpha/"));
+
+            entry.set_text(&path("lis"));
+            wait_until(|| shown() == Some(vec!["list/".to_owned()]));
+            let mut end = entry.text().chars().count() as i32;
+            entry.insert_text("t/", &mut end);
+            wait_until(|| list.reached());
+            assert!(press(gtk::gdk::Key::Down));
+            assert!(press(gtk::gdk::Key::Return));
+            assert!(
+                submitted.borrow().is_empty(),
+                "Enter after Down waits for the listing"
+            );
+            list.release();
+            wait_until(|| submitted.borrow().len() == 1);
+            assert_eq!(submitted.borrow()[0], path("list/Delta/"));
+
+            for (shown_before, typed, keys, folder, result) in [
+                (
+                    None,
+                    "submit/Al",
+                    &[Key::Tab, Key::Return][..],
+                    "submit",
+                    "submit/Alpha/",
+                ),
+                (
+                    None,
+                    "twice/Al",
+                    &[Key::Tab, Key::Tab],
+                    "twice",
+                    "twice/Alpha/Inner/",
+                ),
+                (
+                    Some("pai"),
+                    "pair/Pro",
+                    &[Key::Tab, Key::Down, Key::Return],
+                    "pair",
+                    "pair/Projects-",
+                ),
+            ] {
+                submitted.borrow_mut().clear();
+                match shown_before {
+                    Some(before) => {
+                        entry.set_text(&path(before));
+                        wait_until(|| shown().is_some());
+                        let mut end = entry.text().chars().count() as i32;
+                        entry.insert_text(&typed[before.len()..], &mut end);
+                    }
+                    None => entry.set_text(&path(typed)),
+                }
+                wait_until(|| gate(folder).reached());
+                for key in keys {
+                    assert!(press(*key), "{typed}: {key:?} waits for the listing");
+                }
+                assert_eq!(entry.text().as_str(), path(typed));
+                gate(folder).release();
+                let submits = keys.contains(&Key::Return);
+                wait_until(|| {
+                    completion.request.borrow().is_none()
+                        && entry.text().as_str() == path(result)
+                        && submitted.borrow().len() == usize::from(submits)
+                });
+                if submits {
+                    assert_eq!(submitted.borrow()[0], path(result), "{typed}");
                 }
             }
             window.destroy();

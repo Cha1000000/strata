@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: MIT
 
 use std::{
-    cell::RefCell,
+    cell::OnceCell,
     path::{Path, PathBuf},
-    rc::{Rc, Weak},
+    rc::Rc,
 };
 
-use gtk::prelude::*;
+use gtk::{glib, prelude::*};
 
 use crate::{
     adapters::LocalActionStore,
@@ -17,24 +17,25 @@ use crate::{
         controls::{ModalTone, focus_button, message_dialog_description, message_dialog_layout},
         modal::{
             ModalHost, dismiss_modal_layer, dismiss_modal_layer_then, modal_layer,
-            show_error_dialog,
+            show_error_dialog, show_error_dialog_after_close,
         },
     },
 };
 
 thread_local! {
-    static SHARED_REGISTRY: RefCell<Weak<ActionRegistry>> = const { RefCell::new(Weak::new()) };
+    static SHARED_REGISTRY: OnceCell<Rc<ActionRegistry>> = const { OnceCell::new() };
 }
 
 pub(crate) fn shared() -> Rc<ActionRegistry> {
-    SHARED_REGISTRY.with(|shared| {
-        if let Some(registry) = shared.borrow().upgrade() {
-            return registry;
-        }
-        let registry = Rc::new(ActionRegistry::new(LocalActionStore::new()));
-        shared.replace(Rc::downgrade(&registry));
-        registry
-    })
+    let registry = SHARED_REGISTRY.with(|shared| {
+        shared
+            .get_or_init(|| ActionRegistry::new(LocalActionStore::new()))
+            .clone()
+    });
+    if !registry.reload_waiting() {
+        glib::MainContext::default().spawn_local(registry.reload());
+    }
+    registry
 }
 
 /// Manifest slugs paired with bundled Lucide assets.
@@ -134,12 +135,36 @@ pub(crate) fn run_action(
     source: InvocationSource,
     closed: Option<Rc<dyn Fn()>>,
 ) {
-    let jobs = super::jobs::shared();
-    if action.definition.run.confirm {
-        confirm_and_run(anchor, action, paths, parent, source, closed);
-        return;
-    }
-    enqueue(anchor, &jobs, action, paths, parent, source);
+    let current = shared().definition(action.id().to_owned());
+    let anchor = anchor.as_ref().clone();
+    glib::MainContext::default().spawn_local(async move {
+        let refused = match current.await {
+            Ok(definition) if definition == action.definition => None,
+            Ok(_) => Some(crate::i18n::tr("Actions changed")),
+            Err(error) => Some(error.user_message()),
+        };
+        if let Some(reason) = refused {
+            show_error_dialog_after_close(
+                &anchor,
+                &crate::i18n::tr("Unable to run action"),
+                &reason,
+                closed.unwrap_or_else(|| Rc::new(|| {})),
+            );
+            return;
+        }
+        if action.definition.run.confirm {
+            confirm_and_run(&anchor, action, paths, parent, source, closed);
+            return;
+        }
+        enqueue(
+            &anchor,
+            &super::jobs::shared(),
+            action,
+            paths,
+            parent,
+            source,
+        );
+    });
 }
 
 fn enqueue(

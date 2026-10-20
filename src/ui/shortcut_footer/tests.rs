@@ -227,6 +227,7 @@ fn footer_tracks_modes_and_shields_files_while_open() {
         footer.assert_hints_visible(enabled);
         other.assert_hints_visible(enabled);
     }
+    crate::storage::writer::settle();
     let settings =
         std::path::PathBuf::from(std::env::var_os("XDG_CONFIG_HOME").expect("isolated config"))
             .join("strata/settings.toml");

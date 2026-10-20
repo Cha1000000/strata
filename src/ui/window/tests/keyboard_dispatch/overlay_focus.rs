@@ -14,6 +14,7 @@ impl ComposedFolder {
     fn open() -> Self {
         PreferenceManager::seed_saved_preferences_for_test();
         PreferenceManager::shared().set_tenxer_mode(false);
+        crate::storage::writer::settle();
         let (window, content) = composed_window();
         let directory = tempfile::tempdir().expect("overlay folder");
         for name in ["a.txt", "b.txt", "c.txt"] {
@@ -430,7 +431,8 @@ fn a_dialog_closed_over_settings_returns_focus_to_its_opener() {
                         std::fs::create_dir_all(&action_directory).expect("action folder");
                         std::fs::write(action_directory.join("action.toml"), FOCUS_ACTION_MANIFEST)
                             .expect("action manifest");
-                        crate::ui::actions::shared().reload();
+                        gtk::glib::MainContext::default()
+                            .block_on(crate::ui::actions::shared().reload());
                         let delete = || {
                             let row = descendant(&settings, &|widget| {
                                 widget.has_css_class("settings-action-row") && widget.is_mapped()

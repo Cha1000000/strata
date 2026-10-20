@@ -262,14 +262,12 @@ def _choice_value_problems(strata, title, value):
     ]
 
 
-@pytest.mark.preferences(auto_refresh_interval=120)
 def test_settings_choice_buttons_expose_their_current_value(strata):
     _open_general_settings(strata)
     problems = []
     for title, value in [
         ("Drag & drop to another device", "Always ask"),
         ("Modified date format", "Relative"),
-        ("Auto-refresh folder", "5 min"),
         ("Video preview hardware backend", "Automatic"),
     ]:
         problems += _choice_value_problems(strata, title, value)

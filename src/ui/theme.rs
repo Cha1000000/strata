@@ -3,7 +3,7 @@
 use std::{
     cell::{Cell, RefCell},
     fs, io,
-    path::PathBuf,
+    path::{Path, PathBuf},
     rc::Rc,
     time::Duration,
 };
@@ -16,6 +16,7 @@ use super::preferences::{
     CornerRoundness, FileIconColors, OmarchyVariant, PreferenceManager, TextSize,
     desktop_text_scale_factor, notify_live, snapped_root_font_px,
 };
+use crate::{adapters::Watched, model::Location, services::LoadHandle};
 
 mod font;
 mod omarchy;
@@ -38,13 +39,17 @@ const STYLE_CSS: &str = include_str!("../style.css");
 thread_local! {
     static SHARED_MANAGER: RefCell<Option<Rc<ThemeManager>>> = const { RefCell::new(None) };
     static SOURCE_STYLE_PATH_INSTALLED: Cell<bool> = const { Cell::new(false) };
+    static SOURCE_LANGUAGE_PATH_INSTALLED: Cell<bool> = const { Cell::new(false) };
     static SOURCE_BUFFERS: RefCell<Vec<glib::WeakRef<sourceview5::Buffer>>> = const { RefCell::new(Vec::new()) };
     static DOCUMENT_BUFFERS: RefCell<Vec<glib::WeakRef<gtk::TextBuffer>>> = const { RefCell::new(Vec::new()) };
     static DOCUMENT_VIEWS: RefCell<Vec<glib::WeakRef<super::document_view::DocumentTextView>>> = const { RefCell::new(Vec::new()) };
     /// Installed on the first source preview buffer, so startup performs no SourceView I/O.
     static PENDING_STYLE_TOKENS: RefCell<Option<(ThemeTokens, Option<SourcePalette>)>> = const { RefCell::new(None) };
     static STYLE_SCHEME_DIRTY: Cell<bool> = const { Cell::new(true) };
+    static SOURCE_STYLE_RESOURCE: RefCell<Option<gio::Resource>> = const { RefCell::new(None) };
 }
+
+const SOURCE_STYLE_FOLDER: &str = "/io/github/lgse/Strata/generated/source-styles/";
 
 const THEME_CATALOG: &str = include_str!("../../data/themes/catalog.toml");
 
@@ -195,11 +200,12 @@ pub struct ThemeManager {
     themes: RefCell<Vec<Theme>>,
     preferences: Rc<PreferenceManager>,
     omarchy_available: Cell<bool>,
-    omarchy_monitors: RefCell<Vec<gio::FileMonitor>>,
+    omarchy_state: RefCell<Option<OmarchyState>>,
+    omarchy_monitors: RefCell<Vec<(PathBuf, LoadHandle)>>,
     pending_omarchy_refresh: RefCell<Option<glib::SourceId>>,
-    themes_monitors: RefCell<Vec<gio::FileMonitor>>,
+    themes_monitor: RefCell<Option<LoadHandle>>,
     pending_themes_refresh: RefCell<Option<glib::SourceId>>,
-    user_style_monitor: RefCell<Option<gio::FileMonitor>>,
+    user_style_monitor: RefCell<Option<LoadHandle>>,
     pending_user_style_refresh: RefCell<Option<glib::SourceId>>,
     preview: RefCell<Option<ThemeTokens>>,
     preview_generation: Cell<u64>,
@@ -225,7 +231,12 @@ impl ThemeManager {
     fn load() -> Rc<Self> {
         let preferences = PreferenceManager::shared();
         let themes = merge_builtin_and_custom_themes(builtins(), load_custom_themes());
-        let omarchy_available = load_omarchy_theme(OmarchyVariant::Original).is_some();
+        let omarchy = OmarchyRefresh::read();
+        let omarchy_available = omarchy
+            .state
+            .as_ref()
+            .and_then(|state| state.tokens(OmarchyVariant::Original))
+            .is_some();
         preferences.normalize_loaded_theme_selection(
             |id| themes.iter().any(|theme| theme.id == id),
             omarchy_available,
@@ -252,9 +263,10 @@ impl ThemeManager {
             themes: RefCell::new(themes),
             preferences: preferences.clone(),
             omarchy_available: Cell::new(omarchy_available),
+            omarchy_state: RefCell::new(omarchy.state),
             omarchy_monitors: RefCell::new(Vec::new()),
             pending_omarchy_refresh: RefCell::new(None),
-            themes_monitors: RefCell::new(Vec::new()),
+            themes_monitor: RefCell::new(None),
             pending_themes_refresh: RefCell::new(None),
             user_style_monitor: RefCell::new(None),
             pending_user_style_refresh: RefCell::new(None),
@@ -281,9 +293,11 @@ impl ThemeManager {
         manager.apply_base_stylesheet();
         manager.apply_selected();
         manager.monitor_text_scaling();
-        manager.monitor_omarchy();
-        manager.monitor_custom_themes();
-        manager.load_user_stylesheet();
+        manager.monitor_omarchy(&omarchy.directories);
+        manager.monitor_custom_themes(themes_directory().is_dir());
+        manager
+            .user_provider
+            .load_from_string(&read_user_stylesheet());
         manager.monitor_user_stylesheet();
         manager
     }
@@ -375,38 +389,69 @@ impl ThemeManager {
         self.preview.borrow().is_some()
     }
 
-    pub fn save_custom_theme(self: &Rc<Self>, tokens: ThemeTokens) -> io::Result<String> {
-        validate_tokens(&tokens)
-            .map_err(|message| io::Error::new(io::ErrorKind::InvalidInput, message))?;
-        let directory = themes_directory();
-        fs::create_dir_all(&directory)?;
-        // The directory may not have existed when the watch was last armed.
-        self.monitor_custom_themes();
-        // Never replace a file already there, even one that did not load: it may be
-        // a broken or newly linked dotfile the user still wants.
-        let id = custom_theme_id(&tokens.name, |candidate| {
-            self.themes
-                .borrow()
-                .iter()
-                .any(|theme| theme.id == candidate)
-                || fs::symlink_metadata(directory.join(format!("{candidate}.toml"))).is_ok()
+    pub fn save_custom_theme(
+        self: &Rc<Self>,
+        tokens: ThemeTokens,
+        done: impl FnOnce(io::Result<String>) + 'static,
+    ) {
+        let value = validate_tokens(&tokens)
+            .map_err(|message| io::Error::new(io::ErrorKind::InvalidInput, message))
+            .and_then(|()| toml::to_string_pretty(&tokens).map_err(io::Error::other));
+        let value = match value {
+            Ok(value) => value,
+            Err(error) => return done(Err(error)),
+        };
+        let taken: Vec<String> = self
+            .themes
+            .borrow()
+            .iter()
+            .map(|theme| theme.id.clone())
+            .collect();
+        let name = tokens.name.clone();
+        let saved = crate::storage::writer::run(move || {
+            let directory = themes_directory();
+            fs::create_dir_all(&directory)?;
+            // Never replace a file already there, even one that did not load: it may be
+            // a broken or newly linked dotfile the user still wants.
+            let id = custom_theme_id(&name, |candidate| {
+                taken.iter().any(|id| id == candidate)
+                    || fs::symlink_metadata(directory.join(format!("{candidate}.toml"))).is_ok()
+            });
+            crate::storage::atomic_write_config(
+                &directory.join(format!("{id}.toml")),
+                value.as_bytes(),
+            )?;
+            Ok(id)
         });
-        let path = directory.join(format!("{id}.toml"));
-        let value = toml::to_string_pretty(&tokens).map_err(io::Error::other)?;
-        crate::storage::atomic_write_config(&path, value.as_bytes())?;
-
-        self.themes.borrow_mut().push(Theme {
-            id: id.clone(),
-            tokens,
-            custom: true,
+        let weak = Rc::downgrade(self);
+        glib::MainContext::default().spawn_local(async move {
+            let saved = saved
+                .await
+                .unwrap_or_else(|_| Err(io::Error::from_raw_os_error(libc::ECANCELED)));
+            let Some(manager) = weak.upgrade() else {
+                return;
+            };
+            match saved {
+                Ok(id) => {
+                    // The directory may not have existed when the watch was last armed.
+                    manager.monitor_custom_themes(true);
+                    manager.themes.borrow_mut().push(Theme {
+                        id: id.clone(),
+                        tokens,
+                        custom: true,
+                    });
+                    manager.select_theme(&id);
+                    done(Ok(id));
+                }
+                Err(error) => done(Err(error)),
+            }
         });
-        self.select_theme(&id);
-        Ok(id)
     }
 
     pub fn appearance_tokens(&self) -> ThemeTokens {
         if self.follows_omarchy()
-            && let Some(tokens) = load_omarchy_theme(self.preferences.omarchy_variant())
+            && let Some(tokens) = self
+                .omarchy_tokens(self.preferences.omarchy_variant())
                 .or_else(|| self.applied_omarchy_tokens.borrow().clone())
         {
             return tokens;
@@ -465,48 +510,48 @@ impl ThemeManager {
 
     /// A missing or unreadable file clears the provider, so deleting
     /// `style.css` restores Strata's own appearance without a restart.
-    fn load_user_stylesheet(&self) {
-        let path = user_stylesheet_path();
-        let css = match fs::read_to_string(&path) {
-            Ok(css) => css,
-            Err(error) => {
-                if error.kind() != io::ErrorKind::NotFound {
-                    tracing::warn!(%error, path = %path.display(), "cannot read user stylesheet");
-                }
-                String::new()
+    fn refresh_user_stylesheet(self: &Rc<Self>) {
+        let read = crate::storage::writer::run(read_user_stylesheet);
+        let weak = Rc::downgrade(self);
+        glib::MainContext::default().spawn_local(async move {
+            if let (Ok(css), Some(manager)) = (read.await, weak.upgrade()) {
+                manager.user_provider.load_from_string(&css);
             }
-        };
-        self.user_provider.load_from_string(&css);
+        });
     }
 
     fn monitor_user_stylesheet(self: &Rc<Self>) {
-        if let Some(monitor) = self.user_style_monitor.take() {
-            monitor.cancel();
+        let (changed, live) = (Rc::downgrade(self), Rc::downgrade(self));
+        let monitor = crate::adapters::watch(
+            &Location::local(user_stylesheet_path()),
+            Watched::File,
+            move |_, _| {
+                if let Some(manager) = changed.upgrade() {
+                    manager.schedule_user_style_refresh();
+                }
+            },
+            move || {
+                if let Some(manager) = live.upgrade() {
+                    manager.schedule_user_style_refresh();
+                }
+            },
+        );
+        self.user_style_monitor.replace(Some(monitor));
+    }
+
+    fn schedule_user_style_refresh(self: &Rc<Self>) {
+        if let Some(pending) = self.pending_user_style_refresh.borrow_mut().take() {
+            pending.remove();
         }
-        let Ok(monitor) = gio::File::for_path(user_stylesheet_path())
-            .monitor_file(gio::FileMonitorFlags::WATCH_MOVES, gio::Cancellable::NONE)
-        else {
-            return;
-        };
         let weak = Rc::downgrade(self);
-        monitor.connect_changed(move |_, _, _, _| {
+        let refresh = glib::timeout_add_local_once(Duration::from_millis(75), move || {
             let Some(manager) = weak.upgrade() else {
                 return;
             };
-            if let Some(pending) = manager.pending_user_style_refresh.borrow_mut().take() {
-                pending.remove();
-            }
-            let weak = weak.clone();
-            let refresh = glib::timeout_add_local_once(Duration::from_millis(75), move || {
-                let Some(manager) = weak.upgrade() else {
-                    return;
-                };
-                manager.pending_user_style_refresh.borrow_mut().take();
-                manager.load_user_stylesheet();
-            });
-            manager.pending_user_style_refresh.replace(Some(refresh));
+            manager.pending_user_style_refresh.borrow_mut().take();
+            manager.refresh_user_stylesheet();
         });
-        self.user_style_monitor.replace(Some(monitor));
+        self.pending_user_style_refresh.replace(Some(refresh));
     }
 
     /// Reparses the stylesheet only when the roundness changed; the other
@@ -532,9 +577,13 @@ impl ThemeManager {
             return;
         }
         if self.follows_omarchy() {
-            if let Some(tokens) = load_omarchy_theme(self.preferences.omarchy_variant()) {
+            if let Some(tokens) = self.omarchy_tokens(self.preferences.omarchy_variant()) {
                 self.applied_omarchy_tokens.replace(Some(tokens.clone()));
-                let palette = load_omarchy_source_palette();
+                let palette = self
+                    .omarchy_state
+                    .borrow()
+                    .as_ref()
+                    .and_then(OmarchyState::source_palette);
                 self.apply_tokens(&tokens, palette.as_ref());
             }
             return;
@@ -543,6 +592,13 @@ impl ThemeManager {
         if let Some(tokens) = self.current_tokens() {
             self.apply_tokens(&tokens, None);
         }
+    }
+
+    fn omarchy_tokens(&self, variant: OmarchyVariant) -> Option<ThemeTokens> {
+        self.omarchy_state
+            .borrow()
+            .as_ref()
+            .and_then(|state| state.tokens(variant))
     }
 
     pub(in crate::ui) fn current_tokens(&self) -> Option<ThemeTokens> {
@@ -643,59 +699,68 @@ impl ThemeManager {
         });
     }
 
-    fn monitor_omarchy(self: &Rc<Self>) {
-        for monitor in self.omarchy_monitors.take() {
-            monitor.cancel();
-        }
-        let state = omarchy_state_dir();
-        let home = glib::home_dir();
-        // Ancestor watches survive moving away or replacing the current state tree.
-        let theme = state.join("theme");
-        for path in std::iter::once(theme.as_path())
-            .chain(state.ancestors().take_while(|path| path.starts_with(&home)))
-        {
-            if !path.is_dir() {
+    fn monitor_omarchy(self: &Rc<Self>, directories: &[PathBuf]) {
+        let mut monitors = self.omarchy_monitors.take();
+        monitors.retain(|(path, _)| directories.contains(path));
+        for path in directories {
+            if monitors.iter().any(|(watched, _)| watched == path) {
                 continue;
             }
-            let file = gio::File::for_path(path);
-            let Ok(monitor) =
-                file.monitor_directory(gio::FileMonitorFlags::NONE, gio::Cancellable::NONE)
-            else {
-                continue;
-            };
-            let weak = Rc::downgrade(self);
-            monitor.connect_changed(move |_, file, other_file, _| {
-                if !is_omarchy_theme_event(file)
-                    && !other_file
-                        .as_ref()
-                        .is_some_and(|file| is_omarchy_theme_event(file))
-                {
-                    return;
-                }
-                let Some(manager) = weak.upgrade() else {
-                    return;
-                };
-                if let Some(pending) = manager.pending_omarchy_refresh.borrow_mut().take() {
-                    pending.remove();
-                }
-                let weak = weak.clone();
-                let refresh = glib::timeout_add_local_once(Duration::from_millis(75), move || {
-                    let Some(manager) = weak.upgrade() else {
+            let (changed, live) = (Rc::downgrade(self), Rc::downgrade(self));
+            let monitor = crate::adapters::watch(
+                &Location::local(path),
+                Watched::Folder,
+                move |file, other_file| {
+                    if !is_omarchy_theme_event(file)
+                        && !other_file.is_some_and(is_omarchy_theme_event)
+                    {
                         return;
-                    };
-                    manager.pending_omarchy_refresh.borrow_mut().take();
-                    manager.refresh_omarchy_state();
-                });
-                manager.pending_omarchy_refresh.replace(Some(refresh));
-            });
-            self.omarchy_monitors.borrow_mut().push(monitor);
+                    }
+                    if let Some(manager) = changed.upgrade() {
+                        manager.schedule_omarchy_refresh();
+                    }
+                },
+                move || {
+                    if let Some(manager) = live.upgrade() {
+                        manager.schedule_omarchy_refresh();
+                    }
+                },
+            );
+            monitors.push((path.clone(), monitor));
         }
+        self.omarchy_monitors.replace(monitors);
+    }
+
+    fn schedule_omarchy_refresh(self: &Rc<Self>) {
+        if let Some(pending) = self.pending_omarchy_refresh.borrow_mut().take() {
+            pending.remove();
+        }
+        let weak = Rc::downgrade(self);
+        let refresh = glib::timeout_add_local_once(Duration::from_millis(75), move || {
+            let Some(manager) = weak.upgrade() else {
+                return;
+            };
+            manager.pending_omarchy_refresh.borrow_mut().take();
+            manager.refresh_omarchy_state();
+        });
+        self.pending_omarchy_refresh.replace(Some(refresh));
     }
 
     pub(in crate::ui) fn refresh_omarchy_state(self: &Rc<Self>) {
-        self.monitor_omarchy();
-        let available = load_omarchy_theme(OmarchyVariant::Original).is_some()
-            || (self.is_omarchy_available() && omarchy_state_dir().join("theme.name").is_file());
+        let read = crate::storage::writer::run(OmarchyRefresh::read);
+        let weak = Rc::downgrade(self);
+        glib::MainContext::default().spawn_local(async move {
+            if let (Ok(refresh), Some(manager)) = (read.await, weak.upgrade()) {
+                manager.apply_omarchy_refresh(refresh);
+            }
+        });
+    }
+
+    fn apply_omarchy_refresh(self: &Rc<Self>, refresh: OmarchyRefresh) {
+        self.monitor_omarchy(&refresh.directories);
+        let unchanged = self.omarchy_state.replace(refresh.state.clone()) == refresh.state;
+        let available = self.omarchy_tokens(OmarchyVariant::Original).is_some()
+            || (self.is_omarchy_available() && refresh.name_exists);
         let availability_changed = self.omarchy_available.replace(available) != available;
         if !available && self.follows_omarchy() {
             self.preview.take();
@@ -706,59 +771,68 @@ impl ThemeManager {
             self.preferences.notify_changes();
             return;
         }
-        if self.follows_omarchy() {
+        if !unchanged && self.follows_omarchy() {
             self.apply_selected();
             self.preferences.notify_changes();
         }
     }
 
-    fn monitor_custom_themes(self: &Rc<Self>) {
-        for monitor in self.themes_monitors.take() {
-            monitor.cancel();
-        }
-        let directory = themes_directory();
-        if !directory.is_dir() {
+    fn monitor_custom_themes(self: &Rc<Self>, directory_exists: bool) {
+        if !directory_exists || self.themes_monitor.borrow().is_some() {
             return;
         }
-        let Ok(monitor) = gio::File::for_path(&directory)
-            .monitor_directory(gio::FileMonitorFlags::NONE, gio::Cancellable::NONE)
-        else {
-            return;
-        };
+        let (changed, live) = (Rc::downgrade(self), Rc::downgrade(self));
+        let monitor = crate::adapters::watch(
+            &Location::local(themes_directory()),
+            Watched::Folder,
+            move |file, other_file| {
+                if !is_custom_theme_event(file) && !other_file.is_some_and(is_custom_theme_event) {
+                    return;
+                }
+                if let Some(manager) = changed.upgrade() {
+                    manager.schedule_themes_refresh();
+                }
+            },
+            move || {
+                if let Some(manager) = live.upgrade() {
+                    manager.schedule_themes_refresh();
+                }
+            },
+        );
+        self.themes_monitor.replace(Some(monitor));
+    }
+
+    fn schedule_themes_refresh(self: &Rc<Self>) {
+        if let Some(pending) = self.pending_themes_refresh.borrow_mut().take() {
+            pending.remove();
+        }
         let weak = Rc::downgrade(self);
-        monitor.connect_changed(move |_, file, other_file, _| {
-            if !is_custom_theme_event(file)
-                && !other_file
-                    .as_ref()
-                    .is_some_and(|file| is_custom_theme_event(file))
-            {
-                return;
-            }
+        let refresh = glib::timeout_add_local_once(Duration::from_millis(75), move || {
             let Some(manager) = weak.upgrade() else {
                 return;
             };
-            if let Some(pending) = manager.pending_themes_refresh.borrow_mut().take() {
-                pending.remove();
-            }
-            let weak = weak.clone();
-            let refresh = glib::timeout_add_local_once(Duration::from_millis(75), move || {
-                let Some(manager) = weak.upgrade() else {
-                    return;
-                };
-                manager.pending_themes_refresh.borrow_mut().take();
-                manager.refresh_custom_themes();
-            });
-            manager.pending_themes_refresh.replace(Some(refresh));
+            manager.pending_themes_refresh.borrow_mut().take();
+            manager.refresh_custom_themes();
         });
-        self.themes_monitors.borrow_mut().push(monitor);
+        self.pending_themes_refresh.replace(Some(refresh));
+    }
+
+    pub(in crate::ui) fn refresh_custom_themes(self: &Rc<Self>) {
+        let loaded = crate::storage::writer::run(load_custom_themes);
+        let weak = Rc::downgrade(self);
+        glib::MainContext::default().spawn_local(async move {
+            if let (Ok(custom), Some(manager)) = (loaded.await, weak.upgrade()) {
+                manager.adopt_custom_themes(custom);
+            }
+        });
     }
 
     /// A selected file caught mid-write, invalid, or removed keeps its last
     /// valid colors until a read succeeds again.
-    pub(in crate::ui) fn refresh_custom_themes(&self) {
+    fn adopt_custom_themes(&self, custom: Vec<Theme>) {
         let selected = self.preferences.selected_theme_id();
         let before = self.current_tokens();
-        let mut themes = merge_builtin_and_custom_themes(builtins(), load_custom_themes());
+        let mut themes = merge_builtin_and_custom_themes(builtins(), custom);
         if !themes.iter().any(|theme| theme.id == selected)
             && let Some(previous) = self
                 .themes
@@ -885,16 +959,48 @@ fn load_custom_themes() -> Vec<Theme> {
     themes
 }
 
-fn load_omarchy_theme(variant: OmarchyVariant) -> Option<ThemeTokens> {
-    let state = omarchy_state_dir();
-    let name = fs::read_to_string(state.join("theme.name")).ok()?;
-    let colors = fs::read_to_string(state.join("theme/colors.toml")).ok()?;
-    tokens_from_quattro(name.trim(), &colors, variant)
+#[derive(Clone, PartialEq)]
+struct OmarchyState {
+    name: String,
+    colors: String,
 }
 
-fn load_omarchy_source_palette() -> Option<SourcePalette> {
-    let colors = fs::read_to_string(omarchy_state_dir().join("theme/colors.toml")).ok()?;
-    source_palette_from_quattro(&colors)
+impl OmarchyState {
+    fn tokens(&self, variant: OmarchyVariant) -> Option<ThemeTokens> {
+        tokens_from_quattro(self.name.trim(), &self.colors, variant)
+    }
+
+    fn source_palette(&self) -> Option<SourcePalette> {
+        source_palette_from_quattro(&self.colors)
+    }
+}
+
+struct OmarchyRefresh {
+    state: Option<OmarchyState>,
+    name_exists: bool,
+    /// Ancestor watches survive moving away or replacing the current state tree.
+    directories: Vec<PathBuf>,
+}
+
+impl OmarchyRefresh {
+    fn read() -> Self {
+        let state = omarchy_state_dir();
+        let home = glib::home_dir();
+        let theme = state.join("theme");
+        let directories = std::iter::once(theme.as_path())
+            .chain(state.ancestors().take_while(|path| path.starts_with(&home)))
+            .filter(|path| path.is_dir())
+            .map(Path::to_path_buf)
+            .collect();
+        let read = |name: &str| fs::read_to_string(state.join(name)).ok();
+        Self {
+            state: read("theme.name")
+                .zip(read("theme/colors.toml"))
+                .map(|(name, colors)| OmarchyState { name, colors }),
+            name_exists: state.join("theme.name").is_file(),
+            directories,
+        }
+    }
 }
 
 fn tokens_from_quattro(name: &str, source: &str, variant: OmarchyVariant) -> Option<ThemeTokens> {
@@ -964,20 +1070,49 @@ fn validate_tokens(tokens: &ThemeTokens) -> Result<(), &'static str> {
     Ok(())
 }
 
-fn source_style_scheme() -> Option<sourceview5::StyleScheme> {
-    sourceview5::StyleSchemeManager::default().scheme("strata-current")
+fn source_style_manager() -> sourceview5::StyleSchemeManager {
+    let manager = sourceview5::StyleSchemeManager::default();
+    SOURCE_STYLE_PATH_INSTALLED.with(|installed| {
+        if !installed.replace(true) {
+            manager.set_search_path(&[format!("resource://{SOURCE_STYLE_FOLDER}").as_str()]);
+        }
+    });
+    manager
 }
 
-pub(super) fn register_source_buffer(buffer: &sourceview5::Buffer) {
+pub(super) fn source_languages() -> sourceview5::LanguageManager {
+    let manager = sourceview5::LanguageManager::default();
+    SOURCE_LANGUAGE_PATH_INSTALLED.with(|installed| {
+        if !installed.replace(true) {
+            let user = [glib::user_data_dir(), glib::home_dir()];
+            let system: Vec<_> = manager
+                .search_path()
+                .into_iter()
+                .filter(|folder| {
+                    !user.iter().any(|root| {
+                        root != Path::new("/") && Path::new(folder.as_str()).starts_with(root)
+                    })
+                })
+                .collect();
+            manager.set_search_path(&system.iter().map(glib::GString::as_str).collect::<Vec<_>>());
+        }
+    });
+    manager
+}
+
+pub(super) fn new_source_buffer() -> sourceview5::Buffer {
+    let manager = source_style_manager();
     ensure_source_style_scheme_installed();
-    buffer.set_style_scheme(source_style_scheme().as_ref());
+    let buffer = sourceview5::Buffer::new(None);
+    buffer.set_style_scheme(manager.scheme("strata-current").as_ref());
     SOURCE_BUFFERS.with(|buffers| {
         let mut buffers = buffers.borrow_mut();
         buffers.retain(|buffer| buffer.upgrade().is_some());
         let weak = glib::WeakRef::new();
-        weak.set(Some(buffer));
+        weak.set(Some(&buffer));
         buffers.push(weak);
     });
+    buffer
 }
 
 pub(super) fn register_document_buffer(buffer: &gtk::TextBuffer) {
@@ -1090,32 +1225,38 @@ fn stage_source_style_scheme(tokens: &ThemeTokens, source_palette: Option<&Sourc
     }
 }
 
-/// Writes the staged scheme and rescans the style manager, once per staged token set.
+/// Installs the staged scheme from memory and rescans the style manager, once per staged token set.
 fn ensure_source_style_scheme_installed() {
-    if !STYLE_SCHEME_DIRTY.with(|dirty| dirty.get()) {
+    if !STYLE_SCHEME_DIRTY.with(Cell::get) {
         return;
     }
     let pending = PENDING_STYLE_TOKENS.with(|pending| pending.borrow().clone());
     let Some((tokens, palette)) = pending else {
         return;
     };
-    let directory = glib::user_cache_dir().join("strata").join("source-styles");
-    if let Err(error) = fs::create_dir_all(&directory).and_then(|()| {
-        let value = source_style_scheme_xml(&tokens, palette.as_ref());
-        crate::storage::atomic_write(&directory.join("strata-current.xml"), value.as_bytes())
-    }) {
-        tracing::warn!(%error, "unable to write preview syntax style");
-        return;
-    }
-
-    let manager = sourceview5::StyleSchemeManager::default();
-    SOURCE_STYLE_PATH_INSTALLED.with(|installed| {
-        if !installed.replace(true) {
-            manager.append_search_path(&directory.to_string_lossy());
+    let value = source_style_scheme_xml(&tokens, palette.as_ref());
+    match crate::util::gresource::with_file(
+        SOURCE_STYLE_FOLDER,
+        "strata-current.xml",
+        value.as_bytes(),
+    ) {
+        Ok(resource) => {
+            STYLE_SCHEME_DIRTY.with(|dirty| dirty.set(false));
+            install_source_style_scheme(resource);
         }
-    });
+        Err(error) => tracing::warn!(%error, "unable to build preview syntax style"),
+    }
+}
+
+fn install_source_style_scheme(resource: gio::Resource) {
+    gio::resources_register(&resource);
+    if let Some(previous) =
+        SOURCE_STYLE_RESOURCE.with(|installed| installed.replace(Some(resource)))
+    {
+        gio::resources_unregister(&previous);
+    }
+    let manager = source_style_manager();
     manager.force_rescan();
-    STYLE_SCHEME_DIRTY.with(|dirty| dirty.set(false));
     let scheme = manager.scheme("strata-current");
     SOURCE_BUFFERS.with(|buffers| {
         buffers.borrow_mut().retain(|buffer| {
@@ -1496,6 +1637,19 @@ fn themes_directory() -> PathBuf {
 
 fn user_stylesheet_path() -> PathBuf {
     super::preferences::config_directory().join(USER_STYLE_FILE)
+}
+
+fn read_user_stylesheet() -> String {
+    let path = user_stylesheet_path();
+    match fs::read_to_string(&path) {
+        Ok(css) => css,
+        Err(error) => {
+            if error.kind() != io::ErrorKind::NotFound {
+                tracing::warn!(%error, path = %path.display(), "cannot read user stylesheet");
+            }
+            String::new()
+        }
+    }
 }
 
 pub(in crate::ui) fn omarchy_state_dir() -> PathBuf {

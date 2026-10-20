@@ -237,9 +237,16 @@ fn superseded_operations_still_report_each_location_they_changed() {
     let item = Location::local("/fixture/docs");
     let landed = Location::local("/fixture/archive/docs");
     let overwritten = Location::local("/fixture/archive/docs/note.txt");
-    let identity = TrashedOriginal {
-        device: 1,
-        inode: 2,
+    let identity = ItemIdentity {
+        evidence: crate::services::Evidence {
+            device: 1,
+            inode: 2,
+            kind: rustix::fs::FileType::RegularFile,
+            birth: None,
+            handle: None,
+            attributes: None,
+        },
+        traits: crate::services::IdentityTraits::default(),
     };
     let cancelled_with_item = |request_id| OperationEvent::Cancelled {
         request_id,
@@ -363,7 +370,32 @@ fn superseded_operations_still_report_each_location_they_changed() {
             vec![removed(&item)],
         ),
         (
-            "a restore",
+            "a restore that reports the identity of what it placed",
+            None,
+            Box::new(|request_id| {
+                vec![
+                    OperationEvent::ItemRestored {
+                        request_id,
+                        location: item.clone(),
+                        identity,
+                    },
+                    OperationEvent::RestoreProgress {
+                        request_id,
+                        completed: 1,
+                        total: 1,
+                        restored_location: Some(item.clone()),
+                    },
+                    OperationEvent::Restored {
+                        request_id,
+                        locations: vec![Location::uri("trash:///docs")],
+                        restored: vec![item.clone()],
+                    },
+                ]
+            }),
+            vec![LocationChange::Restored(item.clone(), Some(identity))],
+        ),
+        (
+            "a restore that reports no identity",
             None,
             Box::new(|request_id| {
                 vec![
@@ -380,7 +412,7 @@ fn superseded_operations_still_report_each_location_they_changed() {
                     },
                 ]
             }),
-            vec![LocationChange::Restored(item.clone())],
+            vec![LocationChange::Restored(item.clone(), None)],
         ),
     ];
 

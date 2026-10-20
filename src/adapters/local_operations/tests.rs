@@ -25,13 +25,14 @@ use gtk::{gio, glib, prelude::*};
 use crate::test_support::ASYNC_MAIN_CONTEXT_DEFAULT;
 use fs_quirks::{FsQuirks, Preset, Quirks};
 
-fn serial() -> Result<std::sync::MutexGuard<'static, ()>, String> {
+fn serial() -> Result<crate::test_support::MainContextGuard<'static>, String> {
     ASYNC_MAIN_CONTEXT_DEFAULT
         .lock()
         .map_err(|error| error.to_string())
 }
 
 mod aliases;
+mod closes;
 mod conflicts;
 mod copy;
 mod create_entry;
@@ -39,6 +40,7 @@ mod deletion;
 mod file_copy;
 mod folder_copy;
 pub(super) mod fs_quirks;
+mod leftovers;
 mod merge;
 mod moves;
 mod naming;
@@ -46,6 +48,7 @@ mod paste_results;
 mod paths;
 mod placement;
 mod progress;
+mod release;
 mod replacement;
 mod restore_safety;
 mod sync;
@@ -163,12 +166,9 @@ pub(super) fn renamed_beneath(
 
 fn file_stage(root: &Path) -> Result<super::StagedSibling, Box<dyn Error>> {
     let parent = Arc::new(open_local_parent_directory(root)?);
-    let (name, (_, created)) = super::copy_engine::stage::create_file(
-        super::fs_ops::fs(),
-        parent.as_fd(),
-        super::placement::STAGE_PREFIX,
-    )
-    .map_err(|error| format!("{error:?}"))?;
+    let (name, (_, created)) =
+        super::copy_engine::stage::create_file(super::fs_ops::fs(), parent.as_fd())
+            .map_err(|error| format!("{error:?}"))?;
     Ok(super::StagedSibling {
         ownership: None,
         parent,
@@ -183,10 +183,7 @@ fn staged(
     content: super::StageContent,
 ) -> Result<super::StagedSibling, Box<dyn Error>> {
     let parent = Arc::new(open_local_parent_directory(root)?);
-    Ok(
-        super::StagedSibling::create(parent, super::placement::STAGE_PREFIX, content)
-            .map_err(|error| format!("{error:?}"))?,
-    )
+    Ok(super::StagedSibling::create(parent, content).map_err(|error| format!("{error:?}"))?)
 }
 
 use super::{
@@ -195,24 +192,23 @@ use super::{
     StagedOriginalLookup, TRANSFER_PROGRESS_INTERVAL, TransferProgressTracker, TransferStop,
     TrashError, await_cancellable, copy_failure_after_cleanup, copy_failure_on_fat32,
     copy_new_recursively_on_filesystem, copy_new_remote_file_with, copy_recursively,
-    deletion_error_message, deletion_error_summary, home_trash_entries_at, io_error,
-    join_local_tasks, local_file_identity, merge_local, merge_local_with, move_local,
-    move_local_with,
+    deletion_error_message, deletion_error_summary, io_error, join_local_tasks,
+    local_file_identity, merge_local, merge_local_with, move_local, move_local_with,
     names::{Taken, numbered_name, numbered_names, parse_copy_suffix},
     open_local_parent_directory, operation_error_summary, parallel_delete_local,
     permanently_delete_local, permanently_delete_local_path_if_unchanged, replace_local,
     replace_local_with, run_deletion_in, run_merge_undo, set_removable_roots_for_test,
     set_sync_observer, stop_transfer, sync_probe_observations, transfer_is_noop, transfer_sizes,
-    trash_stage_overwrite, validated_child, was_cancelled,
+    trash_entries_at, trash_stage_overwrite, validated_child, was_cancelled,
 };
 use crate::{
     adapters::volume::FAT32_MAX_FILE_SIZE,
-    model::{EntryKind, FileEntry, Location, MetadataValue},
+    model::{EntryKind, FileEntry, Location, MetadataValue, hidden_names::HiddenName},
     services::{
-        DeleteRequest, LoadHandle, MoveRecord, NameMode, OperationEvent, OperationProvider,
-        OperationRequestId, PasteItem, PasteRequest, PlacedSnapshot, RestoreRequest, RestoreSource,
-        RestoreTrashItem, TransferConflict, TrashedOriginal, UndoMoveItem, UndoMoveRequest,
-        UndoRenameRequest,
+        DeleteRequest, ItemIdentity, LoadHandle, MoveRecord, NameMode, OperationEvent,
+        OperationProvider, OperationRequestId, PasteItem, PasteRequest, PlacedSnapshot,
+        RestoreRequest, RestoreSource, RestoreTrashItem, TransferConflict, UndoMoveItem,
+        UndoMoveRequest, UndoRenameRequest,
     },
 };
 
@@ -295,6 +291,22 @@ pub(super) fn names(dir: &Path) -> io::Result<Vec<String>> {
     Ok(names)
 }
 
+/// Where inode numbers are not trusted, a file born within one birth-time tick
+/// of `than` passes for it.
+fn wait_for_a_later_birth_time(probe: &Path, than: &fs::Metadata) {
+    let Ok(born) = than.created() else {
+        return;
+    };
+    loop {
+        fs::write(probe, b"probe").expect("write the probe");
+        let stamped = fs::metadata(probe).expect("stat the probe");
+        fs::remove_file(probe).expect("remove the probe");
+        if stamped.created().is_ok_and(|later| later > born) {
+            break;
+        }
+    }
+}
+
 fn set_times(path: &Path, seconds: u64, nanoseconds: u32) -> io::Result<()> {
     let times = rustix::fs::Timespec {
         tv_sec: i64::try_from(seconds).map_err(io::Error::other)?,
@@ -310,6 +322,87 @@ fn set_times(path: &Path, seconds: u64, nanoseconds: u32) -> io::Result<()> {
         rustix::fs::AtFlags::empty(),
     )?;
     Ok(())
+}
+
+fn base_takes_noreplace(folder: &Path) -> io::Result<bool> {
+    use rustix::fs::{CWD, RenameFlags, renameat_with};
+    let (one, other) = (folder.join("rename-probe"), folder.join("rename-probe-2"));
+    fs::write(&one, b"one")?;
+    let renamed = renameat_with(CWD, &one, CWD, &other, RenameFlags::NOREPLACE).is_ok();
+    for probe in [&one, &other] {
+        let _ = fs::remove_file(probe);
+    }
+    Ok(renamed)
+}
+
+fn base_takes_rename_flags(folder: &Path) -> io::Result<bool> {
+    use rustix::fs::{CWD, RenameFlags, renameat_with};
+    if !base_takes_noreplace(folder)? {
+        return Ok(false);
+    }
+    let (one, other) = (folder.join("rename-probe"), folder.join("rename-probe-2"));
+    fs::write(&one, b"one")?;
+    fs::write(&other, b"other")?;
+    let exchanged = renameat_with(CWD, &one, CWD, &other, RenameFlags::EXCHANGE).is_ok();
+    // exfat-fuse accepts RENAME_EXCHANGE and overwrites instead of swapping.
+    let overwrote = exchanged && fs::symlink_metadata(&one).is_err();
+    for probe in [&one, &other] {
+        let _ = fs::remove_file(probe);
+    }
+    Ok(!overwrote)
+}
+
+fn hard_linked(original: &Path, link: &Path) -> io::Result<bool> {
+    match fs::hard_link(original, link) {
+        Ok(()) => Ok(true),
+        Err(error) if error.raw_os_error() == Some(rustix::io::Errno::PERM.raw_os_error()) => {
+            Ok(false)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn base_links_keep_their_number(folder: &Path) -> io::Result<bool> {
+    use std::os::unix::fs::MetadataExt;
+    let (one, other) = (folder.join("link-probe"), folder.join("link-probe-2"));
+    fs::write(&one, b"one")?;
+    let kept = hard_linked(&one, &other)?
+        && fs::symlink_metadata(&one)?.ino() == fs::symlink_metadata(&other)?.ino();
+    for probe in [&one, &other] {
+        let _ = fs::remove_file(probe);
+    }
+    Ok(kept)
+}
+
+pub(super) fn base_places_files_by_linking(folder: &Path) -> io::Result<bool> {
+    Ok(!base_takes_noreplace(folder)? && base_links_keep_their_number(folder)?)
+}
+
+fn forced_mode(path: &Path) -> io::Result<u32> {
+    use rustix::fs::{AtFlags, CWD, StatxFlags};
+    let stat = rustix::fs::statx(
+        CWD,
+        path,
+        AtFlags::SYMLINK_NOFOLLOW | AtFlags::STATX_FORCE_SYNC,
+        StatxFlags::TYPE | StatxFlags::MODE,
+    )?;
+    Ok(u32::from(stat.stx_mode))
+}
+
+fn a_later_change_time(path: &Path, than: &Path, seconds: u64) -> io::Result<bool> {
+    use std::os::unix::fs::MetadataExt;
+    let changed = |metadata: &fs::Metadata| (metadata.ctime(), metadata.ctime_nsec());
+    let earlier = changed(&fs::symlink_metadata(than)?);
+    loop {
+        set_times(path, seconds, 0)?;
+        let stamped = fs::symlink_metadata(path)?;
+        if changed(&stamped) == (stamped.mtime(), stamped.mtime_nsec()) {
+            return Ok(false);
+        }
+        if changed(&stamped) > earlier {
+            return Ok(true);
+        }
+    }
 }
 
 /// Sets the times of each file beneath `root` again from outside the seam,
@@ -476,16 +569,34 @@ fn item_moves(events: &[OperationEvent]) -> Vec<(Location, Location)> {
         .collect()
 }
 
-fn trashed_items(events: &[OperationEvent]) -> Vec<(Location, TrashedOriginal)> {
+fn trashed_items(events: &[OperationEvent]) -> Vec<(Location, (u64, u64))> {
     events
         .iter()
         .filter_map(|event| match event {
             OperationEvent::ItemTrashed {
                 location, identity, ..
-            } => Some((location.clone(), *identity)),
+            } => Some((location.clone(), numbers(*identity))),
             _ => None,
         })
         .collect()
+}
+
+fn numbers(identity: ItemIdentity) -> (u64, u64) {
+    (identity.evidence.device, identity.evidence.inode)
+}
+
+fn numbers_at(path: &Path) -> (u64, u64) {
+    use std::os::unix::fs::MetadataExt;
+    let metadata = fs::symlink_metadata(path).expect("identity");
+    (metadata.dev(), metadata.ino())
+}
+
+fn identity_off_main(path: &Path) -> Option<ItemIdentity> {
+    let path = path.to_owned();
+    std::thread::spawn(move || super::native_fs::identity_at_path(&path))
+        .join()
+        .ok()
+        .flatten()
 }
 
 fn pump_until_transfer(events: &RefCell<Vec<OperationEvent>>) {
@@ -734,7 +845,7 @@ fn sequential_delete_local(
         let step_parent = parent.try_clone().map_err(|error| error.to_string())?;
         let step_name = name.clone();
         let step = super::run_local_delete_step(move || {
-            super::open_local_delete_target(&step_parent, &step_name, None)
+            super::open_local_delete_target(&step_parent, &step_name, None, false)
         })
         .await
         .map_err(|error| error.to_string())?;
@@ -872,6 +983,7 @@ fn benchmark_delete_large_directory() -> Result<(), Box<dyn Error>> {
             vec![target_root],
             Arc::new(AtomicBool::new(false)),
             *workers,
+            &Default::default(),
         )
         .map_err(io::Error::other)?;
         let parallel_elapsed = parallel_started.elapsed();
@@ -949,6 +1061,7 @@ fn benchmark_parallel_delete_scale() -> Result<(), Box<dyn Error>> {
         vec![target_root],
         Arc::new(AtomicBool::new(false)),
         workers,
+        &Default::default(),
     )
     .map_err(io::Error::other)?;
     let cleanup_elapsed = cleanup_started.elapsed();

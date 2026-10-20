@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 
 use super::*;
-use crate::ui::window::{parse_pinned_places, serialize_pinned_places};
+use crate::adapters::bookmarks::{parse_pinned_places, serialize_pinned_places};
 
 /// Unpin matches the row reloaded from the bookmarks file, so a pin must come
 /// back from that file unchanged.

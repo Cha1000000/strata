@@ -469,6 +469,91 @@ fn directory_rows_offer_the_open_in_submenu() {
     );
 }
 
+#[test]
+fn folder_open_with_reads_history_when_the_menu_opens() {
+    crate::test_support::gtk_test(
+        "ui::browser::context_menu::tests::menus::folder_open_with_reads_history_when_the_menu_opens",
+        || {
+            crate::ui::preferences::PreferenceManager::shared().set_tenxer_mode(false);
+            let fixture = tempfile::tempdir().expect("menu fixture");
+            let view = BrowserView::new(Rc::new(MenuSource), PeekBehavior::default());
+            let window = gtk::Window::builder()
+                .child(&view.widget())
+                .default_width(1000)
+                .default_height(850)
+                .build();
+            window.present();
+            let browser = view.browser();
+            let navigate = |location: Location| {
+                browser.navigate(location.clone());
+                wait_until(|| {
+                    browser.active_location() == Some(location.clone())
+                        && browser
+                            .column_snapshot(0)
+                            .is_some_and(|column| !column.loading)
+                });
+            };
+            navigate(Location::local(fixture.path()));
+            let choosers = || {
+                descendants(&view.widget())
+                    .iter()
+                    .filter(|widget| widget.has_css_class("open-with-dialog"))
+                    .count()
+            };
+
+            let writer = crate::storage::writer::hold();
+            for _ in 0..2 {
+                let menu = open_menu(&view, None);
+                menu_item(&menu, "Open With…").emit_by_name::<()>("clicked", &[]);
+                pump(Duration::from_millis(100));
+                menu.popdown();
+                wait_until(|| !menu.is_mapped());
+            }
+            navigate(Location::local(fixture.path().join("folder")));
+            drop(writer);
+            crate::storage::writer::settle();
+            pump(Duration::from_millis(200));
+            assert_eq!(
+                choosers(),
+                0,
+                "a click before the history answered opens nothing later"
+            );
+
+            let menu = open_menu(&view, None);
+            wait_until(|| menu_item(&menu, "Open With…").is_sensitive());
+            let writer = crate::storage::writer::hold();
+            menu_item(&menu, "Open With…").emit_by_name::<()>("clicked", &[]);
+            wait_until(|| choosers() == 1);
+            drop(writer);
+
+            browser.clear_observer();
+            window.destroy();
+        },
+    );
+}
+
+fn menu_item(menu: &gtk::Popover, text: &str) -> gtk::Widget {
+    descendants(menu.upcast_ref())
+        .into_iter()
+        .find(|widget| {
+            widget.type_().name() == "GtkModelButton"
+                && descendants(widget).iter().any(|child| {
+                    child
+                        .downcast_ref::<gtk::Label>()
+                        .is_some_and(|label| label.text() == text)
+                })
+        })
+        .expect("menu item")
+}
+
+fn pump(duration: Duration) {
+    let deadline = Instant::now() + duration;
+    while Instant::now() < deadline {
+        glib::MainContext::default().iteration(false);
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
 /// Includes collapsed submenu entries, which stay in the widget tree.
 fn tree_label_texts(menu: &gtk::Popover) -> Vec<String> {
     descendants(menu.upcast_ref())
@@ -486,4 +571,52 @@ fn label_texts(menu: &gtk::Popover) -> Vec<String> {
         .filter(|label| label.is_visible() && !label.text().is_empty())
         .map(|label| label.text().to_string())
         .collect()
+}
+
+#[test]
+fn a_leftover_row_offers_restore_once_hidden_files_are_shown() {
+    crate::test_support::gtk_test(
+        "ui::browser::context_menu::tests::menus::a_leftover_row_offers_restore_once_hidden_files_are_shown",
+        || {
+            let fixture = tempfile::tempdir().expect("menu fixture");
+            let set_aside = crate::model::hidden_names::HiddenName::Replaced.fresh();
+            let set_aside = set_aside.to_string_lossy().into_owned();
+            std::fs::write(fixture.path().join(&set_aside), b"original").expect("set aside");
+            std::fs::write(fixture.path().join("notes.txt"), b"notes").expect("file");
+            let view = BrowserView::new(
+                Rc::new(crate::adapters::LocalFileSource),
+                PeekBehavior::default(),
+            );
+            view.set_operation_provider(Rc::new(crate::adapters::LocalOperationProvider));
+            let window = gtk::Window::builder()
+                .child(&view.widget())
+                .default_width(1000)
+                .default_height(850)
+                .build();
+            window.present();
+            view.browser().navigate(Location::local(fixture.path()));
+            wait_until(|| label(&view.widget(), "notes.txt").is_some());
+            if !view.browser().preferences().show_hidden {
+                view.browser().toggle_hidden();
+            }
+            wait_until(|| label(&view.widget(), &set_aside).is_some());
+            let restore = crate::i18n::tr("Restore");
+
+            let menu = open_menu(&view, Some("notes.txt"));
+            let ordinary = label_texts(&menu);
+            menu.popdown();
+            wait_until(|| !menu.is_mapped());
+            let menu = open_menu(&view, Some(&set_aside));
+            let leftover = label_texts(&menu);
+            assert!(!ordinary.contains(&restore), "{ordinary:?}");
+            assert!(leftover.contains(&restore), "{leftover:?}");
+            menu_item(&menu, &restore).emit_by_name::<()>("clicked", &[]);
+
+            let recovered = fixture.path().join(crate::i18n::tr("Recovered item"));
+            wait_until(|| recovered.exists());
+            assert_eq!(std::fs::read(recovered).expect("recovered"), b"original");
+            view.browser().clear_observer();
+            window.destroy();
+        },
+    );
 }

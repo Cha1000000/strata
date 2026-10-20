@@ -126,4 +126,7 @@ impl OperationProvider for HeldOperations {
     fn restore(&self, request: RestoreRequest, callback: Callback) -> LoadHandle {
         self.hold(request.id, callback)
     }
+    fn recover(&self, request: RecoverRequest, callback: Callback) -> LoadHandle {
+        self.hold(request.id, callback)
+    }
 }

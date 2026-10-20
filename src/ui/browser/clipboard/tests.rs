@@ -344,25 +344,42 @@ fn file_drop_action_hover_matches_cross_volume_strategy() {
 }
 
 #[test]
-fn file_drop_commit_rejects_the_recent_collection() {
+fn file_drop_commit_waits_for_the_volume_answer_and_rejects_the_recent_collection() {
     crate::test_support::gtk_test(
-        "ui::browser::clipboard::tests::file_drop_commit_rejects_the_recent_collection",
+        "ui::browser::clipboard::tests::file_drop_commit_waits_for_the_volume_answer_and_rejects_the_recent_collection",
         || {
-            let recent = Location::uri("recent:///");
-            let prepared = prepare_file_drop_target({
-                let recent = recent.clone();
-                move || Some(recent.clone())
-            });
-
-            assert_eq!(
+            let root = tempfile::tempdir().expect("fixture");
+            std::fs::create_dir(root.path().join("folder")).expect("folder");
+            std::fs::write(root.path().join("note.txt"), b"x").expect("source");
+            for (destination, source, expected) in [
+                (
+                    Location::uri("recent:///"),
+                    Location::local("/fixture/source.txt"),
+                    crate::services::DropCommit::Forbidden,
+                ),
+                (
+                    Location::local(root.path().join("folder")),
+                    Location::local(root.path().join("note.txt")),
+                    crate::services::DropCommit::Move,
+                ),
+            ] {
+                let prepared = prepare_file_drop_target({
+                    let destination = destination.clone();
+                    move || Some(destination.clone())
+                });
+                let committed = Rc::new(Cell::new(None));
+                let sink = committed.clone();
                 file_drop_commit(
                     &prepared.target,
-                    &recent,
-                    &[Location::local("/fixture/source.txt")],
+                    destination.clone(),
+                    vec![source],
                     &prepared.state,
-                ),
-                crate::services::DropCommit::Forbidden
-            );
+                    move |_, _, commit| sink.set(Some(commit)),
+                );
+                prepared.state.reset();
+                pump_main_loop_until(Duration::from_secs(5), || committed.get().is_some());
+                assert_eq!(committed.get(), Some(expected), "{destination:?}");
+            }
         },
     );
 }

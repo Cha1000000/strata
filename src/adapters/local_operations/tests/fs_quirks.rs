@@ -7,8 +7,9 @@
 
 use std::{
     borrow::Cow,
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     ffi::{OsStr, OsString},
+    ops::ControlFlow,
     os::{
         fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd, RawFd},
         unix::ffi::OsStringExt,
@@ -23,14 +24,23 @@ use std::{
 
 use gtk::{gio, glib, prelude::FileExt};
 use rustix::{
-    fs::{AtFlags, FileType, FsWord, Mode, OFlags, RenameFlags, ResolveFlags},
+    fs::{Access, AtFlags, FileType, FsWord, Mode, OFlags, RenameFlags, ResolveFlags, StatxFlags},
     io::Errno,
 };
 
-use super::super::copy_engine::{clock_for_test, forget_learned_copy_support};
+use super::super::copy_engine::clock_for_test;
 use super::super::environment::FsEnvironment;
-use super::super::fs_ops::{Entry, EntryStat, FsOps, FsStat, System, assert_off_main_thread};
-use crate::adapters::volume::{MountKey, MountSite, MountType, forget_test_mount_capabilities};
+use super::super::fs_ops::{
+    Entry, EntryStat, FolderStamp, FsOps, FsStat, Listed, System, Watched, assert_off_main_thread,
+};
+use super::super::holders;
+use super::super::native_fs::LocalFileIdentity;
+use crate::{
+    adapters::volume::{
+        Family, MountKey, MountSite, MountTable, MountType, family, forget_test_mount_capabilities,
+    },
+    services::Holder,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Op {
@@ -75,15 +85,50 @@ pub(crate) enum Op {
     GetXattr,
     SetXattr,
     MountType,
+    CurrentMountType,
     DeviceFormat,
     OpenDir,
     List,
+    ListChunks,
+    FolderStamp,
+    Access,
+    Watch,
+    Unwatch,
     CreateNode,
     OpenFifo,
     CreateReadonly,
     OpenWrite,
     FileFlags,
     SetLinkTimes,
+    Holders,
+}
+
+impl Op {
+    fn changes(self) -> bool {
+        matches!(
+            self,
+            Self::Rename
+                | Self::Exchange
+                | Self::Link
+                | Self::Unlink
+                | Self::Mkdir
+                | Self::Symlink
+                | Self::Create
+                | Self::Trash
+                | Self::LinkFd
+                | Self::Clone
+                | Self::CopyRange
+                | Self::Write
+                | Self::SetLen
+                | Self::ChownFd
+                | Self::ChmodFd
+                | Self::SetTimes
+                | Self::SetXattr
+                | Self::CreateNode
+                | Self::CreateReadonly
+                | Self::SetLinkTimes
+        )
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -149,6 +194,50 @@ pub(crate) enum NameOpens {
     OneAtATime,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Aside {
+    Nfs,
+    Smb,
+    Fuse,
+    Unlisted(Errno),
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Silly {
+    pub aside: Aside,
+    pub lingers: Duration,
+}
+
+impl Silly {
+    pub(crate) fn nfs() -> Self {
+        Self {
+            aside: Aside::Nfs,
+            lingers: Duration::ZERO,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct CachedTimes {
+    pub folders: Duration,
+    pub files: Duration,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct CachedListing {
+    pub kept_for: Duration,
+    pub renewed_by_use: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum Births {
+    #[default]
+    Reported,
+    MadeUp,
+    /// A birth time per file, kept across renumbering, on a base that reports none (as FAT).
+    Recorded,
+}
+
 pub(crate) type Racer = Box<dyn FnMut() + Send>;
 pub(crate) type Preset = fn() -> Quirks;
 
@@ -201,6 +290,7 @@ pub(crate) struct Quirks {
     pub reused_inodes: Option<&'static str>,
     /// As on NFSv3, ntfs-3g and exfat-fuse.
     pub no_birth_time: bool,
+    pub births: Births,
     /// The change time reports the modification time, as on FAT and exFAT,
     /// which store none.
     pub ctime_is_mtime: bool,
@@ -216,9 +306,11 @@ pub(crate) struct Quirks {
     /// Runs once, after the matching call after skipping the given number of matches, whether
     /// or not the call succeeded.
     pub after: Vec<(Op, &'static str, usize, Racer)>,
+    pub unplugged_after: Option<(Op, &'static str, usize)>,
     pub mount_type: Option<(&'static str, &'static str)>,
     pub mount_root: Option<&'static str>,
     pub device_format: Option<&'static str>,
+    pub rotational: Option<bool>,
     pub tmpfile: Support,
     pub tmpfile_link: TmpfileLink,
     /// The most bytes one read or write moves.
@@ -226,6 +318,10 @@ pub(crate) struct Quirks {
     /// Closing a written file sets its times to the close time, as NFSv4.2
     /// write delegations and FUSE writeback caches do.
     pub times_reset_at_close: bool,
+    /// A file opened for writing reports the modification time it had then through any stat
+    /// that does not force revalidation, until a forced stat or a time set revalidates it, as
+    /// the SMB client leaves a written file's times to the server.
+    pub stale_written_times: bool,
     pub chown: Support,
     /// Entries report a group the user is not in.
     pub foreign_group: bool,
@@ -237,9 +333,9 @@ pub(crate) struct Quirks {
     pub node_create: Support,
     /// `mknodat` of a named pipe, which FAT, exFAT and SMB refuse.
     pub fifos: Support,
-    /// Unlinking a file this process holds open renames it to `.nfs*`
-    /// instead, as the NFS client does until the last close.
-    pub silly_rename: bool,
+    pub silly_rename: Option<Silly>,
+    pub holder: Option<Holder>,
+    pub folder_renames_refused_below: Option<Duration>,
     /// Files report a size of 0 whatever they hold, so `copy_file_range`
     /// copies nothing from them, as virtual files on FUSE (lxcfs) do.
     pub virtual_sizes: bool,
@@ -267,14 +363,19 @@ pub(crate) struct Quirks {
     /// filesystem mounted inside another does; scopes otherwise share the
     /// device of the folder they are made in, as bind mounts do.
     pub own_device: bool,
+    pub no_mount_ids: bool,
     /// A stat that does not force revalidation reports the change time the
     /// last stat of the entry saw, until this long after by the test clock,
     /// as the SMB client answers from its attribute cache (`actimeo`).
     pub cached_change_times: Option<Duration>,
+    pub cached_times: Option<CachedTimes>,
+    pub daemon_cache: Option<Duration>,
+    pub cached_listing: Option<CachedListing>,
     /// Times stamped at or after this instant read as it, as one tick of the coarse clock
     /// stamps them where the kernel has no multigrain timestamps. The tick lasts as long as
     /// the scope.
     pub coarse_clock: Option<SystemTime>,
+    pub listing_chunk: Option<usize>,
 }
 
 impl Quirks {
@@ -288,9 +389,12 @@ impl Quirks {
     /// No `RENAME_NOREPLACE`, no hard links, and no rename over an empty folder.
     pub(crate) fn vboxsf() -> Self {
         Self {
+            mount_type: Some(("vboxsf", VBOXSF_OPTIONS)),
+            fs_type: Some(0x786f_4256),
             rename_flags: Support::Rejected(Errno::INVAL),
             links: Support::Rejected(Errno::PERM),
             rename_over_empty_dir: OverEmptyDirectory::NotEmpty,
+            no_birth_time: true,
             ..Self::default()
         }
     }
@@ -315,10 +419,14 @@ impl Quirks {
     }
 
     pub(crate) fn ext4() -> Self {
+        Self::default().on_ext4()
+    }
+
+    pub(crate) fn on_ext4(self) -> Self {
         Self {
-            mount_type: Some(("ext4", "rw")),
-            fs_type: Some(0xEF53),
-            ..Self::default()
+            mount_type: Some(EXT4),
+            fs_type: Some(EXT4_SUPER_MAGIC),
+            ..self
         }
     }
 
@@ -330,6 +438,14 @@ impl Quirks {
             fs_type: Some(0x6969),
             rename_flags: Support::Rejected(Errno::INVAL),
             times_reset_at_close: true,
+            silly_rename: Some(Silly {
+                lingers: Duration::from_millis(2),
+                ..Silly::nfs()
+            }),
+            cached_times: Some(CachedTimes {
+                folders: Duration::from_secs(30),
+                files: Duration::from_secs(3),
+            }),
             ..Self::default()
         }
     }
@@ -340,6 +456,7 @@ impl Quirks {
             times_reset_at_close: false,
             xattrs_refused: vec![("", Errno::OPNOTSUPP)],
             no_birth_time: true,
+            silly_rename: Some(Silly::nfs()),
             ..Self::nfs42()
         }
     }
@@ -359,6 +476,7 @@ impl Quirks {
             fifos: Support::Rejected(Errno::PERM),
             case_insensitive: true,
             xattrs_refused: vec![("", Errno::OPNOTSUPP)],
+            births: Births::Recorded,
             ..Self::default()
         }
     }
@@ -384,6 +502,7 @@ impl Quirks {
             symlinks: Support::Rejected(Errno::NOSYS),
             case_insensitive: true,
             no_birth_time: true,
+            silly_rename: Some(FUSEBLK_SILLY),
             ..Self::default()
         }
     }
@@ -416,6 +535,7 @@ impl Quirks {
             invalid_name: Some(ntfs_3g_refuses),
             no_birth_time: true,
             cut_rename_over_names: true,
+            silly_rename: Some(FUSEBLK_SILLY),
             ..Self::default()
         }
     }
@@ -433,7 +553,27 @@ impl Quirks {
             symlinks: Support::Rejected(Errno::OPNOTSUPP),
             case_insensitive: true,
             cached_change_times: Some(Duration::from_secs(1)),
+            stale_written_times: true,
+            silly_rename: Some(Silly {
+                aside: Aside::Smb,
+                lingers: Duration::from_millis(4),
+            }),
+            cached_times: Some(CachedTimes {
+                folders: Duration::from_secs(1),
+                files: Duration::from_secs(1),
+            }),
+            cached_listing: Some(CachedListing {
+                kept_for: Duration::from_secs(46),
+                renewed_by_use: true,
+            }),
             ..Self::default()
+        }
+    }
+
+    pub(crate) fn cifs_noserverino() -> Self {
+        Self {
+            mount_type: Some(("cifs", CIFS_NOSERVERINO_OPTIONS)),
+            ..Self::cifs()
         }
     }
 
@@ -452,6 +592,10 @@ impl Quirks {
             stored_as: Some(question_marks),
             symlinks: Support::Supported,
             case_insensitive: false,
+            silly_rename: Some(Silly {
+                aside: Aside::Unlisted(Errno::ACCESS),
+                lingers: Duration::from_millis(1),
+            }),
             ..Self::cifs()
         }
     }
@@ -469,12 +613,28 @@ impl Quirks {
             single_link_count: true,
             lost_renames_keep_inodes: true,
             no_birth_time: true,
+            silly_rename: Some(Silly {
+                aside: Aside::Fuse,
+                lingers: Duration::from_millis(70),
+            }),
+            daemon_cache: Some(Duration::from_secs(21)),
+            cached_listing: Some(CachedListing {
+                kept_for: Duration::from_secs(21),
+                renewed_by_use: false,
+            }),
             ..Self::default()
         }
     }
 }
 
 const FUSE_SUPER_MAGIC: FsWord = 0x6573_5546;
+const FUSEBLK_SILLY: Silly = Silly {
+    aside: Aside::Fuse,
+    lingers: Duration::ZERO,
+};
+const EXT4_SUPER_MAGIC: FsWord = 0xEF53;
+const EXT4: (&str, &str) = ("ext4", "rw");
+const VBOXSF_OPTIONS: &str = "rw,nodev,relatime,iocharset=utf8,uid=1000,gid=1000";
 const VFAT_OPTIONS: &str = concat!(
     "rw,uid=1000,gid=1000,fmask=0022,dmask=0022,codepage=437,iocharset=ascii,",
     "shortname=mixed,showexec,utf8,flush,errors=remount-ro"
@@ -489,6 +649,10 @@ const NTFS3_WINDOWS_NAMES_OPTIONS: &str =
 const CIFS_OPTIONS: &str = concat!(
     "rw,vers=3.1.1,cache=strict,uid=1000,forceuid,gid=1000,forcegid,soft,nounix,serverino,",
     "mapposix,reparse=nfs,nativesocket,symlink=native,actimeo=1,closetimeo=1"
+);
+const CIFS_NOSERVERINO_OPTIONS: &str = concat!(
+    "rw,vers=3.1.1,cache=strict,uid=1000,forceuid,gid=1000,forcegid,soft,nounix,mapposix,",
+    "reparse=nfs,nativesocket,symlink=native,actimeo=1,closetimeo=1"
 );
 const CIFS_NOCASE_OPTIONS: &str = concat!(
     "rw,vers=3.1.1,cache=strict,uid=1000,forceuid,gid=1000,forcegid,nocase,soft,nounix,",
@@ -715,9 +879,40 @@ pub(crate) struct Call {
     pub forced: bool,
 }
 
+#[derive(Clone, Copy)]
+struct WrittenTime {
+    birth: Option<(i64, u32)>,
+    modified: (i64, u32),
+}
+
+#[derive(Clone, Copy)]
+struct Seen {
+    modified: (i64, u32),
+    changed: (i64, u32),
+    fetch: Fetch,
+}
+
+#[derive(Clone, Copy)]
+struct Fetch {
+    at: SystemTime,
+    own_changes: u64,
+}
+
+impl Fetch {
+    fn kept(&self, kept_for: Duration, now: Fetch) -> bool {
+        self.own_changes == now.own_changes
+            && now
+                .at
+                .duration_since(self.at)
+                .is_ok_and(|age| age < kept_for)
+    }
+}
+
 struct Scope {
     id: u64,
     root: PathBuf,
+    mount_id: Option<u64>,
+    host: Option<MountType>,
     own_device: bool,
     state: Mutex<State>,
     /// Makes looking a name up and creating it one step, as a filesystem that
@@ -738,6 +933,7 @@ struct State {
     links_made: u64,
     stale: HashMap<PathBuf, EntryStat>,
     written: HashSet<(u64, u64)>,
+    written_times: HashMap<(u64, u64), WrittenTime>,
     renumbered: HashSet<PathBuf>,
     /// Writebacks lost so far, and how many each open folder has reported.
     writebacks_lost: u64,
@@ -749,13 +945,61 @@ struct State {
     read_only_unseen: HashSet<PathBuf>,
     /// The change time each entry's last stat saw, and when, by device and inode.
     seen_change_times: HashMap<(u64, u64), ((i64, u32), SystemTime)>,
+    seen_times: HashMap<(u64, u64), Seen>,
+    listings: HashMap<PathBuf, (Listed, Fetch)>,
+    own_changes: u64,
+    unplugged: bool,
+    serverino_disabled: bool,
+    cached: HashMap<PathBuf, (u64, Option<(i64, u32)>)>,
+    created: HashSet<(u64, u64)>,
+    made_up: HashMap<(u64, u64), (i64, u32)>,
+    recorded_births: HashMap<(u64, u64), SystemTime>,
+    latest_birth: SystemTime,
+    holds: HashMap<(u64, u64), usize>,
+    held_paths: HashMap<(u64, u64), PathBuf>,
+    closed_holds: Vec<(PathBuf, SystemTime)>,
+    leftovers: Vec<SillyLeftover>,
+    silly_renames: u64,
+}
+
+struct SillyLeftover {
+    folder: PathBuf,
+    folder_key: (u64, u64),
+    name: Option<OsString>,
+    key: (u64, u64),
+    unheld_since: Option<SystemTime>,
+}
+
+impl State {
+    fn fetch(&self) -> Fetch {
+        Fetch {
+            at: clock_for_test(),
+            own_changes: self.own_changes,
+        }
+    }
+
+    fn recorded_birth(&mut self, key: (u64, u64)) -> Option<(i64, u32)> {
+        let latest = &mut self.latest_birth;
+        let born = *self.recorded_births.entry(key).or_insert_with(|| {
+            *latest = SystemTime::now().max(*latest + Duration::from_nanos(1));
+            *latest
+        });
+        timespec(born)
+    }
 }
 
 static SCOPES: Mutex<Vec<Arc<Scope>>> = Mutex::new(Vec::new());
 static NEXT_SCOPE: AtomicU64 = AtomicU64::new(1);
+static FIRST_FOLDER_BIRTHS: Mutex<BTreeMap<(u64, u64), (i64, u32)>> = Mutex::new(BTreeMap::new());
 
 fn scopes() -> MutexGuard<'static, Vec<Arc<Scope>>> {
     SCOPES.lock().unwrap_or_else(|error| error.into_inner())
+}
+
+fn first_folder_births() -> MutexGuard<'static, BTreeMap<(u64, u64), (i64, u32)>> {
+    FIRST_FOLDER_BIRTHS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
 }
 
 pub(crate) struct FsQuirks {
@@ -764,9 +1008,19 @@ pub(crate) struct FsQuirks {
 
 impl FsQuirks {
     pub(crate) fn install(root: &Path, quirks: Quirks) -> Self {
+        let mount_id =
+            rustix::fs::statx(rustix::fs::CWD, root, AtFlags::empty(), StatxFlags::MNT_ID)
+                .ok()
+                .filter(|stat| {
+                    StatxFlags::from_bits_retain(stat.stx_mask).contains(StatxFlags::MNT_ID)
+                })
+                .map(|stat| stat.stx_mnt_id);
+        let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
         let scope = Arc::new(Scope {
             id: NEXT_SCOPE.fetch_add(1, Ordering::Relaxed),
-            root: root.canonicalize().unwrap_or_else(|_| root.to_path_buf()),
+            host: host_mount_type(mount_id, &root),
+            root,
+            mount_id,
             own_device: quirks.own_device,
             naming: Mutex::new(()),
             state: Mutex::new(State {
@@ -779,16 +1033,31 @@ impl FsQuirks {
                 links_made: 0,
                 stale: HashMap::new(),
                 written: HashSet::new(),
+                written_times: HashMap::new(),
                 renumbered: HashSet::new(),
                 writebacks_lost: 0,
                 reported_losses: HashMap::new(),
                 opened_names: Vec::new(),
                 read_only_unseen: HashSet::new(),
                 seen_change_times: HashMap::new(),
+                seen_times: HashMap::new(),
+                listings: HashMap::new(),
+                own_changes: 0,
+                unplugged: false,
+                serverino_disabled: false,
+                holds: HashMap::new(),
+                held_paths: HashMap::new(),
+                closed_holds: Vec::new(),
+                leftovers: Vec::new(),
+                silly_renames: 0,
+                cached: HashMap::new(),
+                created: HashSet::new(),
+                made_up: HashMap::new(),
+                recorded_births: HashMap::new(),
+                latest_birth: SystemTime::UNIX_EPOCH,
             }),
         });
         scopes().push(scope.clone());
-        forget_learned_copy_support();
         Self { scope }
     }
 
@@ -826,6 +1095,10 @@ impl FsQuirks {
         self.scope.state().calls.clear();
     }
 
+    pub(crate) fn replug(&self) {
+        self.scope.state().unplugged = false;
+    }
+
     pub(crate) fn used_name(&self, pattern: &str) -> bool {
         self.scope.state().calls.iter().any(|call| {
             let names: Vec<&OsStr> = call.names.iter().map(OsString::as_os_str).collect();
@@ -838,7 +1111,34 @@ impl Drop for FsQuirks {
     fn drop(&mut self) {
         scopes().retain(|scope| !Arc::ptr_eq(scope, &self.scope));
         forget_test_mount_capabilities(self.scope.id);
-        forget_learned_copy_support();
+    }
+}
+
+pub(crate) struct HoldGuard {
+    scope: Arc<Scope>,
+    key: (u64, u64),
+}
+
+impl Drop for HoldGuard {
+    fn drop(&mut self) {
+        let mut state = self.scope.state();
+        let Some(count) = state.holds.get_mut(&self.key) else {
+            return;
+        };
+        *count -= 1;
+        if *count > 0 {
+            return;
+        }
+        state.holds.remove(&self.key);
+        let now = clock_for_test();
+        if let Some(path) = state.held_paths.remove(&self.key) {
+            state.closed_holds.push((path, now));
+        }
+        for leftover in &mut state.leftovers {
+            if leftover.key == self.key {
+                leftover.unheld_since.get_or_insert(now);
+            }
+        }
     }
 }
 
@@ -917,6 +1217,9 @@ impl Scope {
                 names: names.iter().map(|name| name.to_os_string()).collect(),
                 forced,
             });
+            if state.unplugged {
+                return Err(Errno::IO);
+            }
             take_racer(&mut state.quirks.before, op, names)
         };
         if let Some(mut racer) = racer {
@@ -944,7 +1247,25 @@ impl Scope {
         if let Some(errno) = fault {
             return Err(errno);
         }
+        self.reap();
         let result = perform(self);
+        {
+            let mut state = self.state();
+            if result.is_ok() && op.changes() {
+                state.own_changes += 1;
+            }
+            if let Some((unplug_op, pattern, skip)) = state.quirks.unplugged_after.as_mut()
+                && *unplug_op == op
+                && matches(pattern, names)
+            {
+                if *skip == 0 {
+                    state.quirks.unplugged_after = None;
+                    state.unplugged = true;
+                } else {
+                    *skip -= 1;
+                }
+            }
+        }
         let racer = take_racer(&mut self.state().quirks.after, op, names);
         if let Some(mut racer) = racer {
             racer();
@@ -984,12 +1305,86 @@ impl Scope {
         stat
     }
 
+    fn cached_stamp(&self, mut stamp: FolderStamp, forced: bool) -> FolderStamp {
+        let mut state = self.state();
+        let cached_times = state.quirks.cached_times.map(|times| {
+            if stamp.kind == FileType::Directory {
+                times.folders
+            } else {
+                times.files
+            }
+        });
+        let (kept_for, ignores_force) = match (state.quirks.daemon_cache, cached_times) {
+            (Some(daemon), _) => (daemon, true),
+            (None, Some(kept_for)) => (kept_for, false),
+            (None, None) => return stamp,
+        };
+        let now = state.fetch();
+        let fetched = Seen {
+            modified: stamp.modified,
+            changed: stamp.changed,
+            fetch: now,
+        };
+        let seen = state
+            .seen_times
+            .entry((stamp.device, stamp.inode))
+            .or_insert(fetched);
+        if (forced && !ignores_force) || !seen.fetch.kept(kept_for, now) {
+            *seen = fetched;
+        }
+        (stamp.modified, stamp.changed) = (seen.modified, seen.changed);
+        stamp
+    }
+
+    fn listed(&self, folder: &Path, listing: Listed) -> Listed {
+        let mut state = self.state();
+        let Some(cached) = state.quirks.cached_listing else {
+            return listing;
+        };
+        let now = state.fetch();
+        let entry = state
+            .listings
+            .entry(folder.to_path_buf())
+            .or_insert_with(|| (listing.clone(), now));
+        if !entry.1.kept(cached.kept_for, now) {
+            *entry = (listing, now);
+        } else if cached.renewed_by_use {
+            entry.1.at = now.at;
+        }
+        entry.0.clone()
+    }
+
+    fn used(&self, folder: &Path) {
+        let mut state = self.state();
+        if state
+            .quirks
+            .cached_listing
+            .is_some_and(|cached| cached.renewed_by_use)
+            && let Some((_, seen)) = state.listings.get_mut(folder)
+        {
+            seen.at = clock_for_test();
+        }
+    }
+
     fn reported(&self, path: Option<PathBuf>, mut stat: EntryStat) -> EntryStat {
         let key = (stat.identity.device, stat.identity.inode);
         if let Some(device) = path.as_deref().and_then(own_device) {
             stat.identity.device = device;
         }
+        if let Some(birth) = stat.identity.birth.filter(|_| stat.is_directory())
+            && self.keeps_folder_births_its_base_restamps()
+        {
+            stat.identity.birth = Some(*first_folder_births().entry(key).or_insert(birth));
+        }
         let mut state = self.state();
+        let cached = path
+            .as_ref()
+            .and_then(|path| state.cached.get(path).copied());
+        if state.quirks.births == Births::Recorded
+            && stat.identity.birth.is_none_or(|birth| birth == (0, 0))
+        {
+            stat.identity.birth = state.recorded_birth(key);
+        }
         if let Some(&birth) = state.reset_births.get(&key).filter(|_| stat.is_directory()) {
             stat.identity.birth = Some(birth);
         }
@@ -1023,12 +1418,16 @@ impl Scope {
                 .inodes
                 .entry(path.clone())
                 .or_insert(stat.identity.inode);
-            stat.identity.birth = Some((*state.births.entry(path).or_default(), 0));
+            stat.identity.birth = Some((1 + *state.births.entry(path).or_default(), 0));
         }
         if let Some(tick) = state.quirks.coarse_clock.and_then(timespec) {
             stat.mtime = stat.mtime.min(tick);
             stat.ctime = stat.ctime.min(tick);
             stat.identity.birth = stat.identity.birth.map(|birth| birth.min(tick));
+        }
+        if state.quirks.births == Births::MadeUp && !state.created.contains(&key) {
+            let earliest = stat.atime.min(stat.mtime).min(stat.ctime);
+            stat.identity.birth = Some(*state.made_up.entry(key).or_insert(earliest));
         }
         if state.quirks.no_birth_time {
             stat.identity.birth = None;
@@ -1042,7 +1441,60 @@ impl Scope {
         if state.quirks.virtual_sizes && stat.kind == FileType::RegularFile {
             stat.size = 0;
         }
+        if let Some((inode, birth)) = cached {
+            stat.identity.inode = inode;
+            stat.identity.birth = birth;
+        }
         stat
+    }
+
+    fn reported_stamp(&self, path: &Path, stamp: FolderStamp) -> FolderStamp {
+        let real = path.canonicalize().ok();
+        let stat = EntryStat {
+            identity: LocalFileIdentity {
+                device: stamp.device,
+                inode: stamp.inode,
+                kind: stamp.kind,
+                birth: stamp.birth,
+                handle: None,
+            },
+            kind: stamp.kind,
+            mode: stamp.mode & 0o7777,
+            nlink: 1,
+            size: stamp.size,
+            blocks: 0,
+            atime: stamp.modified,
+            mtime: stamp.modified,
+            ctime: stamp.changed,
+            uid: 0,
+            gid: 0,
+        };
+        if let Some(real) = real.as_deref().filter(|_| stat.is_directory()) {
+            self.used(real);
+        }
+        let stat = self.reported(real, stat);
+        FolderStamp {
+            modified: stat.mtime,
+            changed: stat.ctime,
+            device: stat.identity.device,
+            inode: stat.identity.inode,
+            birth: stat.identity.birth,
+            mount_id: (!self.quirk(|quirks| quirks.no_mount_ids)).then_some(u64::MAX - self.id),
+            ..stamp
+        }
+    }
+
+    fn mount(&self) -> Option<(MountType, MountSite)> {
+        self.run(Op::MountType, &[], |scope| {
+            let root = scope.quirk(|quirks| quirks.mount_root).unwrap_or("/");
+            let site = MountSite {
+                point: scope.root.clone(),
+                root: PathBuf::from(root),
+            };
+            Ok(scope.mount_type().map(|mount_type| (mount_type, site)))
+        })
+        .ok()
+        .flatten()
     }
 
     fn mark_written(&self, fd: BorrowedFd<'_>) {
@@ -1055,11 +1507,45 @@ impl Scope {
         }
     }
 
+    fn opened_for_writing(&self, fd: BorrowedFd<'_>) {
+        if self.quirk(|quirks| quirks.stale_written_times)
+            && let Ok(stat) = System.stat_fd(fd)
+        {
+            self.state().written_times.insert(
+                (stat.identity.device, stat.identity.inode),
+                WrittenTime {
+                    birth: stat.identity.birth,
+                    modified: stat.mtime,
+                },
+            );
+        }
+    }
+
+    fn with_written_time(&self, mut stat: EntryStat) -> EntryStat {
+        let key = (stat.identity.device, stat.identity.inode);
+        if let Some(written) = self.state().written_times.get(&key)
+            && written.birth == stat.identity.birth
+        {
+            stat.mtime = written.modified;
+        }
+        stat
+    }
+
+    fn revalidate_written_time(&self, stat: &EntryStat) {
+        let key = (stat.identity.device, stat.identity.inode);
+        if let Some(written) = self.state().written_times.get_mut(&key)
+            && written.birth == stat.identity.birth
+        {
+            written.modified = stat.mtime;
+        }
+    }
+
     fn closing(&self, fd: BorrowedFd<'_>) {
         let written = System.stat_fd(fd).is_ok_and(|stat| {
-            self.state()
-                .written
-                .remove(&(stat.identity.device, stat.identity.inode))
+            let key = (stat.identity.device, stat.identity.inode);
+            let mut state = self.state();
+            state.written_times.remove(&key);
+            state.written.remove(&key)
         });
         if written {
             let now = rustix::fs::Timespec {
@@ -1078,6 +1564,66 @@ impl Scope {
 
     fn quirk<T>(&self, read: impl FnOnce(&Quirks) -> T) -> T {
         read(&self.state().quirks)
+    }
+
+    fn mount_type(&self) -> Option<MountType> {
+        self.emulated_or(|| self.host.clone())
+    }
+
+    fn keeps_folder_births_its_base_restamps(&self) -> bool {
+        self.host
+            .as_ref()
+            .is_some_and(|base| !base.identity().folder_births)
+            && self
+                .mount_type()
+                .is_some_and(|mount| mount.identity().folder_births)
+    }
+
+    fn current_mount_type(&self) -> Option<MountType> {
+        self.emulated_or(|| host_mount_type(self.mount_id, &self.root))
+    }
+
+    fn emulated_or(&self, host: impl FnOnce() -> Option<MountType>) -> Option<MountType> {
+        let serverino_disabled = self.state().serverino_disabled;
+        let mut mount = match self.quirk(|quirks| quirks.mount_type) {
+            Some((fs_type, super_options)) => MountType {
+                fs_type: fs_type.to_owned(),
+                super_options: super_options.to_owned(),
+            },
+            None => host()?,
+        };
+        if serverino_disabled {
+            mount.super_options = mount
+                .super_options
+                .split(',')
+                .filter(|option| *option != "serverino")
+                .collect::<Vec<_>>()
+                .join(",");
+        }
+        Some(mount)
+    }
+
+    fn mounts(&self) -> MountTable {
+        MountTable::parse(
+            self.mount_id
+                .zip(self.mount_type())
+                .map(|(id, mount)| {
+                    let (fs_type, options) = (mount.fs_type, mount.super_options);
+                    format!("{id} 0 0:0 / / rw - {fs_type} test {options}\n")
+                })
+                .unwrap_or_default(),
+        )
+    }
+
+    fn server_numbers(&self) -> bool {
+        self.mount_type().is_some_and(|mount| {
+            mount.server_numbers()
+                || (mount.fs_type == "cifs"
+                    && mount
+                        .super_options
+                        .split(',')
+                        .any(|option| option == "posix"))
+        })
     }
 
     fn invalid(&self, name: &OsStr) -> Option<Errno> {
@@ -1209,20 +1755,33 @@ impl Scope {
             return Err(self.collision());
         }
         let stored = self.stored(at.name);
-        create(Entry {
+        let stored = Entry {
             dir: at.dir,
             name: &stored,
-        })
-        .map_err(|error| {
+        };
+        let created = create(stored).map_err(|error| {
             if error == Errno::EXIST {
                 self.collision()
             } else {
                 error
             }
-        })
+        })?;
+        if self.quirk(|quirks| quirks.births == Births::MadeUp)
+            && let Ok(stat) = System.stat(stored, false)
+        {
+            self.state()
+                .created
+                .insert((stat.identity.device, stat.identity.inode));
+        }
+        Ok(created)
     }
 
     fn rename(&self, from: Entry<'_>, to: Entry<'_>, flags: RenameFlags) -> Result<(), Errno> {
+        if let Some(folder) = path_of(from.dir).map(|dir| dir.join(from.name))
+            && self.refuses_folder_rename(&folder)
+        {
+            return Err(Errno::ACCESS);
+        }
         let _naming = self.naming();
         let (rename_flags, exchange, over_empty) = self.quirk(|quirks| {
             (
@@ -1249,6 +1808,13 @@ impl Scope {
         };
         if flags.contains(RenameFlags::EXCHANGE) {
             match exchange {
+                Exchange::Supported
+                    if System
+                        .statfs(to.dir)
+                        .is_some_and(|stat| stat.kind == FUSE_SUPER_MAGIC) =>
+                {
+                    return Err(Errno::INVAL);
+                }
                 Exchange::Supported => {}
                 Exchange::Rejected => return Err(Errno::INVAL),
                 Exchange::IgnoredOverwrites => {
@@ -1368,6 +1934,19 @@ impl Scope {
             return;
         };
         let mut state = self.state();
+        let cached = state.cached.remove(&from);
+        state.cached.remove(&to);
+        if let Some(cached) = cached {
+            state.cached.insert(to.clone(), cached);
+        }
+        let renumbered = state.renumbered.remove(&from);
+        let displaced_renumbered = state.renumbered.remove(&to);
+        if renumbered {
+            state.renumbered.insert(to.clone());
+        }
+        if displaced_renumbered && flags.contains(RenameFlags::EXCHANGE) {
+            state.renumbered.insert(from.clone());
+        }
         let moved = state.link_names.remove(&from);
         let displaced = state.link_names.remove(&to);
         if let Some(moved) = moved {
@@ -1401,6 +1980,7 @@ impl Scope {
             let mut state = self.state();
             state.link_names.remove(&path);
             state.renumbered.remove(&path);
+            state.cached.remove(&path);
         }
     }
 
@@ -1429,24 +2009,169 @@ impl Scope {
     }
 }
 
-fn open_in_this_process(entry: Entry<'_>) -> Option<u64> {
-    let stat = System.stat(entry, false).ok()?;
-    if stat.kind != FileType::RegularFile {
-        return None;
-    }
-    let held = std::fs::read_dir("/proc/self/fd")
-        .ok()?
-        .filter_map(Result::ok)
-        .any(|fd| {
-            rustix::fs::stat(fd.path()).is_ok_and(|open| {
-                open.st_dev == stat.identity.device && open.st_ino == stat.identity.inode
+fn held_by_this_process(device: u64, inode: u64) -> bool {
+    refers_to(device, inode, true)
+}
+
+fn refers_to(device: u64, inode: u64, o_path: bool) -> bool {
+    let path_only = |fd: &std::fs::DirEntry| {
+        let info = format!("/proc/self/fdinfo/{}", fd.file_name().to_string_lossy());
+        std::fs::read_to_string(info)
+            .ok()
+            .and_then(|info| {
+                let flags = info.lines().find_map(|line| line.strip_prefix("flags:"))?;
+                u32::from_str_radix(flags.trim(), 8).ok()
             })
+            .is_some_and(|flags| flags & OFlags::PATH.bits() != 0)
+    };
+    std::fs::read_dir("/proc/self/fd").is_ok_and(|fds| {
+        fds.filter_map(Result::ok).any(|fd| {
+            (o_path || !path_only(&fd))
+                && rustix::fs::stat(fd.path())
+                    .is_ok_and(|open| (open.st_dev, open.st_ino) == (device, inode))
+        })
+    })
+}
+
+impl Aside {
+    fn held_here(self, (device, inode): (u64, u64)) -> bool {
+        refers_to(device, inode, matches!(self, Self::Nfs))
+    }
+
+    fn name(self, inode: u64, count: u64) -> Option<OsString> {
+        let name = match self {
+            Self::Nfs => format!(".nfs{inode:016x}{count:08x}"),
+            Self::Smb => format!(".__smbfile_silly{count:x}"),
+            Self::Fuse => format!(".fuse_hidden{:08x}{:08x}", inode as u32, count as u32),
+            Self::Unlisted(_) => return None,
+        };
+        Some(OsString::from(name))
+    }
+}
+
+impl Scope {
+    fn refuses_folder_rename(&self, folder: &Path) -> bool {
+        let Some(lingers) = self.quirk(|quirks| quirks.folder_renames_refused_below) else {
+            return false;
+        };
+        if !std::fs::symlink_metadata(folder).is_ok_and(|metadata| metadata.is_dir()) {
+            return false;
+        }
+        let now = clock_for_test();
+        let state = self.state();
+        let below = |path: &Path| path != folder && path.starts_with(folder);
+        state
+            .holds
+            .keys()
+            .filter_map(|key| state.held_paths.get(key))
+            .any(|path| below(path))
+            || state.closed_holds.iter().any(|(path, closed)| {
+                below(path) && now.duration_since(*closed).unwrap_or_default() < lingers
+            })
+    }
+
+    fn reap(&self) {
+        let mut state = self.state();
+        let Some(silly) = state.quirks.silly_rename else {
+            return;
+        };
+        let now = clock_for_test();
+        let State {
+            holds, leftovers, ..
+        } = &mut *state;
+        leftovers.retain_mut(|leftover| {
+            if holds.contains_key(&leftover.key) || silly.aside.held_here(leftover.key) {
+                leftover.unheld_since = None;
+                return true;
+            }
+            let since = *leftover.unheld_since.get_or_insert(now);
+            if now.duration_since(since).unwrap_or_default() < silly.lingers {
+                return true;
+            }
+            if let Some(name) = &leftover.name {
+                let _ = std::fs::remove_file(leftover.folder.join(name));
+            }
+            false
         });
-    held.then_some(stat.identity.inode)
+    }
+
+    fn unlink_held(&self, at: Entry<'_>, flags: AtFlags) -> Option<Result<(), Errno>> {
+        let silly = self.quirk(|quirks| quirks.silly_rename)?;
+        let folder = path_of(at.dir)?;
+        if flags.contains(AtFlags::REMOVEDIR) {
+            let Aside::Unlisted(errno) = silly.aside else {
+                return None;
+            };
+            let target = System.stat(at, false).ok()?.identity;
+            let held_below = self
+                .state()
+                .leftovers
+                .iter()
+                .any(|leftover| leftover.folder_key == (target.device, target.inode));
+            return held_below.then_some(Err(errno));
+        }
+        let stat = System
+            .stat(at, false)
+            .ok()
+            .filter(|stat| stat.kind == FileType::RegularFile)?;
+        let key = (stat.identity.device, stat.identity.inode);
+        let folder_key = System.stat_fd(at.dir).ok()?.identity;
+        let mut state = self.state();
+        let leftover = state.leftovers.iter().position(|leftover| {
+            leftover.folder == folder && leftover.name.as_deref() == Some(at.name)
+        });
+        match (leftover, silly.aside) {
+            (Some(_), Aside::Nfs) => return Some(Err(Errno::BUSY)),
+            (Some(_), Aside::Smb) => return Some(Err(Errno::NOENT)),
+            (Some(_), _) => {}
+            (None, aside) if !state.holds.contains_key(&key) && !aside.held_here(key) => {
+                return None;
+            }
+            (None, _) => {}
+        }
+        let name = loop {
+            state.silly_renames += 1;
+            let name = silly.aside.name(key.1, state.silly_renames);
+            let Some(silly_name) = &name else {
+                break name;
+            };
+            match rustix::fs::statat(at.dir, silly_name, AtFlags::SYMLINK_NOFOLLOW) {
+                Ok(_) => {}
+                Err(Errno::NOENT) => break name,
+                Err(error) => return Some(Err(error)),
+            }
+        };
+        let unlinked = match &name {
+            Some(name) => System.rename(at, Entry { dir: at.dir, name }, RenameFlags::empty()),
+            None => System.unlink(at, AtFlags::empty()),
+        };
+        if unlinked.is_ok() {
+            match leftover {
+                Some(index) => state.leftovers[index].name = name,
+                None => state.leftovers.push(SillyLeftover {
+                    folder,
+                    folder_key: (folder_key.device, folder_key.inode),
+                    name,
+                    key,
+                    unheld_since: None,
+                }),
+            }
+        }
+        Some(unlinked)
+    }
 }
 
 fn path_of(dir: BorrowedFd<'_>) -> Option<PathBuf> {
     std::fs::read_link(format!("/proc/self/fd/{}", dir.as_raw_fd())).ok()
+}
+
+fn host_mount_type(mount_id: Option<u64>, root: &Path) -> Option<MountType> {
+    let table = MountTable::parse(std::fs::read("/proc/self/mountinfo").ok()?);
+    let mount = match mount_id {
+        Some(id) => table.mount_of(id),
+        None => table.mount_at(root),
+    };
+    mount.map(|(mount_type, _)| mount_type.clone())
 }
 
 /// The basename an fd-only call logs; `#<inode> (deleted)` for an unnamed file.
@@ -1521,11 +2246,24 @@ pub(crate) fn gio_device(file: &gio::File, device: Option<u64>) -> Option<u64> {
         .or(device)
 }
 
-fn scope_for_path(path: &Path) -> Option<Arc<Scope>> {
-    let parent = path.parent()?.canonicalize().ok()?;
+fn scope_for_folder(path: &Path) -> Option<Arc<Scope>> {
+    let folder = path.canonicalize().ok()?;
     scopes()
         .iter()
-        .filter(|scope| parent.starts_with(&scope.root))
+        .filter(|scope| folder.starts_with(&scope.root))
+        .max_by_key(|scope| scope.root.as_os_str().len())
+        .cloned()
+}
+
+fn scope_for_path(path: &Path) -> Option<Arc<Scope>> {
+    scope_containing(path.parent()?)
+}
+
+fn scope_containing(path: &Path) -> Option<Arc<Scope>> {
+    let path = path.canonicalize().ok()?;
+    scopes()
+        .iter()
+        .filter(|scope| path.starts_with(&scope.root))
         .max_by_key(|scope| scope.root.as_os_str().len())
         .cloned()
 }
@@ -1536,6 +2274,11 @@ pub(crate) fn recreated(path: &Path) {
     };
     if let Some(parent) = path.parent().and_then(|parent| parent.canonicalize().ok()) {
         *scope.state().births.entry(parent.join(name)).or_default() += 1;
+    }
+    if let Ok(stat) = rustix::fs::lstat(path) {
+        let key = (stat.st_dev, stat.st_ino);
+        scope.state().recorded_births.remove(&key);
+        first_folder_births().remove(&key);
     }
 }
 
@@ -1555,12 +2298,82 @@ pub(crate) fn skips_malformed_name_on_fuse(root: &Path, name: &OsStr) -> bool {
 /// unlinked, as libfuse without `use_ino` and cifs without server inode
 /// numbers do once the kernel evicts an entry.
 pub(crate) fn renumbered(path: &Path) {
+    renumber(path);
+}
+
+fn renumber(path: &Path) -> bool {
     let (Some(scope), Some(name)) = (scope_for_path(path), path.file_name()) else {
-        return;
+        return false;
     };
-    if let Some(parent) = path.parent().and_then(|parent| parent.canonicalize().ok()) {
+    let parent = path.parent().and_then(|parent| parent.canonicalize().ok());
+    parent.is_some_and(|parent| {
         scope.state().renumbered.insert(parent.join(name));
+        true
+    })
+}
+
+pub(crate) fn evict(path: &Path) -> bool {
+    let Ok(stat) = rustix::fs::lstat(path) else {
+        return false;
+    };
+    let held = held_by_this_process(stat.st_dev, stat.st_ino);
+    let Some(scope) = scope_for_path(path).filter(|_| !held) else {
+        return false;
+    };
+    {
+        let mut state = scope.state();
+        state.made_up.remove(&(stat.st_dev, stat.st_ino));
+        if let (Some(parent), Some(name)) = (
+            path.parent().and_then(|parent| parent.canonicalize().ok()),
+            path.file_name(),
+        ) {
+            state.cached.remove(&parent.join(name));
+        }
     }
+    !scope.server_numbers() && renumber(path)
+}
+
+pub(crate) fn hold(path: &Path) -> HoldGuard {
+    let scope = scope_for_path(path).expect("a scope holding the file");
+    let stat = rustix::fs::lstat(path).expect("the held file");
+    let key = (stat.st_dev, stat.st_ino);
+    let mut state = scope.state();
+    *state.holds.entry(key).or_default() += 1;
+    if let Ok(path) = path.canonicalize() {
+        state.held_paths.insert(key, path);
+    }
+    drop(state);
+    HoldGuard { scope, key }
+}
+
+pub(crate) fn autodisable_serverino(path: &Path) -> bool {
+    let Some(scope) = scope_containing(path) else {
+        return false;
+    };
+    scope.state().serverino_disabled = true;
+    if scope.server_numbers() {
+        return true;
+    }
+    let mut folders = vec![scope.root.clone()];
+    while let Some(folder) = folders.pop() {
+        let Ok(dir) = std::fs::File::open(&folder) else {
+            continue;
+        };
+        for entry in std::fs::read_dir(&folder).into_iter().flatten().flatten() {
+            if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                folders.push(entry.path());
+            }
+            let name = entry.file_name();
+            if let Ok(stat) = System.stat(Entry::new(&dir, &name), false) {
+                let stat = scope.reported(Some(entry.path()), stat);
+                scope
+                    .state()
+                    .cached
+                    .insert(entry.path(), (stat.identity.inode, stat.identity.birth));
+            }
+        }
+    }
+    true
 }
 
 fn same_scope(left: &Option<Arc<Scope>>, right: &Option<Arc<Scope>>) -> bool {
@@ -1602,7 +2415,11 @@ impl FsEnvironment for Scoped {
         };
         let name = path.file_name().unwrap_or_default();
         let mut outcome = Ok(true);
-        let _ = scope.run(Op::Trash, &[name], |scope| {
+        let ran = scope.run(Op::Trash, &[name], |scope| {
+            let real = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+            if scope.refuses_folder_rename(&real) {
+                return Err(Errno::ACCESS);
+            }
             outcome = match scope.quirk(|quirks| quirks.trash) {
                 Trash::Supported => System.trash(path, cancellable),
                 Trash::Unsupported | Trash::Refused => Err(glib::Error::new(
@@ -1618,33 +2435,114 @@ impl FsEnvironment for Scoped {
             };
             Ok(())
         });
+        if let Err(errno) = ran {
+            let code = gio::io_error_from_errno(errno.raw_os_error());
+            return Err(glib::Error::new(code, &errno.to_string()));
+        }
         outcome
     }
 
     fn mount_type(&self, fd: BorrowedFd<'_>) -> Option<(MountType, MountSite)> {
         assert_off_main_thread();
         match scope_for(fd) {
+            Some(scope) => scope.mount(),
+            None => System.mount_type(fd),
+        }
+    }
+
+    fn folder_mount(&self, path: &Path, id: Option<u64>) -> Option<(u64, MountType)> {
+        assert_off_main_thread();
+        let scope = match id {
+            Some(id) => scopes()
+                .iter()
+                .find(|scope| u64::MAX - scope.id == id)
+                .cloned(),
+            None => scope_containing(path),
+        };
+        match scope {
             Some(scope) => scope
-                .run(Op::MountType, &[], |scope| {
-                    let root = scope.quirk(|quirks| quirks.mount_root).unwrap_or("/");
-                    Ok(scope
-                        .quirk(|quirks| quirks.mount_type)
-                        .map(|(fs_type, super_options)| {
-                            let mount_type = MountType {
-                                fs_type: fs_type.to_owned(),
-                                super_options: super_options.to_owned(),
-                            };
-                            let site = MountSite {
-                                point: scope.root.clone(),
-                                root: PathBuf::from(root),
-                            };
-                            (mount_type, site)
-                        })
-                        .or_else(|| System.mount_type(fd)))
+                .mount()
+                .map(|(mount_type, _)| (u64::MAX - scope.id, mount_type)),
+            None => System.folder_mount(path, id),
+        }
+    }
+
+    fn watch(
+        &self,
+        file: &gio::File,
+        watched: Watched,
+        flags: gio::FileMonitorFlags,
+    ) -> Result<gio::FileMonitor, glib::Error> {
+        assert_off_main_thread();
+        let path = file.path();
+        let Some((scope, path)) = path
+            .as_deref()
+            .and_then(|path| Some((scope_containing(path)?, path)))
+        else {
+            return System.watch(file, watched, flags);
+        };
+        let mut monitor = None;
+        let ran = scope.run(Op::Watch, &[path.file_name().unwrap_or_default()], |_| {
+            monitor = Some(System.watch(file, watched, flags));
+            Ok(())
+        });
+        match (ran, monitor) {
+            (Ok(()), Some(monitor)) => monitor,
+            (Err(errno), _) => Err(glib::Error::new(
+                gio::io_error_from_errno(errno.raw_os_error()),
+                &errno.to_string(),
+            )),
+            (Ok(()), None) => unreachable!("a call that ran watched the file"),
+        }
+    }
+
+    fn unwatch(&self, file: &gio::File, monitor: gio::FileMonitor) {
+        assert_off_main_thread();
+        let path = file.path();
+        if let Some((scope, path)) = path
+            .as_deref()
+            .and_then(|path| Some((scope_containing(path)?, path)))
+        {
+            let _ = scope.run(Op::Unwatch, &[path.file_name().unwrap_or_default()], |_| {
+                Ok(())
+            });
+        }
+        System.unwatch(file, monitor);
+    }
+
+    fn current_mount_type(&self, fd: BorrowedFd<'_>) -> Option<MountType> {
+        assert_off_main_thread();
+        match scope_for(fd) {
+            Some(scope) => scope
+                .run(Op::CurrentMountType, &[], |scope| {
+                    Ok(scope.current_mount_type())
                 })
                 .ok()
                 .flatten(),
-            None => System.mount_type(fd),
+            None => System.current_mount_type(fd),
+        }
+    }
+
+    fn file_handle_inputs(
+        &self,
+        at: Entry<'_>,
+        stat: &EntryStat,
+    ) -> (MountTable, Option<(i64, u32)>) {
+        let Some(scope) = scope_for(at.dir) else {
+            return System.file_handle_inputs(at, stat);
+        };
+        let path = path_of(at.dir).map(|dir| dir.join(at.name));
+        let reported = scope.reported(path, scope.cached(*stat, false));
+        (scope.mounts(), reported.identity.birth)
+    }
+
+    fn file_handle(&self, at: Entry<'_>) -> Result<u64, Errno> {
+        let made_up = scope_for(at.dir)
+            .and_then(|_| System.current_mount_type(at.dir))
+            .filter(|base| gives_no_handles(base) || family(&base.fs_type) == Family::Fuse);
+        match made_up {
+            Some(base) => made_up_handle(at, &base),
+            None => System.file_handle(at),
         }
     }
 
@@ -1652,13 +2550,75 @@ impl FsEnvironment for Scoped {
         assert_off_main_thread();
         match scope_for(fd) {
             Some(scope) => scope.run(Op::DeviceFormat, &[], |scope| {
-                Ok(scope
-                    .quirk(|quirks| quirks.device_format)
-                    .map(str::to_owned))
+                match scope.quirk(|quirks| (quirks.mount_type, quirks.device_format)) {
+                    (None, None) => System.device_format(fd),
+                    (_, format) => Ok(format.map(str::to_owned)),
+                }
             }),
             None => System.device_format(fd),
         }
     }
+
+    fn rotational(&self, fd: BorrowedFd<'_>) -> Option<bool> {
+        assert_off_main_thread();
+        match scope_for(fd) {
+            Some(scope) => scope.quirk(|quirks| quirks.rotational),
+            None => System.rotational(fd),
+        }
+    }
+
+    fn holders(&self, folder: BorrowedFd<'_>, leftovers: &[OsString]) -> Option<Holder> {
+        assert_off_main_thread();
+        let this_process = || holders::scan(folder, leftovers, &[std::process::id()]);
+        match scope_for(folder) {
+            Some(scope) => scope
+                .run(Op::Holders, &[], |scope| {
+                    Ok(scope
+                        .quirk(|quirks| quirks.holder.clone())
+                        .or_else(this_process))
+                })
+                .ok()
+                .flatten(),
+            None => this_process(),
+        }
+    }
+}
+
+pub(crate) fn smb_base(fd: BorrowedFd<'_>) -> bool {
+    System
+        .current_mount_type(fd)
+        .is_some_and(|base| family(&base.fs_type) == Family::Smb)
+}
+
+pub(crate) fn handleless_base(fd: BorrowedFd<'_>) -> Option<MountType> {
+    System.current_mount_type(fd).filter(gives_no_handles)
+}
+
+fn gives_no_handles(base: &MountType) -> bool {
+    base.fs_type == "exfat" || family(&base.fs_type) == Family::Smb
+}
+
+/// The base's birth time stands for the generation a reused number changes.
+fn made_up_handle(at: Entry<'_>, base: &MountType) -> Result<u64, Errno> {
+    use std::hash::{Hash, Hasher};
+    let flags = if at.name.is_empty() {
+        AtFlags::EMPTY_PATH
+    } else {
+        AtFlags::empty()
+    };
+    let stat = rustix::fs::statx(
+        at.dir,
+        at.name,
+        flags | AtFlags::SYMLINK_NOFOLLOW,
+        StatxFlags::TYPE | StatxFlags::INO | StatxFlags::BTIME,
+    )?;
+    let folder = FileType::from_raw_mode(u32::from(stat.stx_mode)) == FileType::Directory;
+    let birth = (StatxFlags::from_bits_retain(stat.stx_mask).contains(StatxFlags::BTIME)
+        && (!folder || base.identity().folder_births))
+        .then_some((stat.stx_btime.tv_sec, stat.stx_btime.tv_nsec));
+    let mut digest = std::hash::DefaultHasher::new();
+    (stat.stx_dev_major, stat.stx_dev_minor, stat.stx_ino, birth).hash(&mut digest);
+    Ok(digest.finish())
 }
 
 /// Links as on Linux 6.10 and later, where `AT_EMPTY_PATH` needs no privilege, whatever the
@@ -1776,15 +2736,8 @@ impl FsOps for Scoped {
         assert_off_main_thread();
         match scope_for(at.dir) {
             Some(scope) => scope.run(Op::Unlink, &[at.name], |scope| {
-                if scope.quirk(|quirks| quirks.silly_rename)
-                    && let Some(inode) = open_in_this_process(at)
-                {
-                    let aside = OsString::from(format!(".nfs{inode:016x}"));
-                    let aside = Entry {
-                        dir: at.dir,
-                        name: &aside,
-                    };
-                    return System.rename(at, aside, RenameFlags::NOREPLACE);
+                if let Some(unlinked) = scope.unlink_held(at, flags) {
+                    return unlinked;
                 }
                 scope.resolved(at, |at| System.unlink(at, flags))?;
                 scope.unlinked(at);
@@ -1851,7 +2804,15 @@ impl FsOps for Scoped {
                     .run_logged(Op::Stat, &[at.name], force_sync, |scope| {
                         scope.stat(at, path.as_deref(), force_sync)
                     })
-                    .map(|stat| scope.reported(path, scope.cached(stat, force_sync)))
+                    .map(|stat| {
+                        let stat = if force_sync {
+                            scope.revalidate_written_time(&stat);
+                            stat
+                        } else {
+                            scope.with_written_time(stat)
+                        };
+                        scope.reported(path, scope.cached(stat, force_sync))
+                    })
             }
             None => System.stat(at, force_sync),
         }
@@ -1862,7 +2823,10 @@ impl FsOps for Scoped {
         match scope_for(fd) {
             Some(scope) => scope
                 .run(Op::StatFd, &[&fd_name(fd)], |_| System.stat_fd(fd))
-                .map(|stat| scope.reported(path_of(fd), scope.cached(stat, false))),
+                .map(|stat| {
+                    let stat = scope.with_written_time(stat);
+                    scope.reported(path_of(fd), scope.cached(stat, false))
+                }),
             None => System.stat_fd(fd),
         }
     }
@@ -1879,7 +2843,9 @@ impl FsOps for Scoped {
         assert_off_main_thread();
         match scope_for(at.dir) {
             Some(scope) => scope.run(Op::Create, &[at.name], |scope| {
-                scope.creating(at, |at| System.create_exclusive(at, mode))
+                scope
+                    .creating(at, |at| System.create_exclusive(at, mode))
+                    .inspect(|opened| scope.opened_for_writing(opened.as_fd()))
             }),
             None => System.create_exclusive(at, mode),
         }
@@ -1970,6 +2936,7 @@ impl FsOps for Scoped {
             Some(scope) => scope.run(Op::OpenTmpfile, &[], |scope| {
                 match scope.quirk(|quirks| quirks.tmpfile) {
                     Support::Rejected(error) => Err(error),
+                    Support::Supported if smb_base(dir) => Err(Errno::OPNOTSUPP),
                     Support::Supported => System.open_tmpfile(dir, mode),
                 }
             }),
@@ -2165,8 +3132,12 @@ impl FsOps for Scoped {
         mtime: (i64, u32),
     ) -> Result<(), Errno> {
         assert_off_main_thread();
-        on_fd(fd, Op::SetTimes, None, |_| {
-            System.set_times_fd(fd, atime, mtime)
+        on_fd(fd, Op::SetTimes, None, |scope| {
+            System.set_times_fd(fd, atime, mtime)?;
+            if let (Some(scope), Ok(stat)) = (scope, System.stat_fd(fd)) {
+                scope.revalidate_written_time(&stat);
+            }
+            Ok(())
         })
     }
 
@@ -2237,6 +3208,63 @@ impl FsOps for Scoped {
         on_fd(dir, Op::List, None, |_| System.list(dir))
     }
 
+    fn list_chunks(
+        &self,
+        dir: BorrowedFd<'_>,
+        each: &mut dyn FnMut(Listed) -> ControlFlow<()>,
+    ) -> Result<(), Errno> {
+        assert_off_main_thread();
+        let Some(scope) = scope_for(dir) else {
+            return System.list_chunks(dir, each);
+        };
+        let name = fd_name(dir);
+        let mut listed = Vec::new();
+        System.list_chunks(dir, &mut |chunk| {
+            listed.extend(chunk);
+            ControlFlow::Continue(())
+        })?;
+        if let Some(folder) = path_of(dir) {
+            listed = scope.listed(&folder, listed);
+        }
+        let size = scope
+            .quirk(|quirks| quirks.listing_chunk)
+            .unwrap_or(usize::MAX)
+            .max(1);
+        let mut chunks = listed.chunks(size).map(<[_]>::to_vec);
+        loop {
+            let chunk = chunks.next();
+            scope.run(Op::ListChunks, &[name.as_os_str()], |_| Ok(()))?;
+            if chunk.is_none_or(|chunk| each(chunk).is_break()) {
+                return Ok(());
+            }
+        }
+    }
+
+    fn folder_stamp(&self, path: &Path, force_sync: bool) -> Result<FolderStamp, Errno> {
+        assert_off_main_thread();
+        match scope_for_folder(path) {
+            Some(scope) => scope
+                .run_logged(
+                    Op::FolderStamp,
+                    &[path.file_name().unwrap_or_default()],
+                    force_sync,
+                    |_| System.folder_stamp(path, force_sync),
+                )
+                .map(|stamp| scope.reported_stamp(path, scope.cached_stamp(stamp, force_sync))),
+            None => System.folder_stamp(path, force_sync),
+        }
+    }
+
+    fn access(&self, path: &Path, access: Access) -> Result<(), Errno> {
+        assert_off_main_thread();
+        match scope_for_folder(path) {
+            Some(scope) => scope.run(Op::Access, &[path.file_name().unwrap_or_default()], |_| {
+                System.access(path, access)
+            }),
+            None => System.access(path, access),
+        }
+    }
+
     fn create_node(&self, at: Entry<'_>, kind: FileType, mode: Mode) -> Result<(), Errno> {
         assert_off_main_thread();
         match scope_for(at.dir) {
@@ -2278,7 +3306,9 @@ impl FsOps for Scoped {
         assert_off_main_thread();
         match scope_for(at.dir) {
             Some(scope) => scope.run(Op::OpenWrite, &[at.name], |scope| {
-                scope.resolved(at, |at| System.open_write(at))
+                scope
+                    .resolved(at, |at| System.open_write(at))
+                    .inspect(|opened| scope.opened_for_writing(opened.as_fd()))
             }),
             None => System.open_write(at),
         }
@@ -2298,7 +3328,13 @@ impl FsOps for Scoped {
         assert_off_main_thread();
         match scope_for(at.dir) {
             Some(scope) => scope.run(Op::SetLinkTimes, &[at.name], |scope| {
-                scope.resolved(at, |at| System.set_link_times(at, atime, mtime))
+                scope.resolved(at, |at| {
+                    System.set_link_times(at, atime, mtime)?;
+                    if let Ok(stat) = System.stat(at, false) {
+                        scope.revalidate_written_time(&stat);
+                    }
+                    Ok(())
+                })
             }),
             None => System.set_link_times(at, atime, mtime),
         }

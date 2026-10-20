@@ -6,11 +6,13 @@ pub(crate) mod diagnostics;
 mod document;
 pub(crate) mod document_media;
 pub(crate) mod docx;
+pub(crate) mod file_activity;
 pub(crate) mod file_providers;
 mod file_source;
 pub(crate) mod image_conversion;
 mod install_source;
 pub(crate) mod integration_catalog;
+mod item_identity;
 pub(crate) mod jobs;
 mod listeners;
 mod mime_type;
@@ -41,17 +43,18 @@ pub(crate) use document::{
     has_web_scheme, layout_document, parse_document, parse_markdown,
 };
 pub use file_source::{
-    DirectoryChange, DirectoryEvent, DirectoryRequest, FileSource, LoadHandle, LocationIdentity,
-    LocationValidationError, MetadataOutcome, MetadataRequest, MetadataUpdate, RequestId,
-    UriCredentials, backend_unavailable_message, sanitize_uri_credentials,
-    validate_uri_credentials,
+    DirectoryChange, DirectoryEvent, DirectoryRequest, DirectoryStamp, FileSource, LoadHandle,
+    LocationValidationError, MetadataOutcome, MetadataRequest, MetadataUpdate, MountToken,
+    RequestId, Responsiveness, StampAnswer, UriCredentials, Watching, backend_unavailable_message,
+    sanitize_uri_credentials, validate_uri_credentials,
 };
 pub(crate) use file_source::{
-    INVALID_NAME_REASON, error_detail, gio_error_detail, gio_error_message, io_error_detail,
-    io_error_message, sanitize_failure_message,
+    INVALID_NAME_REASON, UNEXPECTED_SYSTEM_ERROR, error_detail, gio_error_detail,
+    gio_error_message, io_error_detail, io_error_message, sanitize_failure_message,
 };
 pub use install_source::{InstallSource, ManagedInstall};
 pub(crate) use install_source::{ensure_self_managed, installed_executable};
+pub use item_identity::{Attributes, Evidence, IdentityTraits, InodeNumbers, ItemIdentity, Proof};
 pub use jobs::{
     ActionEventSink, ActionRunEvent, ActionRunRequest, ActionRunner, CancelHandle,
     InvocationSource, JobId, JobRequest, JobService, JobSnapshot, JobStatus, ScriptProgress,
@@ -64,16 +67,19 @@ pub use mime_type::{
 };
 pub(crate) use model_preview::ModelRender;
 pub use model_preview::{ModelEncoding, ModelFormat, ModelMesh, ModelPalette, ModelView};
-pub(crate) use native_fs::{is_hidden_name, native_hidden_names, native_kind, symlink_kind};
+pub(crate) use native_fs::{
+    is_hidden_name, link_target_kind, listed_kind, native_hidden_names, native_kind, symlink_kind,
+};
 pub(crate) use navigation_history::NavigationHistory;
 pub use operations::{
     ArchiveFormat, CancelledOperation, CompressRequest, CreateDirectoryRequest, CreateFileRequest,
-    DeleteRequest, ExtractRequest, KeptCause, KeptItem, MoveRecord, NameMode, OperationEvent,
-    OperationProvider, OperationRequestId, PasswordFailure, PasteItem, PasteRequest,
-    PlacedSnapshot, RenameCause, RenameRecord, RenameRequest, RenamedItem, ReplacedOriginal,
-    RestoreRequest, RestoreSource, RestoreTrashItem, ShownName, SkippedItem, SpecialKind,
-    TransferConflict, TransferReport, TrashedOriginal, UndoCopyRequest, UndoMergeRequest,
-    UndoMoveItem, UndoMoveRequest, UndoRenameRequest, validate_basename,
+    DeleteRequest, ExtractRequest, Holder, KeptCause, KeptItem, LeftoverInside, MoveRecord,
+    NameMode, OperationEvent, OperationProvider, OperationRequestId, PasswordFailure, PasteItem,
+    PasteRequest, PlacedSnapshot, RecoverRequest, RenameCause, RenameRecord, RenameRequest,
+    RenamedItem, ReplacedOriginal, RestoreRequest, RestoreSource, RestoreTrashItem,
+    ReviewedLeftover, ShownName, SkippedItem, SpecialKind, TransferConflict, TransferReport,
+    UndoCopyRequest, UndoMergeRequest, UndoMoveItem, UndoMoveRequest, UndoRenameRequest,
+    validate_basename,
 };
 pub(crate) use path_match::{PathMatcher, PathQuery};
 pub use preview::{

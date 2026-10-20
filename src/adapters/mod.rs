@@ -4,6 +4,7 @@ pub(crate) mod bookmarks;
 pub(crate) mod directory_summary;
 pub(crate) mod directory_validation;
 mod file_manager1;
+pub(crate) mod gio_close;
 mod gio_location;
 mod local_actions;
 mod local_files;
@@ -19,22 +20,23 @@ pub(crate) use file_manager1::{RevealRequest, export_file_manager};
 pub(crate) use gio_location::{gio_file_for_location, location_for_file, reveal_target_for_file};
 pub(crate) use local_actions::{LocalActionStore, resolve_executable as resolve_action_executable};
 pub use local_files::LocalFileSource;
-pub(crate) use local_files::query_file_entry;
 pub(crate) use local_files::{RecentRemovalState, recent_remove_entries};
+pub(crate) use local_files::{query_file_entry, watch};
 pub(crate) use local_jobs::LocalActionRunner;
 pub use local_operations::LocalOperationProvider;
 pub(crate) use local_operations::{
     ARCHIVE_PREVIEW_FAILED_MESSAGE, ARCHIVE_TOO_LARGE_MESSAGE, ARCHIVE_UNSUPPORTED_MESSAGE,
-    INVALID_ARCHIVE, MAX_ARCHIVE_PASSWORD_BYTES, MAYBE_BAD_PASSWORD, PASSWORD_REQUIRED,
-    archive_payload_valid, encode_archive_result, flush_filesystem, list_archive_entries_direct,
-    transfer_targets, typed_name_refusal,
+    ActiveOperation, INVALID_ARCHIVE, MAX_ARCHIVE_PASSWORD_BYTES, MAYBE_BAD_PASSWORD,
+    PASSWORD_REQUIRED, archive_payload_valid, encode_archive_result, flush_filesystem,
+    list_archive_entries_direct, transfer_targets, typed_name_refusal, typed_rename_is_taken,
 };
 #[cfg(test)]
 pub(crate) use local_operations::{
     ArchiveListing, ArchiveListingStatus, decode_archive_listing, write_compression_fixture,
 };
 #[cfg(test)]
-pub(crate) use local_operations::{FsOp, FsQuirks, Quirks};
+pub(crate) use local_operations::{Births, FsOp, FsQuirks, Quirks, evict};
+pub(crate) use local_operations::{Watched, probes};
 #[cfg(test)]
 pub(crate) use local_operations::{
     clear_sync_probe, install_sync_probe, release_sync_probe, sync_probe_is_blocked,
@@ -48,3 +50,4 @@ pub(crate) use volume::{
     MountTable, RemovableRoot, invalidate_mount_snapshot, is_local_fuse_overlay, mount_can_unplug,
     mount_is_removable, volume_can_unplug, with_mount_snapshot,
 };
+pub(crate) use volume::{mount_lanes, mount_watch};

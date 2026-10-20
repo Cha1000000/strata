@@ -18,7 +18,9 @@ use crate::{
     services::{
         ArchivePreviewTree, DocumentLayout, LoadHandle, MediaPreviewSize, PdfTextLayer, Preview,
         PreviewContent, PreviewEvent, PreviewProvider, PreviewRequest, PreviewRequestId,
-        SecretString, normalize_preview_text,
+        SecretString,
+        file_activity::{self, Notice},
+        normalize_preview_text,
     },
 };
 
@@ -236,6 +238,8 @@ struct PreviewState {
     animation_generation: Rc<Cell<u64>>,
     keyboard_view: RefCell<Option<super::browser::WeakBrowserView>>,
     claim_on_resume: Cell<bool>,
+    released_from: Cell<Option<Option<usize>>>,
+    operations: RefCell<Option<file_activity::Subscription>>,
 }
 
 use keyboard::MediaSeek;
@@ -482,6 +486,8 @@ impl PreviewDrawer {
             handed_off: RefCell::new(None),
             continue_playback: RefCell::new(None),
             claim_on_resume: Cell::new(false),
+            released_from: Cell::new(None),
+            operations: RefCell::new(None),
         });
         let weak = Rc::downgrade(&state);
         state.enabled_action.connect_activate(move |_, _| {
@@ -611,7 +617,57 @@ impl PreviewDrawer {
         self.state.media.borrow().clone()
     }
 
+    pub(in crate::ui) fn follow_operations(&self, browser: &Rc<Browser>) {
+        let weak_state = Rc::downgrade(&self.state);
+        let weak_browser = Rc::downgrade(browser);
+        let subscription = file_activity::observe(move |notice| {
+            let Some(state) = weak_state.upgrade() else {
+                return;
+            };
+            match notice {
+                Notice::Releasing(_) => {
+                    let changing = state.current.borrow().as_ref().is_some_and(|entry| {
+                        entry
+                            .local_thumbnail_path()
+                            .is_some_and(|path| notice.covers(path))
+                    });
+                    if changing {
+                        let depth = state.current_depth.get();
+                        state.clear_target();
+                        state.released_from.set(Some(depth));
+                    }
+                }
+                Notice::Lifted(_) => {
+                    let Some(depth) = state.released_from.get() else {
+                        return;
+                    };
+                    let Some(browser) = weak_browser.upgrade() else {
+                        return;
+                    };
+                    let depth = depth.or_else(|| browser.active_depth());
+                    let entry = depth
+                        .and_then(|depth| browser.cursor_entry(depth))
+                        .and_then(|entry| preview_target(Some(entry)));
+                    if entry
+                        .as_ref()
+                        .and_then(FileEntry::local_thumbnail_path)
+                        .is_some_and(file_activity::is_changing)
+                    {
+                        return;
+                    }
+                    state.released_from.set(None);
+                    if let Some(entry) = entry.filter(|_| state.is_enabled()) {
+                        state.show_after_focus_change(entry, depth);
+                    }
+                }
+                Notice::Ended(_) => {}
+            }
+        });
+        self.state.operations.replace(Some(subscription));
+    }
+
     pub fn observe_browser(&self, browser: &Rc<Browser>) {
+        self.follow_operations(browser);
         let weak_state = Rc::downgrade(&self.state);
         let weak_browser = Rc::downgrade(browser);
         self.state.open.connect_clicked(move |_| {
@@ -1344,6 +1400,7 @@ impl PreviewState {
             self.model.borrow_mut().take();
         }
         self.raw_metadata_load.borrow_mut().take();
+        self.released_from.set(None);
         if super::raw_details::supports(&entry) {
             let load = self
                 .raw_details
@@ -1451,7 +1508,15 @@ impl PreviewState {
                 }
                 if message == crate::services::INCORRECT_ARCHIVE_PASSWORD {
                     self.render_archive_password_prompt(entry, Some(&detail));
+                } else if message == file_activity::HELD_FOR_OPERATION
+                    && !file_activity::is_releasing()
+                {
+                    self.current_request.set(None);
+                    self.show_after_focus_change(entry, self.current_depth.get());
                 } else {
+                    if message == file_activity::HELD_FOR_OPERATION {
+                        self.released_from.set(Some(self.current_depth.get()));
+                    }
                     self.current_request.set(None);
                     let title = crate::i18n::tr("Preview unavailable");
                     if !self.show_audio_error(&title, &detail, None)
@@ -3623,8 +3688,7 @@ fn document_view_action(view: DocumentView) -> (&'static str, &'static str) {
 
 impl SourcePreviewView {
     fn new() -> Self {
-        let buffer = sourceview5::Buffer::new(None);
-        super::theme::register_source_buffer(&buffer);
+        let buffer = super::theme::new_source_buffer();
         let view = sourceview5::View::builder()
             .buffer(&buffer)
             .cursor_visible(true)
@@ -3664,7 +3728,7 @@ impl SourcePreviewView {
                 self.view.unparent();
             }
         }
-        let languages = sourceview5::LanguageManager::default();
+        let languages = super::theme::source_languages();
         let language = languages.guess_language(entry.location.native_path(), Some(content_type));
         if language.is_none() && super::virtual_preview::use_virtual_plain_source(content) {
             let wrapped = super::preferences::PreferenceManager::shared().preview_text_wrap();
@@ -3674,8 +3738,7 @@ impl SourcePreviewView {
             return (container.upcast(), true);
         }
         let display = normalize_preview_text(content).into_owned();
-        let buffer = sourceview5::Buffer::new(None);
-        super::theme::register_source_buffer(&buffer);
+        let buffer = super::theme::new_source_buffer();
         buffer.set_highlight_syntax(false);
         buffer.set_language(language.as_ref());
         self.view.set_buffer(Some(&buffer));

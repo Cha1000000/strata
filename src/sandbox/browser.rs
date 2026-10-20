@@ -8,7 +8,7 @@ use std::{
     io,
     os::unix::{fs::MetadataExt, net::UnixStream},
     path::{Path, PathBuf},
-    process::{Child, Stdio},
+    process::Stdio,
     sync::{
         Arc, Condvar, Mutex, OnceLock,
         atomic::{AtomicUsize, Ordering},
@@ -255,6 +255,20 @@ fn request(
     if cancellation.is_cancelled() {
         return Err("Browser request cancelled".into());
     }
+    let real = path
+        .canonicalize()
+        .map_err(|e| crate::services::io_error_message(&e))?;
+    let stop = cancellation.clone();
+    let hold = crate::services::file_activity::hold([path, &real], move || stop.cancel())?;
+    hold.settle(request_held(pool, path, operation, cancellation))
+}
+
+fn request_held(
+    pool: &Pool,
+    path: &Path,
+    operation: Operation,
+    cancellation: &Cancellation,
+) -> Result<ResultParts, String> {
     let file = open_source(path).map_err(|e| crate::services::io_error_message(&e))?;
     let key = FileKey::read(path, &file).map_err(|e| crate::services::io_error_message(&e))?;
     let metadata_only = matches!(
@@ -720,7 +734,7 @@ impl Worker {
 }
 
 struct ProcessWorker {
-    child: Child,
+    child: super::Renderer,
     socket: UnixStream,
     _snapshot: super::PrivateOutput,
 }

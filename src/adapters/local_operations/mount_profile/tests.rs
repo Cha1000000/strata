@@ -9,8 +9,8 @@ use super::super::{
 };
 use super::{MountProfile, Profiles, folder_name_limit, learn_mount_type};
 use crate::adapters::volume::{
-    FAT32_MAX_FILE_SIZE, Family, FuseFormat, MountNames, NameEncoding, NameLimit, NameProfile,
-    NameRules, Reserved, Strictness, Strip, gvfs_bridge_profile, gvfs_profile,
+    FAT32_MAX_FILE_SIZE, Family, FuseFormat, MountNames, MountTable, NameEncoding, NameLimit,
+    NameProfile, NameRules, Reserved, Strictness, Strip, family, gvfs_bridge_profile, gvfs_profile,
     learn_mount_capability, mount_capabilities,
 };
 
@@ -117,6 +117,42 @@ fn each_mount_is_profiled_from_what_its_folder_reports() -> Result<(), Box<dyn E
         assert_eq!(
             profile_of(&Profiles::default(), root.path())?,
             expected,
+            "{case}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn a_scope_reports_the_filesystem_below_it_unless_its_preset_names_another()
+-> Result<(), Box<dyn Error>> {
+    let root = tempfile::tempdir()?;
+    let host = MountTable::current()
+        .mount_at(root.path())
+        .map(|(mount, _)| mount.clone())
+        .ok_or("the temporary folder's mount")?;
+    let host_kind = rustix::fs::statfs(root.path())?.f_type;
+    let cases: [(&str, Preset, Family, rustix::fs::FsWord); 2] = [
+        (
+            "no mount type",
+            Quirks::default,
+            family(&host.fs_type),
+            host_kind,
+        ),
+        ("vboxsf", Quirks::vboxsf, Family::Other, 0x786f_4256),
+    ];
+    for (case, quirks, expected_family, expected_kind) in cases {
+        let folder = root.path().join(case);
+        fs::create_dir(&folder)?;
+        let _scope = FsQuirks::install(&folder, quirks());
+        let opened = open_local_parent_directory(&folder)?;
+
+        assert_eq!(
+            (
+                profile_of(&Profiles::default(), &folder)?.family,
+                fs().statfs(opened.as_fd()).map(|stat| stat.kind),
+            ),
+            (expected_family, Some(expected_kind)),
             "{case}"
         );
     }

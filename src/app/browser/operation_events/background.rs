@@ -175,6 +175,7 @@ impl Browser {
             }
             OperationEvent::ItemMoved { .. }
             | OperationEvent::ItemTrashed { .. }
+            | OperationEvent::ItemRestored { .. }
             | OperationEvent::ItemKept { .. } => {}
             OperationEvent::ArchiveStarted { total, .. } => {
                 emit(BrowserEvent::ArchiveStarted { total });
@@ -195,18 +196,20 @@ impl Browser {
                     deleting: job.deleting,
                     deletion_permanent: job.deletion_permanent,
                     restoring: false,
+                    recovering: false,
                     archiving: !job.copying && !job.deleting,
                     destination: job.destination.clone(),
                     reveal: job.reveal,
                     undoing: false,
                     reveal_locations: job.created.borrow().clone(),
                 };
-                completion.record_trash_undo(&event, push_background_undo);
+                let trashed = context.location_changes.trashed.take();
+                completion.record_trash_undo(&event, &trashed, push_background_undo);
                 if job.copying {
                     completion.record_transfer_undo(
                         (&[], &HashMap::new(), &TransferReport::default()),
                         job.created.take(),
-                        job.merged.take(),
+                        (job.merged.take(), &trashed),
                         push_background_undo,
                     );
                     emit(BrowserEvent::TransferFinished {

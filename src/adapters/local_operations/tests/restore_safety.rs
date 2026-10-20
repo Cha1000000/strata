@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 
 use super::super::move_restore_path;
-use super::fs_quirks::{Op, Racer, Support};
+use super::fs_quirks::{Op, OverEmptyDirectory, Racer, Support};
 use super::*;
 use crate::services::{KeptCause, KeptItem, SpecialKind, TransferReport};
 use rustix::io::Errno;
@@ -12,13 +12,15 @@ fn restore_path(
     destination: &Path,
     allowed: &Path,
 ) -> Result<TransferReport, glib::Error> {
-    glib::MainContext::default().block_on(move_restore_path(
-        source.to_path_buf(),
-        destination.to_path_buf(),
-        allowed.to_path_buf(),
-        Arc::default(),
-        gio::Cancellable::new(),
-    ))
+    glib::MainContext::default()
+        .block_on(move_restore_path(
+            source.to_path_buf(),
+            destination.to_path_buf(),
+            allowed.to_path_buf(),
+            Arc::default(),
+            gio::Cancellable::new(),
+        ))
+        .map(|(report, _)| report)
 }
 
 #[test]
@@ -281,7 +283,7 @@ fn restore_copy_refuses_a_trash_item_replaced_after_it_was_checked() -> Result<(
             fixture.path(),
             Quirks {
                 before: vec![(op, pattern, 0, racer)],
-                ..Quirks::without_placement()
+                ..Quirks::without_placement().on_ext4()
             },
         );
 
@@ -298,34 +300,64 @@ fn restore_copy_refuses_a_trash_item_replaced_after_it_was_checked() -> Result<(
 #[test]
 fn a_failed_restore_copy_removes_only_what_it_made() -> Result<(), Box<dyn Error>> {
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock()?;
-    let fixture = tempfile::tempdir()?;
-    let source = fixture.path().join("source");
-    fs::create_dir_all(source.join("sub"))?;
-    fs::write(source.join("contents"), b"original")?;
-    fs::write(source.join("sub/nested"), b"nested")?;
-    let destination = fixture.path().join("destination");
-    let (copy, aside) = (destination.clone(), fixture.path().join("old-copy"));
-    let racer: Racer = Box::new(move || {
-        fs::write(copy.join("foreign"), b"unrelated").expect("add a foreign entry");
-        fs::rename(copy.join("contents"), &aside).expect("move a copied entry aside");
-        fs::write(copy.join("contents"), b"replacement").expect("replace a copied entry");
-    });
-    let _scope = FsQuirks::install(
-        fixture.path(),
-        Quirks {
-            before: vec![(Op::SetTimes, "destination", 0, racer)],
-            fail: vec![(Op::SetTimes, "destination", 0, Errno::IO)],
-            ..Quirks::without_placement()
-        },
-    );
+    let exfat_in_one_tick: Preset = || Quirks {
+        coarse_clock: Some(SystemTime::now() - Duration::from_secs(1)),
+        links: Support::Rejected(Errno::MLINK),
+        rename_flags: Support::Rejected(Errno::INVAL),
+        rename_over_empty_dir: OverEmptyDirectory::NotEmpty,
+        ..Quirks::exfat()
+    };
+    let rows: [(Preset, bool); 3] = [
+        (Quirks::without_placement, false),
+        (exfat_in_one_tick, false),
+        (exfat_in_one_tick, true),
+    ];
+    for (preset, evicted) in rows {
+        let row = format!("{:?}, evicted: {evicted}", preset().mount_type);
+        let fixture = tempfile::tempdir()?;
+        let source = fixture.path().join("source");
+        fs::create_dir_all(source.join("sub"))?;
+        fs::write(source.join("contents"), b"original")?;
+        fs::write(source.join("sub/nested"), b"nested")?;
+        let destination = fixture.path().join("destination");
+        let (copy, aside) = (destination.clone(), fixture.path().join("old-copy"));
+        let racer: Racer = Box::new(move || {
+            fs::write(copy.join("foreign"), b"unrelated").expect("add a foreign entry");
+            if evicted {
+                assert!(super::fs_quirks::evict(&copy.join("contents")), "evict");
+                return;
+            }
+            fs::rename(copy.join("contents"), &aside).expect("move a copied entry aside");
+            fs::write(copy.join("contents"), b"replacement").expect("replace a copied entry");
+        });
+        let _scope = FsQuirks::install(
+            fixture.path(),
+            Quirks {
+                before: vec![(Op::SetTimes, "destination", 0, racer)],
+                fail: vec![(Op::SetTimes, "destination", 0, Errno::IO)],
+                ..preset()
+            },
+        );
 
-    assert!(restore_path(&source, &destination, fixture.path()).is_err());
+        assert!(
+            restore_path(&source, &destination, fixture.path()).is_err(),
+            "{row}"
+        );
 
-    assert_eq!(fs::read(destination.join("foreign"))?, b"unrelated");
-    assert_eq!(fs::read(destination.join("contents"))?, b"replacement");
-    assert!(!destination.join("sub").exists());
-    assert_eq!(fs::read(source.join("contents"))?, b"original");
-    assert_eq!(fs::read(source.join("sub/nested"))?, b"nested");
+        assert_eq!(
+            fs::read(destination.join("foreign"))?,
+            b"unrelated",
+            "{row}"
+        );
+        assert_eq!(
+            fs::read(destination.join("contents")).ok(),
+            (!evicted).then(|| b"replacement".to_vec()),
+            "{row}"
+        );
+        assert!(!destination.join("sub").exists(), "{row}");
+        assert_eq!(fs::read(source.join("contents"))?, b"original", "{row}");
+        assert_eq!(fs::read(source.join("sub/nested"))?, b"nested", "{row}");
+    }
     Ok(())
 }
 
@@ -359,15 +391,23 @@ fn a_cancelled_restore_copy_of_a_folder_is_a_cancel_only_once_the_folder_is_gone
     // filling it), checks it, empties it and checks its name before removing
     // it. Rows fail the open or a check, or renumber the folder as libfuse
     // without `use_ino` does, where only its type is compared.
-    let sshfs = Some(("fuse.sshfs", "rw"));
-    for (mount_type, fail, renumber, removed) in [
-        (None, Some((Op::OpenDir, 2)), false, false),
-        (None, Some((Op::StatFd, 2)), false, false),
-        (None, None, true, false),
-        (None, Some((Op::Stat, 2)), false, false),
+    let host: Preset = Quirks::without_placement;
+    let ext4 = || Quirks::without_placement().on_ext4();
+    let sshfs = || Quirks {
+        mount_type: Some(("fuse.sshfs", "rw")),
+        ..Quirks::without_placement()
+    };
+    for (preset, fail, renumber, removed) in [
+        (host, Some((Op::OpenDir, 2)), false, false),
+        (host, Some((Op::StatFd, 2)), false, false),
+        (ext4, None, true, false),
+        (host, Some((Op::Stat, 2)), false, false),
         (sshfs, None, true, true),
     ] {
-        let row = format!("{mount_type:?}, {fail:?}, renumbered: {renumber}");
+        let row = format!(
+            "{:?}, {fail:?}, renumbered: {renumber}",
+            preset().mount_type
+        );
         let fixture = tempfile::tempdir()?;
         let source = fixture.path().join("source");
         fs::create_dir(&source)?;
@@ -394,9 +434,8 @@ fn a_cancelled_restore_copy_of_a_folder_is_a_cancel_only_once_the_folder_is_gone
                     .map(|(op, skip)| (op, "destination", skip, Errno::IO))
                     .into_iter()
                     .collect(),
-                mount_type,
                 reflink: Support::Rejected(Errno::OPNOTSUPP),
-                ..Quirks::without_placement()
+                ..preset()
             },
         );
 
@@ -880,14 +919,17 @@ fn home_trash_fallback_finds_broken_symlinks_the_virtual_backend_has_not_refresh
         format!("[Trash Info]\nPath={encoded}\nDeletionDate=2026-09-03T16:05:39\n"),
     )?;
 
-    let entries = home_trash_entries_at(
-        &trash,
+    let entries = trash_entries_at(
+        std::slice::from_ref(&trash),
         &HashSet::from([original.clone()]),
         &gio::Cancellable::new(),
         &HashMap::new(),
     );
 
-    let entry = entries.get(&original).expect("fallback entry");
+    let entry = entries
+        .get(&original)
+        .and_then(|found| found.as_ref().ok())
+        .expect("fallback entry");
     assert_eq!(
         entry.source,
         Location::local(trash.join("files/report.txt"))
@@ -900,8 +942,8 @@ fn home_trash_fallback_finds_broken_symlinks_the_virtual_backend_has_not_refresh
     let cancellable = gio::Cancellable::new();
     cancellable.cancel();
     assert!(
-        home_trash_entries_at(
-            &trash,
+        trash_entries_at(
+            std::slice::from_ref(&trash),
             &HashSet::from([original]),
             &cancellable,
             &HashMap::new()
@@ -927,10 +969,19 @@ fn cancelling_restore_before_io_reports_every_item_as_unattempted() -> Result<()
             vec![location.clone()],
         ),
         (
-            RestoreSource::OriginalLocations(vec![location.clone()]),
+            RestoreSource::OriginalLocations {
+                locations: vec![location.clone()],
+                originals: HashMap::new(),
+            },
             vec![location],
         ),
-        (RestoreSource::OriginalLocations(Vec::new()), Vec::new()),
+        (
+            RestoreSource::OriginalLocations {
+                locations: Vec::new(),
+                originals: HashMap::new(),
+            },
+            Vec::new(),
+        ),
     ] {
         let events = Rc::new(RefCell::new(Vec::new()));
         let emitted = events.clone();
@@ -1329,7 +1380,7 @@ fn restore_uses_the_trash_entry_target_path_as_the_physical_source() -> Result<(
 fn trash_items_whose_files_share_names_are_restored_whole() -> Result<(), Box<dyn Error>> {
     use std::sync::{
         Arc,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     };
     let _serial = ASYNC_MAIN_CONTEXT_DEFAULT.lock()?;
     let uid = rustix::process::getuid().as_raw();
@@ -1360,9 +1411,15 @@ fn trash_items_whose_files_share_names_are_restored_whole() -> Result<(), Box<dy
         })
         .collect();
     let both = copied.clone();
+    let gave_up = Arc::new(AtomicBool::new(false));
+    let giving_up = gave_up.clone();
     let wait: Racer = Box::new(move || {
-        let start = Instant::now();
-        while both.load(Ordering::SeqCst) < 2 && start.elapsed() < Duration::from_secs(5) {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while both.load(Ordering::SeqCst) < 2 {
+            if Instant::now() > deadline {
+                giving_up.store(true, Ordering::SeqCst);
+                return;
+            }
             thread::sleep(Duration::from_millis(5));
         }
     });
@@ -1395,6 +1452,10 @@ fn trash_items_whose_files_share_names_are_restored_whole() -> Result<(), Box<dy
     );
     wait_for_restore(&events);
 
+    assert!(
+        !gave_up.load(Ordering::SeqCst),
+        "a Trash copy was synced for deletion before both items were copied"
+    );
     let events = events.borrow();
     assert!(
         matches!(events.last(), Some(OperationEvent::Restored { .. })),

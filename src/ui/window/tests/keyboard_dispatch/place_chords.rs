@@ -216,7 +216,7 @@ fn tenxer_go_chord_reaches_places_and_cancels_cleanly() {
                     std::fs::remove_dir_all(path).expect("remove place");
                 }
                 chord(&fixture, key);
-                assert_eq!(fixture.shortcuts.feedback_text(), feedback, "g {key:?}");
+                wait_until(|| fixture.shortcuts.feedback_text() == feedback);
                 pump(20);
                 assert_eq!(browser.active_location(), origin, "g {key:?} stays");
                 std::fs::create_dir_all(path).expect("restore place");
@@ -244,6 +244,31 @@ fn tenxer_go_chord_reaches_places_and_cancels_cleanly() {
                 assert_eq!(browser.active_location(), origin, "{mode:?} g g");
             }
             fixture.view.set_view_mode(BrowserMode::Columns);
+
+            let gate = crate::test_support::Gate::default();
+            let _scope = crate::adapters::FsQuirks::install(
+                &places.home,
+                crate::adapters::Quirks {
+                    before: vec![(
+                        crate::adapters::FsOp::FolderStamp,
+                        "Downloads",
+                        0,
+                        gate.racer(),
+                    )],
+                    ..crate::adapters::Quirks::default()
+                },
+            );
+            chord(&fixture, Key::d);
+            wait_until(|| gate.reached());
+            pump(20);
+            assert_eq!(
+                browser.active_location(),
+                origin,
+                "g d opens once a worker has checked the folder"
+            );
+            gate.release();
+            wait_until(|| browser.active_location() == Some(Location::local(&places.downloads)));
+            wait_loaded(&browser, 0);
 
             for (key, destination) in [
                 (Key::h, &places.home),

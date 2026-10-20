@@ -4,7 +4,6 @@ use std::{
     cell::{Cell, RefCell},
     collections::HashMap,
     fs, io,
-    os::unix::fs::MetadataExt,
     path::{Component, Path, PathBuf},
     rc::Rc,
     time::Duration,
@@ -17,6 +16,10 @@ use crate::{
     model::{FolderColorValue, SortDirection, SortKey, ViewPreferences},
     sandbox::MediaPreviewBackend,
     services::{Channel, CrossVolumeDropStrategy, SearchLimits},
+    storage::{
+        file_stamp,
+        writer::{self, Policy},
+    },
 };
 
 use super::icons_cell::{MAX_ICONS_THUMBNAIL_SIZE, MIN_ICONS_THUMBNAIL_SIZE};
@@ -189,8 +192,8 @@ pub(in crate::ui) struct Preferences {
     preview_text_wrap: bool,
     #[serde(default)]
     preview_autoplay: bool,
-    #[serde(default)]
-    auto_refresh_interval: u32,
+    #[serde(default = "default_enabled")]
+    watch_network_folders: bool,
     #[serde(default = "crate::sandbox::browser::default_worker_limit")]
     thumbnail_workers: usize,
     #[serde(default = "default_enabled")]
@@ -407,7 +410,7 @@ impl Default for Preferences {
             preview_volume: default_full_volume(),
             preview_text_wrap: false,
             preview_autoplay: false,
-            auto_refresh_interval: 0,
+            watch_network_folders: true,
             thumbnail_workers: crate::sandbox::browser::default_worker_limit(),
             show_thumbnails: true,
             icons_thumbnail_size: default_icons_thumbnail_size(),
@@ -541,29 +544,6 @@ fn normalized_volume(volume: f64) -> f64 {
     }
 }
 
-/// The Settings menu's choices are the only intervals the browser runs.
-pub(in crate::ui) const AUTO_REFRESH_CHOICES: [(&str, u32); 4] =
-    [("Off", 0), ("1 min", 60), ("5 min", 300), ("10 min", 600)];
-
-// `normalized_auto_refresh_interval` picks the first choice at or above a value.
-const _: () = {
-    let mut index = 1;
-    while index < AUTO_REFRESH_CHOICES.len() {
-        assert!(AUTO_REFRESH_CHOICES[index - 1].1 < AUTO_REFRESH_CHOICES[index].1);
-        index += 1;
-    }
-};
-
-/// Unlisted intervals round up to the next choice so a hand-written value keeps
-/// auto-refresh on without reloading faster than the fastest menu option.
-fn normalized_auto_refresh_interval(secs: u32) -> u32 {
-    AUTO_REFRESH_CHOICES
-        .iter()
-        .map(|(_, interval)| *interval)
-        .find(|interval| *interval >= secs)
-        .unwrap_or(AUTO_REFRESH_CHOICES[AUTO_REFRESH_CHOICES.len() - 1].1)
-}
-
 pub(in crate::ui) const SEARCH_TIME_LIMIT_CHOICES: [(&str, u32); 6] = [
     ("10 s", 10),
     ("30 s", 30),
@@ -607,8 +587,9 @@ pub struct PreferenceManager {
     startup_locale: &'static str,
     changes: bindings::PreferenceChanges,
     persistence_dirty: Cell<bool>,
-    /// The settings file as this process last wrote or read it.
-    settings_synced: Cell<Option<FileStamp>>,
+    saves_requested: Cell<u64>,
+    saves_finished: Cell<u64>,
+    this: std::rc::Weak<Self>,
     /// Why saving is off for this session: the file existed but could not be read.
     load_failure: Option<io::Error>,
     save_notices: save_notice::SaveNotices,
@@ -631,7 +612,7 @@ impl PreferenceManager {
     }
 
     fn load() -> Rc<Self> {
-        let settings_synced = file_stamp(&settings_path());
+        writer::note(&settings_path(), file_stamp(&settings_path()));
         let (mut preferences, load_failure) = match read_preferences() {
             Ok(preferences) => (preferences, None),
             Err(error) => {
@@ -641,8 +622,6 @@ impl PreferenceManager {
             }
         };
         preferences.preview_volume = normalized_volume(preferences.preview_volume);
-        preferences.auto_refresh_interval =
-            normalized_auto_refresh_interval(preferences.auto_refresh_interval);
         preferences.search_time_limit =
             normalized_search_limit(preferences.search_time_limit, &SEARCH_TIME_LIMIT_CHOICES);
         preferences.search_entry_limit =
@@ -671,12 +650,14 @@ impl PreferenceManager {
 
         let startup_locale = preferences.language.locale();
         rust_i18n::set_locale(startup_locale);
-        Rc::new(Self {
+        let manager = Rc::new_cyclic(|this| Self {
             startup_locale,
             startup_interface_renderer: preferences.interface_renderer,
             changes: bindings::PreferenceChanges::new(preferences.clone()),
             persistence_dirty: Cell::new(false),
-            settings_synced: Cell::new(settings_synced),
+            saves_requested: Cell::new(0),
+            saves_finished: Cell::new(0),
+            this: this.clone(),
             load_failure,
             save_notices: save_notice::SaveNotices::default(),
             folder_views: std::cell::OnceCell::new(),
@@ -684,7 +665,9 @@ impl PreferenceManager {
             folder_save_notices: save_notice::SaveNotices::for_folder_views(),
             item_customizations: Default::default(),
             preferences: RefCell::new(preferences),
-        })
+        });
+        manager.folder_view_store();
+        manager
     }
 
     /// Repairs loaded values whose validity depends on data the preference store
@@ -1293,13 +1276,12 @@ impl PreferenceManager {
             .collect()
     }
 
-    pub fn auto_refresh_interval(&self) -> u32 {
-        self.preferences.borrow().auto_refresh_interval
+    pub fn watch_network_folders(&self) -> bool {
+        self.preferences.borrow().watch_network_folders
     }
 
-    pub fn set_auto_refresh_interval(&self, secs: u32) {
-        self.preferences.borrow_mut().auto_refresh_interval =
-            normalized_auto_refresh_interval(secs);
+    pub fn set_watch_network_folders(&self, enabled: bool) {
+        self.preferences.borrow_mut().watch_network_folders = enabled;
         self.save_preferences();
     }
 
@@ -1808,37 +1790,52 @@ impl PreferenceManager {
         self.persistence_dirty.set(true);
         let contents =
             toml::to_string_pretty(&*self.preferences.borrow()).map_err(io::Error::other);
-        let result = contents.and_then(|contents| {
-            self.save_notices
-                .write(&path, &contents, crate::storage::atomic_write_config)
-        });
-        if result.is_ok() {
-            self.persistence_dirty.set(false);
-            self.settings_synced.set(file_stamp(&path));
+        if let Ok(contents) = &contents {
+            self.queue_settings_save(path.clone(), contents.as_bytes().to_vec());
         }
         if changed {
             self.changes.notify(self);
         }
         // Reported after bindings apply, and whether or not anything changed,
         // because a retry with an unchanged value can fail too.
-        if let Err(error) = result {
+        if let Err(error) = contents {
             self.save_notices.write_failed(&path, &error);
         }
     }
-}
 
-type FileStamp = (u64, i64, i64, u64);
+    fn queue_settings_save(&self, path: PathBuf, contents: Vec<u8>) {
+        let generation = self.saves_requested.get() + 1;
+        self.saves_requested.set(generation);
+        let saved = writer::save(path.clone(), Some(contents), Policy::Config, None);
+        let this = self.this.clone();
+        glib::MainContext::default().spawn_local(async move {
+            let result = saved
+                .await
+                .unwrap_or_else(|_| Err(io::Error::from_raw_os_error(libc::ECANCELED)));
+            if let Some(manager) = this.upgrade() {
+                manager.settings_saved(generation, &path, result);
+            }
+        });
+    }
 
-/// Tells this process's last write or read of a file apart from another
-/// process's later write.
-fn file_stamp(path: &Path) -> Option<FileStamp> {
-    let metadata = fs::metadata(path).ok()?;
-    Some((
-        metadata.ino(),
-        metadata.mtime(),
-        metadata.mtime_nsec(),
-        metadata.len(),
-    ))
+    fn settings_saved(&self, generation: u64, path: &Path, result: io::Result<()>) {
+        self.saves_finished
+            .set(self.saves_finished.get().max(generation));
+        if generation != self.saves_requested.get() {
+            return;
+        }
+        match result {
+            Ok(()) => {
+                self.persistence_dirty.set(false);
+                self.save_notices.saved();
+            }
+            Err(error) => self.save_notices.write_failed(path, &error),
+        }
+    }
+
+    fn settings_save_pending(&self) -> bool {
+        self.saves_finished.get() < self.saves_requested.get()
+    }
 }
 
 fn read_state_file(path: &Path) -> io::Result<Option<String>> {
@@ -1853,7 +1850,11 @@ fn read_preferences() -> io::Result<Preferences> {
     let Some(contents) = read_state_file(&settings_path())? else {
         return Ok(Preferences::default());
     };
-    let table: toml::Table = toml::from_str(&contents)
+    parse_preferences(&contents)
+}
+
+fn parse_preferences(contents: &str) -> io::Result<Preferences> {
+    let table: toml::Table = toml::from_str(contents)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
     match table.clone().try_into() {
         Ok(preferences) => Ok(preferences),
